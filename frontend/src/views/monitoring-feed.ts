@@ -14,6 +14,15 @@
 // answer of a superseded request (an unmounted view, a Retry racing a
 // pending refresh).
 //
+// A refresh the server refuses because the user's sign-in is not
+// usable (ended, or a password an administrator set must be replaced
+// first) pauses the feed instead: every further poll would be refused
+// the same way, and each refusal reopens the Sign-in dialog the user
+// may have closed. A paused feed waits for its area's signal that the
+// same user's sign-in is usable again (`RetryFailedLoadsContext`, the
+// Management sign-in gate), or for a Retry; a regained connection does
+// not restart it.
+//
 // A changed `load` asks a different question (PN Tracking's list under
 // changed filters): its first read is a FIRST load — the previous
 // answer is not that question's, so it is not kept as a stale one, and
@@ -23,9 +32,10 @@
 // behaviour: a monitoring view must never invent its own refresh,
 // staleness or recovery rules.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 
-import { errorMessage } from '../api/client';
+import { errorMessage, refusalFlag } from '../api/client';
+import { RetryFailedLoadsContext } from '../api/use-api-data';
 import type { ConnectivityStatus } from '../app/connectivity-context';
 
 export type MonitoringFeedState<T> =
@@ -63,7 +73,18 @@ export function useMonitoringFeed<T>(
   const liveGeneration = useRef(0);
   const timer = useRef<number | null>(null);
 
+  // Paused by a refusal of the user's sign-in (no refresh is armed).
+  const paused = useRef(false);
+
   const reload = useCallback(() => setGeneration((value) => value + 1), []);
+
+  const retrySignal = useContext(RetryFailedLoadsContext);
+  const seenRetrySignal = useRef(retrySignal);
+  useEffect(() => {
+    if (seenRetrySignal.current === retrySignal) return;
+    seenRetrySignal.current = retrySignal;
+    if (paused.current) reload();
+  }, [retrySignal, reload]);
 
   // A regained connection (lost → healthy) refreshes immediately: the
   // generation bump cancels the pending period and issues a fresh
@@ -79,7 +100,7 @@ export function useMonitoringFeed<T>(
       lost.current = true;
     } else if (connectivity === 'connected' && lost.current) {
       lost.current = false;
-      reload();
+      if (!paused.current) reload();
     }
   }, [connectivity, reload]);
 
@@ -95,6 +116,7 @@ export function useMonitoringFeed<T>(
     }
     let cancelled = false;
     const run = () => {
+      paused.current = false;
       const requested = ++liveGeneration.current;
       void load().then(
         (data) => {
@@ -109,6 +131,13 @@ export function useMonitoringFeed<T>(
               ? { ...current, stale: true }
               : { status: 'error', message: errorMessage(error) },
           );
+          if (
+            refusalFlag(error, 'authentication_required') ||
+            refusalFlag(error, 'password_change_required')
+          ) {
+            paused.current = true;
+            return;
+          }
           timer.current = window.setTimeout(run, refreshMs);
         },
       );

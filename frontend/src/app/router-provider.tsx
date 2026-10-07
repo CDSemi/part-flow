@@ -26,8 +26,10 @@ export function RouterProvider({ children }: { children: ReactNode }) {
   // unknown), pushed in by the shell, which reads the sign-in. A ref:
   // it only steers the next bare '/management' entry.
   const readableRef = useRef<ReadonlySet<ManagementSubview> | null>(null);
-  // The landing of the last bare '/management' entry redirect and the
-  // last-used sub view it was resolved from; cleared by any navigation.
+  // The landing of the last bare '/management' entry redirect made
+  // while the readable sub views were unknown, and the last-used sub
+  // view it was resolved from; cleared by any navigation and by the
+  // first known readable set (which corrects it at most once).
   const landingRef = useRef<{
     path: string;
     lastUsed: ManagementSubview;
@@ -72,19 +74,23 @@ export function RouterProvider({ children }: { children: ReactNode }) {
 
   // A bare '/management' entry made before the sign-in was known (or
   // before a sign-in from the Management panel) lands again on the first
-  // sub view the user may open once it is known — only while the URL is
-  // still that landing; a deep link is never redirected. The router
-  // never reads the sign-in itself (the session lives below it).
+  // sub view the user may open once it is known — only once, only while
+  // the URL is still that landing, and never past a view holding unsaved
+  // work (an active navigation guard); a deep link is never redirected.
+  // A later change of the readable set (another sign-in, changed
+  // permissions) never moves the open view. The router never reads the
+  // sign-in itself (the session lives below it).
   const setManagementReadable = useCallback(
     (readable: ReadonlySet<ManagementSubview> | null) => {
       readableRef.current = readable;
       const landing = landingRef.current;
       // An ended sign-in never moves the open view (its work is kept).
       if (readable === null) return;
+      landingRef.current = null;
       if (landing === null || landing.path !== pathRef.current) return;
+      if (guardRef.current) return;
       const target = `/management/${managementEntrySubview(landing.lastUsed, readable)}`;
       if (target === landing.path) return;
-      landingRef.current = { path: target, lastUsed: landing.lastUsed };
       window.history.replaceState({}, '', target);
       setPath(target);
     },
@@ -95,9 +101,12 @@ export function RouterProvider({ children }: { children: ReactNode }) {
   // browser back/forward never lands on a forwarding URL.
   useEffect(() => {
     if (redirectTo) {
-      landingRef.current = redirectTo.startsWith('/management/')
-        ? { path: redirectTo, lastUsed: lastManagementSubview.current }
-        : null;
+      // Only a landing resolved without the readable sub views is
+      // corrected once they are known.
+      landingRef.current =
+        redirectTo.startsWith('/management/') && readableRef.current === null
+          ? { path: redirectTo, lastUsed: lastManagementSubview.current }
+          : null;
       window.history.replaceState({}, '', redirectTo);
       setPath(redirectTo);
     }

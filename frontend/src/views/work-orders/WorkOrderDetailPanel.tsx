@@ -74,6 +74,11 @@ const FULLY_RELEASED_EXPLANATION =
 const REMOVE_WHILE_DIRTY_EXPLANATION =
   'Save or discard demand changes before removing a saved line.';
 
+const NOTHING_TO_SAVE = 'Nothing to save — the Work Order is unchanged.';
+
+const LINE_DUE_DATES_KEPT =
+  'Line due dates stay unchanged — you may not edit demand lines.';
+
 /**
  * Work Order Details as a modal dialog over the Work Order list
  * (GUI_DESIGN §11.2): the list stays mounted and visible behind it and
@@ -542,6 +547,14 @@ export function WorkOrderDetailPanel({
 
   function handleSave(releaseDemandId: number | null = null) {
     if (!detail || busy) return;
+    // An unchanged draft sends nothing: an empty update asks the server
+    // for nothing (and is refused without Create and edit Work Orders).
+    // A release waiting for the save runs against the saved demand.
+    if (!dirty) {
+      if (releaseDemandId !== null) openReleaseFor(releaseDemandId, detail);
+      else showNotice(NOTHING_TO_SAVE);
+      return;
+    }
     const errors = validateDemandLines(display);
     setLineErrors(errors);
     if (errors.length) {
@@ -625,6 +638,9 @@ export function WorkOrderDetailPanel({
               />
               {due === '' ? (
                 <span className="duetxt none"> no due date</span>
+              ) : null}
+              {!canEditDemand && (due || null) !== detail.dueDate ? (
+                <span className="field-optional"> {LINE_DUE_DATES_KEPT}</span>
               ) : null}
             </>
           ) : (

@@ -14,6 +14,7 @@ import { apiRequest } from '../api/client';
 import type { HotListEntry } from '../api/hot-list';
 import { PERMISSIONS } from '../api/roles';
 import type { Permission } from '../api/roles';
+import { AREA_BOARD_REFRESH_MS } from '../views/area-board/area-board-feed';
 import { clearHotHistory, recordChange } from '../views/priority/hot-history';
 
 // Management access (Phase 14 slice 3), through the real application
@@ -127,8 +128,11 @@ beforeEach(() => {
         return json({ user: sessionUser, setup_open: setupOpen });
       }
       requests.push(`${method} ${url}`);
-      if (url === '/api/test-expire') {
+      if (url === '/api/test-expire' || sessionUser === null) {
         return json({ detail: A1, authentication_required: true }, 401);
+      }
+      if (url === '/api/area-board') {
+        return json({ department: { id: 1, name: 'Machining' }, areas: [] });
       }
       if (url === '/api/policies/due-soon') {
         return json({
@@ -345,6 +349,54 @@ test('FM-1: an ended sign-in keeps open work for the same user only; signing out
     await screen.findByText("Sign in to use PartFlow's Management screens."),
   ).toBeInTheDocument();
   expect(screen.queryByRole('dialog', { name: 'Sign in' })).toBeNull();
+});
+
+test('FM-1: an ended sign-in pauses a kept live view: a closed Sign in stays closed until the same user signs in again', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    sessionUser = ADA;
+    renderAt('/management/area-board');
+    expect(
+      await screen.findByText(
+        'No active Areas are configured in this Department.',
+      ),
+    ).toBeInTheDocument();
+    const boardReads = () =>
+      requests.filter((r) => r === 'GET /api/area-board').length;
+    expect(boardReads()).toBe(1);
+
+    // The server ends the sign-in: the next refresh is refused and the
+    // Sign-in dialog opens over the kept board.
+    sessionUser = null;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AREA_BOARD_REFRESH_MS);
+    });
+    expect(
+      await screen.findByRole('dialog', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    expect(boardReads()).toBe(2);
+
+    // Closed, the dialog stays closed: the feed no longer polls.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * AREA_BOARD_REFRESH_MS);
+    });
+    expect(screen.queryByRole('dialog', { name: 'Sign in' })).toBeNull();
+    expect(boardReads()).toBe(2);
+
+    // The same user signs in again: the feed reads at once and keeps
+    // refreshing.
+    nextSignIn = { ...ADA };
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await signInFromDialog();
+    await waitFor(() => expect(boardReads()).toBe(3));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AREA_BOARD_REFRESH_MS);
+    });
+    expect(boardReads()).toBe(4);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 /* ============ FM-2: access, sub-view bar, entry redirect ============ */

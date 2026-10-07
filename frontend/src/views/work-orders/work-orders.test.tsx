@@ -3928,6 +3928,28 @@ test('FM-4: with Edit Work Order Demand only, the header reads as text and no re
   expect(within(internal).queryByLabelText(/^External WO Number/)).toBeNull();
 });
 
+test('FM-4: with Edit Work Order Demand only, an unchanged Save demand sends nothing — never a request the server refuses', async () => {
+  sessionPermissions = ['EDIT_WORK_ORDER_DEMAND', 'MANAGE_PART_NUMBER_MASTER'];
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  const save = within(dialog).getByRole('button', { name: 'Save demand' });
+
+  fireEvent.click(save);
+  expect(
+    await screen.findByText('Nothing to save — the Work Order is unchanged.'),
+  ).toBeInTheDocument();
+  expect(patchBodies()).toEqual([]);
+
+  // An edit typed back to the saved value leaves nothing to save too.
+  const qty = within(dialog).getByLabelText('Quantity for A-100');
+  const saved = (qty as HTMLInputElement).value;
+  fireEvent.change(qty, { target: { value: '999' } });
+  fireEvent.change(qty, { target: { value: saved } });
+  fireEvent.click(save);
+  expect(patchBodies()).toEqual([]);
+  expect(within(dialog).queryByText(/do not have permission/)).toBeNull();
+});
+
 test('FM-4: with Create and edit Work Orders only, the lines read as text — no draft line can be created — and a save sends only the header', async () => {
   sessionPermissions = ['MANAGE_WORK_ORDERS', 'MANAGE_PART_NUMBER_MASTER'];
   await renderWorkOrders();
@@ -3950,10 +3972,20 @@ test('FM-4: with Create and edit Work Orders only, the lines read as text — no
   ).toHaveLength(3);
 
   // A new WO due date travels alone — the lines are not the user's to
-  // change, so they do not follow it.
+  // change, so they do not follow it, and the dialog says so.
+  expect(
+    within(dialog).queryByText(
+      'Line due dates stay unchanged — you may not edit demand lines.',
+    ),
+  ).toBeNull();
   fireEvent.change(within(dialog).getByLabelText(/^WO due date/), {
     target: { value: '2026-09-20' },
   });
+  expect(
+    within(dialog).getByText(
+      'Line due dates stay unchanged — you may not edit demand lines.',
+    ),
+  ).toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
   await screen.findByText(/007201 demand updated — business demand only/);
   expect(patchBodies()).toEqual([

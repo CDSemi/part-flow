@@ -43,6 +43,7 @@ from sqlalchemy.engine import URL, make_url
 
 from alembic import command
 from app.api.route_access import ROUTE_ACCESS, Access
+from app.application import allocations, production_release
 from app.core.config import get_settings
 from app.domain.enums import Permission
 from app.main import create_app
@@ -1548,6 +1549,61 @@ def test_two_users_racing_one_device_event_id_get_one_winner(
     assert statuses == [201, 409], [response.text for response in results.values()]
     loser = next(response for response in results.values() if response.status_code == 409)
     _recorded_by_another(loser)
+
+
+def _blind_committed_lookup(monkeypatch: pytest.MonkeyPatch, replay: str, calls: int = 2) -> None:
+    """Blind the committed-command lookup of ``replay`` for its first
+    ``calls`` calls — the pre-lock check and the re-check after the locks
+    — so the request reaches the ``device_event_id`` UNIQUE constraint at
+    COMMIT; the lookup after the rollback reads the committed winner."""
+    module: Any
+    missing: list[Any] | None
+    if replay == "release":
+        module, name, missing = production_release, "_committed_release", None
+    else:
+        module, name, missing = allocations, "committed_allocation_command", []
+    real = getattr(module, name)
+    remaining = {"calls": calls}
+
+    def blinded(session: Any, device_event_id: str) -> Any:
+        if remaining["calls"]:
+            remaining["calls"] -= 1
+            return missing
+        return real(session, device_event_id)
+
+    monkeypatch.setattr(module, name, blinded)
+
+
+@pytest.mark.parametrize("replay", ["release", "allocate"])
+def test_another_users_replay_lost_at_commit_is_refused(
+    client: TestClient,
+    db_engine: Engine,
+    shop: _Shop,
+    monkeypatch: pytest.MonkeyPatch,
+    replay: str,
+) -> None:
+    """MA-7 / MA-11 on the COMMIT path: another User's identical request
+    that loses the race at the ``device_event_id`` UNIQUE constraint is
+    refused as recorded by another user — never the winner's result as
+    a replay — and nothing of it is written. (A reversal racing itself
+    violates ``uq_work_order_allocations_reverses_allocation_id`` first
+    — the index PostgreSQL checks first — so its loser is the
+    "already reversed" conflict, covered by the reversal race tests.)"""
+    spec = next(candidate for candidate in _REPLAYS if candidate.name == replay)
+    path, body, _ = spec.prepare(client, shop)
+    winner = client_as(client, *spec.keys)
+    _ok(winner.post(path, json=body), 201)
+    loser = client_as(client, *spec.keys)
+    _blind_committed_lookup(monkeypatch, replay)
+    _recorded_by_another(
+        _refused_without_writes(db_engine, None, lambda: loser.post(path, json=body))
+    )
+    # The same User's retry on the same path is still the replay.
+    _blind_committed_lookup(monkeypatch, replay)
+    replayed = _refused_without_writes(
+        db_engine, None, lambda: another_session(client, winner).post(path, json=body)
+    )
+    assert replayed.status_code == 200, replayed.text
 
 
 def test_a_login_rename_of_the_actor_is_a_bounded_stall(

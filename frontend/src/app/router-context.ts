@@ -19,8 +19,10 @@ export interface RouterValue {
   /**
    * Tell the router which Management sub views the signed-in user may
    * open (null while nobody is known to be signed in). It steers the
-   * bare `/management` entry, and re-steers it while the URL is still
-   * that entry's landing (no navigation since).
+   * bare `/management` entry, and re-steers an entry made while it was
+   * unknown once it becomes known — only while the URL is still that
+   * entry's landing (no navigation since) and no navigation guard is
+   * active.
    */
   setManagementReadable: (
     readable: ReadonlySet<ManagementSubview> | null,
