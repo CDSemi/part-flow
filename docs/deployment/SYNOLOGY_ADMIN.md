@@ -207,6 +207,27 @@
 > (OD-A21-05); `status`, `doctor`, `ps` and `logs` work.
 > This block **supersedes** the `install-control.sh` warnings of the PF-A1.4 block and of sections 5 and 15.
 
+> **Deployment Admin checkpoint PF-A2.2 (2026-10-07) — config wizards and admin-config schema migration; still a
+> development state, not a NAS release.**
+> *Versioned admin configuration.* `pf-config.json` has two readable forms: legacy schema 1 (no
+> `schema_version`; omitted keys take frozen implicit values) and schema 2 (`"schema_version": 2` and every key
+> explicit). Loading never migrates: `status`, `doctor`, every lifecycle command, the installer preflight and the
+> control-install smoke read both forms as they are. Duplicate, unknown, missing (schema 2), mistyped and
+> unsupported-version files are refused with the first problem.
+> *`pf config admin`.* Creates `pf-config.json` from the installed example, migrates a schema 1 file to schema 2
+> (explicit values kept, implicit values written as the frozen schema 1 defaults) or completes a schema 2 file.
+> It asks only the groups that are missing or uncertain, from a read-only list of the host's groups (groups are
+> never created), shows a summary, asks `Write <path>? [y/N]` and writes atomically without overwriting an
+> edit made in the meantime. Before registration, `pf config admin --configuration <dir> --project <project>`
+> creates the file `pf install register` needs.
+> *`pf config app`.* Creates or completes `.env` for the instance's profile: existing secrets are kept byte for
+> byte; a database password is generated only when it is absent and the instance was never deployed; database
+> credentials are never asked or rewritten after the first deployment; a new timezone must exist in the host's
+> installed zone data. The first `pf deploy` without `.env` runs the same wizard.
+> *Audit.* A registered-mode write records `config-change.json` in its operation directory (key names and
+> `unchanged`/`set` for secrets; no secret value and no `.env` hash).
+> This block **supersedes** the "create the configuration by hand" steps of the PF-A2.1 block and of section 5.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -402,9 +423,18 @@ v2.5 launcher (or another root's) and does not reach the new root.
    atomic rename of a sibling build directory; name an absent path below it instead. If the publication
    fails or is interrupted, nothing was published: the build directory is removed and you run the same
    `install-control.sh init` again (there is no `resume` for a root that does not exist yet).
-2. Create `<config>/pf-config.json` and `<config>/.env` by hand from
-   `<root>/releases/<id>/pf-config.example.json` and `nas.env.example` (owner, group and modes as in
-   section 6). PF-A2.1 creates no configuration; the PF-A2.2 wizard will.
+2. Create the admin configuration with the pre-registration wizard (the directory must already exist,
+   root-owned, in protected ancestors; nothing is registered yet):
+
+   ```sh
+   sudo <root>/bootstrap/pf config admin --configuration <config> --project <project>
+   ```
+
+   It asks the workspace and backup groups from the host's existing groups, shows the summary and writes
+   `<config>/pf-config.json` (schema 2, `root:<workspace group>`, `0660`) after `y`. It refuses a directory
+   that an open install operation, a pending registration or a registered instance uses
+   (`install-operation-pending`, `registry-pending`, `config-path-conflict`). An existing legacy schema 1 file
+   is left as it is (`admin-config-legacy-unregistered`).
 3. Register the instance with its existing directories:
 
    ```sh
@@ -415,6 +445,8 @@ v2.5 launcher (or another root's) and does not reach the new root.
    The preflight checks the paths (nothing is created), the admin configuration and its groups, the
    managed-path inventory and the Docker daemon (one read-only `docker info`). Confirm with
    `REGISTER <slug>`. The registry default is never changed.
+4. Create `.env` with `sudo <root>/bootstrap/pf --instance <slug> config app`, or let the first
+   `pf --instance <slug> deploy` ask the same questions.
 
 ### (b) v2.5 home
 
@@ -438,23 +470,32 @@ sudo <root>/bootstrap/pf install migrate-legacy --legacy-home <home> --workspace
 - v2.5 stays the control plane for every change to the instance; pf gives read-only views (`status`,
   `doctor`, `ps`, `logs`) and refuses mutation with `legacy-control-active` until legacy adoption is
   installed.
+- A migrated instance keeps its schema 1 `pf-config.json` (v2.5 reads the same file and would refuse
+  `schema_version`). `pf config` is refused like every mutating route (`legacy-control-active`) until
+  adoption, and the instance counts as deployed for `pf config app` (its database exists).
 
 > **Warning (PF-A2.1).** This is a development checkpoint. A live v2.5 NAS is not migrated before the PF-A2
 > adoption sub-slice (OD-A21-05) and the unattended-grant decision (OD-A14-13) exist. DSM shared-folder ACLs
 > and a group-writable `backups/` are refused by the preflight until PF-A2.3/PF-A5 (A1-T17).
 
+> **Warning (PF-A2.2).** The config wizards are a development checkpoint, proven offline only. A configuration
+> file that carries ACL entries (a DSM shared folder usually does) is refused (`config-file-acl`) and must be
+> edited by hand until PF-A2.3. A password that needs URL encoding still fails at the database migration step of
+> `deploy` and `update` (section 6, `.env`).
+
 ## 6. Configuration files
 
 ### `config/pf-config.json`
 
-This is the actual NAS-local administration configuration. PF-A2.1 creates no configuration file:
-create it by hand from `<root>/releases/<id>/pf-config.example.json` before `pf install register`
-(section 5 (a)); `pf install migrate-legacy` only copies an existing legacy file byte for byte.
+This is the actual NAS-local administration configuration. `pf config admin` creates, migrates or
+completes it (section 5 (a) before registration, `sudo pf --instance <slug> config admin` after it);
+`pf install migrate-legacy` only copies an existing legacy file byte for byte.
 
-Default template:
+Schema 2 template (the installed `pf-config.example.json`, immutable input of the wizard):
 
 ```json
 {
+  "schema_version": 2,
   "repository": "CDSemi/part-flow",
   "branch": "main",
   "project": "partflow-staging",
@@ -472,15 +513,73 @@ Default template:
 Trusted users may edit this file over SMB. The controller validates supported keys,
 project naming, booleans, positive numeric values, and configured DSM groups before using it.
 
+- **Two schemas.** A file without `schema_version` is legacy schema 1: every omitted key takes its frozen
+  schema 1 value (the values of the template above), and it keeps working everywhere. Schema 2 lists
+  every key; a missing, unknown, duplicate or mistyped key is refused. `branch` must be a branch name
+  (no `..`, `//` or trailing `/`), `ci_workflow` a workflow file name, the groups names without control
+  characters, `:` or surrounding whitespace. Any other `schema_version` (including an explicit `1`) is
+  `admin-config-version-unsupported`.
+- **Migration is explicit.** Only `sudo pf --instance <slug> config admin` turns schema 1 into schema 2: explicit
+  values are kept and the implicit ones are written as the frozen schema 1 values, never as the current
+  example. A value that schema 2 refuses blocks the migration (`admin-config-migration-blocked`) and is never
+  repaired. Neither `pf install control` nor `migrate-legacy` changes the file. An unregistered directory (it may
+  be a v2.5 home's `config/`) and a v2.5-active instance are never migrated.
+- **Questions.** The wizard asks only `workspace_write_group` and `backup_read_group`: both when it creates the
+  file, otherwise only a group that does not exist on this host (no default; a broader group is never picked
+  silently). The answer is a number from the list of the host's groups (`users`, then groups with gid 1000 or
+  more) or the exact name of any existing group. Groups are never created. `branch`, `ci_workflow`,
+  `release_channel`, `auto_update`, `health_timeout_seconds` and `minimum_free_mb` are shown but not asked;
+  change them by hand.
+- **Environment label.** `environment` must equal the approved policy environment of the instance. It is a
+  label: changing it never changes the policy (`admin-config-mismatch`); a policy change is a separate approval
+  (PF-A4.3). `project` must equal the registered Compose project.
+- **Backup group.** A changed `backup_read_group` takes effect at the next `backup` or `purge` without a
+  separate approval, exactly as a hand edit does. Revision-bound approval of that change belongs to PF-A2.3.
+- **Writes.** The file is replaced through a private temporary `.pf-config.json.pf-config-<8 hex>` (for `.env`:
+  `.env.pf-config-<8 hex>`) in the same directory, keeping the owner, group and mode of the file it replaces; a
+  new file is `root:<workspace group>` `0660`. If the file changed after the summary, nothing is written
+  (`config-changed`). These temporary names are reserved: a leftover of an interrupted run is removed by the
+  next run, and a file with such a name that is not a leftover is refused (`config-file-unsafe`), never removed.
+- **Downgrade.** A control release older than PF-A2.2 refuses `schema_version`. Selecting such a release with
+  `pf install control --release` after a migration stops at its smoke check (`install-smoke-failed`), and nothing
+  is bound.
+
 `auto_update` is a proposal only: unattended apply needs a protected policy grant, which this
 checkpoint does not provide (section 13).
 
 ### `config/.env`
 
-For a brand-new deployment, `deploy` creates it interactively from the installed
-`control/nas.env.example` template. It generates a 64-character hexadecimal
-`POSTGRES_PASSWORD` using cryptographically secure randomness and does not print the
-password to the terminal.
+`sudo pf --instance <slug> config app` creates or completes it for the instance's profile, and the first
+`deploy` without `.env` runs the same wizard. A created file starts from the installed `nas.env.example`
+(comments kept); otherwise only the lines that change are rewritten and every other line keeps its exact
+bytes. The wizard needs a valid `pf-config.json` (`admin-config-required`). It asks only missing or invalid
+values, in this order: PostgreSQL user, PostgreSQL database, factory timezone, access mode (and the LAN
+address), HTTP port, and the Reverse Proxy hostname (asked only for the `127.0.0.1` binding; Direct LAN
+uses `localhost`).
+
+- **Secrets.** An existing `POSTGRES_PASSWORD` is never shown, changed, regenerated or re-quoted (summary:
+  `unchanged`). A missing or empty one is generated as 64 hexadecimal characters from cryptographically
+  secure randomness (summary: `set`) only when the instance was never deployed.
+- **Deployed instances.** An instance counts as deployed when `state/deployed.json` exists, when a completed
+  v2.5 migration pins it, or when its state cannot be read. Then `POSTGRES_USER`, `POSTGRES_PASSWORD` and
+  `POSTGRES_DB` are never asked, generated or rewritten; a missing or unusable one is refused
+  (`app-credential-unusable`) with restore guidance. A full `purge` removes the state, so a purged instance
+  is new again; a purged migrated instance stays deployed.
+- **Password length.** A kept password shorter than 32 characters is reported
+  (`password-weak-for-new-deployment`): the first `deploy` refuses it. Set a longer one by hand, or leave the
+  line as `POSTGRES_PASSWORD=` (empty) and run `config app` again to generate one.
+- **Timezone.** A new or missing `SITE_TIMEZONE` must exist in this host's installed zone data. An existing
+  value that the host does not know is kept with a note (`zone-unknown-on-host`); without host zone data an
+  existing value is kept with a note and a missing one is refused (`zone-data-unavailable`). The backend
+  checks the value with its own image's zone data at startup; that data is not checked by the wizard.
+- **ACLs.** A `.env` or `pf-config.json` that carries ACL entries is refused before the first question
+  (`config-file-acl`): replacing it would drop the ACL. Edit such a file by hand until PF-A2.3.
+- **Database URL.** The controller passes `PARTFLOW_DATABASE_URL` with percent-encoded credentials; nothing
+  is spliced raw. Limit (until the app-lane fix of `backend/alembic/env.py`, P16-S3 or later, is deployed): the
+  backend migration step hands that URL to Alembic's configuration parser, which rejects `%`. A password
+  that needs encoding (any character outside letters, digits and `-._~`) therefore makes `deploy` and `update`
+  stop at the migration step, before the new version is activated. Generated passwords are unaffected; an
+  existing password is never changed to work around it.
 
 Typical content:
 
@@ -497,7 +596,7 @@ PARTFLOW_ALLOWED_HOST=localhost
 Changing `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after PostgreSQL has
 already initialized is **not** equivalent to changing the existing database credentials.
 Do not casually edit those values on a live instance. Use the managed deployment/recovery
-workflow or plan a credential/database migration explicitly.
+workflow or plan a credential/database migration explicitly; no wizard rotates credentials.
 
 Since PF-A1.2 the file is parsed as data with a strict grammar: exactly these seven keys,
 each once, `KEY=VALUE` with no whitespace around `=` and no `export`; comment lines start
@@ -848,6 +947,9 @@ sudo pf deploy --latest
 Because purge removes `config/.env`, a normal full purge causes the deploy wizard to create
 a new environment and new PostgreSQL password. If the purge variant preserved an external
 configuration for a specific recovery path, the deploy flow validates it before reuse.
+`purge --reset-admin-config` also removes `pf-config.json`; the purge then names the next steps:
+`sudo pf --instance <slug> config admin`, then `sudo pf --instance <slug> deploy --latest` (with the launcher
+of section 5 when `sudo pf` does not reach this root).
 
 After smoke testing:
 
@@ -966,6 +1068,10 @@ refused (section 16).
 There is no managed route for an application CLI inside the backend container (`exec` and `run`
 are refused; a managed route is PF-A4).
 
+Since PF-A2.2 `pf config` is the configuration wizard group (`pf config admin`, `pf config app`).
+`pf config` alone or with any other word (for example the former `pf config --services`) is still refused
+with `compose-route-removed`; the raw Compose model is not available (`pf doctor` validates it privately).
+
 If raw Compose access outside the controller is absolutely necessary, the equivalent shape is:
 
 ```sh
@@ -1041,6 +1147,9 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   the restore.
 - The launcher and verifier bytes are frozen: a candidate that changes `pf.sh` or `pf_bootstrap.py` is
   refused with `bootstrap-change-unsupported` (a launcher migration is PF-A4.3).
+- Installing or selecting a release never migrates `pf-config.json`. Once an instance's file is schema 2,
+  a retained release older than PF-A2.2 rejects it in the smoke check (`install-smoke-failed`, nothing
+  bound); restore the schema 1 file first if you really need to go back.
 - The legacy `recovery/control-upgrades/` archive no longer applies; old releases stay under
   `<root>/releases/`.
 
@@ -1129,6 +1238,47 @@ step. `install-interrupted`: the operation stopped after its commit point or dur
 restore; it stays open in the phase the message names. Run `pf install resume`. When the message says
 the operation is cancelled but its cleanup was interrupted, nothing else was changed: what remains stays
 in its operation directory or is recognized by the next run of the same command.
+
+### `pf config` refusals and notes
+
+Every refusal below changed nothing; the message names the next command.
+
+- `config-option-invalid` (exit 2): `--configuration [--project]` is the pre-registration form of
+  `config admin` only; it cannot be combined with `--instance` or used with `config app`, and `--project`
+  needs `--configuration`.
+- `config-cancelled`: `q`, end of input, Ctrl-C or any answer but `y`/`yes` at `Write …? [y/N]`. A generated
+  password was discarded.
+- `config-current` (exit 0): nothing to change. Notes after it still apply.
+- `admin-config-required`: `config app` needs a valid `pf-config.json`; run `config admin` first.
+- `admin-config-invalid`: the file has a parse, key, type or rule problem (the first one is shown, with the
+  count of the others). Fix it by hand; the wizard never repairs a file.
+- `admin-config-version-unsupported`: the file declares another `schema_version`. A newer control wrote it:
+  select that control again (`pf install control --release <id>`) or restore the previous file.
+- `admin-config-migration-blocked`: an explicit schema 1 value is not valid in schema 2; correct it by hand.
+- `admin-config-mismatch`: `project` differs from the registration, or `environment` from the approved policy.
+  Restore the registered value; a policy change is a separate approval.
+- `admin-config-legacy-unregistered` (exit 0): a schema 1 file in a directory that is not registered was left
+  as it is; register first, then run `config admin` with `--instance`.
+- `admin-example-invalid`, `app-example-invalid`: the installed example is not usable; run `doctor` and
+  reinstall the control release.
+- `app-config-invalid`: `.env` does not parse (unknown or duplicate key, `export`, quoting, line endings).
+- `app-credential-unusable`: the instance counts as deployed and a credential is missing or invalid; restore
+  it from the recovery bundle or your records.
+- `app-profile-undeclared`: the instance's profile declares no application variables in this control.
+- `migration-issue`: an existing value cannot be rendered literally (single quote, trailing backslash, control
+  character) or the password is shorter than 4 characters; fix the file by hand.
+- `zone-data-unavailable`: no host zone data to verify a new `SITE_TIMEZONE`; install it or write the value by
+  hand. As a note: an existing value was kept.
+- `config-file-acl`: the file carries ACL entries; apply the listed changes by hand (PF-A2.3).
+- `config-file-unsafe`: the file is a link, a special or hard-linked file, or the directory holds a reserved
+  temporary name that is not a leftover of an interrupted run; inspect it, nothing was removed.
+- `config-changed`: the file changed while the wizard ran; run the command again to review the new file.
+- `config-busy`: another registration holds the registry lock; try again.
+- `config-dir-invalid`, `config-path-conflict`: the pre-registration directory is missing, non-canonical, in
+  replaceable ancestors, or used by a registered instance (then use `--instance <slug> config admin`).
+- `config-audit-invalid`: internal error; the change record failed its schema and nothing was written.
+- Notes: `config-temp-removed` (leftover temporary files of an interrupted run were removed),
+  `zone-unknown-on-host`, `password-weak-for-new-deployment`, `implicit-materialized`.
 
 ### `compose-route-removed`, `compose-override-refused`, `unknown-option` or `unknown-command`
 
@@ -1284,6 +1434,9 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 | `sudo <root>/bootstrap/pf install migrate-legacy …` | Copy legacy v2.5 configuration and register it; v2.5 stays in control (`MIGRATE <slug>`) |
 | `sudo <root>/bootstrap/pf install control --source DIR \| --release ID` | Install or select a control release (`INSTALL CONTROL`/`SELECT CONTROL <id>`) |
 | `sudo <root>/bootstrap/pf install resume [--operation ID] [--abandon]` | Continue or abandon an open install operation (`RESUME`/`ABANDON <op>`) |
+| `sudo <root>/bootstrap/pf config admin --configuration DIR [--project P]` | Create or complete `pf-config.json` before registration (no `--instance`; schema 2 only) |
+| `sudo pf --instance <slug> config admin` | Create, migrate (schema 1 → 2) or complete the instance's `pf-config.json` (`[y/N]`) |
+| `sudo pf --instance <slug> config app` | Create or complete the instance's `.env` for its profile (`[y/N]`) |
 
 Commands started without a terminal must pass `--instance <slug|uuid>`; until PF-A4.3 policy
 grants exist every locked command is refused without a terminal (`terminal-required`,
@@ -1329,6 +1482,17 @@ PF-A2.1 limits:
 - no configuration creation (PF-A2.2) and no permission change (PF-A2.3);
 - old releases and discarded registrations are not cleaned up (PF-A5.1).
 
+PF-A2.2 limits:
+
+- offline only, as for PF-A2.1;
+- the backend image's zone data is not checked (owner unassigned); the backend still refuses an unknown zone
+  at startup;
+- configuration files with ACL entries are refused and need manual edits; the SMB race between the
+  wizard's final comparison and its rename cannot be closed by a lock;
+- a password that needs URL encoding fails at the backend migration step until the app-lane `env.py` fix is
+  deployed;
+- a `backup_read_group` change takes effect without revision-bound approval (PF-A2.3).
+
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
 instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose
 route remains; the PF-A1 safety scope is proven offline only. A1-T11…T14 stay blocked on a real
@@ -1342,8 +1506,9 @@ live v2.5 NAS is migrated.
 
 ```text
 install-control.sh init
-→ (configuration by hand)
+→ pf config admin --configuration <config> --project <project>
 → pf install register
+→ pf config app
 → doctor
 → backup
 → update

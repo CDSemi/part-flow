@@ -1,0 +1,13 @@
+{
+  "registered": {
+    "slug": "a",
+    "workspace": "{base}/a/repo",
+    "configuration": "{base}/a/config",
+    "backups": "{base}/a/backups",
+    "recovery": "{base}/a/recovery"
+  },
+  "proposal": {
+    "configuration": "{base}/a/repo/config",
+    "project": "partflow-b"
+  }
+}

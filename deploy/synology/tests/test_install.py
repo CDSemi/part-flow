@@ -2313,6 +2313,52 @@ class AuditRegressions(InitBase):
                 self.assertEqual(sorted(imported - used), [])
 
 
+# ============================================================================ PF-A2.2: install copy per verb
+
+
+@ROOT_REQUIRED
+class ConfigCopy(InstallBase):
+    """PF-A2.2 section 4.4: admin-config-missing, group-missing and app-env-unparsed name the next step per verb."""
+
+    instances = ("a",)
+
+    def test_register_names_the_pre_registration_wizard_and_the_app_wizard(self):
+        prefix = pf_install.launcher_prefix(self.root)
+        paths = pfx.data_home(self.base / "c", project="pf-c", group=GROUP)
+        config = paths["configuration"] / "pf-config.json"
+        config.unlink()
+        code, out, err = self.run_pf(register_arguments(self.layout, "c", paths, "pf-c"))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"  - admin-config-missing: {config}: create it with '{prefix} config admin --configuration "
+                      f"{paths['configuration']} --project pf-c', then run again", err)
+        config.write_text(json.dumps({"project": "pf-c", "environment": "staging", "backup_read_group": "pf-no-such",
+                                      "workspace_write_group": GROUP}) + "\n")
+        code, out, err = self.run_pf(register_arguments(self.layout, "c", paths, "pf-c"))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"  - group-missing: {config}: backup_read_group 'pf-no-such' does not exist on this host; nothing "
+                      "is created or substituted (PERMISSIONS section 1); fix the group name in "
+                      f"{config} by hand, or with '{prefix} config admin --configuration {paths['configuration']}' when "
+                      "the file has schema_version 2", err)
+        config.write_text(json.dumps({"project": "pf-c", "environment": "staging", "backup_read_group": GROUP,
+                                      "workspace_write_group": GROUP}) + "\n")
+        (paths["configuration"] / ".env").write_text("not a valid line\n")
+        code, out, err = self.run_pf(register_arguments(self.layout, "c", paths, "pf-c"))
+        self.assertEqual(code, 1, out + err)  # cancelled at the confirmation: the scripted terminal has no answer
+        self.assertIn(f"; after registration fix it with '{prefix} --instance c config app'", out)
+        self.assertNotIn("PF-A2.2 owns", out + err)
+
+    def test_migrate_legacy_keeps_the_v25_file_and_points_at_v25(self):
+        home = pfx.legacy_home(self.base, env_repo="not a valid line\n", admin_legacy={"backup_read_group": "pf-no-such"})
+        code, out, err = self.run_pf(migrate_arguments(home, layout=self.layout))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("backup_read_group 'pf-no-such' does not exist on this host; nothing is created or substituted "
+                      "(PERMISSIONS section 1)", err)
+        self.assertNotIn("config admin --configuration", err)
+        self.assertIn("this migrated instance stays on v2.5 for changes until legacy adoption (OD-A21-05): fix the line "
+                      "by hand or with v2.5", out + err)
+        self.assertNotIn("config app", out + err)
+
+
 class types_result:  # noqa: N801 - a CompletedProcess-shaped value for in-process reruns
     def __init__(self, returncode, stdout, stderr=""):
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr

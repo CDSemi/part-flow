@@ -298,6 +298,59 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > files and the strict JSON load of the schema passed in both runs. Gate statuses are unchanged (A2-T01…T03
 > passed offline; A2-T04, the real global launcher and reboot/power loss not_run; A1-T11…T14, A1-T17 blocked).
 
+> **PF-A2.2 checkpoint addendum (2026-10-07) — config wizard and schema migration.** Wire schemas first:
+> `contracts/admin-config.schema.json` (admin config schema 2, flat, A1 subset keywords) and
+> `contracts/config-change.schema.json` (audit record, A2.1 description markers incl. the new target `scalar`),
+> each equal to its embedded copy in `pf_config.py`; examples under `contracts/examples/admin-config/` bound to
+> their outcomes by `cases.json`; the shipped `pf-config.example.json` gains `"schema_version": 2` only, and the
+> `nas.env.example` header names `pf config app`. `pf_config.parse_admin_config` reads legacy schema 1 (no
+> `schema_version`, frozen implicit values, the A1 messages unchanged) and schema 2 (every key explicit); any
+> other version is `admin-config-version-unsupported`; `validate_admin_config` keeps the A2.1 smoke shape.
+> Explicit migration (`migrate_admin_config`) keeps explicit values and materializes the frozen schema 1 values;
+> loading never migrates. New CLI group `pf config admin|app` (DISPATCH row `config`, 20 routes; `pf config` alone
+> or with any other word stays `compose-route-removed`); `main()` skips only the configuration load and the
+> snapshot freeze for `config`; a pre-registration mode `pf config admin --configuration DIR [--project P]`
+> takes only the registry lock. The writer (`write_editable_file`) refuses symlinks, special or hard-linked files,
+> ACL-bearing files and unexplained reserved temp names before the first question, then compares-and-swaps
+> (rename for replace, no-clobber link for create) and removes classified crash leftovers; registered-mode writes
+> record `config-change.json`. `pf config app` plans per declared key of the record's profile
+> (`APP_DECLARATIONS`), keeps secrets byte for byte, generates a password only for a never-deployed instance
+> (no `deployed.json`, no completed `migrate-legacy` pinned to it, readable state), never rewrites credentials
+> once deployed, and checks new timezones against the interpreter's compile-time TZPATH (never `PYTHONTZPATH`);
+> `deploy`'s missing-`.env` branch uses the same wizard (`render_env_template` removed). `pf_install`:
+> `validate_marked` (the marker walker parameterized by `$defs`; `validate_document` unchanged in behaviour),
+> `read_regular_file` alias, per-verb copy for `admin-config-missing`, `group-missing` and `app-env-unparsed`.
+> `pf_instance.POLICY_SCHEMA_VERSION` with its own message. `doctor` adds the schema and host zone data lines.
+> `CHECKPOINT = "PF-A2.2"`. `pf_bootstrap.py`, `pf.sh`, `INSTALL_CONTRACT`/`INSTALL_SCHEMA_VERSION` and the install
+> schema are byte-identical to `3b81f3a` (BF-1).
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (CPython 3.12.15)
+> and `python:3.9` (CPython 3.9.25) containers, uid 0, source mounted read-only and copied to `/tmp/r`:
+> **556 tests OK, 0 skipped** on both. Baseline: the 479 PF-A2.1 tests minus one moved test (478) all pass;
+> updated without weakening: DT-1 (20 routes), DT-7 (`config` leaves the removed-word table, its guidance stays),
+> DT-9 (`config` confirms with `[y/N]`, OD-A22-17), SS-2 (registry reload of the pre-registration mode), SS-3
+> (writer sites), SS-5/RW-6 (checkpoint), CE-5 (the new `Timezone data:` line is checked separately from the
+> password scan), the two `prepare_new_env` tests (never-deployed fixture; port asked before the hostname, the
+> declaration order), and `test_render_env_template_rejects_missing_required_sample_field` → ER-3. New: 78 tests
+> (`test_config.py` 72: SC-1/SC-2/BF-1 and the shipped example 4, EX-1 1, AV 4, AM 2, AW 12, PR 8, AD 2, AP-1…AP-11
+> plus the wizard part of ER-3 12, ZD 4, ER-1…ER-3/UR-1 4, CC 4, CR 3, SK 2, SC-3 1, PO 1, LC-1 1 plus 7 schema 2
+> re-runs of A1 deploy/update/backup/rollback/purge/side-by-side restore tests; `test_entry_routes` 4: DT-3, DT-5,
+> DT-5b, SS-3c; `test_install` 2: per-verb copy). Evidence outside the suite: UP-1 (A2.1 `install-control.sh init`
+> from `git archive 3b81f3a`, register with a schema 1 file, `install control --source` the A2.2 tree → config
+> bytes unchanged, `config admin` → schema 2, `install control --release <A2.1>` → `install-smoke-failed`, nothing
+> bound: PASS) and SECRET-SCAN (every file under the app-wizard test roots scanned for every test secret, raw and
+> percent-encoded: 0 hits outside `.env`). `sh -n` for the 4 scripts, `ast` (3, 9) for the 17 Python files and the
+> strict JSON load of the 3 contracts passed. Docker is the registered fake; no daemon, NAS, `/usr/local/bin/pf`,
+> running stack or development database was contacted.
+> Gates: A2-T05 **passed** (offline); A2-T06 **passed** (offline, OPS scope: host zone data, secret preservation,
+> generation only when required, OPS URL encoding) with two declared limits: the backend image's zone data is
+> unchecked (owner unassigned, OD-A22-21) and app-side consumption of an encoded URL is **pending the app-lane
+> `backend/alembic/env.py` fix** (WP-APP not built; backend gate not run); A1-T08 **passed** (re-run + ER/UR);
+> A2-T01…T03 **passed** (re-run); A2-T04, the global launcher and reboot **not_run**; container zone data, DSM
+> ACL-bearing files and the SMB write race **not_run**; A1-T11…T14, A1-T17 stay **blocked**. Limits: a password
+> that needs URL encoding fails at the backend migration step until the `env.py` escape lands; ACL-bearing config
+> files are refused (manual edits until PF-A2.3); a `backup_read_group` change takes effect without
+> revision-bound approval (OD-A22-20); offline only.
+
 ## Executed checks
 
 | Check | Actual result |

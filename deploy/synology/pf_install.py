@@ -328,10 +328,13 @@ INSTALL_OPERATION_SCHEMA = {
 }
 
 
-def _validate_target(value, target, path, errors):
-    defs = INSTALL_OPERATION_SCHEMA["$defs"]
+def _validate_target(value, target, path, errors, defs):
     if target.startswith("$defs."):
-        _validate_def(value, target[len("$defs."):], path, errors)
+        _validate_def(value, target[len("$defs."):], path, errors, defs)
+    elif target == "scalar":
+        # PF-A2.2: a string, a non-boolean integer or a boolean (never a float, list, object or null).
+        if not isinstance(value, (str, int)):
+            errors.append(f"{path}: expected a scalar (string, integer or boolean)")
     elif target == "string":
         if not isinstance(value, str):
             errors.append(f"{path}: expected string")
@@ -348,7 +351,7 @@ def _validate_target(value, target, path, errors):
         raise InstallError("schema-invalid", f"unknown schema marker target {target!r} ({sorted(defs)})")
 
 
-def _walk(value, schema, path, errors):
+def _walk(value, schema, path, errors, defs):
     if not isinstance(value, dict):
         return
     for name, sub in schema.get("properties", {}).items():
@@ -359,29 +362,37 @@ def _walk(value, schema, path, errors):
         where = f"{path}.{name}"
         if marker.startswith("null or "):
             if item is not None:
-                _validate_target(item, marker[len("null or "):], where, errors)
+                _validate_target(item, marker[len("null or "):], where, errors, defs)
         elif marker.startswith("items "):
             if isinstance(item, list):
                 for index, element in enumerate(item):
-                    _validate_target(element, marker[len("items "):], f"{where}[{index}]", errors)
+                    _validate_target(element, marker[len("items "):], f"{where}[{index}]", errors, defs)
         elif marker.startswith("map "):
             if isinstance(item, dict):
                 for key, element in item.items():
-                    _validate_target(element, marker[len("map "):], f"{where}.{key}", errors)
+                    _validate_target(element, marker[len("map "):], f"{where}.{key}", errors, defs)
         elif sub.get("type") == "object":
-            _walk(item, sub, where, errors)
+            _walk(item, sub, where, errors, defs)
 
 
-def _validate_def(value, name, path, errors):
-    schema = INSTALL_OPERATION_SCHEMA["$defs"][name]
+def _validate_def(value, name, path, errors, defs):
+    schema = defs[name]
     errors.extend(pf_instance.validate_against_schema(value, schema, path))
-    _walk(value, schema, path, errors)
+    _walk(value, schema, path, errors, defs)
+    return errors
+
+
+def validate_marked(value, schema, *, defs):
+    """Errors of ``value`` against ``schema`` (A1 subset) plus the A2.1 description markers, whose ``$defs.<name>``
+    targets resolve in ``defs``; [] when valid. PF-A2.2: shared by the install operation and config-change records."""
+    errors = list(pf_instance.validate_against_schema(value, schema, "$"))
+    _walk(value, schema, "$", errors, defs)
     return errors
 
 
 def validate_document(value, name):
     """Schema errors of a plan (``name="plan"``) or journal (``name="journal"``); [] when valid."""
-    return _validate_def(value, name, "$", [])
+    return validate_marked(value, INSTALL_OPERATION_SCHEMA["$defs"][name], defs=INSTALL_OPERATION_SCHEMA["$defs"])
 
 
 # ------------------------------------------------------------------------- errors and records
@@ -507,6 +518,10 @@ def _read_regular(path, *, single_link=False):
         return b"".join(chunks)
     finally:
         os.close(fd)
+
+
+# PF-A2.2: public alias for the config wizard (pf-admin); no behaviour change.
+read_regular_file = _read_regular
 
 
 def _read_optional(path):
@@ -1072,11 +1087,20 @@ def _read_optional_safe(path):
         return False
 
 
-def _admin_config_check(report, path, data, *, project=None, environment="staging"):
-    """Validated admin config dict or None. ``project`` None: the config decides it."""
+def _admin_config_check(report, path, data, *, project=None, environment="staging", verb="migrate-legacy",
+                        root=None):
+    """Validated admin config dict or None. ``project`` None: the config decides it.
+
+    PF-A2.2 copy: for ``register`` (``root`` given) the missing-file and missing-group details name the
+    pre-registration wizard; ``migrate-legacy`` keeps the A2.1 details (the v2.5 file must stay schema 1)."""
+    register = verb == "register" and root is not None
     if data is None:
-        report.conflict("admin-config-missing", path, "create pf-config.json by hand from the release's "
-                        "pf-config.example.json (A2.1 creates no configuration), then run again")
+        if register:
+            report.conflict("admin-config-missing", path, f"create it with '{launcher_prefix(root)} config admin "
+                            f"--configuration {Path(path).parent} --project {project}', then run again")
+        else:
+            report.conflict("admin-config-missing", path, "create pf-config.json by hand from the release's "
+                            "pf-config.example.json (A2.1 creates no configuration), then run again")
         return None
     config, problems = pf_config.validate_admin_config(data, label=str(path))
     if problems:
@@ -1093,19 +1117,30 @@ def _admin_config_check(report, path, data, *, project=None, environment="stagin
         try:
             grp.getgrnam(config[name])
         except KeyError:
-            report.conflict("group-missing", path, f"{name} {config[name]!r} does not exist on this host; nothing is "
-                            "created or substituted (PERMISSIONS section 1)")
+            detail = f"{name} {config[name]!r} does not exist on this host; nothing is created or substituted " \
+                     "(PERMISSIONS section 1)"
+            if register:
+                detail += (f"; fix the group name in {path} by hand, or with '{launcher_prefix(root)} config admin "
+                           f"--configuration {Path(path).parent}' when the file has schema_version 2")
+            report.conflict("group-missing", path, detail)
     return config
 
 
-def _app_env_note(report, path):
+def _app_env_note(report, path, *, verb, root, slug=None):
+    """PF-A2.2: the next step for an unparsed ``.env`` per verb (register: the app wizard after registration;
+    migrate-legacy: by hand or with v2.5 until legacy adoption)."""
     data = _read_optional_safe(path)
     if data in (None, False):
         return
     try:
         pf_config.parse_app_env(data, label=str(path))
     except pf_config.ConfigError as exc:
-        report.note("app-env-unparsed", f"{exc}; PF-A2.2 owns the configuration migration")
+        if verb == "register":
+            report.note("app-env-unparsed", f"{exc}; after registration fix it with '{launcher_prefix(root)} "
+                                            f"--instance {slug} config app'")
+        else:
+            report.note("app-env-unparsed", f"{exc}; this migrated instance stays on v2.5 for changes until legacy "
+                                            "adoption (OD-A21-05): fix the line by hand or with v2.5")
 
 
 def _daemon_check(report, runner, endpoint, root):
@@ -1191,7 +1226,8 @@ def _preflight_registration_common(report, root, plan, request, runner, *, proje
     registry, contexts = _registry_checks(report, root)
     _pending_registration_checks(report, root)
     endpoint = request.get("docker_endpoint") or DEFAULT_DOCKER_ENDPOINT
-    config = _admin_config_check(report, config_path, config_data, project=None if legacy else project)
+    config = _admin_config_check(report, config_path, config_data, project=None if legacy else project,
+                                 verb="migrate-legacy" if legacy else "register", root=root)
     if legacy and config is not None:
         project = config["project"]
     engine_id, resolved = _daemon_check(report, runner, endpoint, root)
@@ -1219,7 +1255,7 @@ def _preflight_register(report, root, plan, request, runner):
     _preflight_registration_common(report, root, plan, request, runner, project=request.get("project"),
                                    config_path=config_path, config_data=data)
     if isinstance(configuration, str):
-        _app_env_note(report, Path(configuration) / ".env")
+        _app_env_note(report, Path(configuration) / ".env", verb="register", root=root, slug=request.get("slug"))
     _free_space(report, root, 0)
 
 
@@ -1337,7 +1373,8 @@ def _preflight_migrate(report, root, plan, request, runner, *, under_lock):
                                               config_path=config_path, config_data=data, legacy=True)
     del registry
     env_entry = next((item for item in files if item["role"] == "env"), None)
-    _app_env_note(report, Path(env_entry["source"]) if env_entry else config_dir / ".env")
+    _app_env_note(report, Path(env_entry["source"]) if env_entry else config_dir / ".env", verb="migrate-legacy",
+                  root=root)
     project = plan["instance"]["compose_project"] if plan["instance"] else project
     # Every check that does not need the project runs first, so one report holds every conflict (A2-T01).
     launcher_path = None if request.get("no_launcher") else Path(request.get("launcher_path") or DEFAULT_LAUNCHER)

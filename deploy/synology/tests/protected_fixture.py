@@ -678,3 +678,58 @@ def forked_crash(seam, when, index):
 
     with mock.patch.object(module, seam, wrapper):
         yield calls
+
+
+# ------------------------------------------------------------------ PF-A2.2 config wizard fixtures
+
+
+def admin_config(path, version=1, **values):
+    """Write ``pf-config.json`` at ``path``: schema 1 holds exactly ``values`` (A1 form, other keys implicit);
+    schema 2 is the rendered document of the frozen defaults overlaid with ``values`` (every key explicit)."""
+    path = Path(path)
+    if version == 1:
+        path.write_text(json.dumps(values) + "\n")
+    else:
+        config = pf.pf_config
+        merged = dict(config.ADMIN_CONFIG_DEFAULTS, **values)
+        path.write_bytes(config.render_admin_config(config.admin_document(merged)))
+    return path
+
+
+def zone_dir(base, zones):
+    """A fixture zone data directory: {name: "tzif" | "text" | "fifo" | "link:<target>"}. Returns its path."""
+    directory = Path(base)
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, kind in zones.items():
+        path = directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "tzif":
+            path.write_bytes(b"TZif2" + b"\x00" * 40)
+        elif kind == "text":
+            path.write_bytes(b"not zone data\n")
+        elif kind == "fifo":
+            os.mkfifo(str(path), 0o600)
+        elif kind.startswith("link:"):
+            os.symlink(kind[len("link:"):], str(path))
+        else:
+            raise ValueError(kind)
+    return directory
+
+
+def with_acl(path):
+    """Give ``path`` a POSIX access ACL (a named user entry) through the xattr API, or skip with a named reason."""
+    import struct
+    pf_bootstrap_module = pf.pf_bootstrap
+    entries = ((pf_bootstrap_module.ACL_USER_OBJ, 6, 0xFFFFFFFF), (pf_bootstrap_module.ACL_USER, 6, 1000),
+               (pf_bootstrap_module.ACL_GROUP_OBJ, 6, 0xFFFFFFFF), (pf_bootstrap_module.ACL_MASK, 6, 0xFFFFFFFF),
+               (pf_bootstrap_module.ACL_OTHER, 4, 0xFFFFFFFF))
+    blob = struct.pack("<I", pf_bootstrap_module.ACL_VERSION) + b"".join(struct.pack("<HHI", *entry)
+                                                                      for entry in entries)
+    if not hasattr(os, "setxattr"):
+        raise unittest.SkipTest("posix ACL fixture unavailable: os.setxattr is missing")
+    try:
+        os.setxattr(str(path), "system.posix_acl_access", blob, follow_symlinks=False)
+    except OSError as exc:
+        raise unittest.SkipTest("posix ACL fixture unavailable: the filesystem refuses system.posix_acl_access "
+                                f"({exc.strerror or exc})")
+    return path

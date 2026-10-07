@@ -86,6 +86,8 @@ PROFILE_ID = "partflow-staging-legacy"
 PROFILE_COMPOSE_FILE = "compose.nas.yaml"
 PROFILE_APPLICATION = "partflow"
 SUPPORTED_ENVIRONMENTS = ("staging",)
+# PF-A2.2: the approved policy is versioned separately from the editable admin configuration.
+POLICY_SCHEMA_VERSION = 1
 # The A1 registry envelope (work-packages/PF-A1.md section 4).
 REGISTRY_KEYS = ("schema_version", "default_instance_id", "instances")
 REGISTRY_ENTRY_KEYS = ("instance_id", "slug", "record_path")
@@ -1041,8 +1043,10 @@ def load_policy(context):
     expected = {"schema_version", "revision", "environment"}
     if not isinstance(policy, dict) or set(policy) != expected:
         raise ContextError(f"Policy keys must be exactly {sorted(expected)}.")
-    if not _same_json_value(policy["schema_version"], SCHEMA_VERSION):
-        raise ContextError("Unsupported policy schema_version.")
+    if not _same_json_value(policy["schema_version"], POLICY_SCHEMA_VERSION):
+        raise ContextError(f"Unsupported policy schema_version {policy['schema_version']!r} in "
+                           f"{context.approved_policy.path}; this control reads policy schema {POLICY_SCHEMA_VERSION}. "
+                           "The approved policy was not changed; select the control release that wrote it.")
     if not _type_matches(policy["revision"], "integer") or policy["revision"] != context.approved_policy.revision:
         raise ContextError("Policy revision differs from the protected record.")
     if policy["environment"] != context.approved_environment:

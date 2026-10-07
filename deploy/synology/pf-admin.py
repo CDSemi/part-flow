@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import dataclasses
 import datetime as dt
+import errno
 import grp
 import hashlib
 import importlib.util
@@ -61,7 +62,7 @@ pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A2.1"
+CHECKPOINT = "PF-A2.2"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -114,7 +115,8 @@ REQUIRED_NAS_ENV_KEYS = (
     "PARTFLOW_HTTP_PORT",
     "PARTFLOW_ALLOWED_HOST",
 )
-TIMEZONE_RE = re.compile(r"(?:UTC|[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+)\Z")
+# The A1 SITE_TIMEZONE grammar; one expression, owned by pf_config since PF-A2.2 (host zone data checks).
+TIMEZONE_RE = pf_config.TIMEZONE_RE
 HOST_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 
@@ -362,11 +364,6 @@ def validate_timezone_name(value):
     return value
 
 
-def validate_identifier(value):
-    quote_identifier(value)
-    return value
-
-
 def validate_access_mode(value):
     if value not in ("1", "2"):
         raise Failure("Choose 1 or 2.")
@@ -405,56 +402,6 @@ def validate_allowed_host(value):
     if len(labels) < 2 or any(not HOST_LABEL_RE.fullmatch(label) for label in labels):
         raise Failure("PARTFLOW_ALLOWED_HOST must be one exact hostname such as partflow.example.com.")
     return value.lower()
-
-
-def render_env_template(template_path, values):
-    template_path = Path(template_path)
-    required = set(REQUIRED_NAS_ENV_KEYS)
-    seen = set()
-    rendered = []
-    for original in template_path.read_text(encoding="utf-8").splitlines():
-        stripped = original.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key in values:
-                if key in seen:
-                    raise Failure(f"Duplicate {key} in {template_path}.")
-                value = str(values[key])
-                if "\n" in value or "\r" in value:
-                    raise Failure(f"Unsafe newline in {key}.")
-                rendered.append(f"{key}={value}")
-                seen.add(key)
-                continue
-        rendered.append(original)
-    missing = required - seen
-    if missing:
-        raise Failure("NAS environment sample is missing required fields: " + ", ".join(sorted(missing)))
-    text = "\n".join(rendered) + "\n"
-    # The file this writes must read back literally through the strict parser (A1-T08).
-    try:
-        parsed = pf_config.parse_app_env(text.encode("utf-8"), label="rendered .env")
-    except pf_config.ConfigError as exc:
-        raise Failure("Rendered .env does not round-trip through the strict parser: " + str(exc)) from exc
-    if parsed != {key: str(values[key]) for key in REQUIRED_NAS_ENV_KEYS}:
-        raise Failure("Rendered .env values differ from the approved values; nothing was written.")
-    return text
-
-
-def prompt_value(label, default=None, validator=None):
-    if unattended():
-        raise Failure("Initial deployment configuration requires an interactive terminal.")
-    suffix = f" [{default}]" if default not in (None, "") else ""
-    while True:
-        value = input(f"{label}{suffix}: ").strip()
-        if not value and default not in (None, ""):
-            value = str(default)
-        if not value:
-            log("A value is required.")
-            continue
-        try:
-            return validator(value) if validator else value
-        except Failure as exc:
-            log("Invalid value: " + str(exc))
 
 
 def prompt_yes_no(label, default=True):
@@ -581,6 +528,440 @@ def confirm(phrase, warning):
         raise Failure("Confirmation did not match; nothing was changed.")
 
 
+# ------------------------------------------------------------ config wizards (PF-A2.2)
+# `pf config admin` / `pf config app`: ask only missing or uncertain inputs, show a summary, confirm [y/N], then
+# write one editable file atomically without clobbering an editor's change (compare-and-swap, section 3.7).
+
+
+class ConfigCancelled(Failure):
+    """config-cancelled before the summary: ``q``, end of input or Ctrl-C at a question."""
+
+    def __init__(self, stage):
+        super().__init__(stage)
+        self.stage = stage
+
+
+@contextlib.contextmanager
+def cancelled_before_summary(path):
+    """config-cancelled copy for a cancel at a question (before the summary): nothing was created or changed."""
+    try:
+        yield
+    except ConfigCancelled as exc:
+        raise Failure(f"config-cancelled: Cancelled at {exc.stage}; {path} was not created or changed.") from exc
+
+
+class OptionRefused(Failure):
+    """A refused option combination; exit 2 like an argparse usage error, before any registry read."""
+
+
+# Own temporary names of one wizard write (section 3.7); reserved in the configuration directory.
+EDITABLE_TEMP_RE = re.compile(r"(?:\.pf-config\.json|\.env)\.pf-config-[0-9a-f]{8}\Z")
+GROUP_LIST_LIMIT = 30
+BACKUP_GROUP_CONSEQUENCE = ("Members of the backup read group can read database contents and any credentials "
+                            "included in a backup or recovery bundle.")
+ADMIN_NOT_ASKED = ("branch", "ci_workflow", "release_channel", "auto_update", "health_timeout_seconds",
+                   "minimum_free_mb")
+MAINTENANCE_DATABASES = ("postgres", "template0", "template1")
+
+
+@dataclasses.dataclass(frozen=True, repr=False)
+class EditableTarget:
+    """Read-only observation of one editable file (section 3.7 step 0). Holds the bytes it read; never logged."""
+
+    path: Path
+    present: bool
+    data: object
+    identity: object
+    uid: object
+    gid: object
+    mode: object
+    nlink: int
+    removable_leftovers: tuple
+
+    def __repr__(self):
+        return f"EditableTarget({self.path}, present={self.present})"
+
+
+def editable_temp_name(path, op8):
+    name = Path(path).name
+    return ("" if name.startswith(".") else ".") + name + ".pf-config-" + op8
+
+
+def _config_file_unsafe(path, detail):
+    path = Path(path)
+    return Failure(f"config-file-unsafe: {path} is not a single-link regular file owned as expected, or {path.parent} "
+                   f"holds an unexplained temporary file ({detail}); nothing was changed or removed.")
+
+
+def _config_changed(path, detail, *, written=False):
+    tail = "the observed file is left as it is" if written else "nothing was written"
+    return Failure(f"config-changed: {path} changed while the wizard was running ({detail}); {tail}. Run the command "
+                   "again to review the current file.")
+
+
+def inspect_editable_target(path, *, keys=None):
+    """Section 3.7 step 0 (read-only): the target's bytes, identity and attributes, and the classified own-pattern
+    leftovers. A symlink, non-regular file, unexplained hard link, ACL-bearing file or unexplained leftover is
+    refused here, before any question and again before any write."""
+    path = Path(path)
+    data = identity = uid = gid = mode = None
+    nlink = 0
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        fd = None
+    except OSError as exc:
+        raise _config_file_unsafe(path, f"{path.name}: " + ("symbolic link" if exc.errno == errno.ELOOP
+                                                             else str(exc.strerror or exc))) from exc
+    if fd is not None:
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise _config_file_unsafe(path, f"{path.name}: not a regular file")
+            chunks, total = [], 0
+            while True:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                total += len(block)
+                if total > pf_install.SOURCE_FILE_LIMIT:
+                    raise _config_file_unsafe(path, f"{path.name}: more than {pf_install.SOURCE_FILE_LIMIT} bytes")
+                chunks.append(block)
+            data = b"".join(chunks)
+            identity = (info.st_dev, info.st_ino)
+            uid, gid, mode, nlink = info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), info.st_nlink
+        finally:
+            os.close(fd)
+        acl = pf_bootstrap.inspect_posix_acl(path)
+        if acl.kind != "none":
+            raise Failure(f"config-file-acl: {path} carries ACL entries ({acl.kind}); replacing it would drop them, so "
+                          f"nothing was changed. Apply these changes by hand: "
+                          f"{', '.join(keys) if keys else 'the settings you intended to change'}. ACL-preserving "
+                          "writes belong to PF-A2.3.")
+    temp_prefix = editable_temp_name(path, "")
+    try:
+        names = sorted(os.listdir(str(path.parent)))
+    except OSError as exc:
+        raise _config_file_unsafe(path, f"{path.parent} cannot be listed: {exc.strerror or exc}") from exc
+    removable, linked = [], 0
+    for name in names:
+        if not (name.startswith(temp_prefix) and EDITABLE_TEMP_RE.fullmatch(name)):
+            continue
+        try:
+            item = os.lstat(str(path.parent / name))
+        except FileNotFoundError:
+            continue
+        regular = stat.S_ISREG(item.st_mode)
+        if regular and identity is not None and (item.st_dev, item.st_ino) == identity:
+            linked += 1                     # L1: interrupted create link (the target inode itself)
+        elif regular and item.st_nlink == 1 and item.st_uid == pf_instance.TRUSTED_UID:
+            pass                            # L2: crash before ownership
+        elif regular and item.st_nlink == 1 and identity is not None \
+                and (item.st_uid, item.st_gid, stat.S_IMODE(item.st_mode)) == (uid, gid, mode):
+            pass                            # L3: crash after ownership in replace mode
+        else:
+            raise _config_file_unsafe(path, f"{name}: a reserved 'pf config' temporary name that is not a leftover "
+                                            "of an interrupted run")
+        removable.append(name)
+    if fd is not None and not (nlink == 1 or (nlink == 2 and linked == 1)):
+        raise _config_file_unsafe(path, f"{path.name}: {nlink} hard links")
+    return EditableTarget(path, fd is not None, data, identity, uid, gid, mode, nlink, tuple(removable))
+
+
+def write_editable_file(path, data, *, expected, expected_identity, create_gid, op8, keys=None):
+    """Section 3.7 steps 1-5: refuse unless the target still equals the reviewed observation, remove classified
+    leftovers, write a private temp, take the target's ownership and mode (or root:<create_gid> 0660 for a new file),
+    compare-and-swap, publish by rename (replace) or link (create, never clobbers), fsync and re-read."""
+    path = Path(path)
+    current = inspect_editable_target(path, keys=keys)
+    if (current.data if current.present else None) != expected or current.identity != expected_identity:
+        raise _config_changed(path, "it differs from the file the wizard reviewed")
+    if current.removable_leftovers:
+        for name in current.removable_leftovers:
+            os.unlink(str(path.parent / name))
+        pf_instance._fsync_directory(path.parent)
+        log("config-temp-removed: Removed leftover temporary file(s) of an interrupted 'pf config' run: "
+            + ", ".join(current.removable_leftovers) + ".")
+    temp = path.parent / editable_temp_name(path, op8)
+    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    published = False
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            if current.present:
+                os.fchown(fd, current.uid, current.gid)
+                os.fchmod(fd, current.mode)
+            else:
+                os.fchown(fd, pf_instance.TRUSTED_UID, create_gid)
+                os.fchmod(fd, 0o660)
+        finally:
+            os.close(fd)
+        check = inspect_editable_target(path, keys=keys)
+        if current.present:
+            if not check.present or check.data != expected or check.identity != expected_identity or check.nlink != 1:
+                raise _config_changed(path, "another writer changed it before the swap")
+            os.replace(str(temp), str(path))
+            published = True
+        else:
+            if check.present:
+                raise _config_changed(path, "another writer created it before the swap")
+            try:
+                os.link(str(temp), str(path))
+            except FileExistsError as exc:
+                raise _config_changed(path, "another writer created it before the swap") from exc
+            published = True
+            os.unlink(str(temp))
+    except BaseException:
+        if not published:
+            try:
+                os.unlink(str(temp))
+            except OSError:
+                pass
+        raise
+    pf_instance._fsync_directory(path.parent)
+    try:
+        observed = pf_install.read_regular_file(path)
+    except OSError as exc:
+        raise _config_changed(path, f"after the write it cannot be read: {exc.strerror or exc}", written=True) from exc
+    if observed != data:
+        raise _config_changed(path, "after the write it holds other bytes", written=True)
+
+
+def write_reviewed(path, data, target, *, create_gid, op8, keys, secret=False):
+    """write_editable_file against the reviewed observation ``target``. An interrupt is reported from an observation
+    of the target (old or new bytes), never assumed."""
+    try:
+        write_editable_file(path, data, expected=target.data if target.present else None,
+                            expected_identity=target.identity, create_gid=create_gid, op8=op8, keys=keys)
+    except KeyboardInterrupt as exc:
+        try:
+            observed = pf_install.read_regular_file(path)
+        except OSError:
+            observed = None
+        if observed == data:
+            raise Failure(f"config-interrupted: {path} was written before the interrupt and holds the new content; "
+                          "run the command again to review it.") from exc
+        raise Failure(f"config-cancelled: Cancelled; {path} was not created or changed"
+                      + (" and the generated password was discarded" if secret else "") + ".") from exc
+
+
+def remove_editable_leftovers(target):
+    """Nothing to change: still remove the classified leftovers of an interrupted run (re-inspected first)."""
+    if not target.removable_leftovers:
+        return
+    current = inspect_editable_target(target.path)
+    if current.data != target.data or current.identity != target.identity:
+        raise _config_changed(target.path, "it differs from the file the wizard reviewed")
+    for name in current.removable_leftovers:
+        os.unlink(str(target.path.parent / name))
+    pf_instance._fsync_directory(target.path.parent)
+    log("config-temp-removed: Removed leftover temporary file(s) of an interrupted 'pf config' run: "
+        + ", ".join(current.removable_leftovers) + ".")
+
+
+def host_groups():
+    """Read-only group detection (section 3.3): ``users`` first when it exists, then every group with gid >= 1000
+    except 65534, sorted by name, as (name, gid). Nothing is created."""
+    groups = {}
+    for entry in grp.getgrall():
+        groups.setdefault(entry.gr_name, entry.gr_gid)
+    result = [("users", groups["users"])] if "users" in groups else []
+    result += sorted((name, gid) for name, gid in groups.items()
+                     if name != "users" and gid >= 1000 and gid != 65534)
+    return result
+
+
+def group_exists(name):
+    if not isinstance(name, str):
+        return False
+    try:
+        grp.getgrnam(name)
+    except (KeyError, ValueError):
+        return False
+    return True
+
+
+def ask_answer(stage, question, *, default=None, validate=None, show_default=True):
+    """One wizard answer. Enter takes ``default``; ``q``, end of input and Ctrl-C cancel (config-cancelled)."""
+    suffix = f" [{default}]" if default is not None and show_default else ""
+    while True:
+        try:
+            answer = input(f"{question}{suffix}: ").strip()
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise ConfigCancelled(stage) from exc
+        if answer == "q":
+            raise ConfigCancelled(stage)
+        if not answer:
+            if default is None:
+                log("A value is required.")
+                continue
+            answer = str(default)
+        if validate is None:
+            return answer
+        try:
+            return validate(answer)
+        except Failure as exc:
+            log("Invalid value: " + str(exc))
+
+
+GROUP_LABELS = {
+    "workspace_write_group": "Group that can read and edit the workspace and configuration",
+    "backup_read_group": "Group that can view and copy backups and recovery bundles",
+}
+
+
+def ask_group(key, *, default, location):
+    """Ask one real group from the detected list (or any existing name); groups are never created."""
+    candidates = host_groups()
+    shown = candidates[:GROUP_LIST_LIMIT]
+    log(GROUP_LABELS[key])
+    log("  Location: " + location)
+    log("  Groups on this host:")
+    for number, (name, gid) in enumerate(shown, 1):
+        log(f"    {number}. {name} (gid {gid})")
+    if not shown:
+        log("    (none detected; type a name)")
+    if len(candidates) > len(shown):
+        log(f"    … and {len(candidates) - len(shown)} more; type a name")
+    number = next((str(index) for index, (name, _) in enumerate(shown, 1) if name == default), None)
+
+    def validate(answer):
+        if answer.isdigit() and 1 <= int(answer) <= len(shown):
+            return shown[int(answer) - 1][0]
+        if pf_instance._anchored_fullmatch(pf_config.ADMIN_CONFIG_SCHEMA["properties"][key]["pattern"], answer) \
+                and group_exists(answer):
+            return answer
+        raise Failure(f"{answer!r} is not a listed number or an existing group on this host; groups are never "
+                      "created. Choose a number or type an existing group name.")
+
+    return ask_answer(key, f"Choose a number or type a group name [{number or 'none'}]", default=number,
+                      validate=validate, show_default=False)
+
+
+def confirm_write(path, *, secret=False):
+    """[y/N] confirmation of one editable write (OD-A22-17); anything but y/yes cancels."""
+    try:
+        answer = input(f"Write {path}? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer not in ("y", "yes"):
+        raise Failure(f"config-cancelled: Cancelled; {path} was not created or changed"
+                      + (" and the generated password was discarded" if secret else "") + ".")
+
+
+def display_value(value):
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def load_admin_example(path, pf_command):
+    """The installed immutable example as schema 2 settings, else admin-example-invalid."""
+    try:
+        parsed = pf_config.parse_admin_config(pf_install.read_regular_file(path), label=str(path))
+        problem = parsed.problems[0] if parsed.problems else None
+    except OSError as exc:
+        parsed, problem = None, str(exc.strerror or exc)
+    if problem is not None or parsed.schema_version != pf_config.ADMIN_CONFIG_SCHEMA_VERSION:
+        raise Failure(f"admin-example-invalid: The installed example {path} is not a valid schema 2 admin configuration "
+                      f"({problem or 'legacy schema 1'}); nothing was changed. Run '{pf_command} doctor' and reinstall "
+                      "the control release.")
+    return dict(parsed.values)
+
+
+def refuse_admin_config(path, parsed, *, pf_command, prefix, release_id):
+    """admin-config-invalid / admin-config-version-unsupported copy for a refused current file (nothing asked)."""
+    if parsed.code == "admin-config-version-unsupported":
+        raise Failure(f"admin-config-version-unsupported: {path} declares schema_version "
+                      f"{json.dumps(parsed.declared_version)}; this control ({release_id}) reads schema 2 and the legacy "
+                      "form without schema_version. Nothing was changed. If a newer control wrote this file, select "
+                      f"that control again ('{prefix} install control --release <id>') or restore the previous file.")
+    more = f" (+{len(parsed.problems) - 1} more)" if len(parsed.problems) > 1 else ""
+    raise Failure(f"admin-config-invalid: {path}: {parsed.problems[0]}{more}. Nothing was changed; fix the file by "
+                  f"hand, then run '{pf_command} config admin' again.")
+
+
+def admin_group_questions(values, *, mode, locations):
+    """Ask the missing or uncertain groups (section 3.3) in order; returns {key: answer} and updates ``values``.
+    Create mode asks both (the example's group preselected when it exists); otherwise only a group that does not
+    exist on this host is asked, with no default (a broader group is never picked silently)."""
+    asked = {}
+    for key in ("workspace_write_group", "backup_read_group"):
+        exists = group_exists(values[key])
+        if mode != "create" and exists:
+            continue
+        if key == "backup_read_group":
+            log(BACKUP_GROUP_CONSEQUENCE)
+        answer = ask_group(key, default=values[key] if mode == "create" and exists else None,
+                           location=locations[key])
+        asked[key] = answer
+        values[key] = answer
+    return asked
+
+
+def admin_summary(path, *, mode, before, document, asked, instance_line, environment_line, app_hint):
+    """Section 4.6 admin summary (no confirmation)."""
+    title = {"create": "create", "migrate": "migrate schema 1 -> 2", "complete": "complete"}[mode]
+    log(f"Admin configuration {path} ({title})")
+    log(instance_line)
+    log({"create": "  schema_version: 2 (from example)", "migrate": "  schema_version: (none) -> 2",
+         "complete": "  schema_version: 2 (kept)"}[mode])
+    for key in pf_config.ADMIN_CONFIG_KEYS:
+        value = display_value(document[key])
+        if key in asked and before is not None:
+            old = display_value(before.values[key])
+            log(f"  {key}: {old} -> {value} (asked: {old} does not exist on this host)")
+        elif key in asked:
+            log(f"  {key}: {value} (asked)")
+        elif before is None:
+            log(f"  {key}: {value} (from example)")
+        elif key in before.implicit:
+            log(f"  {key}: {value} (implicit legacy default, now explicit)")
+        else:
+            log(f"  {key}: {value} (kept)")
+    log("Not asked here (edit the file by hand to change): " + ", ".join(ADMIN_NOT_ASKED) + ".")
+    log(environment_line)
+    if before is not None and "backup_read_group" in asked:
+        log("backup_read_group change takes effect at the next backup or purge without a separate approval "
+            "(revision-bound group approval: PF-A2.3).")
+    log(app_hint)
+
+
+def app_value_problem(kind, value):
+    """``check`` of plan_app_config: None when ``value`` is valid as written (canonical), else the reason."""
+    try:
+        if kind == "identifier":
+            quote_identifier(value)
+        elif kind == "database":
+            quote_identifier(value)
+            if value in MAINTENANCE_DATABASES:
+                return "a PostgreSQL maintenance/template database cannot hold the application"
+        elif kind == "timezone":
+            validate_timezone_name(value)
+        elif kind in ("access", "port", "host"):
+            canonical = {"access": validate_ipv4, "port": validate_http_port, "host": validate_allowed_host}[kind](value)
+            if canonical != value:
+                return f"not written in its canonical form ({canonical})"
+        else:
+            return f"no rule for kind {kind!r}"
+    except Failure as exc:
+        return str(exc)
+    return None
+
+
+def app_canonical_value(kind, value):
+    """The canonical spelling of a valid but non-canonical value (e.g. 05173 -> 5173), else None."""
+    validator = {"access": validate_ipv4, "port": validate_http_port, "host": validate_allowed_host}.get(kind)
+    if validator is None:
+        return None
+    try:
+        canonical = validator(value)
+    except Failure:
+        return None
+    return canonical if canonical != value else None
+
+
 # Explicit routes into a pending journal (LIFECYCLE.md section 1, step 2). A
 # command absent from this table is refused while a journal exists. Each
 # handler still validates the exact journal state it accepts; the table only
@@ -637,6 +1018,7 @@ class Controller:
         self.override = self.state / "active-images.yaml"
         self.cli = None
         self._config = None
+        self.config_schema_version = None
         self._backup_gid = None
         self._workspace_gid = None
         # PF-A1.2: one runner, one frozen configuration per locked operation, one source store.
@@ -698,13 +1080,16 @@ class Controller:
         except OSError as exc:
             raise Failure(
                 f"Runtime configuration is missing or unreadable: {path} ({exc.strerror}). "
-                "The controller does not create it; installation/registration provides it."
+                f"The controller does not create it; create it with '{self.pf_command()} config admin'."
             ) from exc
-        # PF-A2.1: the parse and shape rules are pf_config.validate_admin_config (shared with the installer);
-        # the first problem is raised with the unchanged message.
-        config, problems = pf_config.validate_admin_config(data, label=str(path))
-        if problems:
-            raise Failure(problems[0])
+        # PF-A2.1: the parse and shape rules are shared with the installer; the first problem is raised with the
+        # unchanged message. PF-A2.2: both schemas are read as they are (schema 1 with its frozen implicit values);
+        # loading never migrates (INV-06).
+        parsed = pf_config.parse_admin_config(data, label=str(path))
+        if parsed.problems:
+            raise Failure(parsed.problems[0])
+        config = dict(parsed.values)
+        self.config_schema_version = parsed.schema_version
         # The protected registration is authoritative for identity and environment.
         if config["project"] != self.context.compose_project:
             raise Failure(
@@ -722,9 +1107,13 @@ class Controller:
         except KeyError as exc:
             raise Failure(
                 "Configured DSM group does not exist. Check backup_read_group and workspace_write_group in "
-                + str(path)
+                + f"{path}; choose an existing group with '{self.pf_command()} config admin'."
             ) from exc
         return config
+
+    def pf_command(self):
+        """The operator command prefix of this instance in copy: the launcher rule of pf_install (read-only)."""
+        return pf_install.launcher_prefix(self.context.installation_root) + " --instance " + self.context.slug
 
     # ------------------------------------------------------------ runner (PF-A1.2)
 
@@ -1516,8 +1905,11 @@ class Controller:
             values[key] = value
         return values, env_file
 
-    def begin_operation(self, command):
-        """Inside the instance lock: private operation directory, effect log and frozen configuration."""
+    def begin_operation(self, command, *, freeze=True):
+        """Inside the instance lock: private operation directory, effect log and frozen configuration.
+
+        PF-A2.2: ``freeze=False`` (the ``config`` route) skips the snapshot: a wizard runs on a .env that may not
+        parse completely yet, and it never starts a child that would consume one."""
         if self.operation_dir is not None:
             raise Failure("An operation is already active in this process.")
         name = re.sub(r"[^a-z0-9]+", "-", str(command).lower()).strip("-") or "operation"
@@ -1536,7 +1928,7 @@ class Controller:
             "control_sha256": context.control.sha256, "profile_sha256": context.profile.sha256,
             "policy_revision": context.approved_policy.revision, "policy_sha256": context.approved_policy.sha256,
         })
-        if (self.config_dir / ".env").is_file():
+        if freeze and (self.config_dir / ".env").is_file():
             self.freeze_app_config()
 
     def reset_operation_scope(self, command=None):
@@ -1695,10 +2087,12 @@ class Controller:
         log("Live checks skipped: " + reason + ". No Git, Docker or Compose command was issued and nothing was changed.")
         raise Failure("Diagnostics are offline-only: " + reason)
 
-    def require_trusted_context(self):
+    def require_trusted_context(self, *, load_config=True):
         """Refuse privileged mutation unless the protected context and app configuration validated cleanly.
 
-        Runs before any lock, journal write, transport call or filesystem effect.
+        Runs before any lock, journal write, transport call or filesystem effect. PF-A2.2: ``load_config=False``
+        (the ``config`` route only) skips the final configuration load so the wizard can reach an absent, refused
+        or mismatched pf-config.json; the protected-context refusal always runs.
         """
         validation = self.ensure_validation()
         if not validation.mutation_allowed:
@@ -1706,7 +2100,8 @@ class Controller:
                 "Protected context validation refused mutation:\n" + "\n".join(validation.blocking_messages())
             )
         # A rejected editable configuration blocks the mutation here, not after effects started.
-        self.ensure_config()
+        if load_config:
+            self.ensure_config()
 
     def policy_permits(self, operation_class):
         """Whether the approved protected policy permits ``operation_class`` without an operator (PF-A1.4).
@@ -1854,14 +2249,15 @@ class Controller:
             for number, address in enumerate(addresses, 1):
                 log(f"  {number}. {address}")
         default = "1" if len(addresses) == 1 else None
-        while True:
-            answer = prompt_value("NAS LAN IPv4 (enter an address or detected number)", default)
+
+        def validate(answer):
             if answer.isdigit() and addresses and 1 <= int(answer) <= len(addresses):
                 return addresses[int(answer) - 1]
-            try:
-                return validate_ipv4(answer, allow_loopback=False)
-            except Failure as exc:
-                log("Invalid value: " + str(exc))
+            return validate_ipv4(answer, allow_loopback=False)
+
+        # PF-A2.2: a wizard answer (q, end of input and Ctrl-C cancel with config-cancelled).
+        return self.ask("PARTFLOW_BIND_IP", "NAS LAN IPv4 (enter an address or detected number)", default=default,
+                        validate=validate)
 
     def environment_summary(self, values):
         if values["PARTFLOW_BIND_IP"] == "127.0.0.1":
@@ -1879,7 +2275,6 @@ class Controller:
 
     def prepare_new_env(self):
         env_path = self.config_dir / ".env"
-        sample_path = self.control_dir / "nas.env.example"
 
         if env_path.exists():
             # An existing file is accepted only as written (strict parse, literal values) or
@@ -1896,67 +2291,388 @@ class Controller:
             self.freeze_app_config()
             return values
 
-        if not sample_path.is_file():
-            raise Failure("Missing installed control/nas.env.example; cannot initialize config/.env.")
-        sample = read_app_env(sample_path)
-        missing = [key for key in REQUIRED_NAS_ENV_KEYS if key not in sample]
-        if missing:
-            raise Failure("NAS environment sample is missing required fields: " + ", ".join(missing))
-
-        log("Configure the new PartFlow staging environment. Press Enter to accept a shown default.")
-        postgres_user = prompt_value("PostgreSQL user", sample.get("POSTGRES_USER") or "partflow_staging", validate_identifier)
-        postgres_db = prompt_value("PostgreSQL database", sample.get("POSTGRES_DB") or "partflow_staging", validate_identifier)
-        timezone = prompt_value("Factory IANA timezone", sample.get("SITE_TIMEZONE") or "UTC", validate_timezone_name)
-
-        log("Access mode:")
-        log("  1. Direct LAN access to the NAS IP (recommended for initial staging verification)")
-        log("  2. DSM Reverse Proxy; bind PartFlow to 127.0.0.1")
-        mode = prompt_value("Select access mode", "1", validate_access_mode)
-        if mode == "1":
-            bind_ip = self.choose_lan_ipv4()
-            allowed_host = "localhost"
-        else:
-            bind_ip = "127.0.0.1"
-            default_host = sample.get("PARTFLOW_ALLOWED_HOST")
-            if default_host == "localhost":
-                default_host = None
-            allowed_host = prompt_value("Exact internal Reverse Proxy hostname", default_host, validate_allowed_host)
-
-        port = prompt_value("PartFlow HTTP port", sample.get("PARTFLOW_HTTP_PORT") or "5173", validate_http_port)
-        values = {
-            "POSTGRES_USER": postgres_user,
-            "POSTGRES_PASSWORD": secrets.token_hex(32),
-            "POSTGRES_DB": postgres_db,
-            "SITE_TIMEZONE": timezone,
-            "PARTFLOW_BIND_IP": bind_ip,
-            "PARTFLOW_HTTP_PORT": port,
-            "PARTFLOW_ALLOWED_HOST": allowed_host,
-        }
-        self.validate_deploy_env(values, require_strong_password=True)
-        log("A 64-character cryptographically random hexadecimal POSTGRES_PASSWORD was generated and will not be printed.")
-        log(self.environment_summary(values))
-        if not prompt_yes_no("Write .env with these settings and continue", default=True):
-            raise Failure("Cancelled before .env was created.")
-
-        rendered = render_env_template(sample_path, values)
-        temporary = env_path.with_name(".env.tmp-" + uuid.uuid4().hex[:8])
-        try:
-            with temporary.open("x", encoding="utf-8") as stream:
-                stream.write(rendered)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.chown(temporary, -1, self.workspace_gid)
-            os.chmod(temporary, 0o660)
-            os.replace(temporary, env_path)
-            os.chown(env_path, -1, self.workspace_gid)
-            os.chmod(env_path, 0o660)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        # PF-A2.2: the missing-.env branch is the app-variable wizard (the record's profile declaration).
+        values = self.app_wizard(inside_deploy=True)
         log("Created " + str(env_path) + " with group-write access for " + self.config["workspace_write_group"] + ". It remains outside the repository.")
         # The operation consumes the file it just wrote, frozen once, never the editable copy later.
         self.freeze_app_config(explicit=True)
         return values
+
+    # ------------------------------------------------------------ config wizards (PF-A2.2)
+
+    def configure(self, args):
+        """`pf config admin|app` (registered mode), inside the instance lock; never a Git, Docker or Compose child."""
+        if args.config_verb == "admin":
+            self.admin_wizard()
+            return
+        # The workspace group of a created .env comes from a valid admin configuration (the A1 load).
+        try:
+            self.ensure_config()
+        except Failure as exc:
+            raise Failure(f"admin-config-required: {str(exc).splitlines()[0]} Run '{self.pf_command()} config admin' "
+                          "first; nothing was changed.") from exc
+        self.app_wizard()
+
+    def ask(self, stage, question, *, default=None, validate=None, choices=None):
+        """One wizard answer: Enter takes ``default``; ``q``, end of input and Ctrl-C cancel (config-cancelled)."""
+        if choices is not None:
+            allowed = tuple(choices)
+
+            def validate_choice(answer, inner=validate):
+                if answer not in allowed:
+                    raise Failure("Choose one of " + ", ".join(allowed) + ".")
+                return inner(answer) if inner is not None else answer
+
+            return ask_answer(stage, question, default=default, validate=validate_choice)
+        return ask_answer(stage, question, default=default, validate=validate)
+
+    def refuse_admin_mismatch(self, path, values):
+        context = self.context
+        if values["project"] != context.compose_project:
+            raise Failure(f"admin-config-mismatch: {path} names project {values['project']!r}, but {context.slug} is "
+                          f"registered with project {context.compose_project!r}; the registration is authoritative and "
+                          "nothing was changed.")
+        if values["environment"] != context.approved_environment:
+            environment = context.approved_environment
+            raise Failure(f"admin-config-mismatch: {path} names environment {values['environment']!r}; the approved "
+                          f"policy of {context.slug} is {environment} revision {context.approved_policy.revision}. An "
+                          "editable label never changes the approved policy, and nothing was changed. Restore "
+                          f'"environment": "{environment}"; a policy change is a separate approval (PF-A4.3).')
+
+    def admin_wizard(self):
+        """Section 3.3 registered mode: create, migrate (schema 1 -> 2) or complete pf-config.json. It reads the file
+        itself and never calls ensure_config/load_app_config, so an absent, refused or mismatched file and a missing
+        group each reach their own outcome."""
+        context = self.context
+        path = self.config_dir / "pf-config.json"
+        pf_command = self.pf_command()
+        target = inspect_editable_target(path)
+        before = None
+        if not target.present:
+            mode = "create"
+            values = load_admin_example(self.control_dir / "pf-config.example.json", pf_command)
+            values.update(project=context.compose_project, environment=context.approved_environment)
+        else:
+            before = pf_config.parse_admin_config(target.data, label=str(path))
+            if before.problems:
+                refuse_admin_config(path, before, pf_command=pf_command,
+                                    prefix=pf_install.launcher_prefix(context.installation_root),
+                                    release_id=context.control.release_id)
+            values = dict(before.values)
+            self.refuse_admin_mismatch(path, values)
+            mode = "migrate" if before.schema_version == 1 else "complete"
+            if mode == "migrate":
+                try:
+                    pf_config.migrate_admin_config(before)
+                except pf_config.ConfigError as exc:
+                    raise Failure(f"admin-config-migration-blocked: {path} (legacy schema 1) cannot become schema 2: "
+                                  f"{str(exc).split(': ', 1)[1]}. Nothing was changed; correct the value by hand, then "
+                                  f"run '{pf_command} config admin' again.") from exc
+        locations = {"workspace_write_group": f"{context.paths.workspace}, {context.paths.configuration}",
+                     "backup_read_group": f"{context.paths.backups}, {context.paths.recovery}"}
+        with cancelled_before_summary(path):
+            asked = admin_group_questions(values, mode=mode, locations=locations)
+        if mode == "complete" and not asked:
+            remove_editable_leftovers(target)
+            log(f"config-current: {path} is current (admin configuration schema 2); nothing to change.")
+            return
+        document = pf_config.admin_document(values)
+        try:
+            data = pf_config.render_admin_config(document)
+        except pf_config.ConfigError as exc:
+            raise Failure(f"config-changed: {path}: {exc}; nothing was written.") from exc
+        rows = pf_config.admin_config_changes(before, document, asked=asked)
+        admin_summary(
+            path, mode=mode, before=before, document=document, asked=asked,
+            instance_line=(f"Instance: {context.slug} ({context.instance_id}), project {context.compose_project}, "
+                           f"profile {context.profile.id} {context.profile.version}"),
+            environment_line=(f"Environment label: {values['environment']} (approved policy "
+                              f"{context.approved_environment} revision {context.approved_policy.revision}; unchanged)"),
+            app_hint=f"Application variables are not in this file; use '{pf_command} config app'.")
+        record = {"schema_version": 1, "operation_id": self.operation_id, "completed": utc(), "file": "pf-config.json",
+                  "mode": mode, "profile_id": None, "schema_before": None if before is None else before.schema_version,
+                  "schema_after": pf_config.ADMIN_CONFIG_SCHEMA_VERSION,
+                  "before_sha256": pf_instance.sha256_bytes(target.data) if target.present else None,
+                  "after_sha256": pf_instance.sha256_bytes(data), "changes": rows}
+        self.check_config_change(record)
+        confirm_write(path)
+        changed = [row["key"] for row in rows if row["action"] != "kept"]
+        write_reviewed(path, data, target, create_gid=grp.getgrnam(values["workspace_write_group"]).gr_gid,
+                       op8=self.operation_id[-8:], keys=changed)
+        record["completed"] = utc()
+        self.write_config_change(record)
+        log(f"Wrote {path} (admin configuration schema 2; {mode}).")
+        if before is not None and before.implicit:
+            log("implicit-materialized: legacy implicit values are now explicit: " + ", ".join(before.implicit) + ".")
+
+    def deployed_evidence(self):
+        """The section 3.4 deployed predicate (read-only, fail closed): None when never deployed, else the evidence."""
+        try:
+            os.lstat(str(self.state / "deployed.json"))
+            return "state/deployed.json"
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return "unreadable state"
+        root = self.context.installation_root
+        for directory in (self.state, root / pf_install.OPERATIONS_RELATIVE):
+            try:
+                os.listdir(str(directory))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return "unreadable state"
+        for item in pf_install.operations(root):
+            if item["phase"] == "unreadable":
+                return "unreadable state"
+            plan = item["plan"]
+            if item["kind"] == "migrate-legacy" and item["phase"] == "completed" and plan["instance"] is not None \
+                    and plan["instance"]["instance_id"] == self.context.instance_id:
+                return "a completed v2.5 migration"
+        return None
+
+    def instance_deployed(self):
+        """Whether credentials may never be generated, asked or rewritten for this instance (section 3.4)."""
+        return self.deployed_evidence() is not None
+
+    def check_config_change(self, record):
+        """Validate a config-change record before the writer runs (a violation is a programming error)."""
+        errors = pf_install.validate_marked(record, pf_config.CONFIG_CHANGE_SCHEMA["$defs"]["record"],
+                                           defs=pf_config.CONFIG_CHANGE_SCHEMA["$defs"])
+        errors += pf_config.config_change_problems(record)
+        if errors:
+            raise Failure(f"config-audit-invalid: Internal error: the change record for "
+                          f"{self.config_dir / str(record.get('file'))} failed its schema ({errors[0]}); nothing was "
+                          "written.")
+
+    def write_config_change(self, record):
+        """The private audit record of one completed wizard write (section 3.10); no secret, no .env hash."""
+        self.check_config_change(record)
+        self.write_private_json(pf_config.CONFIG_CHANGE_NAME, record)
+
+    def app_note(self, item, current):
+        pf_command = self.pf_command()
+        name = current.get(item.key)
+        if item.code == "zone-unknown-on-host":
+            return (f"zone-unknown-on-host: SITE_TIMEZONE {name} kept; it is not in this host's zone data ({item.reason})."
+                    " The backend checks it with its own zone data at startup; change it by hand only if the factory "
+                    "calendar zone is really wrong.")
+        if item.code == "zone-data-unavailable":
+            return (f"zone-data-unavailable: SITE_TIMEZONE {name} kept; host zone data is unavailable (searched "
+                    f"{item.reason}); the backend checks it at startup.")
+        return (f"password-weak-for-new-deployment: POSTGRES_PASSWORD is kept unchanged, but it is shorter than 32 "
+                f"characters and the first '{pf_command} deploy' will refuse it. Either set a value of at least 32 "
+                f"characters by hand, or leave the line as 'POSTGRES_PASSWORD=' (empty) and run '{pf_command} config "
+                "app' again to generate one.")
+
+    def app_refusal(self, item, path, evidence):
+        if item.code == "migration-issue":
+            return Failure(f"migration-issue: config/.env holds values that cannot be frozen literally: {item.key}: "
+                           f"{item.reason}. Nothing was changed or regenerated; fix the file explicitly.")
+        if item.code == "zone-data-unavailable":
+            return Failure(f"zone-data-unavailable: No IANA zone data was found on this host (searched {item.reason}); "
+                           "SITE_TIMEZONE cannot be verified, so nothing was changed. Install the host's zone data or "
+                           f"write SITE_TIMEZONE in {path} by hand.")
+        return Failure(f"app-credential-unusable: {path} has no usable {item.key} ({item.reason}) and "
+                       f"{self.context.slug} is treated as deployed ({evidence}; the evidence is state/deployed.json, a "
+                       "completed v2.5 migration, or unreadable state); a new value would not match the initialized "
+                       f"database, so nothing was generated or changed. Restore {item.key} from the instance's recovery "
+                       "bundle or your records, then run again.")
+
+    def app_answers(self, plan, declaration, current):
+        """Ask every planned ``ask`` item in declaration order; returns ({key: value}, {derived keys})."""
+        variables = {variable.key: variable for variable in declaration.variables}
+        answers, derived = {}, set()
+
+        def checked(kind):
+            def validate(value):
+                problem = app_value_problem(kind, value)
+                if problem is not None:
+                    raise Failure(problem)
+                return value
+            return validate
+
+        def zone_checked(value):
+            validate_timezone_name(value)
+            status, detail = pf_config.zone_status(value)
+            if status != "ok":
+                raise Failure(f"SITE_TIMEZONE {value!r} is not in the host zone data ({detail}); enter a zone such as "
+                              "America/Los_Angeles.")
+            return value
+
+        for item in plan:
+            if item.action != "ask":
+                continue
+            variable = variables[item.key]
+            if variable.kind == "access":
+                log("Access mode:")
+                log("  1. Direct LAN access to the NAS IP (recommended for initial staging verification)")
+                log("  2. DSM Reverse Proxy; bind PartFlow to 127.0.0.1")
+                mode = self.ask(item.key, variable.question, default="1", validate=validate_access_mode)
+                answers[item.key] = self.choose_lan_ipv4() if mode == "1" else "127.0.0.1"
+            elif variable.kind == "host":
+                if answers.get("PARTFLOW_BIND_IP", current.get("PARTFLOW_BIND_IP")) != "127.0.0.1":
+                    answers[item.key] = "localhost"
+                    derived.add(item.key)
+                else:
+                    default = item.default if item.default not in (None, "localhost") else None
+                    answers[item.key] = self.ask(item.key, variable.question, default=default,
+                                                 validate=validate_allowed_host)
+            elif variable.kind == "timezone":
+                answers[item.key] = self.ask(item.key, variable.question, default=item.default, validate=zone_checked)
+            elif variable.kind == "port":
+                answers[item.key] = self.ask(item.key, variable.question, default=item.default,
+                                             validate=validate_http_port)
+            else:
+                answers[item.key] = self.ask(item.key, variable.question, default=item.default,
+                                             validate=checked(variable.kind))
+        return answers, derived
+
+    def app_wizard(self, *, inside_deploy=False):
+        """Section 3.4: create or complete ``<configuration>/.env`` for the record's profile declaration. Existing
+        secrets are preserved byte for byte; a secret is generated only when absent on a never-deployed instance;
+        credentials are never rewritten once deployed. Returns the resulting values (never printed)."""
+        context = self.context
+        pf_command = self.pf_command()
+        try:
+            declaration = pf_config.app_declaration(context.profile.id)
+        except pf_config.ConfigError as exc:
+            raise Failure(str(exc)) from exc
+        keys = declaration.keys
+        path = self.config_dir / ".env"
+        target = inspect_editable_target(path)
+        example_path = self.control_dir / declaration.example_name
+
+        def example_invalid(detail):
+            return Failure(f"app-example-invalid: The installed example {example_path} does not declare every "
+                           f"{declaration.profile_id} variable exactly once ({detail}); nothing was changed. Run "
+                           f"'{pf_command} doctor' and reinstall the control release.")
+
+        try:
+            example_bytes = pf_install.read_regular_file(example_path)
+            example = pf_config.parse_app_env(example_bytes, label=str(example_path), allowed_keys=keys,
+                                              require_all=False)
+        except OSError as exc:
+            raise example_invalid(str(exc.strerror or exc)) from exc
+        except pf_config.ConfigError as exc:
+            raise example_invalid(str(exc)) from exc
+        current = None
+        if target.present:
+            try:
+                current = pf_config.parse_app_env(target.data, label=str(path), allowed_keys=keys, require_all=False)
+            except pf_config.ConfigError as exc:
+                raise Failure(f"app-config-invalid: {path}: {exc}. Nothing was changed; fix the line by hand, then "
+                              f"run '{pf_command} config app' again.") from exc
+            for key in pf_config.SECRET_KEYS:
+                if current.get(key):
+                    self.redactor.add(current[key])
+        evidence = self.deployed_evidence()
+        plan = pf_config.plan_app_config(declaration, current=current, example=example, deployed=evidence is not None,
+                                         check=app_value_problem, zone=pf_config.zone_status,
+                                         canonical=app_canonical_value)
+        for item in plan:
+            if item.action == "refuse":
+                raise self.app_refusal(item, path, evidence)
+        notes = [self.app_note(item, current or {}) for item in plan if item.action == "kept" and item.code]
+        if all(item.action == "kept" for item in plan):
+            remove_editable_leftovers(target)
+            log(f"config-current: {path} has every value the {declaration.profile_id} profile declares; nothing to "
+                "change.")
+            for note in notes:
+                log(note)
+            return dict(current)
+        if inside_deploy:
+            log("Configure the new PartFlow staging environment. Press Enter to accept a shown default.")
+        with cancelled_before_summary(path):
+            answers, derived = self.app_answers(plan, declaration, current or {})
+        generated = False
+        final = dict(current or {})
+        set_values, append = {}, {}
+        for item in plan:
+            if item.action == "ask":
+                value = answers[item.key]
+            elif item.action == "generate":
+                value = secrets.token_hex(declaration.generated_secret_hex_bytes)
+                self.redactor.add(value)
+                generated = True
+            else:
+                continue
+            final[item.key] = value
+            if current is not None and item.key in current:
+                set_values[item.key] = value
+            elif current is not None:
+                append[item.key] = value
+        if current is None:
+            base, set_values = example_bytes, {key: final[key] for key in keys}
+        else:
+            base = target.data
+        try:
+            data = pf_config.rewrite_app_env(base, keys=keys, set_values=set_values, append=append)
+        except pf_config.ConfigError as exc:
+            if current is None:
+                raise example_invalid(str(exc)) from exc
+            raise Failure(f"app-config-invalid: {path}: {exc}. Nothing was changed; fix the line by hand, then run "
+                          f"'{pf_command} config app' again.") from exc
+        if inside_deploy:
+            self.validate_deploy_env(dict(final), require_strong_password=True)
+        mode = "complete" if target.present else "create"
+        by_key = {item.key: item for item in plan}
+        log(f"Application variables {path} (profile {declaration.profile_id}; {mode})")
+        rows = []
+        for variable in declaration.variables:
+            key, item = variable.key, by_key[variable.key]
+            if variable.secret:
+                word = "set" if item.action == "generate" else "unchanged"
+                extra = f"; generated, {2 * declaration.generated_secret_hex_bytes} hexadecimal characters" \
+                    if item.action == "generate" else ""
+                log(f"  {key}: {word} (not shown{extra})")
+                rows.append({"key": key, "action": word, "before": None, "after": None})
+                continue
+            new, old = final[key], (current or {}).get(key)
+            if item.action == "kept":
+                text, action = f"{new} (kept", "kept"
+            elif key in derived:
+                text = f"{old if old else '(missing)'} -> {new} (derived from access mode"
+                action = "changed" if current is not None and key in current else "added"
+            elif current is not None and key in current:
+                text, action = f"{old if old else '(empty)'} -> {new} (changed: asked", "changed"
+            elif current is not None:
+                text, action = f"(missing) -> {new} (asked", "added"
+            else:
+                text, action = f"{new} (asked", "added"
+            if variable.kind == "timezone":
+                status = pf_config.zone_status(new)[0]
+                text += "; " + {"ok": "present in host zone data",
+                                "zone-data-unavailable": "host zone data unavailable"}.get(status,
+                                                                                          "not in host zone data")
+            log(f"  {key}: {text})")
+            rows.append({"key": key, "action": action, "before": old if action in ("kept", "changed") else None,
+                         "after": new})
+        for note in notes:
+            log("Notes: " + note)
+        credentials = [variable.key for variable in declaration.variables if variable.credential]
+        if credentials:
+            log("Database connection: PARTFLOW_DATABASE_URL is generated with percent-encoded credentials; nothing is "
+                "spliced raw.")
+            log("Credentials (" + ", ".join(credentials) + ") are never changed by this wizard after the first "
+                "deployment.")
+        record = None
+        if not inside_deploy:
+            record = {"schema_version": 1, "operation_id": self.operation_id, "completed": utc(), "file": ".env",
+                      "mode": mode, "profile_id": declaration.profile_id, "schema_before": None, "schema_after": None,
+                      "before_sha256": None, "after_sha256": None, "changes": rows}
+            self.check_config_change(record)
+            confirm_write(path, secret=generated)
+        elif not prompt_yes_no("Write .env with these settings and continue", default=True):
+            raise Failure("Cancelled before .env was created.")
+        changed = [row["key"] for row in rows if row["action"] != "kept" and row["action"] != "unchanged"]
+        write_reviewed(path, data, target, create_gid=self.workspace_gid, op8=self.operation_id[-8:], keys=changed,
+                       secret=generated)
+        if record is not None:
+            record["completed"] = utc()
+            self.write_config_change(record)
+            log(f"Wrote {path} (profile {declaration.profile_id}; {mode}).")
+        return final
 
     def ensure_listener_available(self, values):
         address = values["PARTFLOW_BIND_IP"]
@@ -2218,7 +2934,7 @@ class Controller:
         return self.command(command + list(args), env=child, timeout=timeout, **kwargs)
 
     @contextlib.contextmanager
-    def lock(self, pending_route=None):
+    def lock(self, pending_route=None, *, freeze=True):
         """Hold this instance's stable lock for one mutating operation.
 
         The lock inode lives under <installation-root>/locks and is never
@@ -2241,7 +2957,7 @@ class Controller:
             if not self.state.is_dir():
                 self.state.mkdir(mode=0o700)
                 os.chmod(self.state, 0o700)
-            self.begin_operation(pending_route or "operation")
+            self.begin_operation(pending_route or "operation", freeze=freeze)
             yield handle
         finally:
             self.end_operation()
@@ -3421,7 +4137,10 @@ class Controller:
         log("Purge complete for " + self.config["project"] + ".")
         log("Verified recovery bundle retained at: " + str(self.recovery_root / recovery_id))
         log("The writable repository and root-owned control plane remain. Runtime .env was removed from config/.")
-        log("Next: sudo pf deploy --latest")
+        if reset_admin_config:
+            log(f"Next: {self.pf_command()} config admin, then {self.pf_command()} deploy --latest.")
+        else:
+            log(f"Next: {self.pf_command()} deploy --latest.")
 
     def purge(self, *, delete_backups=None, reset_admin_config=False):
         self.staging()
@@ -3954,6 +4673,17 @@ class Controller:
         self.env()
         return "present and valid"
 
+    def describe_zone_data(self):
+        """PF-A2.2 (read-only): SITE_TIMEZONE against the host's installed zone data. Runtime operations keep the
+        A1 grammar check; the backend validates the value with its own image zone data at startup."""
+        name = self.load_app_env()["SITE_TIMEZONE"]
+        status, detail = pf_config.zone_status(name)
+        if status == "ok":
+            return f"SITE_TIMEZONE {name}: ok in {detail}"
+        if status == "zone-data-unavailable":
+            return f"SITE_TIMEZONE {name}: host zone data unavailable (searched {detail})"
+        return f"SITE_TIMEZONE {name}: unknown in host zone data (the backend checks its own zone data at startup)"
+
     def doctor(self):
         log(f"PartFlow NAS Admin {VERSION} ({CHECKPOINT} checkpoint)")
         self.log_context()
@@ -3981,8 +4711,11 @@ class Controller:
                 f" | channel: {self.config['release_channel']}"
                 f" | workspace group: {self.config['workspace_write_group']}"
                 f" | backup group: {self.config['backup_read_group']}"
+                + (" | schema 2" if self.config_schema_version == 2
+                   else f" | schema 1 (legacy; '{self.pf_command()} config admin' makes it explicit)")
             )),
             ("Runtime .env", self.env_status),
+            ("Timezone data", self.describe_zone_data),
             ("Compose envelope", self.describe_envelope),
             ("Free space", lambda: self.free_space() or "ok"),
         ))
@@ -4137,6 +4870,18 @@ def parser():
     add("instances", help="List registered instances from the protected registry (no Docker access)")
     pf_install.add_parser(subs)
 
+    # PF-A2.2: the config wizards. --configuration/--project select the pre-registration mode of `config admin`;
+    # `config app` refuses them (check_config_options), so they are accepted there only to name the refusal.
+    config = add("config", help="Create, migrate or complete pf-config.json (admin) or .env (app) with a wizard")
+    verbs = config.add_subparsers(dest="config_verb", required=True)
+    for verb, text in (("admin", "Admin configuration wizard (pf-config.json; schema migration 1 -> 2)"),
+                       ("app", "Application variable wizard (.env) for the record's profile")):
+        command = verbs.add_parser(verb, allow_abbrev=False, help=text)
+        command.add_argument("--configuration", help=argparse.SUPPRESS if verb == "app" else
+                             "Pre-registration mode: an unregistered configuration directory (no --instance)")
+        command.add_argument("--project", help=argparse.SUPPRESS if verb == "app" else
+                             "Pre-registration mode: the Compose project the file names")
+
     deploy = add("deploy", help="Create a brand-new managed staging deployment")
     deploy_selection = deploy.add_mutually_exclusive_group()
     deploy_selection.add_argument("--current", action="store_true", help="Deploy the current clean Git checkout (default when no selector is given)")
@@ -4257,6 +5002,9 @@ DISPATCH = {route.name: route for route in (
     _locked("update", "mutating", "refuse", "owned", "always", "terminal", "", "Controller.update"),
     _locked("release-check", "conditional", "refuse", "apply", "if-apply", "policy", "release-check",
             "Controller.resolve"),
+    # PF-A2.2: the config wizards (registered mode); pre-registration mode leaves main() before any registry read
+    # of the instance path (config_admin_unregistered).
+    _locked("config", "mutating", "refuse", "none", "never", "terminal", "", "Controller.configure"),
 )}
 KNOWN_COMMANDS = frozenset(DISPATCH)
 # Commands that never take the instance lock and never mutate managed state.
@@ -4273,7 +5021,6 @@ REMOVED_COMPOSE_ROUTES = {
     **{word: "oneoff" for word in ("run", "exec", "cp", "attach")},
     **{word: "image" for word in ("build", "pull", "push")},
     **{word: "view" for word in ("version", "top", "images", "port", "ls", "events", "stats", "wait")},
-    "config": "config",
 }
 REMOVED_ROUTE_GUIDANCE = {
     "start": "Containers are started only by managed commands: pf resume (reopen after a pre-change failure), "
@@ -4285,9 +5032,11 @@ REMOVED_ROUTE_GUIDANCE = {
               "pf logs; change data with pf backup, pf reset-db or pf rollback --restore-db.",
     "image": "Images are built only by pf deploy and pf update from the protected source store.",
     "view": "Only ps and logs are available as read-only Compose views; pf doctor reports the Compose version.",
+    # PF-A2.2: still used: `pf config` without admin/app is refused with this guidance (classify_command).
     "config": "Raw compose config output is not available through this route; use pf doctor, which validates the "
               "resolved model privately.",
 }
+CONFIG_VERBS = ("admin", "app", "-h", "--help")
 # Leading Compose/Docker global options: the project, files, env-file, directory and daemon are fixed.
 COMPOSE_GLOBAL_OPTIONS = frozenset({
     "-f", "--file", "-p", "--project-name", "--project-directory", "--env-file", "--profile",
@@ -4354,6 +5103,13 @@ def classify_command(rest):
     word = rest[0]
     if word in ("-h", "--help"):
         return "help", None
+    if word == "config" and rest[1:2] and rest[1] in CONFIG_VERBS:
+        return "route", word
+    if word == "config":
+        # PF-A2.2: the former Compose alias is the config group; any other spelling keeps the removed-route refusal.
+        raise Failure("compose-route-removed: 'pf config' without 'admin' or 'app' no longer forwards to Docker "
+                      f"Compose. {REMOVED_ROUTE_GUIDANCE['config']} Use 'pf config admin' or 'pf config app'. Nothing "
+                      "was read or changed.")
     if word in DISPATCH:
         return "route", word
     if word in REMOVED_COMPOSE_ROUTES:
@@ -4488,6 +5244,170 @@ def bind_installation_root(root, running_release):
     return root
 
 
+def check_config_options(args, *, explicit_instance):
+    """PF-A2.2 ``config-option-invalid`` (exit 2), before any registry read."""
+    verb = getattr(args, "config_verb", None)
+    if verb is None:
+        return
+    configuration, project = args.configuration, args.project
+    if (verb == "app" and (configuration is not None or project is not None)) \
+            or (project is not None and configuration is None) or (configuration is not None and explicit_instance):
+        raise OptionRefused("config-option-invalid: --configuration [--project] selects a configuration directory that "
+                            "is not registered yet and cannot be combined with --instance or used with 'config app'; "
+                            "--project needs --configuration. Nothing was read or changed.")
+    if project is not None and not PROJECT_RE.fullmatch(project):
+        raise OptionRefused(f"config-option-invalid: --project {project!r} is not a Compose project name (1-40 "
+                            "characters a-z 0-9 _ - starting with a letter or digit). Nothing was read or changed.")
+
+
+def config_admin_unregistered(root, args, *, running_release, trusted_launch):
+    """Section 3.3 pre-registration mode: create or complete a schema 2 pf-config.json in a configuration directory
+    a fresh `pf install register` will name. Install and registry state, path rules and conflicts are checked before
+    any question and again under the registry lock (LOCK_NB, held only around the reload, the checks and the write).
+    No instance lock, no audit record (no instance exists yet); a legacy schema 1 file is never migrated here."""
+    root = Path(root)
+    prefix = pf_install.launcher_prefix(root)
+    directory_text = args.configuration
+    project = args.project
+    if not trusted_launch:
+        raise Failure("Mutating commands must start through the installed bootstrap launcher (Python isolated mode, "
+                      "sanitized environment).")
+    if unattended():
+        raise Failure("terminal-required: 'config' asks for a typed confirmation and cannot run without a terminal "
+                      "(scheduled task, script, or ssh without -t). Run it interactively: "
+                      f"{prefix} config admin --configuration {directory_text}. Nothing was changed.")
+
+    def state_checks():
+        report = pf_install._Report()
+        pf_install._open_operation_checks(report, root)
+        pf_install._pending_registration_checks(report, root)
+        if report.conflicts:
+            raise Failure("\n".join([f"{report.conflicts[0].code}: pf config admin was refused and nothing was created:"]
+                                    + [f"  - {item.code}: {item.subject}: {item.detail}" for item in report.conflicts]))
+
+    def path_checks():
+        reason = pf_instance.canonical_path_error(directory_text)
+        if reason is not None:
+            findings = [("path-noncanonical", directory_text, reason)]
+        else:
+            checker = pf_bootstrap.PathChecker(root)
+            pf_instance._data_directory(checker, Path(directory_text), "configuration", protected=False)
+            findings = [(item.code, item.path, item.message) for item in checker.findings if item.severity == "refuse"]
+        if findings:
+            raise Failure(f"config-dir-invalid: {directory_text} cannot hold a configuration ({len(findings)} "
+                          "finding(s)); nothing was created:\n"
+                          + "\n".join(f"  - {code}: {path}: {message}" for code, path, message in findings))
+
+    def path_conflict(detail, slug):
+        return Failure(f"config-path-conflict: {directory_text} {detail}; nothing was created. A registered "
+                       f"configuration directory is changed with '{prefix} --instance {slug} config admin'; otherwise "
+                       "choose another directory.")
+
+    def conflict_checks():
+        try:
+            registry = pf_instance.load_registry(root)
+        except pf_instance.ContextError as exc:
+            raise Failure(f"registry-invalid: {exc}; pf config admin was refused and nothing was created.") from exc
+        directory = Path(directory_text)
+        for _, context, _ in registry.records():
+            if context is not None and context.paths.configuration == directory:
+                raise path_conflict(f"is the registered configuration directory of instance {context.slug}",
+                                    context.slug)
+        inventory = pf_instance.inventory_of(registry)
+        problems = pf_instance.managed_path_conflicts({"configuration": directory}, "(unregistered)", inventory, root)
+        if problems:
+            owner = next((owner for owner, _, other in inventory if other == directory
+                          or pf_instance._contains(other, directory) or pf_instance._contains(directory, other)), None)
+            slug = owner.split(":", 1)[1] if owner and owner.startswith("reservation:") else owner or "<slug>"
+            raise path_conflict("conflicts with registered managed paths: "
+                                + "; ".join(f"{code}: {message}" for code, _, message in problems), slug)
+
+    state_checks()
+    path_checks()
+    conflict_checks()
+    path = Path(directory_text) / "pf-config.json"
+    target = inspect_editable_target(path)
+    before = None
+    if not target.present:
+        mode = "create"
+        values = load_admin_example(Path(running_release) / "pf-config.example.json", prefix)
+        if project is None:
+            def validate_project(answer):
+                if not PROJECT_RE.fullmatch(answer):
+                    raise Failure(pf_config.ADMIN_RULES["project"])
+                return answer
+            with cancelled_before_summary(path):
+                project = ask_answer("project", "Compose project", validate=validate_project)
+        values.update(project=project, environment=pf_instance.SUPPORTED_ENVIRONMENTS[0])
+    else:
+        before = pf_config.parse_admin_config(target.data, label=str(path))
+        if before.problems:
+            refuse_admin_config(path, before, pf_command=prefix, prefix=prefix, release_id=Path(running_release).name)
+        if before.schema_version == 1:
+            log(f"admin-config-legacy-unregistered: {path} is a legacy schema 1 file in a directory that is not "
+                "registered; it was left unchanged because a v2.5 control may still read it. 'pf install register' "
+                f"accepts it as it is; after registration run '{prefix} --instance <slug> config admin' to make it "
+                "explicit.")
+            for key in ("backup_read_group", "workspace_write_group"):
+                if not group_exists(before.values[key]):
+                    log(f"{key} {before.values[key]!r} does not exist on this host; fix it by hand first.")
+            return 0
+        values = dict(before.values)
+        if project is not None and values["project"] != project:
+            raise Failure(f"admin-config-mismatch: {path} names project {values['project']!r}, not {project!r}; nothing "
+                          "was changed.")
+        if values["environment"] not in pf_instance.SUPPORTED_ENVIRONMENTS:
+            raise Failure(f"admin-config-mismatch: {path} names environment {values['environment']!r}; registration "
+                          f"approves {', '.join(pf_instance.SUPPORTED_ENVIRONMENTS)} only, and nothing was changed.")
+        mode = "complete"
+    location = f"{directory_text} and the paths registered later"
+    with cancelled_before_summary(path):
+        asked = admin_group_questions(values, mode=mode,
+                                      locations={"workspace_write_group": location, "backup_read_group": location})
+
+    def locked(action):
+        try:
+            handle = pf_instance.acquire_registry_lock(root)
+        except pf_instance.LockBusy as exc:
+            raise Failure(f"config-busy: Another operation holds {root / pf_instance.REGISTRY_LOCK_RELATIVE}; nothing "
+                          "was changed. Try again after it finishes.") from exc
+        except pf_instance.ContextError as exc:
+            raise Failure(str(exc)) from exc
+        try:
+            state_checks()
+            path_checks()
+            conflict_checks()
+            action()
+        finally:
+            handle.release()
+
+    if mode == "complete" and not asked:
+        if target.removable_leftovers:
+            locked(lambda: remove_editable_leftovers(target))
+        log(f"config-current: {path} is current (admin configuration schema 2); nothing to change.")
+        return 0
+    document = pf_config.admin_document(values)
+    try:
+        data = pf_config.render_admin_config(document)
+    except pf_config.ConfigError as exc:
+        raise Failure(f"config-changed: {path}: {exc}; nothing was written.") from exc
+    rows = pf_config.admin_config_changes(before, document, asked=asked)
+    admin_summary(path, mode=mode, before=before, document=document, asked=asked,
+                  instance_line=f"Instance: (not registered yet), project {values['project']}",
+                  environment_line=f"Environment label: {values['environment']} (the approved policy is chosen by "
+                                   "'pf install register'; unchanged)",
+                  app_hint=f"Application variables are not in this file; after registration use '{prefix} --instance "
+                           "<slug> config app'.")
+    confirm_write(path)
+    changed = [row["key"] for row in rows if row["action"] != "kept"]
+    locked(lambda: write_reviewed(path, data, target,
+                                  create_gid=grp.getgrnam(values["workspace_write_group"]).gr_gid,
+                                  op8=uuid.uuid4().hex[:8], keys=changed))
+    log(f"Wrote {path} (admin configuration schema 2; {mode}). Next: '{prefix} install register' with "
+        f"--configuration {directory_text} --project {values['project']}.")
+    return 0
+
+
 def main(argv=None, *, installation_root=None, running_release=None, trusted_launch=None):
     """CLI entry point.
 
@@ -4550,6 +5470,12 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             # PF-A2.1: the installer reads the registry and takes its locks itself (registry lock first).
             return pf_install.run_installed(root, args, running_release=running_release, trusted_launch=trusted_launch,
                                             interaction=pf_install.Interaction(unattended, input_line, log))
+        # PF-A2.2: config option combinations are refused before any registry read; --configuration selects the
+        # pre-registration mode of `config admin`, which takes only the registry lock (never an instance lock).
+        check_config_options(args, explicit_instance=options.instance is not None)
+        if getattr(args, "configuration", None) is not None:
+            return config_admin_unregistered(root, args, running_release=running_release,
+                                             trusted_launch=trusted_launch)
         try:
             registry = pf_instance.load_registry(root)
         except pf_instance.ContextError as exc:
@@ -4573,7 +5499,9 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             raise Failure(f"selection-conflict: --project {project} does not match the selected instance {context.slug} "
                           f"(project {context.compose_project}). Use --instance alone. Nothing was changed.")
         if route.trusted_context:
-            controller.require_trusted_context()
+            # PF-A2.2: the config wizards read pf-config.json themselves (absent, refused or mismatched files reach
+            # their own outcome); the protected-context refusal still runs for every trusted route.
+            controller.require_trusted_context(load_config=route.name != "config")
         if route.trusted_launch and not trusted_launch:
             raise Failure(
                 ("Mutating commands" if route.lock else "Compose views (ps, logs)")
@@ -4608,7 +5536,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 f"revision {revision} of instance {slug} does not (automatic apply is off in this checkpoint). The "
                 f"editable auto_update setting is a proposal only. Nothing was changed. Check with 'pf --instance "
                 f"{slug} release-check' and apply manually with 'pf --instance {slug} update --release <tag>'.")
-        held_lock.enter_context(controller.lock(pending_route=route.name))
+        held_lock.enter_context(controller.lock(pending_route=route.name, freeze=route.name != "config"))
         if route_preflight(route, args) == "owned":
             controller.require_topology_owned(route.name)
         managed_started = route_fail_closed(route, args)
@@ -4639,6 +5567,8 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though runtime .env is stored separately.")
         elif args.command == "reset-db":
             controller.reset_database()
+        elif args.command == "config":
+            controller.configure(args)
         elif args.command == "abort-deploy":
             controller.abort_deploy()
         elif args.command == "rollback":
@@ -4671,7 +5601,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             # stop must still run, under the lock, before this process exits.
             if controller is not None and managed_started:
                 controller.fail_closed()
-        return 20 if isinstance(exc, Deferred) else 1
+        return 20 if isinstance(exc, Deferred) else 2 if isinstance(exc, OptionRefused) else 1
     finally:
         held_lock.close()
 

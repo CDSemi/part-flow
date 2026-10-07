@@ -180,10 +180,10 @@ WRITE_SITE_ALLOWLIST = {
         (".mkdir", "Controller.snapshot"), (".mkdir", "copy_tree_entry"), (".mkdir", "extract_source"),
         (".open", "Controller.create_purge_recovery"), (".open", "Controller.create_tree_archive"),
         (".open", "Controller.dump_database"), (".open", "Controller.extract_tree_archive"),
-        (".open", "Controller.prepare_new_env"), (".open", "Controller.snapshot"), (".open", "create_source_archive"),
+        (".open", "Controller.snapshot"), (".open", "create_source_archive"),
         (".open", "extract_source"), (".open", "write_json"),
         (".unlink", "Controller.abort_deploy"), (".unlink", "Controller.deploy"),
-        (".unlink", "Controller.finish_purge_cleanup"), (".unlink", "Controller.prepare_new_env"),
+        (".unlink", "Controller.finish_purge_cleanup"),
         (".unlink", "Controller.purge"), (".unlink", "Controller.replace_source"),
         (".unlink", "Controller.replace_source_for_recovery"), (".unlink", "Controller.reset_database"),
         (".unlink", "Controller.restore_instance"), (".unlink", "Controller.resume"), (".unlink", "Controller.rollback"),
@@ -202,8 +202,10 @@ WRITE_SITE_ALLOWLIST = {
         ("os.chown", "Controller.publish_config_permissions"), ("os.chown", "Controller.publish_workspace_permissions"),
         ("os.chown", "Controller.restore_runtime_environment"),
         ("os.mkdir", "Controller.begin_operation"), ("os.mkdir", "Controller.freeze_app_config"),
-        ("os.replace", "Controller.make_override"), ("os.replace", "Controller.prepare_new_env"),
+        ("os.replace", "Controller.make_override"),
         ("os.replace", "Controller.restore_runtime_environment"), ("os.replace", "write_json"),
+        # PF-A2.2: the config wizard's compare-and-swap publish (replace mode) and its audit record.
+        ("os.replace", "write_editable_file"), ("write_private_json", "Controller.write_config_change"),
         ("shutil.copy2", "Controller.create_purge_recovery"), ("shutil.copy2", "Controller.replace_source"),
         ("shutil.copy2", "Controller.restore_instance"), ("shutil.copy2", "Controller.restore_runtime_environment"),
         ("shutil.copy2", "copy_tree_entry"), ("shutil.copyfileobj", "Controller.extract_tree_archive"),
@@ -453,7 +455,7 @@ class DispatchTables(unittest.TestCase):
         self.assertEqual(pf.KNOWN_COMMANDS, frozenset(pf.DISPATCH))
         self.assertEqual(pf.READ_ONLY_COMMANDS,
                          {"instances", "status", "doctor", "backups", "recoveries", "ps", "logs"})
-        self.assertEqual(len(pf.DISPATCH), 19)
+        self.assertEqual(len(pf.DISPATCH), 20)
         self.assertNotIn("install", pf.READ_ONLY_COMMANDS)
 
     def test_dt2_every_field_is_in_its_token_set(self):
@@ -569,9 +571,13 @@ class DispatchTables(unittest.TestCase):
         self.assertFalse(removed & pf.COMPOSE_GLOBAL_OPTIONS)
         self.assertTrue(FORMER_MUTATING_VERBS <= removed)
         self.assertTrue(FORMER_READ_ONLY_VERBS - {"ps", "logs"} <= removed)
-        self.assertIn("config", removed)
+        # PF-A2.2: `config` is the wizard group now; its former Compose guidance still answers `pf config` without
+        # admin/app (DT-3), so the guidance group stays while the word leaves the removed-route table.
+        self.assertNotIn("config", removed)
+        self.assertIn("config", pf.DISPATCH)
+        self.assertIn("config", pf.REMOVED_ROUTE_GUIDANCE)
         self.assertTrue(pf_docker.ENVELOPE_VERBS <= removed)
-        self.assertEqual(set(pf.REMOVED_COMPOSE_ROUTES.values()), set(pf.REMOVED_ROUTE_GUIDANCE))
+        self.assertEqual(set(pf.REMOVED_COMPOSE_ROUTES.values()) | {"config"}, set(pf.REMOVED_ROUTE_GUIDANCE))
         self.assertEqual(pf.COMPOSE_READ_ONLY_VERBS, FORMER_READ_ONLY_VERBS)
 
     def test_dt8_entry_routes_are_consistent_and_each_names_a_real_test(self):
@@ -622,7 +628,7 @@ class DispatchTables(unittest.TestCase):
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")
         methods = {node.name: node for node in controller.body if isinstance(node, ast.FunctionDef)}
 
-        def confirms(name):
+        def confirms(name, word="confirm"):
             seen, todo = set(), [name]
             while todo:
                 current = todo.pop()
@@ -630,7 +636,7 @@ class DispatchTables(unittest.TestCase):
                     continue
                 seen.add(current)
                 for node in ast.walk(methods[current]):
-                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "confirm":
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == word:
                         return True
                     if isinstance(node, ast.Call) and dotted(node.func) and dotted(node.func).startswith("self."):
                         todo.append(dotted(node.func)[5:])
@@ -645,10 +651,33 @@ class DispatchTables(unittest.TestCase):
         self.assertIn('_confirm(interaction, f"{verb} {_op8(operation_id)}")', inspect.getsource(pf.pf_install.resume))
         self.assertEqual({route.name for route in terminal},
                          {"deploy", "abort-deploy", "purge", "restore-instance", "reset-db", "rollback", "resume",
-                          "update"})
+                          "update", "config"})
         for route in terminal:
             with self.subTest(route=route.name):
-                self.assertTrue(confirms(route.handler.split(".", 1)[1]), route.handler)
+                # PF-A2.2 (OD-A22-17): the config wizards edit proposal files and confirm with [y/N] (confirm_write);
+                # the typed phrases stay for protected-state changes.
+                word = "confirm_write" if route.name == "config" else "confirm"
+                self.assertTrue(confirms(route.handler.split(".", 1)[1], word), route.handler)
+
+    def test_dt5b_only_the_config_route_skips_the_configuration_load_and_the_freeze(self):
+        """PF-A2.2 DT-5: main() passes load_config=False and freeze=False for `config` only."""
+        source, tree = parse_module("pf-admin.py")
+        calls = {}
+        for call, where in qualified_calls(tree):
+            target = dotted(call.func) or ""
+            for name, keyword in (("require_trusted_context", "load_config"), ("lock", "freeze"),
+                                  ("begin_operation", "freeze")):
+                if target.endswith("." + name):
+                    for item in call.keywords:
+                        if item.arg == keyword:
+                            calls.setdefault(name, []).append((where, ast.get_source_segment(source, item.value)))
+        self.assertEqual(calls["require_trusted_context"], [("main", 'route.name != "config"')])
+        self.assertEqual(calls["lock"], [("main", 'route.name != "config"')])
+        self.assertEqual(calls["begin_operation"], [("Controller.lock", "freeze")])
+        route = pf.DISPATCH["config"]
+        self.assertEqual((route.lock, route.trusted_launch, route.trusted_context, route.pending, route.preflight,
+                          route.fail_closed, route.unattended, route.policy_class, route.handler),
+                         (True, True, True, "refuse", "none", "never", "terminal", "", "Controller.configure"))
 
     @ROOT_REQUIRED
     def test_e8_verifier_refuses_outside_bootstrap(self):
@@ -741,6 +770,42 @@ class RemovedRoutes(Base):
         self.assertIn("unrecognized arguments: --allow", usage.getvalue())
         self.assertEqual(self.fake.calls(), [])
         self.assertEqual(self.operation_dirs(), [])
+
+
+@ROOT_REQUIRED
+class ConfigRoute(Base):
+    """PF-A2.2: the former Compose alias `config` is the wizard group (DT-3, DT-5 behaviour)."""
+
+    def test_dt3_config_without_admin_or_app_keeps_the_removed_route_refusal(self):
+        before = pfx.snapshot_tree(self.base)
+        expected = ("compose-route-removed: 'pf config' without 'admin' or 'app' no longer forwards to Docker Compose. "
+                    + pf.REMOVED_ROUTE_GUIDANCE["config"] + " Use 'pf config admin' or 'pf config app'. Nothing was read "
+                    "or changed.")
+        with mock.patch.object(pf.pf_instance, "load_registry", wraps=pf.pf_instance.load_registry) as registry:
+            for arguments in (["config"], ["config", "--services"], ["config", "foo"], ["--instance", "staging", "config"],
+                              ["config", "-o", str(self.base / "dump.yaml")]):
+                with self.subTest(arguments=arguments):
+                    code, out, err = self.run_main(arguments, interactive=True)
+                    self.assertEqual(code, 1, err)
+                    self.assertEqual(err, "ERROR: " + expected + "\n")
+        registry.assert_not_called()
+        self.assertEqual((self.fake.calls(), self.operation_dirs()), ([], []))
+        self.assertEqual(pfx.snapshot_tree(self.base), before)
+        usage = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, contextlib.redirect_stdout(usage):
+            pf.main(["config", "--help"], installation_root=self.layout.root, running_release=self.layout.release_dir,
+                    trusted_launch=True)
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("admin", usage.getvalue())
+
+    def test_dt5_deploy_still_loads_the_configuration_before_the_lock(self):
+        (self.paths["configuration"] / "pf-config.json").unlink()
+        (self.context.state_dir / "deployed.json").unlink()
+        code, out, err = self.run_main(["--instance", "staging", "deploy"], interactive=True)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("Runtime configuration is missing or unreadable", err)
+        self.assertEqual((self.operation_dirs(), self.fake.calls()), ([], []))
+        self.assert_lock_free()
 
 
 # ============================================================================ RA: read-only views
@@ -1644,7 +1709,8 @@ class StaticScan(unittest.TestCase):
                 sites.setdefault(target, set()).add(where)
         self.assertEqual(sites, {
             "Controller": {"main.select"},
-            "pf_instance.load_registry": {"main"},
+            # PF-A2.2: the pre-registration wizard reloads the registry under the registry lock.
+            "pf_instance.load_registry": {"main", "config_admin_unregistered.conflict_checks"},
             "pf_instance.resolve_instance": {"main.select"},
             "pf_instance.validate_context": {"main.select", "Controller.ensure_validation"},
             "pf_instance.load_policy": {"Controller.policy_permits"},
@@ -1691,6 +1757,60 @@ class StaticScan(unittest.TestCase):
         self.assertEqual(found, set(READ_ONLY_REACHABLE_EXEMPT))
         self.assertNotIn("Controller.lock", reachable)
         self.assertNotIn("Controller.begin_operation", reachable)
+
+    def test_ss3c_config_writer_sites_are_allowlisted_and_the_wizard_readers_write_nothing(self):
+        """PF-A2.2: the wider write vocabulary (links, fchown/fchmod, exclusive creates, unlinks) in pf-admin.py is
+        confined to the config writer; its read-only helpers and every read-only route reach none of it."""
+        _, tree = parse_module("pf-admin.py")
+        wider = {(name, where) for call, where in qualified_calls(tree) for name in [install_write(call)] if name}
+        self.assertEqual(wider - write_sites(tree), {
+            ("os.open(O_CREAT)", "write_editable_file"), ("os.write", "write_editable_file"),
+            ("os.fchown", "write_editable_file"), ("os.fchmod", "write_editable_file"),
+            ("os.link", "write_editable_file"), ("os.unlink", "write_editable_file"),
+            ("os.unlink", "remove_editable_leftovers"),
+            # Pre-existing (PF-A1.3): the envelope render's private file inside the current operation directory.
+            ("os.open(O_CREAT)", "Controller.render_compose"),
+        })
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")
+        methods = {node.name: node for node in controller.body if isinstance(node, ast.FunctionDef)}
+        for node in (functions["host_groups"], functions["inspect_editable_target"], functions["group_exists"],
+                     methods["instance_deployed"], methods["deployed_evidence"], methods["describe_zone_data"]):
+            with self.subTest(reader=node.name):
+                self.assertEqual([install_write(call) for call in ast.walk(node) if isinstance(call, ast.Call)
+                                  and install_write(call)], [])
+        _, config_tree = parse_module("pf_config.py")
+        for name in ("zone_status", "compiled_tzpath", "parse_admin_config", "plan_app_config", "rewrite_app_env"):
+            node = next(item for item in config_tree.body if isinstance(item, ast.FunctionDef) and item.name == name)
+            with self.subTest(pure=name):
+                self.assertEqual([install_write(call) for call in ast.walk(node) if isinstance(call, ast.Call)
+                                  and install_write(call)], [])
+
+        def callees(node):
+            found = set()
+            for child in ast.walk(node):
+                if isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name) and child.value.id == "self" \
+                        and child.attr in methods:
+                    found.add("Controller." + child.attr)
+                elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in functions:
+                    found.add(child.func.id)
+            return found
+
+        def node_of(name):
+            return methods[name.split(".", 1)[1]] if name.startswith("Controller.") else functions[name]
+
+        reachable, todo = set(), ["Controller." + name for name in methods
+                                  if name in READ_ONLY_ROOTS or name.startswith(READ_ONLY_ROOT_PREFIXES)]
+        todo += list(READ_ONLY_MODULE_ROOTS)
+        while todo:
+            name = todo.pop()
+            if name not in reachable:
+                reachable.add(name)
+                todo += sorted(callees(node_of(name)) - reachable)
+        self.assertIn("Controller.describe_zone_data", reachable)
+        for writer in ("write_editable_file", "write_reviewed", "remove_editable_leftovers", "Controller.configure",
+                       "Controller.write_config_change", "Controller.admin_wizard", "Controller.app_wizard"):
+            self.assertNotIn(writer, reachable)
 
     def test_ss3b_installer_writes_are_allowlisted_and_unreachable_from_read_only_install_routes(self):
         _, tree = parse_module("pf_install.py")
@@ -1770,7 +1890,7 @@ class StaticScan(unittest.TestCase):
         admin = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
         self.assertEqual(admin.count("sys.stdin.isatty("), 0)
         self.assertEqual(admin.count("stream.isatty()"), 1)
-        self.assertEqual(pf.CHECKPOINT, "PF-A2.1")
+        self.assertEqual(pf.CHECKPOINT, "PF-A2.2")
         self.assertEqual(pf.VERSION, "2.5.0")
 
     def test_ss6_every_parser_refuses_abbreviations(self):

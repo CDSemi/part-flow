@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "repository": "CDSemi/part-flow",
   "branch": "main",
   "project": "partflow-staging",

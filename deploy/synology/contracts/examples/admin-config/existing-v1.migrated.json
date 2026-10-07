@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "repository": "CDSemi/part-flow",
-  "branch": "main",
+  "branch": "release/2.5",
   "project": "partflow-staging",
   "environment": "staging",
   "release_channel": "stable",
   "auto_update": false,
   "ci_workflow": "ci.yml",
   "health_timeout_seconds": 180,
-  "minimum_free_mb": 2048,
+  "minimum_free_mb": 4096,
   "backup_read_group": "users",
   "workspace_write_group": "users"
 }

@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin config-change record v1 (PF-A2.2)",
+  "description": "Private audit record <root>/instances/<uuid>/operations/<operation-id>/config-change.json of one completed 'pf config' write. Strict UTF-8 JSON, normalized bytes, mode 0600. Normative markers as in install-operation.schema.json: a nullable value and an array item rule are written as the description \"null or <target>\" or \"items <target>\" (<target>: $defs.<name>, string, sha256 or scalar; scalar = a string, a non-boolean integer or a boolean). They are enforced only by pf_install.validate_marked; every consumer validates with it. Cross-field rules (pf_config.config_change_problems): file '.env' has a profile_id and null schema/hash fields, file 'pf-config.json' has a null profile_id and schema_after 2; a key in pf_config.SECRET_KEYS has null before/after and action unchanged or set, every other key never has unchanged or set. No secret value and no .env hash ever appears.",
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_id",
+        "completed",
+        "file",
+        "mode",
+        "profile_id",
+        "schema_before",
+        "schema_after",
+        "before_sha256",
+        "after_sha256",
+        "changes"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-config-[0-9a-f]{8}$"
+        },
+        "completed": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "file": {
+          "enum": [
+            "pf-config.json",
+            ".env"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "create",
+            "migrate",
+            "complete"
+          ]
+        },
+        "profile_id": {
+          "description": "null or string"
+        },
+        "schema_before": {
+          "enum": [
+            null,
+            1,
+            2
+          ]
+        },
+        "schema_after": {
+          "enum": [
+            null,
+            2
+          ]
+        },
+        "before_sha256": {
+          "description": "null or sha256"
+        },
+        "after_sha256": {
+          "description": "null or sha256"
+        },
+        "changes": {
+          "type": "array",
+          "description": "items $defs.change"
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "action",
+        "before",
+        "after"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+        },
+        "action": {
+          "enum": [
+            "created",
+            "kept",
+            "materialized",
+            "changed",
+            "added",
+            "unchanged",
+            "set"
+          ]
+        },
+        "before": {
+          "description": "null or scalar"
+        },
+        "after": {
+          "description": "null or scalar"
+        }
+      }
+    }
+  }
+}

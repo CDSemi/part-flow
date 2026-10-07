@@ -1,0 +1,65 @@
+[
+  {
+    "file": "new-install.json",
+    "expect": {
+      "schema_version": 2,
+      "code": null,
+      "implicit": []
+    }
+  },
+  {
+    "file": "existing-v1.json",
+    "expect": {
+      "schema_version": 1,
+      "code": null,
+      "implicit": [
+        "auto_update",
+        "ci_workflow",
+        "health_timeout_seconds",
+        "backup_read_group"
+      ]
+    }
+  },
+  {
+    "file": "existing-v1.migrated.json",
+    "expect": {
+      "schema_version": 2,
+      "code": null,
+      "implicit": [],
+      "migrated_from": "existing-v1.json"
+    }
+  },
+  {
+    "file": "missing-group.json",
+    "expect": {
+      "schema_version": 2,
+      "code": null,
+      "implicit": [],
+      "group_missing": "workspace_write_group"
+    }
+  },
+  {
+    "file": "unsupported-old-schema.json",
+    "expect": {
+      "schema_version": 0,
+      "code": "admin-config-version-unsupported",
+      "implicit": []
+    }
+  },
+  {
+    "file": "unsupported-future-schema.json",
+    "expect": {
+      "schema_version": 0,
+      "code": "admin-config-version-unsupported",
+      "implicit": []
+    }
+  },
+  {
+    "file": "conflicting-path.json",
+    "expect": {
+      "schema_version": null,
+      "code": "config-path-conflict",
+      "implicit": []
+    }
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "repository": "CDSemi/part-flow",
+  "branch": "release/2.5",
+  "project": "partflow-staging",
+  "environment": "staging",
+  "release_channel": "stable",
+  "minimum_free_mb": 4096,
+  "workspace_write_group": "users"
+}

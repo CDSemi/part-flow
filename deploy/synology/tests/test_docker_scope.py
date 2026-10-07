@@ -992,7 +992,12 @@ class ComposeEnvelope(ScopeBase):
                 self.assertIn("Compose envelope: ok | compose v2.40.2-fixture | services db, "
                               "backend, frontend | dollar-escape doubled | values compared", out)
                 self.assertEqual(pfx.snapshot_tree(self.base / "staging", self.context.paths.private_state), before)
-                self.assertNotIn(password, out + err)
+                # PF-A2.2: the read-only "Timezone data:" line (zone name and host directory only, no value of .env
+                # beyond SITE_TIMEZONE) is checked on its own; the word "data" in it is not the password.
+                zone_lines = [line for line in out.splitlines() if line.startswith("Timezone data: ")]
+                self.assertEqual(len(zone_lines), 1)
+                self.assertTrue(zone_lines[0].startswith("Timezone data: SITE_TIMEZONE America/Los_Angeles: "))
+                self.assertNotIn(password, "\n".join(line for line in out.splitlines() if line not in zone_lines) + err)
                 self.assertNotIn("Compose config", out)
 
     def test_ce6_former_passthrough_verbs_are_refused_before_any_render(self):
@@ -2115,7 +2120,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A2.1")
+        self.assertEqual(pf.CHECKPOINT, "PF-A2.2")
 
 
 if __name__ == "__main__":

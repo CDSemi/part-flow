@@ -434,6 +434,8 @@ class AdminTests(unittest.TestCase):
     def test_prepare_new_env_generates_password_and_direct_lan_values(self):
         self.c = pf.Controller(self.context)
         (self.c.config_dir / ".env").unlink()
+        # PF-A2.2: a password is generated only for a never-deployed instance (the wizard's deployed predicate).
+        (self.c.state / "deployed.json").unlink()
         answers = iter(["", "", "", "1", "1", "", "y"])
         with (
             mock.patch.object(pf.sys.stdin, "isatty", return_value=True),
@@ -459,7 +461,9 @@ class AdminTests(unittest.TestCase):
     def test_prepare_new_env_reverse_proxy_requires_exact_hostname(self):
         self.c = pf.Controller(self.context)
         (self.c.config_dir / ".env").unlink()
-        answers = iter(["", "", "", "2", "partflow.internal.example", "", "y"])
+        (self.c.state / "deployed.json").unlink()
+        # PF-A2.2: the declaration order asks the port before the Reverse Proxy hostname.
+        answers = iter(["", "", "", "2", "", "partflow.internal.example", "y"])
         with (
             mock.patch.object(pf.sys.stdin, "isatty", return_value=True),
             mock.patch("builtins.input", side_effect=lambda *args: next(answers)),
@@ -476,13 +480,6 @@ class AdminTests(unittest.TestCase):
             with self.assertRaises(pf.Failure):
                 self.c.prepare_new_env()
         self.assertEqual((self.c.config_dir / ".env").read_bytes(), before)
-
-    def test_render_env_template_rejects_missing_required_sample_field(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sample = Path(tmp) / "sample"
-            sample.write_text("POSTGRES_USER=x\n")
-            with self.assertRaises(pf.Failure):
-                pf.render_env_template(sample, {"POSTGRES_USER": "x"})
 
     def test_update_backs_up_then_switches_source_and_images(self):
         control_before = (self.c.control_dir / "pf-admin.py").read_text()

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin admin configuration v2 (PF-A2.2)",
+  "description": "Editable <configuration>/pf-config.json. Strict UTF-8 JSON: duplicate keys and non-finite numbers are refused by the parser before this schema runs. Every key is required. A file without schema_version is the legacy schema 1 form: it is read with the frozen schema 1 implicit values and is only ever rewritten by an explicit 'pf config admin'. The environment value is an editable label that must equal the approved policy environment; it never changes the policy. Validated with the A1 subset validator (pf_instance.validate_against_schema).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "branch",
+    "project",
+    "environment",
+    "release_channel",
+    "auto_update",
+    "ci_workflow",
+    "health_timeout_seconds",
+    "minimum_free_mb",
+    "backup_read_group",
+    "workspace_write_group"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "repository": {
+      "const": "CDSemi/part-flow"
+    },
+    "branch": {
+      "type": "string",
+      "pattern": "^(?!.*\\.\\.)(?!.*//)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}(?<!/)$"
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+    },
+    "environment": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "release_channel": {
+      "enum": [
+        "stable",
+        "prerelease"
+      ]
+    },
+    "auto_update": {
+      "type": "boolean"
+    },
+    "ci_workflow": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+    },
+    "health_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "minimum_free_mb": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "backup_read_group": {
+      "type": "string",
+      "pattern": "^[^\\u0000-\\u001f\\u007f:\\s](?:[^\\u0000-\\u001f\\u007f:]{0,62}[^\\u0000-\\u001f\\u007f:\\s])?$"
+    },
+    "workspace_write_group": {
+      "type": "string",
+      "pattern": "^[^\\u0000-\\u001f\\u007f:\\s](?:[^\\u0000-\\u001f\\u007f:]{0,62}[^\\u0000-\\u001f\\u007f:\\s])?$"
+    }
+  }
+}

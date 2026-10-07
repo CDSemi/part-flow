@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A2.1 (trên commit `702ab1c`).
+> Baseline đồng bộ: package revision PF-A2.2 (trên commit `64dcce0`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -200,6 +200,27 @@
 > adoption (OD-A21-05); `status`, `doctor`, `ps` và `logs` vẫn chạy.
 > Khối này **thay thế** các cảnh báo về `install-control.sh` trong khối PF-A1.4 và ở mục 5 và 15.
 
+> **Checkpoint Deployment Admin PF-A2.2 (2026-10-07) — config wizard và schema migration của admin config; vẫn
+> là trạng thái phát triển, chưa phải bản phát hành NAS.**
+> *Admin configuration có version.* `pf-config.json` có hai dạng đọc được: legacy schema 1 (không có
+> `schema_version`; key bị bỏ qua nhận implicit value đã đóng băng) và schema 2 (`"schema_version": 2` và mọi
+> key đều explicit). Việc load không bao giờ migrate: `status`, `doctor`, mọi lifecycle command, preflight của
+> installer và smoke của control install đọc cả hai dạng nguyên trạng. File có key trùng, key lạ, thiếu key
+> (schema 2), sai kiểu hoặc version không hỗ trợ bị từ chối với problem đầu tiên.
+> *`pf config admin`.* Tạo `pf-config.json` từ example đã cài, migrate file schema 1 sang schema 2 (giữ
+> explicit value, ghi implicit value bằng default đã đóng băng của schema 1) hoặc hoàn thiện file schema 2.
+> Wizard chỉ hỏi các group bị thiếu hoặc không chắc chắn, từ danh sách read-only các group của host (không bao
+> giờ tạo group), hiển thị summary, hỏi `Write <path>? [y/N]` và ghi nguyên tử, không ghi đè lên chỉnh sửa xảy
+> ra trong lúc đó. Trước registration, `pf config admin --configuration <dir> --project <project>` tạo file mà
+> `pf install register` cần.
+> *`pf config app`.* Tạo hoặc hoàn thiện `.env` theo profile của instance: secret hiện có được giữ nguyên
+> từng byte; database password chỉ được sinh khi nó vắng mặt và instance chưa từng deploy; credential database
+> không bao giờ được hỏi hoặc ghi lại sau lần deploy đầu tiên; timezone mới phải có trong zone data đã cài
+> trên host. Lần `pf deploy` đầu tiên khi chưa có `.env` chạy cùng wizard này.
+> *Audit.* Một lần ghi ở registered mode lưu `config-change.json` trong thư mục operation (tên key và
+> `unchanged`/`set` cho secret; không có giá trị secret và không có hash của `.env`).
+> Khối này **thay thế** các bước "tạo cấu hình bằng tay" trong khối PF-A2.1 và ở mục 5.
+
 ## 1. Mục đích
 
 PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
@@ -391,9 +412,18 @@ khác) và không tới được root mới.
    một lần rename nguyên tử của thư mục build bên cạnh; hãy chỉ định một đường dẫn chưa tồn tại bên dưới
    nó. Nếu bước publish thất bại hoặc bị gián đoạn thì chưa có gì được publish: thư mục build bị xóa và bạn
    chạy lại đúng lệnh `install-control.sh init` (không có `resume` cho một root chưa tồn tại).
-2. Tạo `<config>/pf-config.json` và `<config>/.env` bằng tay từ
-   `<root>/releases/<id>/pf-config.example.json` và `nas.env.example` (owner, group và mode như mục 6).
-   PF-A2.1 không tạo cấu hình nào; wizard của PF-A2.2 sẽ làm việc đó.
+2. Tạo admin configuration bằng pre-registration wizard (thư mục phải có sẵn, thuộc root, nằm trong các
+   ancestor được bảo vệ; chưa có gì được đăng ký):
+
+   ```sh
+   sudo <root>/bootstrap/pf config admin --configuration <config> --project <project>
+   ```
+
+   Wizard hỏi workspace group và backup group từ các group đang có trên host, hiển thị summary và ghi
+   `<config>/pf-config.json` (schema 2, `root:<workspace group>`, `0660`) sau khi trả lời `y`. Wizard từ chối
+   một thư mục đang được install operation mở, pending registration hoặc instance đã đăng ký sử dụng
+   (`install-operation-pending`, `registry-pending`, `config-path-conflict`). File legacy schema 1 đã có được
+   giữ nguyên (`admin-config-legacy-unregistered`).
 3. Đăng ký instance với các thư mục đã có:
 
    ```sh
@@ -404,6 +434,8 @@ khác) và không tới được root mới.
    Preflight kiểm tra các path (không tạo gì), admin configuration và group của nó, managed-path inventory
    và Docker daemon (một lần `docker info` read-only). Xác nhận bằng `REGISTER <slug>`. Registry default
    không bao giờ bị đổi.
+4. Tạo `.env` bằng `sudo <root>/bootstrap/pf --instance <slug> config app`, hoặc để lần
+   `pf --instance <slug> deploy` đầu tiên hỏi đúng các câu hỏi đó.
 
 ### (b) Home v2.5
 
@@ -425,23 +457,31 @@ sudo <root>/bootstrap/pf install migrate-legacy --legacy-home <home> --workspace
   (không adoption), quyền truy cập, thư mục `control/` v2.5 và launcher v2.5.
 - v2.5 vẫn là control plane cho mọi thay đổi của instance; pf chỉ cho view read-only (`status`, `doctor`,
   `ps`, `logs`) và từ chối mutation với `legacy-control-active` cho tới khi có legacy adoption.
+- Instance đã migrate giữ `pf-config.json` schema 1 (v2.5 đọc cùng file đó và sẽ từ chối `schema_version`).
+  `pf config` bị từ chối như mọi route mutating (`legacy-control-active`) cho tới khi có adoption, và với
+  `pf config app` instance được tính là đã deploy (database của nó đã tồn tại).
 
 > **Cảnh báo (PF-A2.1).** Đây là checkpoint phát triển. Không migrate NAS v2.5 đang chạy trước khi có
 > sub-slice adoption của PF-A2 (OD-A21-05) và quyết định về grant không người trực (OD-A14-13). DSM
 > shared-folder ACL và `backups/` group-writable bị preflight từ chối cho tới PF-A2.3/PF-A5 (A1-T17).
 
+> **Cảnh báo (PF-A2.2).** Các config wizard là checkpoint phát triển, mới chỉ được chứng minh offline. File cấu
+> hình có ACL entry (DSM shared folder thường có) bị từ chối (`config-file-acl`) và phải sửa bằng tay cho tới
+> PF-A2.3. Mật khẩu cần URL encoding vẫn làm `deploy` và `update` dừng ở bước database migration (mục 6, `.env`).
+
 ## 6. Configuration files
 
 ### `config/pf-config.json`
 
-Đây là NAS-local administration config thực sự được dùng. PF-A2.1 không tạo file cấu hình nào: hãy tạo
-nó bằng tay từ `<root>/releases/<id>/pf-config.example.json` trước `pf install register` (mục 5 (a));
-`pf install migrate-legacy` chỉ copy nguyên byte một file cũ đã có.
+Đây là NAS-local administration config thực sự được dùng. `pf config admin` tạo, migrate hoặc hoàn thiện
+nó (mục 5 (a) trước registration, `sudo pf --instance <slug> config admin` sau đó); `pf install migrate-legacy`
+chỉ copy nguyên byte một file cũ đã có.
 
-Default:
+Template schema 2 (`pf-config.example.json` đã cài, input bất biến của wizard):
 
 ```json
 {
+  "schema_version": 2,
   "repository": "CDSemi/part-flow",
   "branch": "main",
   "project": "partflow-staging",
@@ -459,14 +499,71 @@ Default:
 Trusted users có thể sửa file này qua SMB. Controller validate key được hỗ trợ, project name,
 boolean, numeric value và DSM group trước khi sử dụng.
 
+- **Hai schema.** File không có `schema_version` là legacy schema 1: mọi key bị bỏ qua nhận giá trị schema 1
+  đã đóng băng (giá trị của template ở trên), và file vẫn dùng được ở mọi nơi. Schema 2 liệt kê đủ mọi key;
+  thiếu key, key lạ, key trùng hoặc sai kiểu đều bị từ chối. `branch` phải là tên branch (không có `..`,
+  `//` hoặc `/` ở cuối), `ci_workflow` là tên file workflow, các group là tên không có ký tự điều khiển, `:`
+  hoặc khoảng trắng ở hai đầu. Mọi `schema_version` khác (kể cả `1` viết explicit) là
+  `admin-config-version-unsupported`.
+- **Migration là explicit.** Chỉ `sudo pf --instance <slug> config admin` chuyển schema 1 sang schema 2:
+  explicit value được giữ và implicit value được ghi bằng giá trị schema 1 đã đóng băng, không bao giờ bằng
+  example hiện tại. Giá trị mà schema 2 từ chối sẽ chặn migration (`admin-config-migration-blocked`) và không
+  bao giờ được sửa tự động. Cả `pf install control` lẫn `migrate-legacy` đều không đổi file. Thư mục chưa đăng
+  ký (có thể là `config/` của home v2.5) và instance v2.5 còn active không bao giờ bị migrate.
+- **Câu hỏi.** Wizard chỉ hỏi `workspace_write_group` và `backup_read_group`: hỏi cả hai khi tạo file, còn lại
+  chỉ hỏi group không tồn tại trên host này (không có default; không bao giờ âm thầm chọn một group rộng hơn).
+  Câu trả lời là số thứ tự trong danh sách group của host (`users`, rồi các group có gid từ 1000) hoặc đúng tên
+  của một group đang tồn tại. Không bao giờ tạo group. `branch`, `ci_workflow`, `release_channel`,
+  `auto_update`, `health_timeout_seconds` và `minimum_free_mb` được hiển thị nhưng không hỏi; hãy đổi bằng tay.
+- **Environment label.** `environment` phải bằng environment của approved policy của instance. Đó chỉ là
+  label: đổi nó không bao giờ đổi policy (`admin-config-mismatch`); đổi policy là một approval riêng (PF-A4.3).
+  `project` phải bằng Compose project đã đăng ký.
+- **Backup group.** Thay đổi `backup_read_group` có hiệu lực ở lần `backup` hoặc `purge` kế tiếp mà không cần
+  approval riêng, đúng như khi sửa bằng tay. Approval gắn với revision cho thay đổi đó thuộc PF-A2.3.
+- **Ghi file.** File được thay qua một file tạm riêng `.pf-config.json.pf-config-<8 hex>` (với `.env`:
+  `.env.pf-config-<8 hex>`) trong cùng thư mục, giữ owner, group và mode của file bị thay; file mới là
+  `root:<workspace group>` `0660`. Nếu file đổi sau summary thì không ghi gì (`config-changed`). Các tên tạm này
+  được dành riêng: phần còn sót của một lần chạy bị gián đoạn được lần chạy sau xóa, còn file trùng dạng tên đó
+  mà không phải phần còn sót thì bị từ chối (`config-file-unsafe`), không bao giờ bị xóa.
+- **Downgrade.** Control release cũ hơn PF-A2.2 từ chối `schema_version`. Chọn release như vậy bằng
+  `pf install control --release` sau khi đã migrate sẽ dừng ở smoke check (`install-smoke-failed`), và không có
+  gì được bind.
+
 `auto_update` chỉ là đề xuất: apply không người trực cần một grant trong protected policy, mà
 checkpoint này không cung cấp (mục 13).
 
 ### `config/.env`
 
-Khi brand-new deploy, `deploy` tạo file này bằng wizard từ installed template
-`control/nas.env.example`. Script tự sinh `POSTGRES_PASSWORD` 64 ký tự hex bằng secure
-randomness và không in password ra terminal.
+`sudo pf --instance <slug> config app` tạo hoặc hoàn thiện file này theo profile của instance, và lần `deploy`
+đầu tiên khi chưa có `.env` chạy cùng wizard này. File mới bắt đầu từ `nas.env.example` đã cài (giữ comment);
+nếu không thì chỉ các dòng thay đổi được ghi lại và mọi dòng khác giữ nguyên từng byte. Wizard cần
+`pf-config.json` hợp lệ (`admin-config-required`). Wizard chỉ hỏi giá trị thiếu hoặc không hợp lệ, theo thứ tự:
+PostgreSQL user, PostgreSQL database, factory timezone, access mode (và địa chỉ LAN), HTTP port, và hostname
+của Reverse Proxy (chỉ hỏi khi bind `127.0.0.1`; Direct LAN dùng `localhost`).
+
+- **Secret.** `POSTGRES_PASSWORD` hiện có không bao giờ được hiển thị, đổi, sinh lại hoặc quote lại (summary:
+  `unchanged`). Password thiếu hoặc rỗng được sinh thành 64 ký tự hex bằng secure randomness (summary: `set`)
+  chỉ khi instance chưa từng deploy.
+- **Instance đã deploy.** Instance được tính là đã deploy khi có `state/deployed.json`, khi một v2.5 migration
+  đã hoàn tất gắn với nó, hoặc khi state của nó không đọc được. Khi đó `POSTGRES_USER`, `POSTGRES_PASSWORD` và
+  `POSTGRES_DB` không bao giờ được hỏi, sinh hoặc ghi lại; giá trị thiếu hoặc không dùng được bị từ chối
+  (`app-credential-unusable`) kèm hướng dẫn khôi phục. Full `purge` xóa state, nên instance đã purge lại là
+  instance mới; instance đã migrate rồi purge vẫn được tính là đã deploy.
+- **Độ dài password.** Password được giữ nhưng ngắn hơn 32 ký tự sẽ được báo
+  (`password-weak-for-new-deployment`): lần `deploy` đầu tiên sẽ từ chối nó. Hãy đặt password dài hơn bằng
+  tay, hoặc để dòng thành `POSTGRES_PASSWORD=` (rỗng) rồi chạy lại `config app` để sinh password.
+- **Timezone.** `SITE_TIMEZONE` mới hoặc đang thiếu phải có trong zone data đã cài trên host. Giá trị hiện có mà
+  host không biết được giữ kèm note (`zone-unknown-on-host`); khi host không có zone data, giá trị hiện có được
+  giữ kèm note còn giá trị thiếu bị từ chối (`zone-data-unavailable`). Backend kiểm tra giá trị bằng zone data
+  của chính image khi khởi động; wizard không kiểm tra zone data đó.
+- **ACL.** `.env` hoặc `pf-config.json` có ACL entry bị từ chối trước câu hỏi đầu tiên (`config-file-acl`):
+  thay file sẽ làm mất ACL. Hãy sửa file như vậy bằng tay cho tới PF-A2.3.
+- **Database URL.** Controller truyền `PARTFLOW_DATABASE_URL` với credential đã percent-encode; không có gì bị
+  ghép thô. Giới hạn (cho tới khi bản sửa app-lane của `backend/alembic/env.py`, P16-S3 hoặc sau đó, được
+  deploy): bước migration của backend đưa URL đó vào config parser của Alembic, vốn từ chối `%`. Vì vậy password
+  cần encoding (bất kỳ ký tự nào ngoài chữ, số và `-._~`) làm `deploy` và `update` dừng ở bước migration, trước
+  khi version mới được kích hoạt. Password được sinh không bị ảnh hưởng; password hiện có không bao giờ bị đổi
+  để né lỗi này.
 
 Ví dụ:
 
@@ -483,7 +580,7 @@ PARTFLOW_ALLOWED_HOST=localhost
 Sau khi PostgreSQL đã initialize, sửa `POSTGRES_USER`, `POSTGRES_PASSWORD` hay `POSTGRES_DB`
 trong file **không đồng nghĩa** credential/database thật bên trong PostgreSQL cũng tự đổi.
 Đừng tùy tiện sửa các field này trên live instance; cần managed deployment/recovery hoặc
-một credential/database migration có kế hoạch.
+một credential/database migration có kế hoạch; không wizard nào rotate credential.
 
 Từ PF-A1.2 file này được parse như dữ liệu với grammar nghiêm ngặt: đúng bảy key này, mỗi
 key một lần, `KEY=VALUE` không có khoảng trắng quanh `=` và không có `export`; dòng comment
@@ -827,6 +924,9 @@ sudo pf deploy --latest
 Full purge thông thường xóa `config/.env`, vì vậy deploy wizard sẽ tạo environment mới và
 PostgreSQL password mới. Nếu một recovery path cụ thể giữ external configuration thì deploy
 sẽ validate trước khi reuse.
+`purge --reset-admin-config` xóa thêm `pf-config.json`; purge khi đó nêu các bước tiếp theo:
+`sudo pf --instance <slug> config admin`, rồi `sudo pf --instance <slug> deploy --latest` (dùng launcher ở mục 5
+khi `sudo pf` không tới root này).
 
 Smoke test xong:
 
@@ -938,6 +1038,10 @@ không lấy lock và không tạo operation. Mọi từ hoặc option Compose k
 Không có route managed để chạy CLI của ứng dụng trong container backend (`exec` và `run` bị từ
 chối; route managed thuộc PF-A4).
 
+Từ PF-A2.2 `pf config` là nhóm config wizard (`pf config admin`, `pf config app`). `pf config` đứng một mình
+hoặc đi với từ khác (ví dụ `pf config --services` trước đây) vẫn bị từ chối với `compose-route-removed`; raw
+Compose model không được cung cấp (`pf doctor` validate nó một cách riêng tư).
+
 Nếu thật sự cần raw Compose bên ngoài controller, dạng tương đương là:
 
 ```sh
@@ -1010,6 +1114,9 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   `rolling_back` và mọi route của instance bị từ chối cho tới khi `pf install resume` hoàn tất việc khôi phục.
 - Byte của launcher và verifier bị đóng băng: candidate thay đổi `pf.sh` hoặc `pf_bootstrap.py` bị từ chối
   với `bootstrap-change-unsupported` (launcher migration thuộc PF-A4.3).
+- Cài hoặc chọn release không bao giờ migrate `pf-config.json`. Khi file của một instance đã là schema 2,
+  release được giữ lại nhưng cũ hơn PF-A2.2 sẽ từ chối nó ở smoke check (`install-smoke-failed`, không bind
+  gì); hãy khôi phục file schema 1 trước nếu thật sự cần quay lại.
 - Archive cũ `recovery/control-upgrades/` không còn áp dụng; release cũ nằm dưới `<root>/releases/`.
 
 Bước install explicit này chính là security boundary cho phép `repo/` writable bởi users.
@@ -1096,6 +1203,48 @@ operation dừng sau commit point hoặc trong lúc tự khôi phục; nó vẫn
 `pf install resume`. Khi thông báo nói operation đã cancelled nhưng việc dọn dẹp bị gián đoạn thì không có
 gì khác bị thay đổi: phần còn lại nằm trong thư mục operation của nó hoặc được nhận ra ở lần chạy kế tiếp
 của cùng lệnh.
+
+### Từ chối và note của `pf config`
+
+Mỗi lần từ chối dưới đây không thay đổi gì; thông báo nêu lệnh tiếp theo.
+
+- `config-option-invalid` (exit 2): `--configuration [--project]` chỉ là dạng pre-registration của
+  `config admin`; không được kết hợp với `--instance` hoặc dùng với `config app`, và `--project` cần
+  `--configuration`.
+- `config-cancelled`: `q`, hết input, Ctrl-C hoặc bất kỳ câu trả lời nào ngoài `y`/`yes` ở `Write …? [y/N]`.
+  Password đã sinh bị bỏ đi.
+- `config-current` (exit 0): không có gì để đổi. Các note phía sau vẫn có giá trị.
+- `admin-config-required`: `config app` cần `pf-config.json` hợp lệ; chạy `config admin` trước.
+- `admin-config-invalid`: file có lỗi parse, key, kiểu hoặc rule (hiển thị lỗi đầu tiên, kèm số lỗi còn lại).
+  Sửa bằng tay; wizard không bao giờ sửa file.
+- `admin-config-version-unsupported`: file khai báo `schema_version` khác. Control mới hơn đã ghi file này:
+  chọn lại control đó (`pf install control --release <id>`) hoặc khôi phục file trước đó.
+- `admin-config-migration-blocked`: một explicit value của schema 1 không hợp lệ trong schema 2; sửa bằng tay.
+- `admin-config-mismatch`: `project` khác registration, hoặc `environment` khác approved policy. Khôi phục giá
+  trị đã đăng ký; đổi policy là một approval riêng.
+- `admin-config-legacy-unregistered` (exit 0): file schema 1 trong thư mục chưa đăng ký được giữ nguyên; đăng
+  ký trước, rồi chạy `config admin` với `--instance`.
+- `admin-example-invalid`, `app-example-invalid`: example đã cài không dùng được; chạy `doctor` và cài lại
+  control release.
+- `app-config-invalid`: `.env` không parse được (key lạ hoặc trùng, `export`, quote, ký tự xuống dòng).
+- `app-credential-unusable`: instance được tính là đã deploy và một credential bị thiếu hoặc không hợp lệ; khôi
+  phục nó từ recovery bundle hoặc hồ sơ của bạn.
+- `app-profile-undeclared`: profile của instance không khai báo application variable nào trong control này.
+- `migration-issue`: giá trị hiện có không render literal được (dấu nháy đơn, backslash cuối, ký tự điều khiển)
+  hoặc password ngắn hơn 4 ký tự; sửa file bằng tay.
+- `zone-data-unavailable`: host không có zone data để kiểm tra `SITE_TIMEZONE` mới; cài zone data hoặc ghi giá
+  trị bằng tay. Ở dạng note: giá trị hiện có đã được giữ.
+- `config-file-acl`: file có ACL entry; áp dụng bằng tay các thay đổi được liệt kê (PF-A2.3).
+- `config-file-unsafe`: file là link, file đặc biệt hoặc có hard link, hoặc thư mục chứa một tên tạm dành riêng
+  nhưng không phải phần còn sót của lần chạy bị gián đoạn; hãy kiểm tra, không có gì bị xóa.
+- `config-changed`: file đã đổi trong lúc wizard chạy; chạy lại lệnh để xem file mới.
+- `config-busy`: một registration khác đang giữ registry lock; thử lại.
+- `config-dir-invalid`, `config-path-conflict`: thư mục pre-registration bị thiếu, không canonical, nằm trong
+  ancestor có thể bị thay thế, hoặc đang được instance đã đăng ký sử dụng (khi đó dùng
+  `--instance <slug> config admin`).
+- `config-audit-invalid`: lỗi nội bộ; change record không qua schema và không có gì được ghi.
+- Note: `config-temp-removed` (đã xóa file tạm còn sót của lần chạy bị gián đoạn), `zone-unknown-on-host`,
+  `password-weak-for-new-deployment`, `implicit-materialized`.
 
 ### `compose-route-removed`, `compose-override-refused`, `unknown-option` hoặc `unknown-command`
 
@@ -1255,6 +1404,9 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | `sudo <root>/bootstrap/pf install migrate-legacy …` | Copy cấu hình v2.5 và đăng ký; v2.5 vẫn là control plane (`MIGRATE <slug>`) |
 | `sudo <root>/bootstrap/pf install control --source DIR \| --release ID` | Cài hoặc chọn control release (`INSTALL CONTROL`/`SELECT CONTROL <id>`) |
 | `sudo <root>/bootstrap/pf install resume [--operation ID] [--abandon]` | Tiếp tục hoặc abandon install operation đang mở (`RESUME`/`ABANDON <op>`) |
+| `sudo <root>/bootstrap/pf config admin --configuration DIR [--project P]` | Tạo hoặc hoàn thiện `pf-config.json` trước registration (không có `--instance`; chỉ schema 2) |
+| `sudo pf --instance <slug> config admin` | Tạo, migrate (schema 1 → 2) hoặc hoàn thiện `pf-config.json` của instance (`[y/N]`) |
+| `sudo pf --instance <slug> config app` | Tạo hoặc hoàn thiện `.env` của instance theo profile của nó (`[y/N]`) |
 
 Lệnh khởi động không có terminal phải truyền `--instance <slug|uuid>`; cho tới khi có grant
 PF-A4.3, mọi lệnh có lock đều bị từ chối khi không có terminal (`terminal-required`,
@@ -1300,6 +1452,17 @@ Giới hạn của PF-A2.1:
 - không tạo cấu hình (PF-A2.2) và không thay đổi quyền truy cập (PF-A2.3);
 - release cũ và registration đã discard không được dọn dẹp (PF-A5.1).
 
+Giới hạn của PF-A2.2:
+
+- chỉ offline, như PF-A2.1;
+- zone data của backend image không được kiểm tra (chưa có owner); backend vẫn từ chối zone không biết khi khởi
+  động;
+- file cấu hình có ACL entry bị từ chối và cần sửa bằng tay; race SMB giữa lần so sánh cuối của wizard và thao
+  tác rename không thể đóng bằng lock;
+- password cần URL encoding sẽ lỗi ở bước migration của backend cho tới khi bản sửa `env.py` của app-lane được
+  deploy;
+- thay đổi `backup_read_group` có hiệu lực mà không có approval gắn với revision (PF-A2.3).
+
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;
 phạm vi an toàn của PF-A1 mới chỉ được chứng minh offline. A1-T11…T14 vẫn bị chặn vì cần Docker
@@ -1313,8 +1476,9 @@ staging trên NAS thật. Con đường cho NAS v2.5 cần legacy adoption (OD-A
 
 ```text
 install-control.sh init
-→ (configuration by hand)
+→ pf config admin --configuration <config> --project <project>
 → pf install register
+→ pf config app
 → doctor
 → backup
 → update
