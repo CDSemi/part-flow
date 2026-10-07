@@ -10,8 +10,20 @@
 //
 // Pass a stable loader: a module-level function for parameterless
 // lists, or a `useCallback` wrapping the parameters.
+//
+// A view may also signal that loads which failed are worth trying again
+// (`RetryFailedLoadsContext`, e.g. Administration once the user's
+// sign-in is usable again): each change of the signal re-runs a load
+// in the error state; loaded data is never re-read by it.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import { errorMessage } from './client';
 
@@ -32,6 +44,9 @@ export interface ApiData<T> {
    * revalidation recovers. */
   revalidate: () => void;
 }
+
+/** A counter whose every change re-runs the loads under it that failed. */
+export const RetryFailedLoadsContext = createContext(0);
 
 export function useApiData<T>(load: () => Promise<T>): ApiData<T> {
   const [state, setState] = useState<ApiDataState<T>>({ status: 'loading' });
@@ -59,6 +74,16 @@ export function useApiData<T>(load: () => Promise<T>): ApiData<T> {
   }, [load, generation]);
 
   const reload = useCallback(() => setGeneration((value) => value + 1), []);
+
+  const retrySignal = useContext(RetryFailedLoadsContext);
+  const seenRetrySignal = useRef(retrySignal);
+  const failed = state.status === 'error';
+  useEffect(() => {
+    if (seenRetrySignal.current === retrySignal) return;
+    seenRetrySignal.current = retrySignal;
+    if (failed) reload();
+  }, [retrySignal, failed, reload]);
+
   const revalidate = useCallback(() => {
     const requested = ++liveGeneration.current;
     void load().then(

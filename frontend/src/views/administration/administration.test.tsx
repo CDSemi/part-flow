@@ -2819,6 +2819,25 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     'data-label',
     'Undo recent eligible scans',
   );
+  // The inert mark stays where the header is not shown: the stacked
+  // layout's cell caption and the checkbox name.
+  const managerQuantity = screen.getByRole('checkbox', {
+    name: 'Perform quantity corrections — grants nothing yet — Manager',
+  });
+  expect(managerQuantity.closest('td')).toHaveAttribute(
+    'data-label',
+    'Perform quantity corrections — grants nothing yet',
+  );
+  expect(
+    screen
+      .getByRole('checkbox', {
+        name: 'Perform authorized historical corrections — grants nothing yet — Operator',
+      })
+      .closest('td'),
+  ).toHaveAttribute(
+    'data-label',
+    'Perform authorized historical corrections — grants nothing yet',
+  );
   expect(document.body.textContent).toContain(
     'Choose which roles hold each correction permission. The correction permissions are not checked yet; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.',
   );
@@ -4157,7 +4176,7 @@ test('FA-C6: a refused grant shows the reason and the stored value; offline disa
   await openCorrectionPermissions();
   roleFailures.PATCH = { status: 404, detail: 'Role 2 does not exist.' };
   const box = await screen.findByRole('checkbox', {
-    name: 'Perform authorized historical corrections — Manager',
+    name: 'Perform authorized historical corrections — grants nothing yet — Manager',
   });
   fireEvent.click(box);
   expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -4166,13 +4185,13 @@ test('FA-C6: a refused grant shows the reason and the stored value; offline disa
   await waitFor(() =>
     expect(
       screen.getByRole('checkbox', {
-        name: 'Perform authorized historical corrections — Manager',
+        name: 'Perform authorized historical corrections — grants nothing yet — Manager',
       }),
     ).toBeEnabled(),
   );
   expect(
     screen.getByRole('checkbox', {
-      name: 'Perform authorized historical corrections — Manager',
+      name: 'Perform authorized historical corrections — grants nothing yet — Manager',
     }),
   ).not.toBeChecked();
   expect(state.roles[1].permissions).not.toContain(
@@ -4218,7 +4237,7 @@ test('FA-C6: an unanswered grant is an unknown outcome; a failed re-read keeps t
     PATCH: 'network',
     'GET list': { status: 500, detail: 'Database unavailable.' },
   };
-  const other = 'Perform quantity corrections — Operator';
+  const other = 'Perform quantity corrections — grants nothing yet — Operator';
   fireEvent.click(screen.getByRole('checkbox', { name: other }));
   await waitFor(() =>
     expect(screen.getByRole('checkbox', { name: other })).toBeEnabled(),
@@ -4903,6 +4922,151 @@ test('FA-2: an ended sign-in keeps open work for the same user only; signing out
   ).toBeInTheDocument();
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(session.openSignIn).not.toHaveBeenCalled();
+});
+
+test('FA-2: a password an administrator set keeps Administration closed and unread until it is changed', async () => {
+  const bea = signedInUser([...PERMISSIONS], {
+    id: 5,
+    mustChangePassword: true,
+  });
+  session = sessionValue(bea);
+  const view = renderAdmin();
+
+  // The server refuses every read until the new password is chosen, so
+  // none is sent; the panel waits behind the provider's dialog.
+  expect(
+    screen.getByText(
+      "Choose a new password to view and change PartFlow's configuration.",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('navigation', { name: 'Administration sections' }),
+  ).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+  expect(session.openSignIn).not.toHaveBeenCalled();
+  expect(adminRequests()).toEqual([]);
+
+  // The password is changed: the sections load for the same user.
+  session = sessionValue({ ...bea, mustChangePassword: false });
+  view.rerender(adminTree());
+  expect(
+    await screen.findByRole('button', { name: 'Edit Lathe' }),
+  ).toBeVisible();
+  expect(
+    within(
+      screen.getByRole('navigation', { name: 'Administration sections' }),
+    ).getByRole('button', { name: 'Areas' }),
+  ).toHaveFocus();
+});
+
+test('FA-2: kept work waits for the same user to replace an administrator-set password', async () => {
+  const ada = signedInUser([...PERMISSIONS], { id: 1 });
+  session = sessionValue(ada);
+  const view = renderAdmin();
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  await openLoadedSection('Departments');
+  fireEvent.click(screen.getByRole('button', { name: '+ New Department' }));
+  const draft = () =>
+    within(
+      screen.getByRole('dialog', { name: 'New Department' }),
+    ).getByLabelText('Name');
+  fireEvent.change(draft(), { target: { value: 'Paint shop' } });
+
+  // An administrator set the password: the sign-in ended, and the same
+  // user signs in with it and must replace it first.
+  session = sessionValue(null, { endedBy: 'expired' });
+  view.rerender(adminTree());
+  session = sessionValue({ ...ada, mustChangePassword: true });
+  view.rerender(adminTree());
+  expect(draft()).toHaveValue('Paint shop');
+
+  session = sessionValue({ ...ada });
+  view.rerender(adminTree());
+  expect(draft()).toHaveValue('Paint shop');
+});
+
+test('FA-2: a load refused while the sign-in had ended runs again when the same user signs in', async () => {
+  const ada = signedInUser([...PERMISSIONS], { id: 1 });
+  session = sessionValue(ada);
+  const view = renderAdmin();
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+
+  session = sessionValue(null, { endedBy: 'expired' });
+  view.rerender(adminTree());
+  workerFailures['GET list'] = {
+    status: 401,
+    detail: 'Sign in to continue.',
+  };
+  openSection('Workers');
+  expect(
+    await screen.findByText('Worker data could not be loaded.'),
+  ).toBeInTheDocument();
+
+  // The same user signs in again: no Retry needed.
+  workerFailures = {};
+  session = sessionValue({ ...ada });
+  view.rerender(adminTree());
+  expect(
+    await screen.findByRole('button', { name: 'Edit Alex Tran' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText('Worker data could not be loaded.')).toBeNull();
+});
+
+test('FA-2: kept sections still know the user they belong to — no Set password… on the own row', async () => {
+  signInUserAdministrator();
+  seedJane();
+  const owner = session.user!;
+  const view = renderAdmin();
+  await screen.findByText('Lathe');
+  await openLoadedSection('Users');
+  expect(
+    await screen.findByRole('button', { name: 'Set password for Jane Doe' }),
+  ).toBeInTheDocument();
+  const ownRow = () =>
+    screen.queryByRole('button', { name: 'Set password for Ada Admin' });
+  expect(ownRow()).toBeNull();
+
+  session = sessionValue(null, { endedBy: 'expired' });
+  view.rerender(adminTree());
+  expect(
+    screen.getByRole('button', { name: 'Set password for Jane Doe' }),
+  ).toBeInTheDocument();
+  expect(ownRow()).toBeNull();
+
+  session = sessionValue({ ...owner });
+  view.rerender(adminTree());
+  expect(ownRow()).toBeNull();
+});
+
+test('FA-2: a Workers list read without Manage Workers is read again when the permission arrives', async () => {
+  const ada = signedInUser([], { id: 1 });
+  session = sessionValue(ada);
+  const view = renderAdmin();
+  await openLoadedSection('Workers');
+  expect(screen.queryByRole('button', { name: 'Edit Alex Tran' })).toBeNull();
+  expect(screen.queryByText('100482')).toBeNull();
+  const readsBefore = workerListReads;
+
+  // An administrator grants the permission; the same user's sign-in
+  // ends and they sign in again with it.
+  session = sessionValue(null, { endedBy: 'expired' });
+  view.rerender(adminTree());
+  session = sessionValue({ ...ada, permissions: ['MANAGE_WORKERS'] });
+  view.rerender(adminTree());
+
+  expect(await screen.findByText('100482')).toBeInTheDocument();
+  expect(workerListReads).toBe(readsBefore + 1);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  expect(within(dialog).getByLabelText('Badge barcode')).toHaveValue('100482');
+
+  // A name-only change sends only the name.
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Alex T.' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(writes).toHaveLength(1));
+  expect(writes[0].body).toEqual({ name: 'Alex T.' });
 });
 
 test('FA-3: without its permission every section is view-only — values as text, no control, one note', async () => {

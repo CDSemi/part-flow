@@ -12,11 +12,7 @@ import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import {
-  CORRECTION_PERMISSIONS,
-  PERMISSION_LABELS,
-  permissionChoiceLabel,
-} from './permissions';
+import { CORRECTION_PERMISSIONS, permissionChoiceLabel } from './permissions';
 import {
   PolicySwitch,
   ReadOnlyValues,
@@ -251,12 +247,12 @@ function CorrectionRoleTable({
                 <td
                   key={key}
                   className="ad-matrixcell"
-                  data-label={PERMISSION_LABELS[key]}
+                  data-label={permissionChoiceLabel(key)}
                 >
                   {canWrite ? (
                     <input
                       type="checkbox"
-                      aria-label={`${PERMISSION_LABELS[key]} — ${role.name}`}
+                      aria-label={`${permissionChoiceLabel(key)} — ${role.name}`}
                       checked={role.permissions.includes(key)}
                       disabled={writeBlocked || busy}
                       onChange={() => void toggle(role, key)}

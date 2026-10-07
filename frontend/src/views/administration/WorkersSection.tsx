@@ -50,6 +50,9 @@ import { ADMIN_SECTIONS } from './sections';
 //
 // Without the Manage Workers permission the section is view-only, and
 // the server withholds the badge barcodes, so no Badge column renders.
+// The list is read again when that permission changes, and only a row
+// read with its badge opens the editor (an editor without the stored
+// badge would require, and then overwrite, it).
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'workers')?.subtitle ?? '';
@@ -86,6 +89,14 @@ export function WorkersSection() {
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
   const ready = workersData.state.status === 'ready';
 
+  const reloadWorkers = workersData.reload;
+  const listedWithWrite = useRef(canWrite);
+  useEffect(() => {
+    if (listedWithWrite.current === canWrite) return;
+    listedWithWrite.current = canWrite;
+    reloadWorkers();
+  }, [canWrite, reloadWorkers]);
+
   const closeDialog = (wroteAny: boolean) => {
     setDialog(null);
     if (wroteAny) workersData.reload();
@@ -120,37 +131,40 @@ export function WorkersSection() {
               </tr>
             </thead>
             <tbody>
-              {workers.map((worker) => (
-                <tr
-                  key={worker.id}
-                  className={canWrite ? 'selrow' : undefined}
-                  onClick={
-                    canWrite
-                      ? () => setDialog({ kind: 'edit', worker })
-                      : undefined
-                  }
-                >
-                  <td>
-                    <RowOpener
-                      editable={canWrite}
-                      label={`Edit ${worker.name}`}
-                    >
-                      <span className="ad-worker">
-                        <WorkerAvatar worker={worker} size="sm" />
-                        <b>{worker.name}</b>
-                      </span>
-                    </RowOpener>
-                  </td>
-                  {showBadges ? (
-                    <td className="mono" data-label="Badge barcode">
-                      {worker.badgeBarcode}
+              {workers.map((worker) => {
+                const editable = canWrite && worker.badgeBarcode !== null;
+                return (
+                  <tr
+                    key={worker.id}
+                    className={editable ? 'selrow' : undefined}
+                    onClick={
+                      editable
+                        ? () => setDialog({ kind: 'edit', worker })
+                        : undefined
+                    }
+                  >
+                    <td>
+                      <RowOpener
+                        editable={editable}
+                        label={`Edit ${worker.name}`}
+                      >
+                        <span className="ad-worker">
+                          <WorkerAvatar worker={worker} size="sm" />
+                          <b>{worker.name}</b>
+                        </span>
+                      </RowOpener>
                     </td>
-                  ) : null}
-                  <td>
-                    <StatusPill active={worker.isActive} />
-                  </td>
-                </tr>
-              ))}
+                    {showBadges ? (
+                      <td className="mono" data-label="Badge barcode">
+                        {worker.badgeBarcode}
+                      </td>
+                    ) : null}
+                    <td>
+                      <StatusPill active={worker.isActive} />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

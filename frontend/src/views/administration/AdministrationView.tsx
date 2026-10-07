@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 
 import type { SessionUser } from '../../api/session';
+import { RetryFailedLoadsContext } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import {
   SessionContext,
@@ -55,16 +56,22 @@ import type { AdminSection } from './sections';
 // the Sign-in dialog once over it (not while first-run setup is open —
 // setup needs the token from the server log). Any signed-in user may
 // view every section; a section whose permission the user lacks hides
-// its controls and says so. The server checks every permission.
+// its controls and says so. The server checks every permission. A user
+// who must still replace a password an administrator set is not signed
+// in yet for Administration (the server refuses every read until then):
+// a panel waits behind the Choose a new password dialog.
 //
 // Work survives an ended sign-in: when the server refuses a sign-in as
 // ended, the sections stay mounted with their open editors and drafts
-// (presented with the permissions they were rendered with) while the
-// Sign-in dialog is open. The sections belong to the user they were
+// (presented as the user and with the permissions they were rendered
+// with) while the Sign-in dialog — or, after an administrator set the
+// password, the Choose a new password dialog — is open. When the same
+// user's sign-in is usable again, every section load that failed in the
+// meantime runs again. The sections belong to the user they were
 // rendered for: a different user signing in remounts them, dropping the
 // drafts; an explicit sign-out shows the sign-in panel.
 
-type Presented = 'sections' | 'checking' | 'gate';
+type Presented = 'sections' | 'checking' | 'gate' | 'password';
 
 export function AdministrationView() {
   const preview = getViewStatePreview();
@@ -74,20 +81,46 @@ export function AdministrationView() {
   const [sectionId, setSectionId] = useState('areas');
   // The user the sections are rendered for (their drafts belong to them).
   const [owner, setOwner] = useState<SessionUser | null>(null);
-  const signedInUser = status === 'signed-in' ? session.user : null;
-  const keepAfterExpiry =
-    status !== 'signed-in' && endedBy === 'expired' && owner !== null;
+  const user = status === 'signed-in' ? session.user : null;
+  const changePending = user?.mustChangePassword === true;
+  const signedInUser = changePending ? null : user;
+  // The sections stay for their owner while the sign-in is ended, or
+  // while the same user must first replace an administrator-set password.
+  const keepSections =
+    owner !== null &&
+    ((status !== 'signed-in' && endedBy === 'expired') ||
+      (changePending && user?.id === owner.id));
   if (signedInUser !== null && signedInUser !== owner) {
     setOwner(signedInUser);
-  } else if (status === 'signed-out' && !keepAfterExpiry && owner !== null) {
+  } else if (
+    (status === 'signed-out' || changePending) &&
+    !keepSections &&
+    owner !== null
+  ) {
     setOwner(null);
   }
+  // Each time kept sections become usable again for the same user, the
+  // loads that failed meanwhile (refused as signed out) run again.
+  const [keptBefore, setKeptBefore] = useState(false);
+  const [resumed, setResumed] = useState(0);
+  if (keepSections !== keptBefore) {
+    setKeptBefore(keepSections);
+    if (
+      !keepSections &&
+      signedInUser !== null &&
+      signedInUser.id === owner?.id
+    ) {
+      setResumed((count) => count + 1);
+    }
+  }
   const presented: Presented =
-    signedInUser !== null || keepAfterExpiry
+    signedInUser !== null || keepSections
       ? 'sections'
-      : status === 'unknown'
-        ? 'checking'
-        : 'gate';
+      : changePending
+        ? 'password'
+        : status === 'unknown'
+          ? 'checking'
+          : 'gate';
 
   const navRef = useRef<HTMLElement>(null);
   const gateSignInRef = useRef<HTMLButtonElement>(null);
@@ -111,7 +144,10 @@ export function AdministrationView() {
   useEffect(() => {
     const previous = previouslyPresented.current;
     previouslyPresented.current = presented;
-    if (presented === 'sections' && previous === 'gate') {
+    if (
+      presented === 'sections' &&
+      (previous === 'gate' || previous === 'password')
+    ) {
       navRef.current
         ?.querySelector<HTMLElement>('button[aria-current="true"]')
         ?.focus();
@@ -149,6 +185,22 @@ export function AdministrationView() {
             onRetry={() => void session.refresh()}
           />
         )}
+      </section>
+    );
+  }
+
+  if (presented === 'password') {
+    return (
+      <section className="ad" aria-label="Administration">
+        <div className="ad-gate">
+          <div className="ad-gatepanel">
+            <h1>Administration</h1>
+            <p>
+              Choose a new password to view and change PartFlow&apos;s
+              configuration.
+            </p>
+          </div>
+        </div>
       </section>
     );
   }
@@ -202,22 +254,24 @@ export function AdministrationView() {
   const section =
     ADMIN_SECTIONS.find((s) => s.id === sectionId) ?? ADMIN_SECTIONS[1];
   const sectionsUser = signedInUser ?? owner;
-  // After an ended sign-in the kept sections are presented with the
-  // permissions they were rendered with; the server refuses every write
-  // until the user signs in again.
-  const sectionsSession: SessionValue = keepAfterExpiry
-    ? { ...session, can: (key) => hasPermission(owner, key) }
+  // Kept sections are presented as the user and with the permissions
+  // they were rendered with; the server refuses every write until that
+  // user's sign-in is usable again.
+  const sectionsSession: SessionValue = keepSections
+    ? { ...session, user: owner, can: (key) => hasPermission(owner, key) }
     : session;
 
   return (
     <section className="ad" aria-label="Administration">
       <SessionContext.Provider value={sectionsSession}>
-        <SectionsWrap
-          key={sectionsUser?.id ?? 0}
-          navRef={navRef}
-          section={section}
-          onSelect={setSectionId}
-        />
+        <RetryFailedLoadsContext.Provider value={resumed}>
+          <SectionsWrap
+            key={sectionsUser?.id ?? 0}
+            navRef={navRef}
+            section={section}
+            onSelect={setSectionId}
+          />
+        </RetryFailedLoadsContext.Provider>
       </SessionContext.Provider>
     </section>
   );
