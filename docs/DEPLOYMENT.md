@@ -47,7 +47,7 @@ artifacts. Observed constraints include:
 - no production reverse proxy, TLS policy, secret store, log rotation, release
   image tags, scheduled backup job, restore drill, or deployment rollback
   command is provided;
-- Phase 14 authentication/role enforcement is not implemented;
+- Phase 14 authentication/role enforcement is not implemented; Users, roles and permissions configured in Administration grant and restrict nothing until then;
 - several approved views are still development-only previews or pending real
   backend/frontend integration.
 
@@ -125,7 +125,7 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
 - reverse proxy configuration owns TLS, SPA fallback, request limits, and
   `/api` routing — the proxy must accept request bodies of at least 3 MiB on the
   image upload routes (`PUT /api/workers/{id}/avatar`,
-  `PUT /api/part-numbers/image?number=…`, later the User image route), because the application accepts images up to 2 MiB; a
+  `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image?number=…`), because the application accepts images up to 2 MiB; a
   proxy-generated 413 carries no JSON `detail`, so the UI could only show a
   generic failure;
 - required configuration is validated at startup and secrets have no committed

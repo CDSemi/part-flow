@@ -881,8 +881,7 @@ Worker của reversal theo Area mode. Final gate luôn tồn tại:
 - fixed/disabled hoặc option off: final warning question restate key facts.
 
 Không record trước gate. Undo đảo toàn **application command**, ví dụ cả
-`AREA_COMPLETED` + `TRANSFERRED`, không đảo một row tùy ý. Operator chỉ Undo recent
-eligible action theo quyền; Manager/Admin có broader correction; tất cả auditable.
+`AREA_COMPLETED` + `TRANSFERRED`, không đảo một row tùy ý. Undo do permission **Undo recent eligible scans** (§20) cấp; "recent eligible" đúng bằng quy tắc eligibility ở trên (completed PN operation eligible gần nhất), không có time window riêng; role Operator ban đầu giữ permission này. Các broader correction — quantity correction, Work Order Allocation edit và authorized historical correction — là các permission riêng (§20) mà role Manager và Administrator ban đầu giữ; role nào giữ permission correction nào là cấu hình, và permission key là authority duy nhất. Tất cả auditable.
 
 ---
 
@@ -1054,26 +1053,28 @@ luôn visible ở Scan Station.
 
 # 20. Role và permission
 
-RBAC áp dụng. Machine, Planned Route và PartNumber metadata là production master
-data trong Management, do authorized specialist quản lý; không bắt buộc Admin.
+RBAC áp dụng. Role là **named và editable**. Mỗi capability dưới đây là một **permission key**; role cấp một tập permission key và một User giữ một role. **Permission key là authority duy nhất**: quyết định authorization dựa trên các key mà role của User cấp — không bao giờ dựa trên tên role — và không role nào là implicit superuser. Các danh sách Administrator, Manager và Operator dưới đây là **role ban đầu với grant ban đầu**, được seed đúng như liệt kê; administrator được ủy quyền có thể đổi tên role hoặc đổi những gì một role cấp, và mọi thay đổi như vậy đều được audit.
+
+Machine, Planned Route và PartNumber metadata là production master
+data trong Management, do authorized specialist quản lý; không bắt buộc Admin. Role Administrator ban đầu giữ các capability này, nhưng chúng không độc quyền của Administrator.
 
 ## Administrator
 
-Quản lý Department/Area/Operation, Worker, User/role/permission, Station, barcode,
+Role Administrator ban đầu cấp: quản lý Department/Area/Operation, Worker, User/role/permission, Station, barcode,
 scan behavior, Worker session policy, correction permission, settings; có quyền
 quản lý Machine/Route/PartNumber qua Management; edit Demand/Allocation, historical
 correction và archival/purge maintenance.
 
 ## Manager
 
-Xem current/history; create/edit Work Order và Demand; set/reorder priority; assign/
+Role Manager ban đầu cấp: xem current/history; create/edit Work Order và Demand; set/reorder priority; assign/
 edit route; quantity correction; Allocation edit; resolve exception; export/report.
 
 ## Operator
 
-Theo permission: scan PN/Machine/Worker, receive Area, assign Machine, confirm
+Role Operator ban đầu cấp: scan PN/Machine/Worker, receive Area, assign Machine, confirm
 quantity, complete vào Stockroom, review/adjust suggested allocation và Undo recent
-eligible scan. Không trực tiếp rewrite history.
+eligible scan. Không permission nào rewrite history trực tiếp: role Operator ban đầu không giữ permission historical-correction, và mọi correction dùng cơ chế compensating có audit (§16) — Movement history vẫn immutable.
 
 ---
 

@@ -47,7 +47,7 @@ giới hạn đã quan sát được gồm:
 - database và ứng dụng dùng chung PostgreSQL role do Compose tạo;
 - chưa có production reverse proxy, TLS policy, secret store, log rotation,
   release image tag, scheduled backup job, restore drill hoặc command rollback;
-- authentication/role enforcement Phase 14 chưa được triển khai;
+- authentication/role enforcement Phase 14 chưa được triển khai; Users, role và permission được cấu hình trong Administration không cấp và không hạn chế gì cho đến lúc đó;
 - một số view đã duyệt vẫn là preview chỉ có ở development hoặc còn chờ tích
   hợp backend/frontend thật.
 
@@ -122,7 +122,7 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   mount;
 - reverse proxy chịu trách nhiệm TLS, SPA fallback, request limit và route
   `/api` — proxy phải nhận request body tối thiểu 3 MiB trên các route upload ảnh
-  (`PUT /api/workers/{id}/avatar`, `PUT /api/part-numbers/image?number=…`, về sau là route ảnh User), vì
+  (`PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image?number=…`), vì
   application nhận ảnh đến 2 MiB; mã 413 do proxy tự sinh không có JSON `detail`,
   nên UI chỉ có thể hiện lỗi chung;
 - configuration bắt buộc được validate lúc startup và secret không có default

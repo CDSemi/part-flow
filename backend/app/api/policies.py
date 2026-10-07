@@ -20,7 +20,8 @@ handlers in ``app.api.errors`` translate typed failures.
   per-Area overrides are Area fields (``/api/areas``).
 - ``GET /policies/correction-permissions`` — Administration → Correction
   permissions (Phase 13 slice 6): the Undo reason policy; role-based
-  correction permissions are not configurable yet.
+  correction permissions are configured through ``/api/roles`` (slice
+  12) and are not enforced before Phase 14.
 - ``PUT /policies/correction-permissions`` — exactly
   ``{"undo_reason_required": bool}`` (a missing field, a non-boolean, a
   ``null`` or an extra field is 422); answers with the stored policy,

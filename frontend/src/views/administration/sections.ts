@@ -87,14 +87,15 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     phase: 'full',
     group: 'Access',
     label: 'Users',
-    subtitle: 'Application user accounts',
+    subtitle:
+      'Application accounts — name, login name, role, avatar, active status; separate from Workers',
   },
   {
     id: 'roles',
     phase: 'full',
     group: 'Access',
     label: 'Roles & permissions',
-    subtitle: 'Role-based access (Phase 14)',
+    subtitle: 'Named roles and the permissions each one grants',
   },
   {
     id: 'worker-sessions',

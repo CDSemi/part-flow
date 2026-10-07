@@ -29,7 +29,10 @@ production audit identity (`part_movements.worker_id`,
 `work_order_allocations.allocated_by_worker_id`); plus the Worker
 Session runtime (`worker_sessions`, `part_movements.scan_session_id`)
 and the global policy singleton (`application_policy`,
-`areas.worker_session_timeout_minutes`). Business rules stay
+`areas.worker_session_timeout_minutes`); plus the Phase 13 users, roles
+and permissions configuration (`roles`, `role_permissions`, `users` —
+configuration only until Phase 14, never linked to Workers). Business
+rules stay
 in the Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -89,6 +92,7 @@ from app.domain.enums import (
     MachineLifecycleEventType,
     MachineLifecycleState,
     MovementType,
+    Permission,
     QuantityFlowStatus,
     RequestType,
     RouteMode,
@@ -357,6 +361,22 @@ RETENTION_PERIOD_MONTHS_MIN = 12
 RETENTION_PERIOD_MONTHS_MAX = 1200
 POLICY_RETENTION_PERIOD_SQL = (
     "retention_period_months IS NULL OR retention_period_months BETWEEN 12 AND 1200"
+)
+
+# Users, roles and permissions (Phase 13 slice 12; PROJECT_PROFILE §7,
+# §20; owner decisions OD-8, OD-19): the closed permission vocabulary,
+# one key per §20 capability; the canonical login name (trimmed,
+# lowercase ASCII — `app.domain.user_login`, whose every result passes
+# this CHECK), compared under the "C" collation so it never depends on
+# the OS libc tables; and the User tier of the theme preference (NULL =
+# no preference). Repeated verbatim by migration
+# `0028_phase13_users_roles`.
+ROLE_PERMISSION_SQL = (
+    "permission IN (" + ", ".join(f"'{permission}'" for permission in Permission) + ")"
+)
+USER_LOGIN_NAME_SQL = """login_name COLLATE "C" ~ '^[a-z0-9._@+-]{1,128}$'"""
+USER_THEME_PREFERENCE_SQL = (
+    "theme_preference IN (" + ", ".join(f"'{theme}'" for theme in ThemePreference) + ")"
 )
 
 # Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
@@ -1025,6 +1045,117 @@ class ApplicationPolicy(Base):
             POLICY_RETENTION_PERIOD_SQL,
             name=conv("ck_application_policy_retention_period_range"),
         ),
+    )
+
+
+class Role(Base):
+    """A named, editable role (Phase 13 slice 12; owner decision OD-8).
+
+    Seeded by migration `0028_phase13_users_roles` with the three
+    PROJECT_PROFILE §20 roles (Administrator, Manager, Operator) and
+    exactly the grants §20 states, as initial grants; afterwards every
+    row is ordinary editable configuration — no behavior is keyed to a
+    role name. Names are unique (case-sensitive, trimmed). Roles are
+    renamed, never deleted or deactivated. Configuration only: nothing
+    reads a role to allow or refuse an action until Phase 14.
+    """
+
+    __tablename__ = "roles"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("name", name="uq_roles_name"),)
+
+
+class RolePermission(Base):
+    """One permission granted to one role (Phase 13 slice 12).
+
+    The primary key makes a duplicate grant impossible; the CHECK admits
+    exactly the `Permission` vocabulary. No timestamps: the `Role` audit
+    row records when a grant changed.
+    """
+
+    __tablename__ = "role_permissions"
+
+    role_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("roles.id", name="fk_role_permissions_role_id_roles"),
+        primary_key=True,
+    )
+    permission: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    __table_args__ = (
+        CheckConstraint(ROLE_PERMISSION_SQL, name=conv("ck_role_permissions_permission_known")),
+    )
+
+
+class User(Base):
+    """An application account (PROJECT_PROFILE §7 User; Phase 13 slice 12).
+
+    An application account for Management, Administration and the other
+    non-Scan-Station views (PROJECT_PROFILE §7) — never a Worker, never
+    merged with one, and no link to the Worker registry. Configuration
+    only in Phase 13: no credential, no sign-in, nothing reads it to
+    allow or refuse an action (Phase 14). The login name is the
+    account's unique canonical name (trimmed, lowercase ASCII); each
+    User holds exactly one role; Users are deactivated, never deleted.
+    The optional avatar is stored on the row (CD1) with the Worker
+    avatar CHECKs; its bytes are mapped deferred. `theme_preference` is
+    the User tier of GUI_DESIGN §2.1, stored only (OD-19): Phase 13 has
+    no writer and no reader for it; Phase 14 adds both with the
+    signed-in User.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    login_name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    role_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("roles.id", name="fk_users_role_id_roles"), nullable=False
+    )
+    avatar_image: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    avatar_image_type: Mapped[str | None] = mapped_column(Text)
+    # The avatar's cache version: drives the ETag and the `?v=` URL.
+    avatar_image_updated_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    theme_preference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # Every stored value is canonical (CHECK below), so this plain
+        # UNIQUE already gives case-insensitive uniqueness.
+        UniqueConstraint("login_name", name="uq_users_login_name"),
+        CheckConstraint(USER_LOGIN_NAME_SQL, name=conv("ck_users_login_name_canonical")),
+        # An avatar is all three columns or none.
+        CheckConstraint(
+            "(avatar_image IS NULL) = (avatar_image_type IS NULL)"
+            " AND (avatar_image IS NULL) = (avatar_image_updated_at IS NULL)",
+            name=conv("ck_users_avatar_image_shape"),
+        ),
+        CheckConstraint(
+            "avatar_image_type IN ('image/png', 'image/jpeg', 'image/webp')",
+            name=conv("ck_users_avatar_image_type"),
+        ),
+        CheckConstraint(
+            "avatar_image IS NULL OR octet_length(avatar_image) BETWEEN 1 AND 2097152",
+            name=conv("ck_users_avatar_image_size"),
+        ),
+        CheckConstraint(USER_THEME_PREFERENCE_SQL, name=conv("ck_users_theme_preference")),
     )
 
 
@@ -1795,13 +1926,15 @@ class AuditEvent(Base):
     format), Machine configuration (lifecycle transitions stay in
     `machine_lifecycle_events`), the global ApplicationPolicy and
     (slice 8) RouteTemplate — Planned Routes configuration, never the
-    Assigned Route snapshots. Rows are descriptive history for
+    Assigned Route snapshots — and (slice 12) User and Role, the
+    application accounts and the named roles with their permission
+    grants. Rows are descriptive history for
     display and accountability: never replayed to build state, never
     describing production actions (the `RECEIVED` PartMovement is the
     production audit record), and deliberately not an event-sourcing
     framework. `entity_id` is polymorphic text with no FK — the
     internal PK for WorkOrder/WorkOrderDemand/Worker/Department/Area/
-    Operation/Machine/RouteTemplate, the canonical PN string for PartNumber, the
+    Operation/Machine/RouteTemplate/User/Role, the canonical PN string for PartNumber, the
     stable Station ID for ScanStation, `"1"` for the singleton
     MachineAssetTagConfig and the Administration section
     (`worker-sessions`, `correction-permissions`, `due-soon`,
@@ -1843,7 +1976,8 @@ class AuditEvent(Base):
             f" '{AuditEntityType.AREA}', '{AuditEntityType.OPERATION}',"
             f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}',"
             f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}',"
-            f" '{AuditEntityType.ROUTE_TEMPLATE}')",
+            f" '{AuditEntityType.ROUTE_TEMPLATE}', '{AuditEntityType.USER}',"
+            f" '{AuditEntityType.ROLE}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.

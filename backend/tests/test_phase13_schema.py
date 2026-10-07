@@ -7,13 +7,14 @@ verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
 `0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation`,
 `0022_phase13_undo_reason_policy`, `0023_phase13_part_number_master`,
-`0024_phase13_planned_routes`, `0025_phase13_display_settings` and
-`0026_phase13_station_theme` add (IMPLEMENTATION_ROADMAP Phase 13;
+`0024_phase13_planned_routes`, `0025_phase13_display_settings`,
+`0026_phase13_station_theme`, `0027_phase13_retention_period` and
+`0028_phase13_users_roles` add (IMPLEMENTATION_ROADMAP Phase 13;
 PROJECT_PROFILE §7, §8.1, §8.4, §8.8–§8.11, §8.12, §8.13, §10, §16,
 §19, §21, §28; GUI_DESIGN §2.1; owner decisions OD-2, OD-3, OD-5, OD-6,
 OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
 
-- exact head boundary: `0026_phase13_station_theme` is the single
+- exact head boundary: `0028_phase13_users_roles` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -112,7 +113,17 @@ OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
   without a retention period and keeps every earlier policy value; the
   downgrade restores the 0026 boundary (no doubly-prefixed CHECK left)
   and refuses while a period is stored or a `data-retention` audit row
-  exists.
+  exists;
+- users, roles and permissions (0028): the `roles`, `role_permissions`
+  and `users` shapes with their exact constraint names; every migration
+  literal repeats its model constant (the 35-key permission vocabulary,
+  the login-name, theme and avatar CHECKs, the widened audit entity
+  CHECK); the seed holds exactly the PROJECT_PROFILE §20 grants
+  (Administrator 17, Manager 10, Operator 10), no user and no `User` /
+  `Role` audit row; the database refuses an unknown permission, a
+  non-canonical login name, a lowercase theme and a partial avatar; the
+  ORM round-trips a User; the downgrade restores the 0027 boundary and
+  refuses while a user or a `User` / `Role` audit row exists.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -140,7 +151,13 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 
 from alembic import command
 from app.application import policies
-from app.domain.enums import AuditEntityType, WorkerIdentificationMode, WorkerSessionEndReason
+from app.domain.enums import (
+    AuditEntityType,
+    Permission,
+    ThemePreference,
+    WorkerIdentificationMode,
+    WorkerSessionEndReason,
+)
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -158,7 +175,9 @@ _PART_NUMBER_MASTER_REVISION = "0023_phase13_part_number_master"
 _PLANNED_ROUTES_REVISION = "0024_phase13_planned_routes"
 _DISPLAY_SETTINGS_REVISION = "0025_phase13_display_settings"
 _STATION_THEME_REVISION = "0026_phase13_station_theme"
-_HEAD_REVISION = "0027_phase13_retention_period"
+_RETENTION_PERIOD_REVISION = "0027_phase13_retention_period"
+_USERS_ROLES_REVISION = "0028_phase13_users_roles"
+_HEAD_REVISION = _USERS_ROLES_REVISION
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -174,6 +193,7 @@ _PLANNED_ROUTES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0024_phase13_planned_
 _DISPLAY_SETTINGS_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0025_phase13_display_settings.py"
 _STATION_THEME_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0026_phase13_station_theme.py"
 _RETENTION_PERIOD_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0027_phase13_retention_period.py"
+_USERS_ROLES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0028_phase13_users_roles.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -528,7 +548,7 @@ def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> N
 def test_audit_admits_the_environment_entities(connection: Connection) -> None:
     for entity in (*_ENVIRONMENT_ENTITIES, "Machine", "ApplicationPolicy"):
         _insert_audit(connection, "CREATED", entity)
-    for refused in ("MachineLifecycleEvent", "User", "WorkerSession"):
+    for refused in ("MachineLifecycleEvent", "Nobody", "WorkerSession"):
 
         def insert(entity: str = refused) -> None:
             _insert_audit(connection, "CREATED", entity)
@@ -1454,10 +1474,15 @@ def test_worker_sessions_migration_repeats_the_model_literals() -> None:
     assert set(re.findall(r"'([^']*)'", models.WORKER_SESSION_END_REASON_SQL)) == {
         reason.value for reason in WorkerSessionEndReason
     }
-    # 0024 (slice 8) appends RouteTemplate after this literal.
+    # 0024 (slice 8) appends RouteTemplate after this literal, 0028
+    # (slice 12) User and Role.
     assert set(re.findall(r"'([^']*)'", migration._POLICY_ENTITY_TYPES)) == {
         entity.value for entity in AuditEntityType
-    } - {AuditEntityType.ROUTE_TEMPLATE.value}
+    } - {
+        AuditEntityType.ROUTE_TEMPLATE.value,
+        AuditEntityType.USER.value,
+        AuditEntityType.ROLE.value,
+    }
 
 
 def test_application_policy_is_one_seeded_row(connection: Connection) -> None:
@@ -2516,9 +2541,10 @@ def test_planned_routes_migration_restores_the_0020_literal() -> None:
     assert planned_routes._PREVIOUS_ENTITY_TYPES == worker_sessions._POLICY_ENTITY_TYPES
     widened = worker_sessions._POLICY_ENTITY_TYPES[:-1] + ", 'RouteTemplate')"
     assert widened == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES
+    # 0028 (slice 12) appends User and Role after this literal.
     assert set(re.findall(r"'([^']*)'", planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES)) == {
         entity.value for entity in AuditEntityType
-    }
+    } - {AuditEntityType.USER.value, AuditEntityType.ROLE.value}
 
 
 def test_audit_admits_the_route_template_entity(connection: Connection) -> None:
@@ -3529,3 +3555,465 @@ def test_upgrade_leaves_the_policy_without_a_retention_period(admin_engine: Engi
             engine.dispose()
     finally:
         _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# Users, roles and permissions (0028)
+# ---------------------------------------------------------------------------
+
+_SEEDED_ROLES = ("Administrator", "Manager", "Operator")
+_USER_CHECKS = {
+    "ck_users_login_name_canonical",
+    "ck_users_avatar_image_shape",
+    "ck_users_avatar_image_type",
+    "ck_users_avatar_image_size",
+    "ck_users_theme_preference",
+}
+
+
+def _columns(engine: Engine, table: str) -> dict[str, dict[str, object]]:
+    return {
+        str(column["name"]): cast(dict[str, object], column)
+        for column in inspect(engine).get_columns(table)
+    }
+
+
+def _role_id(connection: Connection, name: str) -> int:
+    return _scalar_id(connection, "SELECT id FROM roles WHERE name = :name", name=name)
+
+
+def _insert_user(connection: Connection, login_name: str, **extra: object) -> None:
+    columns = ["login_name", "display_name", "role_id", *extra]
+    values = [":login_name", "'Jane Doe'", ":role_id", *(f":{column}" for column in extra)]
+    connection.execute(
+        sa.text(f"INSERT INTO users ({', '.join(columns)}) VALUES ({', '.join(values)})"),
+        {"login_name": login_name, "role_id": _role_id(connection, "Manager"), **extra},
+    )
+
+
+def _seeded_grants(connection: Connection) -> dict[str, set[str]]:
+    grants: dict[str, set[str]] = {}
+    for name, permission in connection.execute(
+        sa.text(
+            "SELECT r.name, p.permission FROM roles r"
+            " LEFT JOIN role_permissions p ON p.role_id = r.id ORDER BY r.name"
+        )
+    ):
+        grants.setdefault(str(name), set())
+        if permission is not None:
+            grants[str(name)].add(str(permission))
+    return grants
+
+
+def test_users_roles_tables_shape(migrated_engine: Engine) -> None:
+    """S-2: column types, nullability, defaults and identities."""
+    expected: dict[str, dict[str, tuple[type[object], bool]]] = {
+        "roles": {
+            "id": (sa.Integer, False),
+            "name": (sa.Text, False),
+            "created_at": (sa.DateTime, False),
+            "updated_at": (sa.DateTime, False),
+        },
+        "role_permissions": {
+            "role_id": (sa.Integer, False),
+            "permission": (sa.Text, False),
+        },
+        "users": {
+            "id": (sa.Integer, False),
+            "login_name": (sa.Text, False),
+            "display_name": (sa.Text, False),
+            "role_id": (sa.Integer, False),
+            "avatar_image": (sa.LargeBinary, True),
+            "avatar_image_type": (sa.Text, True),
+            "avatar_image_updated_at": (sa.DateTime, True),
+            "theme_preference": (sa.Text, True),
+            "is_active": (sa.Boolean, False),
+            "created_at": (sa.DateTime, False),
+            "updated_at": (sa.DateTime, False),
+        },
+    }
+    for table, shape in expected.items():
+        columns = _columns(migrated_engine, table)
+        assert set(columns) == set(shape), table
+        for name, (type_, nullable) in shape.items():
+            assert isinstance(columns[name]["type"], type_), (table, name)
+            assert columns[name]["nullable"] is nullable, (table, name)
+        for name in ("created_at", "updated_at", "avatar_image_updated_at"):
+            if name in shape:
+                assert getattr(columns[name]["type"], "timezone", None) is True, (table, name)
+    for table in ("roles", "users"):
+        columns = _columns(migrated_engine, table)
+        assert columns["id"].get("identity") is not None, table
+        assert "now()" in str(columns["created_at"]["default"])
+        assert "now()" in str(columns["updated_at"]["default"])
+    users = _columns(migrated_engine, "users")
+    assert str(users["is_active"]["default"]) == "true"
+    assert users["theme_preference"]["default"] is None
+    assert "badge_barcode" not in users
+    assert not {"password", "password_hash", "credential"} & set(users)
+
+
+def test_users_roles_constraints_have_exact_names(migrated_engine: Engine) -> None:
+    """S-2: PKs, UNIQUEs, FKs and CHECKs."""
+    inspector = inspect(migrated_engine)
+    assert inspector.get_pk_constraint("roles")["name"] == "pk_roles"
+    assert inspector.get_pk_constraint("users")["name"] == "pk_users"
+    role_permissions_pk = inspector.get_pk_constraint("role_permissions")
+    assert role_permissions_pk["name"] == "pk_role_permissions"
+    assert role_permissions_pk["constrained_columns"] == ["role_id", "permission"]
+    uniques = {
+        str(unique["name"]): unique["column_names"]
+        for table in ("roles", "role_permissions", "users")
+        for unique in inspector.get_unique_constraints(table)
+    }
+    assert uniques == {"uq_roles_name": ["name"], "uq_users_login_name": ["login_name"]}
+    foreign_keys = {
+        str(foreign_key["name"]): (
+            table,
+            foreign_key["constrained_columns"],
+            foreign_key["referred_table"],
+            foreign_key["referred_columns"],
+        )
+        for table in ("roles", "role_permissions", "users")
+        for foreign_key in inspector.get_foreign_keys(table)
+    }
+    assert foreign_keys == {
+        "fk_role_permissions_role_id_roles": ("role_permissions", ["role_id"], "roles", ["id"]),
+        "fk_users_role_id_roles": ("users", ["role_id"], "roles", ["id"]),
+    }
+    assert {str(check["name"]) for check in inspector.get_check_constraints("users")} == (
+        _USER_CHECKS
+    )
+    assert {
+        str(check["name"]) for check in inspector.get_check_constraints("role_permissions")
+    } == {"ck_role_permissions_permission_known"}
+    assert inspector.get_check_constraints("roles") == []
+    # Nothing references users: no Worker, Movement or allocation link.
+    for table in inspector.get_table_names():
+        for foreign_key in inspector.get_foreign_keys(table):
+            assert foreign_key["referred_table"] != "users", (table, foreign_key["name"])
+
+
+def test_users_roles_migration_repeats_the_model_literals() -> None:
+    """S-3: literal parity between the migration and its sources."""
+    migration = _load_migration(_USERS_ROLES_MIGRATION_FILE)
+    assert migration.revision == _USERS_ROLES_REVISION
+    assert migration.down_revision == _RETENTION_PERIOD_REVISION
+    assert tuple(permission.value for permission in Permission) == migration._PERMISSIONS
+    assert migration._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
+    assert migration._LOGIN_NAME_SQL == models.USER_LOGIN_NAME_SQL
+    assert migration._THEME_SQL == models.USER_THEME_PREFERENCE_SQL
+    assert set(re.findall(r"'([^']*)'", models.USER_THEME_PREFERENCE_SQL)) == {
+        theme.value for theme in ThemePreference
+    }
+    worker_checks = {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in cast(sa.Table, models.Worker.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    user_checks = {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in cast(sa.Table, models.User.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    for facet, literal in (
+        ("shape", migration._AVATAR_SHAPE_SQL),
+        ("type", migration._AVATAR_TYPE_SQL),
+        ("size", migration._AVATAR_SIZE_SQL),
+    ):
+        assert literal == worker_checks[f"ck_workers_avatar_image_{facet}"]
+        assert literal == user_checks[f"ck_users_avatar_image_{facet}"]
+    assert user_checks["ck_users_login_name_canonical"] == models.USER_LOGIN_NAME_SQL
+    assert user_checks["ck_users_theme_preference"] == models.USER_THEME_PREFERENCE_SQL
+    entity_checks = [
+        str(constraint.sqltext)
+        for constraint in cast(sa.Table, models.AuditEvent.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+        and constraint.name == "ck_audit_events_entity_type"
+    ]
+    assert entity_checks == [migration._USER_ROLE_ENTITY_TYPES]
+    planned_routes = _load_migration(_PLANNED_ROUTES_MIGRATION_FILE)
+    assert migration._PREVIOUS_ENTITY_TYPES == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES
+    assert (
+        migration._PREVIOUS_ENTITY_TYPES[:-1] + ", 'User', 'Role')"
+        == migration._USER_ROLE_ENTITY_TYPES
+    )
+    assert set(migration._SEED_GRANTS) == set(_SEEDED_ROLES)
+    for grants in migration._SEED_GRANTS.values():
+        assert len(set(grants)) == len(grants)
+        assert set(grants) <= set(migration._PERMISSIONS)
+    assert {name: len(grants) for name, grants in migration._SEED_GRANTS.items()} == {
+        "Administrator": 17,
+        "Manager": 10,
+        "Operator": 10,
+    }
+
+
+def test_users_roles_seed_is_exactly_the_profile_grants(migrated_engine: Engine) -> None:
+    """S-8: seed exactness on the freshly migrated database (no test of
+    this module commits a role, a grant, a user or a User/Role audit row)."""
+    migration = _load_migration(_USERS_ROLES_MIGRATION_FILE)
+    with migrated_engine.connect() as connection:
+        assert _seeded_grants(connection) == {
+            name: set(grants) for name, grants in migration._SEED_GRANTS.items()
+        }
+        assert connection.execute(sa.text("SELECT count(*) FROM users")).scalar_one() == 0
+        assert (
+            connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type IN ('User', 'Role')")
+            ).scalar_one()
+            == 0
+        )
+
+
+@pytest.mark.parametrize("permission", ["NOPE", "manage_areas", ""])
+def test_database_refuses_an_unknown_permission(connection: Connection, permission: str) -> None:
+    """S-4."""
+    _refused_by(
+        connection,
+        "ck_role_permissions_permission_known",
+        lambda: _execute(
+            connection,
+            "INSERT INTO role_permissions (role_id, permission) VALUES (:role, :permission)",
+            role=_role_id(connection, "Operator"),
+            permission=permission,
+        ),
+    )
+
+
+def test_database_refuses_a_duplicate_grant(connection: Connection) -> None:
+    _refused_by(
+        connection,
+        "pk_role_permissions",
+        lambda: _execute(
+            connection,
+            "INSERT INTO role_permissions (role_id, permission)"
+            " VALUES (:role, 'UNDO_RECENT_SCANS')",
+            role=_role_id(connection, "Operator"),
+        ),
+    )
+
+
+@pytest.mark.parametrize("login_name", ["Abc", "a b", "", "a" * 129, "é", " abc", "a/b"])
+def test_database_refuses_a_non_canonical_login_name(
+    connection: Connection, login_name: str
+) -> None:
+    """S-4."""
+    _refused_by(
+        connection, "ck_users_login_name_canonical", lambda: _insert_user(connection, login_name)
+    )
+
+
+def test_database_refuses_a_duplicate_login_name_and_role_name(connection: Connection) -> None:
+    _insert_user(connection, "jdoe")
+    _refused_by(connection, "uq_users_login_name", lambda: _insert_user(connection, "jdoe"))
+    _refused_by(
+        connection,
+        "uq_roles_name",
+        lambda: _execute(connection, "INSERT INTO roles (name) VALUES ('Manager')"),
+    )
+
+
+def test_database_refuses_an_unknown_role(connection: Connection) -> None:
+    _refused_by(
+        connection,
+        "fk_users_role_id_roles",
+        lambda: _execute(
+            connection,
+            "INSERT INTO users (login_name, display_name, role_id) VALUES ('x', 'X', 999999)",
+        ),
+    )
+
+
+@pytest.mark.parametrize("theme", ["dark", "Light", "SYSTEM", ""])
+def test_database_refuses_a_non_canonical_user_theme(connection: Connection, theme: str) -> None:
+    """S-4."""
+    _refused_by(
+        connection,
+        "ck_users_theme_preference",
+        lambda: _insert_user(connection, "themed", theme_preference=theme),
+    )
+
+
+def test_database_refuses_a_partial_user_avatar(connection: Connection) -> None:
+    """S-4."""
+    _refused_by(
+        connection,
+        "ck_users_avatar_image_shape",
+        lambda: _insert_user(connection, "partial", avatar_image=b"\x89PNG"),
+    )
+    _refused_by(
+        connection,
+        "ck_users_avatar_image_type",
+        lambda: _insert_user(
+            connection,
+            "gif",
+            avatar_image=b"GIF89a",
+            avatar_image_type="image/gif",
+            avatar_image_updated_at=datetime.datetime.now(datetime.UTC),
+        ),
+    )
+    _refused_by(
+        connection,
+        "ck_users_avatar_image_size",
+        lambda: _insert_user(
+            connection,
+            "large",
+            avatar_image=b"\x00" * (2 * 1024 * 1024 + 1),
+            avatar_image_type="image/png",
+            avatar_image_updated_at=datetime.datetime.now(datetime.UTC),
+        ),
+    )
+
+
+def test_database_admits_canonical_users_and_the_user_role_audit_entities(
+    connection: Connection,
+) -> None:
+    """S-4: the admitted shapes."""
+    _insert_user(connection, "a" * 128)
+    _insert_user(connection, "a.b_c@d+e-f")
+    _insert_user(connection, "light", theme_preference="LIGHT")
+    _insert_user(connection, "none", theme_preference=None)
+    _insert_audit(connection, "CREATED", "User")
+    _insert_audit(connection, "UPDATED", "Role")
+    _refused_by(
+        connection,
+        "ck_audit_events_entity_type",
+        lambda: _insert_audit(connection, "CREATED", "Nobody"),
+    )
+
+
+def test_user_model_round_trips_every_column(connection: Connection) -> None:
+    """S-9: the ORM writes and reads back a User, theme preference included."""
+    from sqlalchemy.orm import Session
+
+    stamp = datetime.datetime(2026, 10, 6, 8, 30, tzinfo=datetime.UTC)
+    role_id = _role_id(connection, "Operator")
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        user = models.User(
+            login_name="roundtrip",
+            display_name="Round Trip",
+            role_id=role_id,
+            avatar_image=b"\x89PNG\r\n\x1a\n",
+            avatar_image_type="image/png",
+            avatar_image_updated_at=stamp,
+            theme_preference=ThemePreference.LIGHT,
+            is_active=False,
+        )
+        session.add(user)
+        session.flush()
+        user_id = user.id
+        session.expunge_all()
+        loaded = session.get(models.User, user_id)
+        assert loaded is not None
+        assert (
+            loaded.login_name,
+            loaded.display_name,
+            loaded.role_id,
+            loaded.avatar_image,
+            loaded.avatar_image_type,
+            loaded.avatar_image_updated_at,
+            loaded.theme_preference,
+            loaded.is_active,
+        ) == (
+            "roundtrip",
+            "Round Trip",
+            role_id,
+            b"\x89PNG\r\n\x1a\n",
+            "image/png",
+            stamp,
+            "LIGHT",
+            False,
+        )
+        assert loaded.created_at is not None and loaded.updated_at is not None
+        loaded.theme_preference = None
+        session.flush()
+        session.expire_all()
+        reloaded = session.get(models.User, user_id)
+        assert reloaded is not None and reloaded.theme_preference is None
+
+
+def test_downgrade_to_retention_period_revision_drops_users_and_roles(
+    admin_engine: Engine,
+) -> None:
+    """S-5: a clean head downgrades; the re-upgrade re-seeds exactly."""
+    name = "partflow_test_phase13_downgrade_s12"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    migration = _load_migration(_USERS_ROLES_MIGRATION_FILE)
+    try:
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                # Another entity's history never blocks it.
+                _insert_audit(connection, "CREATED", "Worker")
+            command.downgrade(config, _RETENTION_PERIOD_REVISION)
+            tables = set(inspect(engine).get_table_names())
+            assert not {"roles", "role_permissions", "users"} & tables
+            entity_check = _audit_checks(engine)["ck_audit_events_entity_type"]
+            assert set(re.findall(r"'([^']*)'", entity_check)) == set(
+                re.findall(r"'([^']*)'", migration._PREVIOUS_ENTITY_TYPES)
+            )
+            with engine.connect() as connection:
+                assert _version(connection) == _RETENTION_PERIOD_REVISION
+                # Catches a doubly-prefixed name left behind by the drop.
+                assert [
+                    str(conname)
+                    for conname in connection.execute(
+                        sa.text(
+                            "SELECT conname FROM pg_constraint"
+                            " WHERE conrelid = 'audit_events'::regclass AND contype = 'c'"
+                            " AND conname LIKE '%entity_type%'"
+                        )
+                    ).scalars()
+                ] == ["ck_audit_events_entity_type"]
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _seeded_grants(connection) == {
+                    role: set(grants) for role, grants in migration._SEED_GRANTS.items()
+                }
+            assert "'User'" in _audit_checks(engine)["ck_audit_events_entity_type"]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def _refused_users_roles_downgrade(url: URL) -> None:
+    with pytest.raises(ProgrammingError, match="Users or role configuration exists"):
+        command.downgrade(_alembic_config(url), _RETENTION_PERIOD_REVISION)
+
+
+def test_downgrade_refuses_while_a_user_exists(refused_database: URL) -> None:
+    """S-6."""
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_user(connection, "kept")
+        _refused_users_roles_downgrade(refused_database)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert connection.execute(sa.text("SELECT login_name FROM users")).scalars().all() == [
+                "kept"
+            ]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_role_audit_history_exists(refused_database: URL) -> None:
+    """S-6: no user, but one Role audit row."""
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_audit(connection, "UPDATED", "Role")
+            audits = _rows(connection, "audit_events")
+        _refused_users_roles_downgrade(refused_database)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert _rows(connection, "audit_events") == audits
+            assert set(_seeded_grants(connection)) == set(_SEEDED_ROLES)
+    finally:
+        engine.dispose()

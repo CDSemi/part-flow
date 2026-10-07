@@ -12,8 +12,10 @@ import { DepartmentsSection } from './DepartmentsSection';
 import { HistoryArchivalSection } from './HistoryArchivalSection';
 import { MachineAssignmentSection } from './MachineAssignmentSection';
 import { OperationsSection } from './OperationsSection';
+import { RolesSection } from './RolesSection';
 import { ScanStationsSection } from './ScanStationsSection';
 import { SettingsSection } from './SettingsSection';
+import { UsersSection } from './UsersSection';
 import { WorkerSessionsSection } from './WorkerSessionsSection';
 import { WorkersSection } from './WorkersSection';
 import { SectionHeader } from './section-widgets';
@@ -25,16 +27,18 @@ import type { AdminSection } from './sections';
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
 // configuration — read and write the real configuration through the
 // /api surface, and so do the full Administration phase (Phase 13)
-// sections built so far: Workers, Worker sessions (the real sliding
+// sections: Workers, Users and Roles & permissions (application
+// accounts and named roles — configuration only, nothing is enforced
+// before users can sign in), Worker sessions (the real sliding
 // inactivity timeout — default and per-Area overrides), Correction
-// permissions (the real Undo reason policy), Department display
-// settings (the per-Department Production Board rotation timing),
-// Settings (the real Due Soon warning policy; the rest of Settings says
-// it is not available yet) and History archival & purge (the real
-// retention period; archival and purge runs say they are not available
-// yet). Machine assignment is a read-only statement of the two Area
-// modes. Users and Roles & permissions arrive later in that phase, and
-// Scan behavior has no defined content yet; each presents itself
+// permissions (the real Undo reason policy and the role ×
+// correction-permission table), Department display settings (the
+// per-Department Production Board rotation timing), Settings (the real
+// Due Soon warning policy; the rest of Settings says it is not
+// available yet) and History archival & purge (the real retention
+// period; archival and purge runs say they are not available yet).
+// Machine assignment is a read-only statement of the two Area modes.
+// Scan behavior has no defined content yet and presents itself
 // honestly as not available yet.
 
 export function AdministrationView() {
@@ -100,6 +104,10 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <OperationsSection />;
     case 'workers':
       return <WorkersSection />;
+    case 'users':
+      return <UsersSection />;
+    case 'roles':
+      return <RolesSection />;
     case 'scan-stations':
       return <ScanStationsSection />;
     case 'barcode-configuration':
@@ -125,12 +133,11 @@ function SectionBody({ section }: { section: AdminSection }) {
  * One section that is not available yet, presented honestly: the entry
  * action that does not exist yet is disabled (never made to appear
  * functional). All Phase 3.5 minimum-environment sections, Workers,
- * Worker sessions, Machine assignment (statement), Correction
- * permissions, Department display settings, History archival & purge
- * (retention period) and Settings are real above. A `full` placeholder
- * states that it arrives with the later full Administration phase; a
- * `deferred` one (Scan behavior) has no defined settings and promises
- * no phase.
+ * Users, Roles & permissions, Worker sessions, Machine assignment
+ * (statement), Correction permissions, Department display settings,
+ * History archival & purge (retention period) and Settings are real
+ * above, so only a `deferred` section (Scan behavior) reaches this: it
+ * has no defined settings and promises no phase.
  */
 function PlaceholderSection({
   section,
@@ -157,22 +164,11 @@ function PlaceholderSection({
           ) : undefined
         }
       />
-      {section.phase === 'deferred' ? (
-        <div className="ad-placeholder">
-          The <b>{section.label}</b> configuration is not available yet. Its
-          settings have not been defined. Machines, Planned Routes and Part
-          Numbers are managed in <b>Management</b> by authorized production
-          roles.
-        </div>
-      ) : (
-        <div className="ad-placeholder">
-          The <b>{section.label}</b> configuration is not available yet. It
-          follows the same table + editor pattern as the Areas reference table
-          and arrives with the later <b>full Administration</b> phase. Machines,
-          Planned Routes and Part Numbers are managed in <b>Management</b> by
-          authorized production roles.
-        </div>
-      )}
+      <div className="ad-placeholder">
+        The <b>{section.label}</b> configuration is not available yet. Its
+        settings have not been defined. Machines, Planned Routes and Part
+        Numbers are managed in <b>Management</b> by authorized production roles.
+      </div>
     </>
   );
 }

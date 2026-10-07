@@ -259,8 +259,10 @@ class AuditEntityType(StrEnum):
     the global policy singleton, one `entity_id` per Administration
     section (`worker-sessions`). Phase 13 (slice 8) adds RouteTemplate:
     Planned Routes configuration (create, edit, archive, delete) — never
-    the Assigned Route snapshots, which are production records. Widens
-    additively in later phases.
+    the Assigned Route snapshots, which are production records. Phase 13
+    (slice 12) adds User (application accounts, never Workers) and Role
+    (named roles with their permission grants). Widens additively in
+    later phases.
     """
 
     WORK_ORDER = "WorkOrder"
@@ -275,6 +277,8 @@ class AuditEntityType(StrEnum):
     MACHINE = "Machine"
     APPLICATION_POLICY = "ApplicationPolicy"
     ROUTE_TEMPLATE = "RouteTemplate"
+    USER = "User"
+    ROLE = "Role"
 
 
 class WorkerIdentificationMode(StrEnum):
@@ -347,3 +351,59 @@ class ThemePreference(StrEnum):
 
     DARK = "DARK"
     LIGHT = "LIGHT"
+
+
+class Permission(StrEnum):
+    """One key per capability PROJECT_PROFILE §20 lists (Phase 13 slice 12,
+    owner decision OD-8).
+
+    Configuration only until Phase 14 enforces it. Keys are stable
+    identifiers: a later capability is added (CHECK widening), never
+    renamed. The correction permissions — UNDO_RECENT_SCANS,
+    PERFORM_QUANTITY_CORRECTIONS, EDIT_WORK_ORDER_ALLOCATION,
+    PERFORM_HISTORICAL_CORRECTIONS — are edited in Administration →
+    Correction permissions; the backend treats every key alike until
+    Phase 14. Permission keys are the only authority: no behavior is
+    keyed to a role name.
+    """
+
+    # Administration
+    MANAGE_DEPARTMENTS = "MANAGE_DEPARTMENTS"
+    MANAGE_AREAS = "MANAGE_AREAS"
+    MANAGE_OPERATIONS = "MANAGE_OPERATIONS"
+    MANAGE_WORKERS = "MANAGE_WORKERS"
+    MANAGE_USERS_AND_ROLES = "MANAGE_USERS_AND_ROLES"
+    MANAGE_SCAN_STATIONS = "MANAGE_SCAN_STATIONS"
+    MANAGE_BARCODE_CONFIGURATION = "MANAGE_BARCODE_CONFIGURATION"
+    MANAGE_SCAN_BEHAVIOR = "MANAGE_SCAN_BEHAVIOR"
+    MANAGE_WORKER_SESSION_POLICIES = "MANAGE_WORKER_SESSION_POLICIES"
+    MANAGE_CORRECTION_PERMISSIONS = "MANAGE_CORRECTION_PERMISSIONS"
+    CONFIGURE_SYSTEM_SETTINGS = "CONFIGURE_SYSTEM_SETTINGS"
+    # Production master data
+    MANAGE_MACHINES = "MANAGE_MACHINES"
+    MANAGE_ROUTE_TEMPLATES = "MANAGE_ROUTE_TEMPLATES"
+    MANAGE_PART_NUMBER_MASTER = "MANAGE_PART_NUMBER_MASTER"
+    # Work Orders, priority and reports
+    VIEW_PRODUCTION_DATA = "VIEW_PRODUCTION_DATA"
+    MANAGE_WORK_ORDERS = "MANAGE_WORK_ORDERS"
+    EDIT_WORK_ORDER_DEMAND = "EDIT_WORK_ORDER_DEMAND"
+    SET_DEMAND_PRIORITY = "SET_DEMAND_PRIORITY"
+    REORDER_HOT_ITEMS = "REORDER_HOT_ITEMS"
+    ASSIGN_ROUTES = "ASSIGN_ROUTES"
+    RESOLVE_EXCEPTIONAL_SITUATIONS = "RESOLVE_EXCEPTIONAL_SITUATIONS"
+    EXPORT_REPORTS = "EXPORT_REPORTS"
+    # Scan Station
+    SCAN_PN_BARCODES = "SCAN_PN_BARCODES"
+    SCAN_MACHINE_BARCODES = "SCAN_MACHINE_BARCODES"
+    SCAN_WORKER_BARCODES = "SCAN_WORKER_BARCODES"
+    RECEIVE_QUANTITY = "RECEIVE_QUANTITY"
+    ASSIGN_QUANTITY_TO_MACHINE = "ASSIGN_QUANTITY_TO_MACHINE"
+    CONFIRM_QUANTITY = "CONFIRM_QUANTITY"
+    COMPLETE_INTO_STOCKROOM = "COMPLETE_INTO_STOCKROOM"
+    CONFIRM_SUGGESTED_ALLOCATION = "CONFIRM_SUGGESTED_ALLOCATION"
+    ADJUST_SUGGESTED_ALLOCATION = "ADJUST_SUGGESTED_ALLOCATION"
+    # Correction permissions
+    UNDO_RECENT_SCANS = "UNDO_RECENT_SCANS"
+    PERFORM_QUANTITY_CORRECTIONS = "PERFORM_QUANTITY_CORRECTIONS"
+    EDIT_WORK_ORDER_ALLOCATION = "EDIT_WORK_ORDER_ALLOCATION"
+    PERFORM_HISTORICAL_CORRECTIONS = "PERFORM_HISTORICAL_CORRECTIONS"

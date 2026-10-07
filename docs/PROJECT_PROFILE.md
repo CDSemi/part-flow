@@ -1452,9 +1452,9 @@ The Worker recorded on the reversal follows the Area's Worker ID mode (§19): di
 
 Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records — for example a transfer that implicitly completed source processing (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — the reversal compensates the whole command rather than blindly reversing one arbitrary row.
 
-Operators may undo only recent eligible actions when authorized.
+Undo is granted by the **Undo recent eligible scans** permission (§20). "Recent eligible" means exactly the eligibility rule above — the most recent eligible completed PN operation — with no separate time window. The initial Operator role holds this permission.
 
-Managers and Admins may perform broader corrections.
+The broader corrections — quantity corrections, Work Order Allocation edits and authorized historical corrections — are separate permissions (§20) that the initial Manager and Administrator roles hold; which role holds each correction permission is configured, and the permission keys are the only authority.
 
 All corrections must remain auditable.
 
@@ -1688,11 +1688,13 @@ Session state reduces repetitive scanning but must never replace persistent Move
 
 PartFlow uses role-based authorization.
 
-Machines, Route Templates (Planned Routes), and PartNumber master metadata are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines, Route Templates, and PartNumber master metadata without being an Administrator. Administrators retain these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines, Route Templates, or Part Numbers screens (§21).
+Roles are **named and editable**. Every capability below is a **permission key**; a role grants a set of permission keys and a User holds one role. **Permission keys are the only authority**: authorization is decided by the keys the User's role grants — never by a role's name — and no role is an implicit superuser. The Administrator, Manager and Operator lists below are the **initial roles with their initial grants**, seeded exactly as listed; an authorized administrator may rename these roles or change what any role grants, and every such change is audited.
+
+Machines, Route Templates (Planned Routes), and PartNumber master metadata are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines, Route Templates, and PartNumber master metadata without being an Administrator. The initial Administrator role holds these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines, Route Templates, or Part Numbers screens (§21).
 
 ## Administrator
 
-Administrator capabilities include:
+The initial Administrator role grants:
 
 - manage Departments,
 - manage Areas,
@@ -1716,7 +1718,7 @@ Administrator capabilities include:
 
 ## Manager
 
-Manager capabilities include:
+The initial Manager role grants:
 
 - view all current and historical production data,
 - create and edit Work Orders,
@@ -1733,7 +1735,7 @@ Manager capabilities include:
 
 ## Operator
 
-Operator capabilities may include:
+The initial Operator role grants:
 
 - scan PN barcodes,
 - scan Machine barcodes,
@@ -1746,7 +1748,7 @@ Operator capabilities may include:
 - review and adjust suggested completion allocation,
 - undo recent eligible scans.
 
-Operators must never directly rewrite historical data.
+No permission rewrites historical data directly: the initial Operator role holds no historical-correction permission, and every correction uses the auditable compensating mechanisms (§16) — Movement history stays immutable.
 
 ---
 

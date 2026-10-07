@@ -14,12 +14,12 @@ import { AdministrationView } from './AdministrationView';
 
 // Administration (GUI_DESIGN §9): the minimum environment setup
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
-// configuration — Workers, Worker sessions, Correction permissions,
-// Department display settings, Settings and History archival & purge
-// read and write the real /api surface (faked in-memory here with the
-// same routes and semantics). Machine assignment is a read-only
-// statement; every other section presents itself honestly as not
-// available yet.
+// configuration — Workers, Users, Roles & permissions, Worker sessions,
+// Correction permissions, Department display settings, Settings and
+// History archival & purge read and write the real /api surface (faked
+// in-memory here with the same routes and semantics). Machine
+// assignment is a read-only statement; Scan behavior presents itself
+// honestly as not available yet.
 
 // Image preparation (sniff, decode, downscale) has its own suite; here
 // it passes the chosen file through, or refuses it when a test says so.
@@ -55,6 +55,25 @@ type WorkerRoute =
 type FakeFailure = { status: number; detail: string } | 'network';
 
 type WorkerIdMode = 'DISABLED' | 'FIXED' | 'SCANNED';
+
+interface RoleRow {
+  id: number;
+  name: string;
+  permissions: string[];
+}
+
+interface UserRow {
+  id: number;
+  login_name: string;
+  display_name: string;
+  role_id: number;
+  is_active: boolean;
+  avatar_updated_at: string | null;
+}
+
+/** The fake Roles and Users routes a test can make fail. */
+type RoleRoute = 'GET list' | 'POST' | 'PATCH';
+type UserRoute = 'GET list' | 'POST' | 'PATCH' | 'PUT avatar' | 'DELETE avatar';
 
 interface AreaRow {
   id: number;
@@ -102,6 +121,10 @@ interface FakeState {
     retired_on: string | null;
   }[];
   workers: WorkerRow[];
+  /** Named roles with their grants (the three seeded §20 roles). */
+  roles: RoleRow[];
+  /** Application Users (none seeded). */
+  users: UserRow[];
   /** `application_policy` default Worker session timeout (minutes). */
   sessionTimeout: number;
   /** `application_policy` badge-confirmation options. */
@@ -118,6 +141,54 @@ interface FakeState {
 
 const T0 = '2026-08-01T00:00:00.000Z';
 const ALEX_AVATAR_AT = '2026-09-01T08:00:00.123456+00:00';
+
+// The seeded roles: exactly the grants PROJECT_PROFILE §20 states.
+const ADMINISTRATOR_GRANTS = [
+  'MANAGE_DEPARTMENTS',
+  'MANAGE_AREAS',
+  'MANAGE_OPERATIONS',
+  'MANAGE_MACHINES',
+  'MANAGE_WORKERS',
+  'MANAGE_USERS_AND_ROLES',
+  'MANAGE_SCAN_STATIONS',
+  'MANAGE_BARCODE_CONFIGURATION',
+  'MANAGE_ROUTE_TEMPLATES',
+  'MANAGE_PART_NUMBER_MASTER',
+  'MANAGE_SCAN_BEHAVIOR',
+  'MANAGE_WORKER_SESSION_POLICIES',
+  'MANAGE_CORRECTION_PERMISSIONS',
+  'EDIT_WORK_ORDER_DEMAND',
+  'EDIT_WORK_ORDER_ALLOCATION',
+  'PERFORM_HISTORICAL_CORRECTIONS',
+  'CONFIGURE_SYSTEM_SETTINGS',
+];
+const MANAGER_GRANTS = [
+  'VIEW_PRODUCTION_DATA',
+  'MANAGE_WORK_ORDERS',
+  'EDIT_WORK_ORDER_DEMAND',
+  'SET_DEMAND_PRIORITY',
+  'REORDER_HOT_ITEMS',
+  'ASSIGN_ROUTES',
+  'PERFORM_QUANTITY_CORRECTIONS',
+  'EDIT_WORK_ORDER_ALLOCATION',
+  'RESOLVE_EXCEPTIONAL_SITUATIONS',
+  'EXPORT_REPORTS',
+];
+const OPERATOR_GRANTS = [
+  'SCAN_PN_BARCODES',
+  'SCAN_MACHINE_BARCODES',
+  'SCAN_WORKER_BARCODES',
+  'RECEIVE_QUANTITY',
+  'ASSIGN_QUANTITY_TO_MACHINE',
+  'CONFIRM_QUANTITY',
+  'COMPLETE_INTO_STOCKROOM',
+  'CONFIRM_SUGGESTED_ALLOCATION',
+  'ADJUST_SUGGESTED_ALLOCATION',
+  'UNDO_RECENT_SCANS',
+];
+const ADMINISTRATOR_ID = 1;
+const MANAGER_ID = 2;
+const OPERATOR_ID = 3;
 
 function seedState(): FakeState {
   return {
@@ -194,6 +265,16 @@ function seedState(): FakeState {
         avatar_updated_at: null,
       },
     ],
+    roles: [
+      {
+        id: ADMINISTRATOR_ID,
+        name: 'Administrator',
+        permissions: [...ADMINISTRATOR_GRANTS],
+      },
+      { id: MANAGER_ID, name: 'Manager', permissions: [...MANAGER_GRANTS] },
+      { id: OPERATOR_ID, name: 'Operator', permissions: [...OPERATOR_GRANTS] },
+    ],
+    users: [],
     sessionTimeout: 15,
     badgeConfirm: { done: true, queue: true, undo: true },
     undoReasonRequired: false,
@@ -222,6 +303,10 @@ let correctionFailure: { status: number; detail: string } | null;
 let dueSoonFailure: { status: number; detail: string } | null;
 /** A refusal of every `/api/policies/data-retention` call, if set. */
 let retentionFailure: { status: number; detail: string } | null;
+let roleFailures: Partial<Record<RoleRoute, FakeFailure>>;
+let userFailures: Partial<Record<UserRoute, FakeFailure>>;
+/** While set, a role PATCH stays pending until it resolves. */
+let roleHold: Promise<void> | null;
 
 const E_B1 = 'Seconds per displayed row must be a whole number from 1 to 60.';
 const E_B2 =
@@ -272,6 +357,12 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   if (method !== 'GET') writes.push({ method, url, body: upload ?? body });
 
   if (url === '/api/health') return json({ status: 'ok' });
+  if (url === '/api/roles' || url.startsWith('/api/roles/')) {
+    return handleRoles(url, method, body);
+  }
+  if (url === '/api/users' || url.startsWith('/api/users/')) {
+    return handleUsers(url, method, body);
+  }
   if (url === '/api/workers' || url.startsWith('/api/workers/')) {
     return handleWorkers(url, method, body);
   }
@@ -750,6 +841,164 @@ function handleWorkers(
   return json({ detail: `Unhandled fake route: ${method} ${url}` }, 500);
 }
 
+/** The configured failure of one fake route, if any. */
+function routeFailure(failure: FakeFailure | undefined): Response | null {
+  if (!failure) return null;
+  if (failure === 'network') throw new TypeError('Failed to fetch');
+  return json({ detail: failure.detail }, failure.status);
+}
+
+function roleWire(role: RoleRow) {
+  return {
+    ...stamp({ id: role.id, name: role.name }),
+    permissions: [...role.permissions].sort(),
+    user_count: state.users.filter((u) => u.role_id === role.id).length,
+  };
+}
+
+const E_R2 = 'A role with this name already exists.';
+
+async function handleRoles(
+  url: string,
+  method: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  if (url === '/api/roles' && method === 'GET') {
+    const ordered = [...state.roles].sort(
+      (a, b) => a.name.localeCompare(b.name) || a.id - b.id,
+    );
+    return (
+      routeFailure(roleFailures['GET list']) ?? json(ordered.map(roleWire))
+    );
+  }
+  if (url === '/api/roles' && method === 'POST') {
+    const failure = routeFailure(roleFailures.POST);
+    if (failure) return failure;
+    const name = String(body.name).trim();
+    if (state.roles.some((r) => r.name === name)) {
+      return json({ detail: E_R2 }, 409);
+    }
+    const role: RoleRow = {
+      id: state.nextId++,
+      name,
+      permissions: [...new Set((body.permissions as string[]) ?? [])],
+    };
+    state.roles.push(role);
+    return json(roleWire(role), 201);
+  }
+  const match = /^\/api\/roles\/(\d+)$/.exec(url);
+  const role = state.roles.find((r) => r.id === Number(match?.[1]));
+  if (!match || !role || method !== 'PATCH') {
+    return json({ detail: `Role ${match?.[1]} does not exist.` }, 404);
+  }
+  if (roleHold) await roleHold;
+  const failure = routeFailure(roleFailures.PATCH);
+  if (failure) return failure;
+  if (typeof body.name === 'string') {
+    const name = body.name.trim();
+    if (state.roles.some((r) => r.name === name && r.id !== role.id)) {
+      return json({ detail: E_R2 }, 409);
+    }
+    role.name = name;
+  }
+  // Delta semantics: granting a held key or revoking a missing one is
+  // a no-op.
+  const grant = (body.grant_permissions as string[] | undefined) ?? [];
+  const revoke = (body.revoke_permissions as string[] | undefined) ?? [];
+  role.permissions = [...new Set([...role.permissions, ...grant])].filter(
+    (key) => !revoke.includes(key),
+  );
+  return json(roleWire(role));
+}
+
+function userWire(user: UserRow) {
+  return {
+    ...stamp(user),
+    role_name: state.roles.find((r) => r.id === user.role_id)!.name,
+  };
+}
+
+function duplicateLogin(login: string, exceptId?: number): Response | null {
+  const holder = state.users.find(
+    (u) => u.login_name === login && u.id !== exceptId,
+  );
+  if (!holder) return null;
+  const suffix = holder.is_active ? '' : ' (inactive)';
+  return json(
+    {
+      detail: `This login name is already used by ${holder.display_name}${suffix}.`,
+    },
+    409,
+  );
+}
+
+function handleUsers(
+  url: string,
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  if (url === '/api/users' && method === 'GET') {
+    const ordered = [...state.users].sort(
+      (a, b) => a.display_name.localeCompare(b.display_name) || a.id - b.id,
+    );
+    return (
+      routeFailure(userFailures['GET list']) ?? json(ordered.map(userWire))
+    );
+  }
+  if (url === '/api/users' && method === 'POST') {
+    const failure = routeFailure(userFailures.POST);
+    if (failure) return failure;
+    const login = String(body.login_name).trim().toLowerCase();
+    const duplicate = duplicateLogin(login);
+    if (duplicate) return duplicate;
+    const user: UserRow = {
+      id: state.nextId++,
+      login_name: login,
+      display_name: String(body.display_name).trim(),
+      role_id: Number(body.role_id),
+      is_active: true,
+      avatar_updated_at: null,
+    };
+    state.users.push(user);
+    return json(userWire(user), 201);
+  }
+  const match = /^\/api\/users\/(\d+)(\/avatar)?$/.exec(url);
+  const user = state.users.find((u) => u.id === Number(match?.[1]));
+  if (!match || !user) {
+    return json({ detail: `User ${match?.[1]} does not exist.` }, 404);
+  }
+  if (!match[2] && method === 'PATCH') {
+    const failure = routeFailure(userFailures.PATCH);
+    if (failure) return failure;
+    if (typeof body.login_name === 'string') {
+      const login = body.login_name.trim().toLowerCase();
+      const duplicate = duplicateLogin(login, user.id);
+      if (duplicate) return duplicate;
+      user.login_name = login;
+    }
+    if (typeof body.display_name === 'string') {
+      user.display_name = body.display_name.trim();
+    }
+    if (typeof body.role_id === 'number') user.role_id = body.role_id;
+    if (typeof body.is_active === 'boolean') user.is_active = body.is_active;
+    return json(userWire(user));
+  }
+  if (match[2] && method === 'PUT') {
+    const failure = routeFailure(userFailures['PUT avatar']);
+    if (failure) return failure;
+    avatarVersion += 1;
+    user.avatar_updated_at = `2026-10-05T10:00:00.00000${avatarVersion}+00:00`;
+    return json(userWire(user));
+  }
+  if (match[2] && method === 'DELETE') {
+    const failure = routeFailure(userFailures['DELETE avatar']);
+    if (failure) return failure;
+    user.avatar_updated_at = null;
+    return json(userWire(user));
+  }
+  return json({ detail: `Unhandled fake route: ${method} ${url}` }, 500);
+}
+
 beforeEach(() => {
   window.history.replaceState({}, '', '/administration');
   state = seedState();
@@ -762,6 +1011,9 @@ beforeEach(() => {
   correctionFailure = null;
   dueSoonFailure = null;
   retentionFailure = null;
+  roleFailures = {};
+  userFailures = {};
+  roleHold = null;
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
   URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
@@ -1907,19 +2159,6 @@ test('the Workers section and its editor show no phase numbers', async () => {
 
 /* ============ Later-phase sections stay honest ============ */
 
-test('a full-Administration section presents itself as not available yet', async () => {
-  renderAdmin();
-  await screen.findByRole('button', { name: 'Edit Lathe' });
-  openSection('Users');
-
-  expect(
-    screen.getByText(/is not available yet/, { exact: false }),
-  ).toBeInTheDocument();
-  expect(screen.getByText(/full Administration/)).toBeInTheDocument();
-  const entry = screen.getByRole('button', { name: '+ New entry' });
-  expect(entry).toBeDisabled();
-});
-
 test('FA-S1: Scan behavior is not available yet and promises no phase', async () => {
   renderAdmin();
   await screen.findByRole('button', { name: 'Edit Lathe' });
@@ -2341,13 +2580,26 @@ test('Worker sessions renders server refusals in place, a failed load with Retry
 
 const UNDO_REASON_SWITCH = 'Require a reason for every Undo';
 
+/** The correction table as text: header, then ✓ / - per checkbox. */
+function correctionMatrix(): string[][] {
+  return within(screen.getByRole('table'))
+    .getAllByRole('row')
+    .map((row) =>
+      Array.from(row.children).map((cell) => {
+        const box = cell.querySelector('input[type="checkbox"]');
+        if (box) return (box as HTMLInputElement).checked ? '✓' : '-';
+        return cell.textContent ?? '';
+      }),
+    );
+}
+
 async function openCorrectionPermissions() {
   renderAdmin();
   openSection('Correction permissions');
   return screen.findByRole('switch', { name: UNDO_REASON_SWITCH });
 }
 
-test('Correction permissions shows the real Undo reason switch and states the role-based part honestly', async () => {
+test('FA-C5: Correction permissions shows the real Undo reason switch first, then the role × correction-permission table', async () => {
   const toggle = await openCorrectionPermissions();
 
   expect(toggle).toHaveAttribute('aria-checked', 'false');
@@ -2363,10 +2615,43 @@ test('Correction permissions shows the real Undo reason switch and states the ro
     screen.getByRole('heading', { name: 'Who may undo or correct' }),
   ).toBeVisible();
   expect(
-    screen.getByText(
-      'Role-based correction permissions are not configurable yet.',
-    ),
-  ).toBeInTheDocument();
+    await screen.findByRole('checkbox', {
+      name: 'Undo recent eligible scans — Operator',
+    }),
+  ).toBeChecked();
+  expect(document.body.textContent).not.toContain(
+    'Role-based correction permissions are not configurable yet.',
+  );
+  // The Undo reason switch comes first, the table after it.
+  const table = screen.getByRole('table');
+  expect(
+    toggle.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(correctionMatrix()).toEqual([
+    [
+      'Role',
+      'Undo recent eligible scans',
+      'Perform quantity corrections',
+      'Edit Work Order Allocation',
+      'Perform authorized historical corrections',
+    ],
+    ['Administrator', '-', '-', '✓', '✓'],
+    ['Manager', '-', '✓', '✓', '-'],
+    ['Operator', '✓', '-', '-', '-'],
+  ]);
+  const operatorUndo = screen.getByRole('checkbox', {
+    name: 'Undo recent eligible scans — Operator',
+  });
+  expect(operatorUndo.closest('td')).toHaveAttribute(
+    'data-label',
+    'Undo recent eligible scans',
+  );
+  expect(document.body.textContent).toContain(
+    'Choose which roles hold each correction permission. These permissions are recorded for each role and are not enforced yet.',
+  );
+  expect(document.body.textContent).toContain(
+    "Undo recent eligible scans covers exactly the actions the Scan Station's Undo offers — there is no extra time limit.",
+  );
   expect(screen.getAllByRole('switch')).toHaveLength(1);
   expect(screen.queryByRole('button', { name: /New entry/ })).toBeNull();
   expect(screen.queryByRole('note')).toBeNull();
@@ -3029,4 +3314,731 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
   retentionFailure = null;
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   expect(await screen.findByRole('radio', { name: NO_PERIOD })).toBeChecked();
+});
+
+/* ============ Users (Phase 13 — application accounts) ============ */
+
+const USERS_NOTE =
+  "Users cannot sign in yet. Each user's role is recorded here and takes effect once sign-in is available; until then every screen stays open to anyone who can reach PartFlow. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted.";
+const USER_UNKNOWN_OUTCOME =
+  'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the user before trying again.';
+const E_U2B =
+  'A login name may contain only letters (a–z), digits and . _ @ + -, with no spaces, and at most 128 characters.';
+
+function seedJane(overrides: Partial<UserRow> = {}): UserRow {
+  const user: UserRow = {
+    id: 50,
+    login_name: 'jdoe',
+    display_name: 'Jane Doe',
+    role_id: MANAGER_ID,
+    is_active: true,
+    avatar_updated_at: null,
+    ...overrides,
+  };
+  state.users.push(user);
+  return user;
+}
+
+async function openUsers(status: 'connected' | 'unavailable' = 'connected') {
+  renderAdmin(status);
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  openSection('Users');
+  await screen.findByRole('heading', { name: 'Users' });
+  await waitFor(() =>
+    expect(screen.queryByRole('status', { name: 'Loading users' })).toBeNull(),
+  );
+}
+
+function fillUser(dialog: HTMLElement, name: string, login: string) {
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: name },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Login name'), {
+    target: { value: login },
+  });
+}
+
+test('FA-U1: Users is real — empty state, the honest note after it, an enabled entry action', async () => {
+  await openUsers();
+
+  const main = document.querySelector('.ad-main') as HTMLElement;
+  expect(screen.getByText('No users configured yet.')).toBeInTheDocument();
+  const note = main.querySelector('.ad-notice') as HTMLElement;
+  expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(USERS_NOTE);
+  expect(
+    screen.getByText('No users configured yet.').compareDocumentPosition(note) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(screen.getByRole('button', { name: '+ New user' })).toBeEnabled();
+  expect(main.textContent).toContain(
+    'Application accounts — name, login name, role, avatar, active status; separate from Workers',
+  );
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+  expect(main.textContent).not.toContain('is not available yet');
+  expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
+});
+
+test('FA-U1: the Users table lists name, login name, role and status, with the note after it', async () => {
+  seedJane({ avatar_updated_at: ALEX_AVATAR_AT });
+  seedJane({
+    id: 51,
+    login_name: 'tlam',
+    display_name: 'Tuan Lam',
+    role_id: OPERATOR_ID,
+    is_active: false,
+  });
+  await openUsers();
+
+  const janeRow = screen
+    .getByRole('button', { name: 'Edit Jane Doe' })
+    .closest('tr') as HTMLElement;
+  expect(within(janeRow).getByText('jdoe')).toHaveClass('mono');
+  expect(within(janeRow).getByText('jdoe')).toHaveAttribute(
+    'data-label',
+    'Login name',
+  );
+  expect(within(janeRow).getByText('Manager')).toHaveAttribute(
+    'data-label',
+    'Role',
+  );
+  expect(within(janeRow).getByText('Active')).toBeInTheDocument();
+  expect(janeRow.querySelector('img')?.getAttribute('src')).toBe(
+    `/api/users/50/avatar?v=${encodeURIComponent(ALEX_AVATAR_AT)}`,
+  );
+  const tuanRow = screen
+    .getByRole('button', { name: 'Edit Tuan Lam' })
+    .closest('tr') as HTMLElement;
+  expect(within(tuanRow).getByText('Operator')).toBeInTheDocument();
+  expect(within(tuanRow).getByText('Inactive')).toBeInTheDocument();
+  expect(tuanRow.querySelector('.worker-avatar')?.textContent).toBe('TL');
+
+  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  expect(
+    screen.getByRole('table').compareDocumentPosition(note) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test('FA-U2: a new user posts the trimmed name, the canonical login name and the chosen role', async () => {
+  await openUsers();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New user' }));
+  const dialog = screen.getByRole('dialog', { name: 'New user' });
+  expect(within(dialog).getByLabelText('Name')).toHaveFocus();
+  fillUser(dialog, ' Jane Doe ', 'jdoe');
+  expect(dialog.textContent).not.toContain('Saved as:');
+  fireEvent.change(within(dialog).getByLabelText('Login name'), {
+    target: { value: 'JDoe' },
+  });
+  expect(dialog.textContent).toContain('Saved as: jdoe');
+  expect(dialog.textContent).toContain(
+    'Saved in small letters — letter case does not matter.',
+  );
+  // No role preselected: the choice is required.
+  const role = within(dialog).getByLabelText('Role') as HTMLSelectElement;
+  expect(role.value).toBe('');
+  expect(
+    within(role).getByRole('option', { name: 'Choose a role…' }),
+  ).toBeDisabled();
+  expect(
+    within(role)
+      .getAllByRole('option')
+      .map((option) => option.textContent),
+  ).toEqual(['Choose a role…', 'Administrator', 'Manager', 'Operator']);
+  expect(within(dialog).queryByRole('checkbox', { name: 'Active' })).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add user' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Choose a role.');
+  expect(writes).toEqual([]);
+
+  fireEvent.change(role, { target: { value: String(MANAGER_ID) } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add user' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/users',
+      body: {
+        login_name: 'jdoe',
+        display_name: 'Jane Doe',
+        role_id: MANAGER_ID,
+      },
+    },
+  ]);
+  const row = (
+    await screen.findByRole('button', { name: 'Edit Jane Doe' })
+  ).closest('tr') as HTMLElement;
+  expect(row.querySelector('.worker-avatar')?.textContent).toBe('JD');
+  expect(within(row).getByText('jdoe')).toBeInTheDocument();
+  expect(within(row).getByText('Manager')).toBeInTheDocument();
+  expect(within(row).getByText('Active')).toBeInTheDocument();
+});
+
+test('FA-U3: invalid login names are refused in place; a server duplicate keeps the entry', async () => {
+  seedJane();
+  await openUsers();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New user' }));
+  const dialog = screen.getByRole('dialog', { name: 'New user' });
+  fireEvent.change(within(dialog).getByLabelText('Role'), {
+    target: { value: String(OPERATOR_ID) },
+  });
+  for (const login of ['j doe', 'jdoé', 'a'.repeat(129)]) {
+    fillUser(dialog, 'John Doe', login);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add user' }));
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(E_U2B);
+  }
+  fillUser(dialog, 'John Doe', '');
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'A login name is required.',
+  );
+  expect(writes).toEqual([]);
+
+  fillUser(dialog, 'John Doe', 'JDOE');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add user' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'This login name is already used by Jane Doe.',
+  );
+  expect(screen.getByRole('dialog', { name: 'New user' })).toBe(dialog);
+  expect(within(dialog).getByLabelText('Login name')).toHaveValue('JDOE');
+  expect(state.users).toHaveLength(1);
+});
+
+test('FA-U4: an edit sends only the changed fields; nothing changed sends nothing', async () => {
+  seedJane();
+  await openUsers();
+
+  // Role + deactivate: exactly those two fields.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  let dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  expect(within(dialog).getByLabelText('Name')).toHaveFocus();
+  expect(within(dialog).getByLabelText('Login name')).toHaveValue('jdoe');
+  fireEvent.change(within(dialog).getByLabelText('Role'), {
+    target: { value: String(OPERATOR_ID) },
+  });
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Active' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PATCH',
+      url: '/api/users/50',
+      body: { role_id: OPERATOR_ID, is_active: false },
+    },
+  ]);
+  await waitFor(() =>
+    expect(
+      within(
+        screen
+          .getByRole('button', { name: 'Edit Jane Doe' })
+          .closest('tr') as HTMLElement,
+      ).getByText('Inactive'),
+    ).toBeInTheDocument(),
+  );
+
+  // Rename only: the name alone.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: ' Jane D. Doe ' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[1]).toEqual({
+    method: 'PATCH',
+    url: '/api/users/50',
+    body: { display_name: 'Jane D. Doe' },
+  });
+  expect(state.users[0].is_active).toBe(false);
+
+  // A case or whitespace variant of the stored login is no change.
+  await screen.findByRole('button', { name: 'Edit Jane D. Doe' });
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane D. Doe' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  fireEvent.change(within(dialog).getByLabelText('Login name'), {
+    target: { value: ' JDOE ' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toHaveLength(2);
+});
+
+test('FA-U4: a staged avatar alone is uploaded without a PATCH; after a changed profile it is the second write', async () => {
+  seedJane();
+  await openUsers();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  let dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  const file = pngFile();
+  chooseAvatar(dialog, file);
+  await waitFor(() =>
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+      'blob:staged-avatar',
+    ),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual(['PUT /api/users/50/avatar']);
+  expect(writes[0].body).toEqual({ contentType: 'image/png', size: file.size });
+  const row = (
+    await screen.findByRole('button', { name: 'Edit Jane Doe' })
+  ).closest('tr') as HTMLElement;
+  await waitFor(() =>
+    expect(row.querySelector('img')?.getAttribute('src')).toBe(
+      `/api/users/50/avatar?v=${encodeURIComponent('2026-10-05T10:00:00.000001+00:00')}`,
+    ),
+  );
+
+  // Profile change + staged avatar: PATCH, then PUT.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  fireEvent.change(within(dialog).getByLabelText('Role'), {
+    target: { value: String(ADMINISTRATOR_ID) },
+  });
+  chooseAvatar(dialog);
+  await waitFor(() =>
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+      'blob:staged-avatar',
+    ),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary().slice(1)).toEqual([
+    'PATCH /api/users/50',
+    'PUT /api/users/50/avatar',
+  ]);
+  expect(writes[1].body).toEqual({ role_id: ADMINISTRATOR_ID });
+
+  // Removing the stored avatar sends DELETE alone.
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Jane Doe' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove avatar' }),
+  );
+  expect(dialog.querySelector('img')).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary().slice(3)).toEqual(['DELETE /api/users/50/avatar']);
+});
+
+test('FA-U4: an avatar refused after a changed profile names the saved profile', async () => {
+  seedJane();
+  await openUsers();
+  userFailures['PUT avatar'] = {
+    status: 413,
+    detail: 'The image is larger than 2 MiB.',
+  };
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Jane Q. Doe' },
+  });
+  chooseAvatar(dialog);
+  await waitFor(() => expect(dialog.querySelector('img')).not.toBeNull());
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'The user was saved, but the avatar could not be updated: The image is larger than 2 MiB.',
+  );
+  expect(writeSummary()).toEqual([
+    'PATCH /api/users/50',
+    'PUT /api/users/50/avatar',
+  ]);
+
+  // Retrying sends only the avatar (the profile is saved).
+  userFailures['PUT avatar'] = {
+    status: 413,
+    detail: 'The image is larger than 2 MiB.',
+  };
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(writes).toHaveLength(3));
+  expect(writes[2].url).toBe('/api/users/50/avatar');
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'The avatar could not be updated: The image is larger than 2 MiB.',
+  );
+});
+
+test('FA-U5: an unanswered save is an unknown outcome; offline blocks writes; a failed load offers Retry', async () => {
+  seedJane();
+  await openUsers();
+  userFailures.PATCH = 'network';
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Jane Q. Doe' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    USER_UNKNOWN_OUTCOME,
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit user' })).toBe(dialog);
+  cleanup();
+
+  userFailures = {};
+  await openUsers('unavailable');
+  expect(screen.getByRole('button', { name: '+ New user' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  const offline = screen.getByRole('dialog', { name: 'Edit user' });
+  for (const name of ['Save changes', 'Choose image…']) {
+    expect(within(offline).getByRole('button', { name })).toBeDisabled();
+  }
+  cleanup();
+
+  userFailures['GET list'] = { status: 500, detail: 'Database unavailable.' };
+  renderAdmin();
+  openSection('Users');
+  expect(
+    await screen.findByText('User data could not be loaded.'),
+  ).toBeInTheDocument();
+  expect(screen.getByText('Database unavailable.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '+ New user' })).toBeDisabled();
+  userFailures = {};
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(
+    await screen.findByRole('button', { name: 'Edit Jane Doe' }),
+  ).toBeInTheDocument();
+});
+
+/* ============ Roles & permissions (Phase 13 — named roles) ============ */
+
+const ROLES_NOTE =
+  'Each user holds one role. Permissions are recorded here and take effect once users can sign in. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
+
+async function openRoles(status: 'connected' | 'unavailable' = 'connected') {
+  renderAdmin(status);
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  openSection('Roles & permissions');
+  await screen.findByRole('button', { name: 'Edit Manager' });
+}
+
+function roleRow(name: string): string[] {
+  const row = screen
+    .getByRole('button', { name: `Edit ${name}` })
+    .closest('tr') as HTMLElement;
+  return Array.from(row.querySelectorAll('td'), (td) => td.textContent ?? '');
+}
+
+test('FA-RO1: Roles & permissions lists the seeded roles with permission and user counts', async () => {
+  seedJane();
+  await openRoles();
+
+  expect(roleRow('Administrator')).toEqual(['Administrator', '17 of 35', '0']);
+  expect(roleRow('Manager')).toEqual(['Manager', '10 of 35', '1']);
+  expect(roleRow('Operator')).toEqual(['Operator', '10 of 35', '0']);
+  const managerRow = screen
+    .getByRole('button', { name: 'Edit Manager' })
+    .closest('tr') as HTMLElement;
+  expect(
+    Array.from(managerRow.querySelectorAll('td[data-label]'), (td) =>
+      td.getAttribute('data-label'),
+    ),
+  ).toEqual(['Permissions', 'Users']);
+  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(ROLES_NOTE);
+  expect(
+    screen.getByRole('table').compareDocumentPosition(note) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  const main = document.querySelector('.ad-main') as HTMLElement;
+  expect(main.textContent).toContain(
+    'Named roles and the permissions each one grants',
+  );
+  expect(main.textContent).not.toContain('Phase');
+  expect(screen.getByRole('button', { name: '+ New role' })).toBeEnabled();
+});
+
+test('FA-RO2: editing a role sends one delta over the four editable groups only', async () => {
+  await openRoles();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Manager' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit role' });
+  expect(within(dialog).getByLabelText('Name')).toHaveFocus();
+  expect(
+    within(dialog)
+      .getAllByRole('group')
+      .map((group) => group.querySelector('legend')?.textContent),
+  ).toEqual([
+    'Administration',
+    'Production master data',
+    'Work Orders, priority and reports',
+    'Scan Station',
+  ]);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(31);
+  for (const label of [
+    'Undo recent eligible scans',
+    'Perform quantity corrections',
+    'Edit Work Order Allocation',
+    'Perform authorized historical corrections',
+  ]) {
+    expect(within(dialog).queryByRole('checkbox', { name: label })).toBeNull();
+  }
+  expect(dialog.textContent).toContain(
+    'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Policies → Correction permissions.',
+  );
+  expect(
+    within(dialog).getByRole('checkbox', { name: 'Export and print reports' }),
+  ).toBeChecked();
+  expect(
+    within(dialog).getByRole('checkbox', { name: 'Manage Machines' }),
+  ).not.toBeChecked();
+
+  // Unchanged Save: closes without a request.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([]);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Manager' }));
+  const edit = screen.getByRole('dialog', { name: 'Edit role' });
+  fireEvent.click(
+    within(edit).getByRole('checkbox', { name: 'Export and print reports' }),
+  );
+  fireEvent.click(
+    within(edit).getByRole('checkbox', { name: 'Manage Machines' }),
+  );
+  fireEvent.change(within(edit).getByLabelText('Name'), {
+    target: { value: ' Production Manager ' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PATCH',
+      url: `/api/roles/${MANAGER_ID}`,
+      body: {
+        name: 'Production Manager',
+        grant_permissions: ['MANAGE_MACHINES'],
+        revoke_permissions: ['EXPORT_REPORTS'],
+      },
+    },
+  ]);
+  expect(
+    await screen.findByRole('button', { name: 'Edit Production Manager' }),
+  ).toBeInTheDocument();
+  // The correction permissions the role holds are untouched.
+  expect(state.roles[1].permissions).toContain('PERFORM_QUANTITY_CORRECTIONS');
+  expect(state.roles[1].permissions).toContain('EDIT_WORK_ORDER_ALLOCATION');
+});
+
+test('FA-RO3: a new role posts its name and checked permissions; a duplicate keeps the entry; offline blocks writes', async () => {
+  await openRoles();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New role' }));
+  let dialog = screen.getByRole('dialog', { name: 'New role' });
+  expect(within(dialog).getByLabelText('Name')).toHaveFocus();
+  expect(dialog.textContent).not.toContain('Correction permissions:');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add role' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'A role name is required.',
+  );
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: ' Process Engineer ' },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('checkbox', { name: 'Manage Planned Routes' }),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add role' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/roles',
+      body: {
+        name: 'Process Engineer',
+        permissions: ['MANAGE_ROUTE_TEMPLATES'],
+      },
+    },
+  ]);
+  expect(await roleRowWhenShown('Process Engineer')).toEqual([
+    'Process Engineer',
+    '1 of 35',
+    '0',
+  ]);
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New role' }));
+  dialog = screen.getByRole('dialog', { name: 'New role' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Manager' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add role' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'A role with this name already exists.',
+  );
+  expect(within(dialog).getByLabelText('Name')).toHaveValue('Manager');
+  cleanup();
+
+  await openRoles('unavailable');
+  expect(screen.getByRole('button', { name: '+ New role' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Operator' }));
+  expect(
+    within(screen.getByRole('dialog', { name: 'Edit role' })).getByRole(
+      'button',
+      { name: 'Save changes' },
+    ),
+  ).toBeDisabled();
+});
+
+async function roleRowWhenShown(name: string): Promise<string[]> {
+  await screen.findByRole('button', { name: `Edit ${name}` });
+  return roleRow(name);
+}
+
+test('FA-RO: an unanswered role save is an unknown outcome; a failed load offers Retry', async () => {
+  await openRoles();
+  roleFailures.PATCH = 'network';
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Operator' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit role' });
+  fireEvent.click(
+    within(dialog).getByRole('checkbox', { name: 'Confirm quantity' }),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the role before trying again.',
+  );
+  cleanup();
+
+  roleFailures = {
+    'GET list': { status: 500, detail: 'Database unavailable.' },
+  };
+  renderAdmin();
+  openSection('Roles & permissions');
+  expect(
+    await screen.findByText('Role data could not be loaded.'),
+  ).toBeInTheDocument();
+  roleFailures = {};
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(
+    await screen.findByRole('button', { name: 'Edit Operator' }),
+  ).toBeInTheDocument();
+});
+
+/* ============ Correction permissions — role table ============ */
+
+test('FA-C6: a click grants or revokes exactly that permission of that role, disabled in flight, then re-reads', async () => {
+  await openCorrectionPermissions();
+  const managerUndo = await screen.findByRole('checkbox', {
+    name: 'Undo recent eligible scans — Manager',
+  });
+  expect(managerUndo).not.toBeChecked();
+
+  let release: () => void = () => undefined;
+  roleHold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fireEvent.click(managerUndo);
+  await waitFor(() => expect(managerUndo).toBeDisabled());
+  for (const box of within(screen.getByRole('table')).getAllByRole(
+    'checkbox',
+  )) {
+    expect(box).toBeDisabled();
+  }
+  release();
+  roleHold = null;
+  await waitFor(() =>
+    expect(
+      screen.getByRole('checkbox', {
+        name: 'Undo recent eligible scans — Manager',
+      }),
+    ).toBeChecked(),
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PATCH',
+      url: `/api/roles/${MANAGER_ID}`,
+      body: { grant_permissions: ['UNDO_RECENT_SCANS'] },
+    },
+  ]);
+  await waitFor(() =>
+    expect(
+      screen.getByRole('checkbox', {
+        name: 'Undo recent eligible scans — Manager',
+      }),
+    ).toBeEnabled(),
+  );
+
+  fireEvent.click(
+    screen.getByRole('checkbox', {
+      name: 'Undo recent eligible scans — Manager',
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole('checkbox', {
+        name: 'Undo recent eligible scans — Manager',
+      }),
+    ).not.toBeChecked(),
+  );
+  expect(writes[1]).toEqual({
+    method: 'PATCH',
+    url: `/api/roles/${MANAGER_ID}`,
+    body: { revoke_permissions: ['UNDO_RECENT_SCANS'] },
+  });
+  // The Undo reason policy is never written by the table.
+  expect(writes.every((item) => item.url.startsWith('/api/roles/'))).toBe(true);
+});
+
+test('FA-C6: a refused grant shows the reason and the stored value; offline disables the table', async () => {
+  await openCorrectionPermissions();
+  roleFailures.PATCH = { status: 404, detail: 'Role 2 does not exist.' };
+  const box = await screen.findByRole('checkbox', {
+    name: 'Perform authorized historical corrections — Manager',
+  });
+  fireEvent.click(box);
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Role 2 does not exist.',
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole('checkbox', {
+        name: 'Perform authorized historical corrections — Manager',
+      }),
+    ).toBeEnabled(),
+  );
+  expect(
+    screen.getByRole('checkbox', {
+      name: 'Perform authorized historical corrections — Manager',
+    }),
+  ).not.toBeChecked();
+  expect(state.roles[1].permissions).not.toContain(
+    'PERFORM_HISTORICAL_CORRECTIONS',
+  );
+  cleanup();
+
+  roleFailures = {};
+  writes = [];
+  renderAdmin('unavailable');
+  openSection('Correction permissions');
+  await screen.findByRole('checkbox', {
+    name: 'Undo recent eligible scans — Operator',
+  });
+  const boxes = within(screen.getByRole('table')).getAllByRole('checkbox');
+  expect(boxes).toHaveLength(12);
+  for (const item of boxes) expect(item).toBeDisabled();
+  fireEvent.click(boxes[0]);
+  expect(writes).toEqual([]);
+});
+
+test('FA-C6: a failed roles load offers Retry while the Undo reason switch keeps working', async () => {
+  roleFailures['GET list'] = { status: 500, detail: 'Database unavailable.' };
+  const toggle = await openCorrectionPermissions();
+  expect(
+    await screen.findByText('Role permissions could not be loaded.'),
+  ).toBeInTheDocument();
+
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/correction-permissions',
+      body: { undo_reason_required: true },
+    },
+  ]);
+
+  roleFailures = {};
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(
+    await screen.findByRole('checkbox', {
+      name: 'Undo recent eligible scans — Operator',
+    }),
+  ).toBeChecked();
 });

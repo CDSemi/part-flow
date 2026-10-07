@@ -17,9 +17,11 @@ from app.api.part_numbers import router as part_numbers_router
 from app.api.policies import router as policies_router
 from app.api.production_board import router as production_board_router
 from app.api.production_release import router as production_release_router
+from app.api.roles import router as roles_router
 from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
 from app.api.tracking import router as tracking_router
+from app.api.users import router as users_router
 from app.api.work_orders import router as work_orders_router
 from app.api.workers import router as workers_router
 from app.core.config import get_settings
@@ -45,6 +47,8 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(environment_router)
     app.include_router(workers_router)
+    app.include_router(users_router)
+    app.include_router(roles_router)
     app.include_router(policies_router)
     app.include_router(machines_router)
     app.include_router(part_numbers_router)

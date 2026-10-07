@@ -1,24 +1,10 @@
-import './WorkerAvatar.css';
-
 import { workerAvatarUrl } from '../api/workers';
 import type { Worker } from '../api/workers';
+import { Avatar } from './Avatar';
 
-// The ONE shared Worker avatar presentation: the uploaded avatar image
-// when the Worker has one, otherwise the Worker's initials in a tinted
-// circle (the approved Scan Station Worker pill mark). The name always
-// renders beside the avatar, so the mark itself is decorative.
-
-/** Initials: the first letter of the first two words, uppercased. */
-function initials(name: string): string {
-  return name
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((word) => Array.from(word)[0])
-    .join('')
-    .toUpperCase();
-}
+// The shared Worker avatar: the Worker's uploaded avatar image when
+// there is one, otherwise the Worker's initials (the shared `Avatar`
+// presentation).
 
 export function WorkerAvatar({
   worker,
@@ -35,14 +21,11 @@ export function WorkerAvatar({
    */
   src?: string;
 }) {
-  const className = `worker-avatar ${size}`;
-  const imageSrc = src ?? workerAvatarUrl(worker);
-  if (imageSrc) {
-    return <img className={className} src={imageSrc} alt="" />;
-  }
   return (
-    <span className={className} aria-hidden="true">
-      {initials(worker.name)}
-    </span>
+    <Avatar
+      name={worker.name}
+      size={size}
+      src={src ?? workerAvatarUrl(worker)}
+    />
   );
 }

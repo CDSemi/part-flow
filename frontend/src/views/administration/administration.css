@@ -614,3 +614,41 @@
 .ad-avatarblock .err {
   margin: 6px 0 0;
 }
+
+/* --- Roles & permissions / Correction permissions ---------------------- */
+
+/* One permission group of the Roles editor: a quiet framed fieldset of
+   checkbox rows under its group legend. */
+.ad-permgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.ad-permgroup legend {
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+}
+
+/* The role × correction-permission table sits inside the settings
+   panel, below its help text. */
+.ad-config .ad-table {
+  margin-bottom: 14px;
+}
+
+.ad-table .ad-matrixcell input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--info);
+  cursor: pointer;
+}
+
+.ad-table .ad-matrixcell input:disabled {
+  cursor: default;
+}
