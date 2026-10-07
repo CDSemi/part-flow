@@ -10,9 +10,16 @@ beforeEach(() => {
   document.body.className = '';
   vi.stubGlobal(
     'fetch',
-    vi.fn(() =>
+    vi.fn((input: RequestInfo | URL) =>
       Promise.resolve(
-        new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
+        new Response(
+          JSON.stringify(
+            String(input) === '/api/session'
+              ? { user: null, setup_open: false }
+              : { status: 'ok' },
+          ),
+          { status: 200 },
+        ),
       ),
     ),
   );

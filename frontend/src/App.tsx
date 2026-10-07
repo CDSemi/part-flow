@@ -6,14 +6,17 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 
 import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
+import { AccountChip } from './components/AccountChip';
 import { ConnectivityChip } from './components/ConnectivityChip';
 import { REAL_VIEWS } from './app/real-views';
 import type { AppViewKey } from './app/view-keys';
 import { Link } from './app/link';
 import { NotFoundView } from './app/NotFoundView';
 import { useRouter } from './app/router-context';
+import { isChromeHidden } from './app/router-core';
 import type { ManagementSubview, Route } from './app/router-core';
 import { RouterProvider } from './app/router-provider';
+import { SessionProvider } from './app/session-provider';
 import { ThemeProvider } from './app/theme-provider';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LoadingState } from './components/view-states';
@@ -171,16 +174,9 @@ function AppShell() {
   }, [route]);
 
   // Scan Station production mode and Production Board kiosk mode hide
-  // the top application navigation: production mode keeps operators on
-  // the configured station, kiosk mode keeps a wall display clean.
-  // Both are presentation choices only — never an authorization or
-  // security boundary. The persistent Offline banner is NOT navigation
-  // and stays.
-  const chromeHidden =
-    (route.view === 'scan-station' &&
-      route.stationId !== null &&
-      route.mode === 'production') ||
-    (route.view === 'production-board' && route.mode === 'kiosk');
+  // the top application navigation (router-core). The persistent
+  // Offline banner is NOT navigation and stays.
+  const chromeHidden = isChromeHidden(route);
   return (
     <>
       {chromeHidden ? null : (
@@ -217,6 +213,7 @@ function AppShell() {
               Development preview · <b>sample data</b>
             </span>
           ) : null}
+          <AccountChip />
           <ThemeToggle />
           <ConnectivityChip />
         </nav>
@@ -263,7 +260,9 @@ export function App() {
     <ThemeProvider>
       <ConnectivityProvider>
         <RouterProvider>
-          <AppShell />
+          <SessionProvider>
+            <AppShell />
+          </SessionProvider>
         </RouterProvider>
       </ConnectivityProvider>
     </ThemeProvider>

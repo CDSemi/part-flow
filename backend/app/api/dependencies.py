@@ -7,6 +7,8 @@ from fastapi import Depends, Request
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
+from app.application.first_run import SetupGate
+
 
 def get_session(request: Request) -> Iterator[Session]:
     """Provide a request-scoped ORM session on the application engine.
@@ -21,3 +23,12 @@ def get_session(request: Request) -> Iterator[Session]:
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
+
+
+def get_setup_gate(request: Request) -> SetupGate:
+    """The process's first-run setup gate (Phase 14 slice 1), built by ``create_app``."""
+    gate: SetupGate = request.app.state.setup_gate
+    return gate
+
+
+SetupGateDep = Annotated[SetupGate, Depends(get_setup_gate)]

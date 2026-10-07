@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +60,9 @@ function stationFixture(url: string): Promise<Response> {
       },
       theme_preference: null,
     });
+  }
+  if (url === '/api/session') {
+    return json({ user: null, setup_open: false });
   }
   if (url === '/api/policies/due-soon') {
     return json({
@@ -128,24 +137,71 @@ test('shows ONLINE when the health endpoint succeeds', async () => {
   expect(await screen.findByLabelText('Scan barcode')).toBeEnabled();
 });
 
-test('the primary navigation trails: preview tag → theme control → connectivity chip', async () => {
+test('the primary navigation trails: preview tag → account chip → theme control → connectivity chip', async () => {
   stubFetch(healthOk);
 
   render(<App />);
   await screen.findByText('ONLINE');
 
   // Right-side block order after the spacer: the development preview
-  // tag first, then the Dark/Light control, and the connectivity
-  // status chip at the outer edge.
+  // tag first, then the user account chip, the Dark/Light control, and
+  // the connectivity status chip at the outer edge.
   const nav = screen.getByRole('navigation', { name: 'Primary' });
   const children = Array.from(nav.children, (el) => el.className);
   const spacer = children.indexOf('spacer');
   expect(spacer).toBeGreaterThan(0);
   expect(children.slice(spacer + 1)).toEqual([
     'mock-tag',
+    'acctchip',
     'navbtn',
     expect.stringContaining('connchip'),
   ]);
+});
+
+test('the account chip sits in the navigation and is absent in station production mode and the board kiosk', async () => {
+  // Setup open: the signed-out chip also offers `Set up PartFlow`.
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/api/health')) return healthOk();
+    if (url === '/api/session') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ user: null, setup_open: true }), {
+          status: 200,
+        }),
+      );
+    }
+    return stationFixture(url);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  const standard = render(<App />);
+  expect(
+    await screen.findByRole('button', { name: 'Set up PartFlow' }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+  standard.unmount();
+
+  for (const path of [
+    '/scan-station/DEBURR-ST-01/production',
+    '/production-board/kiosk',
+  ]) {
+    window.history.replaceState({}, '', path);
+    fetchMock.mockClear();
+    const hidden = render(<App />);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([input]) => String(input) === '/api/session',
+        ),
+      ).toBe(true),
+    );
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Set up PartFlow' }),
+    ).toBeNull();
+    hidden.unmount();
+  }
 });
 
 test('the menu button toggles the nav-links panel and navigating closes it', async () => {

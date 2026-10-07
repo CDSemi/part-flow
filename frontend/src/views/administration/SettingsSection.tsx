@@ -16,6 +16,7 @@ import {
 import type { DueSoonPolicy } from '../dates';
 import { SectionHeader, ServerErrorNote } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
+import { SignInSettingsPanel } from './SignInSettingsPanel';
 
 // Administration → Settings (Phase 13; GUI_DESIGN §9 Policies and
 // §3.12): the Due Soon warning panel — the one global policy behind
@@ -23,9 +24,10 @@ import { ADMIN_SECTIONS } from './sections';
 // Station, Priority and Work Orders), stored in the server's
 // application policy (`/api/policies/due-soon`), audited and
 // re-validated by the server. The three fields share a cross-field rule
-// (minimum ≤ maximum), so Save replaces them together. The rest of
-// Settings is not available yet and says so — no control pretends
-// otherwise.
+// (minimum ≤ maximum), so Save replaces them together. The User sign-in
+// panel (SignInSettingsPanel) follows it and loads its own data. The
+// rest of Settings is not available yet and says so — no control
+// pretends otherwise.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'settings')?.subtitle ?? '';
@@ -101,6 +103,7 @@ export function SettingsSection() {
           onSaved={policyData.reload}
           onOutcomeUnknown={policyData.revalidate}
         />
+        <SignInSettingsPanel />
         <h2>Other settings</h2>
         <p className="ad-confighelp">
           Other application settings are not available yet.

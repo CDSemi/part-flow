@@ -153,6 +153,9 @@ beforeEach(() => {
         // Hot list keeps these routing tests focused on navigation.
         return json({ department: { id: 1, name: 'Machining' }, entries: [] });
       }
+      if (url === '/api/session') {
+        return json({ user: null, setup_open: false });
+      }
       if (url === '/api/policies/due-soon') {
         return json({
           due_soon_min_days: 2,

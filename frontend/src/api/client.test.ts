@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-import { ApiError, apiRequest, apiUpload } from './client';
+import {
+  ApiError,
+  apiRequest,
+  apiUpload,
+  setAuthFailureListener,
+} from './client';
 
 // The API client core: the JSON path and the one raw-body upload path
 // share the same response handling — the backend's `{"detail": ...}`
@@ -40,7 +45,10 @@ test('apiUpload sends the blob as the raw body labelled with its own type', asyn
   const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
   expect(path).toBe('/api/workers/3/avatar');
   expect(init.method).toBe('PUT');
-  expect(init.headers).toEqual({ 'Content-Type': 'image/png' });
+  expect(init.headers).toEqual({
+    'Content-Type': 'image/png',
+    'X-PartFlow-CSRF': '1',
+  });
   expect(init.body).toBe(image);
 });
 
@@ -73,7 +81,10 @@ test('the JSON path is unchanged: JSON body out, parsed JSON or ApiError back', 
   expect(created).toEqual({ id: 1, name: 'Alex Tran' });
   const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
   expect(init.method).toBe('POST');
-  expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+  expect(init.headers).toEqual({
+    'Content-Type': 'application/json',
+    'X-PartFlow-CSRF': '1',
+  });
   expect(init.body).toBe('{"name":"Alex Tran","badge_barcode":"ABC1"}');
 
   // A body-less failure keeps the generic status message.
@@ -81,4 +92,77 @@ test('the JSON path is unchanged: JSON body out, parsed JSON or ApiError back', 
   await expect(apiRequest('/api/workers')).rejects.toEqual(
     new ApiError(502, 'The request failed (HTTP 502).'),
   );
+});
+
+test('a body-less GET carries only the request-origin header', async () => {
+  fetchMock.mockResolvedValue(json([]));
+  await apiRequest('/api/workers');
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(init.method).toBe('GET');
+  expect(init.headers).toEqual({ 'X-PartFlow-CSRF': '1' });
+  expect(init.body).toBeUndefined();
+  // The browser default (same-origin) sends the sign-in cookie.
+  expect(init.credentials).toBeUndefined();
+});
+
+test('the auth-failure listener hears an ended sign-in and a required password change only', async () => {
+  const listener = vi.fn();
+  setAuthFailureListener(listener);
+  try {
+    fetchMock.mockResolvedValueOnce(
+      json(
+        {
+          detail:
+            'You are not signed in, or your sign-in has ended. Sign in to continue.',
+          authentication_required: true,
+        },
+        401,
+      ),
+    );
+    const ended = await apiRequest('/api/policies/sign-in').catch(
+      (error: unknown) => error,
+    );
+    expect(ended).toBeInstanceOf(ApiError);
+    expect((ended as ApiError).status).toBe(401);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenLastCalledWith('authentication_required');
+
+    fetchMock.mockResolvedValueOnce(
+      json(
+        {
+          detail: 'Choose a new password before you continue.',
+          password_change_required: true,
+        },
+        403,
+      ),
+    );
+    await expect(apiRequest('/api/policies/sign-in')).rejects.toBeInstanceOf(
+      ApiError,
+    );
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenLastCalledWith('password_change_required');
+
+    // Every other refusal leaves the listener alone.
+    for (const [body, status] of [
+      [{ detail: 'Sign-in failed.', sign_in_failed: true }, 401],
+      [
+        {
+          detail: 'Your account does not have permission to do this.',
+          permission_denied: true,
+          required_permissions: ['MANAGE_USERS_AND_ROLES'],
+        },
+        403,
+      ],
+      [{ detail: 'This request was refused.', csrf_rejected: true }, 403],
+      [{ detail: 'This login name is already used.' }, 409],
+    ] as const) {
+      fetchMock.mockResolvedValueOnce(json(body, status));
+      await expect(
+        apiRequest('/api/session', { method: 'POST', body: {} }),
+      ).rejects.toBeInstanceOf(ApiError);
+    }
+    expect(listener).toHaveBeenCalledTimes(2);
+  } finally {
+    setAuthFailureListener(null);
+  }
 });

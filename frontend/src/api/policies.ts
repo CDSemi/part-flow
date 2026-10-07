@@ -18,7 +18,12 @@
 // replaced as a whole (its fields share a cross-field rule). It also
 // holds the Movement-history retention period of History archival &
 // purge, stored for later archival maintenance only — nothing reads it
-// to archive or purge. The server validates and stays authoritative;
+// to archive or purge. Settings → User sign-in reads the user sign-in
+// policy (how long a user's sign-in lasts, when failed sign-ins lock an
+// account, whether an administrator-set password must be replaced) —
+// readable by any signed-in user, written as a partial merge by users
+// whose role may configure system settings. The server validates and
+// stays authoritative;
 // this module only maps the wire shape, and refuses a Due Soon answer
 // outside the server's ranges rather than letting it degrade the
 // countdowns silently.
@@ -235,4 +240,76 @@ export async function updateRetentionPolicy(
     body: { retention_period_months: retentionPeriodMonths },
   });
   return toRetentionPolicy(wire);
+}
+
+export interface SignInPolicy {
+  /** User sign-ins expire after `sessionDays`; false = never expire. */
+  sessionExpires: boolean;
+  /** Whole days a user's sign-in lasts (kept while expiry is off). */
+  sessionDays: number;
+  /** Failed sign-ins before the account is locked. */
+  lockoutAttempts: number;
+  /** How long a lock lasts, in whole minutes. */
+  lockoutMinutes: number;
+  /** A password an administrator set must be replaced at sign-in. */
+  requirePasswordChange: boolean;
+  /** The policy singleton's timestamp (shared by every section). */
+  updatedAt: string;
+}
+
+interface SignInPolicyWire {
+  user_session_expires: boolean;
+  user_session_days: number;
+  sign_in_lockout_attempts: number;
+  sign_in_lockout_minutes: number;
+  require_password_change: boolean;
+  updated_at: string;
+}
+
+const SIGN_IN_POLICY_PATH = '/api/policies/sign-in';
+
+function toSignInPolicy(wire: SignInPolicyWire): SignInPolicy {
+  return {
+    sessionExpires: wire.user_session_expires,
+    sessionDays: wire.user_session_days,
+    lockoutAttempts: wire.sign_in_lockout_attempts,
+    lockoutMinutes: wire.sign_in_lockout_minutes,
+    requirePasswordChange: wire.require_password_change,
+    updatedAt: wire.updated_at,
+  };
+}
+
+/** The user sign-in policy (Administration → Settings → User sign-in). */
+export async function getSignInPolicy(): Promise<SignInPolicy> {
+  const wire = await apiRequest<SignInPolicyWire>(SIGN_IN_POLICY_PATH);
+  return toSignInPolicy(wire);
+}
+
+/** Store ONLY the provided user sign-in settings (a partial merge: every
+ * other setting keeps its stored value); an unchanged value is a server
+ * no-op. */
+export async function updateSignInPolicy(
+  patch: Partial<Omit<SignInPolicy, 'updatedAt'>>,
+): Promise<SignInPolicy> {
+  const wire = await apiRequest<SignInPolicyWire>(SIGN_IN_POLICY_PATH, {
+    method: 'PUT',
+    body: {
+      ...(patch.sessionExpires !== undefined
+        ? { user_session_expires: patch.sessionExpires }
+        : {}),
+      ...(patch.sessionDays !== undefined
+        ? { user_session_days: patch.sessionDays }
+        : {}),
+      ...(patch.lockoutAttempts !== undefined
+        ? { sign_in_lockout_attempts: patch.lockoutAttempts }
+        : {}),
+      ...(patch.lockoutMinutes !== undefined
+        ? { sign_in_lockout_minutes: patch.lockoutMinutes }
+        : {}),
+      ...(patch.requirePasswordChange !== undefined
+        ? { require_password_change: patch.requirePasswordChange }
+        : {}),
+    },
+  });
+  return toSignInPolicy(wire);
 }

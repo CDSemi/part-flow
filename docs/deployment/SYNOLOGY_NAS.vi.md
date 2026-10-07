@@ -155,6 +155,10 @@ docker compose exec backend uv run alembic current
 Lưu output vào deployment record. Không chạy `alembic downgrade` trên dữ liệu
 staging cần giữ nếu chưa review migration cụ thể và chưa có backup đã verify.
 
+Với database mới chưa có Administrator, hoàn tất first-run setup trước khi mở truy cập:
+đọc setup token bằng `docker compose logs backend | grep "Setup token"` và dùng
+**Set up PartFlow** trong ứng dụng.
+
 ### 4.6 Smoke test
 
 Từ NAS:

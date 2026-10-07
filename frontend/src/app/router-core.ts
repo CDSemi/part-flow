@@ -68,6 +68,22 @@ export type Route =
 
 export const DEFAULT_MANAGEMENT_SUBVIEW: ManagementSubview = 'area-board';
 
+/**
+ * Scan Station production mode and Production Board kiosk mode hide the
+ * top application navigation (and with it the account chip; neither
+ * asks for a user sign-in): production mode keeps operators on the
+ * configured station, kiosk mode keeps a wall display clean. Both are
+ * presentation choices only — never an authorization boundary.
+ */
+export function isChromeHidden(route: Route): boolean {
+  return (
+    (route.view === 'scan-station' &&
+      route.stationId !== null &&
+      route.mode === 'production') ||
+    (route.view === 'production-board' && route.mode === 'kiosk')
+  );
+}
+
 function isManagementSubview(value: string): value is ManagementSubview {
   return (MANAGEMENT_SUBVIEWS as readonly string[]).includes(value);
 }

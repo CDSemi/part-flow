@@ -292,6 +292,24 @@ test('no production module reaches src/mocks/', () => {
   expect(graph).toContain(
     join('views', 'scan-station', 'scan-station-allocation-dialog.tsx'),
   );
+  // User sign-in (Phase 14): the session provider, the account chip
+  // and its dialogs, and the Administration password and sign-in
+  // settings controls ship in every build on `/api/session`,
+  // `/api/setup`, `/api/users` and `/api/policies` and import nothing
+  // from src/mocks/.
+  for (const module of [
+    join('app', 'session-provider.tsx'),
+    join('api', 'session.ts'),
+    join('api', 'setup.ts'),
+    join('components', 'AccountChip.tsx'),
+    join('components', 'SignInDialog.tsx'),
+    join('components', 'ChangePasswordDialog.tsx'),
+    join('components', 'FirstRunSetupDialog.tsx'),
+    join('views', 'administration', 'SetPasswordDialog.tsx'),
+    join('views', 'administration', 'SignInSettingsPanel.tsx'),
+  ]) {
+    expect(graph).toContain(module);
+  }
 
   expect(mockOffenders(graph)).toEqual([]);
 });

@@ -28,7 +28,13 @@ refusals carry ``badge_confirmation_required``,
 Scan Station can switch or re-open the final gate without losing the
 operator's draft. The Undo reason refusal carries
 ``undo_reason_required``, so the Scan Station shows the required reason
-field without losing the operator's draft.
+field without losing the operator's draft. The Phase 14 sign-in
+refusals carry one flag each (``authentication_required`` — which also
+clears the session cookie —, ``permission_denied`` with
+``required_permissions``, ``password_change_required``,
+``sign_in_failed``, ``account_locked``, ``password_check_busy``,
+``setup_closed``, ``setup_token_invalid``), so the client opens the
+right dialog without parsing the message.
 """
 
 from typing import cast
@@ -36,17 +42,26 @@ from typing import cast
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.authorization import clear_session_cookie
 from app.api.hot_list import entry_response
 from app.application.errors import (
+    AccountLockedError,
     ActiveQuantityConfirmationRequiredError,
     ApplicationError,
+    AuthenticationRequiredError,
     ConflictError,
     HotDemandRemovalConfirmationRequiredError,
     HotListChangedError,
     InvalidInputError,
     NotFoundError,
+    PasswordChangeRequiredError,
+    PasswordCheckBusyError,
     PayloadTooLargeError,
+    PermissionDeniedError,
     RouteDeviationConfirmationRequiredError,
+    SetupClosedError,
+    SetupTokenInvalidError,
+    SignInFailedError,
     UnsupportedMediaTypeError,
 )
 from app.application.intake import WorkOrderSelectionRequiredError
@@ -198,3 +213,44 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     for error_type, status_code, flag in _gate_refusals:
         _register_gate_refusal(error_type, status_code, flag)
+
+    # Phase 14 slice 1: the sign-in refusals — nothing was written unless
+    # the refusal is a counted failed attempt; the flag tells the client
+    # which dialog to present (sign in, change password, retry later).
+    _sign_in_refusals: tuple[tuple[type[ApplicationError], int, str], ...] = (
+        (PasswordChangeRequiredError, 403, "password_change_required"),
+        (SignInFailedError, 401, "sign_in_failed"),
+        (AccountLockedError, 409, "account_locked"),
+        (PasswordCheckBusyError, 503, "password_check_busy"),
+        (SetupClosedError, 409, "setup_closed"),
+        (SetupTokenInvalidError, 403, "setup_token_invalid"),
+    )
+    for error_type, status_code, flag in _sign_in_refusals:
+        _register_gate_refusal(error_type, status_code, flag)
+
+    async def authentication_required_handler(request: Request, exc: Exception) -> JSONResponse:
+        # No usable sign-in: the stale cookie (if any) is cleared too.
+        response = JSONResponse(
+            status_code=401,
+            content={
+                "detail": cast(ApplicationError, exc).message,
+                "authentication_required": True,
+            },
+        )
+        clear_session_cookie(response)
+        return response
+
+    app.add_exception_handler(AuthenticationRequiredError, authentication_required_handler)
+
+    async def permission_denied_handler(request: Request, exc: Exception) -> JSONResponse:
+        error = cast(PermissionDeniedError, exc)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": error.message,
+                "permission_denied": True,
+                "required_permissions": list(error.required),
+            },
+        )
+
+    app.add_exception_handler(PermissionDeniedError, permission_denied_handler)

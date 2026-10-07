@@ -112,3 +112,60 @@ class HotListChangedError(ConflictError):
     def __init__(self, message: str, entries: list[Any]) -> None:
         super().__init__(message)
         self.entries = entries
+
+
+class AuthenticationRequiredError(ApplicationError):
+    """No signed-in User, or the sign-in has ended (Phase 14, 401).
+
+    The API adds ``{"authentication_required": true}`` and clears the
+    session cookie, so the client opens the sign-in dialog.
+    """
+
+
+class PermissionDeniedError(ApplicationError):
+    """The signed-in User's role lacks a required permission (403).
+
+    ``required`` names the permission keys the route requires, as plain
+    strings, so this vocabulary never depends on the permission enum.
+    """
+
+    def __init__(self, message: str, required: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.required = required
+
+
+class PasswordChangeRequiredError(ApplicationError):
+    """The signed-in User must first replace an administrator-set password (403)."""
+
+
+class SignInFailedError(ApplicationError):
+    """A sign-in was refused (401). One message for every reason, so the
+    response never tells which part was wrong or whether the account
+    exists, is inactive or is locked."""
+
+
+class AccountLockedError(ConflictError):
+    """The account is locked after too many failed attempts (409); the
+    attempt is neither counted nor checked."""
+
+
+class PasswordCheckBusyError(ApplicationError):
+    """Too many password checks are running (503). A definite refusal:
+    nothing was written or counted, and the request may be retried."""
+
+
+class SetupClosedError(ConflictError):
+    """First-run setup is closed: an administrator already exists (409)."""
+
+
+class SetupTokenInvalidError(ApplicationError):
+    """The first-run setup token is not the current one (403)."""
+
+
+class UnknownLoginError(ApplicationError):
+    """No User has the given login name (recovery command only; never HTTP)."""
+
+
+class RecoveryUnavailableError(ApplicationError):
+    """The recovery reset may not run for this User or in this state
+    (recovery command only; never HTTP)."""

@@ -163,6 +163,72 @@ main {
   letter-spacing: 0.5px;
 }
 
+/* User account chip — outside .appnav-links, so it stays visible at
+   every width; the menu drops down under the chip. */
+.acctchip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+}
+
+.acctchip .btn {
+  padding: 8px 14px;
+  font-size: 13.5px;
+}
+
+.acctbtn {
+  gap: 8px;
+}
+
+.acctmenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  z-index: 150;
+}
+
+.acctmenu .acctrole {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.acctmenu [role='menu'] {
+  display: flex;
+  flex-direction: column;
+}
+
+.acctmenu [role='menuitem'] {
+  text-align: left;
+  padding: 10px 12px;
+  min-height: var(--touch-min);
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.acctmenu [role='menuitem']:hover:not(:disabled),
+.acctmenu [role='menuitem']:focus-visible {
+  background: var(--panel2);
+}
+
+.acctmenu [role='menuitem']:disabled {
+  opacity: 0.4;
+}
+
 /* ============ Management sub-view navigation ============ */
 .mgmtnav {
   display: flex;
@@ -420,6 +486,17 @@ main {
      removed — screen readers keep the full `🌙 Dark` / `☀️ Light`
      name. */
   .appnav .tlabel {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  /* Avatar-only account chip: the name is visually hidden (the button
+     keeps its `Account: …` accessible name). */
+  .appnav .acctname {
     position: absolute;
     width: 1px;
     height: 1px;

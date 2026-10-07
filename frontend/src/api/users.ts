@@ -4,9 +4,10 @@
 // are never Workers (the Scan Station audit identity) and are
 // deactivated, never deleted.
 //
-// Configuration only: sign-in and permission checks are not available
-// yet, and no credential exists. The stored User theme preference has
-// no reader or writer here.
+// Users sign in through `api/session.ts`; the server checks permissions
+// only where a route requires them, and no response carries a
+// credential. The stored User theme preference has no reader or writer
+// here.
 //
 // Wire responses are the backend's snake_case schema; this module maps
 // them to the camelCase application type. The server canonicalizes the
@@ -18,6 +19,18 @@
 
 import { apiRequest, apiUpload } from './client';
 
+/** How a User can sign in — shown to user administrators only. */
+export const SIGN_IN_STATES = [
+  'NO_PASSWORD',
+  'TEMPORARY_PASSWORD',
+  'PASSWORD_SET',
+  'LOCKED',
+] as const;
+
+export type SignInState = (typeof SIGN_IN_STATES)[number];
+
+const KNOWN_SIGN_IN_STATES: ReadonlySet<string> = new Set(SIGN_IN_STATES);
+
 export interface User {
   id: number;
   /** Stored canonical login name (trimmed, lowercase). */
@@ -28,6 +41,9 @@ export interface User {
   isActive: boolean;
   /** Avatar cache version (ISO 8601); null when there is no avatar. */
   avatarUpdatedAt: string | null;
+  /** Present only when the signed-in caller may manage users and roles
+   * (the server omits it for everyone else). */
+  signInState?: SignInState;
 }
 
 interface UserWire {
@@ -40,6 +56,15 @@ interface UserWire {
   avatar_updated_at: string | null;
   created_at: string;
   updated_at: string;
+  sign_in_state?: string;
+}
+
+function toSignInState(value: string): SignInState {
+  // An unknown state means this client is out of date — fail loudly.
+  if (!KNOWN_SIGN_IN_STATES.has(value)) {
+    throw new Error(`Unknown sign-in state from the server: ${value}`);
+  }
+  return value as SignInState;
 }
 
 function toUser(wire: UserWire): User {
@@ -51,6 +76,9 @@ function toUser(wire: UserWire): User {
     roleName: wire.role_name,
     isActive: wire.is_active,
     avatarUpdatedAt: wire.avatar_updated_at,
+    ...(wire.sign_in_state !== undefined
+      ? { signInState: toSignInState(wire.sign_in_state) }
+      : {}),
   };
 }
 
@@ -111,6 +139,22 @@ export async function uploadUserAvatar(id: number, image: Blob): Promise<User> {
 export async function removeUserAvatar(id: number): Promise<User> {
   const wire = await apiRequest<UserWire>(`/api/users/${id}/avatar`, {
     method: 'DELETE',
+  });
+  return toUser(wire);
+}
+
+/**
+ * Give a User a new temporary password (user administrators only, never
+ * the signed-in User's own): every sign-in of that User ends and a lock
+ * on the account is cleared.
+ */
+export async function setUserPassword(
+  id: number,
+  newPassword: string,
+): Promise<User> {
+  const wire = await apiRequest<UserWire>(`/api/users/${id}/password`, {
+    method: 'PUT',
+    body: { new_password: newPassword },
   });
   return toUser(wire);
 }

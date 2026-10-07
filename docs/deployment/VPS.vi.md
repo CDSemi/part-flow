@@ -83,7 +83,8 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
 5. Start PostgreSQL ở private.
 6. Restore seed data đã duyệt hoặc tạo database trống.
 7. Chạy `alembic upgrade head` đúng một lần từ release backend image.
-8. Start backend, frontend và reverse proxy.
+8. Start backend, frontend và reverse proxy. Với database chưa có Administrator,
+   hoàn tất first-run setup (setup token nằm trong backend log) trước khi mở truy cập.
 9. Chạy smoke test và reconciliation qua HTTPS theo runbook.
 10. Bật lịch monitoring/backup rồi chạy backup ngay.
 11. Thực hiện và đo isolated restore trước khi nhận pilot data.

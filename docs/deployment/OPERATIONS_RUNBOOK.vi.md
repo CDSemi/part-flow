@@ -130,7 +130,9 @@ diễn tập.
 3. Stop hoặc block write nếu cần.
 4. Chạy production repository job `alembic upgrade head` rõ ràng đúng một lần.
 5. Lưu migration output và revision mới.
-6. Start/recreate application service ở target release.
+6. Start/recreate application service ở target release. Với database chưa có
+   Administrator, hoàn tất first-run setup (setup token nằm trong backend log)
+   trước khi mở truy cập.
 7. Check health nội bộ và qua HTTPS.
 8. Chạy smoke test authorization, SPA route, `/api`, scan-focus/connectivity và
    designated write/read-back.

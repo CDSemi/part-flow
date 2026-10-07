@@ -28,8 +28,9 @@ import { ADMIN_SECTIONS } from './sections';
 // permissions each one grants (initially Administrator, Manager and
 // Operator with exactly the PROJECT_PROFILE §20 capabilities). The
 // standard table + editor pattern: roles are created and renamed here,
-// never deleted. Configuration only — nothing is hidden or refused by
-// role before users can sign in, and the section says so.
+// never deleted. Permissions are checked only where a route requires
+// them (so far setting passwords and the user sign-in settings), and
+// the section says so.
 //
 // The editor edits the four permission groups only and sends grant /
 // revoke deltas computed over those groups: the correction permissions
@@ -108,9 +109,11 @@ export function RolesSection() {
           </table>
         )}
         <div className="ad-notice">
-          Each user holds one role. Permissions are recorded here and take
-          effect once users can sign in. Correction permissions are set in
-          Policies → Correction permissions. Roles are renamed, never deleted.
+          Each user holds one role. PartFlow checks permissions only for setting
+          passwords and changing user sign-in settings so far; the other
+          permissions are recorded here and are not checked yet. Correction
+          permissions are set in Policies → Correction permissions. Roles are
+          renamed, never deleted.
         </div>
       </>
     );

@@ -21,8 +21,9 @@ owner decisions OD-8, OD-19):
 - Users are never Workers: no foreign key either way, no badge column,
   and a login never resolves as a badge;
 - audit coverage: one row per effective write, none for a no-op or a
-  refusal; and a static proof that only the configuration modules read
-  users, roles or permissions (nothing enforces them before Phase 14).
+  refusal; and a static proof that only the configuration, sign-in and
+  first-run modules and the checked routes read users, roles,
+  credentials or permissions (Phase 14 slice 1 widened it).
 
 The module database is shared and append-only for audit rows, so every
 case creates its own uniquely named roles and users, asserts audit rows
@@ -955,26 +956,43 @@ def test_the_user_theme_preference_has_no_surface(client: TestClient, db_engine:
 
 
 def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
-    """U-8: no foreign key either way, no badge column, no badge resolution."""
+    """U-8: no foreign key either way, no badge column, no badge resolution.
+
+    Phase 14 slice 1 adds the only references to ``users``: the
+    credential, the sign-in sessions and the server-derived
+    ``actor_user_id`` of audit, Machine lifecycle and allocation rows —
+    the allocation's Management actor, never its Worker
+    (``allocated_by_worker_id``)."""
     worker_tables = ("workers", "worker_sessions", "part_movements", "work_order_allocations")
     with db_engine.connect() as connection:
-        links = connection.execute(
-            sa.text(
-                "SELECT conrelid::regclass::text, confrelid::regclass::text FROM pg_constraint"
-                " WHERE contype = 'f' AND ((conrelid = 'users'::regclass"
-                "  AND confrelid::regclass::text = ANY(:tables))"
-                " OR (confrelid = 'users'::regclass AND conrelid::regclass::text = ANY(:tables)))"
-            ),
-            {"tables": list(worker_tables)},
-        ).all()
-        user_references = connection.execute(
-            sa.text(
-                "SELECT conrelid::regclass::text FROM pg_constraint"
-                " WHERE contype = 'f' AND confrelid = 'users'::regclass"
-            )
-        ).all()
-    assert links == []
-    assert user_references == []
+        links = set(
+            connection.execute(
+                sa.text(
+                    "SELECT conname FROM pg_constraint"
+                    " WHERE contype = 'f' AND ((conrelid = 'users'::regclass"
+                    "  AND confrelid::regclass::text = ANY(:tables))"
+                    " OR (confrelid = 'users'::regclass"
+                    "  AND conrelid::regclass::text = ANY(:tables)))"
+                ),
+                {"tables": list(worker_tables)},
+            ).scalars()
+        )
+        user_references = set(
+            connection.execute(
+                sa.text(
+                    "SELECT conname FROM pg_constraint"
+                    " WHERE contype = 'f' AND confrelid = 'users'::regclass"
+                )
+            ).scalars()
+        )
+    assert links == {"fk_work_order_allocations_actor_user_id_users"}
+    assert user_references == {
+        "fk_user_credentials_user_id_users",
+        "fk_user_sessions_user_id_users",
+        "fk_audit_events_actor_user_id_users",
+        "fk_machine_lifecycle_events_actor_user_id_users",
+        "fk_work_order_allocations_actor_user_id_users",
+    }
     assert "badge_barcode" not in {
         str(column["name"]) for column in sa.inspect(db_engine).get_columns("users")
     }
@@ -1066,7 +1084,9 @@ def test_every_effective_write_appends_exactly_one_audit_row(
 
 
 def test_every_public_mutator_is_audited() -> None:
-    """U-10: no mutator exists beyond the audited ones covered above."""
+    """U-10: no mutator exists beyond the audited ones covered above; the
+    extra public names are non-mutating builders and checks shared with
+    sign-in and first-run setup (Phase 14 slice 1)."""
     public = {
         module.__name__.rsplit(".", 1)[-1]: {
             name
@@ -1088,6 +1108,10 @@ def test_every_public_mutator_is_audited() -> None:
         "get_user_avatar",
         "UserAvatar",
         "UserView",
+        "user_view",
+        "lock_user",
+        "require_role",
+        "reject_duplicate_login",
     }
     assert public["roles"] == {
         "role_snapshot",
@@ -1099,43 +1123,110 @@ def test_every_public_mutator_is_audited() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Isolation: configuration only
+# Isolation: who reads users, roles, permissions and credentials
 # ---------------------------------------------------------------------------
 
-_CONFIGURATION_MODULES = {
+# Definers, not readers: the mapped classes and the permission vocabulary.
+_DEFINERS = {"app/infrastructure/models.py", "app/domain/enums.py"}
+_USER_ROLE_READERS = {
     "app/application/users.py",
     "app/application/roles.py",
+    "app/application/user_access.py",
+    "app/application/authentication.py",
+    "app/application/first_run.py",
     "app/api/users.py",
     "app/api/roles.py",
-    # Defines the mapped classes and builds the permission CHECK.
-    "app/infrastructure/models.py",
 }
-_MODEL_NAMES = {"User", "Role", "RolePermission"}
+_CREDENTIAL_READERS = {
+    "app/application/user_access.py",
+    "app/application/authentication.py",
+    "app/application/first_run.py",
+}
+_PERMISSION_READERS = _USER_ROLE_READERS | {
+    "app/api/authorization.py",
+    "app/api/policies.py",
+    "app/api/session.py",
+    "app/api/setup.py",
+}
 
 
-def _reads_users_or_roles(tree: ast.Module) -> bool:
+def _trees() -> dict[str, ast.Module]:
+    return {
+        path.relative_to(_BACKEND_DIR).as_posix(): ast.parse(path.read_text(encoding="utf-8"))
+        for path in sorted(_APP_DIR.rglob("*.py"))
+    }
+
+
+def _reads(tree: ast.Module, module: str, names: set[str]) -> bool:
+    """An ``ImportFrom`` of one of ``names`` from ``module``, or any
+    attribute access to one of them (S12's detector shape)."""
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            names = {alias.name for alias in node.names}
-            if node.module == "app.infrastructure.models" and names & _MODEL_NAMES:
+            if node.module == module and {alias.name for alias in node.names} & names:
                 return True
-            if node.module == "app.domain.enums" and "Permission" in names:
-                return True
-        elif isinstance(node, ast.Attribute) and node.attr in _MODEL_NAMES | {"Permission"}:
+        elif isinstance(node, ast.Attribute) and node.attr in names:
             return True
     return False
 
 
-def test_only_the_configuration_modules_read_users_roles_or_permissions() -> None:
-    """U-11: nothing outside the configuration modules reads a User, a
-    role or a permission — so nothing allows or refuses an action by them
-    before Phase 14."""
-    flagged = {
-        path.relative_to(_BACKEND_DIR).as_posix()
-        for path in sorted(_APP_DIR.rglob("*.py"))
-        if _reads_users_or_roles(ast.parse(path.read_text(encoding="utf-8")))
+def _imported_application_modules(tree: ast.Module) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "app.application":
+                modules |= {alias.name for alias in node.names}
+            elif node.module.startswith("app.application."):
+                modules.add(node.module.removeprefix("app.application.").split(".")[0])
+        elif isinstance(node, ast.Import):
+            modules |= {
+                alias.name.removeprefix("app.application.").split(".")[0]
+                for alias in node.names
+                if alias.name.startswith("app.application.")
+            }
+    return modules
+
+
+def _flagged(module: str, names: set[str]) -> set[str]:
+    return {
+        path
+        for path, tree in _trees().items()
+        if path not in _DEFINERS and _reads(tree, module, names)
     }
-    assert flagged <= _CONFIGURATION_MODULES
-    assert {"app/application/users.py", "app/application/roles.py"} <= flagged
-    for owner in _CONFIGURATION_MODULES:
-        assert (_BACKEND_DIR / owner).is_file()
+
+
+def test_only_the_sign_in_and_configuration_modules_read_users_roles_or_permissions() -> None:
+    """B-STATIC (replaces S12 U-11): Users, roles, grants, credentials,
+    sessions and permission keys are read only where sign-in, first-run
+    setup, the checked routes and the configuration live. Each "⊆" is
+    paired with required members, so the rule cannot pass vacuously."""
+    models = "app.infrastructure.models"
+    users_roles = _flagged(models, {"User", "Role", "RolePermission"})
+    assert users_roles <= _USER_ROLE_READERS
+    assert {
+        "app/application/users.py",
+        "app/application/roles.py",
+        "app/application/user_access.py",
+    } <= users_roles
+    credentials = _flagged(models, {"UserCredential", "UserSession"})
+    assert credentials <= _CREDENTIAL_READERS
+    assert {"app/application/user_access.py", "app/application/authentication.py"} <= credentials
+    permissions = _flagged("app.domain.enums", {"Permission"})
+    assert permissions <= _PERMISSION_READERS
+    assert {
+        "app/application/roles.py",
+        "app/api/roles.py",
+        "app/api/authorization.py",
+    } <= permissions
+    for owner in _PERMISSION_READERS | _DEFINERS:
+        assert (_BACKEND_DIR / owner).is_file(), owner
+
+
+def test_password_hashing_and_the_sign_in_import_graph() -> None:
+    """B-STATIC: who may hash, and an acyclic users / sign-in graph."""
+    imports = {path: _imported_application_modules(tree) for path, tree in _trees().items()}
+    hashing = {path for path, modules in imports.items() if "password_hashing" in modules}
+    assert hashing <= {"app/application/authentication.py", "app/application/first_run.py"}
+    assert "app/application/authentication.py" in hashing
+    assert not {"users", "authentication"} & imports["app/application/user_access.py"]
+    assert not {"authentication", "first_run"} & imports["app/application/users.py"]
+    assert "first_run" not in imports["app/application/authentication.py"]

@@ -35,6 +35,7 @@ def append_audit_event(
     before_data: dict[str, Any] | None,
     after_data: dict[str, Any] | None,
     actor_reference: str | None = None,
+    actor_user_id: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Stage one audit row in the caller's open transaction.
@@ -42,8 +43,10 @@ def append_audit_event(
     ``before_data`` is NULL for creation events; edits append a new
     ``UPDATED`` row and never rewrite prior rows (the append-only
     trigger owned by migration 0004 enforces this in PostgreSQL).
-    ``actor_reference`` stays a nullable, reference-free value until
-    authentication exists (Phase 14).
+    ``actor_user_id`` is server-derived from the session principal only,
+    never from a request body. ``actor_reference`` is the legacy text
+    column, kept for history and never backfilled; existing callers keep
+    passing it until their Phase 14 slice converts them.
     """
     session.add(
         AuditEvent(
@@ -51,6 +54,7 @@ def append_audit_event(
             entity_type=entity_type,
             entity_id=entity_id,
             actor_reference=actor_reference,
+            actor_user_id=actor_user_id,
             occurred_at=func.now(),
             before_data=before_data,
             after_data=after_data,

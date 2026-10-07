@@ -31,7 +31,8 @@ Session runtime (`worker_sessions`, `part_movements.scan_session_id`)
 and the global policy singleton (`application_policy`,
 `areas.worker_session_timeout_minutes`); plus the Phase 13 users, roles
 and permissions configuration (`roles`, `role_permissions`, `users` —
-configuration only until Phase 14, never linked to Workers). Business
+users sign in since Phase 14 slice 1 (`user_credentials`,
+`user_sessions`); never linked to Workers). Business
 rules stay
 in the Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
@@ -97,6 +98,7 @@ from app.domain.enums import (
     RequestType,
     RouteMode,
     ThemePreference,
+    UserSessionEndReason,
     WorkerIdentificationMode,
     WorkerSessionEndReason,
 )
@@ -378,6 +380,31 @@ USER_LOGIN_NAME_SQL = """login_name COLLATE "C" ~ '^[a-z0-9._@+-]{1,128}$'"""
 USER_THEME_PREFERENCE_SQL = (
     "theme_preference IN (" + ", ".join(f"'{theme}'" for theme in ThemePreference) + ")"
 )
+
+# User sign-in (Phase 14 slice 1; owner decisions OD-P1–OD-P3): the
+# sign-in policy of Administration → Settings → User sign-in (sign-ins
+# expire after whole days 1-365, or never; a lock after 3-100 failed
+# sign-ins for 1-1440 minutes; whether an administrator-set password must
+# be replaced), the credential hash format (`scrypt$N$r$p$salt$key`, the
+# parameters carried by the value), and the User session rows (only the
+# SHA-256 digest of the opaque token is stored; an end time exactly with
+# an end reason). Repeated verbatim by migration `0029_phase14_sign_in`.
+USER_SESSION_DAYS_MIN = 1
+USER_SESSION_DAYS_MAX = 365
+SIGN_IN_LOCKOUT_ATTEMPTS_MIN = 3
+SIGN_IN_LOCKOUT_ATTEMPTS_MAX = 100
+SIGN_IN_LOCKOUT_MINUTES_MIN = 1
+SIGN_IN_LOCKOUT_MINUTES_MAX = 1440
+POLICY_USER_SESSION_DAYS_SQL = "user_session_days BETWEEN 1 AND 365"
+POLICY_SIGN_IN_LOCKOUT_ATTEMPTS_SQL = "sign_in_lockout_attempts BETWEEN 3 AND 100"
+POLICY_SIGN_IN_LOCKOUT_MINUTES_SQL = "sign_in_lockout_minutes BETWEEN 1 AND 1440"
+USER_CREDENTIAL_HASH_FORMAT_SQL = "password_hash LIKE 'scrypt$%'"
+USER_CREDENTIAL_FAILED_ATTEMPTS_SQL = "failed_attempts >= 0"
+USER_SESSION_TOKEN_DIGEST_SQL = "octet_length(token_digest) = 32"
+USER_SESSION_END_REASON_SQL = (
+    "end_reason IN (" + ", ".join(f"'{reason}'" for reason in UserSessionEndReason) + ")"
+)
+USER_SESSION_END_SHAPE_SQL = "(ended_at IS NULL) = (end_reason IS NULL)"
 
 # Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
 # closed end-reason vocabulary, an end time exactly with an end reason,
@@ -845,10 +872,14 @@ class MachineLifecycleEvent(Base):
     `audit_events` mechanism and never a generic audit framework.
     Events are immutable (raise-on-write trigger owned by the
     migration) and commit atomically with the lifecycle change they
-    record. `actor` stays a nullable, reference-free value: Machine
-    lifecycle is a Management action, future authenticated actor
-    linkage belongs to Users/authentication (Phase 14), and Workers are
-    never associated with these events. Machine configuration writes are
+    record. Machine lifecycle is a Management action and Workers are
+    never associated with these events. `actor_user_id` is the
+    signed-in User, derived by the server from the session, never from
+    a request body (Phase 14; written only by the slice 1 password and
+    sign-in-policy commands so far). The legacy text column (`actor`) is
+    kept for history and never backfilled; existing writers keep writing
+    it until their slice converts them (the Machine retire/reactivate
+    request-body `actor` until slice 3 removes it). Machine configuration writes are
     audited in `audit_events` (Phase 13); lifecycle transitions are
     recorded only here.
     """
@@ -864,6 +895,9 @@ class MachineLifecycleEvent(Base):
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     actor: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_machine_lifecycle_events_actor_user_id_users")
+    )
     reason: Mapped[str | None] = mapped_column(Text)
     before_state: Mapped[str] = mapped_column(Text, nullable=False)
     after_state: Mapped[str] = mapped_column(Text, nullable=False)
@@ -979,6 +1013,13 @@ class ApplicationPolicy(Base):
     Slice 11 adds the Movement-history retention period of
     Administration → History archival & purge (stored only; executed in
     Phase 16).
+
+    Phase 14 slice 1 adds the user sign-in policy of Administration →
+    Settings → User sign-in (owner decisions OD-P1–OD-P3): whether
+    sign-ins expire and after how many days, the failed sign-ins before
+    a lock and the lock duration, and whether an administrator-set
+    password must be replaced at the next sign-in. Read on every
+    request, so a change applies to open sign-ins at once.
     """
 
     __tablename__ = "application_policy"
@@ -1012,6 +1053,23 @@ class ApplicationPolicy(Base):
     # months; NULL = no retention period. Configuration for the Phase 16
     # archival maintenance — never read by production workflow logic.
     retention_period_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # User sign-in (Phase 14 slice 1): an expiry absolute from sign-in,
+    # whole days, unless sign-ins never expire (the day count is kept
+    # while switched off); the lockout threshold and duration; and the
+    # forced replacement of an administrator-set password.
+    user_session_expires: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    user_session_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("30")
+    )
+    sign_in_lockout_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("10")
+    )
+    sign_in_lockout_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("15")
+    )
+    require_password_change: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1021,6 +1079,18 @@ class ApplicationPolicy(Base):
 
     __table_args__ = (
         CheckConstraint("id = 1", name=conv("ck_application_policy_singleton")),
+        CheckConstraint(
+            POLICY_USER_SESSION_DAYS_SQL,
+            name=conv("ck_application_policy_user_session_days_range"),
+        ),
+        CheckConstraint(
+            POLICY_SIGN_IN_LOCKOUT_ATTEMPTS_SQL,
+            name=conv("ck_application_policy_sign_in_lockout_attempts_range"),
+        ),
+        CheckConstraint(
+            POLICY_SIGN_IN_LOCKOUT_MINUTES_SQL,
+            name=conv("ck_application_policy_sign_in_lockout_minutes_range"),
+        ),
         CheckConstraint(
             POLICY_WORKER_SESSION_TIMEOUT_SQL,
             name=conv("ck_application_policy_worker_session_timeout_range"),
@@ -1056,8 +1126,9 @@ class Role(Base):
     exactly the grants §20 states, as initial grants; afterwards every
     row is ordinary editable configuration — no behavior is keyed to a
     role name. Names are unique (case-sensitive, trimmed). Roles are
-    renamed, never deleted or deactivated. Configuration only: nothing
-    reads a role to allow or refuse an action until Phase 14.
+    renamed, never deleted or deactivated. Its permissions are read for
+    the signed-in User and checked only where a route requires them
+    (Phase 14 slice 1: setting passwords and the user sign-in settings).
     """
 
     __tablename__ = "roles"
@@ -1101,9 +1172,10 @@ class User(Base):
 
     An application account for Management, Administration and the other
     non-Scan-Station views (PROJECT_PROFILE §7) — never a Worker, never
-    merged with one, and no link to the Worker registry. Configuration
-    only in Phase 13: no credential, no sign-in, nothing reads it to
-    allow or refuse an action (Phase 14). The login name is the
+    merged with one, and no link to the Worker registry. Signs in with a
+    password held in `user_credentials` (never on this row) since Phase
+    14 slice 1; its role's permissions are checked only where a route
+    requires them. The login name is the
     account's unique canonical name (trimmed, lowercase ASCII); each
     User holds exactly one role; Users are deactivated, never deleted.
     The optional avatar is stored on the row (CD1) with the Worker
@@ -1156,6 +1228,95 @@ class User(Base):
             name=conv("ck_users_avatar_image_size"),
         ),
         CheckConstraint(USER_THEME_PREFERENCE_SQL, name=conv("ck_users_theme_preference")),
+    )
+
+
+class UserCredential(Base):
+    """The password of one User (Phase 14 slice 1; owner decision OD-P1).
+
+    One row per User (the primary key is the User's id); no row = the User
+    has no password yet and cannot sign in. Credentials never live on
+    `users` and never appear in an audit row or a response. The hash
+    string carries its own scrypt parameters (`scrypt$N$r$p$salt$key`),
+    so a parameter change needs no column. `password_is_temporary` marks
+    a password set by an administrator or the recovery command and not
+    yet replaced by the User; whether that forces a change is the current
+    sign-in policy's `require_password_change`, evaluated per request.
+    The failure counter and the lock are per credential and cleared by
+    every password set.
+    """
+
+    __tablename__ = "user_credentials"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_user_credentials_user_id_users"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    password_is_temporary: Mapped[bool] = mapped_column(nullable=False)
+    password_changed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    locked_until: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            USER_CREDENTIAL_HASH_FORMAT_SQL, name=conv("ck_user_credentials_password_hash_format")
+        ),
+        CheckConstraint(
+            USER_CREDENTIAL_FAILED_ATTEMPTS_SQL,
+            name=conv("ck_user_credentials_failed_attempts_non_negative"),
+        ),
+    )
+
+
+class UserSession(Base):
+    """One sign-in of a User in one browser (Phase 14 slice 1).
+
+    Server-side session: the browser holds an opaque random token in an
+    HttpOnly cookie; only its SHA-256 digest is stored, so a database
+    read never yields a usable cookie. No expiry column: a session
+    expires at `created_at` plus the CURRENT sign-in policy (never, when
+    sign-ins do not expire), so an administrator shortening the expiry
+    ends long sessions at once. `ended_at` / `end_reason` record when
+    PartFlow closed the row and why (sign-out, replacement, password
+    change or reset, deactivation) — expiry is never recorded. Rows are
+    never deleted at runtime; ended rows are history. User sessions are
+    never Worker Sessions (`worker_sessions`, PROJECT_PROFILE §7).
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_user_sessions_user_id_users"), nullable=False
+    )
+    token_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    end_reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_user_sessions_token_digest"),
+        CheckConstraint(
+            USER_SESSION_TOKEN_DIGEST_SQL, name=conv("ck_user_sessions_token_digest_length")
+        ),
+        CheckConstraint(USER_SESSION_END_REASON_SQL, name=conv("ck_user_sessions_end_reason")),
+        CheckConstraint(USER_SESSION_END_SHAPE_SQL, name=conv("ck_user_sessions_end_shape")),
+        # Serves "end every open session of this User".
+        Index(
+            "ix_user_sessions_user_id_open",
+            "user_id",
+            postgresql_where=text("ended_at IS NULL"),
+        ),
     )
 
 
@@ -1818,8 +1979,12 @@ class WorkOrderAllocation(Base):
     rows under one id, replayed as a whole on a transport retry.
     `station_id` names the Stockroom Scan Station of a receiving
     confirmation (NULL for a Management allocation or adjustment);
-    `actor_reference` stays a nullable, reference-free value until
-    authentication exists (Phase 14); `allocated_by_worker_id` (Phase 13)
+    `actor_user_id` is the signed-in User, derived by the server from
+    the session, never from a request body (Phase 14; written only by
+    the slice 1 password and sign-in-policy commands so far). The legacy
+    text column (`actor_reference`) is kept for history and never
+    backfilled; existing writers keep writing it until their slice
+    converts them; `allocated_by_worker_id` (Phase 13)
     is the Worker identified at the Stockroom station; NULL for
     Management rows.
     """
@@ -1857,6 +2022,9 @@ class WorkOrderAllocation(Base):
         ),
     )
     actor_reference: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_work_order_allocations_actor_user_id_users")
+    )
     # The Worker the Stockroom station's Area mode identified (Phase 13
     # slice 3, PROJECT_PROFILE §8.12): recorded only with a station (CHECK).
     allocated_by_worker_id: Mapped[int | None] = mapped_column(
@@ -1938,13 +2106,17 @@ class AuditEvent(Base):
     stable Station ID for ScanStation, `"1"` for the singleton
     MachineAssetTagConfig and the Administration section
     (`worker-sessions`, `correction-permissions`, `due-soon`,
-    `data-retention`) for ApplicationPolicy;
+    `data-retention`, `sign-in`) for ApplicationPolicy;
     integrity is guaranteed by writing the audit row in
     the same transaction as the audited change (an Application-layer
-    transaction protocol, Phase 4 workflows). `actor_reference` stays a
-    nullable, reference-free value until authentication exists
-    (Phase 14). Append-only enforcement is the raise-on-write trigger
-    owned by the Phase 4 migration.
+    transaction protocol, Phase 4 workflows). `actor_user_id` is the
+    signed-in User, derived by the server from the session, never from
+    a request body (Phase 14; written only by the slice 1 password and
+    sign-in-policy commands so far). The legacy text column
+    (`actor_reference`) is kept for history and never backfilled;
+    existing writers keep writing it until their slice converts them.
+    Append-only enforcement is the raise-on-write trigger owned by the
+    Phase 4 migration.
     """
 
     __tablename__ = "audit_events"
@@ -1954,6 +2126,9 @@ class AuditEvent(Base):
     entity_type: Mapped[str] = mapped_column(Text, nullable=False)
     entity_id: Mapped[str] = mapped_column(Text, nullable=False)
     actor_reference: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_audit_events_actor_user_id_users")
+    )
     occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # jsonb snapshots of the audited fields; before_data is NULL for
     # creation events. Edits append a new UPDATED row — prior rows are

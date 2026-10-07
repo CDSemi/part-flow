@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from app.api.allocations import router as allocations_router
 from app.api.area_board import router as area_board_router
+from app.api.csrf import CsrfMiddleware, NoStoreMiddleware
 from app.api.environment import router as environment_router
 from app.api.errors import register_exception_handlers
 from app.api.health import router as health_router
@@ -20,10 +21,13 @@ from app.api.production_release import router as production_release_router
 from app.api.roles import router as roles_router
 from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
+from app.api.session import router as session_router
+from app.api.setup import router as setup_router
 from app.api.tracking import router as tracking_router
 from app.api.users import router as users_router
 from app.api.work_orders import router as work_orders_router
 from app.api.workers import router as workers_router
+from app.application import first_run
 from app.core.config import get_settings
 from app.infrastructure.database import build_engine
 
@@ -36,6 +40,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # DATABASE_URL aborts startup here instead of failing per-request.
     settings = get_settings()
     app.state.engine = build_engine(settings.database_url)
+    # Phase 14 slice 1: while no administrator exists, print the
+    # first-run setup token once (never fails startup).
+    first_run.announce_if_open(app.state.engine, app.state.setup_gate)
     try:
         yield
     finally:
@@ -44,7 +51,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="PartFlow API", lifespan=lifespan)
+    # One first-run setup token per process (in memory only).
+    app.state.setup_gate = first_run.SetupGate()
+    # Transport rules of the User session cookie (app.api.csrf).
+    app.add_middleware(CsrfMiddleware)
+    app.add_middleware(NoStoreMiddleware)
     app.include_router(health_router)
+    app.include_router(session_router)
+    app.include_router(setup_router)
     app.include_router(environment_router)
     app.include_router(workers_router)
     app.include_router(users_router)

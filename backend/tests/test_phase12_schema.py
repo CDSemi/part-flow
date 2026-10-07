@@ -22,7 +22,8 @@ Phase 12 — Priority Management; PROJECT_PROFILE §21; invariant H1):
 This module is pinned to `0013_phase12_priority` (Phase 13 added the
 Workers migration 0014): every assertion documents the Phase 12
 boundary as it shipped, and the head-level coverage (models↔schema
-parity at head) lives in `test_phase13_schema.py`.
+parity at head) lives in the current head phase's schema test
+(`test_phase14_schema.py` since Phase 14 slice 1).
 """
 
 import os

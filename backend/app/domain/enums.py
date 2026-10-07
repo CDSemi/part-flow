@@ -357,7 +357,7 @@ class Permission(StrEnum):
     """One key per capability PROJECT_PROFILE §20 lists (Phase 13 slice 12,
     owner decision OD-8).
 
-    Configuration only until Phase 14 enforces it. Keys are stable
+    Enforced route by route from Phase 14 slice 1. Keys are stable
     identifiers: a later capability is added (CHECK widening), never
     renamed. The correction permissions — UNDO_RECENT_SCANS,
     PERFORM_QUANTITY_CORRECTIONS, EDIT_WORK_ORDER_ALLOCATION,
@@ -407,3 +407,37 @@ class Permission(StrEnum):
     PERFORM_QUANTITY_CORRECTIONS = "PERFORM_QUANTITY_CORRECTIONS"
     EDIT_WORK_ORDER_ALLOCATION = "EDIT_WORK_ORDER_ALLOCATION"
     PERFORM_HISTORICAL_CORRECTIONS = "PERFORM_HISTORICAL_CORRECTIONS"
+
+
+class UserSessionEndReason(StrEnum):
+    """Why a User sign-in session ended (Phase 14 slice 1).
+
+    SIGNED_OUT — the User signed out; REPLACED — a new sign-in in the same
+    browser; PASSWORD_CHANGED — the User changed the password (every other
+    session of the User); PASSWORD_RESET — an administrator or the recovery
+    command set the password; USER_DEACTIVATED — the User was deactivated.
+    Expiry is never recorded: it is derived from the current sign-in policy.
+    User sessions are never Worker Sessions (PROJECT_PROFILE §7).
+    """
+
+    SIGNED_OUT = "SIGNED_OUT"
+    REPLACED = "REPLACED"
+    PASSWORD_CHANGED = "PASSWORD_CHANGED"
+    PASSWORD_RESET = "PASSWORD_RESET"
+    USER_DEACTIVATED = "USER_DEACTIVATED"
+
+
+class SignInState(StrEnum):
+    """How a User's credential presents to administrators (Phase 14 slice 1).
+
+    Derived from the credential row on every read, never stored:
+    NO_PASSWORD — no credential yet; TEMPORARY_PASSWORD — set by an
+    administrator or the recovery command and not yet replaced by the User;
+    PASSWORD_SET — chosen by the User; LOCKED — locked after too many failed
+    sign-ins, until the lock expires or a password is set.
+    """
+
+    NO_PASSWORD = "NO_PASSWORD"
+    TEMPORARY_PASSWORD = "TEMPORARY_PASSWORD"
+    PASSWORD_SET = "PASSWORD_SET"
+    LOCKED = "LOCKED"

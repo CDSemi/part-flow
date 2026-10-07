@@ -14,8 +14,8 @@ PROJECT_PROFILE §7, §8.1, §8.4, §8.8–§8.11, §8.12, §8.13, §10, §16,
 §19, §21, §28; GUI_DESIGN §2.1; owner decisions OD-2, OD-3, OD-5, OD-6,
 OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
 
-- exact head boundary: `0028_phase13_users_roles` is the single
-  head;
+- exact Phase 13 boundary: every migration run stops at
+  `0028_phase13_users_roles`, the last Phase 13 revision;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
   (`areas.fixed_worker_id`, `part_movements.worker_id`,
@@ -43,8 +43,6 @@ OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
   collation, so it admits a PN the OS libc case tables would uppercase
   (`ɤ`) and still refuses ASCII lowercase, ASCII whitespace and the
   empty string;
-- models↔migration metadata parity at head (moved here from the
-  Phase 12 schema test, which is now pinned to 0013);
 - clean downgrade back to the Phase 12 boundary with a successful
   re-upgrade, and the refusing downgrade while Worker configuration or
   Worker audit history exists (never deleted); the 0015 downgrade
@@ -125,10 +123,9 @@ OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
   ORM round-trips a User; the downgrade restores the 0027 boundary and
   refuses while a user or a `User` / `Role` audit row exists.
 
-Phase 13 is the current head, so this module carries the head-level
-coverage. When a later phase adds its migration, pin this module to the
-last Phase 13 revision and move the head-level coverage into that
-phase's schema test.
+Pinned to the last Phase 13 revision since Phase 14 slice 1 added
+`0029_phase14_sign_in`; the head-level coverage lives in
+`test_phase14_schema.py`.
 """
 
 import datetime
@@ -144,7 +141,6 @@ from typing import cast
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
@@ -253,9 +249,9 @@ def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _HEAD_REVISION)
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _HEAD_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -308,14 +304,9 @@ def _refused_by(connection: Connection, constraint: str, statement: Callable[[],
 # ---------------------------------------------------------------------------
 
 
-def test_head_is_the_phase13_revision(migrated_engine: Engine) -> None:
+def test_migrated_engine_is_the_last_phase13_revision(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
         assert _version(connection) == _HEAD_REVISION
-
-
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
 
 
 def test_workers_table_shape(migrated_engine: Engine) -> None:
@@ -653,16 +644,6 @@ def test_each_pn_table_check_evaluates_the_canonical_rule(
 # ---------------------------------------------------------------------------
 
 
-def test_models_metadata_matches_the_migrated_schema(migrated_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with migrated_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 def _audit_checks(engine: Engine) -> dict[str, str]:
     return {
         str(check["name"]): str(check["sqltext"])
@@ -676,7 +657,7 @@ def test_downgrade_restores_the_phase12_boundary(admin_engine: Engine) -> None:
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _PHASE12_REVISION)
         engine = create_engine(url)
         try:
@@ -693,7 +674,7 @@ def test_downgrade_restores_the_phase12_boundary(admin_engine: Engine) -> None:
                 assert _version(connection) == _PHASE12_REVISION
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             assert "workers" in inspect(engine).get_table_names()
@@ -712,7 +693,7 @@ def test_downgrade_to_badge_check_revision_restores_the_s1_vocabulary(
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _BADGE_CHECK_REVISION)
         engine = create_engine(url)
         try:
@@ -724,7 +705,7 @@ def test_downgrade_to_badge_check_revision_restores_the_s1_vocabulary(
                 assert _version(connection) == _BADGE_CHECK_REVISION
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.connect() as connection:
@@ -741,7 +722,7 @@ def refused_database(admin_engine: Engine) -> Iterator[URL]:
     name = "partflow_test_phase13_downgrade_refused"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
-    command.upgrade(_alembic_config(url), "head")
+    command.upgrade(_alembic_config(url), _HEAD_REVISION)
     yield url
     _drop_temp_database(admin_engine, name)
 
@@ -800,7 +781,7 @@ def test_badge_check_downgrade_restores_the_libc_check(refused_database: URL) ->
                 lambda: _insert_worker(connection, _LIBC_UPPERCASED_BADGE),
             )
             connection.rollback()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         with engine.begin() as connection:
             _insert_worker(connection, _LIBC_UPPERCASED_BADGE)
             assert _version(connection) == _HEAD_REVISION
@@ -845,7 +826,7 @@ def test_downgrade_to_environment_audit_revision_drops_machine(admin_engine: Eng
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _ENVIRONMENT_AUDIT_REVISION)
         engine = create_engine(url)
         try:
@@ -859,7 +840,7 @@ def test_downgrade_to_environment_audit_revision_drops_machine(admin_engine: Eng
                 assert _version(connection) == _ENVIRONMENT_AUDIT_REVISION
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.connect() as connection:
@@ -903,7 +884,7 @@ def test_pn_check_downgrade_restores_the_libc_check(refused_database: URL) -> No
                 lambda: _insert_part_number(connection, _LIBC_UPPERCASED_PN),
             )
             connection.rollback()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         with engine.begin() as connection:
             _insert_part_number(connection, _LIBC_UPPERCASED_PN)
             assert _version(connection) == _HEAD_REVISION
@@ -1057,7 +1038,7 @@ def test_upgrade_leaves_existing_rows_without_identity(admin_engine: Engine) -> 
             with engine.begin() as connection:
                 seeded = _seed_production(connection)
                 before = _table_counts(connection)
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.begin() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _table_counts(connection) == before
@@ -1145,7 +1126,7 @@ def test_downgrade_to_pn_check_revision_restores_the_boundary(admin_engine: Engi
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _PN_CHECK_REVISION)
         engine = create_engine(url)
         try:
@@ -1163,7 +1144,7 @@ def test_downgrade_to_pn_check_revision_restores_the_boundary(admin_engine: Engi
                 assert _version(connection) == _PN_CHECK_REVISION
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.connect() as connection:
@@ -1667,7 +1648,7 @@ def test_downgrade_to_worker_identity_revision_restores_the_boundary(
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _WORKER_IDENTITY_REVISION)
         engine = create_engine(url)
         try:
@@ -1701,7 +1682,7 @@ def test_downgrade_to_worker_identity_revision_restores_the_boundary(
             assert leftovers == 0
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.connect() as connection:
@@ -1822,7 +1803,7 @@ def test_upgrade_preserves_existing_rows_without_sessions(admin_engine: Engine) 
                 movements = _rows(connection, "part_movements")
                 areas = _rows(connection, "areas")
                 before = _table_counts(connection)
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.begin() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _table_counts(connection) == before
@@ -1912,7 +1893,7 @@ def test_downgrade_to_worker_sessions_revision_drops_the_options(admin_engine: E
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _WORKER_SESSIONS_REVISION)
         engine = create_engine(url)
         try:
@@ -1924,7 +1905,7 @@ def test_downgrade_to_worker_sessions_revision_drops_the_options(admin_engine: E
                 assert _version(connection) == _WORKER_SESSIONS_REVISION
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.connect() as connection:
@@ -2022,7 +2003,7 @@ def test_upgrade_keeps_the_policy_and_its_audit_rows(admin_engine: Engine) -> No
                     },
                 )
                 audits = _rows(connection, "audit_events")
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _policy_row(connection) == (1, 30, True, True, True)
@@ -2107,7 +2088,7 @@ def test_downgrade_to_badge_confirmation_revision_drops_the_column(admin_engine:
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         command.downgrade(config, _BADGE_CONFIRMATION_REVISION)
         engine = create_engine(url)
         try:
@@ -2119,7 +2100,7 @@ def test_downgrade_to_badge_confirmation_revision_drops_the_column(admin_engine:
                 assert _version(connection) == _BADGE_CONFIRMATION_REVISION
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.connect() as connection:
@@ -2212,7 +2193,7 @@ def test_upgrade_keeps_the_policy_audit_and_reversal_rows(admin_engine: Engine) 
                 _insert_reversal_with_reason(connection, _seed_production(connection))
                 audits = _rows(connection, "audit_events")
                 movements = _rows(connection, "part_movements")
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _policy_row(connection) == (1, 30, True, True, False)
@@ -2386,7 +2367,7 @@ def test_upgrade_keeps_existing_masters_and_their_audit_rows(admin_engine: Engin
                     )
                 masters = _part_number_rows(connection)
                 audits = _rows(connection, "audit_events")
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _part_number_rows(connection) == [
@@ -2407,7 +2388,7 @@ def test_downgrade_to_undo_reason_revision_drops_the_details(admin_engine: Engin
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.begin() as connection:
@@ -2436,7 +2417,7 @@ def test_downgrade_to_undo_reason_revision_drops_the_details(admin_engine: Engin
                     sa.text("SELECT count(*) FROM audit_events WHERE entity_id = 'PN-GONE'")
                 ).scalar_one()
             assert deleted == 2
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
         finally:
@@ -2629,7 +2610,7 @@ def test_upgrade_keeps_routes_snapshots_and_audit_rows(admin_engine: Engine) -> 
             with engine.begin() as connection:
                 _seed_routes(connection)
                 before = _route_rows(connection)
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 after = _route_rows(connection)
@@ -2655,7 +2636,7 @@ def test_downgrade_to_part_number_master_revision_restores_the_boundary(
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.begin() as connection:
@@ -2673,7 +2654,7 @@ def test_downgrade_to_part_number_master_revision_restores_the_boundary(
                 assert _version(connection) == _PART_NUMBER_MASTER_REVISION
                 assert len(_rows(connection, "route_steps")) == 2
                 assert len(_rows(connection, "assigned_route_steps")) == 2
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
         finally:
@@ -2989,7 +2970,7 @@ def test_downgrade_to_planned_routes_revision_drops_the_settings(admin_engine: E
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.begin() as connection:
@@ -3013,7 +2994,7 @@ def test_downgrade_to_planned_routes_revision_drops_the_settings(admin_engine: E
                     sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'Department'")
                 ).scalar_one()
                 assert kept == 2
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _department_settings(connection) == [("Kept", 3, 6)]
@@ -3141,7 +3122,7 @@ def test_upgrade_gives_departments_and_the_policy_their_defaults(admin_engine: E
                 )
                 audits = _rows(connection, "audit_events")
                 departments = _rows(connection, "departments")
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _rows(connection, "departments") == [
@@ -3279,7 +3260,7 @@ def test_downgrade_to_display_settings_revision_drops_the_theme_column(
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.begin() as connection:
@@ -3296,7 +3277,7 @@ def test_downgrade_to_display_settings_revision_drops_the_theme_column(
                 assert _version(connection) == _DISPLAY_SETTINGS_REVISION
                 kept = connection.execute(sa.text("SELECT station_id FROM scan_stations"))
                 assert kept.scalar_one() == "KEPT-1"
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _station_themes(connection) == [("KEPT-1", None)]
@@ -3342,7 +3323,7 @@ def test_upgrade_keeps_existing_stations_without_preference(admin_engine: Engine
                     "UPDATE scan_stations SET is_active = false WHERE station_id = 'OLD-2'",
                 )
                 stations = _station_rows(connection)
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _station_rows(connection) == [
@@ -3461,7 +3442,7 @@ def test_downgrade_to_station_theme_revision_drops_the_retention_period(
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.begin() as connection:
@@ -3479,7 +3460,7 @@ def test_downgrade_to_station_theme_revision_drops_the_retention_period(
                 # Catches a doubly-prefixed name left behind by the drop.
                 assert _policy_check_names(connection, "retention_period_range") == []
                 assert _policy_row(connection) == (1, 30, True, True, True)
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _retention_period(connection) is None
@@ -3544,7 +3525,7 @@ def test_upgrade_leaves_the_policy_without_a_retention_period(admin_engine: Engi
                 _insert_policy_audit(connection, "due-soon", {"due_soon_max_days": 9})
                 policy = _rows(connection, "application_policy")
                 audits = _rows(connection, "audit_events")
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _rows(connection, "application_policy") == [
@@ -3943,7 +3924,7 @@ def test_downgrade_to_retention_period_revision_drops_users_and_roles(
     config = _alembic_config(url)
     migration = _load_migration(_USERS_ROLES_MIGRATION_FILE)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _HEAD_REVISION)
         engine = create_engine(url)
         try:
             with engine.begin() as connection:
@@ -3969,7 +3950,7 @@ def test_downgrade_to_retention_period_revision_drops_users_and_roles(
                         )
                     ).scalars()
                 ] == ["ck_audit_events_entity_type"]
-            command.upgrade(config, "head")
+            command.upgrade(config, _HEAD_REVISION)
             with engine.connect() as connection:
                 assert _version(connection) == _HEAD_REVISION
                 assert _seeded_grants(connection) == {

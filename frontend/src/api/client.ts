@@ -10,6 +10,14 @@
 // body labelled with its own media type (no multipart), answered with
 // JSON like every other call.
 //
+// Every request carries `X-PartFlow-CSRF: 1`: the server refuses a
+// state-changing request that carries the user sign-in cookie without
+// it, and no other origin can send it (no CORS grant exists). The
+// browser's default `credentials` (same-origin) send that cookie. One
+// optional listener hears the two refusals that change what the session
+// UI shows — the sign-in has ended, or a new password must be chosen
+// first — before the `ApiError` is thrown as usual.
+//
 // Production-safe: no mock data, no framework imports.
 
 /** One failed API call: HTTP status plus the user-facing message. */
@@ -30,6 +38,45 @@ export class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+/** Marks a request as sent by the PartFlow application. */
+const CSRF_HEADERS: Readonly<Record<string, string>> = {
+  'X-PartFlow-CSRF': '1',
+};
+
+/** The two authentication refusals the session UI reacts to. */
+export type AuthFailureKind =
+  'authentication_required' | 'password_change_required';
+
+let authFailureListener: ((kind: AuthFailureKind) => void) | null = null;
+
+/**
+ * Register (or clear, with null) the one listener told about a 401
+ * `authentication_required` or a 403 `password_change_required`
+ * answer. Every other refusal (a failed sign-in, a missing permission,
+ * a refused request origin) never calls it.
+ */
+export function setAuthFailureListener(
+  listener: ((kind: AuthFailureKind) => void) | null,
+): void {
+  authFailureListener = listener;
+}
+
+/** The authentication refusal a failed answer carries, if any. */
+function authFailureKind(
+  status: number,
+  body: unknown,
+): AuthFailureKind | null {
+  if (!body || typeof body !== 'object') return null;
+  const flags = body as Record<string, unknown>;
+  if (status === 401 && flags.authentication_required === true) {
+    return 'authentication_required';
+  }
+  if (status === 403 && flags.password_change_required === true) {
+    return 'password_change_required';
+  }
+  return null;
 }
 
 /**
@@ -71,8 +118,8 @@ export async function apiRequestWithStatus<T>(
     method: init?.method ?? 'GET',
     headers:
       init?.body !== undefined
-        ? { 'Content-Type': 'application/json' }
-        : undefined,
+        ? { 'Content-Type': 'application/json', ...CSRF_HEADERS }
+        : { ...CSRF_HEADERS },
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
   return readResponse<T>(response);
@@ -90,7 +137,7 @@ export async function apiUpload<T>(
 ): Promise<T> {
   const response = await fetch(path, {
     method,
-    headers: { 'Content-Type': blob.type },
+    headers: { 'Content-Type': blob.type, ...CSRF_HEADERS },
     body: blob,
   });
   return (await readResponse<T>(response)).data;
@@ -115,6 +162,8 @@ async function readResponse<T>(
       body && typeof body === 'object'
         ? (body as { detail?: unknown }).detail
         : undefined;
+    const kind = authFailureKind(response.status, body);
+    if (kind !== null) authFailureListener?.(kind);
     throw new ApiError(
       response.status,
       detailToMessage(detail, response.status),

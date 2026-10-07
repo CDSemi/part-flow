@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6), plus Part Numbers management (the real Management → Part Numbers view and the shared `Edit Part Number` dialog on `/api/part-numbers`: create-only creation, a partial edit, the image, the bounded `/page` search and the hard delete of the master record; the pencil `Edit Part Number` control on Work Order demand lines; the saved name on Add Part results, the Production Board rows and PN Tracking) (slice 7), plus Planned Routes management (the real Management → Planned Routes view on `/api/route-templates`: the management list with usage, create, full-replacement edit with an optional advisory preferred Machine per step, archive of an ever-used route, delete of a never-used route, the usage list; the preferred Machine is copied into the Assigned Route snapshot) (slice 8), plus the Department display settings and the Due Soon policy (the Production Board rotation timing per Department through the Department `PATCH`, `GET`/`PUT /api/policies/due-soon`, the real Administration → Department display settings and Administration → Settings sections; every due countdown uses the server policy) (slice 9), plus the Scan Station theme persistence of the station tier (`PUT /api/scan-stations/{id}/theme-preference`, not audited; `GET /api/scan-stations/{id}/context` reports the saved theme; the theme toggle on a Scan Station route saves it for that station while connected) (slice 10), plus the Movement-history retention period (`GET`/`PUT /api/policies/data-retention`, audited; the real Administration → History archival & purge section stores a period of 12–1200 whole months or none and states that archival and purge runs are not available yet — nothing reads the period, and nothing is archived or purged; Administration → Machine assignment is a read-only statement of the two Area modes, and Scan behavior states that it is not available yet) (slice 11), plus Users, roles and permissions configuration (`/api/roles` and `/api/users`, audited; the real Administration → Users and Roles & permissions sections, and the role × correction-permission table in Administration → Correction permissions; the stored User theme preference has no writer yet — users cannot sign in, and nothing reads a user, a role or a permission to allow or refuse an action before Phase 14) (slice 12):
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6), plus Part Numbers management (the real Management → Part Numbers view and the shared `Edit Part Number` dialog on `/api/part-numbers`: create-only creation, a partial edit, the image, the bounded `/page` search and the hard delete of the master record; the pencil `Edit Part Number` control on Work Order demand lines; the saved name on Add Part results, the Production Board rows and PN Tracking) (slice 7), plus Planned Routes management (the real Management → Planned Routes view on `/api/route-templates`: the management list with usage, create, full-replacement edit with an optional advisory preferred Machine per step, archive of an ever-used route, delete of a never-used route, the usage list; the preferred Machine is copied into the Assigned Route snapshot) (slice 8), plus the Department display settings and the Due Soon policy (the Production Board rotation timing per Department through the Department `PATCH`, `GET`/`PUT /api/policies/due-soon`, the real Administration → Department display settings and Administration → Settings sections; every due countdown uses the server policy) (slice 9), plus the Scan Station theme persistence of the station tier (`PUT /api/scan-stations/{id}/theme-preference`, not audited; `GET /api/scan-stations/{id}/context` reports the saved theme; the theme toggle on a Scan Station route saves it for that station while connected) (slice 10), plus the Movement-history retention period (`GET`/`PUT /api/policies/data-retention`, audited; the real Administration → History archival & purge section stores a period of 12–1200 whole months or none and states that archival and purge runs are not available yet — nothing reads the period, and nothing is archived or purged; Administration → Machine assignment is a read-only statement of the two Area modes, and Scan behavior states that it is not available yet) (slice 11), plus Users, roles and permissions configuration (`/api/roles` and `/api/users`, audited; the real Administration → Users and Roles & permissions sections, and the role × correction-permission table in Administration → Correction permissions; the stored User theme preference has no writer yet — users could not sign in until Phase 14 slice 1, and nothing reads a user, a role or a permission to allow or refuse an action before Phase 14) (slice 12) — and, in the open **Phase 14**, **sign-in for application Users** (slice 1): local login name and password accounts, server sessions and the CSRF header rule (`/api/session`, `/api/session/password`), the first-run setup of the first Administrator with a one-time setup token printed to the server log (`/api/setup`), `PUT /api/users/{id}/password`, the sign-in settings (`GET`/`PUT /api/policies/sign-in`), the recovery command `python -m app.cli reset-password`, and the account chip, sign-in dialogs, Users `Set password…` and Settings → User sign-in in the frontend; permission checks cover only setting passwords and changing the user sign-in settings, so every other screen and write stays open to anyone who can reach the service until Phase 14 slices 2–3:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -301,7 +301,11 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   `application_policy.retention_period_months`; the downgrade refuses;
   `0028_phase13_users_roles` adds `roles`, `role_permissions` and `users`
   with the three seeded roles and the `User` / `Role` audit entities; the
-  downgrade refuses)
+  downgrade refuses;
+  `0029_phase14_sign_in` adds the sign-in policy columns on
+  `application_policy`, `user_credentials`, `user_sessions` and
+  `actor_user_id` on `audit_events`, `machine_lifecycle_events` and
+  `work_order_allocations`; the downgrade refuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -630,7 +634,7 @@ adding the partial expression index that serves the released-quantity
 derivation — and the Phase 5 revision `0006_phase5_transfer` widening
 `part_movements` (`TRANSFERRED`, `station_id`, per-type shape check) on
 top of the no-op repository-foundation baseline; the current head is
-`0028_phase13_users_roles`):
+`0029_phase14_sign_in`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -675,6 +679,39 @@ Two more caveats:
 - A `$` inside `POSTGRES_PASSWORD` can collide with Docker Compose
   variable interpolation in `.env`; escape it as `$$` if Compose warns
   about an unset variable.
+
+## First-run setup and account recovery
+
+A new database has no Administrator. While none exists, the backend writes a
+one-time setup token to its log when it starts, and the **Set up PartFlow**
+button in the top navigation opens the first-run dialog:
+
+```bash
+docker compose logs backend | grep "Setup token"
+```
+
+Open PartFlow, choose **Set up PartFlow**, paste the token and create the first
+Administrator. The first creation closes setup for good and the token is then
+discarded; a restart of the backend announces a new token only while no
+Administrator exists. The token is the only protection of first-run setup, so
+complete it before the service is reachable by anyone else and restrict access
+to the log until then. Each backend process announces its own token.
+
+If the only Administrator forgets the password, reset it from the host:
+
+```bash
+docker compose exec backend uv run python -m app.cli reset-password --login-name <name>
+```
+
+The new password is typed at the prompt, never on the command line. The command
+works only for a user that already has a password and only while an
+Administrator exists; it never creates an Administrator. It sets a temporary
+password, ends the user's sign-ins and clears a lock.
+
+The backend reads `SESSION_COOKIE_SECURE` (default `false`, because the
+development stack runs over plain HTTP). Set it to `true` in the backend
+environment when PartFlow is served over HTTPS so the session cookie is sent
+only on secure connections; the development `compose.yaml` does not pass it.
 
 ## IntelliJ IDEA / PyCharm setup (database tools and SQL inspections)
 
@@ -738,6 +775,8 @@ integration):
   `ping_database` (success and safe 503 responses; no database needed).
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
+- `tests/test_password_hashing.py` and `tests/test_password_policy.py` —
+  **unit** tests for the scrypt password hashing and the password policy.
 - `tests/test_worker_badge_normalization.py` — **unit** tests for the
   canonical Worker badge rule (trim, uppercase, `PF:` and length
   refusals; no database needed).
@@ -760,8 +799,11 @@ integration):
   `tests/test_part_number_management_api.py`, and
   `tests/test_display_settings_api.py`,
   `tests/test_station_theme_api.py`,
-  `tests/test_retention_policy_api.py`, and
-  `tests/test_users_roles_api.py` — **integration** tests that
+  `tests/test_retention_policy_api.py`,
+  `tests/test_users_roles_api.py`,
+  `tests/test_authentication_api.py`,
+  `tests/test_first_run_setup_api.py`, and
+  `tests/test_cli.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
@@ -789,7 +831,8 @@ integration):
   `0025_phase13_display_settings`,
   `0026_phase13_station_theme`,
   `0027_phase13_retention_period` and
-  `0028_phase13_users_roles`: the `workers`
+  `0028_phase13_users_roles`, while `tests/test_phase14_schema.py`
+  carries the Phase 14 revision `0029_phase14_sign_in`: the `workers`
   table's constraints, the widened audit vocabulary including the
   environment audit entities, the refusing
   downgrades, and

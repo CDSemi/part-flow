@@ -47,7 +47,7 @@ artifacts. Observed constraints include:
 - no production reverse proxy, TLS policy, secret store, log rotation, release
   image tags, scheduled backup job, restore drill, or deployment rollback
   command is provided;
-- Phase 14 authentication/role enforcement is not implemented; Users, roles and permissions configured in Administration grant and restrict nothing until then;
+- Phase 14 sign-in for application Users exists, but server-side permission checks cover only setting passwords and changing user sign-in settings; every other screen and write stays open to anyone who can reach the service;
 - several approved views are still development-only previews or pending real
   backend/frontend integration.
 
@@ -106,6 +106,9 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
 
 - Phase 14 authentication and server-side role enforcement are complete and
   tested; hiding navigation is never authorization.
+- `SESSION_COOKIE_SECURE=true` is set behind TLS. The first-run setup token
+  is the only secret ever written to the backend log: complete first-run
+  setup before exposing the service and restrict log access until then.
 - Every production view in the intended pilot scope uses real APIs; no mock or
   explicit unconnected placeholder is mistaken for an operational feature.
 - Production writes remain blocked while disconnected and are never queued
@@ -116,7 +119,8 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
 ### Production artifacts
 
 - production backend image has no reload server and uses a documented process
-  model;
+  model (each backend process announces its own first-run setup token while no
+  Administrator exists; the first creation closes setup for all of them);
 - production frontend is an immutable Vite build served by a production web
   server;
 - production Compose configuration has restart policies, health checks,
@@ -193,7 +197,9 @@ Every platform follows the same release order:
 5. Build or pull the target images without replacing the running release.
 6. Enter the approved maintenance mode/window when required.
 7. Run Alembic migration once and capture its output.
-8. Start the target application release.
+8. Start the target application release. On a database with no
+   Administrator, complete first-run setup (the setup token is in the backend
+   log) before opening access.
 9. Run health, API, UI, authorization, scan-focus, and write/read-back smoke
    checks using designated test data.
 10. Run quantity/movement reconciliation checks.

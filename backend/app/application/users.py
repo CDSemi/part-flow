@@ -6,8 +6,10 @@ non-Scan-Station views (PROJECT_PROFILE §7) — never a Worker, the Scan
 Station production audit identity. The two are never merged: nothing
 here reads the Worker registry, and no Scan Station service reads Users.
 
-Configuration only — no credential exists, nobody signs in, and nothing
-reads a User or its role to allow or refuse an action until Phase 14.
+Users sign in with a password held in `user_credentials` (Phase 14
+slice 1, `app.application.authentication`); deactivating a User ends
+every open sign-in. Permissions are checked only where a route requires
+them.
 
 Rules owned here (owner decision OD-8; slice 12 decisions):
 
@@ -20,14 +22,15 @@ Rules owned here (owner decision OD-8; slice 12 decisions):
 - The display name is required, not unique.
 - Each User holds exactly one existing role.
 - Users are deactivated, never deleted: no delete service exists, and
-  no last-Administrator guard exists before authentication (Phase 14).
+  no last-Administrator guard exists yet (Phase 14 slice 2).
 - The optional avatar is stored on the row (CD1/OD-10) after the shared
   image validation (``app.application.images``) — the Worker protocol.
 - ``users.theme_preference`` (OD-19) is stored only: no service here
   writes or reads it (Phase 14 adds both with the signed-in User).
 - Every effective write appends exactly one ``audit_events`` row in the
-  SAME transaction (entity ``User``, ``actor_reference`` NULL until
-  Phase 14). Profile rows snapshot ``{login_name, display_name, role_id,
+  SAME transaction (entity ``User``, ``actor_reference`` and
+  ``actor_user_id`` NULL until Phase 14 slice 2 converts these
+  writers). Profile rows snapshot ``{login_name, display_name, role_id,
   is_active}``; avatar rows snapshot ``{"avatar": digest-or-null}`` —
   never bytes. Rejected writes and no-ops append nothing.
 
@@ -47,7 +50,7 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, undefer
 
-from app.application import audit, images
+from app.application import audit, images, user_access
 from app.application.common import (
     UNSET,
     UnsetType,
@@ -58,7 +61,7 @@ from app.application.common import (
     required_text,
 )
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.domain.enums import AuditEntityType, AuditEventType
+from app.domain.enums import AuditEntityType, AuditEventType, UserSessionEndReason
 from app.domain.user_login import (
     EMPTY_LOGIN_NAME_MESSAGE,
     InvalidLoginNameError,
@@ -66,7 +69,7 @@ from app.domain.user_login import (
 )
 from app.infrastructure.models import Role, User
 
-_USER_CONFLICTS: Final = {
+USER_CONFLICTS: Final = {
     "uq_users_login_name": "This login name is already used by another user.",
 }
 
@@ -140,7 +143,12 @@ def _require_role(session: Session, role_id: int) -> Role:
     return role
 
 
-def _reject_duplicate_login(session: Session, login: str, exclude_id: int | None = None) -> None:
+def require_role(session: Session, value: object) -> Role:
+    """The existing role ``value`` names, or ``InvalidInputError`` (no write)."""
+    return _require_role(session, _role_id(value))
+
+
+def reject_duplicate_login(session: Session, login: str, exclude_id: int | None = None) -> None:
     query = select(User.display_name, User.is_active).where(User.login_name == login).limit(1)
     if exclude_id is not None:
         query = query.where(User.id != exclude_id)
@@ -151,7 +159,7 @@ def _reject_duplicate_login(session: Session, login: str, exclude_id: int | None
         raise ConflictError(f"This login name is already used by {display_name}{suffix}.")
 
 
-def _lock_user(session: Session, user_id: int, *, with_avatar: bool = False) -> User:
+def lock_user(session: Session, user_id: int, *, with_avatar: bool = False) -> User:
     """Load one User under its row lock; avatar bytes only when compared."""
     if not is_bindable_id(user_id):
         raise NotFoundError(f"User {user_id} does not exist.")
@@ -173,7 +181,7 @@ def _avatar_digest(user: User) -> dict[str, str | int] | None:
     return images.image_digest(user.avatar_image, user.avatar_image_type)
 
 
-def _view(session: Session, user: User) -> UserView:
+def user_view(session: Session, user: User) -> UserView:
     """The answer, read from this transaction (role name included)."""
     role = session.get(Role, user.role_id)
     assert role is not None  # the FK guarantees it
@@ -218,13 +226,13 @@ def create_user(
 ) -> UserView:
     clean_name = required_text(display_name, "Name")
     login = canonical_login_name(login_name)
-    role = _require_role(session, _role_id(role_id))
-    _reject_duplicate_login(session, login)
+    role = require_role(session, role_id)
+    reject_duplicate_login(session, login)
     user = User(login_name=login, display_name=clean_name, role_id=role.id, is_active=True)
     session.add(user)
     # The id is the audit entity id; a login race lost here surfaces as
     # the same conflict as one lost at COMMIT.
-    flush(session, _USER_CONFLICTS)
+    flush(session, USER_CONFLICTS)
     audit.append_audit_event(
         session,
         event_type=AuditEventType.CREATED,
@@ -233,8 +241,8 @@ def create_user(
         before_data=None,
         after_data=profile_snapshot(user),
     )
-    view = _view(session, user)
-    commit(session, _USER_CONFLICTS)
+    view = user_view(session, user)
+    commit(session, USER_CONFLICTS)
     return view
 
 
@@ -249,9 +257,15 @@ def update_user(
 ) -> UserView:
     """Apply the provided profile fields; a no-op writes and audits nothing.
 
-    Deactivation and reactivation have no guard.
+    Deactivation and reactivation have no guard. Deactivation ends every
+    open sign-in of the User (Phase 14 slice 1): the credential row is
+    locked after the User row and before any assignment — before a login
+    rename upgrades the User lock at its UPDATE — so a concurrent sign-in
+    or own password change either committed first (its session is ended
+    here) or waits and then reads the User inactive. Reactivation never
+    revives an ended session.
     """
-    user = _lock_user(session, user_id)
+    user = lock_user(session, user_id)
     before = profile_snapshot(user)
 
     changes: dict[str, Any] = {}
@@ -273,17 +287,22 @@ def update_user(
         if active != user.is_active:
             changes["is_active"] = active
     if not changes:
-        return _view(session, user)
+        return user_view(session, user)
     if "role_id" in changes:
-        _require_role(session, changes["role_id"])
+        require_role(session, changes["role_id"])
     if "login_name" in changes:
-        _reject_duplicate_login(session, changes["login_name"], exclude_id=user.id)
+        reject_duplicate_login(session, changes["login_name"], exclude_id=user.id)
+    deactivating = changes.get("is_active") is False
+    if deactivating:
+        user_access.lock_credential(session, user.id)
 
     # Read-before-assign: no query runs from here to the explicit flush.
     for field, value in changes.items():
         setattr(user, field, value)
     user.updated_at = func.now()
-    flush(session, _USER_CONFLICTS)
+    flush(session, USER_CONFLICTS)
+    if deactivating:
+        user_access.end_user_sessions(session, user.id, UserSessionEndReason.USER_DEACTIVATED)
     audit.append_audit_event(
         session,
         event_type=AuditEventType.UPDATED,
@@ -292,8 +311,8 @@ def update_user(
         before_data=before,
         after_data=profile_snapshot(user),
     )
-    view = _view(session, user)
-    commit(session, _USER_CONFLICTS)
+    view = user_view(session, user)
+    commit(session, USER_CONFLICTS)
     return view
 
 
@@ -307,17 +326,17 @@ def set_user_avatar(
     unknown outcome.
     """
     content_type = images.validate_image(data, declared_type)
-    user = _lock_user(session, user_id, with_avatar=True)
+    user = lock_user(session, user_id, with_avatar=True)
     before = _avatar_digest(user)
     after = images.image_digest(data, content_type)
     if before == after:
-        return _view(session, user)
+        return user_view(session, user)
 
     user.avatar_image = data
     user.avatar_image_type = content_type
     user.avatar_image_updated_at = func.now()
     user.updated_at = func.now()
-    flush(session, _USER_CONFLICTS)
+    flush(session, USER_CONFLICTS)
     audit.append_audit_event(
         session,
         event_type=AuditEventType.UPDATED,
@@ -326,23 +345,23 @@ def set_user_avatar(
         before_data={"avatar": before},
         after_data={"avatar": after},
     )
-    view = _view(session, user)
-    commit(session, _USER_CONFLICTS)
+    view = user_view(session, user)
+    commit(session, USER_CONFLICTS)
     return view
 
 
 def remove_user_avatar(session: Session, user_id: int) -> UserView:
     """Remove the avatar; a User without one is a no-op."""
-    user = _lock_user(session, user_id, with_avatar=True)
+    user = lock_user(session, user_id, with_avatar=True)
     before = _avatar_digest(user)
     if before is None:
-        return _view(session, user)
+        return user_view(session, user)
 
     user.avatar_image = None
     user.avatar_image_type = None
     user.avatar_image_updated_at = None
     user.updated_at = func.now()
-    flush(session, _USER_CONFLICTS)
+    flush(session, USER_CONFLICTS)
     audit.append_audit_event(
         session,
         event_type=AuditEventType.UPDATED,
@@ -351,8 +370,8 @@ def remove_user_avatar(session: Session, user_id: int) -> UserView:
         before_data={"avatar": before},
         after_data={"avatar": None},
     )
-    view = _view(session, user)
-    commit(session, _USER_CONFLICTS)
+    view = user_view(session, user)
+    commit(session, USER_CONFLICTS)
     return view
 
 

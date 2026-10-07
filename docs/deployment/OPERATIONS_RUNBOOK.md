@@ -127,7 +127,9 @@ in a rehearsal command.
 3. Stop or block writes as required.
 4. Run the production repository's explicit `alembic upgrade head` job once.
 5. Capture migration output and new revision.
-6. Start/recreate application services at the target release.
+6. Start/recreate application services at the target release. On a database
+   with no Administrator, complete first-run setup (the setup token is in the
+   backend log) before opening access.
 7. Check health internally and through HTTPS.
 8. Run authorization, SPA-route, `/api`, scan-focus/connectivity, and designated
    write/read-back smoke tests.

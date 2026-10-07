@@ -12,14 +12,16 @@ import {
   uploadUserAvatar,
   userAvatarUrl,
 } from '../../api/users';
-import type { User } from '../../api/users';
+import type { SignInState, User } from '../../api/users';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { Avatar } from '../../components/Avatar';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
   ImageUploadError,
   prepareImageUpload,
 } from '../../components/image-upload';
+import { useToastNotice } from '../../components/toast-notice';
 import {
   EmptyState,
   ErrorState,
@@ -33,14 +35,16 @@ import {
   StatusPill,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
+import { SetPasswordDialog } from './SetPasswordDialog';
 import { canonicalLoginName, loginNameError } from './user-login';
 
 // Administration → Users: application accounts for Management,
 // Administration and the other non-Scan-Station views — separate from
 // Workers, who scan at the Scan Stations. The standard table + editor
 // pattern: Users are created and edited here and deactivated, never
-// deleted. Configuration only: users cannot sign in yet and nothing is
-// hidden or refused by role; the section says so. The server owns
+// deleted. Users sign in since Phase 14 slice 1; only the Sign-in column
+// and Set password… are shown by permission (hidden, not disabled); the
+// section says what is checked so far. The server owns
 // every rule (login-name canonical form and uniqueness, image limits);
 // the editor mirrors the login-name rule only to answer early.
 //
@@ -58,14 +62,40 @@ const SUBTITLE =
 const UNKNOWN_OUTCOME_MESSAGE =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the user before trying again.';
 
-type PendingDialog = { kind: 'new' } | { kind: 'edit'; user: User };
+const SIGN_IN_STATE_LABELS: Record<SignInState, string> = {
+  NO_PASSWORD: 'No password',
+  TEMPORARY_PASSWORD: 'Temporary password',
+  PASSWORD_SET: 'Password set',
+  LOCKED: 'Locked',
+};
+
+type PendingDialog =
+  | { kind: 'new' }
+  | { kind: 'edit'; user: User }
+  | { kind: 'password'; user: User };
 
 export function UsersSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const session = useSession();
+  // User administrators see how each user can sign in and may give any
+  // other user a password; the server checks the same permission.
+  const administersUsers = session.can('MANAGE_USERS_AND_ROLES');
+  const signedInId = session.user?.id ?? null;
   const usersData = useApiData(listUsers);
   const rolesData = useApiData(listRoles);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  const { showNotice, noticeElement } = useToastNotice();
+
+  // The list answer depends on who is signed in (the sign-in states are
+  // sent to user administrators only): read it again when that changes.
+  const reloadUsersList = usersData.reload;
+  const listedFor = useRef(signedInId);
+  useEffect(() => {
+    if (listedFor.current === signedInId) return;
+    listedFor.current = signedInId;
+    reloadUsersList();
+  }, [signedInId, reloadUsersList]);
   const ready =
     usersData.state.status === 'ready' && rolesData.state.status === 'ready';
 
@@ -117,7 +147,9 @@ export function UsersSection() {
                 <th>User</th>
                 <th>Login name</th>
                 <th>Role</th>
+                {administersUsers ? <th>Sign-in</th> : null}
                 <th>Status</th>
+                {administersUsers ? <th aria-label="Actions" /> : null}
               </tr>
             </thead>
             <tbody>
@@ -146,20 +178,45 @@ export function UsersSection() {
                     {user.loginName}
                   </td>
                   <td data-label="Role">{user.roleName}</td>
+                  {administersUsers ? (
+                    <td data-label="Sign-in">
+                      {user.signInState
+                        ? SIGN_IN_STATE_LABELS[user.signInState]
+                        : '—'}
+                    </td>
+                  ) : null}
                   <td data-label="Status">
                     <StatusPill active={user.isActive} />
                   </td>
+                  {administersUsers ? (
+                    <td>
+                      {user.id !== signedInId ? (
+                        <button
+                          className="btn"
+                          aria-label={`Set password for ${user.displayName}`}
+                          onClick={(event) => {
+                            // The row itself opens the editor.
+                            event.stopPropagation();
+                            setDialog({ kind: 'password', user });
+                          }}
+                        >
+                          Set password…
+                        </button>
+                      ) : null}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
           </table>
         )}
         <div className="ad-notice">
-          Users cannot sign in yet. Each user&apos;s role is recorded here and
-          takes effect once sign-in is available; until then every screen stays
-          open to anyone who can reach PartFlow. Workers who scan at the Scan
-          Stations are managed in Workers, not here. Users are deactivated,
-          never deleted.
+          Users sign in with their login name and a password. Use Set password…
+          to give a user a password. PartFlow checks permissions only for
+          setting passwords and changing user sign-in settings so far; every
+          other screen stays open to anyone who can reach PartFlow. Workers who
+          scan at the Scan Stations are managed in Workers, not here. Users are
+          deactivated, never deleted; deactivating a user signs them out.
         </div>
       </>
     );
@@ -181,7 +238,21 @@ export function UsersSection() {
         }
       />
       {body}
-      {dialog && rolesData.state.status === 'ready' ? (
+      {dialog?.kind === 'password' ? (
+        <SetPasswordDialog
+          user={dialog.user}
+          writeBlocked={writeBlocked}
+          onCancel={() => setDialog(null)}
+          onSet={(user) => {
+            setDialog(null);
+            showNotice(`Password set for ${user.displayName}.`);
+            usersData.reload();
+          }}
+        />
+      ) : null}
+      {dialog &&
+      dialog.kind !== 'password' &&
+      rolesData.state.status === 'ready' ? (
         <UserDialog
           user={dialog.kind === 'edit' ? dialog.user : undefined}
           roles={rolesData.state.data}
@@ -189,6 +260,7 @@ export function UsersSection() {
           onClose={closeDialog}
         />
       ) : null}
+      {noticeElement}
     </>
   );
 }

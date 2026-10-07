@@ -47,7 +47,7 @@ giới hạn đã quan sát được gồm:
 - database và ứng dụng dùng chung PostgreSQL role do Compose tạo;
 - chưa có production reverse proxy, TLS policy, secret store, log rotation,
   release image tag, scheduled backup job, restore drill hoặc command rollback;
-- authentication/role enforcement Phase 14 chưa được triển khai; Users, role và permission được cấu hình trong Administration không cấp và không hạn chế gì cho đến lúc đó;
+- Phase 14 đã có sign-in cho application User, nhưng permission check phía server chỉ bao phủ việc đặt mật khẩu và đổi user sign-in settings; mọi màn hình và write khác vẫn mở cho bất kỳ ai truy cập được service;
 - một số view đã duyệt vẫn là preview chỉ có ở development hoặc còn chờ tích
   hợp backend/frontend thật.
 
@@ -106,6 +106,9 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
 
 - Authentication và server-side role enforcement Phase 14 hoàn tất và đã test;
   ẩn navigation không bao giờ là authorization.
+- `SESSION_COOKIE_SECURE=true` được đặt phía sau TLS. Setup token của first-run
+  là secret duy nhất từng được ghi vào backend log: hoàn tất first-run setup
+  trước khi mở service ra ngoài và hạn chế quyền đọc log cho đến lúc đó.
 - Mọi production view nằm trong pilot scope đều dùng API thật; không nhầm mock
   hoặc placeholder chưa kết nối với tính năng vận hành.
 - Production write vẫn bị block khi mất kết nối và không bao giờ được queue cục
@@ -115,7 +118,8 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
 ### Production artifact
 
 - backend image production không chạy reload server và có process model được
-  ghi rõ;
+  ghi rõ (mỗi process backend thông báo setup token first-run riêng của nó khi chưa
+  có Administrator; lần tạo đầu tiên đóng setup cho tất cả);
 - frontend production là Vite build bất biến do production web server phục vụ;
 - production Compose có restart policy, health check, private network,
   persistent volume, resource limit thận trọng và không có development bind
@@ -190,7 +194,8 @@ Mọi nền tảng dùng cùng thứ tự release:
 5. Build hoặc pull target image mà chưa thay thế release đang chạy.
 6. Vào maintenance mode/window đã duyệt nếu cần.
 7. Chạy Alembic migration đúng một lần và lưu output.
-8. Khởi động target application release.
+8. Khởi động target application release. Với database chưa có Administrator,
+   hoàn tất first-run setup (setup token nằm trong backend log) trước khi mở truy cập.
 9. Chạy health, API, UI, authorization, scan-focus và write/read-back smoke test
    bằng dữ liệu test được chỉ định.
 10. Chạy quantity/Movement reconciliation.

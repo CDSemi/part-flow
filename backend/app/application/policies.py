@@ -27,7 +27,15 @@ for the Phase 16 archival maintenance; nothing in Phase 13 reads it,
 archives or purges (PROJECT_PROFILE §28 "retention settings live in
 Administration/configuration, not in production workflow logic").
 Audited under its own ``entity_id`` ``data-retention``; clearing the
-period (NULL) is a valid, audited change.
+period (NULL) is a valid, audited change. Phase 14 slice 1 adds the User
+sign-in panel of Administration → Settings (owner decisions OD-P1–OD-P3;
+``entity_id`` ``sign-in``, a partial merge like Worker sessions): whether
+user sign-ins expire and after how many whole days (1-365, default 30),
+the failed sign-ins before a lock (3-100, default 10), the lock duration
+(1-1440 minutes, default 15) and whether an administrator-set password
+must be replaced at the next sign-in (default on). Every request reads
+it, so a change applies to open sign-ins at their next request; its audit
+row names the signed-in administrator (``actor_user_id``).
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -62,6 +70,12 @@ from app.infrastructure.models import (
     DUE_SOON_PERCENT_MIN,
     RETENTION_PERIOD_MONTHS_MAX,
     RETENTION_PERIOD_MONTHS_MIN,
+    SIGN_IN_LOCKOUT_ATTEMPTS_MAX,
+    SIGN_IN_LOCKOUT_ATTEMPTS_MIN,
+    SIGN_IN_LOCKOUT_MINUTES_MAX,
+    SIGN_IN_LOCKOUT_MINUTES_MIN,
+    USER_SESSION_DAYS_MAX,
+    USER_SESSION_DAYS_MIN,
     WORKER_SESSION_TIMEOUT_MAX,
     WORKER_SESSION_TIMEOUT_MIN,
     ApplicationPolicy,
@@ -78,6 +92,9 @@ DUE_SOON_SECTION: Final = "due-soon"
 # The audit entity_id and API path segment of Administration →
 # History archival & purge (CD3: the sidebar section id, S11-OD2).
 DATA_RETENTION_SECTION: Final = "data-retention"
+# The audit entity_id and API path segment of Administration → Settings →
+# User sign-in (Phase 14 slice 1; CD3).
+SIGN_IN_SECTION: Final = "sign-in"
 # Lock-first mode of a policy write: the FOR NO KEY UPDATE its own UPDATE takes.
 _EDIT_LOCK: Final = {"key_share": True}
 
@@ -315,6 +332,100 @@ def update_retention_policy(
         entity_id=DATA_RETENTION_SECTION,
         before_data=before,
         after_data=_retention_snapshot(policy),
+    )
+    commit(session, {})
+    return policy
+
+
+def _is_whole_in(value: object, minimum: int, maximum: int) -> TypeGuard[int]:
+    """A whole number in [minimum, maximum] (a bool is never a number)."""
+    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+
+
+def _sign_in_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {
+        "user_session_expires": policy.user_session_expires,
+        "user_session_days": policy.user_session_days,
+        "sign_in_lockout_attempts": policy.sign_in_lockout_attempts,
+        "sign_in_lockout_minutes": policy.sign_in_lockout_minutes,
+        "require_password_change": policy.require_password_change,
+    }
+
+
+def update_sign_in_policy(
+    session: Session,
+    *,
+    actor_user_id: int,
+    user_session_expires: object = UNSET,
+    user_session_days: object = UNSET,
+    sign_in_lockout_attempts: object = UNSET,
+    sign_in_lockout_minutes: object = UNSET,
+    require_password_change: object = UNSET,
+) -> ApplicationPolicy:
+    """Merge the given user sign-in settings; a no-op writes and audits nothing.
+
+    The Worker sessions protocol: a field not given keeps its stored
+    value. The audit row names the signed-in administrator.
+    """
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    given = {
+        name: value
+        for name, value in {
+            "user_session_expires": user_session_expires,
+            "user_session_days": user_session_days,
+            "sign_in_lockout_attempts": sign_in_lockout_attempts,
+            "sign_in_lockout_minutes": sign_in_lockout_minutes,
+            "require_password_change": require_password_change,
+        }.items()
+        if not isinstance(value, UnsetType)
+    }
+    if not given:
+        raise InvalidInputError("Change at least one user sign-in setting.")
+    if "user_session_days" in given and not _is_whole_in(
+        given["user_session_days"], USER_SESSION_DAYS_MIN, USER_SESSION_DAYS_MAX
+    ):
+        raise InvalidInputError(
+            "User sign-ins must expire after a whole number of days from 1 to 365."
+        )
+    if "sign_in_lockout_attempts" in given and not _is_whole_in(
+        given["sign_in_lockout_attempts"],
+        SIGN_IN_LOCKOUT_ATTEMPTS_MIN,
+        SIGN_IN_LOCKOUT_ATTEMPTS_MAX,
+    ):
+        raise InvalidInputError(
+            "The number of failed sign-ins before a lock must be a whole number from 3 to 100."
+        )
+    if "sign_in_lockout_minutes" in given and not _is_whole_in(
+        given["sign_in_lockout_minutes"], SIGN_IN_LOCKOUT_MINUTES_MIN, SIGN_IN_LOCKOUT_MINUTES_MAX
+    ):
+        raise InvalidInputError(
+            "The lock duration must be a whole number of minutes from 1 to 1440."
+        )
+    if any(
+        not isinstance(given[name], bool)
+        for name in ("user_session_expires", "require_password_change")
+        if name in given
+    ):
+        raise InvalidInputError("Each user sign-in option must be On or Off.")
+    before = _sign_in_snapshot(policy)
+    after = {**before, **given}
+    if after == before:
+        return policy
+    for name, value in given.items():
+        setattr(policy, name, value)
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=SIGN_IN_SECTION,
+        before_data=before,
+        after_data=_sign_in_snapshot(policy),
+        actor_user_id=actor_user_id,
     )
     commit(session, {})
     return policy

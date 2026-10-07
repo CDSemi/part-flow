@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # §11.5). Derived on the server only, never in a browser's local
     # time, so a filter and the row it returns can never disagree.
     site_timezone: str = "UTC"
+    # Whether the User session cookie carries `Secure` (Phase 14 slice 1).
+    # Off for plain-HTTP development; Phase 16 turns it on behind TLS.
+    session_cookie_secure: bool = False
 
     @field_validator("site_timezone")
     @classmethod

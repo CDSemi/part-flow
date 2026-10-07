@@ -8,7 +8,10 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import type { SessionUser } from '../../api/session';
 import { ConnectivityContext } from '../../app/connectivity-context';
+import { SessionContext, hasPermission } from '../../app/session-context';
+import type { SessionValue } from '../../app/session-context';
 import { prepareImageUpload } from '../../components/image-upload';
 import { AdministrationView } from './AdministrationView';
 
@@ -69,11 +72,20 @@ interface UserRow {
   role_id: number;
   is_active: boolean;
   avatar_updated_at: string | null;
+  /** How the user can sign in (default: no password). */
+  sign_in_state?:
+    'NO_PASSWORD' | 'TEMPORARY_PASSWORD' | 'PASSWORD_SET' | 'LOCKED';
 }
 
 /** The fake Roles and Users routes a test can make fail. */
 type RoleRoute = 'GET list' | 'POST' | 'PATCH';
-type UserRoute = 'GET list' | 'POST' | 'PATCH' | 'PUT avatar' | 'DELETE avatar';
+type UserRoute =
+  | 'GET list'
+  | 'POST'
+  | 'PATCH'
+  | 'PUT avatar'
+  | 'DELETE avatar'
+  | 'PUT password';
 
 interface AreaRow {
   id: number;
@@ -307,6 +319,27 @@ let roleFailures: Partial<Record<RoleRoute, FakeFailure>>;
 let userFailures: Partial<Record<UserRoute, FakeFailure>>;
 /** While set, a role PATCH stays pending until it resolves. */
 let roleHold: Promise<void> | null;
+/** While set, a user password PUT stays pending until it resolves. */
+let userHold: Promise<void> | null;
+
+interface SignInPolicyRow {
+  user_session_expires: boolean;
+  user_session_days: number;
+  sign_in_lockout_attempts: number;
+  sign_in_lockout_minutes: number;
+  require_password_change: boolean;
+}
+
+const DEFAULT_SIGN_IN_POLICY: SignInPolicyRow = {
+  user_session_expires: true,
+  user_session_days: 30,
+  sign_in_lockout_attempts: 10,
+  sign_in_lockout_minutes: 15,
+  require_password_change: true,
+};
+let signInPolicy: SignInPolicyRow;
+/** A refusal (or no answer) of every `/api/policies/sign-in` call. */
+let signInPolicyFailure: FakeFailure | null;
 
 const E_B1 = 'Seconds per displayed row must be a whole number from 1 to 60.';
 const E_B2 =
@@ -362,6 +395,9 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
   if (url === '/api/users' || url.startsWith('/api/users/')) {
     return handleUsers(url, method, body);
+  }
+  if (url === '/api/policies/sign-in') {
+    return handleSignInPolicy(method, body);
   }
   if (url === '/api/workers' || url.startsWith('/api/workers/')) {
     return handleWorkers(url, method, body);
@@ -832,7 +868,7 @@ function handleWorkers(
     worker.avatar_updated_at = `2026-10-04T10:00:00.00000${avatarVersion}+00:00`;
     return json(stamp(worker));
   }
-  if (match[2] && method === 'DELETE') {
+  if (match[2] === '/avatar' && method === 'DELETE') {
     const failure = workerFailure('DELETE avatar');
     if (failure) return failure;
     worker.avatar_updated_at = null;
@@ -911,11 +947,45 @@ async function handleRoles(
   return json(roleWire(role));
 }
 
+/** The server's two user response shapes: `sign_in_state` only for a
+ * caller who may manage users and roles, absent for everyone else. */
 function userWire(user: UserRow) {
+  const { sign_in_state, ...profile } = user;
   return {
-    ...stamp(user),
+    ...stamp(profile),
     role_name: state.roles.find((r) => r.id === user.role_id)!.name,
+    ...(hasPermission(session.user, 'MANAGE_USERS_AND_ROLES')
+      ? { sign_in_state: sign_in_state ?? 'NO_PASSWORD' }
+      : {}),
   };
+}
+
+/** `GET`/`PUT /api/policies/sign-in` (partial merge, server ranges). */
+function handleSignInPolicy(
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  const failure = routeFailure(signInPolicyFailure ?? undefined);
+  if (failure) return failure;
+  if (method === 'PUT') {
+    const ranges: Record<string, [number, number]> = {
+      user_session_days: [1, 365],
+      sign_in_lockout_attempts: [3, 100],
+      sign_in_lockout_minutes: [1, 1440],
+    };
+    for (const [key, value] of Object.entries(body)) {
+      if (key in ranges) {
+        const [min, max] = ranges[key];
+        if (!wholeIn(value, min, max)) {
+          return json({ detail: 'Out of range.' }, 422);
+        }
+      } else if (typeof value !== 'boolean' || !(key in signInPolicy)) {
+        return json({ detail: 'Invalid request.' }, 422);
+      }
+    }
+    signInPolicy = { ...signInPolicy, ...body };
+  }
+  return json({ ...signInPolicy, updated_at: T0 });
 }
 
 function duplicateLogin(login: string, exceptId?: number): Response | null {
@@ -932,11 +1002,11 @@ function duplicateLogin(login: string, exceptId?: number): Response | null {
   );
 }
 
-function handleUsers(
+async function handleUsers(
   url: string,
   method: string,
   body: Record<string, unknown>,
-): Response {
+): Promise<Response> {
   if (url === '/api/users' && method === 'GET') {
     const ordered = [...state.users].sort(
       (a, b) => a.display_name.localeCompare(b.display_name) || a.id - b.id,
@@ -962,7 +1032,7 @@ function handleUsers(
     state.users.push(user);
     return json(userWire(user), 201);
   }
-  const match = /^\/api\/users\/(\d+)(\/avatar)?$/.exec(url);
+  const match = /^\/api\/users\/(\d+)(\/avatar|\/password)?$/.exec(url);
   const user = state.users.find((u) => u.id === Number(match?.[1]));
   if (!match || !user) {
     return json({ detail: `User ${match?.[1]} does not exist.` }, 404);
@@ -983,7 +1053,14 @@ function handleUsers(
     if (typeof body.is_active === 'boolean') user.is_active = body.is_active;
     return json(userWire(user));
   }
-  if (match[2] && method === 'PUT') {
+  if (match[2] === '/password' && method === 'PUT') {
+    if (userHold) await userHold;
+    const failure = routeFailure(userFailures['PUT password']);
+    if (failure) return failure;
+    user.sign_in_state = 'TEMPORARY_PASSWORD';
+    return json(userWire(user));
+  }
+  if (match[2] === '/avatar' && method === 'PUT') {
     const failure = routeFailure(userFailures['PUT avatar']);
     if (failure) return failure;
     avatarVersion += 1;
@@ -1014,6 +1091,10 @@ beforeEach(() => {
   roleFailures = {};
   userFailures = {};
   roleHold = null;
+  signInPolicy = { ...DEFAULT_SIGN_IN_POLICY };
+  signInPolicyFailure = null;
+  userHold = null;
+  session = sessionValue();
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
   URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
@@ -1031,12 +1112,59 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderAdmin(status: 'connected' | 'unavailable' = 'connected') {
+/**
+ * An explicit user sign-in for the sections that read it (Users, the
+ * Settings → User sign-in panel): signed out unless a test signs a user
+ * in. The session provider has its own suite.
+ */
+function sessionValue(user: SessionUser | null = null): SessionValue {
+  return {
+    status: user ? 'signed-in' : 'signed-out',
+    user,
+    setupOpen: false,
+    can: (permission) => hasPermission(user, permission),
+    openSignIn: vi.fn(),
+    openSetup: vi.fn(),
+    openChangePassword: vi.fn(),
+    signOut: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+}
+
+/** The signed-in user of a test: a User of the fake with these keys. */
+function signedInUser(
+  permissions: SessionUser['permissions'],
+  overrides: Partial<SessionUser> = {},
+): SessionUser {
+  return {
+    id: 90,
+    loginName: 'admin',
+    displayName: 'Ada Admin',
+    roleId: ADMINISTRATOR_ID,
+    roleName: 'Administrator',
+    avatarUpdatedAt: null,
+    permissions,
+    mustChangePassword: false,
+    sessionExpiresAt: null,
+    ...overrides,
+  };
+}
+
+let session: SessionValue;
+
+function renderWithSession(
+  ui: React.ReactElement,
+  status: 'connected' | 'unavailable' = 'connected',
+) {
   return render(
     <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
-      <AdministrationView />
+      <SessionContext.Provider value={session}>{ui}</SessionContext.Provider>
     </ConnectivityContext.Provider>,
   );
+}
+
+function renderAdmin(status: 'connected' | 'unavailable' = 'connected') {
+  return renderWithSession(<AdministrationView />, status);
 }
 
 function openSection(label: string) {
@@ -3334,7 +3462,7 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
 /* ============ Users (Phase 13 — application accounts) ============ */
 
 const USERS_NOTE =
-  "Users cannot sign in yet. Each user's role is recorded here and takes effect once sign-in is available; until then every screen stays open to anyone who can reach PartFlow. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted.";
+  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions only for setting passwords and changing user sign-in settings so far; every other screen stays open to anyone who can reach PartFlow. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
 const USER_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the user before trying again.';
 const E_U2B =
@@ -3717,7 +3845,7 @@ test('FA-U5: an unanswered save is an unknown outcome; offline blocks writes; a 
 /* ============ Roles & permissions (Phase 13 — named roles) ============ */
 
 const ROLES_NOTE =
-  'Each user holds one role. Permissions are recorded here and take effect once users can sign in. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
+  'Each user holds one role. PartFlow checks permissions only for setting passwords and changing user sign-in settings so far; the other permissions are recorded here and are not checked yet. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
 
 async function openRoles(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);
@@ -4108,4 +4236,433 @@ test('FA-C6: a failed roles load offers Retry while the Undo reason switch keeps
       name: 'Undo recent eligible scans — Operator',
     }),
   ).toBeChecked();
+});
+
+/* ============ Users — sign-in states and Set password… (Phase 14) ============ */
+
+const SET_PASSWORD_TEXT =
+  'This replaces the password and signs Jane Doe out everywhere. Give the new password to them in person. If Settings → User sign-in requires it, they choose their own password at their next sign-in. A lock on the account is cleared.';
+const SET_PASSWORD_UNKNOWN =
+  'The server did not answer — the password may or may not have been set. Set it again to be sure.';
+
+/** Signed in as user 90 holding `MANAGE_USERS_AND_ROLES`, listed too. */
+function signInUserAdministrator() {
+  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  seedJane({
+    id: 90,
+    login_name: 'admin',
+    display_name: 'Ada Admin',
+    role_id: ADMINISTRATOR_ID,
+    sign_in_state: 'PASSWORD_SET',
+  });
+}
+
+function signInCell(name: string): string | null | undefined {
+  const row = screen
+    .getByRole('button', { name: `Edit ${name}` })
+    .closest('tr') as HTMLElement;
+  return row.querySelector('td[data-label="Sign-in"]')?.textContent;
+}
+
+test('FA-U6: user administrators see every sign-in state and Set password… on every other user', async () => {
+  signInUserAdministrator();
+  seedJane({ sign_in_state: 'PASSWORD_SET' });
+  seedJane({
+    id: 51,
+    login_name: 'tlam',
+    display_name: 'Tuan Lam',
+    sign_in_state: 'TEMPORARY_PASSWORD',
+  });
+  seedJane({
+    id: 52,
+    login_name: 'mnguyen',
+    display_name: 'Mai Nguyen',
+    sign_in_state: 'LOCKED',
+  });
+  seedJane({ id: 53, login_name: 'bkim', display_name: 'Bo Kim' });
+  await openUsers();
+
+  expect(
+    screen.getAllByRole('columnheader').map((th) => th.textContent),
+  ).toEqual(['User', 'Login name', 'Role', 'Sign-in', 'Status', '']);
+  expect(signInCell('Jane Doe')).toBe('Password set');
+  expect(signInCell('Tuan Lam')).toBe('Temporary password');
+  expect(signInCell('Mai Nguyen')).toBe('Locked');
+  expect(signInCell('Bo Kim')).toBe('No password');
+  for (const name of ['Jane Doe', 'Tuan Lam', 'Mai Nguyen', 'Bo Kim']) {
+    expect(
+      screen.getByRole('button', { name: `Set password for ${name}` }),
+    ).toBeInTheDocument();
+  }
+  // Never on the signed-in user's own row (Change password is theirs).
+  expect(signInCell('Ada Admin')).toBe('Password set');
+  expect(
+    screen.queryByRole('button', { name: 'Set password for Ada Admin' }),
+  ).toBeNull();
+});
+
+test('FA-U6: without the permission, or signed out, neither the Sign-in column nor Set password… exists', async () => {
+  seedJane({ sign_in_state: 'LOCKED' });
+  // Signed out: the server omits the state; the table is the S12 table.
+  await openUsers();
+  expect(
+    screen.getAllByRole('columnheader').map((th) => th.textContent),
+  ).toEqual(['User', 'Login name', 'Role', 'Status']);
+  expect(screen.queryByRole('button', { name: /^Set password/ })).toBeNull();
+  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(USERS_NOTE);
+  expect(document.body.textContent).not.toContain('Users cannot sign in yet');
+  cleanup();
+
+  // Signed in without the permission: the same table.
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openUsers();
+  expect(
+    screen.getAllByRole('columnheader').map((th) => th.textContent),
+  ).toEqual(['User', 'Login name', 'Role', 'Status']);
+  expect(screen.queryByText('Locked')).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Set password/ })).toBeNull();
+});
+
+test('FA-U7: Set password… sends exactly the new password; a mismatch or a short password sends nothing', async () => {
+  signInUserAdministrator();
+  seedJane({ sign_in_state: 'LOCKED' });
+  await openUsers();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Set password for Jane Doe' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Set password for Jane Doe',
+  });
+  // The row underneath never opened its editor.
+  expect(screen.queryByRole('dialog', { name: 'Edit user' })).toBeNull();
+  expect(
+    within(dialog).getByText(
+      (_, element) =>
+        element?.tagName === 'P' &&
+        element.textContent?.replace(/\s+/g, ' ').trim() === SET_PASSWORD_TEXT,
+    ),
+  ).toBeInTheDocument();
+  const next = within(dialog).getByLabelText('New password');
+  const repeat = within(dialog).getByLabelText('Repeat password');
+  expect(next).toHaveFocus();
+  const submit = within(dialog).getByRole('button', { name: 'Set password' });
+
+  fireEvent.change(next, { target: { value: 'short-pass' } });
+  fireEvent.change(repeat, { target: { value: 'short-pass' } });
+  fireEvent.click(submit);
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'At least 12 characters.',
+  );
+  fireEvent.change(next, { target: { value: 'correct horse battery' } });
+  fireEvent.change(repeat, { target: { value: 'correct horse battery!' } });
+  fireEvent.click(submit);
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'The new passwords do not match.',
+  );
+  expect(writes).toEqual([]);
+
+  fireEvent.change(repeat, { target: { value: 'correct horse battery' } });
+  fireEvent.click(submit);
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    'Password set for Jane Doe.',
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/users/50/password',
+      body: { new_password: 'correct horse battery' },
+    },
+  ]);
+  // The list reloads: the lock is cleared, the password is temporary.
+  await waitFor(() =>
+    expect(signInCell('Jane Doe')).toBe('Temporary password'),
+  );
+});
+
+test('FA-U7: Set password… closes without a request, ignores closing in flight, blocks offline and states an unknown outcome', async () => {
+  signInUserAdministrator();
+  seedJane();
+  await openUsers();
+  const open = () => {
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Set password for Jane Doe' }),
+    );
+    return screen.getByRole('dialog', { name: 'Set password for Jane Doe' });
+  };
+  const fill = (dialog: HTMLElement) => {
+    for (const label of ['New password', 'Repeat password']) {
+      fireEvent.change(within(dialog).getByLabelText(label), {
+        target: { value: 'correct horse battery' },
+      });
+    }
+  };
+
+  // Cancel, Escape and the backdrop close it; nothing is sent.
+  fireEvent.click(within(open()).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.keyDown(open(), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.mouseDown(open().parentElement as HTMLElement);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([]);
+
+  // In flight, closing is ignored.
+  let release = () => {};
+  userHold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const held = open();
+  fill(held);
+  fireEvent.click(within(held).getByRole('button', { name: 'Set password' }));
+  await waitFor(() => expect(writes).toHaveLength(1));
+  const cancel = within(held).getByRole('button', { name: 'Cancel (Esc)' });
+  expect(cancel).toBeDisabled();
+  fireEvent.click(cancel);
+  fireEvent.keyDown(held, { key: 'Escape' });
+  fireEvent.mouseDown(held.parentElement as HTMLElement);
+  expect(screen.getByRole('dialog')).toBe(held);
+  release();
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  userHold = null;
+
+  // No answer: the outcome is unknown and setting it again is offered.
+  userFailures['PUT password'] = 'network';
+  const unanswered = open();
+  fill(unanswered);
+  fireEvent.click(
+    within(unanswered).getByRole('button', { name: 'Set password' }),
+  );
+  expect((await within(unanswered).findByRole('alert')).textContent).toBe(
+    SET_PASSWORD_UNKNOWN,
+  );
+  expect(
+    within(unanswered).getByRole('button', { name: 'Set password' }),
+  ).toBeEnabled();
+  // A busy password check is a definite refusal with its own text.
+  const busy =
+    'PartFlow is busy checking other passwords. Try again in a moment.';
+  vi.mocked(fetch).mockImplementationOnce(async () =>
+    json({ detail: busy, password_check_busy: true }, 503),
+  );
+  fireEvent.click(
+    within(unanswered).getByRole('button', { name: 'Set password' }),
+  );
+  await waitFor(() =>
+    expect(within(unanswered).getByRole('alert').textContent).toBe(busy),
+  );
+  expect(
+    within(unanswered).getByRole('button', { name: 'Set password' }),
+  ).toBeEnabled();
+  cleanup();
+
+  userFailures = {};
+  await openUsers('unavailable');
+  const offline = open();
+  fill(offline);
+  expect(
+    within(offline).getByRole('button', { name: 'Set password' }),
+  ).toBeDisabled();
+});
+
+/* ============ Settings → User sign-in (Phase 14) ============ */
+
+function signInPolicyRows(): Record<string, string> {
+  return Object.fromEntries(
+    Array.from(document.querySelectorAll('.ad-configpreview .prow'), (row) => [
+      row.querySelector('.k')?.textContent ?? '',
+      row.querySelector('.v')?.textContent ?? '',
+    ]),
+  );
+}
+
+function signInPolicyReads(): number {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(([input]) => String(input) === '/api/policies/sign-in')
+    .length;
+}
+
+async function openSignInSettings(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  await openSettings(status);
+  await screen.findByRole('heading', { name: 'User sign-in' });
+}
+
+test('FA-S1: signed out, the User sign-in panel asks to sign in and reads nothing', async () => {
+  await openSignInSettings();
+
+  expect(
+    screen.getByText(
+      "How long a user's sign-in lasts, when repeated failed sign-ins lock a user's account, and whether users must replace a password an administrator set.",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('Sign in to see the user sign-in settings.'),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(session.openSignIn).toHaveBeenCalledTimes(1);
+  expect(signInPolicyReads()).toBe(0);
+  // The Due Soon panel comes first, Other settings stays last.
+  expect(
+    screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
+  ).toEqual(['Due Soon warning', 'User sign-in', 'Other settings']);
+});
+
+test('FA-S2: signed in without the permission, the settings read without an edit control', async () => {
+  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  await openSignInSettings();
+
+  await waitFor(() =>
+    expect(signInPolicyRows()).toEqual({
+      'User sign-ins expire': 'After 30 days',
+      'Failed sign-ins before a lock': '10',
+      'Lock duration': '15 minutes',
+      'New password at first sign-in': 'Required',
+    }),
+  );
+  expect(
+    screen.getByText(
+      'Only users whose role may configure system settings can change these.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: 'Edit user sign-in settings…' }),
+  ).toBeNull();
+  // User sign-in never says "sessions" (those are Worker Sessions).
+  expect(document.querySelector('.ad-config')?.textContent).not.toMatch(
+    /session/i,
+  );
+});
+
+test('FA-S3: the editor saves only the changed setting and re-reads', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openSignInSettings();
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Edit user sign-in settings…' }),
+  );
+  let dialog = screen.getByRole('dialog', { name: 'User sign-in settings' });
+  expect(dialog.textContent).not.toMatch(/session/i);
+  fireEvent.change(within(dialog).getByLabelText('Expire after (days)'), {
+    target: { value: '7' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/sign-in',
+      body: { user_session_days: 7 },
+    },
+  ]);
+  await waitFor(() =>
+    expect(signInPolicyRows()['User sign-ins expire']).toBe('After 7 days'),
+  );
+
+  // Expiry Off: the days stay (disabled) and only the switch is sent.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit user sign-in settings…' }),
+  );
+  dialog = screen.getByRole('dialog', { name: 'User sign-in settings' });
+  const expires = within(dialog).getByRole('switch', {
+    name: 'User sign-ins expire',
+  });
+  expect(expires).toHaveAttribute('aria-checked', 'true');
+  fireEvent.click(expires);
+  expect(expires).toHaveAttribute('aria-checked', 'false');
+  const days = within(dialog).getByLabelText('Expire after (days)');
+  expect(days).toBeDisabled();
+  expect(days).toHaveValue(7);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[1]).toEqual({
+    method: 'PUT',
+    url: '/api/policies/sign-in',
+    body: { user_session_expires: false },
+  });
+  await waitFor(() =>
+    expect(signInPolicyRows()['User sign-ins expire']).toBe('Never'),
+  );
+  expect(signInPolicy.user_session_days).toBe(7);
+
+  // Nothing changed: Save closes without a request.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit user sign-in settings…' }),
+  );
+  dialog = screen.getByRole('dialog', { name: 'User sign-in settings' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toHaveLength(2);
+});
+
+test('FA-S4: invalid values are refused in place, offline blocks editing and a failed read offers Retry', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openSignInSettings();
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Edit user sign-in settings…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'User sign-in settings' });
+  const save = within(dialog).getByRole('button', { name: 'Save changes' });
+  for (const [label, value, message] of [
+    [
+      'Expire after (days)',
+      '366',
+      'User sign-ins must expire after a whole number of days from 1 to 365.',
+    ],
+    [
+      'Failed sign-ins before a lock',
+      '2',
+      'The number of failed sign-ins before a lock must be a whole number from 3 to 100.',
+    ],
+    [
+      'Lock duration (minutes)',
+      '1441',
+      'The lock duration must be a whole number of minutes from 1 to 1440.',
+    ],
+  ] as const) {
+    const field = within(dialog).getByLabelText(label);
+    const before = (field as HTMLInputElement).value;
+    fireEvent.change(field, { target: { value } });
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(message);
+    expect(save).toBeDisabled();
+    fireEvent.change(field, { target: { value: before } });
+    expect(within(dialog).queryByRole('alert')).toBeNull();
+  }
+  // An unanswered save is an unknown outcome; closing re-reads.
+  signInPolicyFailure = 'network';
+  fireEvent.click(
+    within(dialog).getByRole('switch', {
+      name: 'Require a new password at first sign-in',
+    }),
+  );
+  fireEvent.click(save);
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    'The server did not answer — the settings may or may not have been saved. Close this window to reload them before trying again.',
+  );
+  signInPolicyFailure = null;
+  const readsBefore = signInPolicyReads();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() => expect(signInPolicyReads()).toBe(readsBefore + 1));
+  cleanup();
+
+  await openSignInSettings('unavailable');
+  expect(
+    await screen.findByRole('button', { name: 'Edit user sign-in settings…' }),
+  ).toBeDisabled();
+  cleanup();
+
+  signInPolicyFailure = { status: 500, detail: 'Database unavailable.' };
+  await openSignInSettings();
+  expect(
+    await screen.findByText('The user sign-in settings could not be loaded.'),
+  ).toBeInTheDocument();
+  signInPolicyFailure = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() =>
+    expect(signInPolicyRows()['Lock duration']).toBe('15 minutes'),
+  );
 });

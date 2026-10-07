@@ -1,0 +1,47 @@
+/* User sign-in dialogs (Sign in, Change password, Set up PartFlow): the
+   dialogs open from the top navigation over any view, so they carry
+   their own small form stylesheet on the shared .dlg shell instead of
+   depending on a view's CSS. */
+
+.acct-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 14px 0 4px;
+}
+
+.acct-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+}
+
+.dlg .acct-form .field {
+  margin-bottom: 0;
+}
+
+.acct-form .err {
+  color: var(--err-t);
+  font-size: 12.5px;
+  font-weight: 700;
+  margin: -4px 0 0;
+}
+
+.acct-form .acct-help {
+  color: var(--faint);
+  font-size: 12px;
+  margin: -6px 0 0;
+}
+
+.acct-form .acct-note {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: -6px 0 0;
+}
+
+.acct-form .row {
+  margin-top: 8px;
+}

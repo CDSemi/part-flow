@@ -12,10 +12,13 @@ import {
 } from './permissions';
 
 // The permission vocabulary and its presentation (Administration →
-// Roles & permissions and → Correction permissions), and the guard that
-// nothing outside Administration reads a user, a role or a permission:
-// they are configuration only — no screen is hidden or refused by role
-// before users can sign in.
+// Roles & permissions and → Correction permissions), and the guards that
+// only Administration and the user sign-in modules read a user, a role or
+// a permission, and that only the session UI, Users and the Settings →
+// User sign-in panel ask whether the signed-in user holds a permission:
+// the server checks permissions only where a route requires them (so far
+// setting passwords and the user sign-in settings), and no other screen
+// is hidden or refused by role.
 
 /** The server's vocabulary, in order (literal copy of the contract). */
 const CONTRACT_KEYS = [
@@ -122,8 +125,31 @@ function sourcesMatching(pattern: RegExp): string[] {
     .sort();
 }
 
-test('only the Administration users, roles and correction sections use the users and roles API', () => {
+test('only Administration and the session modules use the users and roles API', () => {
   expect(sourcesMatching(/from '[./]*api\/(users|roles)'/)).toEqual([
+    'app/session-context.ts',
+    'components/AccountChip.tsx',
+    'views/administration/CorrectionPermissionsSection.tsx',
+    'views/administration/RolesSection.tsx',
+    'views/administration/SetPasswordDialog.tsx',
+    'views/administration/UsersSection.tsx',
+    'views/administration/permissions.ts',
+  ]);
+});
+
+test('only Administration and the session modules read a user, a role or a permission', () => {
+  expect(
+    sourcesMatching(
+      /\b(Permission|PERMISSIONS|PERMISSION_LABELS|CORRECTION_PERMISSIONS|listRoles|listUsers|roleId|roleName)\b/,
+    ),
+  ).toEqual([
+    'api/roles.ts',
+    'api/session.ts',
+    'api/setup.ts',
+    'api/users.ts',
+    'app/session-context.ts',
+    'components/AccountChip.tsx',
+    'components/FirstRunSetupDialog.tsx',
     'views/administration/CorrectionPermissionsSection.tsx',
     'views/administration/RolesSection.tsx',
     'views/administration/UsersSection.tsx',
@@ -131,17 +157,11 @@ test('only the Administration users, roles and correction sections use the users
   ]);
 });
 
-test('nothing outside Administration reads a user, a role or a permission', () => {
-  expect(
-    sourcesMatching(
-      /\b(Permission|PERMISSIONS|PERMISSION_LABELS|CORRECTION_PERMISSIONS|listRoles|listUsers|roleId|roleName)\b/,
-    ),
-  ).toEqual([
-    'api/roles.ts',
-    'api/users.ts',
-    'views/administration/CorrectionPermissionsSection.tsx',
-    'views/administration/RolesSection.tsx',
+test('only the session UI, Users and the User sign-in panel ask for a permission', () => {
+  expect(sourcesMatching(/\bcan\(|\bhasPermission\b/)).toEqual([
+    'app/session-context.ts',
+    'app/session-provider.tsx',
+    'views/administration/SignInSettingsPanel.tsx',
     'views/administration/UsersSection.tsx',
-    'views/administration/permissions.ts',
   ]);
 });

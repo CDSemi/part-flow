@@ -44,15 +44,29 @@ handlers in ``app.api.errors`` translate typed failures.
   ``null`` clears the period (a missing key, a string, float or bool, or
   an extra field is 422); the 12-1200 range is the Application's 422;
   answers with the stored policy, also when nothing changed.
+- ``GET /policies/sign-in`` — Administration → Settings → User sign-in
+  (Phase 14 slice 1): whether user sign-ins expire and after how many
+  days, the failed sign-ins before a lock, the lock duration and whether
+  an administrator-set password must be replaced. Requires a signed-in
+  User (no pending forced password change).
+- ``PUT /policies/sign-in`` — a partial merge like Worker sessions
+  (strict integers and booleans; an empty body, a ``null`` or an extra
+  field is 422); requires ``CONFIGURE_SYSTEM_SETTINGS``; the audit row
+  names the signed-in administrator. Every other policy route keeps its
+  Phase 13 gate (none) until Phase 14 slice 2.
 """
 
 import datetime
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
+from app.api.authorization import RequirePermission, SignedInDep
 from app.api.dependencies import SessionDep
 from app.application import policies
+from app.application.authentication import Principal
+from app.domain.enums import Permission
 from app.infrastructure.models import ApplicationPolicy
 
 router = APIRouter(prefix="/api")
@@ -217,3 +231,59 @@ def put_retention_policy(
         session, retention_period_months=body.retention_period_months
     )
     return _retention_response(policy)
+
+
+class SignInPolicyResponse(BaseModel):
+    user_session_expires: bool
+    user_session_days: int
+    sign_in_lockout_attempts: int
+    sign_in_lockout_minutes: int
+    require_password_change: bool
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class SignInPolicyPutRequest(BaseModel):
+    """Any non-empty subset of the section; a field left out keeps its value.
+
+    An explicit ``null`` reaches the service (exclude_unset) and is
+    refused there.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_session_expires: StrictBool | None = None
+    user_session_days: StrictInt | None = None
+    sign_in_lockout_attempts: StrictInt | None = None
+    sign_in_lockout_minutes: StrictInt | None = None
+    require_password_change: StrictBool | None = None
+
+
+def _sign_in_response(policy: ApplicationPolicy) -> SignInPolicyResponse:
+    return SignInPolicyResponse(
+        user_session_expires=policy.user_session_expires,
+        user_session_days=policy.user_session_days,
+        sign_in_lockout_attempts=policy.sign_in_lockout_attempts,
+        sign_in_lockout_minutes=policy.sign_in_lockout_minutes,
+        require_password_change=policy.require_password_change,
+        updated_at=policy.updated_at,
+    )
+
+
+@router.get("/policies/sign-in")
+def get_sign_in_policy(session: SessionDep, principal: SignedInDep) -> SignInPolicyResponse:
+    return _sign_in_response(policies.get_policy(session))
+
+
+@router.put("/policies/sign-in")
+def put_sign_in_policy(
+    body: SignInPolicyPutRequest,
+    session: SessionDep,
+    principal: Annotated[
+        Principal, Depends(RequirePermission(Permission.CONFIGURE_SYSTEM_SETTINGS))
+    ],
+) -> SignInPolicyResponse:
+    policy = policies.update_sign_in_policy(
+        session, actor_user_id=principal.user_id, **body.model_dump(exclude_unset=True)
+    )
+    return _sign_in_response(policy)

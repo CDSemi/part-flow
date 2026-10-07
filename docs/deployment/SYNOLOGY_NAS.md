@@ -158,6 +158,10 @@ Capture the output in the deployment record. Never run `alembic downgrade` on
 staging data you need to preserve without first reviewing the specific
 migrations and creating a verified backup.
 
+On a new database with no Administrator, complete first-run setup before opening
+access: read the setup token with `docker compose logs backend | grep "Setup token"`
+and use **Set up PartFlow** in the application.
+
 ### 4.6 Smoke test
 
 From the NAS:
