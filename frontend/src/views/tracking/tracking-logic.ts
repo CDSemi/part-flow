@@ -17,7 +17,12 @@ import type {
   TrackingStatus,
 } from '../../api/tracking';
 import { DEFAULT_TRACKING_FILTERS } from '../../api/tracking';
-import { exceedsExpectedDuration, formatElapsedSince } from '../dates';
+import {
+  exceedsExpectedDuration,
+  formatElapsedSince,
+  formatIsoDateShort,
+  formatTimeOfDay,
+} from '../dates';
 
 /** Refresh period of the list and of an open detail — the monitoring
  * cadence every live view shares. */
@@ -183,6 +188,11 @@ export const FLOW_STATUS_LABEL: Record<string, string> = {
   STOCKED: 'stocked — complete',
   REVERSED: 'reversed — never active',
 };
+
+/** The date and time of one history entry (`Jul 24 08:15`). */
+export function timestamp(iso: string): string {
+  return `${formatIsoDateShort(iso.slice(0, 10))} ${formatTimeOfDay(iso)}`;
+}
 
 export function flowId(id: number): string {
   return `QF-${id}`;

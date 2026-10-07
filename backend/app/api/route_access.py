@@ -249,6 +249,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/tracking/movements"): _any_of(_TRACKING_VIEW),
     ("GET", "/api/tracking/flows"): _any_of(_TRACKING_VIEW),
     ("GET", "/api/tracking/allocations"): _any_of(_TRACKING_VIEW),
+    ("GET", "/api/tracking/audit-trail"): _any_of(_TRACKING_VIEW),
     ("GET", "/api/area-board"): _any_of(_AREA_BOARD_VIEW),
     ("GET", "/api/machines/{machine_id}"): _any_of(_MACHINES_VIEW),
     ("GET", "/api/machines/{machine_id}/lifecycle-events"): _any_of(_MACHINES_VIEW),

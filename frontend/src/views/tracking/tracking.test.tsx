@@ -6,14 +6,22 @@ import {
   screen,
   within,
 } from '@testing-library/react';
+import { useEffect } from 'react';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { PERMISSIONS } from '../../api/roles';
 import type { Permission } from '../../api/roles';
 import { ConnectivityContext } from '../../app/connectivity-context';
+import { useRouter } from '../../app/router-context';
+import { RouterProvider } from '../../app/router-provider';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { formatIsoDateShort, formatTimeOfDay } from '../dates';
+import {
+  clearPriorityFocus,
+  peekPriorityFocus,
+} from '../priority/priority-focus';
 import { TrackingView } from './TrackingView';
 import {
   SEARCH_DEBOUNCE_MS,
@@ -533,13 +541,19 @@ let session: SessionValue = signedInSession();
 /** Render the view with a healthy shared connectivity state. */
 async function renderTracking(
   status: 'connected' | 'unavailable' = 'connected',
+  extra: ReactNode = null,
 ) {
+  // The detail's `Change priority` navigates, so the view renders under
+  // the router as it does in the app.
   const result = render(
-    <SessionContext.Provider value={session}>
-      <ConnectivityContext.Provider value={{ status, retry: () => {} }}>
-        <TrackingView />
-      </ConnectivityContext.Provider>
-    </SessionContext.Provider>,
+    <RouterProvider>
+      <SessionContext.Provider value={session}>
+        <ConnectivityContext.Provider value={{ status, retry: () => {} }}>
+          <TrackingView />
+        </ConnectivityContext.Provider>
+      </SessionContext.Provider>
+      {extra}
+    </RouterProvider>,
   );
   // The first feed answer resolves in a microtask.
   await act(async () => {});
@@ -565,6 +579,7 @@ function flowBlock(id: string): Element {
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/tracking');
   session = signedInSession();
+  clearPriorityFocus();
   stubFetch();
 });
 
@@ -2253,12 +2268,19 @@ function section(title: string): HTMLElement {
   )!;
 }
 
-test('FC-9: no Corrections section without a correction key', async () => {
+test('FC-9 / FT-4: a reader sees Corrections with only View audit trail, without the tag', async () => {
   session = signedInSession(['VIEW_PRODUCTION_DATA']);
   await renderTracking();
   await openFirstRow();
   expect(document.querySelector('.tk-right h2')?.textContent).toBe(PN);
-  expect(section('Corrections')).toBeUndefined();
+  const corrections = section('Corrections');
+  expect(corrections.querySelector('h4')?.textContent).toBe('Corrections');
+  expect(corrections.querySelector('h4 .tag')).toBeNull();
+  expect(
+    within(corrections)
+      .getAllByRole('button')
+      .map((button) => button.textContent),
+  ).toEqual(['View audit trail']);
   expect(
     screen.queryByRole('button', { name: /Adjust WO Allocation/ }),
   ).toBeNull();
@@ -2278,8 +2300,10 @@ test('FC-9 / FE-1: only Edit assigned Route… without Edit Work Order Allocatio
   const buttons = within(corrections).getAllByRole('button');
   expect(buttons.map((button) => button.textContent)).toEqual([
     'Edit assigned Route…',
+    'View audit trail',
   ]);
   expect(buttons[0]).toBeEnabled();
+  expect(buttons[1]).toBeEnabled();
   cleanup();
 
   await renderTracking('unavailable');
@@ -2287,6 +2311,9 @@ test('FC-9 / FE-1: only Edit assigned Route… without Edit Work Order Allocatio
   expect(
     screen.getByRole('button', { name: 'Edit assigned Route…' }),
   ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'View audit trail' }),
+  ).toBeEnabled();
 });
 
 test('FC-9 / FE-1: Corrections offers Edit assigned Route… then Adjust WO Allocation… — disabled while offline', async () => {
@@ -2300,9 +2327,10 @@ test('FC-9 / FE-1: Corrections offers Edit assigned Route… then Adjust WO Allo
   expect(buttons.map((button) => button.textContent)).toEqual([
     'Edit assigned Route…',
     'Adjust WO Allocation…',
+    'Change priority',
+    'View audit trail',
   ]);
-  expect(buttons[0]).toBeEnabled();
-  expect(buttons[1]).toBeEnabled();
+  for (const button of buttons) expect(button).toBeEnabled();
   // The Corrections section is the last detail section.
   const sections = document.querySelectorAll('.tk-right .tk-sec');
   expect(sections[sections.length - 1]).toBe(corrections);
@@ -2316,6 +2344,11 @@ test('FC-9 / FE-1: Corrections offers Edit assigned Route… then Adjust WO Allo
   expect(
     screen.getByRole('button', { name: 'Adjust WO Allocation…' }),
   ).toBeDisabled();
+  // A navigation and a read stay available while disconnected.
+  expect(screen.getByRole('button', { name: 'Change priority' })).toBeEnabled();
+  expect(
+    screen.getByRole('button', { name: 'View audit trail' }),
+  ).toBeEnabled();
 });
 
 test('FC-9: Adjust WO Allocation… opens the PN dialog; a correction reloads both feeds and reports under the button', async () => {
@@ -2851,4 +2884,146 @@ test('FE-13: a route adjustment re-reads the appended flow pages; an unchanged t
   await act(async () => {});
   await act(async () => {});
   expect(flowReads()).toBe(2);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 14 slice 7 — Change priority and View audit trail
+// ---------------------------------------------------------------------------
+
+function correctionButtons(): (string | null)[] {
+  return within(section('Corrections'))
+    .getAllByRole('button')
+    .map((button) => button.textContent);
+}
+
+function trailPage(entries: unknown[] = []) {
+  return {
+    part_number: PN,
+    entries,
+    total: entries.length,
+    has_more: false,
+    next_before_source: null,
+    next_before_id: null,
+  };
+}
+
+test('FT-4: Change priority follows the priority keys, without the tag', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA', 'REORDER_HOT_ITEMS']);
+  await renderTracking();
+  await openFirstRow();
+  expect(correctionButtons()).toEqual(['Change priority', 'View audit trail']);
+  expect(section('Corrections').querySelector('h4 .tag')).toBeNull();
+});
+
+test('FT-4: Edit Work Order Allocation alone offers Adjust and the trail, with the tag', async () => {
+  session = signedInSession(['EDIT_WORK_ORDER_ALLOCATION']);
+  await renderTracking();
+  await openFirstRow();
+  expect(correctionButtons()).toEqual([
+    'Adjust WO Allocation…',
+    'View audit trail',
+  ]);
+  expect(section('Corrections').querySelector('h4 .tag')?.textContent).toBe(
+    'authorized actions — recorded with your name',
+  );
+});
+
+test('FT-4: a user holding none of the five keys sees no Corrections section', async () => {
+  session = signedInSession(['MANAGE_MACHINES']);
+  await renderTracking();
+  await openFirstRow();
+  expect(document.querySelector('.tk-right h2')?.textContent).toBe(PN);
+  expect(section('Corrections')).toBeUndefined();
+});
+
+test('FT-4: View audit trail opens while disconnected and shows the read error with Retry', async () => {
+  let reachable = false;
+  stubFetch((url) => {
+    if (url.startsWith('/api/tracking/audit-trail')) {
+      if (!reachable) throw new TypeError('Failed to fetch');
+      return jsonResponse(trailPage());
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking('unavailable');
+  await openFirstRow();
+  fireEvent.click(screen.getByRole('button', { name: 'View audit trail' }));
+  const dialog = await screen.findByRole('dialog', {
+    name: `Audit trail — ${PN}`,
+  });
+  expect(
+    await within(dialog).findByText(
+      'The PartFlow server could not be reached. Nothing was changed.',
+    ),
+  ).toBeInTheDocument();
+  reachable = true;
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
+  expect(
+    await within(dialog).findByText(`No recorded changes for ${PN} yet.`),
+  ).toBeInTheDocument();
+});
+
+test('FT-4 / FT-3: the trail closes with Escape, returning focus to View audit trail; the panel stays', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/audit-trail')
+      ? jsonResponse(trailPage())
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+  const opener = screen.getByRole('button', { name: 'View audit trail' });
+  opener.focus();
+  fireEvent.click(opener);
+  const dialog = await screen.findByRole('dialog', {
+    name: `Audit trail — ${PN}`,
+  });
+  await within(dialog).findByText(`No recorded changes for ${PN} yet.`);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.activeElement).toBe(
+    screen.getByRole('button', { name: 'View audit trail' }),
+  );
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+});
+
+test('FT-4: selecting another PN closes the trail of the previous one', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/audit-trail')
+      ? jsonResponse(trailPage())
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+  fireEvent.click(screen.getByRole('button', { name: 'View audit trail' }));
+  await screen.findByRole('dialog', { name: `Audit trail — ${PN}` });
+  const rows = document.querySelectorAll<HTMLElement>('.tk-table .rowbtn');
+  fireEvent.click(rows[1]);
+  await act(async () => {});
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('FT-5: Change priority opens Priority and hands the PN over', async () => {
+  await renderTracking();
+  await openFirstRow();
+  fireEvent.click(screen.getByRole('button', { name: 'Change priority' }));
+  expect(window.location.pathname).toBe('/management/priority');
+  expect(peekPriorityFocus()).toBe(PN);
+});
+
+/** An active navigation guard that refuses every navigation. */
+function RefusingGuard() {
+  const { setNavigationGuard } = useRouter();
+  useEffect(() => {
+    setNavigationGuard(() => false);
+    return () => setNavigationGuard(null);
+  }, [setNavigationGuard]);
+  return null;
+}
+
+test('FT-5: a refused navigation leaves the path and hands nothing over', async () => {
+  await renderTracking('connected', <RefusingGuard />);
+  await openFirstRow();
+  fireEvent.click(screen.getByRole('button', { name: 'Change priority' }));
+  expect(window.location.pathname).toBe('/management/tracking');
+  expect(peekPriorityFocus()).toBeNull();
 });

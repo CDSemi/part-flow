@@ -29,6 +29,11 @@ The read-only management surface of `app.application.tracking`:
 - ``GET /tracking/allocations?part_number=&before=`` — a further page of
   the allocation history (``allocated_at DESC, id DESC``, ``before``
   naming the last allocation delivered).
+- ``GET /tracking/audit-trail?part_number=&before_source=&before_id=`` — one
+  page of the PN's audit trail (Phase 14 slice 7): its master-data, Work
+  Order (completion included), demand, priority, Management allocation
+  and route-adjustment records, newest first (``(occurred_at DESC,
+  source, id DESC)``), the cursor naming the last entry delivered.
 
 A PN is addressed by its canonical value in a query parameter (a PN is
 an opaque string that may carry path-hostile characters); the input is
@@ -48,7 +53,7 @@ from pydantic import BaseModel
 from app.api.authorization import TRACKING_READ, RequireAnyPermission
 from app.api.dependencies import SessionDep
 from app.api.user_refs import UserRefResponse, user_ref_response
-from app.application import tracking
+from app.application import audit_trail, tracking
 from app.application.allocations import DemandContext
 from app.application.authentication import Principal
 from app.application.production_board import BoardLocation, FlowPosition, LocationState
@@ -850,3 +855,184 @@ def get_tracking_allocations(
     """A further page of one PN's allocation history — ``(allocated_at
     DESC, id DESC)``, continuing below the allocation ``before`` names."""
     return _allocation_page(tracking.allocation_history_of(session, part_number, before, limit))
+
+
+# ---------------------------------------------------------------------------
+# The PN audit trail (Phase 14 slice 7)
+# ---------------------------------------------------------------------------
+
+# Values as stored (the smart union keeps the stored type); an image is
+# reduced to whether one is set.
+AuditTrailValue = bool | int | str | list[str] | None
+
+
+class AuditTrailChangeResponse(BaseModel):
+    field: Literal[
+        "name",
+        "current_revision",
+        "erp_id",
+        "image",
+        "work_order_number",
+        "received_date",
+        "due_date",
+        "status",
+        "request_type",
+        "requested_quantity",
+        "job_numbers",
+        "requester",
+        "reason",
+        "notes",
+        "priority_rank",
+    ]
+    before: AuditTrailValue
+    after: AuditTrailValue
+
+
+class AuditTrailSubjectResponse(BaseModel):
+    work_order_id: int | None
+    # The Work Order's current number; null for an internal Work Order.
+    work_order_number: str | None
+    work_order_demand_id: int | None
+    # Null unless work_order_demand_id is set; false for a deleted line.
+    demand_exists: bool | None
+    quantity_flow_id: int | None
+
+
+class AuditTrailPriorityResponse(BaseModel):
+    # ADD, REMOVE, MOVE_UP, MOVE_DOWN, DRAG, UNDO, REDO, AUTO_REMOVE, LINE_DELETE, …
+    action: str | None
+    # ALLOCATION, WORK_ORDER_SAVE, DEMAND_LINE_REMOVAL, …
+    trigger: str | None
+    # FULLY_ALLOCATED, WORK_ORDER_COMPLETED, LINE_DELETED, …
+    removal_reason: str | None
+
+
+class AuditTrailAllocationResponse(BaseModel):
+    quantity: int
+    source: Literal["STOCKROOM", "MANAGEMENT"]
+    is_manual_override: bool
+    exceeds_demand: bool
+    reverses_allocation_id: int | None
+    station_id: str | None
+
+
+class AuditTrailRouteStepResponse(BaseModel):
+    sequence: int
+    area: TrackingAreaRef
+    operation: TrackingOperationRef | None
+    expected_duration: datetime.timedelta | None
+    # Retired Machines included.
+    preferred_machine: TrackingMachineRef | None
+    instructions: str | None
+
+
+class AuditTrailRouteResponse(BaseModel):
+    kept_through_sequence: int
+    # The replaced tail and the new tail, ascending.
+    before_steps: list[AuditTrailRouteStepResponse]
+    after_steps: list[AuditTrailRouteStepResponse]
+
+
+class AuditTrailEntryResponse(BaseModel):
+    source: audit_trail.AuditTrailSource
+    id: int
+    occurred_at: datetime.datetime
+    kind: audit_trail.AuditTrailKind
+    actor_user: UserRefResponse | None
+    legacy_actor: str | None
+    reason: str | None
+    subject: AuditTrailSubjectResponse
+    changes: list[AuditTrailChangeResponse]
+    priority: AuditTrailPriorityResponse | None
+    # WORK_ORDER_COMPLETED only: WORK_ORDER_SAVE, DEMAND_LINE_REMOVAL, …
+    completion_trigger: str | None
+    allocation: AuditTrailAllocationResponse | None
+    route: AuditTrailRouteResponse | None
+
+
+class AuditTrailPageResponse(BaseModel):
+    part_number: str
+    # Newest first.
+    entries: list[AuditTrailEntryResponse]
+    total: int
+    has_more: bool
+    # Pass as before_source / before_id for the next (older) page; null on
+    # the last page.
+    next_before_source: audit_trail.AuditTrailSource | None
+    next_before_id: int | None
+
+
+def _trail_step(step: audit_trail.TrailRouteStep) -> AuditTrailRouteStepResponse:
+    return AuditTrailRouteStepResponse(
+        sequence=step.sequence,
+        area=_area(step.area),
+        operation=_operation(step.operation),
+        expected_duration=step.expected_duration,
+        preferred_machine=_machine(step.preferred_machine),
+        instructions=step.instructions,
+    )
+
+
+def _trail_entry(entry: audit_trail.TrailEntry) -> AuditTrailEntryResponse:
+    allocation = entry.allocation
+    route = entry.route
+    return AuditTrailEntryResponse(
+        source=entry.source,
+        id=entry.id,
+        occurred_at=entry.occurred_at,
+        kind=entry.kind,
+        actor_user=user_ref_response(entry.actor_user),
+        legacy_actor=entry.legacy_actor,
+        reason=entry.reason,
+        subject=AuditTrailSubjectResponse(**entry.subject._asdict()),
+        changes=[
+            AuditTrailChangeResponse.model_validate(change._asdict()) for change in entry.changes
+        ],
+        priority=(
+            AuditTrailPriorityResponse(**entry.priority._asdict())
+            if entry.priority is not None
+            else None
+        ),
+        completion_trigger=entry.completion_trigger,
+        allocation=(
+            AuditTrailAllocationResponse.model_validate(allocation._asdict())
+            if allocation is not None
+            else None
+        ),
+        route=(
+            AuditTrailRouteResponse(
+                kept_through_sequence=route.kept_through_sequence,
+                before_steps=[_trail_step(step) for step in route.before_steps],
+                after_steps=[_trail_step(step) for step in route.after_steps],
+            )
+            if route is not None
+            else None
+        ),
+    )
+
+
+@router.get("/tracking/audit-trail")
+def get_tracking_audit_trail(
+    principal: TrackingReaderDep,
+    session: SessionDep,
+    part_number: str,
+    before_source: Literal["AUDIT", "ALLOCATION"] | None = None,
+    before_id: int | None = Query(None, ge=1, le=9_223_372_036_854_775_807),
+    limit: int = Query(audit_trail.DEFAULT_TRAIL_LIMIT, ge=1, le=audit_trail.MAX_TRAIL_LIMIT),
+) -> AuditTrailPageResponse:
+    """One page of the PN's audit trail — its recorded master-data, Work
+    Order, demand, priority, Management allocation and route-adjustment
+    changes, newest first ``(occurred_at DESC, source, id DESC)``,
+    continuing below the entry ``before_source`` / ``before_id`` names
+    (both or neither). Read-only and unlocked. The PN is canonicalized;
+    an unknown PN, or a cursor outside its trail, is 404."""
+    cursor = audit_trail.trail_cursor(before_source, before_id)
+    page = audit_trail.audit_trail_of(session, part_number, before=cursor, limit=limit)
+    return AuditTrailPageResponse(
+        part_number=page.part_number,
+        entries=[_trail_entry(entry) for entry in page.entries],
+        total=page.total,
+        has_more=page.has_more,
+        next_before_source=page.next_before.source if page.next_before is not None else None,
+        next_before_id=page.next_before.id if page.next_before is not None else None,
+    )

@@ -1011,7 +1011,7 @@ def flow_page_of(
 ) -> FlowPage:
     """A further page of one PN's Quantity Flows (canonicalized; unknown
     PN, or a cursor that is not a flow of the PN → 404)."""
-    pn = _require_tracked(session, part_number)
+    pn = require_tracked(session, part_number)
     areas = _all_areas(session)
     return _tracking_flows(session, pn, None, areas, before_flow_id=before_flow_id, limit=limit)
 
@@ -1288,7 +1288,7 @@ def allocation_history_of(
     session: Session, part_number: object, before_allocation_id: int | None, limit: int
 ) -> AllocationPage:
     """`allocation_history` for a raw PN input (canonicalized; unknown → 404)."""
-    pn = _require_tracked(session, part_number)
+    pn = require_tracked(session, part_number)
     return allocation_history(session, pn, before_allocation_id=before_allocation_id, limit=limit)
 
 
@@ -1303,7 +1303,9 @@ def _is_tracked(session: Session, pn: str) -> bool:
     return False
 
 
-def _require_tracked(session: Session, part_number: object) -> str:
+def require_tracked(session: Session, part_number: object) -> str:
+    """The canonical PN of a raw input that PartFlow tracks (unknown → 404) —
+    the one PN check of every Tracking read, the audit trail's included."""
     pn = canonical_part_number(part_number)
     if not _is_tracked(session, pn):
         raise NotFoundError(f"Part Number {pn} is not known to PartFlow.")
@@ -1318,7 +1320,7 @@ def movement_history_of(
     movement_types: Collection[MovementType] | None = None,
 ) -> MovementPage:
     """`movement_history` for a raw PN input (canonicalized; unknown → 404)."""
-    pn = _require_tracked(session, part_number)
+    pn = require_tracked(session, part_number)
     return movement_history(
         session,
         pn,
@@ -1345,7 +1347,7 @@ def tracking_detail(
     absent — the history and current state are untouched. Unknown to
     production, demand and master alike → 404.
     """
-    pn = _require_tracked(session, part_number)
+    pn = require_tracked(session, part_number)
     areas = _all_areas(session)
     positions = flow_positions(session, _active_flows(session, [pn]))
     locations = group_locations(positions.values(), areas).get(pn, [])
@@ -1410,7 +1412,7 @@ def assigned_routes_of(session: Session, part_number: object) -> AssignedRoutes:
     preferred Machine is read by id, retired ones included. A read, no
     lock: the command re-judges everything under its locks.
     """
-    pn = _require_tracked(session, part_number)
+    pn = require_tracked(session, part_number)
     flows = list(
         session.scalars(
             select(QuantityFlow)

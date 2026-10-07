@@ -47,6 +47,14 @@ import {
   useHotHistory,
 } from './hot-history';
 import type { HistoryOp, HistoryStep } from './hot-history';
+import { clearPriorityFocus, peekPriorityFocus } from './priority-focus';
+
+/** `#2`, `#2 and #5`, `#1, #2 and #5` — ranks in rank order. */
+function rankList(ranks: readonly number[]): string {
+  const labels = ranks.map((rank) => `#${rank}`);
+  if (labels.length <= 1) return labels.join('');
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
 
 /** The derived due countdown of one demand: its own due date against
  * its Work Order's received date (the lead time of the Due Soon
@@ -263,6 +271,21 @@ export function PriorityView() {
   const now = useUiClock('minute');
   const addButton = useRef<HTMLButtonElement>(null);
   const retryButton = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLOListElement>(null);
+
+  // Arrival from Tracking's `Change priority` (GUI_DESIGN §8): the PN
+  // handed over once (read at mount, then cleared so a later visit sees
+  // nothing), applied once the Hot list is first ready in this mount.
+  // Arrival writes nothing: it highlights the PN's Hot entries, or
+  // opens the Add dialog listing exactly the PN's eligible demand, or
+  // says why neither applies.
+  const [focusPn] = useState(peekPriorityFocus);
+  useEffect(() => {
+    clearPriorityFocus();
+  }, []);
+  const arrivalApplied = useRef(false);
+  const [focusIds, setFocusIds] = useState<readonly number[]>([]);
+  const [addFocusPn, setAddFocusPn] = useState<string | null>(null);
 
   // Focus discipline: the control that opened a confirmation is frozen
   // while the change is in flight, so focus would be lost. Once the
@@ -296,6 +319,44 @@ export function PriorityView() {
     reloading ||
     loaded === null;
 
+  const arrivalReady = loaded !== null && dueSoonData.state.status === 'ready';
+  useEffect(() => {
+    if (focusPn === null || arrivalApplied.current) return;
+    if (!arrivalReady || loaded === null) return;
+    arrivalApplied.current = true;
+    const ranked = loaded.entries.flatMap((entry, index) =>
+      entry.partNumber === focusPn
+        ? [{ id: idOf(entry), rank: entry.rank ?? index + 1 }]
+        : [],
+    );
+    if (ranked.length > 0) {
+      setFocusIds(ranked.map((item) => item.id));
+      setMessage({
+        tone: 'info',
+        text: `${focusPn} is on the Hot list at ${rankList(
+          ranked.map((item) => item.rank),
+        )}.`,
+      });
+    } else if (canSetPriority) {
+      setAddFocusPn(focusPn);
+      setAddOpen(true);
+    } else {
+      setMessage({
+        tone: 'info',
+        text: `${focusPn} is not on the Hot list. Your account can reorder the Hot list but not add to it.`,
+      });
+    }
+  }, [focusPn, arrivalReady, loaded, canSetPriority]);
+
+  // The first highlighted entry is brought into view (focus stays put —
+  // the status line announces the arrival).
+  useEffect(() => {
+    if (focusIds.length === 0) return;
+    listRef.current
+      ?.querySelector('.hot-focus')
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }, [focusIds]);
+
   function reloadList() {
     setReloadingFrom(listData.state);
     listData.reload();
@@ -313,6 +374,8 @@ export function PriorityView() {
     try {
       const result = await applyHotListChange(submission.input);
       setUnknownOutcome(null);
+      // An applied change ends the arrival highlight.
+      setFocusIds([]);
       // A replay may come without the list (no single active Department
       // any more): the committed step still counts; read the list afresh.
       if (result.entries === null) reloadList();
@@ -480,12 +543,16 @@ export function PriorityView() {
 
   function undo() {
     const step = history.undo[history.undo.length - 1];
-    if (step && !writesFrozen) stepHistory('Undo', step);
+    if (!step || writesFrozen) return;
+    setFocusIds([]);
+    stepHistory('Undo', step);
   }
 
   function redo() {
     const step = history.redo[history.redo.length - 1];
-    if (step && !writesFrozen) stepHistory('Redo', step);
+    if (!step || writesFrozen) return;
+    setFocusIds([]);
+    stepHistory('Redo', step);
   }
 
   function moveTo(action: ReorderAction, fromIndex: number, toIndex: number) {
@@ -575,6 +642,8 @@ export function PriorityView() {
             disabled={writesFrozen}
             onClick={() => {
               setMessage(null);
+              setFocusIds([]);
+              setAddFocusPn(null);
               setAddOpen(true);
             }}
           >
@@ -699,13 +768,15 @@ export function PriorityView() {
             barcode in the add dialog.
           </div>
         ) : (
-          <ol className="pr-list" style={{ listStyle: 'none' }}>
+          <ol ref={listRef} className="pr-list" style={{ listStyle: 'none' }}>
             {entries.map((entry, index) => {
               const due = dueInfo(entry, now, dueSoon);
               return (
                 <li
                   key={idOf(entry)}
-                  className={`pr-item ${dragId === idOf(entry) ? 'dragging' : ''}`}
+                  className={`pr-item ${dragId === idOf(entry) ? 'dragging' : ''}${
+                    focusIds.includes(idOf(entry)) ? ' hot-focus' : ''
+                  }`}
                   draggable={canReorder && !writesFrozen}
                   onDragStart={() => setDragId(idOf(entry))}
                   onDragEnd={() => setDragId(null)}
@@ -839,6 +910,7 @@ export function PriorityView() {
         {addOpen && (
           <HotAddDialog
             disabled={writesFrozen}
+            focusPartNumber={addFocusPn ?? undefined}
             onCancel={() => setAddOpen(false)}
             onAdd={addCandidate}
           />
@@ -1288,17 +1360,27 @@ const SEARCH_DEBOUNCE_MS = 200;
 const isBarcodeInput = (text: string) => text.toUpperCase().startsWith('PF:');
 
 type CandidateList = HotListCandidates & {
-  /** What produced the list: everything eligible, a search, or a scan. */
-  source: 'all' | 'search' | 'barcode';
+  /** What produced the list: everything eligible, a search, a scan, or
+   * the exact PN read of an arrival from Tracking. */
+  source: 'all' | 'search' | 'barcode' | 'focus';
   term: string;
 };
 
 function HotAddDialog({
   disabled,
+  focusPartNumber,
   onCancel,
   onAdd,
 }: {
   disabled: boolean;
+  /**
+   * Arrival from Tracking's `Change priority`: while the search input
+   * is empty the dialog lists ALL and ONLY this PN's eligible demand —
+   * an exact PN read (the PN barcode form, unbounded), never a text
+   * search — and adds nothing until a row is clicked, even when only
+   * one is listed. The PN is never placed in the input.
+   */
+  focusPartNumber?: string;
   onCancel: () => void;
   onAdd: (candidate: HotListEntry) => void;
 }) {
@@ -1316,18 +1398,35 @@ function HotAddDialog({
   const now = useUiClock('minute');
   const policy = useDueSoonPolicy();
 
-  const runSearch = useCallback(async (term: string) => {
-    const requested = ++generation.current;
-    try {
-      const data = await getHotListCandidates(term ? { search: term } : {});
-      if (generation.current !== requested) return;
-      setList({ ...data, source: term ? 'search' : 'all', term });
-      setLoadError(null);
-    } catch (error) {
-      if (generation.current !== requested) return;
-      setLoadError(errorMessage(error));
-    }
-  }, []);
+  const runSearch = useCallback(
+    async (term: string) => {
+      const requested = ++generation.current;
+      // The empty input of an arrival lists the PN's own demand: the
+      // server strips exactly one `PF:PN:` and matches the canonical
+      // PN exactly — never the scan path's one-candidate add.
+      const focus = term ? undefined : focusPartNumber;
+      try {
+        const data = await getHotListCandidates(
+          term
+            ? { search: term }
+            : focus !== undefined
+              ? { barcode: `PF:PN:${focus}` }
+              : {},
+        );
+        if (generation.current !== requested) return;
+        setList(
+          focus !== undefined
+            ? { ...data, source: 'focus', term: focus }
+            : { ...data, source: term ? 'search' : 'all', term },
+        );
+        setLoadError(null);
+      } catch (error) {
+        if (generation.current !== requested) return;
+        setLoadError(errorMessage(error));
+      }
+    },
+    [focusPartNumber],
+  );
 
   useEffect(() => {
     const term = query.trim();
@@ -1449,6 +1548,14 @@ function HotAddDialog({
           If a PN has multiple active WO Demands, each is listed separately.
         </div>
       )}
+      {list?.source === 'focus' &&
+      loadError === null &&
+      candidates.length > 0 ? (
+        <div className="sub hotadd-focus">
+          All Work Order Demand of {list.term} that can join the Hot list —
+          choose one to add it at the bottom.
+        </div>
+      ) : null}
       <div className="hotaddlist">
         {loadError !== null ? (
           <div className="hotadd-empty" role="alert">
@@ -1487,7 +1594,9 @@ function HotAddDialog({
           <div className="hotadd-empty">
             {list.source === 'search'
               ? `No eligible Work Order Demand matches “${list.term}”${listedNote}`
-              : `No eligible Work Order Demand${listedNote}`}
+              : list.source === 'focus'
+                ? `No Work Order Demand of ${list.term} can join the Hot list${listedNote}.`
+                : `No eligible Work Order Demand${listedNote}`}
           </div>
         )}
         {list?.truncated ? (

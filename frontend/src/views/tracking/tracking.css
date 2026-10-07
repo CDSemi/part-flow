@@ -1006,3 +1006,57 @@
   background: var(--panel2);
   font-weight: 650;
 }
+
+/* PN audit trail dialog (GUI_DESIGN §7.4; Phase 14 slice 7): one
+   entry per recorded change, newest first — the headline (time, what
+   changed, on what, by whom) and its detail lines; read-only. */
+.tk-trail-dlg .tk-trail-intro,
+.tk-trail-dlg .tk-trail-empty {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 6px 0 12px;
+  overflow-wrap: anywhere;
+}
+
+.tk-trail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tk-trail li {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--hair);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.tk-trail li:last-child {
+  border-bottom: none;
+}
+
+.tk-trail .t {
+  color: var(--muted);
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+}
+
+.tk-trail-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  vertical-align: middle;
+}
+
+.tk-trail-actor .worker-avatar.sm {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+
+.tk-trail-line {
+  color: var(--muted);
+  padding-left: 12px;
+}

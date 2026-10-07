@@ -610,7 +610,7 @@ interface DetailWire {
 // Mapping
 // ---------------------------------------------------------------------------
 
-function toArea(wire: AreaRefWire): TrackingAreaRef {
+export function toArea(wire: AreaRefWire): TrackingAreaRef {
   return {
     id: wire.id,
     name: wire.name,
@@ -619,7 +619,7 @@ function toArea(wire: AreaRefWire): TrackingAreaRef {
   };
 }
 
-function toOperation(wire: OperationRefWire): TrackingOperationRef {
+export function toOperation(wire: OperationRefWire): TrackingOperationRef {
   return {
     id: wire.id,
     code: wire.code,

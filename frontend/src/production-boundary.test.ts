@@ -281,6 +281,12 @@ test('no production module reaches src/mocks/', () => {
   expect(graph).toContain(join('api', 'area-board.ts'));
   expect(graph).toContain(join('views', 'tracking', 'TrackingView.tsx'));
   expect(graph).toContain(join('api', 'tracking.ts'));
+  // The PN audit trail and the `Change priority` hand-off (Phase 14
+  // slice 7) ship with Tracking and import nothing from src/mocks/.
+  expect(graph).toContain(join('views', 'tracking', 'AuditTrailDialog.tsx'));
+  expect(graph).toContain(join('views', 'tracking', 'audit-trail-text.ts'));
+  expect(graph).toContain(join('api', 'audit-trail.ts'));
+  expect(graph).toContain(join('views', 'priority', 'priority-focus.ts'));
   // Both views render the ONE shared Area monitoring model.
   expect(graph).toContain(join('api', 'area-inventory.ts'));
   expect(graph).toContain(join('views', 'area-presentation.ts'));

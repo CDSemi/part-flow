@@ -229,6 +229,7 @@ test('only Administration, the Management access presentation and the session mo
     'views/administration/section-widgets.tsx',
     'views/administration/sections.ts',
     'views/machines/MachinesView.tsx',
+    'views/tracking/AuditTrailDialog.tsx',
   ]);
 });
 

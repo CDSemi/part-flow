@@ -1297,8 +1297,8 @@ def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services()
     Hot list membership rule is a domain import); the environment, Worker
     and policy services and the Management services know nothing about
     permissions (their routes check them) and never read the User model
-    (Machines, allocations and Tracking read display references through
-    ``user_access``)."""
+    (Machines, allocations, Tracking and the audit trail read display
+    references through ``user_access``)."""
     trees = _trees()
     rules = trees["app/application/authorization.py"]
     imported = {
@@ -1330,12 +1330,13 @@ def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services()
         "route_templates",
         "tracking",
         "route_adjustments",
+        "audit_trail",
     ):
         tree = trees[f"app/application/{service}.py"]
         assert not _reads(tree, "app.domain.enums", {"Permission"}), service
         assert "authorization" not in _imported_application_modules(tree), service
         assert not _reads(tree, "app.infrastructure.models", {"User"}), service
-    for service in ("machines", "allocations", "tracking", "route_adjustments"):
+    for service in ("machines", "allocations", "tracking", "route_adjustments", "audit_trail"):
         tree = trees[f"app/application/{service}.py"]
         assert "user_access" in _imported_application_modules(tree), service
 

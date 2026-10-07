@@ -8,6 +8,7 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { StrictMode } from 'react';
 import type { ReactNode } from 'react';
 
 import { PERMISSIONS } from '../../api/roles';
@@ -16,6 +17,11 @@ import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { ConnectivityProvider } from '../../app/connectivity-provider';
 import { clearHotHistory } from './hot-history';
+import {
+  clearPriorityFocus,
+  peekPriorityFocus,
+  requestPriorityFocus,
+} from './priority-focus';
 import { PriorityView } from './PriorityView';
 
 // Priority Management regression tests (Phase 12): the view runs against
@@ -423,6 +429,7 @@ beforeEach(() => {
   // The session history is module-scoped (it survives sub-view
   // switches); every test starts a fresh session.
   clearHotHistory();
+  clearPriorityFocus();
   vi.stubGlobal('fetch', vi.fn(handle));
 });
 
@@ -1917,4 +1924,219 @@ test('FM-6: a change already recorded by another user reloads the list and keeps
   expect(undoButton()).toBeEnabled();
   expect(screen.queryByText(/removed from the history/)).toBeNull();
   expect(screen.queryByText(/may already have been applied/)).toBeNull();
+});
+
+/* ============ Arrival from Tracking (Phase 14 slice 7) ============ */
+
+const candidateReads = () =>
+  state.reads.filter((read) => read.startsWith('/api/hot-list/candidates'));
+
+function statusLine(): string | null {
+  return document.querySelector('.pr-msg[role="status"]')?.textContent ?? null;
+}
+
+async function arriveFor(pn: string) {
+  requestPriorityFocus(pn);
+  await renderPriority();
+}
+
+/** The open Add dialog once its focus list has answered. */
+async function focusDialog() {
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Add WO Demand to Hot list',
+  });
+  await waitFor(() => expect(candidateReads()).toHaveLength(1));
+  await waitFor(() =>
+    expect(within(dialog).queryByText(/Loading eligible/)).toBeNull(),
+  );
+  return dialog;
+}
+
+function decodedQuery(read: string): Record<string, string> {
+  return Object.fromEntries(
+    new URL(read, 'http://partflow.test').searchParams.entries(),
+  );
+}
+
+test('FT-6a: the PN’s Hot entries are highlighted and their ranks named; nothing else is read or sent', async () => {
+  state.demands.push(demand(15, 'B-200', '007020', { rank: 5 }));
+  await arriveFor('B-200');
+  await waitFor(() =>
+    expect(statusLine()).toBe('B-200 is on the Hot list at #2 and #5.'),
+  );
+  const highlighted = Array.from(
+    document.querySelectorAll('.pr-item.hot-focus'),
+    (row) => row.querySelector('.pn')?.textContent,
+  );
+  expect(highlighted).toEqual(['B-200', 'B-200']);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(candidateReads()).toEqual([]);
+  expect(state.posts).toEqual([]);
+  // The hand-off is one-shot.
+  expect(peekPriorityFocus()).toBeNull();
+});
+
+test('FT-6a: the highlight clears when the Add dialog opens', async () => {
+  await arriveFor('A-100');
+  await waitFor(() =>
+    expect(statusLine()).toBe('A-100 is on the Hot list at #1.'),
+  );
+  expect(document.querySelectorAll('.pr-item.hot-focus')).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  expect(document.querySelectorAll('.pr-item.hot-focus')).toHaveLength(0);
+});
+
+test('FT-6b: without a Hot entry the Add dialog lists exactly the PN’s eligible demand — an exact PN read', async () => {
+  // A sibling PN and a Work Order Number containing the PN are never
+  // listed: the read is the exact PN, not a text search.
+  state.demands.push(
+    demand(25, 'F-6000', '007030'),
+    demand(26, 'K-100', 'F-600-1'),
+  );
+  await arriveFor('F-600');
+  const dialog = await focusDialog();
+  const search = within(dialog).getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  ) as HTMLInputElement;
+  expect(search.value).toBe('');
+  expect(search).toHaveFocus();
+  const [read] = candidateReads();
+  expect(read.startsWith('/api/hot-list/candidates?')).toBe(true);
+  expect(decodedQuery(read)).toEqual({ barcode: 'PF:PN:F-600' });
+  expect(
+    within(dialog).getByText(
+      'All Work Order Demand of F-600 that can join the Hot list — choose one to add it at the bottom.',
+    ),
+  ).toBeInTheDocument();
+  const rows = Array.from(dialog.querySelectorAll('.hotadd-item'));
+  expect(rows.map((row) => row.querySelector('.hpn')?.textContent)).toEqual([
+    'F-600',
+    'F-600',
+  ]);
+  expect(state.posts).toEqual([]);
+});
+
+test('FT-6b: one eligible demand is listed, never added until its row is clicked — Enter on the empty input adds nothing', async () => {
+  await arriveFor('G-700');
+  const dialog = await focusDialog();
+  const search = within(dialog).getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  expect(
+    within(dialog).getByRole('button', { name: /WO 007013/ }),
+  ).toBeInTheDocument();
+  fireEvent.keyDown(search, { key: 'Enter' });
+  await act(async () => {});
+  expect(state.posts).toEqual([]);
+  expect(candidateReads()).toHaveLength(1);
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+  fireEvent.click(within(dialog).getByRole('button', { name: /WO 007013/ }));
+  await waitFor(() => expect(listedPns()).toEqual([...INITIAL, 'G-700']));
+  expect(state.posts).toHaveLength(1);
+  expect(state.posts[0]).toMatchObject({
+    action: 'ADD',
+    new_order: [11, 12, 13, 14, 24],
+  });
+});
+
+test('FT-6b: a PN that itself starts with PF: lists its own demand, never the shorter PN’s', async () => {
+  state.demands.push(
+    demand(27, 'PF:PN:X', '007040'),
+    demand(28, 'X', '007041'),
+  );
+  await arriveFor('PF:PN:X');
+  const dialog = await focusDialog();
+  expect(decodedQuery(candidateReads()[0])).toEqual({
+    barcode: 'PF:PN:PF:PN:X',
+  });
+  expect(
+    within(dialog).getByRole('button', { name: /WO 007040/ }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).queryByRole('button', { name: /WO 007041/ }),
+  ).toBeNull();
+});
+
+test('FT-6b: a PN with no eligible demand says so and adds nothing', async () => {
+  state.demands.push(demand(29, 'J-900', '007050', { completed: true }));
+  await arriveFor('J-900');
+  const dialog = await focusDialog();
+  expect(
+    within(dialog).getByText(
+      'No Work Order Demand of J-900 can join the Hot list.',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText(/choose one to add it/)).toBeNull();
+  expect(state.posts).toEqual([]);
+});
+
+test('FT-6b: typing searches as before; clearing the input lists the PN again', async () => {
+  await arriveFor('F-600');
+  const dialog = await focusDialog();
+  const search = within(dialog).getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  fireEvent.change(search, { target: { value: '18190' } });
+  await waitFor(() =>
+    expect(state.reads).toContain('/api/hot-list/candidates?search=18190'),
+  );
+  await within(dialog).findByRole('button', { name: /WO 007010/ });
+  fireEvent.change(search, { target: { value: '' } });
+  await waitFor(() => expect(candidateReads()).toHaveLength(3));
+  expect(decodedQuery(candidateReads()[2])).toEqual({
+    barcode: 'PF:PN:F-600',
+  });
+  await waitFor(() =>
+    expect(
+      within(dialog).queryByRole('button', { name: /WO 007010/ }),
+    ).toBeNull(),
+  );
+  expect(dialog.querySelectorAll('.hotadd-item')).toHaveLength(2);
+});
+
+test('FT-6c: a user who may only reorder is told the PN is not on the Hot list; no dialog', async () => {
+  requestPriorityFocus('F-600');
+  await renderPriorityAs(['REORDER_HOT_ITEMS']);
+  await waitFor(() =>
+    expect(statusLine()).toBe(
+      'F-600 is not on the Hot list. Your account can reorder the Hot list but not add to it.',
+    ),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(candidateReads()).toEqual([]);
+});
+
+test('FT-6d: the arrival is one-shot — leaving and re-entering Priority shows nothing', async () => {
+  await arriveFor('A-100');
+  await waitFor(() =>
+    expect(statusLine()).toBe('A-100 is on the Hot list at #1.'),
+  );
+  cleanup();
+  await renderPriority();
+  expect(statusLine()).toBeNull();
+  expect(document.querySelectorAll('.pr-item.hot-focus')).toHaveLength(0);
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('FT-6e: under StrictMode the arrival still applies once', async () => {
+  requestPriorityFocus('A-100');
+  render(
+    <StrictMode>
+      <ConnectivityProvider>
+        <PriorityView />
+      </ConnectivityProvider>
+    </StrictMode>,
+    { wrapper: SignedIn },
+  );
+  await waitFor(() =>
+    expect(statusLine()).toBe('A-100 is on the Hot list at #1.'),
+  );
+  expect(
+    Array.from(
+      document.querySelectorAll('.pr-item.hot-focus'),
+      (row) => row.querySelector('.pn')?.textContent,
+    ),
+  ).toEqual(['A-100']);
+  expect(peekPriorityFocus()).toBeNull();
 });

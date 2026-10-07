@@ -58,6 +58,14 @@
   border-style: dashed;
 }
 
+/* Arrival from Tracking's `Change priority` (GUI_DESIGN §8): the PN's
+   Hot entries are outlined — distinct from the focus ring, and never
+   by color alone (the status line names their ranks). */
+.pr-item.hot-focus {
+  outline: 2px solid var(--warn-t);
+  outline-offset: -2px;
+}
+
 .pr-item .grip {
   color: var(--faint);
   font-size: 17px;

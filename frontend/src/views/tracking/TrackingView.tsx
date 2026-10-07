@@ -19,6 +19,7 @@ import {
   trackingListQuery,
 } from '../../api/tracking';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useRouter } from '../../app/router-context';
 import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { AllocationAdjustmentDialog } from '../../components/AllocationAdjustmentDialog';
@@ -36,7 +37,9 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { formatIsoDateShort, formatTimeOfDay } from '../dates';
+import { formatIsoDateShort } from '../dates';
+import { requestPriorityFocus } from '../priority/priority-focus';
+import { AuditTrailDialog } from './AuditTrailDialog';
 import { EditAssignedRouteDialog } from './EditAssignedRouteDialog';
 import type { OlderPages } from './tracking-feed';
 import {
@@ -69,6 +72,7 @@ import {
   positionText,
   readyNote,
   routeSteps,
+  timestamp,
   traceText,
 } from './tracking-logic';
 import { LONG_PREVIEW_PAGE } from './tracking-preview';
@@ -93,10 +97,6 @@ function colorOf(area: { color: string | null }): string {
   return area.color ?? 'var(--faint)';
 }
 
-function timestamp(iso: string): string {
-  return `${formatIsoDateShort(iso.slice(0, 10))} ${formatTimeOfDay(iso)}`;
-}
-
 // PN-centric management view (GUI_DESIGN §7): filterable list + read-only
 // detail panel, both REAL reads since Phase 11 — the list is the polled
 // `GET /api/tracking` page in the canonical demand order with every
@@ -114,11 +114,14 @@ function timestamp(iso: string): string {
 // (the row and panel cases restore focus to the originating row; a
 // plain outside click does not).
 //
-// Corrections (GUI_DESIGN §7.2 item 8, Phase 14 slices 5 and 6): the
-// detail ends with the authorized correction actions the signed-in user
-// may use — `Edit assigned Route…` for Assign and edit Routes, `Adjust
-// WO Allocation…` for Edit Work Order Allocation — and renders no
-// section at all for a user who may use none of them.
+// Corrections (GUI_DESIGN §7.2 item 8 / §7.3, Phase 14 slices 5–7): the
+// detail ends with the actions the signed-in user may use — `Edit
+// assigned Route…` for Assign and edit Routes, `Adjust WO Allocation…`
+// for Edit Work Order Allocation, `Change priority` (a link into
+// Management → Priority) for Set Demand Priority or Reorder Hot Items,
+// and `View audit trail` (the PN's read-only audit trail) for every key
+// that opens Tracking — and renders no section at all for a user who
+// may use none of them.
 export function TrackingView() {
   const preview = getViewStatePreview();
   const { status: connectivity } = useConnectivity();
@@ -631,14 +634,25 @@ function TrackingDetailPanel({
 }) {
   const { status: connectivity } = useConnectivity();
   const { can } = useSession();
+  const { navigate } = useRouter();
   const feed = useTrackingDetailFeed(pn, connectivity, enabled);
   // The `Adjust WO Allocation` and `Edit assigned Route` dialogs, and
   // the outcome of the last correction shown as the section's status
   // line (cleared when either dialog opens; a different PN is a fresh
-  // panel).
+  // panel — which also closes this PN's audit trail).
   const [adjusting, setAdjusting] = useState(false);
   const [editingRoute, setEditingRoute] = useState(false);
+  const [viewingTrail, setViewingTrail] = useState(false);
   const [correctionNotice, setCorrectionNotice] = useState<string | null>(null);
+  /** `Change priority`: open Management → Priority for this PN — the
+   * hand-off is left only when the navigation really happened (an
+   * active navigation guard may refuse it). */
+  const changePriority = () => {
+    navigate('/management/priority');
+    if (window.location.pathname === '/management/priority') {
+      requestPriorityFocus(pn);
+    }
+  };
   const afterAdjustment = (notice: string) => {
     setAdjusting(false);
     feed.reload();
@@ -772,7 +786,11 @@ function TrackingDetailPanel({
               ),
             }}
             corrections={
-              can('ASSIGN_ROUTES') || can('EDIT_WORK_ORDER_ALLOCATION')
+              can('ASSIGN_ROUTES') ||
+              can('EDIT_WORK_ORDER_ALLOCATION') ||
+              can('SET_DEMAND_PRIORITY') ||
+              can('REORDER_HOT_ITEMS') ||
+              can('VIEW_PRODUCTION_DATA')
                 ? {
                     writeBlocked: connectivity !== 'connected',
                     notice: correctionNotice,
@@ -788,6 +806,18 @@ function TrackingDetailPanel({
                           setAdjusting(true);
                         }
                       : null,
+                    // A navigation and a read: neither records anything,
+                    // so neither clears the last correction's notice.
+                    onChangePriority:
+                      can('SET_DEMAND_PRIORITY') || can('REORDER_HOT_ITEMS')
+                        ? changePriority
+                        : null,
+                    onViewAuditTrail:
+                      can('VIEW_PRODUCTION_DATA') ||
+                      can('EDIT_WORK_ORDER_ALLOCATION') ||
+                      can('ASSIGN_ROUTES')
+                        ? () => setViewingTrail(true)
+                        : null,
                   }
                 : null
             }
@@ -819,18 +849,25 @@ function TrackingDetailPanel({
           }}
         />
       ) : null}
+      {viewingTrail ? (
+        <AuditTrailDialog pn={pn} onClose={() => setViewingTrail(false)} />
+      ) : null}
     </>
   );
 }
 
 /** The correction actions of the detail (null: none permitted). */
 interface CorrectionActions {
+  /** Disables the correction-flow openers (`onEditRoute`, `onAdjust`)
+   * only — the navigation and the read stay available offline. */
   writeBlocked: boolean;
   /** The outcome of the last correction (the section's status line). */
   notice: string | null;
   /** null: the user may not use the action — its button is hidden. */
   onEditRoute: (() => void) | null;
   onAdjust: (() => void) | null;
+  onChangePriority: (() => void) | null;
+  onViewAuditTrail: (() => void) | null;
 }
 
 /** `Showing n of m <noun>` with the explicit continuation control. */
@@ -1252,10 +1289,19 @@ function TrackingDetailContent({
       {corrections !== null ? (
         <div className="tk-sec tk-corr">
           <h4>
-            Corrections{' '}
-            <span className="tag">
-              authorized actions — recorded with your name
-            </span>
+            Corrections
+            {/* The tag holds only while a recording correction is
+                offered — `Change priority` and `View audit trail`
+                record nothing here. */}
+            {corrections.onEditRoute !== null ||
+            corrections.onAdjust !== null ? (
+              <>
+                {' '}
+                <span className="tag">
+                  authorized actions — recorded with your name
+                </span>
+              </>
+            ) : null}
           </h4>
           <div className="tk-corr-actions">
             {corrections.onEditRoute !== null ? (
@@ -1274,6 +1320,25 @@ function TrackingDetailContent({
                 onClick={corrections.onAdjust}
               >
                 Adjust WO Allocation…
+              </button>
+            ) : null}
+            {/* A navigation and a read: enabled while disconnected —
+                Priority blocks its own writes, the trail shows its read
+                error with Retry. */}
+            {corrections.onChangePriority !== null ? (
+              <button
+                className="btn ghost"
+                onClick={corrections.onChangePriority}
+              >
+                Change priority
+              </button>
+            ) : null}
+            {corrections.onViewAuditTrail !== null ? (
+              <button
+                className="btn ghost"
+                onClick={corrections.onViewAuditTrail}
+              >
+                View audit trail
               </button>
             ) : null}
           </div>
