@@ -63,9 +63,11 @@ export interface DetailRevisions {
  * - Scrap history: its row count and the net scrapped quantity — an
  *   undone scrap keeps its place in the history while the net figure
  *   changes and the row gains its REVERSED mark.
- * - Quantity Flows: the flow count and the Movement count — a flow's
- *   status, position and trace only ever change through a Movement of
- *   the PN, and the flow that closed or reopened may sit on any page.
+ * - Quantity Flows: the flow count, the Movement count and the route
+ *   adjustment count — a flow's status, position and trace only ever
+ *   change through a Movement of the PN, its route steps and route
+ *   notes only through an AssignedRoute adjustment, and the flow that
+ *   changed may sit on any page.
  * - Allocation history: its row count — allocation rows are append-only,
  *   a reversal being a new row beside the one it takes back.
  */
@@ -73,7 +75,7 @@ export function detailRevisions(detail: TrackingDetail): DetailRevisions {
   return {
     movements: `${detail.movements.total}`,
     scrap: `${detail.scrapHistory.total}|${detail.scrappedQuantity}`,
-    flows: `${detail.flows.total}|${detail.movements.total}`,
+    flows: `${detail.flows.total}|${detail.movements.total}|${detail.routeAdjustmentTotal}`,
     allocations: `${detail.allocations.total}`,
   };
 }

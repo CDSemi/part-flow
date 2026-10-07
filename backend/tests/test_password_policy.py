@@ -90,5 +90,23 @@ def test_no_domain_module_imports_hashing_secrets_or_fastapi() -> None:
     assert hashlib_users <= {"hot_list.py"}
     for path in sorted(_DOMAIN_DIR.rglob("*.py")):
         assert not _imported_roots(path) & {"secrets", "fastapi"}, path.name
-    for name in ("password_policy.py", "user_login.py"):
+    for name in ("password_policy.py", "user_login.py", "assigned_route.py"):
         assert not _imported_roots(_DOMAIN_DIR / name) & {"hashlib", "secrets", "fastapi"}
+
+
+def test_the_assigned_route_rules_stay_framework_free() -> None:
+    """Phase 14 slice 6: the AssignedRoute adjustment rules import no
+    application, infrastructure or SQLAlchemy module (the fingerprint, the
+    locks and the persistence live in ``app.application.route_adjustments``)."""
+    tree = ast.parse((_DOMAIN_DIR / "assigned_route.py").read_text(encoding="utf-8"))
+    modules = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert not {
+        module
+        for module in modules
+        if module.startswith(("app.application", "app.infrastructure", "sqlalchemy", "fastapi"))
+    }

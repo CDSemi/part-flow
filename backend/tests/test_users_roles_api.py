@@ -1201,6 +1201,8 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/application/station_access.py",
     "app/api/station_devices.py",
     "app/api/scan_station.py",
+    # Phase 14 slice 6: the AssignedRoute adjustment routes.
+    "app/api/route_adjustments.py",
 }
 
 
@@ -1327,12 +1329,13 @@ def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services()
         "allocations",
         "route_templates",
         "tracking",
+        "route_adjustments",
     ):
         tree = trees[f"app/application/{service}.py"]
         assert not _reads(tree, "app.domain.enums", {"Permission"}), service
         assert "authorization" not in _imported_application_modules(tree), service
         assert not _reads(tree, "app.infrastructure.models", {"User"}), service
-    for service in ("machines", "allocations", "tracking"):
+    for service in ("machines", "allocations", "tracking", "route_adjustments"):
         tree = trees[f"app/application/{service}.py"]
         assert "user_access" in _imported_application_modules(tree), service
 

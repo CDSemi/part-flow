@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
 > Baseline upstream: commit `f96bf09` (Production Board — merged quantity theo mọi nhánh lineage).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) và slice 5 (Management allocation và correction beyond-demand) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station), slice 5 (Management allocation và correction beyond-demand) và slice 6 (AssignedRoute adjustment) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
@@ -701,13 +701,15 @@ monitoring chung.
 3. Current Area/Machine bars, derive Movement.
 4. Flow & Routes: shared compact `RouteModeChip`; Planned snapshot state/deviation;
    Floating actual trace, repeated Area/split/Repair; arrows separate siblings;
-   finished rack không route step.
+   finished rack không route step. Flow `PLANNED` có route riêng đã được adjust (Phase 14 slice 6, PROJECT_PROFILE §8.10) hiện `(snapshot, adjusted)` trong Planned note và một ghi chú `Route adjusted …` cho mỗi adjustment — thời điểm, user, reason và "the steps after step n were replaced", kèm ghi chú giữ audit — mọi adjustment, cũ nhất trước, đặt sau các deviation note, không cắt bớt. Ghi chú thuộc về flow có route được adjust: split child hoặc merge result copy route như lúc đó (hiện `(snapshot)`) và dòng position của nó nêu flow nguồn, block của flow nguồn mang các ghi chú.
 5. Immutable reverse-chronological Movement history, canonical types, Repair badge,
    DONE vs Stocked distinction; no edit.
 6. Scrap history + cumulative/reconciliation.
 7. Stocked & Allocation history. Entry Management nêu tên user đã ghi nó; correction beyond-demand được đánh dấu `beyond demand`.
 8. Authorized corrections: adjustment, route, allocation, priority, audit; reason
    bắt buộc và tạo new history — mọi correction (allocation beyond demand, reversal) cần reason và tạo new history; allocation thường của stocked quantity để lại cho sau, được cung cấp từ cùng dialog `Adjust WO Allocation` (§11.6), nhận ghi chú tùy chọn.
+
+**Dialog Edit assigned Route (Phase 14 slice 6).** `Edit assigned Route…` (Assign and edit Routes) mở `Edit assigned Route — {PN}`: khi PN có nhiều flow `PLANNED` đang active, user phải chọn Quantity Flow tường minh trước (không preselect; flow khác giữ route của chúng); chỉ có một lựa chọn thì preselect, PN không có Planned flow active nhận lời giải thích đơn giản. Các step mà quantity đã tới hoặc history ghi nhận bị **khóa** (`Done` / `Current` / `Recorded`; `Recorded` là step của một arrival đã undo, vẫn giữ), kèm hint chính xác nêu step mà arrival on-route kế tiếp được kiểm tra. Chỉ future step được sửa, bằng **row** step của Planned Routes (quy tắc step-row §13.2; đánh số tiếp sau các step bị khóa; tail có thể để trống), marker `● Unsaved changes` và guard `Discard unsaved route changes?` của §13.2. Reason bắt buộc. `Review adjustment` dẫn tới bước review (`Adjust the assigned route?`) hiện các step trước và sau; route đã đổi kể từ lúc mở bị từ chối bằng `Reload route` (edit bị bỏ); kết quả không rõ cho `Retry` và adjustment chỉ được áp dụng một lần. Chỉ AssignedRoute của chính flow đó đổi — không bao giờ Planned Route, flow khác hay Movement history, và route trước được giữ trong audit history.
 
 ## 7.3 States
 
@@ -733,7 +735,7 @@ khi refresh dời ranh giới của nó hoặc đổi nội dung các row nó hi
 đóng hoặc mở lại, scrap bị undo), không bao giờ khi refresh không đổi gì liên
 quan, name / revision / image / ERP
 id từ master lấy từ chi tiết Part Number đã lưu từ Phase 13 và render `—` (ảnh mặc định) khi vắng,
-và section Corrections (§7.2 mục 8) ẩn hoàn toàn với user không giữ permission của nút đã triển khai nào của nó — không bao giờ render nút vô hiệu. **Ranh giới triển khai (Phase 14 slice 5):** section Corrections chỉ render cho user giữ permission của ít nhất một nút đã triển khai của nó và chỉ hiện các nút đó — `Adjust WO Allocation…` (Edit Work Order Allocation, §11.6) — dưới tag `authorized actions — recorded with your name`, với kết quả của lần adjustment gần nhất là dòng trạng thái dưới nút; nút chưa triển khai thì vắng mặt, không bao giờ vô hiệu. Dòng position của một
+và section Corrections (§7.2 mục 8) ẩn hoàn toàn với user không giữ permission của nút đã triển khai nào của nó — không bao giờ render nút vô hiệu. **Ranh giới triển khai (Phase 14 slice 5):** section Corrections chỉ render cho user giữ permission của ít nhất một nút đã triển khai của nó và chỉ hiện các nút đó — `Adjust WO Allocation…` (Edit Work Order Allocation, §11.6) — dưới tag `authorized actions — recorded with your name`, với kết quả của lần adjustment gần nhất là dòng trạng thái dưới nút; nút chưa triển khai thì vắng mặt, không bao giờ vô hiệu. **Ranh giới triển khai (Phase 14 slice 6):** các nút đã triển khai là `Edit assigned Route…` (Assign and edit Routes, §7.2 mục 8) và `Adjust WO Allocation…` (Edit Work Order Allocation, §11.6), theo thứ tự đó, và một dòng trạng thái duy nhất hiện kết quả của correction gần nhất (route adjustment hoặc allocation change); chữ ký refresh `flows` gồm cả route adjustment, nên các page flow đã nối thêm được đọc lại sau đó. Dòng position của một
 Quantity Flow thêm ghi chú advisory tường minh `· exceeds expected duration`
 (warning tone, viết ra chữ — không bao giờ chỉ màu) khi position đã vượt expected
 duration hiệu lực (PROJECT_PROFILE §17 — thời điểm `expected_by` cố định của
@@ -1020,6 +1022,8 @@ silent-clear. Area change revalidates selections. Dirty guard. Used-template not
 changes future only; existing snapshot untouched. Duplicate handles unsaved choice
 and creates active variant draft.
 
+Row step dùng chung (Phase 14 slice 6): row step, validation và đánh số của chúng là một component dùng chung với `Edit assigned Route…` của Tracking (§7.2 mục 8), cũng dùng marker `● Unsaved changes` và guard `Discard unsaved route changes?` của mục này.
+
 ## 13.3 Archive so với delete
 
 Never-used delete bằng plain confirm. Ever-used archive: protect unsaved choice,
@@ -1202,6 +1206,8 @@ session không còn shift end.
 30. **Enroll thiết bị Scan Station** (§4.1, §4.5, §4.13, §9; quyết định owner OD-P6, OD-S4-1, OD-S4-9, 2026-10-06 — không bump version): cả hai mode của Scan Station yêu cầu thiết bị đã enroll (§4.1); `⟲ UNDO` không hiển thị khi role áp dụng tại Scan Stations không cấp nó (§4.5); §4.13 mới mô tả màn hình và dialog enroll cùng các action mà station ẩn; Administration → Scan Stations có thêm dialog `Devices…` và Roles & permissions đánh dấu role áp dụng tại Scan Stations (§9).
 
 31. **Management allocation adjustment và correction beyond-demand** (§4.11, §7.2, §7.3, §10, §11.2, §11.5, §11.6; quyết định owner OD-P10, OD-P12/P13, OD-S5-3, 2026-10-06 — không tăng version): Work Order Details cung cấp `Allocate from stock…` và `Reverse…` trên mọi line đã lưu (Work Order Open, Released và Completed) và section Corrections của Tracking cung cấp `Adjust WO Allocation…`, cả hai mở dialog dùng chung của §11.6 với bước thứ hai beyond-demand tường minh; line được allocate vượt demand hiện `(+n beyond demand)` và allocation progress tính riêng phần đó; Qty edit bị giới hạn không bao giờ xét Qty không đổi.
+
+32. **AssignedRoute adjustment** (§7.2, §7.3, §13.2; quyết định owner OD-P11, 2026-10-06 — không tăng version): section Corrections của Tracking cung cấp `Edit assigned Route…`, mở dialog chỉ thay future step của route riêng của một Planned Quantity Flow, với reason bắt buộc và bước review; step mà quantity đã tới hoặc history ghi nhận vẫn bị khóa; block flow hiện `(snapshot, adjusted)` và một ghi chú `Route adjusted …` cho mỗi adjustment; row step của Planned Routes được dùng chung với dialog.
 
 ## 15.2 Từ GUI Design v16
 

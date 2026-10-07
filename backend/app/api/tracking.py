@@ -51,7 +51,7 @@ from app.api.user_refs import UserRefResponse, user_ref_response
 from app.application import tracking
 from app.application.allocations import DemandContext
 from app.application.authentication import Principal
-from app.application.production_board import BoardLocation, LocationState
+from app.application.production_board import BoardLocation, FlowPosition, LocationState
 from app.application.transfers import ROUTE_DEVIATION_KEY
 from app.domain.enums import MovementType
 
@@ -357,6 +357,15 @@ class RouteTemplateRef(BaseModel):
     name: str
 
 
+class RouteAdjustmentNoteResponse(BaseModel):
+    audit_event_id: int
+    occurred_at: datetime.datetime
+    reason: str
+    # The steps after this sequence were replaced.
+    kept_through_sequence: int
+    actor_user: UserRefResponse | None
+
+
 class FlowResponse(BaseModel):
     id: int
     quantity: int
@@ -370,11 +379,14 @@ class FlowResponse(BaseModel):
     children: list[LineageLinkResponse]
     # The actual route trace derived from Movement history.
     trace: list[TraceStepResponse]
-    # PLANNED only: the immutable AssignedRoute snapshot.
+    # PLANNED only: the AssignedRoute snapshot (past steps immutable).
     route_steps: list[RouteStepResponse]
     source_template: RouteTemplateRef | None
     off_route: bool
     deviations: list[RouteDeviationResponse]
+    # Every adjustment of this flow's own snapshot, oldest first (Phase 14
+    # slice 6) — a split child or merge result shows only its own.
+    route_adjustments: list[RouteAdjustmentNoteResponse]
 
 
 class AllocationResponse(BaseModel):
@@ -486,6 +498,9 @@ class TrackingDetailResponse(BaseModel):
     # restricted to scrap, newest first; `scrapped_quantity` above is
     # the effective (net of reversed) total.
     scrap_history: MovementPageResponse
+    # AssignedRoute adjustments across the PN's flows — part of the client's
+    # flows revision, so an adjustment re-reads the appended flow pages.
+    route_adjustment_total: int
 
 
 def _work_order_ref(demand: Any, work_order: Any) -> TrackingWorkOrderRef:
@@ -516,8 +531,27 @@ def _location(location: BoardLocation) -> LocationResponse:
     )
 
 
+def flow_position_response(position: FlowPosition | None, area: Any) -> FlowPositionResponse | None:
+    """An ACTIVE flow's derived position (``None`` without one)."""
+    if position is None or area is None:
+        return None
+    return FlowPositionResponse(
+        area=_area(area),
+        machine=_machine(position.machine),
+        operation=TrackingOperationRef(
+            id=position.operation.id,
+            code=position.operation.code,
+            name=position.operation.name,
+            is_external=position.operation.is_external,
+        ),
+        activity=position.activity,
+        state=position.state,
+        since=position.position.entered_at,
+        expected_by=position.position.expected_by,
+    )
+
+
 def _flow(entry: tracking.TrackingFlow) -> FlowResponse:
-    position = entry.position
     return FlowResponse(
         id=entry.flow.id,
         quantity=entry.flow.quantity,
@@ -525,24 +559,7 @@ def _flow(entry: tracking.TrackingFlow) -> FlowResponse:
         route_mode=entry.flow.route_mode,
         created_at=entry.flow.created_at,
         closed_at=entry.flow.closed_at,
-        position=(
-            FlowPositionResponse(
-                area=_area(entry.current_area),
-                machine=_machine(position.machine),
-                operation=TrackingOperationRef(
-                    id=position.operation.id,
-                    code=position.operation.code,
-                    name=position.operation.name,
-                    is_external=position.operation.is_external,
-                ),
-                activity=position.activity,
-                state=position.state,
-                since=position.position.entered_at,
-                expected_by=position.position.expected_by,
-            )
-            if position is not None and entry.current_area is not None
-            else None
-        ),
+        position=flow_position_response(entry.position, entry.current_area),
         parents=[
             LineageLinkResponse(quantity_flow_id=link.flow_id, relation=link.relation)
             for link in entry.parents
@@ -596,6 +613,16 @@ def _flow(entry: tracking.TrackingFlow) -> FlowResponse:
                 worker=_worker(deviation.worker),
             )
             for deviation in entry.deviations
+        ],
+        route_adjustments=[
+            RouteAdjustmentNoteResponse(
+                audit_event_id=note.audit_event_id,
+                occurred_at=note.occurred_at,
+                reason=note.reason,
+                kept_through_sequence=note.kept_through_sequence,
+                actor_user=user_ref_response(note.actor_user),
+            )
+            for note in entry.route_adjustments
         ],
     )
 
@@ -764,6 +791,7 @@ def get_tracking_detail(
         allocations=_allocation_page(detail.allocations),
         movements=_movement_page(detail.movements),
         scrap_history=_movement_page(detail.scrap_history),
+        route_adjustment_total=detail.route_adjustment_total,
     )
 
 

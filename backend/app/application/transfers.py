@@ -42,9 +42,8 @@ Rules owned here:
   never recorded as matched (PROJECT_PROFILE §17 steps 1–5, 7). No
   Movement type beyond `TRANSFERRED` exists in this phase, so the
   deviation is recorded ON the transfer, and the previous route stays
-  untouched: route adjustment and the separate
-  `ROUTE_DEVIATION_CONFIRMED`/`ROUTE_ADJUSTED` events arrive with route
-  editing (Phase 9+).
+  untouched: the route changes only through the authorized adjustment
+  (`app.application.route_adjustments`, Phase 14 slice 6).
 - The Operation is resolved from the station Area's configuration
   (SLICE1_DATA_MODEL §12 applied to the destination): a step-defined
   Operation of the matched route step, else the single active

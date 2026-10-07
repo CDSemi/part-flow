@@ -19,6 +19,7 @@ from app.api.policies import router as policies_router
 from app.api.production_board import router as production_board_router
 from app.api.production_release import router as production_release_router
 from app.api.roles import router as roles_router
+from app.api.route_adjustments import router as route_adjustments_router
 from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
 from app.api.session import router as session_router
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(production_board_router)
     app.include_router(area_board_router)
     app.include_router(tracking_router)
+    app.include_router(route_adjustments_router)
     app.include_router(hot_list_router)
     register_exception_handlers(app)
     return app

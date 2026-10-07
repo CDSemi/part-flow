@@ -41,6 +41,14 @@ flow's quantity — it only moves flows between open and closed.
   phase);
 - the command was not already reversed, and is not itself an Undo — a
   reversal is permanent and corrected forward, never un-reversed;
+- no flow the command CREATED (a split child, a merge result) had its
+  AssignedRoute adjusted since (Phase 14 slice 6, owner decision
+  OD-S6-19): undoing the command would close that flow and put its
+  quantity back on the source's unadjusted route — a silent route
+  rewrite. Every adjustment of a created flow's snapshot is later than
+  the command, so an ``AssignedRoute`` audit row's existence is the
+  test; the adjustment takes the same PN lock first, so the two never
+  interleave;
 - restoring quantity onto a Machine requires that Machine to still be
   active (its row is locked; a Maintenance override does not block —
   the quantity physically never left the Machine); restoring quantity
@@ -99,7 +107,7 @@ import hashlib
 import json
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -126,10 +134,17 @@ from app.application.machines import (
 from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import effective_latest_movement, processing_state_of
 from app.application.transfers import require_production_station
-from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, StationCommand
+from app.domain.enums import (
+    AuditEntityType,
+    MovementType,
+    ProcessingState,
+    QuantityFlowStatus,
+    StationCommand,
+)
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
     Area,
+    AuditEvent,
     Machine,
     PartMovement,
     QuantityFlow,
@@ -259,6 +274,34 @@ def _first_movement_ids(session: Session, flow_ids: list[int]) -> dict[int, int]
     return {int(flow_id): int(movement_id) for flow_id, movement_id in rows}
 
 
+def _adjusted_created_flow_id(session: Session, rows: list[PartMovement]) -> int | None:
+    """The lowest id of a flow the command created whose AssignedRoute was
+    adjusted afterwards (Phase 14 slice 6), or None.
+
+    "Created" is the criterion ``_plan_restoration`` closes a flow by: its
+    first Movement belongs to the command.
+    """
+    command_ids = {row.id for row in rows}
+    first = _first_movement_ids(session, _involved_flow_ids(rows))
+    created = [flow_id for flow_id, movement_id in first.items() if movement_id in command_ids]
+    if not created:
+        return None
+    return session.scalar(
+        select(QuantityFlow.id)
+        .where(
+            QuantityFlow.id.in_(created),
+            select(AuditEvent.id)
+            .where(
+                AuditEvent.entity_type == AuditEntityType.ASSIGNED_ROUTE,
+                AuditEvent.entity_id == cast(QuantityFlow.assigned_route_id, Text),
+            )
+            .exists(),
+        )
+        .order_by(QuantityFlow.id)
+        .limit(1)
+    )
+
+
 def _ineligibility(session: Session, station: ScanStation, rows: list[PartMovement]) -> str | None:
     """Why the command cannot be undone — None when it is eligible.
 
@@ -321,6 +364,13 @@ def _ineligibility(session: Session, station: ScanStation, rows: list[PartMoveme
         )
     if _already_reversed(session, rows):
         return "This action has already been reversed."
+    adjusted_flow_id = _adjusted_created_flow_id(session, rows)
+    if adjusted_flow_id is not None:
+        return (
+            "Later activity exists for this quantity: the route of Quantity Flow"
+            f" {adjusted_flow_id} was adjusted after this action, so it cannot be undone"
+            " from a station. Correct the quantity with the production workflows instead."
+        )
     flow_ids = _involved_flow_ids(rows)
     newest = _newest_effective_movement_ids(session, flow_ids)
     command_ids = {row.id for row in rows}

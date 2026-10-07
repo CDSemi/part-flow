@@ -846,6 +846,7 @@ Rules:
 - It becomes independent after assignment.
 - Template changes must not alter active work.
 - Authorized users may edit it.
+- Past steps are immutable: an authorized edit replaces only the future steps — those after the last step any Movement of the flow references, undone Movements included — of the selected flow's own AssignedRoute, requires a reason, and is audited as `ROUTE_ADJUSTED` with the complete previous and new step lists and the signed-in user (decided 2026-10-06, OD-P11).
 - Different Quantity Flows of the same PN may have different Routes.
 - Actual Movement history remains authoritative.
 - Route deviations must be recorded.
@@ -893,7 +894,7 @@ Initial Movement types may include:
 - `STOCKED`
 - `QUANTITY_ADJUSTED`
 - `SCRAPPED`
-- `ROUTE_ADJUSTED`
+- `ROUTE_ADJUSTED` — recorded as an audit event on the AssignedRoute, never as a PartMovement: it moves no quantity (decided 2026-10-06, OD-P11)
 - `ROUTE_DEVIATION_CONFIRMED`
 - `REVERSED`
 
@@ -1519,7 +1520,7 @@ Rules:
 - Different Quantity Flows of the same PN may have different Routes.
 - A split may inherit the parent Route or receive a modified Route.
 - Route Template changes must not affect active assigned Routes.
-- Authorized edits affect only the selected Quantity Flow.
+- Authorized edits affect only the selected Quantity Flow, and only its future steps; past steps never change (decided 2026-10-06, OD-P11).
 - Actual Movement history remains the source of truth.
 
 ---
@@ -1537,6 +1538,8 @@ Route deviation applies to Planned Routes only (a Floating Route has no expectat
 7. Record user, timestamp, and reason.
 
 The application must represent actual production rather than forcing production to match an obsolete plan.
+
+A deviation never changes the assigned Route by itself; the route changes only through the authorized, reasoned adjustment (decided 2026-10-06, OD-P11).
 
 ---
 

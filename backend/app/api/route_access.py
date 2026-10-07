@@ -208,6 +208,12 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     # write workflow uses (OD-P7, OD-P10).
     ("POST", "/api/allocations/corrections"): _permission(_EWOA),
     ("GET", "/api/allocations/management/context"): _permission(_EWOA),
+    # Slice 6: the AssignedRoute adjustment and the editor read only its
+    # write workflow uses (OD-P11, OD-P10).
+    ("POST", "/api/quantity-flows/{quantity_flow_id}/route-adjustments"): _permission(
+        Permission.ASSIGN_ROUTES
+    ),
+    ("GET", "/api/tracking/assigned-routes"): _permission(Permission.ASSIGN_ROUTES),
     # --- PERMISSION (static + conditional) ----------------------------------
     ("POST", "/api/areas"): _permission(Permission.MANAGE_AREAS, conditional=_keys(_MWSP)),
     ("POST", "/api/roles"): _permission(_MUAR, conditional=_keys(_MCP)),

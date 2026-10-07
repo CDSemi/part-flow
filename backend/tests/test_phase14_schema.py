@@ -7,10 +7,12 @@ Phase 14; PROJECT_PROFILE §7 User; owner decisions OD-P1–OD-P5,
 OD-P17) — pinned to `0029` since slice 4 added the next revision — and
 what `0030_phase14_station_devices` adds (owner decisions OD-P6,
 OD-S4-1) — pinned to `0030` since slice 5 added the next revision — and
-what `0031_phase14_beyond_demand` adds (owner decisions OD-P12/P13):
+what `0031_phase14_beyond_demand` adds (owner decisions OD-P12/P13) —
+pinned to `0031` since slice 6 added the next revision — and what
+`0032_phase14_route_adjusted` adds (owner decision OD-P11):
 
-- exact head boundary: `0031_phase14_beyond_demand` is the single
-  head (the 0029 and 0030 cases run against their own revision);
+- exact head boundary: `0032_phase14_route_adjusted` is the single
+  head (the 0029, 0030 and 0031 cases run against their own revision);
 - the sign-in policy columns on `application_policy` (types, server
   defaults, the seeded row's values) with their exact range CHECKs;
 - the `user_credentials` and `user_sessions` shapes with their exact
@@ -41,11 +43,22 @@ what `0031_phase14_beyond_demand` adds (owner decisions OD-P12/P13):
   metadata parity at head; pre-0031 rows (a station allocation with a
   Worker, Management allocations with and without a User, a reversal)
   read false across the upgrade and survive a clean downgrade; the
-  downgrade refuses (exact message) while a correction row exists.
+  downgrade refuses (exact message) while a correction row exists;
+- 0032: the widened audit event and entity CHECKs (literal parity with
+  the enums and the model constraints), the UNIQUE partial
+  `uq_audit_events_route_adjustment_device_event_id` in the JSONB
+  subscript form the application's lookup uses (EXPLAIN), the
+  `ix_part_movements_assigned_route_step_id` index, the
+  `trg_assigned_route_steps_forbid_update` trigger (UPDATE refused even
+  for zero rows; DELETE of an unreferenced step and INSERT allowed),
+  models↔migration metadata parity at head; up/down/up on a clean head;
+  the downgrade refuses (exact message) while an `AssignedRoute` or
+  `ROUTE_ADJUSTED` audit row exists.
 """
 
 import functools
 import importlib.util
+import json
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -61,7 +74,12 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from alembic import command
 from app.application import policies
-from app.domain.enums import StationDeviceRevokedReason, UserSessionEndReason
+from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
+    StationDeviceRevokedReason,
+    UserSessionEndReason,
+)
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -69,11 +87,13 @@ _PREVIOUS_REVISION = "0028_phase13_users_roles"
 _SIGN_IN_REVISION = "0029_phase14_sign_in"
 _DEVICES_REVISION = "0030_phase14_station_devices"
 _CORRECTION_REVISION = "0031_phase14_beyond_demand"
-_HEAD_REVISION = _CORRECTION_REVISION
+_ROUTE_REVISION = "0032_phase14_route_adjusted"
+_HEAD_REVISION = _ROUTE_REVISION
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261006_0029_phase14_sign_in.py"
 _DEVICES_MIGRATION_FILE = _VERSIONS_DIR / "20261007_0030_phase14_station_devices.py"
 _CORRECTION_MIGRATION_FILE = _VERSIONS_DIR / "20261007_0031_phase14_beyond_demand.py"
+_ROUTE_MIGRATION_FILE = _VERSIONS_DIR / "20261007_0032_phase14_route_adjusted.py"
 _TEMPLATE_DATABASE = "partflow_test_phase14_template"
 _DEVICES_TEMPLATE_DATABASE = "partflow_test_phase14_devices_template"
 _ACTOR_TABLES = ("audit_events", "machine_lifecycle_events", "work_order_allocations")
@@ -790,7 +810,9 @@ def test_device_migration_literals_repeat_the_model_constants() -> None:
         if constraint.name == "ck_audit_events_entity_type"
     )
     assert isinstance(entity_check, sa.CheckConstraint)
-    assert str(entity_check.sqltext) == migration._DEVICE_ENTITY_TYPES
+    # The model carries the latest vocabulary since slice 6 widened it
+    # again (0032 re-creates it from exactly this literal plus its own).
+    assert str(entity_check.sqltext) == (migration._DEVICE_ENTITY_TYPES[:-1] + ", 'AssignedRoute')")
     assert (
         migration._PREVIOUS_ENTITY_TYPES[:-1] + ", 'ScanStationDevice')"
     ) == migration._DEVICE_ENTITY_TYPES
@@ -946,7 +968,7 @@ def test_the_upgrade_refuses_without_an_operator_role(admin_engine: Engine) -> N
                 sa.text("UPDATE roles SET name = 'Line Crew' WHERE name = 'Operator'")
             )
         with pytest.raises(ProgrammingError) as raised:
-            command.upgrade(config, "head")
+            command.upgrade(config, _CORRECTION_REVISION)
         assert _NO_OPERATOR in str(raised.value.orig)
         with engine.connect() as connection:
             assert _version(connection) == _SIGN_IN_REVISION
@@ -976,13 +998,14 @@ def _load_correction_migration() -> ModuleType:
 
 @pytest.fixture(scope="module")
 def correction_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → 0030 → head through real Alembic runs."""
+    """Temporary database migrated 0031 → 0030 → 0031 through real Alembic
+    runs (the 0031 cases are pinned to their own boundary)."""
     name = "partflow_test_phase14_correction_schema"
     _create_temp_database(admin_engine, name)
     config = _alembic_config(_url(name))
-    command.upgrade(config, "head")
+    command.upgrade(config, _CORRECTION_REVISION)
     command.downgrade(config, _DEVICES_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, _CORRECTION_REVISION)
     engine = create_engine(_url(name))
     yield engine
     engine.dispose()
@@ -1001,7 +1024,7 @@ def correction_connection(correction_engine: Engine) -> Iterator[Connection]:
 @pytest.fixture(scope="module")
 def correction_template(admin_engine: Engine) -> Iterator[str]:
     _create_temp_database(admin_engine, _CORRECTION_TEMPLATE_DATABASE)
-    command.upgrade(_alembic_config(_url(_CORRECTION_TEMPLATE_DATABASE)), "head")
+    command.upgrade(_alembic_config(_url(_CORRECTION_TEMPLATE_DATABASE)), _CORRECTION_REVISION)
     yield _CORRECTION_TEMPLATE_DATABASE
     _drop_temp_database(admin_engine, _CORRECTION_TEMPLATE_DATABASE)
 
@@ -1083,16 +1106,6 @@ def test_correction_migration_literals_repeat_the_model_constants() -> None:
     assert migration._COLUMN == "exceeds_demand"
 
 
-def test_models_metadata_matches_the_migrated_schema(correction_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with correction_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 def test_correction_rows_are_refused_when_malformed(correction_connection: Connection) -> None:
     """BC-14: a row recorded ``exceeds_demand`` is Management, reasoned,
     User-recorded, never a reversal, never a station or Worker row."""
@@ -1170,7 +1183,7 @@ def test_existing_rows_cross_the_revision_unflagged(correction_head_database: UR
         command.downgrade(config, _DEVICES_REVISION)
         with engine.begin() as connection:
             ids = _pre_correction_rows(connection)
-        command.upgrade(config, "head")
+        command.upgrade(config, _CORRECTION_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _CORRECTION_REVISION
             flags: dict[int, bool] = {
@@ -1199,7 +1212,7 @@ def test_existing_rows_cross_the_revision_unflagged(correction_head_database: UR
             assert kept == len(ids)
         columns = {str(c["name"]) for c in inspect(engine).get_columns("work_order_allocations")}
         assert "exceeds_demand" not in columns
-        command.upgrade(config, "head")
+        command.upgrade(config, _CORRECTION_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _CORRECTION_REVISION
     finally:
@@ -1230,5 +1243,328 @@ def test_correction_downgrade_refuses_while_a_correction_exists(
             assert _version(connection) == _CORRECTION_REVISION
         columns = {str(c["name"]) for c in inspect(engine).get_columns("work_order_allocations")}
         assert "exceeds_demand" in columns
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0032 — the AssignedRoute adjustment (Phase 14 slice 6)
+# ---------------------------------------------------------------------------
+
+_ADJUSTMENT_INDEX = "uq_audit_events_route_adjustment_device_event_id"
+_STEP_REFERENCE_INDEX = "ix_part_movements_assigned_route_step_id"
+_FORBID_UPDATE_TRIGGER = "trg_assigned_route_steps_forbid_update"
+_ROUTE_TEMPLATE_DATABASE = "partflow_test_phase14_route_template"
+_ADJUSTMENT_EVENT = "00000000-0000-0000-0000-00000000a0a0"
+
+
+def _load_route_migration() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "phase14_route_adjusted_migration", _ROUTE_MIGRATION_FILE
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def route_engine(admin_engine: Engine) -> Iterator[Engine]:
+    """Temporary database migrated head → 0031 → head through real Alembic runs."""
+    name = "partflow_test_phase14_route_schema"
+    _create_temp_database(admin_engine, name)
+    config = _alembic_config(_url(name))
+    command.upgrade(config, "head")
+    command.downgrade(config, _CORRECTION_REVISION)
+    command.upgrade(config, "head")
+    engine = create_engine(_url(name))
+    yield engine
+    engine.dispose()
+    _drop_temp_database(admin_engine, name)
+
+
+@pytest.fixture
+def route_connection(route_engine: Engine) -> Iterator[Connection]:
+    """Per-test connection at head whose transaction is always rolled back."""
+    with route_engine.connect() as conn:
+        transaction = conn.begin()
+        yield conn
+        transaction.rollback()
+
+
+@pytest.fixture(scope="module")
+def route_template(admin_engine: Engine) -> Iterator[str]:
+    _create_temp_database(admin_engine, _ROUTE_TEMPLATE_DATABASE)
+    command.upgrade(_alembic_config(_url(_ROUTE_TEMPLATE_DATABASE)), "head")
+    yield _ROUTE_TEMPLATE_DATABASE
+    _drop_temp_database(admin_engine, _ROUTE_TEMPLATE_DATABASE)
+
+
+@pytest.fixture
+def route_head_database(admin_engine: Engine, route_template: str) -> Iterator[URL]:
+    name = "partflow_test_phase14_route_downgrade"
+    _create_temp_database(admin_engine, name, template=route_template)
+    yield _url(name)
+    _drop_temp_database(admin_engine, name)
+
+
+def _insert_route(connection: Connection, name: str = "ROUTE-ADJ") -> tuple[int, list[int]]:
+    """One AssignedRoute with two steps in a fresh Area; returns (route, step ids)."""
+    department = _scalar_id(
+        connection, "INSERT INTO departments (name) VALUES (:name) RETURNING id", name=name
+    )
+    area = _scalar_id(
+        connection,
+        "INSERT INTO areas (department_id, name) VALUES (:department, :name) RETURNING id",
+        department=department,
+        name=name,
+    )
+    route = _scalar_id(connection, "INSERT INTO assigned_routes DEFAULT VALUES RETURNING id")
+    steps = [
+        _scalar_id(
+            connection,
+            "INSERT INTO assigned_route_steps (assigned_route_id, sequence, area_id)"
+            " VALUES (:route, :sequence, :area) RETURNING id",
+            route=route,
+            sequence=sequence,
+            area=area,
+        )
+        for sequence in (1, 2)
+    ]
+    return route, steps
+
+
+def _insert_adjustment_audit(
+    connection: Connection, entity_id: str, *, entity_type: str = "AssignedRoute"
+) -> None:
+    metadata = {"route_adjustment": {"device_event_id": _ADJUSTMENT_EVENT}}
+    connection.execute(
+        sa.text(
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at, metadata)"
+            " VALUES (:event_type, :entity_type, :entity_id, now(), CAST(:metadata AS jsonb))"
+        ),
+        {
+            "event_type": "ROUTE_ADJUSTED" if entity_type == "AssignedRoute" else "UPDATED",
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "metadata": json.dumps(metadata),
+        },
+    )
+
+
+def test_head_is_the_route_adjusted_revision(route_engine: Engine) -> None:
+    with route_engine.connect() as connection:
+        assert _version(connection) == _ROUTE_REVISION
+    migration = _load_route_migration()
+    assert migration.revision == _ROUTE_REVISION
+    assert migration.down_revision == _CORRECTION_REVISION
+    assert len(_ROUTE_REVISION) <= 32
+
+
+def _model_check(name: str) -> str:
+    for constraint in models.Base.metadata.tables["audit_events"].constraints:
+        if isinstance(constraint, sa.CheckConstraint) and constraint.name == name:
+            return str(constraint.sqltext)
+    raise AssertionError(name)
+
+
+def test_route_migration_literals_repeat_the_model_constants() -> None:
+    migration = _load_route_migration()
+    event_types = "event_type IN ({})".format(", ".join(f"'{v}'" for v in AuditEventType))
+    entity_types = "entity_type IN ({})".format(", ".join(f"'{v}'" for v in AuditEntityType))
+    route_event_types, route_entity_types = (
+        migration._ROUTE_EVENT_TYPES,
+        migration._ROUTE_ENTITY_TYPES,
+    )
+    assert route_event_types == event_types
+    assert route_entity_types == entity_types
+    assert route_event_types == _model_check("ck_audit_events_event_type")
+    assert route_entity_types == _model_check("ck_audit_events_entity_type")
+    # The downgrade restores exactly the previous vocabularies.
+    assert migration._PREVIOUS_EVENT_TYPES == "event_type IN ('CREATED', 'UPDATED', 'DELETED')"
+    assert migration._PREVIOUS_ENTITY_TYPES == _load_devices_migration()._DEVICE_ENTITY_TYPES
+    assert migration._ADJUSTMENT_INDEX == _ADJUSTMENT_INDEX
+    assert migration._STEP_REFERENCE_INDEX == _STEP_REFERENCE_INDEX
+    assert migration._FORBID_UPDATE_TRIGGER == _FORBID_UPDATE_TRIGGER
+
+
+def test_audit_vocabulary_is_widened(route_engine: Engine) -> None:
+    with route_engine.connect() as connection:
+        definitions = {
+            str(name): str(definition)
+            for name, definition in connection.execute(
+                sa.text(
+                    "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint"
+                    " WHERE conname IN ('ck_audit_events_event_type',"
+                    " 'ck_audit_events_entity_type')"
+                )
+            )
+        }
+    assert "'ROUTE_ADJUSTED'::text" in definitions["ck_audit_events_event_type"]
+    assert "'AssignedRoute'::text" in definitions["ck_audit_events_entity_type"]
+    assert "'ScanStationDevice'::text" in definitions["ck_audit_events_entity_type"]
+
+
+def test_adjustment_index_stores_the_subscript_expression(route_engine: Engine) -> None:
+    """UNIQUE, partial on AssignedRoute, in the JSONB SUBSCRIPT form the
+    application emits (not the `->` operator form)."""
+    with route_engine.connect() as connection:
+        definition = connection.execute(
+            sa.text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
+            {"name": _ADJUSTMENT_INDEX},
+        ).scalar_one()
+    assert "CREATE UNIQUE INDEX" in definition
+    assert "ON public.audit_events" in definition
+    assert "metadata['route_adjustment'::text] ->> 'device_event_id'::text" in definition
+    assert "WHERE (entity_type = 'AssignedRoute'::text)" in definition
+
+
+def test_the_adjustment_lookup_uses_the_index(route_connection: Connection) -> None:
+    """The planner matches the application's lookup to the stored expression."""
+    lookup = sa.select(models.AuditEvent.id).where(
+        models.AuditEvent.entity_type == "AssignedRoute",
+        models.ROUTE_ADJUSTMENT_DEVICE_EVENT_ID == _ADJUSTMENT_EVENT,
+    )
+    sql = str(lookup.compile(route_connection, compile_kwargs={"literal_binds": True}))
+    route_connection.execute(sa.text("SET LOCAL enable_seqscan = off"))
+    plan = "\n".join(
+        str(line) for line in route_connection.execute(sa.text(f"EXPLAIN {sql}")).scalars()
+    )
+    assert _ADJUSTMENT_INDEX in plan
+
+
+def test_step_reference_index_exists(route_engine: Engine) -> None:
+    indexes = {
+        str(index["name"]): index for index in inspect(route_engine).get_indexes("part_movements")
+    }
+    assert indexes[_STEP_REFERENCE_INDEX]["column_names"] == ["assigned_route_step_id"]
+    assert indexes[_STEP_REFERENCE_INDEX]["unique"] is False
+
+
+def test_models_metadata_matches_the_migrated_schema(route_engine: Engine) -> None:
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    with route_engine.connect() as conn:
+        context = MigrationContext.configure(conn)
+        diffs = compare_metadata(context, models.Base.metadata)
+    assert diffs == []
+
+
+def test_a_device_event_id_names_one_adjustment(route_connection: Connection) -> None:
+    connection = route_connection
+    _insert_adjustment_audit(connection, "1")
+    # The same metadata shape on another entity is outside the partial index.
+    _insert_adjustment_audit(connection, "2", entity_type="WorkOrderDemand")
+    savepoint = connection.begin_nested()
+    with pytest.raises(IntegrityError) as raised:
+        _insert_adjustment_audit(connection, "3")
+    savepoint.rollback()
+    assert _ADJUSTMENT_INDEX in str(raised.value.orig)
+
+
+def test_assigned_route_steps_are_never_updated(route_connection: Connection) -> None:
+    connection = route_connection
+    route, steps = _insert_route(connection)
+    for statement in (
+        "UPDATE assigned_route_steps SET instructions = 'x' WHERE id = :step",
+        # Statement-level: even a zero-row UPDATE is refused.
+        "UPDATE assigned_route_steps SET instructions = 'x' WHERE id = -1 AND id = :step",
+    ):
+        savepoint = connection.begin_nested()
+        with pytest.raises(ProgrammingError) as raised:
+            connection.execute(sa.text(statement), {"step": steps[0]})
+        savepoint.rollback()
+        assert "past steps are immutable" in str(raised.value.orig)
+    # An unreferenced step may be deleted, and new steps inserted.
+    connection.execute(
+        sa.text("DELETE FROM assigned_route_steps WHERE id = :step"), {"step": steps[1]}
+    )
+    connection.execute(
+        sa.text(
+            "INSERT INTO assigned_route_steps (assigned_route_id, sequence, area_id)"
+            " SELECT :route, 2, area_id FROM assigned_route_steps WHERE id = :step"
+        ),
+        {"route": route, "step": steps[0]},
+    )
+    count = connection.execute(
+        sa.text("SELECT count(*) FROM assigned_route_steps WHERE assigned_route_id = :route"),
+        {"route": route},
+    ).scalar_one()
+    assert count == 2
+
+
+def test_clean_route_downgrade_restores_the_correction_boundary(
+    route_head_database: URL,
+) -> None:
+    config = _alembic_config(route_head_database)
+    engine = create_engine(route_head_database)
+    try:
+        command.downgrade(config, _CORRECTION_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _CORRECTION_REVISION
+            checks = {
+                str(name): str(definition)
+                for name, definition in connection.execute(
+                    sa.text(
+                        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint"
+                        " WHERE conname IN ('ck_audit_events_event_type',"
+                        " 'ck_audit_events_entity_type')"
+                    )
+                )
+            }
+            triggers = connection.execute(
+                sa.text("SELECT count(*) FROM pg_trigger WHERE tgname = :name"),
+                {"name": _FORBID_UPDATE_TRIGGER},
+            ).scalar_one()
+        assert "ROUTE_ADJUSTED" not in checks["ck_audit_events_event_type"]
+        assert "AssignedRoute" not in checks["ck_audit_events_entity_type"]
+        assert "ScanStationDevice" in checks["ck_audit_events_entity_type"]
+        assert triggers == 0
+        inspector = inspect(engine)
+        indexes = {
+            str(index["name"])
+            for table in ("audit_events", "part_movements")
+            for index in inspector.get_indexes(table)
+        }
+        assert not indexes & {_ADJUSTMENT_INDEX, _STEP_REFERENCE_INDEX}
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert _version(connection) == _ROUTE_REVISION
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("event_type", "entity_type"), [("ROUTE_ADJUSTED", "Area"), ("UPDATED", "AssignedRoute")]
+)
+def test_route_downgrade_refuses_while_an_adjustment_is_recorded(
+    route_head_database: URL, event_type: str, entity_type: str
+) -> None:
+    """Either half of the vocabulary blocks the downgrade; the row is kept."""
+    engine = create_engine(route_head_database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at)"
+                    " VALUES (:event_type, :entity_type, '1', now())"
+                ),
+                {"event_type": event_type, "entity_type": entity_type},
+            )
+        with pytest.raises(ProgrammingError) as raised:
+            command.downgrade(_alembic_config(route_head_database), _CORRECTION_REVISION)
+        assert "Assigned Route adjustments are recorded; refusing downgrade" in str(
+            raised.value.orig
+        )
+        with engine.connect() as connection:
+            assert _version(connection) == _ROUTE_REVISION
+            kept = connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM audit_events"
+                    " WHERE entity_type = 'AssignedRoute' OR event_type = 'ROUTE_ADJUSTED'"
+                )
+            ).scalar_one()
+            assert kept == 1
     finally:
         engine.dispose()

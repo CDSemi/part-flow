@@ -50,6 +50,9 @@ station was rebound away from ``station_context_changed`` (409), a
 refused enrollment code ``enrollment_code_invalid`` (403), and a station
 allocation whose unchanged suggestion went stale ``suggestion_changed``
 (409), so the station ends an unknown outcome without parsing the message.
+Since slice 6 an AssignedRoute adjustment whose future steps changed
+since the editor read them carries ``route_changed`` (409), so the
+dialog offers to reload the route.
 
 Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
@@ -69,6 +72,7 @@ from app.application.errors import (
     AccountLockedError,
     ActiveQuantityConfirmationRequiredError,
     ApplicationError,
+    AssignedRouteChangedError,
     AuthenticationRequiredError,
     ConflictError,
     EnrollmentCodeInvalidError,
@@ -274,6 +278,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     )
     for error_type, status_code, flag in _sign_in_refusals:
         _register_gate_refusal(error_type, status_code, flag)
+
+    # Phase 14 slice 6: the AssignedRoute's future steps changed since the
+    # editor read them — nothing was changed; the client reloads the route.
+    _register_gate_refusal(AssignedRouteChangedError, 409, "route_changed")
 
     # Phase 14 slice 4: the station device refusals — nothing was written
     # (only the device's last-seen time); D-1 never clears the User cookie.

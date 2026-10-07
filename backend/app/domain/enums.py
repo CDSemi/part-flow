@@ -69,9 +69,9 @@ class MovementType(StrEnum):
     the implicit AREA_COMPLETED of actively processing quantity) — the
     quantity is manufacturing-complete, leaves active production (the
     flow closes as STOCKED) and becomes available for Work Order
-    Allocation, which is recorded separately from Movement. Later
-    phases widen this additively (ROUTE_ADJUSTED, ...); none of those
-    values exist yet.
+    Allocation, which is recorded separately from Movement.
+    ROUTE_ADJUSTED is not a Movement type: it is an audit event on the
+    AssignedRoute (Phase 14 slice 6, OD-P11).
     """
 
     RECEIVED = "RECEIVED"
@@ -235,12 +235,16 @@ class AuditEventType(StrEnum):
     Slice 1 records exactly creation and edit; the vocabulary widens
     additively in the phases that introduce new auditable actions.
     Phase 13 adds DELETED for hard deletes of master/configuration
-    records (first writers in later Phase 13 slices).
+    records (first writers in later Phase 13 slices). Phase 14 slice 6
+    adds ROUTE_ADJUSTED — an authorized change of the future steps of
+    one PLANNED flow's AssignedRoute (PROJECT_PROFILE §8.10, §17); never
+    a PartMovement: it moves no quantity.
     """
 
     CREATED = "CREATED"
     UPDATED = "UPDATED"
     DELETED = "DELETED"
+    ROUTE_ADJUSTED = "ROUTE_ADJUSTED"
 
 
 class AuditEntityType(StrEnum):
@@ -258,13 +262,16 @@ class AuditEntityType(StrEnum):
     machine_lifecycle_events. Phase 13 (slice 4) adds ApplicationPolicy:
     the global policy singleton, one `entity_id` per Administration
     section (`worker-sessions`). Phase 13 (slice 8) adds RouteTemplate:
-    Planned Routes configuration (create, edit, archive, delete) — never
-    the Assigned Route snapshots, which are production records. Phase 13
+    Planned Routes configuration (create, edit, archive, delete). Phase 13
     (slice 12) adds User (application accounts, never Workers) and Role
     (named roles with their permission grants). Phase 14 slice 4 adds
     ScanStationDevice: enrollment, activation, replacement and
     revocation of a station device — configuration of a terminal, never
-    production activity. Widens additively in later phases.
+    production activity. Phase 14 slice 6 adds AssignedRoute: only the
+    ROUTE_ADJUSTED correction of a snapshot's future steps; the
+    snapshot's creation by release, receipt, split or merge stays
+    recorded by the Movements themselves. Widens additively in later
+    phases.
     """
 
     WORK_ORDER = "WorkOrder"
@@ -282,6 +289,7 @@ class AuditEntityType(StrEnum):
     USER = "User"
     ROLE = "Role"
     SCAN_STATION_DEVICE = "ScanStationDevice"
+    ASSIGNED_ROUTE = "AssignedRoute"
 
 
 class WorkerIdentificationMode(StrEnum):

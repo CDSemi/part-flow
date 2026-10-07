@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), làm rõ §8.2 và §21 của Phase 14 slice 5 (allocation action trên Completed Work Orders), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), làm rõ §8.2 và §21 của Phase 14 slice 5 (allocation action trên Completed Work Orders) và các câu §8.10, §8.11, §17 của Phase 14 slice 6 (AssignedRoute adjustment, OD-P11), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
@@ -453,6 +453,10 @@ dùng overdue/bottleneck/queue/processing/estimate và không block production.
 Snapshot optional chỉ cho `PLANNED` Flow. Copy từ template rồi độc lập; template
 edit không đổi active work. Authorized user có thể audited-edit selected Flow;
 flows cùng PN có route khác; deviation được ghi, Movement luôn authoritative.
+Past step bất biến: authorized edit chỉ thay các future step — những step sau step cuối cùng
+mà bất kỳ Movement nào của Flow tham chiếu, kể cả Movement đã undo — của AssignedRoute của
+chính selected Flow, bắt buộc có reason, và được audit là `ROUTE_ADJUSTED` kèm đầy đủ danh
+sách step trước/sau và user đang đăng nhập (quyết định 2026-10-06, OD-P11).
 
 ## 8.11 PartMovement
 
@@ -467,6 +471,9 @@ Type ban đầu:
 - `AREA_COMPLETED`, `SPLIT`, `MERGED`, `STOCKED`;
 - `QUANTITY_ADJUSTED`, `SCRAPPED`, `ROUTE_ADJUSTED`;
 - `ROUTE_DEVIATION_CONFIRMED`, `REVERSED`.
+
+`ROUTE_ADJUSTED` được ghi là audit event trên AssignedRoute, không bao giờ là PartMovement: nó
+không di chuyển quantity (quyết định 2026-10-06, OD-P11).
 
 `movement_reason = REPAIR` là explicit transfer intent, reason text bắt buộc.
 `QUANTITY_ADJUSTED` direction `INCREASE` thêm physical quantity có audit nhưng
@@ -932,13 +939,17 @@ Material
 
 Snapshot khi `PLANNED` release. Flows cùng PN có thể khác route; split có thể
 inherit/modify; template change không đổi snapshot; authorized edit chỉ selected
-Flow và có audit; Movement luôn source of truth.
+Flow, chỉ future step của Flow đó, có audit; past step không bao giờ đổi (quyết định
+2026-10-06, OD-P11); Movement luôn source of truth.
 
 ## Route Deviation
 
 Chỉ áp dụng Planned. Khi tới unexpected Area: warn, confirm nếu cần, record actual
 Movement + deviation, giữ previous route, update assigned route nếu authorized và
 ghi actor/time/reason. Không ép reality theo plan lỗi thời.
+
+Deviation tự nó không bao giờ đổi assigned Route; route chỉ đổi qua adjustment có reason và được
+ủy quyền (quyết định 2026-10-06, OD-P11).
 
 ## Expected Duration
 

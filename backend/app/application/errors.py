@@ -252,6 +252,12 @@ class SuggestionChangedError(ConflictError):
     request's ``device_event_id``."""
 
 
+class AssignedRouteChangedError(ConflictError):
+    """The AssignedRoute's future steps differ from the ones the editor read
+    (409; Phase 14 slice 6, RT-4): the quantity moved on or another User
+    adjusted the route. Nothing was changed; the client re-reads the route."""
+
+
 class EnrollmentCodeInvalidError(ApplicationError):
     """An enrollment code that is unknown, used, expired, revoked or issued
     for another Scan Station (403; Phase 14 slice 4, E-1) — one answer for

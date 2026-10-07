@@ -1692,7 +1692,13 @@ class RouteStep(Base):
 
 
 class AssignedRoute(Base):
-    """Immutable route snapshot of one PLANNED QuantityFlow (PROJECT_PROFILE §8.10).
+    """Route snapshot of one PLANNED QuantityFlow (PROJECT_PROFILE §8.10).
+
+    Past steps are immutable (no UPDATE — trigger
+    `trg_assigned_route_steps_forbid_update`; a step a Movement
+    references is never deleted — FK); only the unreferenced future
+    steps change, through the audited ROUTE_ADJUSTED command (Phase 14
+    slice 6).
 
     Carries no `quantity_flow_id` back-reference: the owning flow points
     here through `quantity_flows.assigned_route_id` — the single FK
@@ -1912,8 +1918,9 @@ class PartMovement(Base):
         ForeignKey("operations.id", name="fk_part_movements_operation_id_operations"),
         nullable=False,
     )
-    # References the immutable snapshot step (never the mutable
-    # route_steps template row): set for a PLANNED flow's Movement, NULL
+    # References a snapshot step (never the mutable `route_steps`
+    # template row); a referenced step is a past step and never
+    # changes. Set for a PLANNED flow's Movement, NULL
     # for FLOATING. Cross-table agreement with the flow's own
     # AssignedRoute is a transaction-protocol invariant (Phase 4).
     assigned_route_step_id: Mapped[int | None] = mapped_column(
@@ -2030,6 +2037,11 @@ class PartMovement(Base):
         # two concurrent Undo submissions.
         UniqueConstraint("reverses_movement_id", name="uq_part_movements_reverses_movement_id"),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
+        # The FK's RI check when an AssignedRoute adjustment deletes an
+        # unreferenced future step, and the adjustment's "is this step
+        # referenced" boundary (Phase 14 slice 6). Created by migration
+        # `0032_phase14_route_adjusted`.
+        Index("ix_part_movements_assigned_route_step_id", "assigned_route_step_id"),
         # The per-PN reverse-chronological history read of PN Tracking
         # (Phase 11): `(occurred_at DESC, id DESC)` with keyset paging.
         Index(
@@ -2249,18 +2261,23 @@ class AuditEvent(Base):
     Operation, ScanStation and MachineAssetTagConfig (the Asset Tag
     format), Machine configuration (lifecycle transitions stay in
     `machine_lifecycle_events`), the global ApplicationPolicy and
-    (slice 8) RouteTemplate — Planned Routes configuration, never the
-    Assigned Route snapshots — and (slice 12) User and Role, the
+    (slice 8) RouteTemplate — Planned Routes configuration — and
+    (Phase 14 slice 6) AssignedRoute, only for the ROUTE_ADJUSTED
+    correction of a snapshot's future steps: the one route-guidance
+    correction audited here, never a quantity event (it moves no
+    quantity; the Movements stay the production record) — and
+    (slice 12) User and Role, the
     application accounts and the named roles with their permission
     grants — and (Phase 14 slice 4) ScanStationDevice, the enrollment,
     activation, replacement and revocation of a station device (never a
     code, token or digest). Rows are descriptive history for
     display and accountability: never replayed to build state, never
-    describing production actions (the `RECEIVED` PartMovement is the
+    describing quantity movement (the `RECEIVED` PartMovement is the
     production audit record), and deliberately not an event-sourcing
     framework. `entity_id` is polymorphic text with no FK — the
     internal PK for WorkOrder/WorkOrderDemand/Worker/Department/Area/
-    Operation/Machine/RouteTemplate/User/Role, the canonical PN string for PartNumber, the
+    Operation/Machine/RouteTemplate/User/Role, the `assigned_routes.id`
+    for AssignedRoute, the canonical PN string for PartNumber, the
     stable Station ID for ScanStation, `"1"` for the singleton
     MachineAssetTagConfig and the Administration section
     (`worker-sessions`, `correction-permissions`, `due-soon`,
@@ -2301,7 +2318,7 @@ class AuditEvent(Base):
         # Both vocabularies widen additively in later phases.
         CheckConstraint(
             f"event_type IN ('{AuditEventType.CREATED}', '{AuditEventType.UPDATED}',"
-            f" '{AuditEventType.DELETED}')",
+            f" '{AuditEventType.DELETED}', '{AuditEventType.ROUTE_ADJUSTED}')",
             name=conv("ck_audit_events_event_type"),
         ),
         CheckConstraint(
@@ -2312,7 +2329,8 @@ class AuditEvent(Base):
             f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}',"
             f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}',"
             f" '{AuditEntityType.ROUTE_TEMPLATE}', '{AuditEntityType.USER}',"
-            f" '{AuditEntityType.ROLE}', '{AuditEntityType.SCAN_STATION_DEVICE}')",
+            f" '{AuditEntityType.ROLE}', '{AuditEntityType.SCAN_STATION_DEVICE}',"
+            f" '{AuditEntityType.ASSIGNED_ROUTE}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.
@@ -2337,4 +2355,21 @@ Index(
     "ix_audit_events_hot_list_device_event_id",
     HOT_LIST_DEVICE_EVENT_ID,
     postgresql_where=AuditEvent.entity_type == AuditEntityType.WORK_ORDER_DEMAND,
+)
+
+# The idempotency lookup of the AssignedRoute adjustment (Phase 14
+# slice 6): its single audit row IS the idempotency record. Same JSONB
+# SUBSCRIPT form as HOT_LIST_DEVICE_EVENT_ID, but UNIQUE — one command
+# writes exactly one row, so a `device_event_id` names one adjustment
+# even when two flows (two PN locks) race with the same id. Partial on
+# AssignedRoute rows. Repeated verbatim by migration
+# `0032_phase14_route_adjusted`.
+ROUTE_ADJUSTMENT_DEVICE_EVENT_ID = AuditEvent.metadata_["route_adjustment"].op(
+    "->>", return_type=Text
+)("device_event_id")
+Index(
+    "uq_audit_events_route_adjustment_device_event_id",
+    ROUTE_ADJUSTMENT_DEVICE_EVENT_ID,
+    unique=True,
+    postgresql_where=AuditEvent.entity_type == AuditEntityType.ASSIGNED_ROUTE,
 )

@@ -30,7 +30,7 @@ here:
 - Lock order. Writers lock the template row first — FOR NO KEY UPDATE
   for an edit or archive, FOR UPDATE for a delete — and then, before
   inserting any step, the referenced Machines → Areas → Operations FOR
-  KEY SHARE, each ascending by id (``_lock_references``): the production
+  KEY SHARE, each ascending by id (``lock_step_references``): the production
   order (transfer Machine → Area → Operation, Undo Machines then Areas
   ascending, release Area → Operation), so a save never acquires those
   rows in step order. Release and receipt take the template FOR SHARE
@@ -64,6 +64,7 @@ from sqlalchemy.orm import Session
 from app.application import audit
 from app.application.common import commit, flush, optional_text
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
+from app.domain.assigned_route import StepContent
 from app.domain.enums import AuditEntityType, AuditEventType, MovementType
 from app.infrastructure.models import (
     Area,
@@ -142,16 +143,6 @@ class RouteTemplateUsage(NamedTuple):
     flows: list[RouteTemplateUsageEntry]
 
 
-class _StepState(NamedTuple):
-    """A step's comparable content (no id, no sequence value)."""
-
-    area_id: int
-    operation_id: int | None
-    expected_duration: datetime.timedelta | None
-    preferred_machine_id: int | None
-    instructions: str | None
-
-
 # ---------------------------------------------------------------------------
 # Audit snapshot: an explicit field list. Ids of the template (the audit
 # entity_id) and of its steps, created_at and updated_at never belong.
@@ -214,7 +205,8 @@ def list_active_route_templates(session: Session) -> list[RouteTemplateDetail]:
     Ordered by name (then id) for a stable, user-facing selection list.
     Archived templates never appear: a new release can only reference an
     active template (SLICE1_DATA_MODEL §8), while historical PLANNED
-    flows keep their own immutable AssignedRoute snapshots regardless.
+    flows keep their own AssignedRoute snapshots (past steps immutable)
+    regardless.
     """
     templates = list(
         session.scalars(
@@ -393,11 +385,20 @@ def _route_description(value: object) -> str | None:
     return optional_text(value)
 
 
-def _shaped_steps(steps: Sequence[RouteStepInput]) -> list[_StepState]:
-    if not steps:
+def shape_route_steps(
+    steps: Sequence[RouteStepInput], *, allow_empty: bool, first_number: int = 1
+) -> list[StepContent]:
+    """The step rules that need no database, per step in request order.
+
+    Templates require at least one step (``allow_empty=False``); an
+    AssignedRoute adjustment may leave no future step. ``first_number``
+    is the absolute number of the first step in the messages (an
+    adjustment's tail continues the kept route's numbering).
+    """
+    if not steps and not allow_empty:
         raise InvalidInputError("A Planned Route needs at least one step.")
-    shaped: list[_StepState] = []
-    for number, step in enumerate(steps, start=1):
+    shaped: list[StepContent] = []
+    for number, step in enumerate(steps, start=first_number):
         if step.operation_id is None:
             raise InvalidInputError(f"Step {number} needs an Operation.")
         duration = step.expected_duration
@@ -407,7 +408,7 @@ def _shaped_steps(steps: Sequence[RouteStepInput]) -> list[_StepState]:
         if instructions is not None and "\x00" in instructions:
             raise InvalidInputError(f"Step {number}: the instructions must be text.")
         shaped.append(
-            _StepState(
+            StepContent(
                 area_id=step.area_id,
                 operation_id=step.operation_id,
                 expected_duration=duration,
@@ -446,8 +447,13 @@ def _locked_rows[Row: (Area, Operation, Machine)](
     return {row.id: row for row in rows}
 
 
-def _lock_references(session: Session, steps: Sequence[_StepState]) -> None:
+def lock_step_references(
+    session: Session, steps: Sequence[StepContent], *, first_number: int = 1
+) -> None:
     """Lock the referenced rows in the production order, then validate.
+
+    ``first_number`` is the absolute number of the first step (messages
+    and the step-1 terminal rule, which applies only to step 1 itself).
 
     FOR KEY SHARE on the preferred Machines, then the Areas, then the
     Operations, each ascending by id, before any step INSERT — whose FK
@@ -470,7 +476,7 @@ def _lock_references(session: Session, steps: Sequence[_StepState]) -> None:
         Operation,
         {step.operation_id for step in steps if step.operation_id is not None},
     )
-    for number, step in enumerate(steps, start=1):
+    for number, step in enumerate(steps, start=first_number):
         area = areas.get(step.area_id)
         if area is None:
             raise InvalidInputError(f"Step {number}: Area {step.area_id} does not exist.")
@@ -530,7 +536,7 @@ def _template_steps(session: Session, template_id: int) -> list[RouteStep]:
     )
 
 
-def _add_steps(session: Session, template_id: int, steps: Sequence[_StepState]) -> list[RouteStep]:
+def _add_steps(session: Session, template_id: int, steps: Sequence[StepContent]) -> list[RouteStep]:
     rows = [
         RouteStep(
             route_template_id=template_id,
@@ -608,8 +614,8 @@ def create_route_template(
     """Create an active, never-used template with its ordered steps."""
     route_name = _route_name(name)
     route_description = _route_description(description)
-    shaped = _shaped_steps(steps)
-    _lock_references(session, shaped)
+    shaped = shape_route_steps(steps, allow_empty=False)
+    lock_step_references(session, shaped)
     template = RouteTemplate(name=route_name, description=route_description)
     session.add(template)
     flush(session, {})
@@ -646,7 +652,7 @@ def replace_route_template(
     """
     route_name = _route_name(name)
     route_description = _route_description(description)
-    shaped = _shaped_steps(steps)
+    shaped = shape_route_steps(steps, allow_empty=False)
     template = _lock_for_edit(session, template_id)
     if template.archived_at is not None:
         raise ConflictError(
@@ -655,7 +661,7 @@ def replace_route_template(
         )
     current = _template_steps(session, template.id)
     current_state = [
-        _StepState(
+        StepContent(
             area_id=step.area_id,
             operation_id=step.operation_id,
             expected_duration=step.expected_duration,
@@ -676,7 +682,7 @@ def replace_route_template(
             ever_used=_is_ever_used(session, template.id),
             usage_count=_usage_count(session, template.id),
         )
-    _lock_references(session, shaped)
+    lock_step_references(session, shaped)
     before = route_template_snapshot(template, current)
     session.execute(delete(RouteStep).where(RouteStep.route_template_id == template.id))
     # UNIQUE (route_template_id, sequence) is not deferrable: the old

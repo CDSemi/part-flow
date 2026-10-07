@@ -13,6 +13,7 @@ import type { Permission } from '../../api/roles';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
+import { formatIsoDateShort, formatTimeOfDay } from '../dates';
 import { TrackingView } from './TrackingView';
 import {
   SEARCH_DEBOUNCE_MS,
@@ -288,6 +289,7 @@ function detailPayload() {
           source_template: null,
           off_route: false,
           deviations: [],
+          route_adjustments: [],
         },
         {
           id: 140,
@@ -319,6 +321,7 @@ function detailPayload() {
           source_template: { id: 7, name: 'Bracket std v3' },
           off_route: false,
           deviations: [],
+          route_adjustments: [],
         },
       ],
       total: 2,
@@ -397,6 +400,7 @@ function detailPayload() {
       has_more: true,
       next_before_movement_id: 11,
     },
+    route_adjustment_total: 0,
   };
 }
 
@@ -2249,8 +2253,8 @@ function section(title: string): HTMLElement {
   )!;
 }
 
-test('FC-9: no Corrections section without Edit Work Order Allocation', async () => {
-  session = signedInSession(['VIEW_PRODUCTION_DATA', 'ASSIGN_ROUTES']);
+test('FC-9: no Corrections section without a correction key', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
   await renderTracking();
   await openFirstRow();
   expect(document.querySelector('.tk-right h2')?.textContent).toBe(PN);
@@ -2258,9 +2262,13 @@ test('FC-9: no Corrections section without Edit Work Order Allocation', async ()
   expect(
     screen.queryByRole('button', { name: /Adjust WO Allocation/ }),
   ).toBeNull();
+  expect(
+    screen.queryByRole('button', { name: /Edit assigned Route/ }),
+  ).toBeNull();
 });
 
-test('FC-9: Corrections offers exactly Adjust WO Allocation… — disabled while offline', async () => {
+test('FC-9 / FE-1: only Edit assigned Route… without Edit Work Order Allocation — disabled while offline', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA', 'ASSIGN_ROUTES']);
   await renderTracking();
   await openFirstRow();
   const corrections = section('Corrections');
@@ -2269,9 +2277,32 @@ test('FC-9: Corrections offers exactly Adjust WO Allocation… — disabled whil
   );
   const buttons = within(corrections).getAllByRole('button');
   expect(buttons.map((button) => button.textContent)).toEqual([
+    'Edit assigned Route…',
+  ]);
+  expect(buttons[0]).toBeEnabled();
+  cleanup();
+
+  await renderTracking('unavailable');
+  await openFirstRow();
+  expect(
+    screen.getByRole('button', { name: 'Edit assigned Route…' }),
+  ).toBeDisabled();
+});
+
+test('FC-9 / FE-1: Corrections offers Edit assigned Route… then Adjust WO Allocation… — disabled while offline', async () => {
+  await renderTracking();
+  await openFirstRow();
+  const corrections = section('Corrections');
+  expect(corrections.querySelector('h4 .tag')?.textContent).toBe(
+    'authorized actions — recorded with your name',
+  );
+  const buttons = within(corrections).getAllByRole('button');
+  expect(buttons.map((button) => button.textContent)).toEqual([
+    'Edit assigned Route…',
     'Adjust WO Allocation…',
   ]);
   expect(buttons[0]).toBeEnabled();
+  expect(buttons[1]).toBeEnabled();
   // The Corrections section is the last detail section.
   const sections = document.querySelectorAll('.tk-right .tk-sec');
   expect(sections[sections.length - 1]).toBe(corrections);
@@ -2279,6 +2310,9 @@ test('FC-9: Corrections offers exactly Adjust WO Allocation… — disabled whil
 
   await renderTracking('unavailable');
   await openFirstRow();
+  expect(
+    screen.getByRole('button', { name: 'Edit assigned Route…' }),
+  ).toBeDisabled();
   expect(
     screen.getByRole('button', { name: 'Adjust WO Allocation…' }),
   ).toBeDisabled();
@@ -2484,4 +2518,337 @@ test('FC-9: a single line allocated beyond its demand reads fully covered plus i
   expect(
     (demandSection.querySelector('.prog i') as HTMLElement).style.width,
   ).toBe('100%');
+});
+
+// ---------------------------------------------------------------------------
+// Edit assigned Route (Phase 14 slice 6)
+// ---------------------------------------------------------------------------
+
+function routeAdjustment(id: number, overrides: Record<string, unknown> = {}) {
+  return {
+    audit_event_id: id,
+    occurred_at: `2030-07-22T1${id % 10}:00:00Z`,
+    reason: `reason ${id}`,
+    kept_through_sequence: 30,
+    actor_user: {
+      id: 90,
+      display_name: 'Mia Manager',
+      avatar_updated_at: null,
+    },
+    ...overrides,
+  };
+}
+
+function noteTime(iso: string): string {
+  return `${formatIsoDateShort(iso.slice(0, 10))} ${formatTimeOfDay(iso)}`;
+}
+
+/** QF-140's assigned route as the editor reads it: at Lathe (step 30),
+ * Deburr and Stockroom still ahead. */
+function assignedRoutesPayload() {
+  const editorStep = (
+    id: number,
+    area: typeof LATHE,
+    state: string,
+    locked: boolean,
+  ) => ({
+    id,
+    sequence: id * 10,
+    area,
+    operation: null,
+    expected_duration: null,
+    preferred_machine: null,
+    instructions: null,
+    state,
+    locked,
+  });
+  return {
+    part_number: PN,
+    flows: [
+      {
+        quantity_flow_id: 140,
+        quantity: 6,
+        position: {
+          area: LATHE,
+          machine: null,
+          operation: OPERATION,
+          activity: null,
+          state: 'QUEUE',
+          since: '2030-07-22T11:20:00Z',
+          expected_by: null,
+        },
+        off_route: false,
+        source_template: { id: 7, name: 'Bracket std v3' },
+        kept_through_sequence: 30,
+        future_step_ids: [4, 5],
+        steps: [
+          editorStep(1, MATERIAL, 'DONE', true),
+          editorStep(2, CUT, 'DONE', true),
+          editorStep(3, LATHE, 'CURRENT', true),
+          editorStep(4, DEBURR, 'FUTURE', false),
+          editorStep(5, STOCKROOM, 'FUTURE', false),
+        ],
+      },
+    ],
+  };
+}
+
+/** End the route at the current step, give a reason and confirm. */
+async function adjustTheRoute(dialog: HTMLElement) {
+  await within(dialog).findByLabelText('Step 31 Area');
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove step 32' }),
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove step 31' }),
+  );
+  fireEvent.change(within(dialog).getByLabelText('Reason (required)'), {
+    target: { value: 'Stock at Deburr' },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Review adjustment' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Adjust route' }));
+  await act(async () => {});
+  await act(async () => {});
+}
+
+test('FE-5: Edit assigned Route… opens the PN dialog; an adjustment reloads the detail, reports on the status line and returns focus', async () => {
+  const posted: { url: string; body: Record<string, unknown> }[] = [];
+  const fetchMock = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/api/tracking/assigned-routes')) {
+        return jsonResponse(assignedRoutesPayload());
+      }
+      if (url === '/api/quantity-flows/140/route-adjustments') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        posted.push({ url, body });
+        return jsonResponse(
+          {
+            device_event_id: body.device_event_id,
+            quantity_flow_id: 140,
+            part_number: PN,
+            assigned_route_id: 900,
+            kept_through_sequence: 30,
+            reason: body.reason,
+            steps: [],
+          },
+          201,
+        );
+      }
+      return defaultAnswer(url);
+    },
+  );
+  vi.stubGlobal('fetch', fetchMock);
+  await renderTracking();
+  await openFirstRow();
+  const edit = screen.getByRole('button', { name: 'Edit assigned Route…' });
+  edit.focus();
+  fireEvent.click(edit);
+  const dialog = await screen.findByRole('dialog', {
+    name: `Edit assigned Route — ${PN}`,
+  });
+  const calls = () => fetchMock.mock.calls.map((call) => String(call[0]));
+  expect(calls()).toContain(`/api/tracking/assigned-routes?part_number=${PN}`);
+  // A click inside the dialog is never an outside click of the panel.
+  fireEvent.mouseDown(dialog);
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+
+  const detailReads = () =>
+    calls().filter((url) => url.startsWith('/api/tracking/detail')).length;
+  const before = detailReads();
+  await adjustTheRoute(dialog);
+
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(posted).toHaveLength(1);
+  expect(posted[0].body).toMatchObject({
+    expected_future_step_ids: [4, 5],
+    steps: [],
+    reason: 'Stock at Deburr',
+  });
+  const notice = document.querySelector('.tk-corr-notice');
+  expect(notice?.getAttribute('role')).toBe('status');
+  expect(notice?.textContent).toBe('✓ Route adjusted for QF-140.');
+  expect(detailReads()).toBe(before + 1);
+  expect(document.activeElement).toBe(
+    screen.getByRole('button', { name: 'Edit assigned Route…' }),
+  );
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+
+  // Opening either correction dialog clears the status line.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit assigned Route…' }));
+  expect(document.querySelector('.tk-corr-notice')).toBeNull();
+});
+
+test('FE-5: closing an adjustment with an unknown outcome reloads the detail and says so on the status line', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith('/api/tracking/assigned-routes')) {
+      return jsonResponse(assignedRoutesPayload());
+    }
+    if (url === '/api/quantity-flows/140/route-adjustments') {
+      throw new TypeError('Failed to fetch');
+    }
+    return defaultAnswer(url);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  await renderTracking();
+  await openFirstRow();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit assigned Route…' }));
+  const dialog = await screen.findByRole('dialog', {
+    name: `Edit assigned Route — ${PN}`,
+  });
+  await adjustTheRoute(dialog);
+  const detailReads = () =>
+    fetchMock.mock.calls.filter((call) =>
+      String(call[0]).startsWith('/api/tracking/detail'),
+    ).length;
+  const before = detailReads();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  await act(async () => {});
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.querySelector('.tk-corr-notice')?.textContent).toBe(
+    "The last route adjustment may have been applied. Check the Quantity Flow's route before trying again.",
+  );
+  expect(detailReads()).toBe(before + 1);
+});
+
+test('FE-9: every route adjustment renders as a note, oldest first, after the deviation notes', async () => {
+  stubFetch((url) => {
+    if (!url.startsWith('/api/tracking/detail')) return defaultAnswer(url);
+    const payload = detailPayload();
+    const planned = payload.flows.flows.find((flow) => flow.id === 140)!;
+    Object.assign(planned, {
+      deviations: [
+        {
+          movement_id: 3,
+          occurred_at: '2030-07-22T11:20:00Z',
+          kind: 'AREA',
+          expected_area: LATHE,
+          expected_operation: OPERATION,
+          actual_area: DEBURR,
+          actual_operation: null,
+          reason: 'Lathe down',
+          station_id: 'DEB-ST-01',
+          worker: null,
+        },
+      ],
+      route_adjustments: [501, 502, 503, 504, 505, 506, 507].map((id) =>
+        routeAdjustment(
+          id,
+          id === 502 ? { actor_user: null, reason: 'Deburr moved' } : {},
+        ),
+      ),
+    });
+    return jsonResponse(payload);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  const block = flowBlock('QF-140');
+  const notes = Array.from(block.querySelectorAll('.devnote'));
+  expect(notes[0].textContent).toContain(
+    'Planned Route “Bracket std v3” (snapshot, adjusted) — guidance only',
+  );
+  expect(notes[1].classList.contains('deviation')).toBe(true);
+  const adjusted = notes.slice(2);
+  expect(adjusted).toHaveLength(7);
+  expect(adjusted.every((note) => note.classList.contains('adjusted'))).toBe(
+    true,
+  );
+  expect(adjusted.map((note) => note.textContent)).toEqual(
+    [501, 502, 503, 504, 505, 506, 507].map((id) =>
+      id === 502
+        ? `Route adjusted ${noteTime(routeAdjustment(id).occurred_at)}: the steps after step 30 were replaced — reason: Deburr moved. The previous route is kept in the audit history.`
+        : `Route adjusted ${noteTime(routeAdjustment(id).occurred_at)} by Mia Manager: the steps after step 30 were replaced — reason: reason ${id}. The previous route is kept in the audit history.`,
+    ),
+  );
+  // No count line: every adjustment is listed.
+  expect(block.textContent).not.toContain('Showing');
+  // The deviation note is unchanged.
+  expect(notes[1].textContent).toContain('reason: Lathe down');
+  // A flow whose route was never adjusted shows no route note.
+  expect(flowBlock('QF-141').querySelector('.devnote.adjusted')).toBeNull();
+});
+
+test('FE-9: a never-adjusted Planned flow reads (snapshot) without a route note', async () => {
+  await renderTracking();
+  await openFirstRow();
+  const block = flowBlock('QF-140');
+  expect(block.textContent).toContain(
+    'Planned Route “Bracket std v3” (snapshot) — guidance only; actual Movement history stays authoritative.',
+  );
+  expect(block.querySelector('.devnote.adjusted')).toBeNull();
+});
+
+test('FE-13: a route adjustment re-reads the appended flow pages; an unchanged total keeps them', async () => {
+  vi.useFakeTimers();
+  // v1: the first page holds the two newest flows, the older page the
+  // Planned QF-120; v2: QF-120's route was adjusted — only the route
+  // adjustment total moves (no Movement, no new flow); v3: nothing new.
+  let version = 1;
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const base = detailPayload();
+      return jsonResponse({
+        ...base,
+        flows: {
+          ...base.flows,
+          total: 3,
+          has_more: true,
+          next_before_flow_id: 140,
+        },
+        route_adjustment_total: version === 1 ? 0 : 1,
+      });
+    }
+    if (url.startsWith('/api/tracking/flows')) {
+      return jsonResponse({
+        flows: [
+          {
+            ...detailPayload().flows.flows[1],
+            id: 120,
+            parents: [],
+            children: [],
+            route_adjustments: version === 1 ? [] : [routeAdjustment(601)],
+          },
+        ],
+        total: 3,
+        has_more: false,
+        next_before_flow_id: null,
+      });
+    }
+    return defaultAnswer(url);
+  });
+  const flowReads = () =>
+    trackingCalls(fetchMock).filter((url) => url.includes('/flows')).length;
+  await renderTracking();
+  await openFirstRow();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older Quantity Flows' }),
+  );
+  await act(async () => {});
+  expect(flowReads()).toBe(1);
+  expect(flowBlock('QF-120').querySelector('.devnote.adjusted')).toBeNull();
+
+  version = 2;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  await act(async () => {});
+  expect(flowReads()).toBe(2);
+  expect(flowIds()).toEqual(['QF-141', 'QF-140', 'QF-120']);
+  expect(
+    flowBlock('QF-120').querySelector('.devnote.adjusted')?.textContent,
+  ).toContain('reason: reason 601');
+
+  version = 3;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  await act(async () => {});
+  expect(flowReads()).toBe(2);
 });

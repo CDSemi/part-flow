@@ -37,6 +37,7 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { formatIsoDateShort, formatTimeOfDay } from '../dates';
+import { EditAssignedRouteDialog } from './EditAssignedRouteDialog';
 import type { OlderPages } from './tracking-feed';
 import {
   useOlderPages,
@@ -113,10 +114,11 @@ function timestamp(iso: string): string {
 // (the row and panel cases restore focus to the originating row; a
 // plain outside click does not).
 //
-// Corrections (GUI_DESIGN §7.2 item 8, Phase 14 slice 5): the detail
-// ends with the authorized correction actions the signed-in user may
-// use — `Adjust WO Allocation…` for Edit Work Order Allocation — and
-// renders no section at all for a user who may use none of them.
+// Corrections (GUI_DESIGN §7.2 item 8, Phase 14 slices 5 and 6): the
+// detail ends with the authorized correction actions the signed-in user
+// may use — `Edit assigned Route…` for Assign and edit Routes, `Adjust
+// WO Allocation…` for Edit Work Order Allocation — and renders no
+// section at all for a user who may use none of them.
 export function TrackingView() {
   const preview = getViewStatePreview();
   const { status: connectivity } = useConnectivity();
@@ -630,10 +632,12 @@ function TrackingDetailPanel({
   const { status: connectivity } = useConnectivity();
   const { can } = useSession();
   const feed = useTrackingDetailFeed(pn, connectivity, enabled);
-  // The `Adjust WO Allocation` dialog, and the outcome of the last
-  // adjustment shown under its button (cleared by the next open; a
-  // different PN is a fresh panel).
+  // The `Adjust WO Allocation` and `Edit assigned Route` dialogs, and
+  // the outcome of the last correction shown as the section's status
+  // line (cleared when either dialog opens; a different PN is a fresh
+  // panel).
   const [adjusting, setAdjusting] = useState(false);
+  const [editingRoute, setEditingRoute] = useState(false);
   const [correctionNotice, setCorrectionNotice] = useState<string | null>(null);
   const afterAdjustment = (notice: string) => {
     setAdjusting(false);
@@ -768,14 +772,22 @@ function TrackingDetailPanel({
               ),
             }}
             corrections={
-              can('EDIT_WORK_ORDER_ALLOCATION')
+              can('ASSIGN_ROUTES') || can('EDIT_WORK_ORDER_ALLOCATION')
                 ? {
                     writeBlocked: connectivity !== 'connected',
                     notice: correctionNotice,
-                    onAdjust: () => {
-                      setCorrectionNotice(null);
-                      setAdjusting(true);
-                    },
+                    onEditRoute: can('ASSIGN_ROUTES')
+                      ? () => {
+                          setCorrectionNotice(null);
+                          setEditingRoute(true);
+                        }
+                      : null,
+                    onAdjust: can('EDIT_WORK_ORDER_ALLOCATION')
+                      ? () => {
+                          setCorrectionNotice(null);
+                          setAdjusting(true);
+                        }
+                      : null,
                   }
                 : null
             }
@@ -797,6 +809,16 @@ function TrackingDetailPanel({
           onCommitted={(_result, notice) => afterAdjustment(notice)}
         />
       ) : null}
+      {editingRoute ? (
+        <EditAssignedRouteDialog
+          pn={pn}
+          onClose={({ changed, notice }) => {
+            setEditingRoute(false);
+            if (changed) feed.reload();
+            if (notice !== null) setCorrectionNotice(notice);
+          }}
+        />
+      ) : null}
     </>
   );
 }
@@ -804,9 +826,11 @@ function TrackingDetailPanel({
 /** The correction actions of the detail (null: none permitted). */
 interface CorrectionActions {
   writeBlocked: boolean;
-  /** The outcome of the last adjustment, under its button. */
+  /** The outcome of the last correction (the section's status line). */
   notice: string | null;
-  onAdjust: () => void;
+  /** null: the user may not use the action — its button is hidden. */
+  onEditRoute: (() => void) | null;
+  onAdjust: (() => void) | null;
 }
 
 /** `Showing n of m <noun>` with the explicit continuation control. */
@@ -1234,13 +1258,24 @@ function TrackingDetailContent({
             </span>
           </h4>
           <div className="tk-corr-actions">
-            <button
-              className="btn ghost"
-              disabled={corrections.writeBlocked}
-              onClick={corrections.onAdjust}
-            >
-              Adjust WO Allocation…
-            </button>
+            {corrections.onEditRoute !== null ? (
+              <button
+                className="btn ghost"
+                disabled={corrections.writeBlocked}
+                onClick={corrections.onEditRoute}
+              >
+                Edit assigned Route…
+              </button>
+            ) : null}
+            {corrections.onAdjust !== null ? (
+              <button
+                className="btn ghost"
+                disabled={corrections.writeBlocked}
+                onClick={corrections.onAdjust}
+              >
+                Adjust WO Allocation…
+              </button>
+            ) : null}
           </div>
           {corrections.notice !== null ? (
             <p className="tk-corr-notice" role="status">
@@ -1323,8 +1358,10 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
         <div className="devnote">
           Planned Route{' '}
           {flow.sourceTemplate ? `“${flow.sourceTemplate.name}” ` : ''}
-          (snapshot) — guidance only; actual Movement history stays
-          authoritative.
+          {flow.routeAdjustments.length > 0
+            ? '(snapshot, adjusted)'
+            : '(snapshot)'}{' '}
+          — guidance only; actual Movement history stays authoritative.
           {flow.trace.length > 0 ? ` Actual path: ${traceText(flow)}.` : ''}
           {flow.offRoute ? ' Currently off the Planned Route.' : ''}
         </div>
@@ -1349,6 +1386,17 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
             : ''}
           {deviation.reason ? ` — reason: ${deviation.reason}` : ''}. The
           previous route stays recorded unchanged.
+        </div>
+      ))}
+      {flow.routeAdjustments.map((adjustment) => (
+        <div className="devnote adjusted" key={adjustment.auditEventId}>
+          Route adjusted {timestamp(adjustment.occurredAt)}
+          {adjustment.actorUser
+            ? ` by ${adjustment.actorUser.displayName}`
+            : ''}
+          : the steps after step {adjustment.keptThroughSequence} were replaced
+          — reason: {adjustment.reason}. The previous route is kept in the audit
+          history.
         </div>
       ))}
     </div>

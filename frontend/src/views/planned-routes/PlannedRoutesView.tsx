@@ -1,14 +1,11 @@
 import './planned-routes.css';
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import type { CSSProperties, DragEvent, ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
 import { ApiError } from '../../api/client';
-import { isoDurationToMinutes, minutesToIsoDuration } from '../../api/duration';
 import { areaColor, listAreas, listOperations } from '../../api/environment';
-import type { Area, Operation } from '../../api/environment';
 import { listMachines } from '../../api/machines';
-import type { Machine } from '../../api/machines';
 import {
   archiveRouteTemplate,
   createRouteTemplate,
@@ -18,7 +15,6 @@ import {
   replaceRouteTemplate,
 } from '../../api/route-templates';
 import type {
-  RouteStepInput,
   RouteTemplateInput,
   RouteTemplateRecord,
 } from '../../api/route-templates';
@@ -42,7 +38,18 @@ import {
 } from '../../components/view-states';
 import { operationLabel } from '../area-presentation';
 import { formatIsoDate } from '../dates';
-import { formatEstimate, parseEstimate } from './route-duration';
+import { RouteStepList } from './route-step-editor';
+import type { Catalog, EditableStep } from './route-steps';
+import {
+  activeAreas,
+  editableStep,
+  findById,
+  newStep,
+  offeredOperations,
+  stepInput,
+  stepsKey,
+  validateSteps,
+} from './route-steps';
 
 // Management → Planned Routes: reusable route definitions (internal
 // name: RouteTemplate) owned by authorized production roles — full
@@ -71,13 +78,6 @@ const UNKNOWN_ARCHIVE_MESSAGE =
 const UNKNOWN_DELETE_MESSAGE =
   'The server did not answer — the route may or may not have been deleted. Close this window to refresh the list, then check the route.';
 
-/** The configuration a route editor offers its choices from. */
-interface Catalog {
-  areas: Area[];
-  operations: Operation[];
-  machines: Machine[];
-}
-
 interface PlannedRoutesData extends Catalog {
   records: RouteTemplateRecord[];
 }
@@ -104,33 +104,6 @@ type PendingDialog =
   | { kind: 'edit'; catalog: Catalog; record: RouteTemplateRecord }
   | { kind: 'usage'; record: RouteTemplateRecord }
   | { kind: 'notice'; message: string };
-
-const byId = <T extends { id: number }>(a: T, b: T): number => a.id - b.id;
-
-function findById<T extends { id: number }>(
-  items: readonly T[],
-  id: number | null,
-): T | undefined {
-  return id === null ? undefined : items.find((item) => item.id === id);
-}
-
-/** The Area's active Operations, by id. */
-function offeredOperations(catalog: Catalog, areaId: number): Operation[] {
-  return catalog.operations
-    .filter((op) => op.areaId === areaId && op.isActive)
-    .sort(byId);
-}
-
-/** The Area's non-retired Machines, by id. */
-function offeredMachines(catalog: Catalog, areaId: number): Machine[] {
-  return catalog.machines
-    .filter((m) => m.areaId === areaId && m.retiredOn === undefined)
-    .sort(byId);
-}
-
-function activeAreas(catalog: Catalog): Area[] {
-  return catalog.areas.filter((area) => area.isActive);
-}
 
 /** The template copied as a write request — every step field, the
  * stored ISO durations verbatim. */
@@ -693,81 +666,25 @@ function UsageDialog({
   );
 }
 
-/** One step as the editor holds it. */
-interface EditableStep {
-  /** Render identity (stable across reorders). */
-  key: number;
-  areaId: number;
-  operationId: number | null;
-  /** The step was stored without an Operation (legacy) and still has
-   * none chosen — rendered `—`, never `Select an Operation…`. */
-  legacyNullOperation: boolean;
-  durationText: string;
-  /** The stored ISO value, sent verbatim while its text is unchanged. */
-  storedDuration: string | null;
-  storedDurationText: string;
-  preferredMachineId: number | null;
-  instructions: string;
-}
-
 interface EditorState {
   name: string;
   description: string;
   steps: EditableStep[];
 }
 
-function estimateText(iso: string | null): string {
-  if (iso === null) return '';
-  const minutes = isoDurationToMinutes(iso);
-  return minutes === null ? iso : formatEstimate(minutes);
-}
-
 function editorState(source: RouteTemplateInput): EditorState {
   return {
     name: source.name,
     description: source.description ?? '',
-    steps: source.steps.map((step, index) => {
-      const text = estimateText(step.expectedDuration);
-      return {
-        key: index,
-        areaId: step.areaId,
-        operationId: step.operationId,
-        legacyNullOperation: step.operationId === null,
-        durationText: text,
-        storedDuration: step.expectedDuration,
-        storedDurationText: text,
-        preferredMachineId: step.preferredMachineId,
-        instructions: step.instructions ?? '',
-      };
-    }),
+    steps: source.steps.map((step, index) => editableStep(step, index)),
   };
-}
-
-/** The ISO duration a step saves, or false when its text is invalid:
- * unchanged text sends the stored value verbatim (no rounding of a
- * legacy sub-minute value), cleared text sends none. */
-function stepDuration(step: EditableStep): string | null | false {
-  const text = step.durationText.trim();
-  if (text === step.storedDurationText) return step.storedDuration;
-  if (!text) return null;
-  const minutes = parseEstimate(text);
-  return minutes === null ? false : minutesToIsoDuration(minutes);
 }
 
 function toInput(state: EditorState): RouteTemplateInput {
   return {
     name: state.name.trim(),
     description: state.description.trim() || null,
-    steps: state.steps.map((step): RouteStepInput => {
-      const duration = stepDuration(step);
-      return {
-        areaId: step.areaId,
-        operationId: step.operationId,
-        expectedDuration: duration === false ? null : duration,
-        preferredMachineId: step.preferredMachineId,
-        instructions: step.instructions.trim() || null,
-      };
-    }),
+    steps: state.steps.map(stepInput),
   };
 }
 
@@ -776,37 +693,8 @@ function stateKey(state: EditorState): string {
   return JSON.stringify({
     name: state.name.trim(),
     description: state.description.trim(),
-    steps: state.steps.map((step) => {
-      const duration = stepDuration(step);
-      return [
-        step.areaId,
-        step.operationId,
-        duration === false ? `invalid:${step.durationText.trim()}` : duration,
-        step.preferredMachineId,
-        step.instructions.trim(),
-      ];
-    }),
+    steps: stepsKey(state.steps),
   });
-}
-
-function areaUnavailable(catalog: Catalog, step: EditableStep): boolean {
-  return !findById(catalog.areas, step.areaId)?.isActive;
-}
-
-function operationUnavailable(catalog: Catalog, step: EditableStep): boolean {
-  if (step.operationId === null) return false;
-  const operation = findById(catalog.operations, step.operationId);
-  return !operation || !operation.isActive || operation.areaId !== step.areaId;
-}
-
-function machineUnavailable(catalog: Catalog, step: EditableStep): boolean {
-  if (step.preferredMachineId === null) return false;
-  const machine = findById(catalog.machines, step.preferredMachineId);
-  return (
-    !machine ||
-    machine.retiredOn !== undefined ||
-    machine.areaId !== step.areaId
-  );
 }
 
 /** Client validation — blocks Save; the server stays the authority. */
@@ -815,44 +703,13 @@ function validateRoute(state: EditorState, catalog: Catalog): string | null {
   if (state.steps.length === 0) {
     return 'A Planned Route needs at least one step.';
   }
-  if (state.steps.some((step) => step.operationId === null)) {
-    return 'Every step needs an Operation.';
-  }
-  for (const [index, step] of state.steps.entries()) {
-    const n = index + 1;
-    if (areaUnavailable(catalog, step)) {
-      return `Step ${n}: choose an available Area.`;
-    }
-    if (operationUnavailable(catalog, step)) {
-      return `Step ${n}: choose an available Operation.`;
-    }
-    if (machineUnavailable(catalog, step)) {
-      return `Step ${n}: choose an available Machine.`;
-    }
-    if (stepDuration(step) === false) {
-      return `Step ${n}: enter the estimated time like 45m, 4h or 2d 03h.`;
-    }
-  }
+  const stepProblem = validateSteps(state.steps, catalog, 1);
+  if (stepProblem !== null) return stepProblem;
   const first = findById(catalog.areas, state.steps[0].areaId);
   if (first?.isTerminal) {
     return `Step 1: Area '${first.name}' is a terminal Area and never starts production. Choose a starting Area for the first step.`;
   }
   return null;
-}
-
-/** A fresh step in `area` with its first active Operation. */
-function newStep(catalog: Catalog, areaId: number, key: number): EditableStep {
-  return {
-    key,
-    areaId,
-    operationId: offeredOperations(catalog, areaId)[0]?.id ?? null,
-    legacyNullOperation: false,
-    durationText: '',
-    storedDuration: null,
-    storedDurationText: '',
-    preferredMachineId: null,
-    instructions: '',
-  };
 }
 
 /** The empty New state: one step in the first active non-terminal
@@ -864,26 +721,6 @@ function emptyState(catalog: Catalog): EditorState {
     description: '',
     steps: start ? [newStep(catalog, start.id, 0)] : [],
   };
-}
-
-function areaOptionLabel(catalog: Catalog, areaId: number): string {
-  const area = findById(catalog.areas, areaId);
-  return area ? `${area.name} (unavailable)` : `Area ${areaId} (unavailable)`;
-}
-
-function operationOptionLabel(catalog: Catalog, operationId: number): string {
-  const operation = findById(catalog.operations, operationId);
-  return operation
-    ? `${operationLabel(operation)} (unavailable)`
-    : `Operation ${operationId} (unavailable)`;
-}
-
-function machineOptionLabel(catalog: Catalog, machineId: number): string {
-  const machine = findById(catalog.machines, machineId);
-  if (!machine) return `Machine ${machineId} (unavailable)`;
-  return machine.retiredOn !== undefined
-    ? `${machine.name} — retired (unavailable)`
-    : `${machine.name} (unavailable)`;
 }
 
 type EditorStage =
@@ -950,7 +787,6 @@ function RouteEditDialog({
   const [everUsed, setEverUsed] = useState(record?.everUsed ?? false);
   const [error, setError] = useState<string | null>(initialError ?? null);
   const [busy, setBusy] = useState(false);
-  const [dragKey, setDragKey] = useState<number | null>(null);
   const [stage, setStage] = useState<EditorStage>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   // After an unknown outcome (or the route vanished), closing the
@@ -1143,71 +979,6 @@ function RouteEditDialog({
     }
   };
 
-  const setStep = (key: number, change: Partial<EditableStep>) =>
-    setSteps((list) =>
-      list.map((step) => (step.key === key ? { ...step, ...change } : step)),
-    );
-
-  /** Area change keeps the Operation / Machine only when the new Area
-   * still offers them; otherwise its first active Operation and no
-   * preferred Machine. */
-  const changeArea = (key: number, areaId: number) =>
-    setSteps((list) =>
-      list.map((step) => {
-        if (step.key !== key) return step;
-        const operations = offeredOperations(catalog, areaId);
-        const machines = offeredMachines(catalog, areaId);
-        return {
-          ...step,
-          areaId,
-          operationId: operations.some((op) => op.id === step.operationId)
-            ? step.operationId
-            : (operations[0]?.id ?? null),
-          legacyNullOperation: false,
-          preferredMachineId: machines.some(
-            (m) => m.id === step.preferredMachineId,
-          )
-            ? step.preferredMachineId
-            : null,
-        };
-      }),
-    );
-
-  const addStep = () =>
-    setSteps((list) => {
-      const last = list[list.length - 1];
-      const areaId =
-        last && !areaUnavailable(catalog, last)
-          ? last.areaId
-          : activeAreas(catalog)[0]?.id;
-      if (areaId === undefined) return list;
-      const key = 1 + Math.max(-1, ...list.map((step) => step.key));
-      return [...list, newStep(catalog, areaId, key)];
-    });
-
-  const move = (index: number, delta: -1 | 1) =>
-    setSteps((list) => {
-      const target = index + delta;
-      if (target < 0 || target >= list.length) return list;
-      const next = [...list];
-      const [step] = next.splice(index, 1);
-      next.splice(target, 0, step);
-      return next;
-    });
-
-  const handleDrop = (targetKey: number) => {
-    if (dragKey === null || dragKey === targetKey) return;
-    setSteps((list) => {
-      const from = list.findIndex((step) => step.key === dragKey);
-      const to = list.findIndex((step) => step.key === targetKey);
-      if (from < 0 || to < 0) return list;
-      const next = [...list];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-  };
-
   const title = saved ? 'Edit Planned Route' : 'New Planned Route';
   const writeDisabled = writeBlocked || readOnly || busy;
   const usageCount = saved?.usageCount ?? 0;
@@ -1236,174 +1007,7 @@ function RouteEditDialog({
           onChange={(e) => setDescription(e.target.value)}
         />
         <label>Steps</label>
-        {/* Column labels for the step fields — the bottom-border-only
-            instruction/duration inputs stay labelled (v15). */}
-        <div className="rt-stephead" aria-hidden="true">
-          <span />
-          <span />
-          <span>Area</span>
-          <span>Operation</span>
-          <span>Est. time</span>
-          <span>Preferred Machine</span>
-          <span />
-        </div>
-        <div className="rt-steplist">
-          {steps.map((step, index) => {
-            const operations = offeredOperations(catalog, step.areaId);
-            const machines = offeredMachines(catalog, step.areaId);
-            return (
-              // Drag-and-drop reorder (HTML5 DnD, same pattern as the
-              // Priority list) with ↑/↓ as the keyboard/touch path —
-              // drag is never the only way to reorder.
-              <div
-                className={`rt-steprow${dragKey === step.key ? ' dragging' : ''}`}
-                key={step.key}
-                draggable
-                onDragStart={() => setDragKey(step.key)}
-                onDragEnd={() => setDragKey(null)}
-                onDragOver={(event: DragEvent) => event.preventDefault()}
-                onDrop={(event: DragEvent) => {
-                  event.preventDefault();
-                  handleDrop(step.key);
-                }}
-              >
-                <span className="grip" aria-hidden="true">
-                  ⠿
-                </span>
-                <span className="idx">{index + 1}</span>
-                <select
-                  aria-label={`Step ${index + 1} Area`}
-                  value={String(step.areaId)}
-                  onChange={(e) => changeArea(step.key, Number(e.target.value))}
-                >
-                  {areaUnavailable(catalog, step) ? (
-                    // A stored Area that is no longer offered stays
-                    // visible as an explicit unavailable value — never
-                    // silently replaced.
-                    <option value={String(step.areaId)}>
-                      {areaOptionLabel(catalog, step.areaId)}
-                    </option>
-                  ) : null}
-                  {activeAreas(catalog).map((area) => (
-                    <option key={area.id} value={String(area.id)}>
-                      {area.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label={`Step ${index + 1} Operation`}
-                  value={
-                    step.operationId === null ? '' : String(step.operationId)
-                  }
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      setStep(step.key, {
-                        operationId: Number(e.target.value),
-                        legacyNullOperation: false,
-                      });
-                    }
-                  }}
-                >
-                  {step.operationId === null ? (
-                    <option value="" disabled>
-                      {step.legacyNullOperation ? '—' : 'Select an Operation…'}
-                    </option>
-                  ) : null}
-                  {step.operationId !== null &&
-                  operationUnavailable(catalog, step) ? (
-                    <option value={String(step.operationId)}>
-                      {operationOptionLabel(catalog, step.operationId)}
-                    </option>
-                  ) : null}
-                  {operations.map((operation) => (
-                    <option key={operation.id} value={String(operation.id)}>
-                      {operationLabel(operation)}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="uline"
-                  aria-label={`Step ${index + 1} expected duration`}
-                  placeholder="e.g. 4h"
-                  value={step.durationText}
-                  onChange={(e) =>
-                    setStep(step.key, { durationText: e.target.value })
-                  }
-                />
-                <select
-                  aria-label={`Step ${index + 1} preferred Machine`}
-                  value={
-                    step.preferredMachineId === null
-                      ? ''
-                      : String(step.preferredMachineId)
-                  }
-                  onChange={(e) =>
-                    setStep(step.key, {
-                      preferredMachineId: e.target.value
-                        ? Number(e.target.value)
-                        : null,
-                    })
-                  }
-                >
-                  <option value="">— no preferred Machine</option>
-                  {step.preferredMachineId !== null &&
-                  machineUnavailable(catalog, step) ? (
-                    // A retired / moved / missing Machine stays visible
-                    // as an explicit unavailable value — never silently
-                    // cleared; choosing another value replaces it.
-                    <option value={String(step.preferredMachineId)}>
-                      {machineOptionLabel(catalog, step.preferredMachineId)}
-                    </option>
-                  ) : null}
-                  {machines.map((machine) => (
-                    <option key={machine.id} value={String(machine.id)}>
-                      {machine.name}
-                    </option>
-                  ))}
-                </select>
-                <span className="steppbtns">
-                  <button
-                    aria-label={`Move step ${index + 1} up`}
-                    disabled={index === 0}
-                    onClick={() => move(index, -1)}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    aria-label={`Move step ${index + 1} down`}
-                    disabled={index === steps.length - 1}
-                    onClick={() => move(index, 1)}
-                  >
-                    ↓
-                  </button>
-                  <button
-                    aria-label={`Remove step ${index + 1}`}
-                    disabled={steps.length === 1}
-                    onClick={() =>
-                      setSteps((list) => list.filter((s) => s.key !== step.key))
-                    }
-                  >
-                    ✕
-                  </button>
-                </span>
-                <label className="instrwrap">
-                  <span className="flbl">Instructions</span>
-                  <input
-                    className="instr uline"
-                    placeholder="optional"
-                    value={step.instructions}
-                    onChange={(e) =>
-                      setStep(step.key, { instructions: e.target.value })
-                    }
-                  />
-                </label>
-              </div>
-            );
-          })}
-        </div>
-        <button className="rt-addstep" onClick={addStep}>
-          + Add step
-        </button>
+        <RouteStepList catalog={catalog} steps={steps} onChange={setSteps} />
         {error ? (
           <div className="err" role="alert">
             {error}
@@ -1416,7 +1020,8 @@ function RouteEditDialog({
               ? `The ${usageCount} Quantity Flow${usageCount === 1 ? '' : 's'} already released with this route keep${usageCount === 1 ? 's' : ''}`
               : 'Quantity Flows already released with this route keep'}{' '}
             the assigned route unchanged — an in-production route is changed in
-            its own audited workflow, with a reason.
+            its own audited workflow, with a reason (Tracking → Edit assigned
+            Route…).
           </div>
         ) : null}
       </div>

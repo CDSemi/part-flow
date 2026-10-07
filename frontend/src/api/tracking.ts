@@ -218,6 +218,22 @@ export interface TrackingRouteDeviation {
   worker: TrackingWorkerRef | null;
 }
 
+/** The User who recorded a Management correction (a history
+ * reference — the User may have been deactivated since). */
+export type TrackingUserRef = AllocationUserRef;
+
+/** One authorized adjustment of a flow's own AssignedRoute (Phase 14
+ * slice 6): the future steps after `keptThroughSequence` were replaced;
+ * the previous route is kept in the audit history. */
+export interface TrackingRouteAdjustment {
+  auditEventId: number;
+  occurredAt: string;
+  reason: string;
+  keptThroughSequence: number;
+  /** null for an adjustment whose User reference is unavailable. */
+  actorUser: TrackingUserRef | null;
+}
+
 export interface TrackingLineageLink {
   quantityFlowId: number;
   relation: string;
@@ -236,11 +252,13 @@ export interface TrackingFlow {
   children: TrackingLineageLink[];
   /** The actual route trace derived from Movement history. */
   trace: TrackingTraceStep[];
-  /** PLANNED only: the immutable AssignedRoute snapshot. */
+  /** PLANNED only: the AssignedRoute snapshot (past steps immutable; future steps change only by an audited adjustment). */
   routeSteps: TrackingRouteStep[];
   sourceTemplate: { id: number; name: string } | null;
   offRoute: boolean;
   deviations: TrackingRouteDeviation[];
+  /** Every adjustment of this flow's own AssignedRoute, oldest first. */
+  routeAdjustments: TrackingRouteAdjustment[];
 }
 
 export interface TrackingWorkOrderRef {
@@ -356,6 +374,9 @@ export interface TrackingDetail {
   /** The PN's SCRAPPED events — the same immutable history restricted
    * to scrap, newest first; `scrappedQuantity` is the net total. */
   scrapHistory: TrackingMovementPage;
+  /** AssignedRoute adjustments across the PN's flows — a refresh
+   * signature only (appended flow pages are read again when it moves). */
+  routeAdjustmentTotal: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +537,7 @@ interface FlowWire {
     station_id: string | null;
     worker: TrackingWorkerRef | null;
   }[];
+  route_adjustments: unknown;
 }
 
 interface AllocationWire {
@@ -581,6 +603,7 @@ interface DetailWire {
   allocations: AllocationPageWire;
   movements: MovementPageWire;
   scrap_history: MovementPageWire;
+  route_adjustment_total: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -695,6 +718,40 @@ function toMovementPage(wire: MovementPageWire): TrackingMovementPage {
   };
 }
 
+function malformedRouteAdjustment(): Error {
+  return new Error('The server answered a malformed route adjustment.');
+}
+
+/**
+ * The `route_adjustments` of a flow block — always present (empty when
+ * the route was never adjusted); a missing or malformed list throws
+ * instead of hiding an adjustment.
+ */
+function toRouteAdjustments(wire: unknown): TrackingRouteAdjustment[] {
+  if (!Array.isArray(wire)) throw malformedRouteAdjustment();
+  return wire.map((item: unknown) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw malformedRouteAdjustment();
+    }
+    const note = item as Record<string, unknown>;
+    if (
+      !Number.isInteger(note.audit_event_id) ||
+      typeof note.occurred_at !== 'string' ||
+      typeof note.reason !== 'string' ||
+      !Number.isInteger(note.kept_through_sequence)
+    ) {
+      throw malformedRouteAdjustment();
+    }
+    return {
+      auditEventId: note.audit_event_id as number,
+      occurredAt: note.occurred_at,
+      reason: note.reason,
+      keptThroughSequence: note.kept_through_sequence as number,
+      actorUser: toAllocationUserRef(note.actor_user),
+    };
+  });
+}
+
 function toFlow(wire: FlowWire): TrackingFlow {
   return {
     id: wire.id,
@@ -756,6 +813,7 @@ function toFlow(wire: FlowWire): TrackingFlow {
       stationId: item.station_id,
       worker: item.worker,
     })),
+    routeAdjustments: toRouteAdjustments(wire.route_adjustments),
   };
 }
 
@@ -835,7 +893,15 @@ function toDetail(wire: DetailWire): TrackingDetail {
     allocations: toAllocationPage(wire.allocations),
     movements: toMovementPage(wire.movements),
     scrapHistory: toMovementPage(wire.scrap_history),
+    routeAdjustmentTotal: toRouteAdjustmentTotal(wire.route_adjustment_total),
   };
+}
+
+function toRouteAdjustmentTotal(wire: unknown): number {
+  if (typeof wire !== 'number' || !Number.isInteger(wire) || wire < 0) {
+    throw malformedRouteAdjustment();
+  }
+  return wire;
 }
 
 // ---------------------------------------------------------------------------

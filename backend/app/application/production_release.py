@@ -26,7 +26,8 @@ Rules owned here:
   committed replays the original result instead of tripping over the
   now-active quantity.
 - The result of a release is built from the immutable ``RECEIVED``
-  Movement (plus its immutable snapshot step for ``PLANNED``), never
+  Movement (plus its AssignedRoute snapshot step for ``PLANNED`` — a
+  referenced, past step, immutable), never
   from the mutable QuantityFlow projection: an idempotent replay
   returns the ORIGINAL release result — release-time starting Area
   included — even after the flow has since moved on.
@@ -121,7 +122,7 @@ class ProductionRelease(NamedTuple):
     """One committed release result (SLICE1 §8.6), immutable by source.
 
     Every field is read from the ``RECEIVED`` Movement (and, for
-    ``PLANNED``, its immutable AssignedRoute snapshot step) — never
+    ``PLANNED``, its AssignedRoute snapshot step — past steps immutable) — never
     from the mutable QuantityFlow projection — so a fresh release and
     every later idempotent replay carry the identical original values.
     ``created`` is False for an idempotent replay.
@@ -229,7 +230,8 @@ def _result_from_movement(
     starting Area (``to_area_id``), Operation, Movement id,
     ``device_event_id`` and ``occurred_at``; the route mode and the
     snapshot reference derive from its ``assigned_route_step_id``
-    against the immutable ``assigned_route_steps`` snapshot. Nothing
+    against the ``assigned_route_steps`` snapshot (a referenced step is a
+    past step and never changes). Nothing
     here reads the mutable QuantityFlow projection, so a replay is
     byte-identical to the original response whatever happened to the
     flow since.

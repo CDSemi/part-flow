@@ -16,6 +16,7 @@ process.
 """
 
 import ast
+import contextlib
 import datetime
 import json
 import os
@@ -37,7 +38,14 @@ from sqlalchemy.orm import Session
 
 from alembic import command
 from app import cli
-from app.application import allocations, production_release, projections, reconciliation
+from app.application import (
+    allocations,
+    production_release,
+    projections,
+    reconciliation,
+    route_adjustments,
+)
+from app.application.route_templates import RouteStepInput
 from app.core.config import get_settings
 from app.domain.enums import MovementType, QuantityFlowStatus
 from app.infrastructure import models
@@ -1703,6 +1711,75 @@ def test_a_reversed_correction_excuses_nothing(case: Case, run: Callable[..., Ru
         "WorkOrderDemand",
         s.demands["L2"],
     )
+
+
+@contextlib.contextmanager
+def _station_client(url: URL) -> Iterator[TestClient]:
+    """A station client on the case database (the scenario's own API)."""
+    original_url = os.environ[_DB_URL_ENV]
+    os.environ[_DB_URL_ENV] = url.render_as_string(hide_password=False)
+    get_settings.cache_clear()
+    try:
+        with TestClient(create_app()) as client:
+            yield station_device_client(client)
+    finally:
+        os.environ[_DB_URL_ENV] = original_url
+        get_settings.cache_clear()
+
+
+def test_route_adjustments_keep_every_check_clean(case: Case, run: Callable[..., Run]) -> None:
+    """RC-2 (Phase 14 slice 6): the planned flow's route gains a step after
+    its last one through the Application command itself — never SQL — then
+    a transfer follows the new step and is undone; every check stays clean
+    (no ROUTE_STEP_MISMATCH)."""
+    s = case.scenario
+    actor = int(case.scalar("SELECT min(id) FROM users"))
+    with Session(case.engine) as session:
+        adjusted = route_adjustments.adjust_assigned_route(
+            session,
+            actor_user_id=actor,
+            quantity_flow_id=s.flows["PLANNED"],
+            device_event_id=_event(),
+            expected_future_step_ids=[],
+            steps=[
+                RouteStepInput(
+                    area_id=s.areas["LATHE"],
+                    operation_id=s.operations["LATHE"],
+                    expected_duration=None,
+                    preferred_machine_id=None,
+                    instructions=None,
+                )
+            ],
+            reason="extra turning",
+        )
+    assert adjusted.created and adjusted.kept_through_sequence == 2
+    new_step = adjusted.steps[-1].id
+    event = _event()
+    with _station_client(case.url) as client:
+        moved = client.post(
+            f"/api/scan-stations/{s.stations['LATHE']}/transfers",
+            json={
+                "part_number": _PN_A,
+                "quantity_flow_id": s.flows["PLANNED"],
+                "source_area_id": s.areas["DEBURR"],
+                "target_area_id": s.areas["LATHE"],
+                "quantity": 20,
+                "device_event_id": event,
+            },
+        )
+        assert moved.status_code == 201, moved.text
+        assert moved.json()["assigned_route_step_id"] == new_step
+        undone = client.post(
+            f"/api/scan-stations/{s.stations['LATHE']}/undos",
+            json={
+                "part_number": _PN_A,
+                "reverses_device_event_id": event,
+                "device_event_id": _event(),
+            },
+        )
+        assert undone.status_code == 201, undone.text
+    result = run(case.url)
+    _assert_failing(result, {}, exit_code=0)
 
 
 def test_reversal_with_another_quantity(case: Case, run: Callable[..., Run]) -> None:

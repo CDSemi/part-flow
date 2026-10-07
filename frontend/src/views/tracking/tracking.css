@@ -848,3 +848,161 @@
   margin: 8px 0 0;
   overflow-wrap: anywhere;
 }
+
+/* An authorized route adjustment of the flow's own AssignedRoute
+   (Phase 14 slice 6): the informational tone — guidance changed, no
+   quantity moved. */
+.devnote.adjusted {
+  color: var(--info-t);
+}
+
+/* Edit assigned Route dialog (GUI_DESIGN §7.2 Corrections): locked
+   past steps above the shared step rows (route-step-editor.css), the
+   mandatory reason and the review step. */
+.ear .ear-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+
+.ear .ear-sec {
+  margin-top: 14px;
+}
+
+.ear .ear-sec h4 {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.ear .ear-note {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+
+.ear .ear-offroute {
+  color: var(--warn-t);
+}
+
+.ear .ear-flows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ear .ear-flow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel2);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.ear .ear-locked {
+  list-style: none;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ear .ear-locked li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.ear .ear-state {
+  margin-left: auto;
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.ear .ear-state.current {
+  color: var(--info-t);
+}
+
+.ear .ear-state.future {
+  color: var(--warn-t);
+}
+
+.ear .ear-problem,
+.ear .ear-error {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--err-t);
+  margin-top: 8px;
+}
+
+.ear .ear-label {
+  display: block;
+  margin: 14px 0 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ear .ear-reason {
+  width: 100%;
+  background-color: var(--field-bg);
+  border: 1.5px solid var(--border2);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 15px;
+  padding: 9px 12px;
+  min-height: 44px;
+  outline: none;
+}
+
+.ear .ear-reason:focus {
+  border-color: var(--info-t);
+}
+
+.ear .ear-reason[readonly] {
+  opacity: 0.7;
+}
+
+.ear .ear-fixed {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 12px 0 4px;
+}
+
+.ear-review {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.ear-review .ear-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+  font-weight: 650;
+}

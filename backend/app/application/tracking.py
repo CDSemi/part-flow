@@ -27,8 +27,8 @@ Board, the Area Board or the Scan Station about a quantity:
 - **Quantity Flows** keep their lineage: the effective SPLIT / MERGED
   edges name every parent and child, a consumed or closed flow stays
   listed with its status, and an undone command's edges are void.
-- **Routes**: a `PLANNED` flow shows its immutable AssignedRoute
-  snapshot with each step judged done / current / future from the
+- **Routes**: a `PLANNED` flow shows its AssignedRoute snapshot (past
+  steps immutable) with each step judged done / current / future from the
   flow's last known step and judged off route while the current
   position's arrival fulfilled no step (`projections.route_positions` —
   the shared route-position derivation the expected-duration precedence
@@ -36,7 +36,13 @@ Board, the Area Board or the Scan Station about a quantity:
   an earlier step's Area stays off route) — off-route quantity has no
   CURRENT step: its known step reads DONE and the route waits for the
   next one — and every confirmed deviation read back from
-  the `TRANSFERRED` / `STOCKED` Movement that recorded it. Every flow
+  the `TRANSFERRED` / `STOCKED` Movement that recorded it, and every
+  authorized adjustment of its own snapshot's future steps (Phase 14
+  slice 6), oldest first, read from the `ROUTE_ADJUSTED` audit rows —
+  a split child or merge result shows only its own snapshot's
+  adjustments. The editor read of the adjustment
+  (`assigned_routes_of`) lists every ACTIVE `PLANNED` flow of a PN with
+  its steps locked (past) or editable (future). Every flow
   also carries its **actual route trace** derived from Movement
   history: the Areas its quantity arrived in, in order — repeated
   Areas preserved, a Repair transfer marked explicitly, a split child
@@ -76,7 +82,7 @@ from typing import Any, Final, Literal, NamedTuple
 from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.orm import Session, aliased
 
-from app.application import user_access
+from app.application import route_adjustments, user_access
 from app.application.allocations import (
     DemandContext,
     active_allocated_quantities,
@@ -99,6 +105,7 @@ from app.application.projections import (
     reversed_movement_ids,
     route_positions,
 )
+from app.application.route_adjustments import RouteAdjustmentNote
 from app.application.transfers import ROUTE_DEVIATION_KEY
 from app.application.work_orders import site_today
 from app.domain.enums import MovementReason, MovementType, QuantityFlowStatus, RouteMode
@@ -277,6 +284,8 @@ class TrackingFlow(NamedTuple):
     # step's Area (it left the route on a confirmed deviation).
     off_route: bool
     deviations: list[RouteDeviationView]
+    # Every adjustment of this flow's own snapshot, oldest first (Phase 14).
+    route_adjustments: list[RouteAdjustmentNote]
 
 
 class FlowPage(NamedTuple):
@@ -350,6 +359,42 @@ class TrackingDetail(NamedTuple):
     movements: MovementPage
     # The PN's SCRAPPED Movements — the same immutable history, newest first.
     scrap_history: MovementPage
+    # AssignedRoute adjustments across the PN's flows (the flows revision).
+    route_adjustment_total: int
+
+
+class EditorStep(NamedTuple):
+    """One snapshot step as the Edit assigned Route dialog shows it."""
+
+    step: AssignedRouteStep
+    area: Area
+    operation: Operation | None
+    # Read by id — a retired Machine is still named.
+    preferred_machine: Machine | None
+    state: RouteStepState
+    # A past step (sequence <= the kept-through sequence): never editable.
+    locked: bool
+
+
+class AdjustableRoute(NamedTuple):
+    """One ACTIVE PLANNED flow whose route's future steps may change."""
+
+    flow: QuantityFlow
+    position: FlowPosition | None
+    # The position's Area (None without a derived position).
+    current_area: Area | None
+    off_route: bool
+    source_template: RouteTemplate | None
+    kept_through_sequence: int
+    future_step_ids: list[int]
+    steps: list[EditorStep]
+
+
+class AssignedRoutes(NamedTuple):
+    """The editor read of one PN (canonical) — its ACTIVE PLANNED flows."""
+
+    part_number: str
+    flows: list[AdjustableRoute]
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +836,38 @@ def _operations(session: Session, operation_ids: Collection[int]) -> dict[int, O
     }
 
 
+def _source_templates(session: Session, route_ids: Collection[int]) -> dict[int, RouteTemplate]:
+    """The source template per snapshot id, where it has one.
+
+    The snapshot's provenance is informational: the template's CURRENT
+    name labels the snapshot, whose steps stay what they were.
+    """
+    if not route_ids:
+        return {}
+    source_template_of = {
+        route.id: route.source_route_template_id
+        for route in session.scalars(select(AssignedRoute).where(AssignedRoute.id.in_(route_ids)))
+    }
+    template_ids = {
+        template_id for template_id in source_template_of.values() if template_id is not None
+    }
+    templates = (
+        {
+            template.id: template
+            for template in session.scalars(
+                select(RouteTemplate).where(RouteTemplate.id.in_(template_ids))
+            )
+        }
+        if template_ids
+        else {}
+    )
+    return {
+        route_id: templates[template_id]
+        for route_id, template_id in source_template_of.items()
+        if template_id is not None and template_id in templates
+    }
+
+
 def _flow_cursor(session: Session, pn: str, before_flow_id: int) -> QuantityFlow:
     """The flow a paging cursor names — of THIS PN, or the cursor is
     rejected (never read as a bare ``id < before`` that would accept
@@ -899,40 +976,13 @@ def _tracking_flows(
         if operation_id is not None
     )
     operations = _operations(session, operation_ids)
-    # The snapshot's provenance is informational: the template's CURRENT
-    # name labels the snapshot, whose steps stay what they were.
-    source_template_of = (
-        {
-            route.id: route.source_route_template_id
-            for route in session.scalars(
-                select(AssignedRoute).where(AssignedRoute.id.in_(route_ids))
-            )
-        }
-        if route_ids
-        else {}
-    )
-    template_ids = {
-        template_id for template_id in source_template_of.values() if template_id is not None
-    }
-    templates = (
-        {
-            template.id: template
-            for template in session.scalars(
-                select(RouteTemplate).where(RouteTemplate.id.in_(template_ids))
-            )
-        }
-        if template_ids
-        else {}
-    )
+    templates = _source_templates(session, route_ids)
+    adjustments = route_adjustments.route_adjustment_notes(session, route_ids)
 
     result: list[TrackingFlow] = []
     for flow in flows:
         route_steps, off_route = _route_steps(session, flow, areas, operations)
-        template_id = (
-            source_template_of.get(flow.assigned_route_id)
-            if flow.assigned_route_id is not None
-            else None
-        )
+        route_id = flow.assigned_route_id
         result.append(
             TrackingFlow(
                 flow=flow,
@@ -942,9 +992,10 @@ def _tracking_flows(
                 children=children_of.get(flow.id, []),
                 trace=flow_trace(session, flow.id, areas),
                 route_steps=route_steps,
-                source_template=templates.get(template_id) if template_id is not None else None,
+                source_template=templates.get(route_id) if route_id is not None else None,
                 off_route=off_route,
                 deviations=_deviations(session, flow, areas, operations),
+                route_adjustments=adjustments.get(route_id, []) if route_id is not None else [],
             )
         )
     return FlowPage(
@@ -1336,7 +1387,102 @@ def tracking_detail(
         movements=movement_history(
             session, pn, before_movement_id=movements_before, limit=movements_limit
         ),
+        route_adjustment_total=route_adjustments.route_adjustment_total(session, pn),
         scrap_history=movement_history(
             session, pn, limit=scrap_limit, movement_types=(MovementType.SCRAPPED,)
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Edit assigned Route — the editor read (Phase 14 slice 6)
+# ---------------------------------------------------------------------------
+
+
+def assigned_routes_of(session: Session, part_number: object) -> AssignedRoutes:
+    """Every ACTIVE PLANNED flow of the PN with its whole snapshot, newest
+    first — unbounded (a PN's active flows are read completely by the
+    detail's locations too). Canonicalized PN; unknown PN → 404.
+
+    Per step: the Tracking state (``_route_steps``, the shared
+    route-position derivation) and ``locked`` (a past step — sequence at
+    or below the kept-through sequence, ``route_adjustments``); the
+    preferred Machine is read by id, retired ones included. A read, no
+    lock: the command re-judges everything under its locks.
+    """
+    pn = _require_tracked(session, part_number)
+    flows = list(
+        session.scalars(
+            select(QuantityFlow)
+            .where(
+                QuantityFlow.part_number == pn,
+                QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+                QuantityFlow.route_mode == RouteMode.PLANNED,
+                QuantityFlow.assigned_route_id.is_not(None),
+            )
+            .order_by(QuantityFlow.id.desc())
+        )
+    )
+    route_ids = [flow.assigned_route_id for flow in flows if flow.assigned_route_id is not None]
+    if not route_ids:
+        return AssignedRoutes(part_number=pn, flows=[])
+    areas = _all_areas(session)
+    positions = flow_positions(session, flows)
+    all_steps = list(
+        session.scalars(
+            select(AssignedRouteStep).where(AssignedRouteStep.assigned_route_id.in_(route_ids))
+        )
+    )
+    operations = _operations(
+        session, {step.operation_id for step in all_steps if step.operation_id is not None}
+    )
+    machine_ids = {
+        step.preferred_machine_id for step in all_steps if step.preferred_machine_id is not None
+    }
+    machines = (
+        {
+            machine.id: machine
+            for machine in session.scalars(select(Machine).where(Machine.id.in_(machine_ids)))
+        }
+        if machine_ids
+        else {}
+    )
+    templates = _source_templates(session, route_ids)
+    kept_through = route_adjustments.kept_through_sequences(session, route_ids)
+
+    found: list[AdjustableRoute] = []
+    for flow in flows:
+        route_id = flow.assigned_route_id
+        if route_id is None:
+            continue
+        views, off_route = _route_steps(session, flow, areas, operations)
+        # A PLANNED flow always references a step; without one (a defect)
+        # nothing reads as locked and the command refuses the change.
+        kept = kept_through.get(route_id, 0)
+        found.append(
+            AdjustableRoute(
+                flow=flow,
+                position=positions.get(flow.id),
+                current_area=areas[flow.current_area_id] if flow.id in positions else None,
+                off_route=off_route,
+                source_template=templates.get(route_id),
+                kept_through_sequence=kept,
+                future_step_ids=[view.step.id for view in views if view.step.sequence > kept],
+                steps=[
+                    EditorStep(
+                        step=view.step,
+                        area=view.area,
+                        operation=view.operation,
+                        preferred_machine=(
+                            machines.get(view.step.preferred_machine_id)
+                            if view.step.preferred_machine_id is not None
+                            else None
+                        ),
+                        state=view.state,
+                        locked=view.step.sequence <= kept,
+                    )
+                    for view in views
+                ],
+            )
+        )
+    return AssignedRoutes(part_number=pn, flows=found)

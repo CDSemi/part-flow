@@ -79,6 +79,7 @@ RHI = Permission.REORDER_HOT_ITEMS
 MM = Permission.MANAGE_MACHINES
 MRT = Permission.MANAGE_ROUTE_TEMPLATES
 MPNM = Permission.MANAGE_PART_NUMBER_MASTER
+AR = Permission.ASSIGN_ROUTES
 
 _COUNTED = ("audit_events", "machine_lifecycle_events", "work_order_allocations", "part_movements")
 
@@ -705,6 +706,45 @@ def _p_context(client: TestClient, shop: _Shop) -> _Prepared:
     return f"/api/allocations/management/context?part_number={pn}", {}, None
 
 
+def _planned_flow(client: TestClient, shop: _Shop) -> tuple[str, int]:
+    """A PLANNED release on a one-step Planned Route (flow at step 1)."""
+    admin = admin_of(client)
+    template = _ok(admin.post("/api/route-templates", json=_route_body(shop.material)), 201)
+    pn = _unique("PN")
+    wo, demands = _work_order(admin, (pn, 5))
+    released = _ok(
+        admin.post(
+            f"/api/work-orders/{wo}/demands/{demands[0]}/release",
+            json=_release_body(shop, pn, 5, route_mode="PLANNED", route_template_id=template["id"]),
+        ),
+        201,
+    )
+    return pn, int(released["quantity_flow_id"])
+
+
+def _p_route_adjust(client: TestClient, shop: _Shop) -> _Prepared:
+    _, flow_id = _planned_flow(client, shop)
+    return (
+        f"/api/quantity-flows/{flow_id}/route-adjustments",
+        {
+            "json": {
+                "device_event_id": _event(),
+                "expected_future_step_ids": [],
+                "steps": [
+                    {"area_id": shop.material.area_id, "operation_id": shop.material.operation_id}
+                ],
+                "reason": "rework needed",
+            }
+        },
+        ("quantity_flows", "id", flow_id),
+    )
+
+
+def _p_assigned_routes(client: TestClient, shop: _Shop) -> _Prepared:
+    pn, _ = _planned_flow(client, shop)
+    return f"/api/tracking/assigned-routes?part_number={pn}", {}, None
+
+
 def _keys(*keys: Permission) -> frozenset[Permission]:
     return frozenset(keys)
 
@@ -802,6 +842,23 @@ _WRITES: list[_Write] = [
         _p_context,
         records=False,
     ),
+    # Phase 14 slice 6: the AssignedRoute adjustment and its editor read.
+    _Write(
+        "route-adjust",
+        "POST",
+        "/api/quantity-flows/{quantity_flow_id}/route-adjustments",
+        _keys(AR),
+        _p_route_adjust,
+        201,
+    ),
+    _Write(
+        "assigned-routes",
+        "GET",
+        "/api/tracking/assigned-routes",
+        _keys(AR),
+        _p_assigned_routes,
+        records=False,
+    ),
 ]
 
 _MANAGEMENT_PREFIXES = (
@@ -811,6 +868,8 @@ _MANAGEMENT_PREFIXES = (
     "/api/work-orders",
     "/api/hot-list",
     "/api/allocations",
+    "/api/quantity-flows",
+    "/api/tracking/assigned-routes",
 )
 
 

@@ -6,7 +6,9 @@ WorkOrderDemand, PartNumber, or (Phase 13) Worker, the environment
 configuration entities (Department, Area, Operation, ScanStation and
 the Machine Asset Tag format) and Machine configuration (Machine
 retirement and reactivation stay recorded in
-``machine_lifecycle_events``). The helper only
+``machine_lifecycle_events``), and (Phase 14 slice 6) the
+``ROUTE_ADJUSTED`` correction of an AssignedRoute's future steps —
+route guidance, never quantity. The helper only
 stages the row on the caller's session: **the caller owns the
 transaction**, so the audit row and the audited
 change commit together or roll back together — an audited write without

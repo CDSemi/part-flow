@@ -179,6 +179,7 @@ def _concrete(path: str) -> str:
         .replace("{work_order_id}", "1")
         .replace("{demand_id}", "1")
         .replace("{allocation_id}", "1")
+        .replace("{quantity_flow_id}", "1")
     )
 
 
@@ -816,6 +817,9 @@ _MANAGEMENT_WRITES = {
     # Phase 14 slice 5: the correction and its workflow's static-key read.
     ("POST", "/api/allocations/corrections"),
     ("GET", "/api/allocations/management/context"),
+    # Phase 14 slice 6: the AssignedRoute adjustment and its editor read.
+    ("POST", "/api/quantity-flows/{quantity_flow_id}/route-adjustments"),
+    ("GET", "/api/tracking/assigned-routes"),
 }
 
 
