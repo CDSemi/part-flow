@@ -16,7 +16,9 @@ config = context.config
 if not config.get_main_option("sqlalchemy.url"):
     from app.core.config import get_settings
 
-    config.set_main_option("sqlalchemy.url", get_settings().database_url)
+    # ConfigParser interpolation reserves "%": escape the percent-encoded URL;
+    # get_main_option returns it unescaped.
+    config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 
 # The Phase 3 domain metadata (app/infrastructure/models.py) — the real
 # model metadata Alembic compares against for autogenerate support.
