@@ -45,7 +45,11 @@
 > endpoint đã đăng ký, `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), đối số là
 > mảng, output được giới hạn và redact (mật khẩu database và dạng URL-encoded của nó không
 > bao giờ lọt vào thông báo hay log), mọi lời gọi đều có deadline, timeout hay ngắt giữa
-> chừng sẽ kết thúc cả process group. Mọi tiến trình con mutation (Compose `up`/`down`/
+> chừng sẽ kết thúc cả process group. Ngắt giữa chừng nghĩa là `SIGINT`, `SIGTERM`, `SIGHUP`
+> (ví dụ phiên SSH bị rớt) hoặc `SIGQUIT`: controller kết thúc process group của tiến trình
+> con, ghi effect và chạy bước dừng fail-closed rồi mới nhả instance lock; signal lặp lại
+> không cắt ngang quá trình đó (chỉ `SIGKILL` hoặc mất điện mới làm được; phục hồi sau các
+> trường hợp đó là việc của lần chạy kế tiếp). Mọi tiến trình con mutation (Compose `up`/`down`/
 > `stop`/`build`/`run`, `createdb`/`dropdb`/`pg_restore`, SQL mutation, Docker `tag`/`rm`/
 > `image load`, store `fetch`) mang một effect descriptor (kind, verb, targets — không bao giờ
 > chứa giá trị ứng dụng), nên timeout hay ngắt giữa chừng của nó được ghi vào
@@ -415,7 +419,9 @@ Phép so sánh chỉ bỏ qua artifact workspace *không được track* theo t�
 sách này không bao giờ che nội dung được track: commit track một đường dẫn mang các tên đó
 bị source store từ chối trước khi export (`unsupported source path (tracked reserved
 workspace artifact name)`), candidate tree chứa file như vậy bị từ chối trước khi `repo/`
-bị chạm tới, và manifest liệt kê đường dẫn như vậy không thể được verify — công cụ dừng
+bị chạm tới (trong `rollback` và `restore-instance`, cùng với bước chứng minh provenance từ
+store, trước mọi xác nhận, pending journal, thay đổi `config/.env`, pause, safety snapshot
+hay database swap), và manifest liệt kê đường dẫn như vậy không thể được verify — công cụ dừng
 fail-closed thay vì báo khớp khi chưa chứng minh.
 
 Manual update khi thấy workspace dirty/khác deployed revision sẽ đưa working tree hiện tại

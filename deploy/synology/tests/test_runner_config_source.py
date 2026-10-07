@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1110,6 +1111,83 @@ class TimeoutAndCancellation(Base):
         self.assertEqual(records[0]["effect"], {"kind": "compose", "verb": "stop", "project": "partflow-staging",
                                                 "targets": ["frontend", "backend"]})
         self.assertNotIn(self.password, json.dumps(records))
+
+    def test_real_termination_signals_through_the_installed_cli_record_the_effect_before_the_lock_is_free(self):
+        """A12r2-F01: a hangup (SSH drop) or quit is an interruption like SIGTERM/SIGINT. Sent for real
+        to the installed launcher during a mutating Compose child, each must terminate the child group
+        and journal the effect before the controller exits and its instance lock is released."""
+        operations = self.context.operations_dir
+        for signum in (signal.SIGHUP, signal.SIGQUIT, signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                if self.pidfile.exists():
+                    self.pidfile.unlink()
+                before = set(os.listdir(str(operations))) if operations.exists() else set()
+                with open(str(self.base / "cli-out.txt"), "wb") as out, open(str(self.base / "cli-err.txt"), "wb") as err:
+                    process = subprocess.Popen(
+                        [str(self.layout.launcher), "--instance", "staging", "up", "-d", "--no-deps", "db"],
+                        env={"PATH": "/usr/bin:/bin", "TERM": "dumb"}, cwd=str(self.layout.root.parent),
+                        stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+                    try:
+                        deadline = time.monotonic() + 60
+                        while not self.pidfile.exists() and process.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.05)
+                        self.assertTrue(self.pidfile.exists(), (self.base / "cli-err.txt").read_text())
+                        time.sleep(0.3)  # the child is running and streaming; the controller is in the runner
+                        process.send_signal(signum)
+                        returncode = process.wait(timeout=60)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+                descendant = int(self.pidfile.read_text().strip())
+                # Checked at once, without polling: the controller held the lock until it exited, so the
+                # child group must already be gone when its process ends.
+                self.assertFalse(self.alive(descendant), "the mutating child outlived the controller and its lock")
+                stderr = (self.base / "cli-err.txt").read_text()
+                self.assertEqual(returncode, 1, stderr)
+                self.assertIn(f"Interrupted by signal {int(signum)}", stderr)
+                new = sorted(set(os.listdir(str(operations))) - before)
+                records = [record for name in new
+                           for record in pf_runner.load_unresolved_effects(operations / name / "unresolved-effects.json")]
+                self.assertEqual([record["outcome"] for record in records], ["interrupted"])
+                self.assertEqual(records[0]["effect"], {"kind": "compose-passthrough", "verb": "up"})
+                self.assertEqual(pf_runner.group_members(records[0]["process_group"]), [])
+                self.assertNotIn(self.password, json.dumps(records) + stderr
+                                 + (self.base / "cli-out.txt").read_text())
+                handle = pf_instance.acquire_instance_lock(self.context)
+                handle.release()
+
+    def test_effect_is_recorded_even_when_the_streamed_output_cannot_be_written(self):
+        """A12r2-F01: after a hangup the operator's terminal is gone; flushing the streamed tail fails,
+        and that failure must not prevent the effect record."""
+        class GoneTerminal:
+            def write(self, text):
+                raise OSError(5, "Input/output error")
+
+            def flush(self):
+                raise OSError(5, "Input/output error")
+
+        effects_path = self.base / "effects.json"
+        runner = pf_runner.ProcessRunner({"docker": str(self.tool)}, home=str(self.base), docker_config=str(self.base),
+                                         docker_host="unix:///nonexistent", effects_path=effects_path,
+                                         stream_sink=GoneTerminal())
+
+        def interrupted(process, spec, out, err, stream, *args):
+            deadline = time.monotonic() + 5
+            while not self.pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            stream.feed(b"partial line without a newline")  # held back until close()
+            raise KeyboardInterrupt("Interrupted by signal 1")
+
+        spec = pf_runner.ProcessSpec(tool="docker", argv=("up",), cwd=str(self.base), env=runner.environment(),
+                                     timeout=60, stdout="stream", effect={"kind": "compose-passthrough", "verb": "up"})
+        with mock.patch.object(runner, "_pump", side_effect=interrupted):
+            with self.assertRaises((KeyboardInterrupt, OSError)):
+                runner.run(spec)
+        self.wait_descendant_dead()
+        records = pf_runner.load_unresolved_effects(effects_path)
+        self.assertEqual([record["outcome"] for record in records], ["interrupted"])
+        self.assertEqual(records[0]["effect"], {"kind": "compose-passthrough", "verb": "up"})
 
     def test_status_reports_unresolved_effects_of_earlier_operations(self):
         controller = self.controller(self.context)

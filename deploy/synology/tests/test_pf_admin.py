@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -782,6 +783,43 @@ class AdminTests(unittest.TestCase):
         self.assertFalse(any(name.startswith(("pf_keep_", "pf_restore_")) for name in self.c.dbs))
         self.assertEqual((self.root / "app-version.txt").read_text(), OLD)
 
+    def test_rollback_proves_source_provenance_before_any_confirmation_or_effect(self):
+        """A12r2-F02: the store proof can refuse (a legacy commit tracking a reserved name); that
+        refusal must come before confirmation, pause, safety snapshot or database swap."""
+        checkpoint = self.c.snapshot("test")
+        refusal = pf.Failure("Source provenance check failed: unsupported source path (tracked reserved "
+                             "workspace artifact name): node_modules/x.js")
+        with mock.patch.object(self.c, "prove_tree_commit", side_effect=refusal) as proof, \
+             mock.patch.object(pf, "confirm", side_effect=AssertionError("confirmation must not be asked")), \
+             mock.patch.object(self.c, "snapshot", side_effect=AssertionError("snapshot must not run")), \
+             mock.patch.object(self.c, "pause", side_effect=AssertionError("pause must not run")), \
+             mock.patch.object(self.c, "swap_database", side_effect=AssertionError("swap must not run")):
+            with self.assertRaisesRegex(pf.Failure, "tracked reserved workspace artifact name"):
+                self.c.rollback(checkpoint["id"], restore_database=True)
+        proof.assert_called_once()
+        self.assertFalse(self.c.pending.exists())
+        self.assertTrue(self.c.running["frontend"])
+        self.assertEqual(self.c.revision(), OLD)
+        self.assertFalse(any(name.startswith(("pf_keep_", "pf_restore_")) for name in self.c.dbs))
+
+    def test_fail_closed_runs_when_the_error_report_cannot_be_written(self):
+        """A12r2-F01: after a hangup stderr is a dead terminal; the fail-closed stop must still run."""
+        class GoneTerminal(io.StringIO):
+            def write(self, text):
+                raise OSError(5, "Input/output error")
+
+        def interrupted_rollback(*args, **kwargs):
+            pf.write_json(self.c.pending, {"operation": "rollback", "phase": "paused", "started": pf.utc()})
+            raise KeyboardInterrupt("Interrupted by signal 1")
+
+        checkpoint = self.c.snapshot("test")
+        with mock.patch.object(self.c, "rollback", side_effect=interrupted_rollback), \
+             mock.patch.object(self.c, "fail_closed") as fail_closed, \
+             mock.patch.object(sys, "stderr", GoneTerminal()):
+            with self.assertRaises(OSError):
+                self.invoke(["rollback", checkpoint["id"], "--restore-db"])
+        fail_closed.assert_called_once_with()
+
     def test_missing_retained_image_blocks_rollback(self):
         checkpoint = self.c.snapshot("test")
         del self.c.tags[checkpoint["images"]["backend"]["reference"]]
@@ -1020,6 +1058,23 @@ class AdminTests(unittest.TestCase):
 
 
 class PureTests(unittest.TestCase):
+    def test_every_catchable_termination_signal_interrupts_the_controller_once(self):
+        """A12r2-F01: SIGHUP/SIGQUIT must unwind like SIGTERM/SIGINT (not kill without cleanup), and a
+        repeated signal must not abort the termination and effect record already under way."""
+        names = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
+        saved = {name: signal.getsignal(getattr(signal, name)) for name in names}
+        try:
+            handler = pf.install_interrupt_handlers()
+            for name in names:
+                self.assertIs(signal.getsignal(getattr(signal, name)), handler, name)
+            with self.assertRaisesRegex(KeyboardInterrupt, "Interrupted by signal 1"):
+                handler(int(signal.SIGHUP), None)
+            self.assertIsNone(handler(int(signal.SIGTERM), None))
+        finally:
+            for name, previous in saved.items():
+                signal.signal(getattr(signal, name), previous)
+        source = (PACKAGE / "pf-admin.py").read_text()
+        self.assertIn('if __name__ == "__main__":\n    install_interrupt_handlers()\n    sys.exit(main())', source)
     def test_root_entry_point_uses_the_registered_interpreter_not_a_path_search(self):
         # v2.5 searched PATH and SynoCommunity package paths for an interpreter. PF-A1.1
         # runs only the canonical interpreter registered in the protected bootstrap.conf
@@ -1359,6 +1414,58 @@ class PurgeRecoveryTests(unittest.TestCase):
              }):
             with self.assertRaisesRegex(pf.Failure, "empty target project"):
                 self.c.restore_instance(recovery)
+
+    def exact_restore_bundle(self, tree_extra=None):
+        recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
+        folder = Path(self.temp.name) / "bundle"
+        folder.mkdir()
+        tree = Path(self.temp.name) / "tree"
+        source_fixture(tree, OLD)
+        if tree_extra:
+            tree_extra(tree)
+        with tarfile.open(folder / "source.tar.gz", "w:gz") as archive:
+            for item in sorted(tree.iterdir()):
+                archive.add(item, arcname=item.name)
+        (self.c.state / "deployed.json").unlink()
+        if self.c.pending.exists():
+            self.c.pending.unlink()
+        return {"id": recovery_id, "_folder": str(folder), "project": "partflow-staging", "root": str(self.root),
+                "postgres_major": 16, "database": "partflow_staging", "database_user": "partflow_staging",
+                "source_revision": OLD, "source_verified": True, "databases": []}
+
+    def assert_exact_restore_refused_before_any_effect(self, recovery, pattern):
+        env_path = self.c.config_dir / ".env"
+        env_before = env_path.read_bytes() if env_path.exists() else None
+        with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
+             mock.patch.object(self.c, "detailed_project_resources", return_value={
+                 "containers": [], "volumes": [], "networks": [], "images": []}), \
+             mock.patch.object(pf, "confirm", side_effect=AssertionError("confirmation must not be asked")), \
+             mock.patch.object(self.c, "restore_runtime_environment",
+                               side_effect=AssertionError("configuration must not be touched")):
+            with self.assertRaisesRegex(pf.Failure, pattern):
+                self.c.restore_instance(recovery)
+        # No route-less restore-instance journal is left behind to wedge the instance.
+        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(env_path.read_bytes() if env_path.exists() else None, env_before)
+
+    def test_exact_restore_refuses_reserved_bundle_paths_before_confirmation_or_journal(self):
+        """A12r2-F02: a bundle source carrying a path the manifest cannot verify is refused before
+        either RESTORE confirmation, the pending journal or any configuration change."""
+        def reserved(tree):
+            (tree / "nested" / "node_modules").mkdir(parents=True)
+            (tree / "nested" / "node_modules" / "x.js").write_text("1")
+
+        self.assert_exact_restore_refused_before_any_effect(
+            self.exact_restore_bundle(reserved), "cannot verify.*nested/node_modules/x.js")
+
+    def test_exact_restore_proves_source_provenance_before_confirmation_or_journal(self):
+        """A12r2-F02: a store-proof refusal also comes before confirmation, journal and configuration."""
+        recovery = self.exact_restore_bundle()
+        refusal = pf.Failure("Source provenance check failed: unsupported source path (tracked reserved "
+                             "workspace artifact name): node_modules/x.js")
+        with mock.patch.object(self.c, "prove_tree_commit", side_effect=refusal) as proof:
+            self.assert_exact_restore_refused_before_any_effect(recovery, "tracked reserved workspace artifact name")
+        proof.assert_called_once()
 
     def test_verify_recovery_detects_modified_payload(self):
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"

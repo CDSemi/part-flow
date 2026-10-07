@@ -456,13 +456,15 @@ class ProcessRunner:
             raise
         finally:
             self._close(stdin_handle, stdout_handle)
-            if stream is not None:
-                stream.close()
             duration = time.monotonic() - started
             effect_id = None
+            # The effect is persisted before the streamed output is flushed: after a hangup the
+            # operator's terminal is gone and a write to it fails, which must not lose the record.
             if (timed_out or interrupted) and spec.effect is not None:
                 effect_id = self._record_effect(spec, rendered, executable, process,
                                                 "timeout" if timed_out else "interrupted")
+            if stream is not None:
+                stream.close()
             hold = self.redactor.longest
             result = ProcessResult(
                 tool=spec.tool, executable=executable, argv=rendered,

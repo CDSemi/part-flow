@@ -61,6 +61,26 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > evidence, audit probes and the HTTPS store probe rerun as recorded in the r2 checkpoint
 > package. Host validations remain not exercised; A1-T17's host gate stays *blocked*.
 
+> **PF-A1.2 r2 audit addendum (2026-10-06).** `SIGHUP` and `SIGQUIT` now unwind like `SIGTERM`/
+> `SIGINT`: one handler (`install_interrupt_handlers`, installed by the entry point) interrupts
+> the controller once and ignores repeats, so the runner terminates the child group, records the
+> unresolved effect and `fail_closed()` runs before the instance lock is released; the effect is
+> written before the streamed tail is flushed and `fail_closed()` runs even when the error report
+> cannot be written (a hung-up terminal). Before this, a real `SIGHUP` killed the controller
+> without unwinding: no effect, a still-running child, a free lock. `restore-instance` now
+> extracts the bundle source, refuses reserved paths and runs the store's provenance proof
+> before either RESTORE confirmation, the pending journal or any `config/.env` change, and
+> `rollback` runs the provenance proof before confirmation, pause, safety snapshot or database
+> swap; the r2 wording above was not yet true for `restore-instance`. New regressions (each
+> failed on the r2 source): real `SIGHUP`/`SIGQUIT`/`SIGTERM`/`SIGINT` sent to the installed
+> launcher during a mutating Compose passthrough (child group gone when the controller exits,
+> one `interrupted` effect, lock free afterwards), effect recorded when the stream sink fails,
+> `fail_closed()` with a failing stderr, handler registration, and the two restore-instance and
+> one rollback ordering cases. Summary, uid 0, Linux container with real Git and `/tmp` on
+> tmpfs: full discovery `tests/` **247 tests OK, 0 skipped** on CPython 3.12.15 and 3.9.25
+> (baseline suite 106, PF-A1.1 suite 91, PF-A1.2 suite 50). Host validations remain not
+> exercised; A1-T17's host gate stays *blocked*.
+
 ## Executed checks
 
 | Check | Actual result |

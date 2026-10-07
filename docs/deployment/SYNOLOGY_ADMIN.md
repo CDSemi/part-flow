@@ -47,7 +47,11 @@
 > `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), arguments are arrays, captured
 > output is bounded and redacted (the database password and its URL-encoded form never
 > reach a message or log), every call has a deadline, and a timeout or interruption
-> terminates the whole process group. Every mutating child (Compose `up`/`down`/`stop`/
+> terminates the whole process group. Interruption means `SIGINT`, `SIGTERM`, `SIGHUP` (for
+> example an SSH session that drops) or `SIGQUIT`: the controller terminates the child group,
+> records the effect and runs its fail-closed stop before it releases the instance lock, and
+> a repeated signal does not cut that short (only `SIGKILL` or power loss can; recovery from
+> those is the next launch's job). Every mutating child (Compose `up`/`down`/`stop`/
 > `build`/`run`, `createdb`/`dropdb`/`pg_restore`, mutating SQL, Docker `tag`/`rm`/`image load`,
 > store `fetch`) carries an effect descriptor (kind, verb, targets — never application values),
 > so its timeout or interruption is recorded under
@@ -426,7 +430,9 @@ The comparison ignores *untracked* workspace artifacts by name only (`.env`,
 policy never hides tracked content: a commit that tracks a path with one of those names
 is refused by the source store before export (`unsupported source path (tracked reserved
 workspace artifact name)`), a candidate tree carrying one is refused before `repo/` is
-touched, and a manifest that lists one cannot be verified — the tool fails closed instead
+touched (in `rollback` and `restore-instance`, together with the store's provenance proof,
+before any confirmation, pending journal, `config/.env` change, pause, safety snapshot or
+database swap), and a manifest that lists one cannot be verified — the tool fails closed instead
 of reporting a match it did not prove.
 
 A manual update that finds a dirty/different workspace first includes that current

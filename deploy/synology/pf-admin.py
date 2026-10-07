@@ -2775,34 +2775,35 @@ class Controller:
         log("  Active database: " + recovery["database"])
         log("  Preserved databases: " + ", ".join(item["name"] for item in recovery["databases"]))
         log("  Recovery bundle: " + recovery["id"])
-        confirm(
-            "RESTORE INSTANCE " + recovery["project"],
-            "This recreates the purged functional instance from its recovery bundle. Docker container/network IDs are newly created. PostgreSQL globals are preserved as evidence but extra roles are not automatically executed.",
-        )
-        confirm(
-            "RESTORE " + recovery["database"] + " " + recovery["id"],
-            "Final restore confirmation. Repository workspace, runtime .env, application images, active database, retained databases, and revision checkpoints will be restored into an empty project. The current pf-config.json remains authoritative.",
-        )
-
-        write_json(self.pending, {
-            "operation": "restore-instance", "phase": "confirmed", "started": utc(),
-            "recovery": recovery["id"], "database": recovery["database"],
-        })
         with tempfile.TemporaryDirectory(prefix="restore-source-", dir=self.state) as temp:
             candidate = Path(temp)
             archive = folder / (recovery.get("workspace_archive") or "source.tar.gz")
             extract_source(archive, candidate)
             # v1 bundles stored .env inside source.tar.gz; v2 stores it separately. Anything
-            # else the manifest could not verify stops here, before configuration is touched.
+            # else the manifest could not verify, and any provenance-proof failure, stops here:
+            # before any confirmation, pending journal or configuration change. restore-instance
+            # has no automatic journal route, so a refusal after the journal would wedge it.
             self.refuse_reserved_candidate_paths(candidate, allow=(".env",))
+            restored_exact = not recovery.get("workspace_archive")
+            verified = (restored_exact and bool(recovery.get("source_verified"))
+                        and self.prove_tree_commit(candidate, recovery["source_revision"]))
+            confirm(
+                "RESTORE INSTANCE " + recovery["project"],
+                "This recreates the purged functional instance from its recovery bundle. Docker container/network IDs are newly created. PostgreSQL globals are preserved as evidence but extra roles are not automatically executed.",
+            )
+            confirm(
+                "RESTORE " + recovery["database"] + " " + recovery["id"],
+                "Final restore confirmation. Repository workspace, runtime .env, application images, active database, retained databases, and revision checkpoints will be restored into an empty project. The current pf-config.json remains authoritative.",
+            )
+
+            write_json(self.pending, {
+                "operation": "restore-instance", "phase": "confirmed", "started": utc(),
+                "recovery": recovery["id"], "database": recovery["database"],
+            })
             self.restore_runtime_environment(recovery, extracted_source=candidate)
             # The restored .env is the configuration this operation consumes from here on.
             self.freeze_app_config(explicit=True)
-            restored_exact = not recovery.get("workspace_archive")
-            self.replace_source_for_recovery(
-                candidate, recovery["source_revision"],
-                verified=restored_exact and bool(recovery.get("source_verified"))
-                and self.prove_tree_commit(candidate, recovery["source_revision"]))
+            self.replace_source_for_recovery(candidate, recovery["source_revision"], verified=verified)
 
         self.phase("loading-images")
         self.docker("image", "load", "-i", folder / "images.tar")
@@ -2952,7 +2953,12 @@ class Controller:
                 current_contract = self.ensure_local_contract()
                 if current_contract["files"] != selected["migration_files"] or self.db_heads() != selected["database_heads"]:
                     raise Failure("Database/schema compatibility is not established. Code-only rollback refused; review --restore-db.")
-            phrase = ("RESTORE " + self.env()["POSTGRES_DB"] + " " if restore_database else "ROLLBACK ") + selected["id"]
+            # The checkpoint's own flag does not assign provenance: the tree is `git_commit` only
+            # when the protected store proves it, otherwise it is recorded as unknown. The proof
+            # reads the store (and refuses a commit that tracks a reserved name), so it runs
+            # before any confirmation, pause, snapshot or database swap.
+            verified = self.prove_tree_commit(candidate, selected["source_revision"])
+            phrase =("RESTORE " + self.env()["POSTGRES_DB"] + " " if restore_database else "ROLLBACK ") + selected["id"]
             confirm(phrase, ("Database will return to the selected backup time. Newer writes will no longer appear in the active app; the current DB is retained."
                              if restore_database else "Only code/images will change. Current data is kept. Schema equality does not prove all business-semantic compatibility."))
             self.pause("rollback", selected=selected["id"])
@@ -2965,10 +2971,7 @@ class Controller:
                 if self.db_heads(prepared) != selected["database_heads"]:
                     raise Failure("Restored schema does not match the selected checkpoint.")
                 retained = self.swap_database(prepared)
-            # The checkpoint's own flag does not assign provenance: the tree is `git_commit` only
-            # when the protected store proves it, otherwise it is recorded as unknown.
-            self.replace_source(candidate, selected["source_revision"],
-                                verified=self.prove_tree_commit(candidate, selected["source_revision"]))
+            self.replace_source(candidate, selected["source_revision"], verified=verified)
             self.phase("activating", checkpoint=emergency["id"])
             self.activate(selected["images"], selected["database_heads"])
             write_json(self.state / "deployed.json", {"sha": selected["source_revision"], "ref": "rollback:" + selected["id"],
@@ -3472,16 +3475,45 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             controller.update(target, automatic=True)
         return 0
     except (Failure, pf_instance.ContextError, OSError, ValueError, KeyError, KeyboardInterrupt) as exc:
-        print("ERROR: " + str(exc), file=sys.stderr, flush=True)
-        if controller is not None and managed_started:
-            controller.fail_closed()
+        try:
+            print("ERROR: " + str(exc), file=sys.stderr, flush=True)
+        finally:
+            # After a hangup the terminal is gone and the report above fails; the fail-closed
+            # stop must still run, under the lock, before this process exits.
+            if controller is not None and managed_started:
+                controller.fail_closed()
         return 20 if isinstance(exc, Deferred) else 1
     finally:
         held_lock.close()
 
 
-if __name__ == "__main__":
+# Every catchable termination request unwinds as KeyboardInterrupt, so the runner terminates the
+# child process group and records the unresolved effect, fail_closed() runs and the instance lock
+# is released only afterwards. A default SIGHUP/SIGQUIT action would kill the controller without
+# unwinding (an SSH drop during a migration or restore) and leave the child running unrecorded.
+INTERRUPT_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
+
+
+def install_interrupt_handlers():
+    """Route INTERRUPT_SIGNALS through one handler that interrupts the controller once.
+
+    Later signals are ignored so they cannot abort the group termination, the effect record or
+    the fail-closed stop already under way (each bounded by its own deadline); SIGKILL remains.
+    Python-level handlers are not inherited across exec, so children keep default dispositions.
+    """
+    fired = []
+
     def interrupted(signum, frame):
+        if fired:
+            return
+        fired.append(signum)
         raise KeyboardInterrupt(f"Interrupted by signal {signum}")
-    signal.signal(signal.SIGTERM, interrupted)
+
+    for name in INTERRUPT_SIGNALS:
+        signal.signal(getattr(signal, name), interrupted)
+    return interrupted
+
+
+if __name__ == "__main__":
+    install_interrupt_handlers()
     sys.exit(main())
