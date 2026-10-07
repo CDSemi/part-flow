@@ -3398,10 +3398,11 @@ def _finish_message(journal, plan, root):
     if kind == "control":
         return f"Control release {result.get('release_id')} is bound (operation {plan['operation_id']} completed)."
     if kind == "init":
+        # PF-A2.2: the pre-registration wizard creates the configuration register needs (SYNOLOGY_ADMIN section 5).
+        prefix = launcher_prefix(plan["root"], Path(plan["launcher"]["path"]) if plan["launcher"] else DEFAULT_LAUNCHER)
         return f"Installation root {plan['root']} initialized with release {result.get('release_id')} (operation " \
-               f"{plan['operation_id']} completed). Next: create the configuration by hand, then " \
-               f"'{launcher_prefix(plan['root'], Path(plan['launcher']['path']) if plan['launcher'] else DEFAULT_LAUNCHER)}" \
-               " install register'."
+               f"{plan['operation_id']} completed). Next: create the configuration with '{prefix} config admin " \
+               f"--configuration <config> --project <project>', then '{prefix} install register'."
     return f"Instance {plan['instance']['slug']} registered (operation {plan['operation_id']} completed); the default " \
            "is unchanged."
 

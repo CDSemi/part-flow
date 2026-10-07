@@ -384,9 +384,16 @@ def config_change_problems(record):
 
 
 def _reject_control_characters(value, where):
+    # The character is never echoed: the line may hold a secret (PF-A2.2 audit).
     for char in value:
         if ord(char) < 0x20 or char == "\x7f":
-            raise ConfigError(f"{where}: control character U+{ord(char):04X} is not supported")
+            raise ConfigError(f"{where}: a control character is not supported (not shown)")
+
+
+def _utf8_error(data, label, exc):
+    """``{label}:{line}: not valid UTF-8`` without the offending bytes (the line may hold a secret)."""
+    line = bytes(data[:exc.start]).count(b"\n") + 1
+    return ConfigError(f"{label}:{line}: not valid UTF-8 (the bytes are not shown)")
 
 
 def value_render_issue(value):
@@ -420,7 +427,8 @@ def _parse_double_quoted(body, where):
                 raise ConfigError(f"{where}: dangling backslash in a double-quoted value")
             nxt = body[index + 1]
             if nxt not in ("\\", '"'):
-                raise ConfigError(f"{where}: unsupported escape \\{nxt} in a double-quoted value "
+                # The escaped character is never echoed: the value may be a secret (PF-A2.2 audit).
+                raise ConfigError(f"{where}: unsupported escape in a double-quoted value "
                                   "(only \\\\ and \\\" are accepted; no $ expansion)")
             result.append(nxt)
             index += 2
@@ -448,7 +456,7 @@ def parse_app_env(data, *, label, allowed_keys=APP_KEYS, require_all=True):
     try:
         text = bytes(data).decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ConfigError(f"{label}: not valid UTF-8: {exc}") from exc
+        raise _utf8_error(data, label, exc) from exc
     values = {}
     for number, raw in enumerate(text.split("\n"), 1):
         where = f"{label}:{number}"
@@ -662,9 +670,15 @@ def plan_app_config(declaration, *, current, example, deployed, check, zone, can
         if kind == "timezone":
             if present and problem is None:
                 status, detail = zone(value)
-                note = {"ok": None, "zone-data-unavailable": "zone-data-unavailable"}.get(status, "zone-unknown-on-host")
-                items.append(AppPlanItem(key, "kept", note, detail, None))
-                continue
+                if status == "invalid-name":
+                    # Not a zone name at all (a `.`/`..` component): invalid independent of host data, so it is
+                    # asked like a grammar-invalid value instead of kept with a misleading host-data note.
+                    problem = detail
+                else:
+                    note = {"ok": None, "zone-data-unavailable": "zone-data-unavailable"}.get(status,
+                                                                                            "zone-unknown-on-host")
+                    items.append(AppPlanItem(key, "kept", note, detail, None))
+                    continue
             if zone_data is None:
                 zone_data = zone("UTC")
             if zone_data[0] == "zone-data-unavailable":
@@ -710,7 +724,7 @@ def rewrite_app_env(base, *, keys, set_values, append):
     try:
         text = bytes(base).decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ConfigError(f"base: not valid UTF-8: {exc}") from exc
+        raise _utf8_error(base, "base", exc) from exc
     intended = parse_app_env(base, label="base", allowed_keys=keys, require_all=False)
     for key in list(set_values) + list(append):
         if key not in keys:

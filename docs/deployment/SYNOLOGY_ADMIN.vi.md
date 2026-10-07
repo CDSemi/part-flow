@@ -217,8 +217,18 @@
 > từng byte; database password chỉ được sinh khi nó vắng mặt và instance chưa từng deploy; credential database
 > không bao giờ được hỏi hoặc ghi lại sau lần deploy đầu tiên; timezone mới phải có trong zone data đã cài
 > trên host. Lần `pf deploy` đầu tiên khi chưa có `.env` chạy cùng wizard này.
-> *Audit.* Một lần ghi ở registered mode lưu `config-change.json` trong thư mục operation (tên key và
-> `unchanged`/`set` cho secret; không có giá trị secret và không có hash của `.env`).
+> *Audit.* Một lần ghi bằng `pf config admin` hoặc `pf config app` trên instance đã đăng ký lưu
+> `config-change.json` trong thư mục operation (tên key và `unchanged`/`set` cho secret; không có giá trị secret
+> và không có hash của `.env`). Wizard chạy bên trong lần `pf deploy` đầu tiên không ghi `config-change.json`:
+> `operation.json` và snapshot `app.env` đã đóng băng của deploy operation đó là bằng chứng. Pre-registration
+> mode không ghi record (chưa có instance).
+> *Audit fixes (chưa commit, trên `5d102d1`).* Wizard pre-registration từ chối khi có bất kỳ instance record đã
+> đăng ký nào không load được (`registry-record-invalid`), và copy `admin-config-invalid` của nó lặp lại
+> `--configuration`/`--project`; chọn DSM Reverse Proxy trong `config app` sẽ hỏi lại hostname `localhost` đang
+> được giữ; `SITE_TIMEZONE` hiện có nhưng không phải tên zone (có thành phần `.`/`..`) được hỏi lại thay vì giữ;
+> lỗi parser của `.env` không bao giờ hiện một ký tự nào của dòng; interrupt sau khi ghi được báo là
+> `config-interrupted` hoặc `config-audit-not-recorded` (file đã chứa nội dung mới); dòng hoàn tất của
+> `install-control.sh init` nêu `config admin --configuration`.
 > Khối này **thay thế** các bước "tạo cấu hình bằng tay" trong khối PF-A2.1 và ở mục 5.
 
 ## 1. Mục đích
@@ -422,8 +432,9 @@ khác) và không tới được root mới.
    Wizard hỏi workspace group và backup group từ các group đang có trên host, hiển thị summary và ghi
    `<config>/pf-config.json` (schema 2, `root:<workspace group>`, `0660`) sau khi trả lời `y`. Wizard từ chối
    một thư mục đang được install operation mở, pending registration hoặc instance đã đăng ký sử dụng
-   (`install-operation-pending`, `registry-pending`, `config-path-conflict`). File legacy schema 1 đã có được
-   giữ nguyên (`admin-config-legacy-unregistered`).
+   (`install-operation-pending`, `registry-pending`, `config-path-conflict`), và từ chối mọi thư mục khi một
+   instance record đã đăng ký không load được (`registry-record-invalid`). File legacy schema 1 đã có được giữ
+   nguyên (`admin-config-legacy-unregistered`). Dòng hoàn tất của `init` nêu đúng lệnh này.
 3. Đăng ký instance với các thư mục đã có:
 
    ```sh
@@ -535,11 +546,14 @@ checkpoint này không cung cấp (mục 13).
 ### `config/.env`
 
 `sudo pf --instance <slug> config app` tạo hoặc hoàn thiện file này theo profile của instance, và lần `deploy`
-đầu tiên khi chưa có `.env` chạy cùng wizard này. File mới bắt đầu từ `nas.env.example` đã cài (giữ comment);
+đầu tiên khi chưa có `.env` chạy cùng wizard này (bên trong `deploy` không ghi `config-change.json`;
+`operation.json` và snapshot `app.env` đã đóng băng của deploy operation là bằng chứng). File mới bắt đầu từ `nas.env.example` đã cài (giữ comment);
 nếu không thì chỉ các dòng thay đổi được ghi lại và mọi dòng khác giữ nguyên từng byte. Wizard cần
 `pf-config.json` hợp lệ (`admin-config-required`). Wizard chỉ hỏi giá trị thiếu hoặc không hợp lệ, theo thứ tự:
 PostgreSQL user, PostgreSQL database, factory timezone, access mode (và địa chỉ LAN), HTTP port, và hostname
-của Reverse Proxy (chỉ hỏi khi bind `127.0.0.1`; Direct LAN dùng `localhost`).
+của Reverse Proxy (chỉ hỏi khi bind `127.0.0.1`, không có default; Direct LAN dùng `localhost`). Khi access mode
+được hỏi và bạn chọn DSM Reverse Proxy, `PARTFLOW_ALLOWED_HOST=localhost` đang được giữ sẽ được hỏi lại, vì
+proxy cần đúng hostname nội bộ.
 
 - **Secret.** `POSTGRES_PASSWORD` hiện có không bao giờ được hiển thị, đổi, sinh lại hoặc quote lại (summary:
   `unchanged`). Password thiếu hoặc rỗng được sinh thành 64 ký tự hex bằng secure randomness (summary: `set`)
@@ -553,9 +567,10 @@ của Reverse Proxy (chỉ hỏi khi bind `127.0.0.1`; Direct LAN dùng `localho
   (`password-weak-for-new-deployment`): lần `deploy` đầu tiên sẽ từ chối nó. Hãy đặt password dài hơn bằng
   tay, hoặc để dòng thành `POSTGRES_PASSWORD=` (rỗng) rồi chạy lại `config app` để sinh password.
 - **Timezone.** `SITE_TIMEZONE` mới hoặc đang thiếu phải có trong zone data đã cài trên host. Giá trị hiện có mà
-  host không biết được giữ kèm note (`zone-unknown-on-host`); khi host không có zone data, giá trị hiện có được
-  giữ kèm note còn giá trị thiếu bị từ chối (`zone-data-unavailable`). Backend kiểm tra giá trị bằng zone data
-  của chính image khi khởi động; wizard không kiểm tra zone data đó.
+  host không biết được giữ kèm note (`zone-unknown-on-host`); giá trị hiện có nhưng hoàn toàn không phải tên
+  zone (có thành phần `.` hoặc `..`) được hỏi lại như giá trị không hợp lệ; khi host không có zone data, giá trị
+  hiện có được giữ kèm note còn giá trị thiếu bị từ chối (`zone-data-unavailable`). Backend kiểm tra giá trị
+  bằng zone data của chính image khi khởi động; wizard không kiểm tra zone data đó.
 - **ACL.** `.env` hoặc `pf-config.json` có ACL entry bị từ chối trước câu hỏi đầu tiên (`config-file-acl`):
   thay file sẽ làm mất ACL. Hãy sửa file như vậy bằng tay cho tới PF-A2.3.
 - **Database URL.** Controller truyền `PARTFLOW_DATABASE_URL` với credential đã percent-encode; không có gì bị
@@ -1216,7 +1231,8 @@ Mỗi lần từ chối dưới đây không thay đổi gì; thông báo nêu l
 - `config-current` (exit 0): không có gì để đổi. Các note phía sau vẫn có giá trị.
 - `admin-config-required`: `config app` cần `pf-config.json` hợp lệ; chạy `config admin` trước.
 - `admin-config-invalid`: file có lỗi parse, key, kiểu hoặc rule (hiển thị lỗi đầu tiên, kèm số lỗi còn lại).
-  Sửa bằng tay; wizard không bao giờ sửa file.
+  Sửa bằng tay; wizard không bao giờ sửa file. Trước khi đăng ký, copy lặp lại `--configuration <dir>` (và
+  `--project`) để lần chạy sau kiểm tra lại đúng thư mục đó.
 - `admin-config-version-unsupported`: file khai báo `schema_version` khác. Control mới hơn đã ghi file này:
   chọn lại control đó (`pf install control --release <id>`) hoặc khôi phục file trước đó.
 - `admin-config-migration-blocked`: một explicit value của schema 1 không hợp lệ trong schema 2; sửa bằng tay.
@@ -1227,6 +1243,8 @@ Mỗi lần từ chối dưới đây không thay đổi gì; thông báo nêu l
 - `admin-example-invalid`, `app-example-invalid`: example đã cài không dùng được; chạy `doctor` và cài lại
   control release.
 - `app-config-invalid`: `.env` không parse được (key lạ hoặc trùng, `export`, quote, ký tự xuống dòng).
+  Thông báo nêu số dòng; không bao giờ hiện ký tự nào của giá trị (escape không hỗ trợ, UTF-8 không hợp lệ
+  hoặc ký tự điều khiển chỉ được mô tả, không được in ra).
 - `app-credential-unusable`: instance được tính là đã deploy và một credential bị thiếu hoặc không hợp lệ; khôi
   phục nó từ recovery bundle hoặc hồ sơ của bạn.
 - `app-profile-undeclared`: profile của instance không khai báo application variable nào trong control này.
@@ -1238,10 +1256,20 @@ Mỗi lần từ chối dưới đây không thay đổi gì; thông báo nêu l
 - `config-file-unsafe`: file là link, file đặc biệt hoặc có hard link, hoặc thư mục chứa một tên tạm dành riêng
   nhưng không phải phần còn sót của lần chạy bị gián đoạn; hãy kiểm tra, không có gì bị xóa.
 - `config-changed`: file đã đổi trong lúc wizard chạy; chạy lại lệnh để xem file mới.
+- `config-interrupted` (exit 1): một interrupt (Ctrl-C, `SIGTERM`, `SIGHUP` khi SSH bị ngắt) đến trong lúc
+  publish file, và file đã chứa nội dung mới. Không có gì khác bị đổi và không ghi change record; chạy lại lệnh
+  để xem file (lệnh sẽ báo `config-current`). Interrupt trước khi publish là `config-cancelled` và file giữ
+  nguyên.
+- `config-audit-not-recorded` (exit 1): file đã được ghi (thông báo nói file còn chứa nội dung mới hay không),
+  nhưng việc ghi `config-change.json` bị lỗi hoặc bị gián đoạn. Bản thân thay đổi đã hoàn tất; chạy lại lệnh để
+  xem file.
 - `config-busy`: một registration khác đang giữ registry lock; thử lại.
 - `config-dir-invalid`, `config-path-conflict`: thư mục pre-registration bị thiếu, không canonical, nằm trong
   ancestor có thể bị thay thế, hoặc đang được instance đã đăng ký sử dụng (khi đó dùng
   `--instance <slug> config admin`).
+- `registry-record-invalid`, `registry-invalid` (pre-registration): một instance record đã đăng ký (hoặc
+  registry) không load được, nên wizard không biết thư mục có thuộc về nó hay không; không hỏi và không tạo gì.
+  Hãy sửa record trước (giống như với `pf install register`).
 - `config-audit-invalid`: lỗi nội bộ; change record không qua schema và không có gì được ghi.
 - Note: `config-temp-removed` (đã xóa file tạm còn sót của lần chạy bị gián đoạn), `zone-unknown-on-host`,
   `password-weak-for-new-deployment`, `implicit-materialized`.

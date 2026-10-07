@@ -351,6 +351,35 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > files are refused (manual edits until PF-A2.3); a `backup_read_group` change takes effect without
 > revision-bound approval (OD-A22-20); offline only.
 
+> **PF-A2.2 audit addendum (2026-10-07, uncommitted over `5d102d1`).** The implementation audit
+> (`3b81f3a..5d102d1`, 12 confirmed findings, all minor after verification; `_claude_outputs/ops/PF-A2.2/
+> audit-findings.json`) is closed with `test_config.AuditRegressions` AU-1…AU-9. Seven of them fail on the
+> `5d102d1` `pf-admin.py`/`pf_config.py`/`pf_install.py` (20 subtest failures) and pass after; AU-4 and AU-9
+> add the missing evidence for paths that already behaved. Fixes: (1) pre-registration `pf config admin
+> --configuration` also runs the A2.1 registry checks, so a registered record that cannot be loaded refuses
+> (`registry-record-invalid`) before any question and again under the registry lock (AU-1); (2) when the access
+> mode is asked and the DSM Reverse Proxy is chosen, a kept `PARTFLOW_ALLOWED_HOST=localhost` is asked with no
+> default (AU-2); (3) an interrupt or I/O error while `config-change.json` is written after the publish is
+> `config-audit-not-recorded`, reported from an observation of the target (AU-3); (4) the writer's interrupt
+> mapping (`config-cancelled` before the publish, `config-interrupted` after it) now has tests for fchmod,
+> rename, link and the directory fsync, and `config-interrupted` is documented (AU-4); (5) the pre-registration
+> `admin-config-invalid` copy repeats `--configuration`/`--project` (AU-5); (6) the `install-control.sh init`
+> completion names `config admin --configuration <config> --project <project>` (AU-6); (7) a present
+> `SITE_TIMEZONE` with a `.`/`..` component (`zone_status` `invalid-name`) is asked instead of kept (AU-7);
+> (8) `.env` parser messages never echo a value character (unsupported escape, invalid UTF-8 byte, control
+> character), in `app-config-invalid` and in the register note `app-env-unparsed` (AU-8); (9) Direct LAN through
+> `pf config app` is covered and the test module docstring corrected (AU-9); (10) SYNOLOGY_ADMIN (EN/VI) states
+> that the wizard inside `deploy` writes no `config-change.json`. The PF-A2.1 SS-3/SS-3b allowlist entries
+> (`os.rename` in `_Run.cancel`, `os.unlink` in `_Run._remove_own_launcher_temp`) and the PF-A2.2 entries
+> (`os.replace`/`os.link`/`os.unlink`/`fchown`/`fchmod`/exclusive create in `write_editable_file`, `os.unlink`
+> in `remove_editable_leftovers`, `write_private_json` in `Controller.write_config_change`) were re-reviewed:
+> each acts on an own temp, a classified leftover or the reviewed target after a fresh compare, and no fix adds
+> a write site. OD-A22-20 and OD-A22-21 are unchanged. Executed on the final tree: the same discovery in
+> `python:3.12` (CPython 3.12.15) and `python:3.9` (CPython 3.9.25), uid 0: **565 tests OK, 0 skipped** on both
+> (556 + 9); SECRET-SCAN with the AU cases (20 cases, 12 tracked secrets, 0 hits outside `.env`); `sh -n` (4
+> scripts), `ast` (3, 9) (17 files) and the strict JSON load of the 3 contracts passed in both images;
+> `pf_bootstrap.py` and `pf.sh` hashes unchanged (BF-1). Gate statuses are unchanged.
+
 ## Executed checks
 
 | Check | Actual result |

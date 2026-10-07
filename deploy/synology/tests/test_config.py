@@ -13,13 +13,15 @@ Case mapping (PF-A2.2 SPEC section 6.1; design r3 acceptance cases A2-T05, A2-T0
   ER-1..ER-3, UR-1   .env rewrite and URL round-trip (A1-T08)         -> EnvRewrite
   CC-1..CC-4         locks and concurrent writers                     -> Concurrency
   CR-1..CR-3         forked crash windows of the writer               -> Crash
+  AU-1..AU-9         PF-A2.2 audit regressions (audit-findings.json)  -> AuditRegressions
   SK-1..SK-2         A2.1 smoke against an A2.2 candidate             -> SmokeCompatibility
   PO-1               policy versioned separately                      -> Policy
   LC-1               schema 2 lifecycle subset                        -> Schema2Lifecycle*, Schema2Purge
 
 Everything runs as uid 0 in disposable temporary roots. No Docker daemon, NAS, launcher outside the fixture root or
-running stack is touched; the wizards start no child process. Group detection is read-only (``grp``); no group is
-ever created.
+running stack is touched; the wizards start no Git, Docker or Compose child (Direct LAN may run the read-only
+``ip``/``hostname`` detection, mocked in these tests). Group detection is read-only (``grp``); no group is ever
+created.
 """
 import contextlib
 import grp
@@ -1486,6 +1488,301 @@ class Crash(ConfigBase):
         self.assertEqual(code, 1, out + err)
         self.assertIn("config-changed", err)
         self.assertTrue(leftover.exists())
+
+
+# ============================================================================ AU: audit regressions
+
+
+@ROOT_REQUIRED
+class AuditRegressions(ConfigBase):
+    """PF-A2.2 audit (``_claude_outputs/ops/PF-A2.2/audit-findings.json``). AU-1, AU-2, AU-3, AU-5..AU-8 fail on
+    5d102d1 and pass with their fix; AU-4 and AU-9 add the missing evidence for paths that already behaved."""
+
+    def setUp(self):
+        super().setUp()
+        pfx.admin_config(self.config_path, project=PROJECT, backup_read_group=GROUP, workspace_write_group=GROUP)
+
+    def new_home(self, name="b", project="partflow-b"):
+        paths = pfx.data_home(self.base / name, project=project, group=GROUP)
+        (paths["configuration"] / "pf-config.json").unlink()
+        (paths["configuration"] / ".env").unlink()
+        return paths
+
+    def pre(self, directory, answers=(), project=None):
+        arguments = ["config", "admin", "--configuration", str(directory)]
+        if project is not None:
+            arguments += ["--project", project]
+        return self.run_main(arguments, answers)
+
+    def clear_operations(self):
+        for name in os.listdir(str(self.context.operations_dir)):
+            shutil.rmtree(str(self.context.operations_dir / name))
+
+    def legacy_admin_config(self):
+        pfx.admin_config(self.config_path, project=PROJECT, backup_read_group=GROUP, workspace_write_group=GROUP)
+
+    # AU-1 (findings 1 and 7): an unloadable registered record is never treated as "not registered".
+    def test_au1_pre_registration_refuses_an_unloadable_registered_record(self):
+        users_gid()
+        other = self.new_home()
+        record = self.context.record_path
+        good = record.read_bytes()
+        self.config_path.unlink()
+        record.write_bytes(good[:-4] + b"\xff\xff\xff\xff")
+        for directory in (self.config_dir, other["configuration"]):
+            with self.subTest(directory=str(directory)):
+                before = pfx.snapshot_tree(directory)
+                code, out, err, script = self.pre(directory, ["1", "1", "y"], project="partflow-x")
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("ERROR: registry-record-invalid: pf config admin was refused and nothing was created:",
+                              err)
+                self.assertIn("  - registry-record-invalid: ", err)
+                self.assertIn(": staging: ", err)
+                self.assertEqual(script.prompts, [])
+                self.assertEqual(pfx.snapshot_tree(directory), before)
+        # Damaged between the confirmation and the registry lock: refused by the re-check under the lock.
+        record.write_bytes(good)
+
+        def damage_then_confirm():
+            record.write_bytes(good[:-4] + b"\xff\xff\xff\xff")
+            return "y"
+
+        code, out, err, script = self.pre(other["configuration"], ["1", "1", damage_then_confirm], project="partflow-b")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ERROR: registry-record-invalid: ", err)
+        self.assertTrue(script.prompts[-1].startswith("Write "))
+        self.assertEqual(os.listdir(str(other["configuration"])), [])
+
+    # AU-2 (finding 2): choosing the proxy binding re-asks a kept `localhost` hostname, with no default.
+    def test_au2_the_proxy_binding_re_asks_a_kept_localhost_hostname(self):
+        for label, bind in (("empty", ""), ("missing", None), ("invalid", "0.0.0.0")):
+            with self.subTest(bind=label):
+                self.clear_operations()
+                original = env_text(PARTFLOW_BIND_IP=bind, PARTFLOW_ALLOWED_HOST="localhost").encode()
+                self.env_path.write_bytes(original)
+                code, out, err, script = self.app(["2", "partflow.internal.example", "y"])
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual([prompt for prompt in script.prompts if not prompt.startswith("Write ")],
+                                 ["Select access mode [1]: ", "Exact internal Reverse Proxy hostname: "])
+                values = pf_config.parse_app_env(self.env_path.read_bytes(), label=".env")
+                self.assertEqual((values["PARTFLOW_BIND_IP"], values["PARTFLOW_ALLOWED_HOST"]),
+                                 ("127.0.0.1", "partflow.internal.example"))
+                self.assertIn("PARTFLOW_ALLOWED_HOST: localhost -> partflow.internal.example (changed: asked)", out)
+                record = self.audits()[0]
+                self.assert_valid_record(record)
+                row = {row["key"]: row for row in record["changes"]}["PARTFLOW_ALLOWED_HOST"]
+                self.assertEqual((row["action"], row["before"], row["after"]),
+                                 ("changed", "localhost", "partflow.internal.example"))
+        # Typing localhost again keeps it (asked, not changed); Direct LAN never asks the hostname.
+        self.clear_operations()
+        self.env_path.write_bytes(env_text(PARTFLOW_BIND_IP="", PARTFLOW_ALLOWED_HOST="localhost").encode())
+        code, out, err, script = self.app(["2", "localhost", "y"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("PARTFLOW_ALLOWED_HOST: localhost (kept)", out)
+        self.assertEqual({row["key"]: row["action"] for row in self.audits()[0]["changes"]}["PARTFLOW_ALLOWED_HOST"],
+                         "kept")
+        self.env_path.write_bytes(env_text(PARTFLOW_BIND_IP="", PARTFLOW_ALLOWED_HOST="localhost").encode())
+        with mock.patch.object(pf.Controller, "detect_lan_ipv4", return_value=["192.168.1.20"]):
+            code, out, err, script = self.app(["1", "", "y"])
+        self.assertEqual(code, 0, out + err)
+        self.assertFalse([prompt for prompt in script.prompts if "hostname" in prompt])
+        values = pf_config.parse_app_env(self.env_path.read_bytes(), label=".env")
+        self.assertEqual((values["PARTFLOW_BIND_IP"], values["PARTFLOW_ALLOWED_HOST"]), ("192.168.1.20", "localhost"))
+
+    # AU-3 (finding 3): a failure while recording the audit after the publish names the written file.
+    def test_au3_an_interrupt_or_io_error_at_the_audit_record_names_the_written_file(self):
+        cases = (("interrupt", KeyboardInterrupt("Interrupted by signal 15"), "Interrupted by signal 15"),
+                 ("disk full", OSError(28, "No space left on device"), "No space left on device"))
+        for label, error, reason in cases:
+            with self.subTest(case=label, file="pf-config.json"):
+                self.clear_operations()
+                self.legacy_admin_config()
+                with mock.patch.object(pf.Controller, "write_config_change", side_effect=error):
+                    code, out, err, _ = self.admin(["y"])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"ERROR: config-audit-not-recorded: {self.config_path} holds the new content; its change "
+                              "record ", err)
+                self.assertIn(f"{pf_config.CONFIG_CHANGE_NAME} was not recorded ({reason}). Run the command again to "
+                              "review the file.", err)
+                self.assertEqual(pf_config.parse_admin_config(self.config_path.read_bytes(), label="x").schema_version,
+                                 2)
+                self.assertEqual(self.audits(), [])
+                code, out, err, _ = self.admin()
+                self.assertEqual(code, 0, out + err)
+                self.assertIn("config-current: ", out)
+            with self.subTest(case=label, file=".env"):
+                self.clear_operations()
+                original = env_text(POSTGRES_PASSWORD="'" + AP1_PASSWORD + "'", PARTFLOW_ALLOWED_HOST=None).encode()
+                self.env_path.write_bytes(original)
+                with mock.patch.object(pf.Controller, "write_config_change", side_effect=error):
+                    code, out, err, _ = self.app(["partflow.internal.example", "y"])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"ERROR: config-audit-not-recorded: {self.env_path} holds the new content;", err)
+                self.assertEqual(self.env_path.read_bytes(),
+                                 original + b"PARTFLOW_ALLOWED_HOST=partflow.internal.example\n")
+                self.assertEqual(self.audits(), [])
+                self.assert_secret_absent(AP1_PASSWORD, out, err, roots=(self.context.operations_dir,))
+
+    def assert_secret_absent(self, secret, *texts, roots=()):
+        AppWizard.assert_secret_absent(self, secret, *texts, roots=roots)
+
+    def interrupting(self, owner, name, when, *, match):
+        """Raise KeyboardInterrupt (as a signal handler does) before or after the real call when ``match``."""
+        real = getattr(owner, name)
+
+        def wrapper(*args, **kwargs):
+            hit = match(*args)
+            if hit and when == "before":
+                raise KeyboardInterrupt("Interrupted by signal 15")
+            result = real(*args, **kwargs)
+            if hit and when == "after":
+                raise KeyboardInterrupt("Interrupted by signal 15")
+            return result
+
+        return mock.patch.object(owner, name, wrapper)
+
+    # AU-4 (findings 4 and 10): an interrupt inside the writer is reported from an observation of the target.
+    def test_au4_an_interrupt_inside_the_writer_is_reported_from_the_target(self):
+        users_gid()
+        own = Crash.own
+        cancelled = f"ERROR: config-cancelled: Cancelled; {self.config_path} was not created or changed."
+        interrupted = (f"ERROR: config-interrupted: {self.config_path} was written before the interrupt and holds the "
+                       "new content; run the command again to review it.")
+        rows = (("fchmod of the temp (replace)", "migrate", (os, "fchmod", "before", lambda *a: bool(self.temps())),
+                 cancelled),
+                ("before rename (replace)", "migrate", (os, "replace", "before", lambda *a: own(a[0])), cancelled),
+                ("after rename (replace)", "migrate", (os, "replace", "after", lambda *a: own(a[0])), interrupted),
+                ("before link (create)", "create", (os, "link", "before", lambda *a: own(a[0])), cancelled),
+                ("between link and unlink (create)", "create", (os, "link", "after", lambda *a: own(a[0])),
+                 interrupted),
+                ("directory fsync after the publish", "migrate",
+                 (pf_instance, "_fsync_directory", "before", lambda *a: Path(a[0]) == self.config_dir), interrupted))
+        for label, mode, (owner, name, when, match), expected in rows:
+            with self.subTest(window=label):
+                self.clear_operations()
+                if mode == "create":
+                    if self.config_path.exists():
+                        self.config_path.unlink()
+                    answers = ["1", "1", "y"]
+                else:
+                    self.legacy_admin_config()
+                    answers = ["y"]
+                old = self.config_path.read_bytes() if self.config_path.exists() else None
+                with self.interrupting(owner, name, when, match=match):
+                    code, out, err, _ = self.admin(answers)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(expected, err)
+                self.assertEqual(self.temps(), [])
+                self.assertEqual(self.audits(), [])
+                if expected == cancelled:
+                    self.assertEqual(self.config_path.read_bytes() if self.config_path.exists() else None, old)
+                else:
+                    self.assertEqual(os.lstat(str(self.config_path)).st_nlink, 1)
+                    self.assertEqual(pf_config.parse_admin_config(self.config_path.read_bytes(),
+                                                                  label="x").schema_version, 2)
+                    code, out, err, _ = self.admin()
+                    self.assertEqual(code, 0, out + err)
+                    self.assertIn("config-current: ", out)
+
+    # AU-5 (finding 5): the pre-registration admin-config-invalid copy re-checks the same directory.
+    def test_au5_pre_registration_invalid_file_copy_names_the_directory(self):
+        prefix = pf_install.launcher_prefix(self.layout.root)
+        paths = self.new_home()
+        target = paths["configuration"] / "pf-config.json"
+        data = json.dumps({"project": "partflow-b", "zz": 1}).encode()
+        target.write_bytes(data)
+        for project, suffix in ((None, ""), ("partflow-b", " --project partflow-b")):
+            with self.subTest(project=project):
+                code, out, err, script = self.pre(paths["configuration"], ["y"], project=project)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"ERROR: admin-config-invalid: {target}: Unknown configuration keys: zz. Nothing was "
+                              f"changed; fix the file by hand, then run '{prefix} config admin --configuration "
+                              f"{paths['configuration']}{suffix}' again.", err)
+                self.assertEqual((script.prompts, target.read_bytes()), ([], data))
+
+    # AU-6 (finding 6): the init completion copy names the pre-registration wizard.
+    def test_au6_init_completion_names_the_pre_registration_wizard(self):
+        plan = {"kind": "init", "root": str(self.layout.root), "operation_id": "inst-20261007T000000Z-0123abcd",
+                "launcher": None}
+        text = pf_install._finish_message({"result": {"release_id": "r1"}}, plan, self.layout.root)
+        prefix = pf_install.launcher_prefix(str(self.layout.root))
+        self.assertIn(f"Next: create the configuration with '{prefix} config admin --configuration <config> --project "
+                      f"<project>', then '{prefix} install register'.", text)
+        self.assertNotIn("by hand", text)
+
+    # AU-7 (finding 8): a present SITE_TIMEZONE that is not a zone name is asked, not kept with a host-data note.
+    def test_au7_a_present_timezone_that_is_not_a_zone_name_is_asked(self):
+        host_zone("UTC")
+        declaration = pf_config.app_declaration("partflow-staging-legacy")
+        for name in ("Etc/..", "America/../UTC", "./UTC"):
+            with self.subTest(name=name):
+                self.assertTrue(pf_config.TIMEZONE_RE.fullmatch(name))  # passes the A1 grammar
+                plan = pf_config.plan_app_config(declaration, current={"SITE_TIMEZONE": name}, example={},
+                                                 deployed=True, check=lambda kind, value: None,
+                                                 zone=pf_config.zone_status)
+                item = {item.key: item for item in plan}["SITE_TIMEZONE"]
+                self.assertEqual((item.action, item.code, item.default), ("ask", None, None))
+                original = env_text(SITE_TIMEZONE=name).encode()
+                self.env_path.write_bytes(original)
+                code, out, err, script = self.app(["UTC", "y"])
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(script.prompts[0], "Factory IANA timezone: ")
+                self.assertNotIn("zone-unknown-on-host", out)
+                self.assertIn(f"SITE_TIMEZONE: {name} -> UTC (changed: asked", out)
+                self.assertEqual(self.env_path.read_bytes(),
+                                 original.replace(f"SITE_TIMEZONE={name}\n".encode(), b"SITE_TIMEZONE=UTC\n"))
+
+    # AU-8 (finding 9): a parser error never echoes a character of the secret line.
+    def test_au8_parser_errors_never_echo_a_character_of_a_secret(self):
+        default = b"POSTGRES_PASSWORD=" + b"a" * 64
+        cases = (("escape", b'POSTGRES_PASSWORD="Zsecret\\Qpart-0123456789abcdef0123456789"',
+                  ":2: unsupported escape in a double-quoted value", ("\\Q", "Q")),
+                 ("utf-8", b"POSTGRES_PASSWORD=caf\xe9-part-0123456789abcdef0123456789",
+                  ":2: not valid UTF-8 (the bytes are not shown)", ("0xe9", "\\xe9", "position")),
+                 ("control", b"POSTGRES_PASSWORD='Zsecret\x07part-0123456789abcdef0123456789'",
+                  ":2: a control character is not supported (not shown)", ("U+0007",)))
+        for label, line, fragment, forbidden in cases:
+            with self.subTest(case=label):
+                data = env_text().encode().replace(default, line)
+                self.assertNotEqual(data, env_text().encode())
+                self.env_path.write_bytes(data)
+                code, out, err, script = self.app(["y"])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"ERROR: app-config-invalid: {self.env_path}: ", err)
+                self.assertIn(f"{self.env_path}{fragment}", err)
+                for text in forbidden:
+                    self.assertNotIn(text, out + err)
+                self.assertEqual((script.prompts, self.env_path.read_bytes()), ([], data))
+                report = pf_install._Report()
+                pf_install._app_env_note(report, self.env_path, verb="register", root=self.layout.root, slug="b")
+                self.assertEqual([note["code"] for note in report.notes], ["app-env-unparsed"])
+                self.assertIn(fragment, report.notes[0]["detail"])
+                for text in forbidden:
+                    self.assertNotIn(text, report.notes[0]["detail"])
+
+    # AU-9 (finding 12): Direct LAN through `pf config app` (read-only ip/hostname children, mocked here).
+    def test_au9_direct_lan_through_config_app_derives_localhost_and_cancels_at_the_ipv4_question(self):
+        original = env_text(PARTFLOW_BIND_IP=None, PARTFLOW_ALLOWED_HOST=None).encode()
+        self.env_path.write_bytes(original)
+        with mock.patch.object(pf.Controller, "detect_lan_ipv4", return_value=["192.168.1.20"]):
+            code, out, err, script = self.app(["1", "q"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"ERROR: config-cancelled: Cancelled at PARTFLOW_BIND_IP; {self.env_path} was not created or "
+                      "changed.", err)
+        self.assertEqual(script.prompts, ["Select access mode [1]: ",
+                                          "NAS LAN IPv4 (enter an address or detected number) [1]: "])
+        self.assertEqual((self.env_path.read_bytes(), self.temps(), self.audits()), (original, [], []))
+        with mock.patch.object(pf.Controller, "detect_lan_ipv4", return_value=["192.168.1.20"]):
+            code, out, err, script = self.app(["1", "", "y"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("Detected NAS LAN IPv4 addresses:\n  1. 192.168.1.20", out)
+        self.assertIn("PARTFLOW_ALLOWED_HOST: (missing) -> localhost (derived from access mode)", out)
+        values = pf_config.parse_app_env(self.env_path.read_bytes(), label=".env")
+        self.assertEqual((values["PARTFLOW_BIND_IP"], values["PARTFLOW_ALLOWED_HOST"]), ("192.168.1.20", "localhost"))
+        record = self.audits()[0]
+        self.assert_valid_record(record)
+        actions = {row["key"]: row["action"] for row in record["changes"]}
+        self.assertEqual((actions["PARTFLOW_BIND_IP"], actions["PARTFLOW_ALLOWED_HOST"]), ("added", "added"))
 
 
 # ============================================================================ SK: smoke compatibility

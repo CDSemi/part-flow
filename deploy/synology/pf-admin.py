@@ -870,8 +870,9 @@ def load_admin_example(path, pf_command):
     return dict(parsed.values)
 
 
-def refuse_admin_config(path, parsed, *, pf_command, prefix, release_id):
-    """admin-config-invalid / admin-config-version-unsupported copy for a refused current file (nothing asked)."""
+def refuse_admin_config(path, parsed, *, rerun, prefix, release_id):
+    """admin-config-invalid / admin-config-version-unsupported copy for a refused current file (nothing asked).
+    ``rerun`` is the full command that re-checks this file (pre-registration: with --configuration/--project)."""
     if parsed.code == "admin-config-version-unsupported":
         raise Failure(f"admin-config-version-unsupported: {path} declares schema_version "
                       f"{json.dumps(parsed.declared_version)}; this control ({release_id}) reads schema 2 and the legacy "
@@ -879,7 +880,7 @@ def refuse_admin_config(path, parsed, *, pf_command, prefix, release_id):
                       f"that control again ('{prefix} install control --release <id>') or restore the previous file.")
     more = f" (+{len(parsed.problems) - 1} more)" if len(parsed.problems) > 1 else ""
     raise Failure(f"admin-config-invalid: {path}: {parsed.problems[0]}{more}. Nothing was changed; fix the file by "
-                  f"hand, then run '{pf_command} config admin' again.")
+                  f"hand, then run '{rerun}' again.")
 
 
 def admin_group_questions(values, *, mode, locations):
@@ -2355,7 +2356,7 @@ class Controller:
         else:
             before = pf_config.parse_admin_config(target.data, label=str(path))
             if before.problems:
-                refuse_admin_config(path, before, pf_command=pf_command,
+                refuse_admin_config(path, before, rerun=f"{pf_command} config admin",
                                     prefix=pf_install.launcher_prefix(context.installation_root),
                                     release_id=context.control.release_id)
             values = dict(before.values)
@@ -2400,7 +2401,7 @@ class Controller:
         write_reviewed(path, data, target, create_gid=grp.getgrnam(values["workspace_write_group"]).gr_gid,
                        op8=self.operation_id[-8:], keys=changed)
         record["completed"] = utc()
-        self.write_config_change(record)
+        self.record_config_change(record, path, data)
         log(f"Wrote {path} (admin configuration schema 2; {mode}).")
         if before is not None and before.implicit:
             log("implicit-materialized: legacy implicit values are now explicit: " + ", ".join(before.implicit) + ".")
@@ -2450,6 +2451,24 @@ class Controller:
         self.check_config_change(record)
         self.write_private_json(pf_config.CONFIG_CHANGE_NAME, record)
 
+    def record_config_change(self, record, path, data):
+        """Step 5 after the editable file was published: write the audit record. An interrupt or I/O error here is
+        reported from an observation of the target (section 3.9), never as if nothing had been written; the record
+        itself stays best effort (section 3.10)."""
+        try:
+            self.write_config_change(record)
+        except (KeyboardInterrupt, OSError) as exc:
+            try:
+                observed = pf_install.read_regular_file(path)
+            except OSError:
+                observed = None
+            state = "holds the new content" if observed == data \
+                else "was written, but it now holds other bytes or cannot be read"
+            reason = (exc.strerror or str(exc)) if isinstance(exc, OSError) else (str(exc) or "interrupted")
+            raise Failure(f"config-audit-not-recorded: {path} {state}; its change record "
+                          f"{self.operation_dir / pf_config.CONFIG_CHANGE_NAME} was not recorded ({reason}). Run the "
+                          "command again to review the file.") from exc
+
     def app_note(self, item, current):
         pf_command = self.pf_command()
         name = current.get(item.key)
@@ -2480,7 +2499,8 @@ class Controller:
                        "bundle or your records, then run again.")
 
     def app_answers(self, plan, declaration, current):
-        """Ask every planned ``ask`` item in declaration order; returns ({key: value}, {derived keys})."""
+        """Ask every planned ``ask`` item in declaration order, plus a kept ``localhost`` hostname when the proxy
+        binding is chosen here; returns ({key: value}, {derived keys}). A key absent from the answers stays kept."""
         variables = {variable.key: variable for variable in declaration.variables}
         answers, derived = {}, set()
 
@@ -2501,9 +2521,13 @@ class Controller:
             return value
 
         for item in plan:
-            if item.action != "ask":
-                continue
             variable = variables[item.key]
+            # A kept `localhost` cannot serve a DSM Reverse Proxy: when the access mode is asked in this run and the
+            # proxy binding is chosen, that hostname is uncertain and asked like a missing one (no localhost default).
+            proxy_host = variable.kind == "host" and item.action == "kept" \
+                and answers.get("PARTFLOW_BIND_IP") == "127.0.0.1" and current.get(item.key) == "localhost"
+            if item.action != "ask" and not proxy_host:
+                continue
             if variable.kind == "access":
                 log("Access mode:")
                 log("  1. Direct LAN access to the NAS IP (recommended for initial staging verification)")
@@ -2516,8 +2540,9 @@ class Controller:
                     derived.add(item.key)
                 else:
                     default = item.default if item.default not in (None, "localhost") else None
-                    answers[item.key] = self.ask(item.key, variable.question, default=default,
-                                                 validate=validate_allowed_host)
+                    answer = self.ask(item.key, variable.question, default=default, validate=validate_allowed_host)
+                    if not (proxy_host and answer == current.get(item.key)):
+                        answers[item.key] = answer
             elif variable.kind == "timezone":
                 answers[item.key] = self.ask(item.key, variable.question, default=item.default, validate=zone_checked)
             elif variable.kind == "port":
@@ -2589,7 +2614,7 @@ class Controller:
         final = dict(current or {})
         set_values, append = {}, {}
         for item in plan:
-            if item.action == "ask":
+            if item.key in answers:
                 value = answers[item.key]
             elif item.action == "generate":
                 value = secrets.token_hex(declaration.generated_secret_hex_bytes)
@@ -2629,7 +2654,7 @@ class Controller:
                 rows.append({"key": key, "action": word, "before": None, "after": None})
                 continue
             new, old = final[key], (current or {}).get(key)
-            if item.action == "kept":
+            if item.action == "kept" and key not in answers:
                 text, action = f"{new} (kept", "kept"
             elif key in derived:
                 text = f"{old if old else '(missing)'} -> {new} (derived from access mode"
@@ -2670,7 +2695,7 @@ class Controller:
                        secret=generated)
         if record is not None:
             record["completed"] = utc()
-            self.write_config_change(record)
+            self.record_config_change(record, path, data)
             log(f"Wrote {path} (profile {declaration.profile_id}; {mode}).")
         return final
 
@@ -5281,6 +5306,9 @@ def config_admin_unregistered(root, args, *, running_release, trusted_launch):
         report = pf_install._Report()
         pf_install._open_operation_checks(report, root)
         pf_install._pending_registration_checks(report, root)
+        # A registered record that cannot be loaded hides its configuration directory from the conflict checks
+        # below: refuse it with the A2.1 register code (fail closed) instead of treating DIR as unregistered.
+        pf_install._registry_checks(report, root)
         if report.conflicts:
             raise Failure("\n".join([f"{report.conflicts[0].code}: pf config admin was refused and nothing was created:"]
                                     + [f"  - {item.code}: {item.subject}: {item.detail}" for item in report.conflicts]))
@@ -5342,7 +5370,9 @@ def config_admin_unregistered(root, args, *, running_release, trusted_launch):
     else:
         before = pf_config.parse_admin_config(target.data, label=str(path))
         if before.problems:
-            refuse_admin_config(path, before, pf_command=prefix, prefix=prefix, release_id=Path(running_release).name)
+            rerun = f"{prefix} config admin --configuration {directory_text}" \
+                + (f" --project {project}" if project is not None else "")
+            refuse_admin_config(path, before, rerun=rerun, prefix=prefix, release_id=Path(running_release).name)
         if before.schema_version == 1:
             log(f"admin-config-legacy-unregistered: {path} is a legacy schema 1 file in a directory that is not "
                 "registered; it was left unchanged because a v2.5 control may still read it. 'pf install register' "

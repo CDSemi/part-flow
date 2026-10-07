@@ -224,8 +224,18 @@
 > byte; a database password is generated only when it is absent and the instance was never deployed; database
 > credentials are never asked or rewritten after the first deployment; a new timezone must exist in the host's
 > installed zone data. The first `pf deploy` without `.env` runs the same wizard.
-> *Audit.* A registered-mode write records `config-change.json` in its operation directory (key names and
-> `unchanged`/`set` for secrets; no secret value and no `.env` hash).
+> *Audit.* A `pf config admin` or `pf config app` write on a registered instance records `config-change.json`
+> in its operation directory (key names and `unchanged`/`set` for secrets; no secret value and no `.env` hash).
+> The wizard run inside the first `pf deploy` writes no `config-change.json`: that deploy operation's
+> `operation.json` and its frozen `app.env` snapshot are the evidence. The pre-registration mode writes no record
+> (no instance exists yet).
+> *Audit fixes (uncommitted over `5d102d1`).* The pre-registration wizard refuses while any registered instance
+> record cannot be loaded (`registry-record-invalid`), and its `admin-config-invalid` copy repeats
+> `--configuration`/`--project`; choosing the DSM Reverse Proxy in `config app` re-asks a kept `localhost`
+> hostname; a present `SITE_TIMEZONE` that is not a zone name (a `.`/`..` component) is asked instead of kept;
+> `.env` parser errors never show a character of the line; an interrupt after the write is reported as
+> `config-interrupted` or `config-audit-not-recorded` (the file already holds the new content); the
+> `install-control.sh init` completion names `config admin --configuration`.
 > This block **supersedes** the "create the configuration by hand" steps of the PF-A2.1 block and of section 5.
 
 ## 1. Purpose
@@ -433,8 +443,9 @@ v2.5 launcher (or another root's) and does not reach the new root.
    It asks the workspace and backup groups from the host's existing groups, shows the summary and writes
    `<config>/pf-config.json` (schema 2, `root:<workspace group>`, `0660`) after `y`. It refuses a directory
    that an open install operation, a pending registration or a registered instance uses
-   (`install-operation-pending`, `registry-pending`, `config-path-conflict`). An existing legacy schema 1 file
-   is left as it is (`admin-config-legacy-unregistered`).
+   (`install-operation-pending`, `registry-pending`, `config-path-conflict`), and refuses any directory while
+   a registered instance record cannot be loaded (`registry-record-invalid`). An existing legacy schema 1 file
+   is left as it is (`admin-config-legacy-unregistered`). The completion line of `init` names this command.
 3. Register the instance with its existing directories:
 
    ```sh
@@ -550,12 +561,15 @@ checkpoint does not provide (section 13).
 ### `config/.env`
 
 `sudo pf --instance <slug> config app` creates or completes it for the instance's profile, and the first
-`deploy` without `.env` runs the same wizard. A created file starts from the installed `nas.env.example`
-(comments kept); otherwise only the lines that change are rewritten and every other line keeps its exact
-bytes. The wizard needs a valid `pf-config.json` (`admin-config-required`). It asks only missing or invalid
-values, in this order: PostgreSQL user, PostgreSQL database, factory timezone, access mode (and the LAN
-address), HTTP port, and the Reverse Proxy hostname (asked only for the `127.0.0.1` binding; Direct LAN
-uses `localhost`).
+`deploy` without `.env` runs the same wizard (inside `deploy` no `config-change.json` is written; the deploy
+operation's `operation.json` and frozen `app.env` snapshot are the evidence). A created file starts from the
+installed `nas.env.example` (comments kept); otherwise only the lines that change are rewritten and every
+other line keeps its exact bytes. The wizard needs a valid `pf-config.json` (`admin-config-required`). It asks
+only missing or invalid values, in this order: PostgreSQL user, PostgreSQL database, factory timezone, access
+mode (and the LAN address), HTTP port, and the Reverse Proxy hostname (asked only for the `127.0.0.1`
+binding, with no default; Direct LAN uses `localhost`). When the access mode is asked and you choose the
+DSM Reverse Proxy, a kept `PARTFLOW_ALLOWED_HOST=localhost` is asked again, because the proxy needs the
+exact internal hostname.
 
 - **Secrets.** An existing `POSTGRES_PASSWORD` is never shown, changed, regenerated or re-quoted (summary:
   `unchanged`). A missing or empty one is generated as 64 hexadecimal characters from cryptographically
@@ -569,7 +583,8 @@ uses `localhost`).
   (`password-weak-for-new-deployment`): the first `deploy` refuses it. Set a longer one by hand, or leave the
   line as `POSTGRES_PASSWORD=` (empty) and run `config app` again to generate one.
 - **Timezone.** A new or missing `SITE_TIMEZONE` must exist in this host's installed zone data. An existing
-  value that the host does not know is kept with a note (`zone-unknown-on-host`); without host zone data an
+  value that the host does not know is kept with a note (`zone-unknown-on-host`); an existing value that is
+  not a zone name at all (a `.` or `..` component) is asked like an invalid one; without host zone data an
   existing value is kept with a note and a missing one is refused (`zone-data-unavailable`). The backend
   checks the value with its own image's zone data at startup; that data is not checked by the wizard.
 - **ACLs.** A `.env` or `pf-config.json` that carries ACL entries is refused before the first question
@@ -1251,7 +1266,8 @@ Every refusal below changed nothing; the message names the next command.
 - `config-current` (exit 0): nothing to change. Notes after it still apply.
 - `admin-config-required`: `config app` needs a valid `pf-config.json`; run `config admin` first.
 - `admin-config-invalid`: the file has a parse, key, type or rule problem (the first one is shown, with the
-  count of the others). Fix it by hand; the wizard never repairs a file.
+  count of the others). Fix it by hand; the wizard never repairs a file. Before registration the copy repeats
+  `--configuration <dir>` (and `--project`) so the next run re-checks the same directory.
 - `admin-config-version-unsupported`: the file declares another `schema_version`. A newer control wrote it:
   select that control again (`pf install control --release <id>`) or restore the previous file.
 - `admin-config-migration-blocked`: an explicit schema 1 value is not valid in schema 2; correct it by hand.
@@ -1262,6 +1278,8 @@ Every refusal below changed nothing; the message names the next command.
 - `admin-example-invalid`, `app-example-invalid`: the installed example is not usable; run `doctor` and
   reinstall the control release.
 - `app-config-invalid`: `.env` does not parse (unknown or duplicate key, `export`, quoting, line endings).
+  The message names the line; it never shows a character of the value (an unsupported escape, invalid UTF-8
+  or a control character is described, not printed).
 - `app-credential-unusable`: the instance counts as deployed and a credential is missing or invalid; restore
   it from the recovery bundle or your records.
 - `app-profile-undeclared`: the instance's profile declares no application variables in this control.
@@ -1273,9 +1291,19 @@ Every refusal below changed nothing; the message names the next command.
 - `config-file-unsafe`: the file is a link, a special or hard-linked file, or the directory holds a reserved
   temporary name that is not a leftover of an interrupted run; inspect it, nothing was removed.
 - `config-changed`: the file changed while the wizard ran; run the command again to review the new file.
+- `config-interrupted` (exit 1): an interrupt (Ctrl-C, `SIGTERM`, `SIGHUP` after an SSH drop) arrived while
+  the file was being published, and the file already holds the new content. Nothing else was changed and no
+  change record was written; run the command again to review the file (it reports `config-current`). An
+  interrupt before the publish is `config-cancelled` and leaves the file unchanged.
+- `config-audit-not-recorded` (exit 1): the file was written (the message says whether it still holds the new
+  content), but recording `config-change.json` failed or was interrupted. The change itself is complete;
+  run the command again to review the file.
 - `config-busy`: another registration holds the registry lock; try again.
 - `config-dir-invalid`, `config-path-conflict`: the pre-registration directory is missing, non-canonical, in
   replaceable ancestors, or used by a registered instance (then use `--instance <slug> config admin`).
+- `registry-record-invalid`, `registry-invalid` (pre-registration): a registered instance record (or the
+  registry) cannot be loaded, so the wizard cannot tell whether the directory belongs to it; nothing is asked
+  or created. Repair the record first (as for `pf install register`).
 - `config-audit-invalid`: internal error; the change record failed its schema and nothing was written.
 - Notes: `config-temp-removed` (leftover temporary files of an interrupted run were removed),
   `zone-unknown-on-host`, `password-weak-for-new-deployment`, `implicit-materialized`.
