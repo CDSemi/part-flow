@@ -14,13 +14,32 @@ Python standard library only, Python 3.9 language baseline.
 import dataclasses
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import sys
 import types
 import urllib.parse
 import uuid
+
+
+def _load_sibling_module(name):
+    path = Path(__file__).resolve().parent / (name + ".py")
+    if name in sys.modules and getattr(sys.modules[name], "__file__", None) == str(path):
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load control module: " + str(path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# PF-A2.1: the admin-config validator parses with the one strict JSON parser of the release.
+pf_bootstrap = _load_sibling_module("pf_bootstrap")
 
 APP_KEYS = (
     "POSTGRES_USER",
@@ -45,6 +64,60 @@ SCHEMA_VERSION = 1
 
 class ConfigError(RuntimeError):
     """A rejected proposal. Nothing was written or changed."""
+
+
+# ------------------------------------------------------------ admin configuration (PF-A2.1)
+
+# The editable ``config/pf-config.json`` keys and their defaults (formerly pf-admin.py DEFAULTS).
+ADMIN_CONFIG_DEFAULTS = {
+    "repository": "CDSemi/part-flow", "branch": "main",
+    "project": "partflow-staging", "environment": "staging",
+    "release_channel": "stable", "auto_update": False,
+    "ci_workflow": "ci.yml", "health_timeout_seconds": 180,
+    "minimum_free_mb": 2048,
+    # Revision checkpoints and purge recovery bundles can contain database data.
+    # Purge recovery also contains the external runtime .env. Keep these artifacts
+    # read-only to the configured DSM group so they can be copied over SMB safely.
+    "backup_read_group": "users",
+    "workspace_write_group": "users",
+}
+
+
+def validate_admin_config(data, *, label):
+    """Pure validation of ``pf-config.json`` bytes -> (config with defaults, problems).
+
+    The rules and messages of ``Controller.load_app_config`` from the parse through the group-name shape
+    checks, in the same order, without the comparison with a registered record and without the group
+    lookup (callers add both). ``problems`` is empty for a valid document; ``config`` is None when the
+    bytes are not a JSON object. PF-A2.2 replaces this with the versioned validator.
+    """
+    try:
+        supplied = pf_bootstrap.parse_strict_json(data, label=label)
+    except pf_bootstrap.BootstrapError as exc:
+        return None, [str(exc)]
+    if not isinstance(supplied, dict):
+        return None, ["Runtime configuration must be a JSON object: " + label]
+    problems = []
+    unknown = set(supplied) - set(ADMIN_CONFIG_DEFAULTS)
+    if unknown:
+        problems.append("Unknown configuration keys: " + ", ".join(sorted(unknown)))
+    config = dict(ADMIN_CONFIG_DEFAULTS)
+    config.update(supplied)
+    if config["repository"] != "CDSemi/part-flow":
+        problems.append("This controller is scoped to CDSemi/part-flow.")
+    if not isinstance(config["project"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", config["project"]):
+        problems.append("Invalid Compose project name.")
+    if config["release_channel"] not in ("stable", "prerelease"):
+        problems.append("release_channel must be stable or prerelease.")
+    if type(config["auto_update"]) is not bool:
+        problems.append("auto_update must be a JSON boolean.")
+    for name in ("health_timeout_seconds", "minimum_free_mb"):
+        if type(config[name]) is not int or config[name] <= 0:
+            problems.append(f"{name} must be a positive integer.")
+    for name in ("backup_read_group", "workspace_write_group"):
+        if not isinstance(config[name], str) or not config[name].strip():
+            problems.append(f"{name} must be a non-empty DSM group name.")
+    return config, problems
 
 
 def _reject_control_characters(value, where):

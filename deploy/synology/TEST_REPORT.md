@@ -217,6 +217,61 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > WORK_PACKAGES §5): PF-A1 as a whole **PASS_WITH_DECLARED_LIMITS** (offline formal exit; docker gate
 > A1-T11…T14 and host gate A1-T17 blocked; releases PF-A2.1 offline development only).
 
+> **PF-A2.1 checkpoint addendum (2026-10-07) — preflight installer, staged control generations,
+> journaled switch.** New module `pf_install.py` (required release file) with the wire schema
+> `contracts/install-operation.schema.json` (embedded copy compared by a test): `install-control.sh` is
+> now a thin `init`-only wrapper that execs the repository `pf_install.py` with a root-owned isolated
+> interpreter; `pf install status | register | migrate-legacy | control | resume` run from the installed
+> control (`DISPATCH` row `install`, 19 routes; `ENTRY_ROUTES` E4 = the global launcher created only when
+> absent, E11 = `installer-init`). Every kind prompts missing inputs per stage, runs a read-only preflight
+> that reports every conflict at once, shows the frozen plan and asks a typed phrase; then it takes its
+> locks non-blocking (init: flock on a private sibling build directory; registry lock, then the v2.5
+> `operation.lock` or every instance lock in UUID order), re-runs the preflight under them
+> (`install-plan-changed`), publishes `plan.json` + `journal.json` as one atomic intent and journals each
+> effect `intended` (with the created object's identity) and `complete`. `resume` observes every effect
+> before deciding (`not_started`/`complete`/`partial`/`unknown`); `unknown` → `needs_operator` (open,
+> gating, with its next step); `rolling_back`/`abandoning` resume to their end; `--abandon` restores the
+> previous binding or discards a never-used registration (`pf_instance.discard_unused_registration`).
+> `control` stages a content-addressed release (`r-<16 hex>` of the release-id-free content inventory),
+> smoke-checks it with the registered interpreter (`pf_runner` tool id `interpreter`; cwd outside the
+> release; the live `pf-config.json`/`.env` of every instance against a running-release baseline),
+> re-verifies, publishes, binds `bootstrap.conf` then every record, verifies end to end through the real
+> bootstrap and restores automatically on failure; the bootstrap bytes stay frozen
+> (`bootstrap-change-unsupported`). `migrate-legacy` copies legacy-only files byte for byte through a
+> staged `O_EXCL` name and a no-clobber `os.link`, registers with the user's paths and leaves the v2.5
+> `control/` active (`legacy-control-active` in `Controller.lock`, together with the binding re-check
+> `control-binding-changed` and the gate `install-operation-pending`). A1 changes: `register_instance(...,
+> registry_lock=)`, `initialize_installation_root(build_dir=, wrappers=)`, the root requires
+> `install-operations/` and `home/.docker/config.json`, `pf_config.validate_admin_config` (the extracted
+> `load_app_config` rules, messages unchanged), the interrupt handler moved to `pf_runner` (re-exported),
+> `CHECKPOINT = "PF-A2.1"`.
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (CPython
+> 3.12.15, git 2.47.3) and `python:3.9` (CPython 3.9.25, git 2.47.3) containers, uid 0, source mounted
+> read-only and copied to `/tmp/r`: **463 tests OK, 0 skipped** on both. Baseline (the 398 PF-A1 tests,
+> reported separately): all pass; converted: `test_control_installer_encodes_external_layout_…` →
+> `test_control_installer_is_the_thin_init_only_wrapper` (the v2.5 copy installer is replaced), DT-1/DT-2/
+> DT-4/DT-8/DT-9, SS-1/SS-3/SS-5/SS-7, SW-6 (wrappers placed by the installer), RW-1/RW-6 and the
+> installer-text assertions of `test_runner_config_source`. New: 65 tests (`test_install.py` 55: CS 3, PF 9,
+> RI 4, LB 3, CN 4, RS 4, CM 8, SM 2, IP 1, CC 7, LG 3, SC 3, LM 3, Schema 1; `test_entry_routes` 2: DT-2b,
+> SS-3b; `test_instance_context` 5; `test_runner_config_source` 3). Crash matrix (`INSTALL_CRASH_MATRIX.json`):
+> 270 forked rows (control 108, control rollback 14, migrate-legacy 108, init 36, register 4; every labelled
+> boundary before/after each journal write and each effect, resumed through the installed CLI with
+> `resume` and `resume --abandon`, or a re-run of init before publication) and 8 real-signal rows
+> (SIGINT/SIGHUP/SIGTERM during the control and init smoke, SIGKILL during verify and during the init
+> smoke); every outcome is terminal (completed, cancelled, abandoned, rolled_back or no operation) with
+> exactly one bound generation (control/migrate-legacy/register rows: old release retained, configuration
+> bytes unchanged; init rows have neither); the only Docker argv in any row is the read-only `docker info` of the
+> registration preflight (migrate-legacy and register rows). `sh -n` passed for `pf.sh`, `install-control.sh`, `backup.sh`, `release-check.sh`; the 16 Python
+> files under `deploy/synology` parse with `ast.parse(..., feature_version=(3, 9))`. Docker is the
+> registered fake; no daemon, NAS, `/usr/local/bin/pf` or running stack was contacted.
+> Gates: A2-T01, A2-T02, A2-T03 **passed** (offline, installer); A2-T04 **not_run** (needs a real Docker
+> daemon; IP-1 offline identities passed; owners PF-A3.4/PF-A5.1); the real global launcher and reboot/power
+> loss **not_run** (PF-A5.1); A1-T01…T10, T15, T16, T18 **passed** (re-run); A1-T11…T14 and A1-T17 stay
+> **blocked**. Limits: offline only; one control release per root; launcher/verifier bytes frozen until
+> PF-A4.3; no legacy resource adoption, v2.5 control retirement or state import (OD-A21-05); no
+> configuration creation (PF-A2.2); no permission change (PF-A2.3); no cleanup of old releases (PF-A5.1);
+> no durability claim beyond fsync and rename on the tested filesystem.
+
 ## Executed checks
 
 | Check | Actual result |

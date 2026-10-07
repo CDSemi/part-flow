@@ -67,6 +67,12 @@ REGISTRY_LOCK_RELATIVE = Path("locks") / "registry.lock"
 RESERVATIONS_RELATIVE = Path("registry") / "reservations"
 STAGING_RELATIVE = Path("staging")
 SOURCES_RELATIVE = Path("sources")
+# PF-A2.1: install operation journals (one directory per operation) and the root-level protected task
+# home of the installer's runner (its read-only `docker info` and interpreter runs need one before any
+# instance exists). Both are created by initialize_installation_root.
+INSTALL_OPERATIONS_RELATIVE = Path("install-operations")
+ROOT_HOME_RELATIVE = Path("home")
+INSTALL_OPERATION_NAME_RE = re.compile(r"(?:inst-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|\.inst-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.new)\Z")
 ROLE_NAMES = ("workspace", "configuration", "backups", "recovery")
 STATE_SUBDIR = "state"
 HOME_SUBDIR = "home"
@@ -630,10 +636,13 @@ def validate_installation_root(root, checker=None, *, interpreter=None):
     if checker.root_dev is None:
         return checker
     for relative in ("registry", REGISTRY_RELATIVE.parent / "reservations", "locks", "instances", "releases",
-                     "profiles", "policies", STAGING_RELATIVE, SOURCES_RELATIVE):
+                     "profiles", "policies", STAGING_RELATIVE, SOURCES_RELATIVE,
+                     # PF-A2.1: the install journals and the installer's protected task home.
+                     INSTALL_OPERATIONS_RELATIVE, ROOT_HOME_RELATIVE, ROOT_HOME_RELATIVE / ".docker"):
         checker.protected(root / relative, kind="dir")
     checker.protected(registry_path(root), kind="file")
     checker.protected(root / REGISTRY_LOCK_RELATIVE, kind="file")
+    checker.protected(root / ROOT_HOME_RELATIVE / ".docker" / "config.json", kind="file")
     return checker
 
 
@@ -1208,8 +1217,30 @@ def build_control_inventory(release_id, files):
     return normalize_json(inventory)
 
 
+def _intent_only_build_problem(target):
+    """None when ``target`` is absent, empty, or holds only ``install-operations/`` with operation
+    directories (an install intent written before the build, PF-A2.1); otherwise the reason."""
+    if not os.path.lexists(str(target)):
+        return None
+    if os.path.islink(str(target)) or not os.path.isdir(str(target)):
+        return "not a directory"
+    names = os.listdir(str(target))
+    if not names:
+        return None
+    if names != [str(INSTALL_OPERATIONS_RELATIVE)]:
+        return "holds " + ", ".join(sorted(names))
+    operations = target / INSTALL_OPERATIONS_RELATIVE
+    if os.path.islink(str(operations)) or not os.path.isdir(str(operations)):
+        return "install-operations is not a directory"
+    for name in os.listdir(str(operations)):
+        path = operations / name
+        if not INSTALL_OPERATION_NAME_RE.fullmatch(name) or os.path.islink(str(path)) or not os.path.isdir(str(path)):
+            return "install-operations holds " + name
+    return None
+
+
 def initialize_installation_root(root, *, launcher, interpreter, release_id, release_files,
-                                 profile, policy_documents, tools=None):
+                                 profile, policy_documents, tools=None, build_dir=None, wrappers=None):
     """Create a fresh, disposable protected installation root.
 
     ``launcher``: launcher script bytes installed as ``bootstrap/pf``.
@@ -1220,50 +1251,68 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
     ``policy_documents``: mapping file name -> bytes for ``policies/``.
     ``tools``: {tool id: absolute path} of registered host executables for ``bootstrap/tools.conf``
     (PF-A1.2); an omitted tool is unavailable to the runner, never searched on PATH.
-    Refuses an existing non-empty root. Trusted-installer/fixture primitive, not an operator wizard.
+    ``build_dir`` (PF-A2.1): write the tree there instead of ``root``; every rendered absolute
+    reference (bootstrap.conf, release path) still names ``root``, which the installer publishes
+    with one rename of ``build_dir``. ``wrappers``: {name: bytes} scheduler wrappers for ``bootstrap/`` (0700).
+    The target (``build_dir`` or ``root``) must be absent, empty, or hold only ``install-operations/``
+    with operation directories (the install intent). Trusted-installer/fixture primitive, not an operator wizard.
     """
     root = canonical_path(root, label="installation root")
     if not root.is_absolute():
         raise ContextError("Installation root must be absolute.")
-    if os.path.lexists(str(root)) and os.listdir(str(root)):
-        raise ContextError("Refusing to initialize a non-empty installation root: " + str(root))
+    target = root if build_dir is None else canonical_path(build_dir, label="build directory")
+    problem = _intent_only_build_problem(target)
+    if problem is not None:
+        raise ContextError("Refusing to initialize a non-empty installation root: " + str(target) + " (" + problem + ")")
     if not RELEASE_ID_RE.fullmatch(release_id):
         raise ContextError("Invalid release_id: " + release_id)
     missing = [name for name in pf_bootstrap.REQUIRED_RELEASE_FILES if name not in release_files]
     if missing:
         raise ContextError("Release files missing required control files: " + ", ".join(missing))
-    if not os.path.lexists(str(root)):
-        _create_private_dir(root, 0o755)
+    if not os.path.lexists(str(target)):
+        _create_private_dir(target, 0o755)
     else:
-        os.chmod(str(root), 0o755)
+        os.chmod(str(target), 0o755)
     for relative in (BOOTSTRAP_DIR, "registry", RESERVATIONS_RELATIVE, "locks", "instances", "releases",
                      "profiles", "policies", STAGING_RELATIVE, SOURCES_RELATIVE):
-        _create_private_dir(root / relative, 0o700)
+        _create_private_dir(target / relative, 0o700)
+    if not os.path.lexists(str(target / INSTALL_OPERATIONS_RELATIVE)):
+        _create_private_dir(target / INSTALL_OPERATIONS_RELATIVE, 0o700)
+    _create_private_dir(target / ROOT_HOME_RELATIVE, 0o700)
+    _create_private_dir(target / ROOT_HOME_RELATIVE / ".docker", 0o700)
+    _create_private_dir(target / ROOT_HOME_RELATIVE / ".docker" / "cli-plugins", 0o700)
+    _write_private_file(target / ROOT_HOME_RELATIVE / ".docker" / "config.json", DOCKER_CLIENT_CONFIG, 0o600)
     release_dir = root / "releases" / release_id
-    _create_private_dir(release_dir, 0o700)
+    built_release = target / "releases" / release_id
+    _create_private_dir(built_release, 0o700)
     for name, data in release_files.items():
         if "/" in name or name.startswith(".") or name == CONTROL_INVENTORY_NAME:
             raise ContextError("Release files must be flat, visible names: " + name)
-        _write_private_file(release_dir / name, data, 0o600)
+        _write_private_file(built_release / name, data, 0o600)
     inventory_bytes = build_control_inventory(release_id, release_files)
-    _write_private_file(release_dir / CONTROL_INVENTORY_NAME, inventory_bytes, 0o600)
-    _write_private_file(root / BOOTSTRAP_DIR / LAUNCHER_NAME, launcher, 0o700)
-    _write_private_file(root / BOOTSTRAP_DIR / BOOTSTRAP_MODULE_NAME, release_files[BOOTSTRAP_MODULE_NAME], 0o600)
-    _write_private_file(root / BOOTSTRAP_DIR / BOOTSTRAP_CONF_NAME,
+    _write_private_file(built_release / CONTROL_INVENTORY_NAME, inventory_bytes, 0o600)
+    _write_private_file(target / BOOTSTRAP_DIR / LAUNCHER_NAME, launcher, 0o700)
+    _write_private_file(target / BOOTSTRAP_DIR / BOOTSTRAP_MODULE_NAME, release_files[BOOTSTRAP_MODULE_NAME], 0o600)
+    _write_private_file(target / BOOTSTRAP_DIR / BOOTSTRAP_CONF_NAME,
                         render_bootstrap_conf(interpreter, str(release_dir), sha256_bytes(inventory_bytes)), 0o600)
     try:
         tools_bytes = pf_bootstrap.render_tools_conf(dict(tools or {}))
     except pf_bootstrap.BootstrapError as exc:
         raise ContextError(str(exc)) from exc
-    _write_private_file(root / BOOTSTRAP_DIR / pf_bootstrap.TOOLS_CONF_NAME, tools_bytes, 0o600)
-    _write_private_file(registry_path(root), normalize_json(
+    _write_private_file(target / BOOTSTRAP_DIR / pf_bootstrap.TOOLS_CONF_NAME, tools_bytes, 0o600)
+    for name, data in sorted((wrappers or {}).items()):
+        if "/" in name or name.startswith(".") or name in (LAUNCHER_NAME, BOOTSTRAP_MODULE_NAME, BOOTSTRAP_CONF_NAME,
+                                                           pf_bootstrap.TOOLS_CONF_NAME):
+            raise ContextError("Bootstrap wrappers must be flat names other than the bootstrap files: " + name)
+        _write_private_file(target / BOOTSTRAP_DIR / name, data, 0o700)
+    _write_private_file(registry_path(target), normalize_json(
         {"schema_version": SCHEMA_VERSION, "default_instance_id": None, "instances": []}), 0o600)
-    _create_lock_file(root / REGISTRY_LOCK_RELATIVE)
+    _create_lock_file(target / REGISTRY_LOCK_RELATIVE)
     profile_name, profile_bytes = profile
-    _write_private_file(root / "profiles" / profile_name, profile_bytes, 0o600)
+    _write_private_file(target / "profiles" / profile_name, profile_bytes, 0o600)
     for name, data in policy_documents.items():
-        _write_private_file(root / "policies" / name, data, 0o600)
-    _fsync_directory(root)
+        _write_private_file(target / "policies" / name, data, 0o600)
+    _fsync_directory(target)
     return {
         "root": root,
         "release_dir": release_dir,
@@ -1454,8 +1503,13 @@ def _existing_instance_dir_state(root, record):
     return "published-record"
 
 
-def register_instance(root, spec):
+def register_instance(root, spec, *, registry_lock=None):
     """Minimal registration transaction for a fresh disposable installation (A11-R04 protocol).
+
+    ``registry_lock`` (PF-A2.1): an already held LockHandle on ``<root>/locks/registry.lock``. The
+    installer holds the registry lock across its whole transaction (lock order: registry first), and a
+    second flock on another descriptor in the same process would refuse as busy; with the handle the
+    steps below run without acquiring the lock again. Without it the behaviour is unchanged.
 
     Steps, all under the registry lock:
       1. preflight: trusted root/release, profile/policy semantics, registered paths, global
@@ -1563,89 +1617,98 @@ def register_instance(root, spec):
         raise ContextError("Registered paths are not acceptable; registration refused:\n"
                            + "\n".join(preflight.blocking()))
 
+    if registry_lock is not None:
+        if registry_lock.fd is None or registry_lock.path != root / REGISTRY_LOCK_RELATIVE:
+            raise ContextError("register_instance: the supplied handle is not the held registry lock of " + str(root))
+        return _register_locked(root, record, context, requested_id)
     with acquire_registry_lock(root):
-        registry = load_registry(root)
-        candidate_paths = {role: getattr(context.paths, role) for role in ROLE_NAMES}
-        # 1a. Idempotent success: the same request is already published.
-        for entry, other, error in registry.records():
-            if other is None:
-                raise ContextError(f"Registered record {entry.slug} is invalid ({error}); fix it before registering.")
-            if other.slug == context.slug:
-                published_record = parse_strict_json(read_bytes_nofollow(other.record_path), label=str(other.record_path))
-                if _same_registration_identity(published_record, record) and (requested_id in (None, other.instance_id)):
-                    _clear_reservation(root, other.instance_id)
-                    return other
-                raise ContextError(f"slug {context.slug!r} is already registered.")
-        # 1b. Resume a durable reservation for the same request; refuse a conflicting one.
-        pending = pending_registrations(root)
-        for item in pending:
-            if item.kind != "reservation":
-                continue
-            if item.record is None:
-                raise ContextError(f"Reservation {item.path} is unreadable ({item.error}); an administrator must "
-                                   "inspect it explicitly. Nothing was changed.")
-            same_slug = item.slug == context.slug
-            same_id = item.instance_id == record["instance_id"]
-            if same_slug or same_id:
-                if not _same_registration_identity(item.record, record) or (requested_id and requested_id != item.instance_id):
-                    raise ContextError(f"Reservation {item.instance_id} for slug {item.slug!r} conflicts with this "
-                                       "request; an administrator must remove it explicitly. Nothing was changed.")
-                record = dict(item.record)
-                context = context_from_record(root, record, root / "instances" / record["instance_id"] / "record.json",
-                                              sha256_bytes(normalize_json(record)))
-                break
-        # 2. Collision checks against published records and every other reservation.
-        reserved_ids = {entry.instance_id for entry in registry.entries}
-        for entry, other, _ in registry.records():
-            if other is None:
-                continue
-            if (other.daemon.engine_id, other.compose_project) == (context.daemon.engine_id, context.compose_project) \
-                    and other.state != "purged":
-                raise ContextError(
-                    f"Compose project {context.compose_project!r} is already registered on daemon "
-                    f"{context.daemon.engine_id} by instance {other.slug}."
-                )
-        for item in pending:
-            if item.kind != "reservation" or item.record is None or item.instance_id == record["instance_id"]:
-                continue
-            reserved_ids.add(item.instance_id)
-            if item.slug == context.slug:
-                raise ContextError(f"slug {context.slug!r} is reserved by pending registration {item.instance_id}.")
-            if (item.record["daemon"]["engine_id"], item.record["compose_project"]) == \
-                    (context.daemon.engine_id, context.compose_project):
-                raise ContextError(
-                    f"Compose project {context.compose_project!r} on daemon {context.daemon.engine_id} is reserved "
-                    f"by pending registration {item.instance_id}."
-                )
-        if record["instance_id"] in reserved_ids:
-            raise ContextError(f"instance_id {record['instance_id']} is already registered or reserved.")
-        others = inventory_of(registry, exclude_instance_id=record["instance_id"])
-        problems = managed_path_conflicts(candidate_paths, context.slug, others, root)
-        if problems:
-            raise ContextError("Managed paths overlap or alias other managed paths; registration refused:\n"
-                               + "\n".join(f"[refuse] {code}: {path}: {message}" for code, path, message in problems))
-        for item in pending:
-            if item.kind != "reservation" and item.instance_id == record["instance_id"]:
-                raise ContextError(f"{item.path}: {item.error}; an administrator must inspect it. Nothing was changed.")
-        # 3. Durable reservation before any instance directory exists.
-        reservation_path = root / RESERVATIONS_RELATIVE / (record["instance_id"] + ".json")
-        if not reservation_path.is_file():
-            _write_reservation(root, record)
-        # 4. Instance directory: staged and published atomically, or already there from an earlier attempt.
-        if _existing_instance_dir_state(root, record) is None:
-            _stage_instance_dir(root, record)
-        # 5. Stable lock: created once, kept forever.
-        lock_path = root / "locks" / (record["instance_id"] + ".lock")
-        if not os.path.lexists(str(lock_path)):
-            _create_lock_file(lock_path)
-        # 6. Registry publication (atomic replace); the default is untouched.
-        private_state = root / "instances" / record["instance_id"]
-        if registry.entry(record["instance_id"]) is None:
-            _write_registry(root, _registry_document(registry, [{
-                "instance_id": record["instance_id"], "slug": context.slug, "record_path": str(private_state / "record.json"),
-            }]))
-        # 7. The reservation has done its job.
-        _clear_reservation(root, record["instance_id"])
+        return _register_locked(root, record, context, requested_id)
+
+
+def _register_locked(root, record, context, requested_id):
+    """Steps 1-7 of register_instance; the caller holds the registry lock."""
+    registry = load_registry(root)
+    candidate_paths = {role: getattr(context.paths, role) for role in ROLE_NAMES}
+    # 1a. Idempotent success: the same request is already published.
+    for entry, other, error in registry.records():
+        if other is None:
+            raise ContextError(f"Registered record {entry.slug} is invalid ({error}); fix it before registering.")
+        if other.slug == context.slug:
+            published_record = parse_strict_json(read_bytes_nofollow(other.record_path), label=str(other.record_path))
+            if _same_registration_identity(published_record, record) and (requested_id in (None, other.instance_id)):
+                _clear_reservation(root, other.instance_id)
+                return other
+            raise ContextError(f"slug {context.slug!r} is already registered.")
+    # 1b. Resume a durable reservation for the same request; refuse a conflicting one.
+    pending = pending_registrations(root)
+    for item in pending:
+        if item.kind != "reservation":
+            continue
+        if item.record is None:
+            raise ContextError(f"Reservation {item.path} is unreadable ({item.error}); an administrator must "
+                               "inspect it explicitly. Nothing was changed.")
+        same_slug = item.slug == context.slug
+        same_id = item.instance_id == record["instance_id"]
+        if same_slug or same_id:
+            if not _same_registration_identity(item.record, record) or (requested_id and requested_id != item.instance_id):
+                raise ContextError(f"Reservation {item.instance_id} for slug {item.slug!r} conflicts with this "
+                                   "request; an administrator must remove it explicitly. Nothing was changed.")
+            record = dict(item.record)
+            context = context_from_record(root, record, root / "instances" / record["instance_id"] / "record.json",
+                                          sha256_bytes(normalize_json(record)))
+            break
+    # 2. Collision checks against published records and every other reservation.
+    reserved_ids = {entry.instance_id for entry in registry.entries}
+    for entry, other, _ in registry.records():
+        if other is None:
+            continue
+        if (other.daemon.engine_id, other.compose_project) == (context.daemon.engine_id, context.compose_project) \
+                and other.state != "purged":
+            raise ContextError(
+                f"Compose project {context.compose_project!r} is already registered on daemon "
+                f"{context.daemon.engine_id} by instance {other.slug}."
+            )
+    for item in pending:
+        if item.kind != "reservation" or item.record is None or item.instance_id == record["instance_id"]:
+            continue
+        reserved_ids.add(item.instance_id)
+        if item.slug == context.slug:
+            raise ContextError(f"slug {context.slug!r} is reserved by pending registration {item.instance_id}.")
+        if (item.record["daemon"]["engine_id"], item.record["compose_project"]) == \
+                (context.daemon.engine_id, context.compose_project):
+            raise ContextError(
+                f"Compose project {context.compose_project!r} on daemon {context.daemon.engine_id} is reserved "
+                f"by pending registration {item.instance_id}."
+            )
+    if record["instance_id"] in reserved_ids:
+        raise ContextError(f"instance_id {record['instance_id']} is already registered or reserved.")
+    others = inventory_of(registry, exclude_instance_id=record["instance_id"])
+    problems = managed_path_conflicts(candidate_paths, context.slug, others, root)
+    if problems:
+        raise ContextError("Managed paths overlap or alias other managed paths; registration refused:\n"
+                           + "\n".join(f"[refuse] {code}: {path}: {message}" for code, path, message in problems))
+    for item in pending:
+        if item.kind != "reservation" and item.instance_id == record["instance_id"]:
+            raise ContextError(f"{item.path}: {item.error}; an administrator must inspect it. Nothing was changed.")
+    # 3. Durable reservation before any instance directory exists.
+    reservation_path = root / RESERVATIONS_RELATIVE / (record["instance_id"] + ".json")
+    if not reservation_path.is_file():
+        _write_reservation(root, record)
+    # 4. Instance directory: staged and published atomically, or already there from an earlier attempt.
+    if _existing_instance_dir_state(root, record) is None:
+        _stage_instance_dir(root, record)
+    # 5. Stable lock: created once, kept forever.
+    lock_path = root / "locks" / (record["instance_id"] + ".lock")
+    if not os.path.lexists(str(lock_path)):
+        _create_lock_file(lock_path)
+    # 6. Registry publication (atomic replace); the default is untouched.
+    private_state = root / "instances" / record["instance_id"]
+    if registry.entry(record["instance_id"]) is None:
+        _write_registry(root, _registry_document(registry, [{
+            "instance_id": record["instance_id"], "slug": context.slug, "record_path": str(private_state / "record.json"),
+        }]))
+    # 7. The reservation has done its job.
+    _clear_reservation(root, record["instance_id"])
     return load_registry(root).load_record(RegistryEntry(record["instance_id"], context.slug, private_state / "record.json"))
 
 
@@ -1658,3 +1721,74 @@ def set_default_instance(root, instance_id):
             raise ContextError(f"{instance_id} is not a registered instance; default unchanged.")
         _write_registry(root, _registry_document(registry, default=instance_id, keep_default=False))
     return load_registry(root)
+
+
+class DiscardRefused(ContextError):
+    """A precondition of discard_unused_registration failed; nothing was changed."""
+
+
+def discard_unused_registration(root, instance_id, expected_record_bytes, retain_dir, *, registry_lock):
+    """Abandon of an open PF-A2.1 install operation: undo a registration nothing has used.
+
+    The caller holds the registry lock (``registry_lock``). The instance lock is taken non-blocking for
+    the duration. Preconditions (each refusal raises DiscardRefused naming it, before any change): the
+    registry default is not this instance; the record bytes (published or already retained) equal
+    ``expected_record_bytes``; ``operations/``, ``state/`` and ``artifacts/`` of the instance are empty;
+    the instance lock is free. Then, in order and each step idempotent: the registry is rewritten without
+    the entry, a reservation for the UUID is cleared, own ``staging/<uuid>.*`` trees are removed and
+    ``instances/<uuid>`` is renamed to ``retain_dir`` (nothing is deleted from it). The lock file stays.
+    """
+    root = Path(root)
+    if registry_lock is None or registry_lock.fd is None or registry_lock.path != root / REGISTRY_LOCK_RELATIVE:
+        raise ContextError("discard_unused_registration requires the held registry lock of " + str(root))
+    if not _anchored_fullmatch(UUID_PATTERN, str(instance_id)):
+        raise ContextError("Invalid instance_id: " + str(instance_id))
+    retain_dir = Path(retain_dir)
+    instance_dir = root / "instances" / instance_id
+    lock_path = root / "locks" / (instance_id + ".lock")
+    handle = None
+    if os.path.lexists(str(lock_path)):
+        try:
+            handle = acquire_lock(lock_path, busy_message=f"the instance lock of {instance_id} is held by another operation")
+        except LockBusy as exc:
+            raise DiscardRefused(str(exc)) from exc
+    try:
+        registry = load_registry(root)
+        if registry.default_instance_id == instance_id:
+            raise DiscardRefused("the registry default is this instance")
+        current = instance_dir if os.path.lexists(str(instance_dir)) else \
+            retain_dir if os.path.lexists(str(retain_dir)) else None
+        if current is not None:
+            try:
+                data = read_bytes_nofollow(current / "record.json")
+            except FileNotFoundError:
+                data = None
+            if data != expected_record_bytes:
+                raise DiscardRefused("the record bytes changed after registration")
+            for name in (OPERATIONS_SUBDIR, STATE_SUBDIR, ARTIFACTS_SUBDIR):
+                try:
+                    entries = os.listdir(str(current / name))
+                except FileNotFoundError:
+                    entries = []
+                if entries:
+                    raise DiscardRefused(f"{name}/ of the instance is not empty")
+        if registry.entry(instance_id) is not None:
+            remaining = [entry for entry in registry.entries if entry.instance_id != instance_id]
+            _write_registry(root, {
+                "schema_version": SCHEMA_VERSION, "default_instance_id": registry.default_instance_id,
+                "instances": [{"instance_id": entry.instance_id, "slug": entry.slug,
+                               "record_path": str(entry.record_path)} for entry in remaining],
+            })
+        _clear_reservation(root, instance_id)
+        staging_root = root / STAGING_RELATIVE
+        for name in sorted(os.listdir(str(staging_root))):
+            if name.split(".", 1)[0] == instance_id:
+                _remove_tree(staging_root / name)
+        if os.path.lexists(str(instance_dir)):
+            if os.path.lexists(str(retain_dir)):
+                raise ContextError(f"{retain_dir} already exists; the instance directory was not moved")
+            _publish_instance_dir(instance_dir, retain_dir)
+            _fsync_directory(instance_dir.parent)
+    finally:
+        if handle is not None:
+            handle.release()

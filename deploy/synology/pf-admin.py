@@ -56,11 +56,13 @@ pf_runner = _load_sibling_module("pf_runner")
 pf_config = _load_sibling_module("pf_config")
 pf_source = _load_sibling_module("pf_source")
 pf_docker = _load_sibling_module("pf_docker")
+# PF-A2.1: the installer (pf install ...) and the install gate/binding re-check of Controller.lock.
+pf_install = _load_sibling_module("pf_install")
 pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A1.4"
+CHECKPOINT = "PF-A2.1"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -81,18 +83,8 @@ INVENTORY_ATTEMPTS = 3
 # reset-db (fullmatch). Any other key or value is refused before rendering (OD-A13-13).
 COMPOSE_VALUE_OVERRIDES = {"POSTGRES_DB": r"pf_(migrate|clean)_[0-9a-f]{20}"}
 GITHUB_HTTPS = "https://github.com/"
-DEFAULTS = {
-    "repository": "CDSemi/part-flow", "branch": "main",
-    "project": "partflow-staging", "environment": "staging",
-    "release_channel": "stable", "auto_update": False,
-    "ci_workflow": "ci.yml", "health_timeout_seconds": 180,
-    "minimum_free_mb": 2048,
-    # Revision checkpoints and purge recovery bundles can contain database data.
-    # Purge recovery also contains the external runtime .env. Keep these artifacts
-    # read-only to the configured DSM group so they can be copied over SMB safely.
-    "backup_read_group": "users",
-    "workspace_write_group": "users",
-}
+# The editable admin-config keys and defaults; owned by pf_config since PF-A2.1 (validate_admin_config).
+DEFAULTS = pf_config.ADMIN_CONFIG_DEFAULTS
 # Runtime control/configuration lives outside the writable repository in v2.5. These names are
 # ignored as *untracked* workspace artifacts only; a verified commit that tracks one of them is
 # refused by the store export, so nothing deployed is ever outside the manifest (A12-R02).
@@ -576,6 +568,11 @@ def unattended():
         return True
 
 
+def input_line(prompt):
+    """One operator answer (the pf install prompts); EOF and Ctrl-C propagate to the caller."""
+    return input(prompt)
+
+
 def confirm(phrase, warning):
     log(warning)
     if unattended():
@@ -704,31 +701,11 @@ class Controller:
                 f"Runtime configuration is missing or unreadable: {path} ({exc.strerror}). "
                 "The controller does not create it; installation/registration provides it."
             ) from exc
-        try:
-            supplied = pf_instance.parse_strict_json(data, label=str(path))
-        except pf_instance.ContextError as exc:
-            raise Failure(str(exc)) from exc
-        if not isinstance(supplied, dict):
-            raise Failure("Runtime configuration must be a JSON object: " + str(path))
-        unknown = set(supplied) - set(DEFAULTS)
-        if unknown:
-            raise Failure("Unknown configuration keys: " + ", ".join(sorted(unknown)))
-        config = dict(DEFAULTS)
-        config.update(supplied)
-        if config["repository"] != "CDSemi/part-flow":
-            raise Failure("This controller is scoped to CDSemi/part-flow.")
-        if not isinstance(config["project"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", config["project"]):
-            raise Failure("Invalid Compose project name.")
-        if config["release_channel"] not in ("stable", "prerelease"):
-            raise Failure("release_channel must be stable or prerelease.")
-        if type(config["auto_update"]) is not bool:
-            raise Failure("auto_update must be a JSON boolean.")
-        for name in ("health_timeout_seconds", "minimum_free_mb"):
-            if type(config[name]) is not int or config[name] <= 0:
-                raise Failure(f"{name} must be a positive integer.")
-        for name in ("backup_read_group", "workspace_write_group"):
-            if not isinstance(config[name], str) or not config[name].strip():
-                raise Failure(f"{name} must be a non-empty DSM group name.")
+        # PF-A2.1: the parse and shape rules are pf_config.validate_admin_config (shared with the installer);
+        # the first problem is raised with the unchanged message.
+        config, problems = pf_config.validate_admin_config(data, label=str(path))
+        if problems:
+            raise Failure(problems[0])
         # The protected registration is authoritative for identity and environment.
         if config["project"] != self.context.compose_project:
             raise Failure(
@@ -2256,6 +2233,8 @@ class Controller:
         except pf_instance.ContextError as exc:
             raise Failure(str(exc)) from exc
         try:
+            # PF-A2.1: inside the lock, before the journal is read or any operation begins.
+            self.require_install_binding(pending_route or "operation")
             journal = self.read_journal()
             if journal is not None:
                 self.check_pending_route(journal, pending_route)
@@ -2268,6 +2247,41 @@ class Controller:
         finally:
             self.end_operation()
             handle.release()
+
+    def require_install_binding(self, route):
+        """PF-A2.1 inside the instance lock: the binding re-check, then the install gate (read-only).
+
+        ``control-binding-changed``: bootstrap.conf no longer binds the running release or record.json changed
+        since validate_context ran in main() (a `pf install control` can complete in between).
+        ``install-operation-pending`` / ``legacy-control-active``: pf_install.require_no_pending_install.
+        """
+        context = self.context
+        conf_path = context.installation_root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_CONF_NAME
+        detail = None
+        try:
+            conf = pf_bootstrap.parse_bootstrap_conf(pf_instance.read_bytes_nofollow(conf_path), label=str(conf_path),
+                                                     error=pf_instance.ContextError)
+            record = pf_instance.read_bytes_nofollow(context.record_path)
+        except (OSError, UnicodeDecodeError, pf_instance.ContextError) as exc:
+            detail = f"the binding cannot be read: {exc}"
+        else:
+            if self.running_release is not None and Path(conf["control_release"]) != Path(self.running_release):
+                detail = f"bootstrap.conf now binds {Path(conf['control_release']).name}"
+            elif pf_instance.sha256_bytes(record) != context.record_sha256:
+                detail = "record.json changed after selection"
+        if detail is not None:
+            raise Failure(f"control-binding-changed: The control binding of instance {context.slug} changed while "
+                          f"{route} was starting ({detail}); nothing was changed. Run the command again.")
+        try:
+            pf_install.require_no_pending_install(context.installation_root, context.instance_id, route=route)
+        except pf_install.InstallError as exc:
+            raise Failure(f"{exc.code}: {exc}") from exc
+
+    def log_installation(self):
+        """PF-A2.1 (read-only): the bound control generation, open install operations, an active legacy control."""
+        for line in pf_install.describe_installation(self.context.installation_root,
+                                                     instance_ids={self.context.instance_id}):
+            log(line)
 
     def staging(self):
         # The protected approved environment decides; config agreement is enforced on load.
@@ -3944,6 +3958,7 @@ class Controller:
     def doctor(self):
         log(f"PartFlow NAS Admin {VERSION} ({CHECKPOINT} checkpoint)")
         self.log_context()
+        self.log_installation()
         validation = self.ensure_validation()
         self.log_validation()
         self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
@@ -3982,6 +3997,7 @@ class Controller:
         # shown before any app config, .env, Git or Docker access (A1-T16). A refused
         # context or a rejected configuration ends here with zero transport calls (A11-R05).
         self.log_context()
+        self.log_installation()
         validation = self.log_trust_summary()
         self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
         self.log_effects()
@@ -4120,6 +4136,7 @@ def parser():
         add(name)
 
     add("instances", help="List registered instances from the protected registry (no Docker access)")
+    pf_install.add_parser(subs)
 
     deploy = add("deploy", help="Create a brand-new managed staging deployment")
     deploy_selection = deploy.add_mutually_exclusive_group()
@@ -4195,6 +4212,7 @@ def parser():
 class Route:
     name: str
     mutability: str      # "read-only" | "registry-read" | "mutating" | "conditional" (mutating only with --apply)
+                         # | "installation" (pf install: its own operation journal and locks, PF-A2.1)
     lock: bool
     trusted_launch: bool
     trusted_context: bool
@@ -4223,6 +4241,10 @@ DISPATCH = {route.name: route for route in (
     _read_only("recoveries", "Controller.display_recoveries"),
     _read_only("ps", "Controller.compose_ps", trusted=True),
     _read_only("logs", "Controller.compose_logs", trusted=True),
+    # PF-A2.1: installer verbs; unlocked here (each verb takes its own locks inside pf_install), a terminal
+    # and a trusted launch for every verb except `install status`.
+    Route("install", "installation", False, True, False, "any", "none", "never", "terminal", "",
+          "pf_install.run_installed"),
     _locked("permissions", "mutating", "refuse", "none", "never", "policy", "permissions", "Controller.permissions"),
     _locked("deploy", "mutating", "refuse", "empty-target", "always", "terminal", "", "Controller.deploy"),
     _locked("abort-deploy", "mutating", "abort-deploy", "plan", "always", "terminal", "", "Controller.abort_deploy"),
@@ -4239,7 +4261,8 @@ DISPATCH = {route.name: route for route in (
 )}
 KNOWN_COMMANDS = frozenset(DISPATCH)
 # Commands that never take the instance lock and never mutate managed state.
-READ_ONLY_COMMANDS = frozenset(name for name, route in DISPATCH.items() if not route.lock)
+READ_ONLY_COMMANDS = frozenset(name for name, route in DISPATCH.items() if route.mutability in ("read-only",
+                                                                                              "registry-read"))
 # Effect classifier only (compose_effect): Compose verbs that change nothing. No route forwards these
 # words; `ps` and `logs` are rebuilt from parsed options by Controller.compose_ps/compose_logs.
 COMPOSE_READ_ONLY_VERBS = {"ps", "logs", "version", "top", "images", "port", "ls", "events", "stats"}
@@ -4279,7 +4302,7 @@ COMPOSE_GLOBAL_OPTIONS = frozenset({
 class EntryRoute:
     id: str              # "E1".."E11"
     entry: str
-    target_route: str    # a DISPATCH name | "*" (every DISPATCH route) | "refuse" | "fail_closed"
+    target_route: str    # a DISPATCH name | "*" (every DISPATCH route) | "refuse" | "fail_closed" | "installer-init"
     mutability: str      # target's mutability | "per-route" for "*" | "none" for "refuse" | "mutating"
     lock: str            # "per-route" | "none" | "held" (the failing operation's own lock, until finally)
     pending: str         # "per-route" | "n/a" | "existing-journal" (fail_closed acts only when one exists)
@@ -4297,8 +4320,9 @@ ENTRY_ROUTES = (
     EntryRoute("E3", "legacy <home>/control/pf.sh", "refuse", "none", "none", "n/a",
                "test_entry_routes.SchedulerWrappers.test_sw4_legacy_control_wrapper_reports_the_command_word",
                "PF-A1.4"),
-    EntryRoute("E4", "/usr/local/bin/pf (legacy installer)", "refuse", "none", "none", "n/a",
-               "test_entry_routes.StaticScan.test_ss7_shell_entry_points", "PF-A2"),
+    EntryRoute("E4", "global launcher (created by install-control.sh init when absent) -> <root>/bootstrap/pf", "*",
+               "per-route", "per-route", "per-route",
+               "test_install.LauncherBinding.test_lb2_global_launcher_execs_the_bootstrap", "PF-A2.1"),
     EntryRoute("E5", "backup.sh", "backup", "mutating", "yes", "refuse",
                "test_entry_routes.SchedulerWrappers.test_sw6_installed_wrappers_reach_the_policy_gates", "PF-A1.4"),
     EntryRoute("E6", "release-check.sh", "release-check", "conditional", "yes", "refuse",
@@ -4315,8 +4339,8 @@ ENTRY_ROUTES = (
                "test_entry_routes.ErrorHandler."
                "test_eh7_a_real_signal_through_the_installed_launcher_runs_fail_closed_before_the_lock_is_free",
                "PF-A1.4"),
-    EntryRoute("E11", "install-control.sh", "refuse", "none", "none", "n/a",
-               "test_entry_routes.StaticScan.test_ss7_shell_entry_points", "PF-A2"),
+    EntryRoute("E11", "install-control.sh", "installer-init", "mutating", "none", "install-journal",
+               "test_install.RepositoryInstaller.test_ri1_init_end_to_end", "PF-A2.1"),
 )
 
 
@@ -4406,6 +4430,8 @@ def display_registry(registry):
     root = registry.root
     default = registry.default_instance_id
     log(f"Registered instances at {root} | default: {default or 'none (explicit --instance required when several exist)'}")
+    for line in pf_install.describe_installation(root):
+        log(line)
     rows = registry.records()
     if not rows:
         log("  (no registrations)")
@@ -4521,6 +4547,10 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         _, name = classify_command(rest)
         args = parser().parse_args(rest if rest else [name])
         route = DISPATCH[args.command]
+        if args.command == "install":
+            # PF-A2.1: the installer reads the registry and takes its locks itself (registry lock first).
+            return pf_install.run_installed(root, args, running_release=running_release, trusted_launch=trusted_launch,
+                                            interaction=pf_install.Interaction(unattended, input_line, log))
         try:
             registry = pf_instance.load_registry(root)
         except pf_instance.ContextError as exc:
@@ -4647,31 +4677,10 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         held_lock.close()
 
 
-# Every catchable termination request unwinds as KeyboardInterrupt, so the runner terminates the
-# child process group and records the unresolved effect, fail_closed() runs and the instance lock
-# is released only afterwards. A default SIGHUP/SIGQUIT action would kill the controller without
-# unwinding (an SSH drop during a migration or restore) and leave the child running unrecorded.
-INTERRUPT_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
-
-
-def install_interrupt_handlers():
-    """Route INTERRUPT_SIGNALS through one handler that interrupts the controller once.
-
-    Later signals are ignored so they cannot abort the group termination, the effect record or
-    the fail-closed stop already under way (each bounded by its own deadline); SIGKILL remains.
-    Python-level handlers are not inherited across exec, so children keep default dispositions.
-    """
-    fired = []
-
-    def interrupted(signum, frame):
-        if fired:
-            return
-        fired.append(signum)
-        raise KeyboardInterrupt(f"Interrupted by signal {signum}")
-
-    for name in INTERRUPT_SIGNALS:
-        signal.signal(getattr(signal, name), interrupted)
-    return interrupted
+# The shared interrupt handler lives in pf_runner since PF-A2.1 (also installed by pf_install.main for
+# `install-control.sh init`); re-exported here under the same names.
+INTERRUPT_SIGNALS = pf_runner.INTERRUPT_SIGNALS
+install_interrupt_handlers = pf_runner.install_interrupt_handlers
 
 
 if __name__ == "__main__":

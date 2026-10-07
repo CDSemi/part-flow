@@ -51,6 +51,10 @@ def _load_sibling_module(name):
 pf_bootstrap = _load_sibling_module("pf_bootstrap")
 TRUSTED_UID = pf_bootstrap.TRUSTED_UID
 TOOL_IDS = pf_bootstrap.TOOL_IDS
+# PF-A2.1: the installer also runs the registered interpreter (smoke and end-to-end checks) through this
+# runner. ``interpreter`` is never a ``tools.conf`` key (parsing keeps pf_bootstrap.TOOL_IDS) and the
+# lifecycle controller refuses it (Controller.command checks pf_bootstrap.TOOL_IDS).
+RUNNER_TOOL_IDS = TOOL_IDS + ("interpreter",)
 
 # Fixed trusted PATH for children (same list as the installed launcher). It exists for
 # helpers a registered tool may start itself; the control release never resolves its own
@@ -341,7 +345,7 @@ class ProcessRunner:
 
     def __init__(self, tools, *, home, docker_config, docker_host, redactor=None, effects_path=None,
                  stream_sink=None):
-        unknown = sorted(set(tools) - set(TOOL_IDS))
+        unknown = sorted(set(tools) - set(RUNNER_TOOL_IDS))
         if unknown:
             raise RunnerError("tools-unknown: " + ", ".join(unknown))
         self.tools = {key: str(value) for key, value in tools.items()}
@@ -357,7 +361,7 @@ class ProcessRunner:
     # -- executables -------------------------------------------------------
 
     def registered(self, tool):
-        if tool not in TOOL_IDS:
+        if tool not in RUNNER_TOOL_IDS:
             raise RunnerError(f"tool-unknown: {tool!r} is not a typed executable id")
         path = self.tools.get(tool)
         if path is None:
@@ -374,7 +378,7 @@ class ProcessRunner:
     def describe(self):
         """Read-only description of every registered tool and its trust status."""
         rows = []
-        for tool in TOOL_IDS:
+        for tool in RUNNER_TOOL_IDS:
             path = self.tools.get(tool)
             if path is None:
                 rows.append((tool, "unregistered", ""))
@@ -690,6 +694,34 @@ def load_unresolved_effects(path):
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise RunnerError(f"{path}: unresolved effects must be a JSON array of objects")
     return value
+
+
+# Every catchable termination request unwinds as KeyboardInterrupt, so the runner terminates the
+# child process group and records the unresolved effect, fail_closed() runs and the instance lock
+# is released only afterwards. A default SIGHUP/SIGQUIT action would kill the controller without
+# unwinding (an SSH drop during a migration or restore) and leave the child running unrecorded.
+# Shared by pf-admin.py (``pf …``) and pf_install.py (repository ``install-control.sh init``) since PF-A2.1.
+INTERRUPT_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
+
+
+def install_interrupt_handlers():
+    """Route INTERRUPT_SIGNALS through one handler that interrupts the controller once.
+
+    Later signals are ignored so they cannot abort the group termination, the effect record or
+    the fail-closed stop already under way (each bounded by its own deadline); SIGKILL remains.
+    Python-level handlers are not inherited across exec, so children keep default dispositions.
+    """
+    fired = []
+
+    def interrupted(signum, frame):
+        if fired:
+            return
+        fired.append(signum)
+        raise KeyboardInterrupt(f"Interrupted by signal {signum}")
+
+    for name in INTERRUPT_SIGNALS:
+        signal.signal(getattr(signal, name), interrupted)
+    return interrupted
 
 
 def failure_detail(result, limit=5000):

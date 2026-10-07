@@ -1,174 +1,50 @@
 #!/bin/sh
-# Install the repository's reviewed NAS admin source as a root-owned control plane.
+# Deployment Admin repository installer (PF-A2.1): initializes a NEW protected installation root only.
+#
+#   sudo sh ./deploy/synology/install-control.sh init [--root <root>] [--interpreter <python3>]
+#        [--tool <id>=<path>]... [--launcher-path <path> | --no-launcher]
+#
+# Trust boundary: the administrator chooses and runs these reviewed repository bytes. This wrapper only
+# selects a root-owned system interpreter and execs the repository's pf_install.py in isolated mode with
+# an environment rebuilt from scratch; pf_install.py reads the candidate control files as data, shows every
+# conflict, asks for a typed confirmation and builds the root in a locked private sibling directory before
+# one atomic rename. Every other verb (register, migrate-legacy, control, resume, status) runs from the
+# installed, verified control: sudo <root>/bootstrap/pf install <verb>.
 set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+unset PF_PYTHON PF_HOME PF_REPO_ROOT PF_CONFIG_DIR PF_CONTROL_DIR
+unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONSAFEPATH PYTHONUSERBASE LD_PRELOAD LD_LIBRARY_PATH
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Run as root: sudo sh ./deploy/synology/install-control.sh" >&2
+    echo "Run as root: sudo sh ./deploy/synology/install-control.sh init --root <root>" >&2
     exit 2
 fi
 if [ ! -t 0 ]; then
     echo "Interactive terminal required; installation has no --yes bypass." >&2
     exit 2
 fi
-
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-PF_HOME=$(CDPATH= cd -- "$REPO_ROOT/.." && pwd)
-CONTROL="$PF_HOME/control"
-CONFIG="$PF_HOME/config"
-GROUP=users
-
-if ! grep -q "^${GROUP}:" /etc/group 2>/dev/null; then
-    echo "Required DSM group '$GROUP' was not found." >&2
+if [ "$#" -lt 1 ]; then
+    echo "Usage: sudo sh ./deploy/synology/install-control.sh init [--root <root>] [--interpreter <python3>]" \
+        "[--tool <id>=<path>]... [--launcher-path <path> | --no-launcher]" >&2
+    exit 2
+fi
+if [ "$1" != init ]; then
+    echo "installer-verb-installed-only: install-control.sh only initializes a new installation root." \
+        "Run '$1' from the installed control: sudo <root>/bootstrap/pf install $1 …. Nothing was read or changed." >&2
     exit 2
 fi
 
-for path in \
-    "$REPO_ROOT/pf.sh" \
-    "$REPO_ROOT/compose.nas.yaml" \
-    "$SCRIPT_DIR/pf-admin.py" \
-    "$SCRIPT_DIR/pf_instance.py" \
-    "$SCRIPT_DIR/pf_bootstrap.py" \
-    "$SCRIPT_DIR/pf_runner.py" \
-    "$SCRIPT_DIR/pf_config.py" \
-    "$SCRIPT_DIR/pf_source.py" \
-    "$SCRIPT_DIR/pf_docker.py" \
-    "$SCRIPT_DIR/backup.sh" \
-    "$SCRIPT_DIR/release-check.sh" \
-    "$SCRIPT_DIR/pf-config.example.json" \
-    "$SCRIPT_DIR/nas.env.example"
-do
-    if [ ! -f "$path" ]; then
-        echo "Missing install source: $path" >&2
-        exit 2
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PY=
+for candidate in /usr/bin/python3 /usr/local/bin/python3 /var/packages/Python3.9/target/usr/bin/python3; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ]; then
+        PY=$candidate
+        break
     fi
 done
-
-cat <<SUMMARY
-PartFlow NAS control-plane installation
-  Repository (users writable): $REPO_ROOT
-  Runtime control (users read): $CONTROL
-  Runtime config (users write): $CONFIG
-  Backup/recovery read group:   $GROUP
-
-The repository copies are source/reference files only after installation.
-Operational commands will run the root-owned copy under control/.
-SUMMARY
-printf "Type exactly 'INSTALL CONTROL': "
-IFS= read -r answer
-if [ "$answer" != "INSTALL CONTROL" ]; then
-    echo "Cancelled; nothing was changed." >&2
-    exit 1
+if [ -z "$PY" ]; then
+    echo "No root-owned python3 found in /usr/bin, /usr/local/bin or the DSM Python3.9 package; nothing was changed." >&2
+    exit 2
 fi
-
-# Resolve legacy runtime configuration before replacing the control plane.
-mkdir -p "$CONFIG"
-chown root:"$GROUP" "$CONFIG"
-chmod 2770 "$CONFIG"
-
-if [ -f "$REPO_ROOT/.env" ]; then
-    if [ -f "$CONFIG/.env" ]; then
-        if ! cmp -s "$REPO_ROOT/.env" "$CONFIG/.env"; then
-            echo "Both repo/.env and config/.env exist and differ. Reconcile them before installation." >&2
-            exit 1
-        fi
-        rm -f "$REPO_ROOT/.env"
-    else
-        mv "$REPO_ROOT/.env" "$CONFIG/.env"
-    fi
-fi
-
-LEGACY_CONFIG="$SCRIPT_DIR/pf-config.json"
-if [ -f "$LEGACY_CONFIG" ] && [ -f "$CONFIG/pf-config.json" ]; then
-    if ! cmp -s "$LEGACY_CONFIG" "$CONFIG/pf-config.json"; then
-        echo "Both legacy deploy/synology/pf-config.json and config/pf-config.json exist and differ." >&2
-        echo "Reconcile them before installation; neither file was replaced." >&2
-        exit 1
-    fi
-elif [ -f "$LEGACY_CONFIG" ]; then
-    cp -p "$LEGACY_CONFIG" "$CONFIG/pf-config.json"
-elif [ ! -f "$CONFIG/pf-config.json" ]; then
-    cp "$SCRIPT_DIR/pf-config.example.json" "$CONFIG/pf-config.json"
-fi
-
-for path in "$CONFIG/pf-config.json" "$CONFIG/.env"; do
-    if [ -f "$path" ]; then
-        chown root:"$GROUP" "$path"
-        chmod 0660 "$path"
-    fi
-done
-# The repo-local runtime config was a v2.4 compatibility location only.
-# Remove it after migration so there is one authoritative host configuration.
-if [ -f "$LEGACY_CONFIG" ]; then
-    rm -f "$LEGACY_CONFIG"
-fi
-
-TEMP="$PF_HOME/.control-install-$$"
-trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
-rm -rf "$TEMP"
-mkdir -p "$TEMP"
-cp "$REPO_ROOT/pf.sh" "$TEMP/pf.sh"
-cp "$SCRIPT_DIR/pf-admin.py" "$TEMP/pf-admin.py"
-cp "$SCRIPT_DIR/pf_instance.py" "$TEMP/pf_instance.py"
-cp "$SCRIPT_DIR/pf_bootstrap.py" "$TEMP/pf_bootstrap.py"
-cp "$SCRIPT_DIR/pf_runner.py" "$TEMP/pf_runner.py"
-cp "$SCRIPT_DIR/pf_config.py" "$TEMP/pf_config.py"
-cp "$SCRIPT_DIR/pf_source.py" "$TEMP/pf_source.py"
-cp "$SCRIPT_DIR/pf_docker.py" "$TEMP/pf_docker.py"
-cp "$REPO_ROOT/compose.nas.yaml" "$TEMP/compose.nas.yaml"
-cp "$SCRIPT_DIR/backup.sh" "$TEMP/backup.sh"
-cp "$SCRIPT_DIR/release-check.sh" "$TEMP/release-check.sh"
-cp "$SCRIPT_DIR/pf-config.example.json" "$TEMP/pf-config.example.json"
-cp "$SCRIPT_DIR/nas.env.example" "$TEMP/nas.env.example"
-
-chown -R root:"$GROUP" "$TEMP"
-find "$TEMP" -type d -exec chmod 0750 {} \;
-find "$TEMP" -type f -exec chmod 0640 {} \;
-# Root may execute operational shell entry points; the users group can only read them.
-chmod 0740 "$TEMP/pf.sh" "$TEMP/backup.sh" "$TEMP/release-check.sh"
-
-if [ -d "$CONTROL" ]; then
-    UPGRADE_DIR="$PF_HOME/recovery/control-upgrades"
-    mkdir -p "$UPGRADE_DIR"
-    chown root:"$GROUP" "$PF_HOME/recovery" "$UPGRADE_DIR" 2>/dev/null || true
-    chmod 0750 "$PF_HOME/recovery" "$UPGRADE_DIR" 2>/dev/null || true
-    stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    tar -czf "$UPGRADE_DIR/control-$stamp.tar.gz" -C "$PF_HOME" control
-    chown root:"$GROUP" "$UPGRADE_DIR/control-$stamp.tar.gz" 2>/dev/null || true
-    chmod 0640 "$UPGRADE_DIR/control-$stamp.tar.gz" 2>/dev/null || true
-    rm -rf "$CONTROL"
-fi
-mv "$TEMP" "$CONTROL"
-trap - EXIT HUP INT TERM
-
-# Install a tiny root-owned launcher. It contains no lifecycle logic.
-mkdir -p /usr/local/bin
-LAUNCHER=/usr/local/bin/pf
-if [ -e "$LAUNCHER" ] && ! grep -q '^# PartFlow NAS installed launcher$' "$LAUNCHER" 2>/dev/null; then
-    echo "WARNING: $LAUNCHER already exists and is not managed by PartFlow; it was not overwritten." >&2
-else
-    cat > "$LAUNCHER" <<LAUNCHER_EOF
-#!/bin/sh
-# PartFlow NAS installed launcher
-exec "$CONTROL/pf.sh" "\$@"
-LAUNCHER_EOF
-    chown root:root "$LAUNCHER"
-    chmod 0700 "$LAUNCHER"
-fi
-
-# Normalize the writable repo/config and read-only backup/recovery policies.
-PF_HOME="$PF_HOME" PF_REPO_ROOT="$REPO_ROOT" PF_CONFIG_DIR="$CONFIG" PF_CONTROL_DIR="$CONTROL" \
-    "$CONTROL/pf.sh" permissions
-
-cat <<DONE
-Control-plane installation complete.
-
-Use:
-  sudo pf doctor
-  sudo pf status
-  sudo pf update --latest
-
-Runtime .env is now:
-  $CONFIG/.env
-The writable repository .env is no longer used by the controller.
-DONE
+exec env -i PATH="$PATH" HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM="${TERM:-dumb}" "$PY" -I -B "$SCRIPT_DIR/pf_install.py" "$@"

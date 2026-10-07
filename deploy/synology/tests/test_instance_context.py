@@ -384,6 +384,20 @@ class ReadOnlyDiagnostics(Base):
         self.assertIsNone(controller.read_journal())
 
 
+    def test_read_only_routes_show_an_open_install_operation_and_change_nothing(self):
+        """A1-T03 (PF-A2.1 sub-case): instances/status/doctor show an open install operation and change no byte."""
+        operation = forge_open_install_operation(self.layout.root)
+        before = pfx.snapshot_tree(self.base)
+        results = self.run_all_read_only([["instances"], ["status"], ["doctor"]])
+        self.assertEqual(pfx.snapshot_tree(self.base), before)
+        for arguments, code, out, err, controller in results:
+            with self.subTest(arguments=arguments):
+                self.assertIn(f"INSTALL OPERATION {operation} kind=control phase=switching: next: "
+                              f"'sudo {self.layout.root}/bootstrap/pf install resume' or 'sudo {self.layout.root}/"
+                              "bootstrap/pf install resume --abandon'", out)
+                self.assertIn(f"Control: bound {pfx.RELEASE_ID} (bootstrap.conf sha256 ", out)
+
+
 @ROOT_REQUIRED
 class StableLocks(Base):
     """A1-T04."""
@@ -1714,6 +1728,142 @@ class RegistrySemanticInvariants(Base):
         self.assertEqual(code, 0)
         self.assertIn("record=INVALID", out)
         self.assertTrue((private_state / "record.json").exists())
+
+
+# =============================================================================== PF-A2.1 additions
+
+
+def forge_open_install_operation(root, *, kind="control", phase="switching"):
+    """A schema-valid open install operation (plan + journal) for display and gate tests."""
+    pf_install = pf.pf_install
+    operation_id = pf_install.new_operation_id()
+    plan = pf_install._empty_plan(kind, str(root), operation_id, pf_install._utc_text())
+    plan_bytes = pf_instance.normalize_json(plan)
+    journal = {"schema_version": 1, "operation_id": operation_id, "kind": kind,
+               "plan_sha256": pf_instance.sha256_bytes(plan_bytes), "phase": phase, "sequence": 3,
+               "started": plan["created"], "updated": plan["created"], "effects": [], "result": None,
+               "last_error": None, "next": ["install resume", "install resume --abandon"]}
+    directory = Path(root) / "install-operations" / operation_id
+    pf_instance._create_private_dir(directory, 0o700)
+    pf_instance._write_private_file(directory / "plan.json", plan_bytes, 0o600)
+    pf_instance._write_private_file(directory / "journal.json", pf_instance.normalize_json(journal), 0o600)
+    return operation_id
+
+
+@ROOT_REQUIRED
+class InstallerRootPrimitives(Base):
+    """PF-A2.1 section 2.2 (a)/(b)/(c)/(e): the pf_instance changes the installer reuses."""
+
+    def test_root_layout_requires_the_installer_directories(self):
+        self.assertEqual(pf_instance.validate_installation_root(self.layout.root).blocking(), [])
+        for relative in ("install-operations", "home", "home/.docker", "home/.docker/config.json"):
+            with self.subTest(missing=relative):
+                path = self.layout.root / relative
+                aside = self.base / "aside"
+                os.rename(path, aside)
+                try:
+                    blocking = pf_instance.validate_installation_root(self.layout.root).blocking()
+                    self.assertTrue([line for line in blocking if line.startswith("[refuse] missing: " + str(path))],
+                                    blocking)
+                finally:
+                    os.rename(aside, path)
+        self.assertEqual((self.layout.root / "home/.docker/config.json").read_bytes(), b"{}\n")
+
+    def test_initialize_into_a_build_dir_accepts_only_an_install_intent(self):
+        target_root = self.base / "built-root"
+        build = self.base / ".built-root.init-0123abcd"
+        build.mkdir(mode=0o700)
+        (build / "install-operations" / "inst-20261006T000000Z-0123abcd").mkdir(parents=True, mode=0o700)
+        arguments = dict(launcher=(pfx.REPO_PACKAGE / "pf.sh").read_bytes(), interpreter=os.path.realpath(sys.executable),
+                         release_id=pfx.RELEASE_ID, release_files=pfx.release_files(),
+                         profile=(pfx.PROFILE_NAME, pfx.profile_document()),
+                         policy_documents={pfx.POLICY_NAME: pfx.policy_document()}, wrappers=pfx.wrapper_files())
+        values = pf_instance.initialize_installation_root(target_root, build_dir=build, **arguments)
+        self.assertEqual(values["release_dir"], target_root / "releases" / pfx.RELEASE_ID)
+        conf = (build / "bootstrap" / "bootstrap.conf").read_text()
+        self.assertIn(f"control_release={target_root}/releases/{pfx.RELEASE_ID}\n", conf)
+        self.assertFalse(target_root.exists())
+        self.assertTrue((build / "install-operations" / "inst-20261006T000000Z-0123abcd").is_dir())
+        os.rename(build, target_root)
+        self.assertEqual(pf_instance.validate_installation_root(target_root).blocking(), [])
+        for name, content in (("other", "x"), ("install-operations-extra", None)):
+            with self.subTest(extra=name):
+                other = self.base / (".other-" + name)
+                other.mkdir()
+                (other / "install-operations").mkdir()
+                if content is None:
+                    (other / "install-operations" / "not-an-operation").mkdir()
+                else:
+                    (other / name).write_text(content)
+                with self.assertRaisesRegex(pf_instance.ContextError, "Refusing to initialize a non-empty"):
+                    pf_instance.initialize_installation_root(self.base / ("root-" + name), build_dir=other, **arguments)
+                self.assertFalse((other / "bootstrap").exists())
+
+    def test_register_with_the_held_registry_lock_behaves_as_without(self):
+        first = pfx.data_home(self.base / "one", project="partflow-one", group=GROUP)
+        second = pfx.data_home(self.base / "two", project="partflow-two", group=GROUP)
+        plain = pfx.register(self.layout, "one", first, project="partflow-one")
+        with pf_instance.acquire_registry_lock(self.layout.root) as handle:
+            held = pf_instance.register_instance(self.layout.root, pfx.registration_spec(
+                self.layout, "two", second, project="partflow-two"), registry_lock=handle)
+            # The handle stays held by this caller: the transaction never re-acquired or released it.
+            with self.assertRaises(pf_instance.LockBusy):
+                pf_instance.acquire_registry_lock(self.layout.root)
+            self.assertIsNotNone(handle.fd)
+        self.assertEqual(json.loads(held.record_path.read_bytes())["control"],
+                         json.loads(plain.record_path.read_bytes())["control"])
+        self.assertEqual([entry.slug for entry in pf_instance.load_registry(self.layout.root).entries], ["one", "two"])
+        again = pfx.data_home(self.base / "three", project="partflow-three", group=GROUP)
+        with pf_instance.acquire_registry_lock(self.layout.root) as handle:
+            with mock.patch.object(pf_instance, "acquire_registry_lock") as acquire:
+                pf_instance.register_instance(self.layout.root, pfx.registration_spec(
+                    self.layout, "three", again, project="partflow-three"), registry_lock=handle)
+            acquire.assert_not_called()
+        foreign = pf_instance.LockHandle(self.base / "elsewhere.lock", None, os.stat(self.base))
+        with self.assertRaisesRegex(pf_instance.ContextError, "not the held registry lock"):
+            pf_instance.register_instance(self.layout.root, pfx.registration_spec(
+                self.layout, "four", pfx.data_home(self.base / "four", project="partflow-four", group=GROUP),
+                project="partflow-four"), registry_lock=foreign)
+
+    def test_discard_unused_registration_refuses_every_failed_precondition(self):
+        context, _ = self.instance("fresh")
+        record = context.record_path.read_bytes()
+        retain = self.base / "retained"
+
+        def attempt(expected=record):
+            with pf_instance.acquire_registry_lock(self.layout.root) as handle:
+                pf_instance.discard_unused_registration(self.layout.root, context.instance_id, expected, retain,
+                                                        registry_lock=handle)
+
+        cases = []
+        cases.append(("default", lambda: pf_instance.set_default_instance(self.layout.root, context.instance_id),
+                      lambda: pf_instance.set_default_instance(self.layout.root, None), "the registry default"))
+        marker = context.operations_dir / "20261006T000000Z-backup-00000000"
+        cases.append(("operations", lambda: marker.mkdir(mode=0o700), lambda: marker.rmdir(), "operations/ of the instance"))
+        cases.append(("record", None, None, "the record bytes changed"))
+        held = {}
+        cases.append(("instance lock", lambda: held.setdefault("handle", pf_instance.acquire_instance_lock(context)),
+                      lambda: held.pop("handle").release(), "is held by another operation"))
+        for label, arrange, restore, message in cases:
+            with self.subTest(precondition=label):
+                if arrange:
+                    arrange()
+                before = pfx.snapshot_tree(self.layout.root)
+                try:
+                    with self.assertRaisesRegex(pf_instance.DiscardRefused, message):
+                        attempt(record + b" " if label == "record" else record)
+                finally:
+                    after = pfx.snapshot_tree(self.layout.root)
+                    if restore:
+                        restore()
+                self.assertEqual(after, before)
+                self.assertFalse(retain.exists())
+        attempt()
+        self.assertEqual(pf_instance.load_registry(self.layout.root).entries, ())
+        self.assertTrue((retain / "record.json").is_file())
+        self.assertTrue(context.lock_path.exists())  # the lock inode is never removed
+        self.assertEqual(pf_instance.pending_registrations(self.layout.root), [])
+        attempt()  # idempotent
 
 
 if __name__ == "__main__":

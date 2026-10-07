@@ -1693,6 +1693,22 @@ class ReadOnlyAfterExtraction(Base):
 
 
 @ROOT_REQUIRED
+class InterpreterToolBoundary(Base):
+    """PF-A2.1: the lifecycle controller never starts the installer's ``interpreter`` tool id."""
+
+    def test_controller_command_refuses_the_interpreter(self):
+        self.install({"git": "/usr/bin/git"} if os.path.isfile("/usr/bin/git") else {})
+        context, _ = self.instance()
+        controller = self.controller(context)
+        controller._runner = pf_runner.ProcessRunner({"interpreter": os.path.realpath(sys.executable)},
+                                                     home=context.home_dir, docker_config=context.docker_config_dir,
+                                                     docker_host=context.daemon.endpoint)
+        with self.assertRaisesRegex(pf.Failure, "'interpreter' is not a registered executable id"):
+            controller.command(["interpreter", "-c", "print(1)"], effect=None)
+        self.assertEqual(controller.runner.history, [])
+
+
+@ROOT_REQUIRED
 class ProtectedRuntimeDirectories(Base):
     """A1-T17 repeat: the registration-created runtime home, operations and artifacts directories are
     protected private state; an unsafe one refuses mutation from leaf modes alone."""
@@ -1752,7 +1768,8 @@ class StaticCallSites(unittest.TestCase):
     """Every child process goes through pf_runner; no other release module starts one."""
 
     def test_only_the_runner_starts_processes(self):
-        for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py"):
+        for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py",
+                     "pf_install.py"):
             source = (pfx.PACKAGE / name).read_text()
             for forbidden in ("import subprocess", "os.system(", "os.popen(", "os.exec", "os.spawn", "os.fork(",
                               "shell=True"):
@@ -1761,7 +1778,8 @@ class StaticCallSites(unittest.TestCase):
                 self.assertNotIn(forbidden, source, f"{name} contains {forbidden}")
         admin = (pfx.PACKAGE / "pf-admin.py").read_text()
         # A12-R03: control-plane children are argv only; no shell command strings anywhere in the release.
-        for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py", "pf_runner.py"):
+        for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py", "pf_runner.py",
+                     "pf_install.py"):
             source = (pfx.PACKAGE / name).read_text()
             for forbidden in ('"sh", "-c"', "'sh', '-c'", '"bash", "-c"', "'bash', '-c'", "sh -c", "bash -c",
                               "shell=True", "$POSTGRES_USER", "$POSTGRES_DB", '"$1"', '"$2"'):
@@ -1786,17 +1804,60 @@ class StaticCallSites(unittest.TestCase):
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
             for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py",
-                         "pf_runner.py"):
+                         "pf_runner.py", "pf_install.py"):
                 compile((pfx.PACKAGE / name).read_text(), str(pfx.PACKAGE / name), "exec")
             pf_source.parse_git_config("[core]\n\tbare = true # comment\n\tfsmonitor = false ; note\n")
         self.assertNotIn("re.split(r\"\\s[#;]\", value, 1)", (pfx.PACKAGE / "pf_source.py").read_text())
         self.assertIn("maxsplit=1", (pfx.PACKAGE / "pf_source.py").read_text())
 
     def test_release_inventory_and_installer_carry_the_new_modules(self):
-        for name in ("pf_runner.py", "pf_config.py", "pf_source.py"):
+        # PF-A2.1: the installer reads the release files from pf_install.CONTROL_RELEASE_FILES (install-control.sh is
+        # the thin init wrapper that execs pf_install.py), so the inventory proof moved there.
+        for name in ("pf_runner.py", "pf_config.py", "pf_source.py", "pf_install.py"):
             self.assertIn(name, pf_bootstrap.REQUIRED_RELEASE_FILES)
-            self.assertIn(name, (pfx.PACKAGE / "install-control.sh").read_text())
+            self.assertEqual(pf.pf_install.CONTROL_RELEASE_FILES[name], "deploy/synology/" + name)
+        self.assertTrue(set(pf_bootstrap.REQUIRED_RELEASE_FILES) <= set(pf.pf_install.CONTROL_RELEASE_FILES))
+        self.assertIn('"$PY" -I -B "$SCRIPT_DIR/pf_install.py" "$@"', (pfx.PACKAGE / "install-control.sh").read_text())
         self.assertEqual(pf_bootstrap.TOOL_IDS, ("docker", "docker_compose", "git", "ip", "hostname"))
+
+    def test_interpreter_is_a_runner_tool_id_but_never_a_tools_conf_key(self):
+        """PF-A2.1: the installer's smoke and end-to-end checks run the registered interpreter through the runner."""
+        self.assertEqual(pf_runner.RUNNER_TOOL_IDS, pf_bootstrap.TOOL_IDS + ("interpreter",))
+        runner = pf_runner.ProcessRunner({"interpreter": "/usr/bin/python3"}, home="/nonexistent",
+                                         docker_config="/nonexistent/.docker", docker_host="unix:///x.sock")
+        self.assertEqual(runner.registered("interpreter"), "/usr/bin/python3")
+        self.assertIn("interpreter", [row[0] for row in runner.describe()])
+        with self.assertRaises(pf_runner.RunnerError):
+            pf_runner.ProcessRunner({"python": "/usr/bin/python3"}, home="/x", docker_config="/x", docker_host="x")
+        with self.assertRaisesRegex(pf_bootstrap.BootstrapError, "unknown key 'interpreter'"):
+            pf_bootstrap.parse_tools_conf(b"interpreter=/usr/bin/python3\n", label="tools.conf")
+        with self.assertRaisesRegex(pf_bootstrap.BootstrapError, "unknown tool ids: interpreter"):
+            pf_bootstrap.render_tools_conf({"interpreter": "/usr/bin/python3"})
+
+    def test_validate_admin_config_returns_the_controller_messages_in_order(self):
+        """PF-A2.1 (d): the extracted validator keeps the exact Controller.load_app_config messages and order."""
+        validate = pf_config.validate_admin_config
+        self.assertEqual(pf.DEFAULTS, pf_config.ADMIN_CONFIG_DEFAULTS)
+        config, problems = validate(b'{"project": "partflow-x", "environment": "staging"}', label="cfg")
+        self.assertEqual(problems, [])
+        self.assertEqual(config, dict(pf_config.ADMIN_CONFIG_DEFAULTS, project="partflow-x"))
+        cases = {
+            b"{": ["cfg: invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"],
+            b'{"a": 1, "a": 2}': ["cfg: Duplicate JSON object key: a"],
+            b'{"a": NaN}': ["cfg: Non-finite JSON number is not allowed: NaN"],
+            b"[]": ["Runtime configuration must be a JSON object: cfg"],
+            json.dumps({"zz": 1, "repository": "x/y", "project": "Bad", "release_channel": "beta", "auto_update": 1,
+                        "health_timeout_seconds": 0, "minimum_free_mb": True, "backup_read_group": " ",
+                        "workspace_write_group": 3}).encode(): [
+                "Unknown configuration keys: zz", "This controller is scoped to CDSemi/part-flow.",
+                "Invalid Compose project name.", "release_channel must be stable or prerelease.",
+                "auto_update must be a JSON boolean.", "health_timeout_seconds must be a positive integer.",
+                "minimum_free_mb must be a positive integer.", "backup_read_group must be a non-empty DSM group name.",
+                "workspace_write_group must be a non-empty DSM group name."],
+        }
+        for data, expected in cases.items():
+            with self.subTest(data=data[:30]):
+                self.assertEqual(validate(data, label="cfg")[1], expected)
 
 
 if __name__ == "__main__":

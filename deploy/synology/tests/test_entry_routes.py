@@ -54,7 +54,7 @@ ROOT_REQUIRED = unittest.skipUnless(os.geteuid() == 0, "protected fixtures requi
 PROJECT = "partflow-staging"
 PROBE = ["info", "--format", "{{json .}}"]
 RELEASE_MODULES = ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_runner.py", "pf_config.py", "pf_source.py",
-                   "pf_docker.py")
+                   "pf_docker.py", "pf_install.py")
 SHELL_ENTRY_POINTS = (REPO_PACKAGE / "pf.sh", PACKAGE / "install-control.sh", PACKAGE / "backup.sh",
                       PACKAGE / "release-check.sh")
 GATE_CODES = ("terminal-required", "instance-required-unattended", "policy-grant-required")
@@ -244,7 +244,67 @@ WRITE_SITE_ALLOWLIST = {
         ("tempfile.mkstemp", "SourceStore.export"),
     },
     "pf_docker.py": set(),
+    # PF-A2.1: the journal writer, the staged release, smoke evidence, binding writes and restores, and the three
+    # renames (atomic intent, release publication, root publication). The wider installer tracker below adds links,
+    # unlinks and the private-directory helpers.
+    "pf_install.py": {
+        ("_write_private_file", "_Run._apply_smoke"), ("_write_private_file", "_Run._apply_stage_release"),
+        ("_write_private_file", "_Run._write_binding"), ("_write_private_file", "_Run.restore_bindings"),
+        ("_write_private_file", "_journal_write"), ("os.rename", "_Run._apply_publish_release"),
+        ("os.rename", "_Run._apply_publish_root"), ("os.rename", "_Run.write_intent"),
+    },
 }
+# PF-A2.1 (SS-3 for pf_install.py): every call that can change the filesystem, with the wider installer vocabulary
+# (section 4.2: _write_private_file, _create_private_dir, _create_lock_file, _remove_tree, register_instance,
+# discard_unused_registration, os.rename, the exclusive os.open of a staged copy or launcher temp, and os.link).
+INSTALL_WRITERS = {"_journal_write", "_write_private_file", "_create_private_dir", "_create_lock_file", "_remove_tree",
+                   "register_instance", "discard_unused_registration", "initialize_installation_root"}
+INSTALL_OS_WRITES = {"link", "unlink", "rmdir", "rename", "replace", "mkdir", "chmod", "chown", "fchmod", "fchown",
+                     "write"}
+INSTALL_WRITE_SITES = {
+    ("_create_lock_file", "_Run.lock"), ("_create_private_dir", "_Run._apply_smoke"),
+    ("_create_private_dir", "_Run._apply_stage_release"), ("_create_private_dir", "_Run.lock_build"),
+    ("_create_private_dir", "_Run.verify_problems"), ("_create_private_dir", "_Run.write_intent"),
+    ("_journal_write", "_Run.save"), ("_journal_write", "_Run.write_intent"), ("_remove_tree", "_Run._remove_build"),
+    ("_remove_tree", "_Run.abandon"), ("_remove_tree", "_Run.cancel"), ("_remove_tree", "_Run.lock_build"),
+    ("_remove_tree", "_remove_intent_leftovers"), ("_remove_tree", "_remove_own_leftover"),
+    ("_write_private_file", "_Run._apply_smoke"), ("_write_private_file", "_Run._apply_stage_release"),
+    ("_write_private_file", "_Run._write_binding"), ("_write_private_file", "_Run.restore_bindings"),
+    ("_write_private_file", "_journal_write"), ("discard_unused_registration", "_Run._discard_registration"),
+    ("initialize_installation_root", "_Run._apply_build_root"), ("os.fchmod", "_Run._apply_bind_launcher"),
+    ("os.fchmod", "_Run._apply_stage_legacy_file"), ("os.fchown", "_Run._apply_stage_legacy_file"),
+    ("os.link", "_Run._apply_bind_launcher"), ("os.link", "_Run._apply_publish_legacy_file"),
+    ("os.open(O_CREAT)", "_Run._apply_bind_launcher"), ("os.open(O_CREAT)", "_Run._apply_stage_legacy_file"),
+    ("os.rename", "_Run._apply_publish_release"), ("os.rename", "_Run._apply_publish_root"),
+    ("os.rename", "_Run.write_intent"), ("os.rmdir", "_Run._remove_build"), ("os.rmdir", "_remove_own_leftover"),
+    ("os.unlink", "_Run._after_observed_complete"), ("os.unlink", "_Run._apply_bind_launcher"),
+    ("os.unlink", "_Run._apply_publish_legacy_file"), ("os.unlink", "_Run._reconcile"),
+    ("os.unlink", "_Run._remove_build"), ("os.unlink", "_Run._remove_legacy_copies"), ("os.unlink", "_Run.abandon"),
+    ("os.unlink", "_Run.restore_bindings"), ("os.unlink", "_remove_own_leftover"),
+    ("os.write", "_Run._apply_bind_launcher"), ("os.write", "_Run._apply_stage_legacy_file"),
+    ("register_instance", "_Run._apply_register_instance"),
+}
+# Read-only installer entries: `pf install status`, every preflight, the gate and the displays.
+INSTALL_READ_ONLY_ROOTS = ("_status", "preflight", "_preflight", "operations", "pending_operations",
+                           "require_no_pending_install", "describe_installation", "read_candidate",
+                           "read_retained_release", "classify_launcher", "launcher_prefix", "render_next",
+                           "load_operation", "render_summary", "confirmation_phrase")
+
+
+def install_write(call):
+    """The SS-3 name of a pf_install.py call that can change the filesystem, or None."""
+    name = tracked_write(call)
+    if name:
+        return name
+    target = dotted(call.func) or ""
+    last = target.rsplit(".", 1)[-1]
+    if last in INSTALL_WRITERS:
+        return last
+    if target.startswith("os.") and last in INSTALL_OS_WRITES:
+        return target
+    if target == "os.open" and "O_CREAT" in ast.dump(call):
+        return "os.open(O_CREAT)"
+    return None
 # Read-only roots of SS-3 rule 2 (Controller methods by name or prefix, plus module functions).
 READ_ONLY_ROOTS = ("__init__", "status", "doctor", "snapshots", "recoveries", "verify_recovery", "compose_ps",
                    "compose_logs", "policy_permits")
@@ -392,13 +452,15 @@ class DispatchTables(unittest.TestCase):
         self.assertEqual(pf.KNOWN_COMMANDS, frozenset(pf.DISPATCH))
         self.assertEqual(pf.READ_ONLY_COMMANDS,
                          {"instances", "status", "doctor", "backups", "recoveries", "ps", "logs"})
-        self.assertEqual(len(pf.DISPATCH), 18)
+        self.assertEqual(len(pf.DISPATCH), 19)
+        self.assertNotIn("install", pf.READ_ONLY_COMMANDS)
 
     def test_dt2_every_field_is_in_its_token_set(self):
         for name, route in pf.DISPATCH.items():
             with self.subTest(route=name):
                 self.assertEqual(route.name, name)
-                self.assertIn(route.mutability, ("read-only", "registry-read", "mutating", "conditional"))
+                self.assertIn(route.mutability, ("read-only", "registry-read", "mutating", "conditional",
+                                                 "installation"))
                 self.assertIn(route.pending, ("any", "refuse", name))
                 self.assertIn(route.preflight, ("none", "owned", "empty-target", "plan", "restore", "apply"))
                 self.assertIn(route.fail_closed, ("never", "always", "unless-side-by-side", "if-apply"))
@@ -407,9 +469,17 @@ class DispatchTables(unittest.TestCase):
                 if route.lock:
                     self.assertTrue(route.trusted_launch and route.trusted_context)
                     self.assertIn(route.unattended, ("terminal", "policy"))
+                elif name == "install":
+                    # PF-A2.1: the one unlocked route that writes; it takes its own locks and journal in pf_install
+                    # and needs a terminal and a trusted launch for every verb except `install status` (DT-2b).
+                    self.assertEqual((route.pending, route.preflight, route.fail_closed, route.unattended),
+                                     ("any", "none", "never", "terminal"))
+                    self.assertEqual((route.mutability, route.handler, route.trusted_launch, route.trusted_context),
+                                     ("installation", "pf_install.run_installed", True, False))
                 else:
                     self.assertEqual((route.pending, route.preflight, route.fail_closed, route.unattended),
                                      ("any", "none", "never", "allowed"))
+                    self.assertIn(route.mutability, ("read-only", "registry-read"))
                 self.assertEqual(bool(route.policy_class), route.unattended == "policy")
         self.assertEqual({name for name, route in pf.DISPATCH.items() if route.unattended == "policy"},
                          {"backup", "permissions", "release-check"})
@@ -449,8 +519,8 @@ class DispatchTables(unittest.TestCase):
         for name, route in pf.DISPATCH.items():
             with self.subTest(route=name):
                 owner, _, attribute = route.handler.rpartition(".")
-                target = pf.Controller if owner == "Controller" else pf
-                self.assertIn(owner, ("Controller", ""))
+                self.assertIn(owner, ("Controller", "", "pf_install"))
+                target = {"Controller": pf.Controller, "": pf, "pf_install": pf.pf_install}[owner]
                 self.assertTrue(callable(getattr(target, attribute)))
 
     def test_dt5_main_compares_each_known_command_exactly_once(self):
@@ -510,7 +580,8 @@ class DispatchTables(unittest.TestCase):
         for entry in pf.ENTRY_ROUTES:
             with self.subTest(entry=entry.id):
                 target = entry.target_route
-                self.assertTrue(target in pf.DISPATCH or target in ("*", "refuse", "fail_closed"), target)
+                self.assertTrue(target in pf.DISPATCH or target in ("*", "refuse", "fail_closed", "installer-init"),
+                                target)
                 if target in pf.DISPATCH:
                     route = pf.DISPATCH[target]
                     self.assertEqual(entry.mutability, route.mutability)
@@ -521,6 +592,11 @@ class DispatchTables(unittest.TestCase):
                 elif target == "fail_closed":
                     self.assertEqual((entry.mutability, entry.lock, entry.pending),
                                      ("mutating", "held", "existing-journal"))
+                elif target == "installer-init":
+                    # PF-A2.1 E11: the repository installer initializes a new root under its own build lock and
+                    # install journal; no instance lock exists yet.
+                    self.assertEqual((entry.mutability, entry.lock, entry.pending), ("mutating", "none", "install-journal"))
+                    self.assertEqual(entry.owner, "PF-A2.1")
                 else:
                     self.assertEqual((entry.mutability, entry.lock, entry.pending),
                                      ("per-route", "per-route", "per-route"))
@@ -559,7 +635,13 @@ class DispatchTables(unittest.TestCase):
                         todo.append(dotted(node.func)[5:])
             return False
 
-        terminal = [route for route in pf.DISPATCH.values() if route.unattended == "terminal"]
+        terminal = [route for route in pf.DISPATCH.values() if route.unattended == "terminal" and route.lock]
+        # PF-A2.1: the unlocked install route asks its typed confirmations inside pf_install.
+        install = pf.DISPATCH["install"]
+        self.assertEqual((install.unattended, install.lock), ("terminal", False))
+        self.assertIn("_confirm(interaction, confirmation_phrase(result.plan))",
+                      inspect.getsource(pf.pf_install.run_installed))
+        self.assertIn('_confirm(interaction, f"{verb} {_op8(operation_id)}")', inspect.getsource(pf.pf_install.resume))
         self.assertEqual({route.name for route in terminal},
                          {"deploy", "abort-deploy", "purge", "restore-instance", "reset-db", "rollback", "resume",
                           "update"})
@@ -937,6 +1019,30 @@ class UnattendedGate(Base):
         self.assertEqual(self.fake.calls(), [])
 
 
+# ============================================================================ DT-2b: install verbs need a terminal
+
+
+@ROOT_REQUIRED
+class InstallTerminalGate(Base):
+    """DT-2b (PF-A2.1): every `pf install` verb except `status` refuses without a terminal and writes nothing."""
+
+    def test_dt2b_every_install_verb_but_status_needs_a_terminal(self):
+        before = pfx.snapshot_tree(self.base)
+        for verb, extra in (("register", ["--slug", "x"]), ("migrate-legacy", []), ("control", ["--source", "/x"]),
+                            ("resume", []), ("resume", ["--abandon"])):
+            with self.subTest(verb=verb, extra=extra):
+                code, out, err = self.run_main(["install", verb, *extra], terminal=False)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"ERROR: terminal-required: 'install {verb}' asks for a typed confirmation and cannot run "
+                              f"without a terminal. Run it interactively: sudo {self.layout.root}/bootstrap/pf install "
+                              f"{verb} …. Nothing was changed.", err)
+                self.assertEqual(pfx.snapshot_tree(self.base), before)
+                self.assertEqual(self.fake.calls(), [])
+        code, out, err = self.run_main(["install", "status"], terminal=False, trusted_launch=False)
+        self.assertEqual((code, out.strip()), (0, "No install operations."), err)
+        self.assertEqual(pfx.snapshot_tree(self.base), before)
+
+
 # ============================================================================ SW: scheduler wrappers
 
 
@@ -1043,8 +1149,12 @@ class SchedulerWrappers(Base):
 
     def test_sw6_installed_wrappers_reach_the_policy_gates(self):
         self.set_config(auto_update=True)
-        backup = pfx.install_wrapper(self.layout, "backup.sh")
-        check = pfx.install_wrapper(self.layout, "release-check.sh")
+        # PF-A2.1 (OD-A14-05): the wrappers placed in bootstrap/ by initialize_installation_root(wrappers=...).
+        backup = self.layout.root / "bootstrap" / "backup.sh"
+        check = self.layout.root / "bootstrap" / "release-check.sh"
+        for path in (backup, check):
+            self.assertEqual(path.read_bytes(), (PACKAGE / path.name).read_bytes())
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o700)
         transcripts = {}
         for label, path, arguments, code in (
                 ("release-check-apply", check, ["--instance", "staging", "--apply"], "auto-apply-not-permitted"),
@@ -1514,7 +1624,13 @@ class StaticScan(unittest.TestCase):
                                              (name, where))
         self.assertEqual(popen, [("pf_runner.py", "ProcessRunner.run")])
         self.assertEqual(execv, [("pf_bootstrap.py", "main", "os.execv")])
-        self.assertEqual(runner_runs, [("pf-admin.py", "Controller.command")])
+        # PF-A2.1: the installer's smoke and end-to-end checks are the only other self.runner.run sites, and its two
+        # read-only preflight probes (docker info, interpreter version) call the same runner boundary.
+        self.assertEqual(sorted(runner_runs), [("pf-admin.py", "Controller.command"), ("pf_install.py", "_Run._apply_smoke"),
+                                               ("pf_install.py", "_Run.verify_problems")])
+        _, tree = parse_module("pf_install.py")
+        self.assertEqual(sorted(where for call, where in qualified_calls(tree) if dotted(call.func) == "runner.run"),
+                         ["_daemon_check", "_preflight_init"])
         self.assertEqual((PACKAGE / "pf-admin.py").read_text().count("self.runner.run("), 1)
 
     def test_ss2_context_construction_sites(self):
@@ -1575,6 +1691,45 @@ class StaticScan(unittest.TestCase):
         self.assertNotIn("Controller.lock", reachable)
         self.assertNotIn("Controller.begin_operation", reachable)
 
+    def test_ss3b_installer_writes_are_allowlisted_and_unreachable_from_read_only_install_routes(self):
+        _, tree = parse_module("pf_install.py")
+        sites = {(name, where) for call, where in qualified_calls(tree) for name in [install_write(call)] if name}
+        self.assertEqual(sites, INSTALL_WRITE_SITES)
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        methods = {}
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        methods[node.name + "." + item.name] = (node.name, item)
+
+        def callees(name):
+            node = functions[name] if name in functions else methods[name][1]
+            owner = methods[name][0] if name in methods else None
+            found = set()
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in functions:
+                    found.add(child.func.id)
+                elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id + ".__init__" in methods:
+                    found.add(child.func.id + ".__init__")
+                elif owner and isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name) \
+                        and child.value.id == "self" and owner + "." + child.attr in methods:
+                    found.add(owner + "." + child.attr)
+            return found
+
+        self.assertTrue(set(INSTALL_READ_ONLY_ROOTS) <= set(functions))
+        reachable, todo = set(), list(INSTALL_READ_ONLY_ROOTS)
+        while todo:
+            name = todo.pop()
+            if name not in reachable:
+                reachable.add(name)
+                todo += sorted(callees(name) - reachable)
+        self.assertFalse([name for name in reachable if name.startswith("_Run.")], sorted(reachable))
+        self.assertNotIn("execute", reachable)
+        self.assertNotIn("resume", reachable)
+        written = {(name, where) for name, where in sites if where in reachable}
+        self.assertEqual(written, set())
+
     def test_ss4_git_runs_only_as_a_version_probe_or_through_the_protected_store(self):
         _, tree = parse_module("pf-admin.py")
         sites = []
@@ -1614,7 +1769,7 @@ class StaticScan(unittest.TestCase):
         admin = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
         self.assertEqual(admin.count("sys.stdin.isatty("), 0)
         self.assertEqual(admin.count("stream.isatty()"), 1)
-        self.assertEqual(pf.CHECKPOINT, "PF-A1.4")
+        self.assertEqual(pf.CHECKPOINT, "PF-A2.1")
         self.assertEqual(pf.VERSION, "2.5.0")
 
     def test_ss6_every_parser_refuses_abbreviations(self):
@@ -1650,9 +1805,17 @@ class StaticScan(unittest.TestCase):
                 self.assertNotIn("`", text)
                 for word in ("eval", "docker", "python", "python3"):
                     self.assertFalse([line for line in code_lines if re.search(r"\b" + word + r"\b", line)], word)
-        installer = (PACKAGE / "install-control.sh").read_text().rstrip().splitlines()
-        self.assertIn('"$CONTROL/pf.sh" permissions', "\n".join(installer[-20:]))  # E11: refused by E3 (PF-A2)
-        self.assertIn('exec "$CONTROL/pf.sh" "\\$@"', "\n".join(installer))       # E4: /usr/local/bin/pf -> E3
+        # PF-A2.1 (E11): the thin init-only wrapper execs only the selected root-owned interpreter, isolated, with a
+        # rebuilt environment; no eval, no removal, no file copy and no launcher writing in shell.
+        installer = (PACKAGE / "install-control.sh").read_text()
+        code_lines = [line for line in installer.splitlines() if not line.lstrip().startswith("#")]
+        self.assertEqual([line.strip() for line in code_lines if re.search(r"\bexec\b", line)],
+                         ['exec env -i PATH="$PATH" HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM="${TERM:-dumb}" "$PY" -I '
+                          '-B "$SCRIPT_DIR/pf_install.py" "$@"'])
+        self.assertNotIn("`", installer)
+        for word in ("eval", "rm", "mv", "cp", "docker", "chmod", "chown"):
+            self.assertFalse([line for line in code_lines if re.search(r"\b" + word + r"\b", line)], word)
+        self.assertIn('[ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ]', installer)
         for path in SHELL_ENTRY_POINTS:
             with self.subTest(script=path.name):
                 result = subprocess.run(["sh", "-n", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -28,10 +28,10 @@ case "$(basename -- "$SELF_DIR")" in
     control) MODE=legacy ;;
     *)
         echo "This is the repository source copy of pf.sh and is intentionally not used for NAS operations." >&2
-        echo "Install/update the root-owned control plane with:" >&2
-        echo "  sudo sh ./deploy/synology/install-control.sh" >&2
+        echo "Create a new protected installation root (PF-A2.1) with:" >&2
+        echo "  sudo sh ./deploy/synology/install-control.sh init --root <root>" >&2
         echo "Then run:" >&2
-        echo "  sudo pf <command>" >&2
+        echo "  sudo <root>/bootstrap/pf <command>   (or sudo pf <command> when init created the global launcher)" >&2
         exit 2
         ;;
 esac
@@ -146,7 +146,7 @@ for state_dir in "$HOME_DIR"/.pf-state-*; do
     fi
 done
 [ "$FOUND" -eq 1 ] || echo "  Pending journal: none found under $HOME_DIR/.pf-state-*"
-echo "Mutating commands require a protected registration (PF-A2 legacy migration). No files were changed."
+echo "Mutating commands require a protected registration: sudo <root>/bootstrap/pf install migrate-legacy --legacy-home $HOME_DIR (PF-A2.1). No files were changed."
 case "$COMMAND" in
     ''|-h|--help|status|doctor|instances) exit 0 ;;
     *)

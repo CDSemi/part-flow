@@ -1184,16 +1184,23 @@ class PureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("repository source copy", result.stderr)
         self.assertIn("sudo pf", result.stderr)
+        # PF-A2.1: the copy names the working installer verb and the launcher that reaches a new root.
+        self.assertIn("  sudo sh ./deploy/synology/install-control.sh init --root <root>", result.stderr)
+        self.assertIn("  sudo <root>/bootstrap/pf <command>", result.stderr)
 
-    def test_control_installer_encodes_external_layout_and_read_only_control_policy(self):
+    def test_control_installer_is_the_thin_init_only_wrapper(self):
+        """PF-A2.1 (OD-A14-07): install-control.sh only initializes a new root through pf_install.py; the v2.5
+        copy-and-replace installer (moves of .env/pf-config.json, rm -rf control/, launcher overwrite) is gone."""
         script = (REPO_PACKAGE / "deploy/synology/install-control.sh").read_text()
-        self.assertIn('CONTROL="$PF_HOME/control"', script)
-        self.assertIn('CONFIG="$PF_HOME/config"', script)
-        self.assertIn('mv "$REPO_ROOT/.env" "$CONFIG/.env"', script)
-        self.assertIn('chmod 0740 "$TEMP/pf.sh"', script)
-        self.assertIn('chmod 0700 "$LAUNCHER"', script)
-        self.assertIn('rm -f "$LEGACY_CONFIG"', script)
-        self.assertIn('Both legacy deploy/synology/pf-config.json and config/pf-config.json exist and differ.', script)
+        code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+        self.assertIn('if [ "$1" != init ]; then', code)
+        self.assertIn("installer-verb-installed-only: install-control.sh only initializes a new installation root.", code)
+        self.assertIn('exec env -i PATH="$PATH" HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM="${TERM:-dumb}" "$PY" -I -B '
+                      '"$SCRIPT_DIR/pf_install.py" "$@"', code)
+        self.assertIn("Run as root: sudo sh ./deploy/synology/install-control.sh init --root <root>", code)
+        self.assertIn("Interactive terminal required; installation has no --yes bypass.", code)
+        for removed in ("mv ", "rm -", "cp ", "chmod", "chown", "cat >", "/usr/local/bin/pf", "eval", "permissions"):
+            self.assertNotIn(removed, code, removed)
 
     def test_pagination_25_items(self):
         items = list(range(25))

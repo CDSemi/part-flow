@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A1.4 (trên commit `53246a1`).
+> Baseline đồng bộ: package revision PF-A2.1 (trên commit `702ab1c`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -166,6 +166,40 @@
 > nêu chúng dưới dạng một danh sách (`recovery-state-file-refused`).
 > Khối này **thay thế** các câu về passthrough trong khối PF-A1.2 và PF-A1.3 ở trên.
 
+> **Checkpoint Deployment Admin PF-A2.1 (2026-10-07) — installer và các generation của control; vẫn là
+> trạng thái phát triển, chưa phải bản phát hành NAS.**
+> *Installation root mới.* `sudo sh ./deploy/synology/install-control.sh init --root <root>` là verb duy
+> nhất của installer trong repository: nó đọc các file repository đã review như dữ liệu, hiển thị mọi
+> conflict trước khi di chuyển bất cứ thứ gì, hỏi `INSTALL CONTROL <release-id>`, dựng root trong một thư
+> mục anh em riêng tư có lock, smoke-check release mới bằng interpreter đã đăng ký rồi publish root bằng
+> một lần rename. Nó ghi staging policy và profile `partflow-staging-legacy`, đặt các wrapper của
+> scheduler vào `<root>/bootstrap/`, và chỉ tạo global launcher (mặc định `/usr/local/bin/pf`) khi path
+> đó chưa tồn tại; launcher đã có (của v2.5, của root khác hay bất kỳ file nào) không bao giờ bị thay.
+> *Verb đã cài.* Từ control đã cài: `pf install status | register | migrate-legacy | control | resume`.
+> Mọi verb trừ `status` cần terminal; input chưa truyền được hỏi lần lượt, một preflight read-only báo
+> **mọi** conflict cùng lúc (exit 1, không thay đổi gì), và plan đã đóng băng được xác nhận bằng cụm gõ tay
+> (`REGISTER <slug>`, `MIGRATE <slug>`, `INSTALL CONTROL <id>`, `SELECT CONTROL <id>`, `RESUME <op>`,
+> `ABANDON <op>`).
+> *Journal và resume.* Mỗi operation ghi `plan.json` và `journal.json` dưới
+> `<root>/install-operations/<id>/` trước effect đầu tiên và journal mọi effect trước và sau khi chạy.
+> Operation bị gián đoạn vẫn mở; `pf install resume` quan sát mọi effect trên disk trước khi quyết định,
+> và `pf install resume --abandon` khôi phục trạng thái trước đó khi hợp lệ. Effect gặp trạng thái mà
+> installer không ghi sẽ dừng ở `needs_operator`, nêu target và bước tiếp theo; đó không bao giờ là ngõ
+> cụt. Khi install operation còn mở, các route nó ảnh hưởng bị từ chối với `install-operation-pending`.
+> *Generation của control.* `pf install control --source <reviewed tree>` stage một release
+> content-addressed (`releases/r-<16 hex>`), smoke-check nó (kể cả cấu hình live của mọi instance), kiểm
+> tra lại, rồi chuyển `bootstrap.conf` và mọi instance record như một binding set dưới registry lock và
+> instance lock, verify end-to-end qua bootstrap thật và tự động khôi phục binding trước đó nếu verify thất
+> bại. Luôn đúng một generation được bind; release cũ được giữ lại và có thể chọn lại bằng `--release`.
+> Không restart, build, pull hay migrate application; thay đổi `compose.nas.yaml` được báo là một
+> application operation riêng.
+> *Default và v2.5.* Không install operation nào đổi registry default. `migrate-legacy` copy nguyên byte
+> các file `.env`/`pf-config.json` chỉ có ở vị trí cũ vào `config/` (bản cũ vẫn giữ), đăng ký instance với
+> các path của người dùng và để `control/` v2.5 cùng launcher của nó tiếp tục là control plane đang hoạt
+> động: lệnh mutating của pf trên instance đó vẫn bị từ chối (`legacy-control-active`) cho tới khi có legacy
+> adoption (OD-A21-05); `status`, `doctor`, `ps` và `logs` vẫn chạy.
+> Khối này **thay thế** các cảnh báo về `install-control.sh` trong khối PF-A1.4 và ở mục 5 và 15.
+
 ## 1. Mục đích
 
 PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
@@ -300,93 +334,105 @@ repo/
     └── tests/
 ```
 
-`install-control.sh` copy các lifecycle source đã review sang `control/`, đổi chúng thành
-root-owned và chỉ-read đối với `users`, rồi cài launcher rất nhỏ:
+Từ PF-A2.1, control plane đã cài là một protected installation root:
 
 ```text
-/usr/local/bin/pf
+<root>/
+├── bootstrap/            # pf (launcher), pf_bootstrap.py (verifier), bootstrap.conf, tools.conf,
+│                         # backup.sh, release-check.sh (scheduler wrappers)
+├── releases/r-<16 hex>/  # immutable, content-addressed control releases (control-manifest.json)
+├── install-operations/   # one plan.json + journal.json per install operation (kept as the audit record)
+├── profiles/             # partflow-staging-legacy.json
+├── policies/             # staging.json
+├── registry/, locks/, instances/<uuid>/, staging/, sources/, home/
 ```
+
+`install-control.sh init` là trust boundary: administrator chọn và chạy chính các byte repository đã
+review. Nó đọc file candidate như dữ liệu (không follow link, giới hạn kích thước, parse như Python 3.9,
+chỉ lấy literal) và chỉ chạy code mới trong smoke check sau khi xác nhận gõ tay; thứ được cài đúng là thứ
+summary đã hiển thị. Mọi thay đổi sau đó chạy từ control đã cài và đã verify
+(`<root>/bootstrap/pf install …`), không bao giờ từ repository.
 
 Sau khi cài, `pf.sh` trong repository cố ý từ chối chạy operational command. Dùng:
 
 ```sh
-sudo pf status
+sudo <root>/bootstrap/pf status
 ```
 
-không dùng:
+(hoặc `sudo pf status` khi `init` đã tạo global launcher cho root này), không dùng:
 
 ```sh
 sudo sh ./pf.sh status
 ```
 
 Application update **không** âm thầm update privileged control plane. Khi revision mới có
-thay đổi `pf-admin.py`, `compose.nas.yaml` hay lifecycle source khác, hãy review rồi cài lại
-control plane một cách explicit.
+thay đổi `pf-admin.py`, `compose.nas.yaml` hay lifecycle source khác, hãy review revision đó rồi cài
+nó một cách explicit bằng `pf install control` (mục 15).
 
-## 5. Cài mới control plane hoặc migrate từ Admin v2.4.x
+## 5. Cài mới hoặc migrate
 
-Từ repository root:
+Mọi lệnh dưới đây có dạng `<root>/bootstrap/pf` chỉ được viết thành `sudo pf …` khi global launcher do
+`init` tạo cho chính root này. Trên NAS vẫn chạy v2.5, `/usr/local/bin/pf` là launcher v2.5 (hoặc của root
+khác) và không tới được root mới.
 
-```sh
-cd /volume1/docker/partflow/repo
-```
+### (a) Cài mới
 
-Vì `repo/` cho users quyền ghi, trước khi chạy installer bằng root cần bảo đảm source revision
-là bản bạn tin cậy. Tối thiểu hãy xem Git status và các thay đổi trong deployment/control.
+1. Từ một repository checkout đã review, khởi tạo root mới (chưa tồn tại hoặc rỗng):
 
-Chạy:
+   ```sh
+   sudo sh ./deploy/synology/install-control.sh init --root <root>
+   ```
 
-```sh
-sudo sh ./deploy/synology/install-control.sh
-```
+   Input còn thiếu sẽ được hỏi; `--interpreter`, `--tool <id>=<path>`, `--launcher-path <path>` và
+   `--no-launcher` thay các giá trị mặc định đã phát hiện (hiển thị trong summary). Xác nhận bằng
+   `INSTALL CONTROL <release-id>`. Mọi verb khác của `install-control.sh` bị từ chối với
+   `installer-verb-installed-only`.
+2. Tạo `<config>/pf-config.json` và `<config>/.env` bằng tay từ
+   `<root>/releases/<id>/pf-config.example.json` và `nas.env.example` (owner, group và mode như mục 6).
+   PF-A2.1 không tạo cấu hình nào; wizard của PF-A2.2 sẽ làm việc đó.
+3. Đăng ký instance với các thư mục đã có:
 
-> **Cảnh báo (PF-A1.4).** `install-control.sh` cài layout v2.5 cũ, mà launcher của nó ở checkpoint
-> này chỉ read-only (mục 15). Trên một NAS v2.5 đang chạy, nó thay thư mục `control/` v2.5 đang
-> hoạt động (được archive vào `recovery/control-upgrades/`) bằng một thư mục read-only cho tới khi có
-> installer PF-A2. Không chạy nó trên NAS bạn vẫn đang quản trị bằng v2.5.
+   ```sh
+   sudo <root>/bootstrap/pf install register --slug <slug> --project <project> --workspace <checkout> \
+     --configuration <config> --backups <backups> --recovery <recovery>
+   ```
 
-Installer hiển thị target path và yêu cầu nhập chính xác:
+   Preflight kiểm tra các path (không tạo gì), admin configuration và group của nó, managed-path inventory
+   và Docker daemon (một lần `docker info` read-only). Xác nhận bằng `REGISTER <slug>`. Registry default
+   không bao giờ bị đổi.
 
-```text
-INSTALL CONTROL
-```
-
-Installer migrate an toàn như sau:
-
-1. Tạo `/volume1/docker/partflow/config/`.
-2. Chuyển `repo/.env` cũ sang `config/.env` nếu có.
-3. Chuyển/copy `deploy/synology/pf-config.json` cũ sang `config/pf-config.json`.
-4. Nếu bản cũ và bản mới của `.env` hoặc `pf-config.json` cùng tồn tại nhưng khác nhau, installer dừng để bạn reconcile; không âm thầm chọn một bản.
-5. Nếu đã có `control/`, archive nó vào `recovery/control-upgrades/` trước khi thay.
-6. Cài bản `control/` root-owned mới.
-7. Cài `/usr/local/bin/pf` nếu path đó chưa bị phần mềm khác sử dụng.
-8. Chạy `pf permissions` để chuẩn hóa quyền repo/config/backup/recovery. Ở checkpoint này lệnh
-   đó tới launcher read-only cũ, vốn từ chối `permissions` trên installation chưa đăng ký; do
-   `set -eu`, installer dừng tại đó và không in thông báo "installation complete". Thư mục control
-   vẫn là thư mục read-only cũ cho tới PF-A2.
-
-Installer không xóa container, volume, database, revision backup hay application source.
-Đây không phải redeploy và cũng không reset database.
-
-Kiểm tra sau khi cài:
+### (b) Home v2.5
 
 ```sh
-sudo pf doctor
-sudo pf status
+sudo <root>/bootstrap/pf install migrate-legacy --legacy-home <home> --workspace <checkout> --slug <slug>
 ```
 
-Nếu `/usr/local/bin/pf` không thể cài vì đã có file không thuộc PartFlow, dùng trực tiếp:
+- `configuration`, `backups` và `recovery` là `<home>/config`, `<home>/backups` và `<home>/recovery`;
+  workspace là checkout bạn chỉ định, tên gì cũng được; project lấy từ `pf-config.json` đang có hiệu lực.
+- Conflict không bao giờ được tự giải quyết: khi `<checkout>/.env` và `<home>/config/.env` (hoặc
+  `<checkout>/deploy/synology/pf-config.json` và `<home>/config/pf-config.json`) cùng tồn tại và khác nhau,
+  preflight từ chối và nêu cả hai. File chỉ có ở vị trí cũ được copy nguyên byte (giữ mode và group của
+  nguồn) vào một tên staged riêng tư, được validate, rồi publish mà không ghi đè; bản cũ vẫn ở nguyên chỗ
+  (v2.5 vẫn đọc nó).
+- Operation lock của v2.5 `<home>/.pf-state-<project>/operation.lock` được giữ trong suốt operation;
+  `pending.json` của v2.5 làm migration bị từ chối (hoàn tất hoặc xử lý nó bằng v2.5 trước). Các state file
+  khác của v2.5 được báo cáo, không được import.
+- Được migrate: các bản copy cấu hình và registration. Không được migrate: state v2.5, Docker resource
+  (không adoption), quyền truy cập, thư mục `control/` v2.5 và launcher v2.5.
+- v2.5 vẫn là control plane cho mọi thay đổi của instance; pf chỉ cho view read-only (`status`, `doctor`,
+  `ps`, `logs`) và từ chối mutation với `legacy-control-active` cho tới khi có legacy adoption.
 
-```sh
-sudo /volume1/docker/partflow/control/pf.sh status
-```
+> **Cảnh báo (PF-A2.1).** Đây là checkpoint phát triển. Không migrate NAS v2.5 đang chạy trước khi có
+> sub-slice adoption của PF-A2 (OD-A21-05) và quyết định về grant không người trực (OD-A14-13). DSM
+> shared-folder ACL và `backups/` group-writable bị preflight từ chối cho tới PF-A2.3/PF-A5 (A1-T17).
 
 ## 6. Configuration files
 
 ### `config/pf-config.json`
 
-Đây là NAS-local administration config thực sự được dùng. Nếu chưa có, controller tạo từ
-root-owned `control/pf-config.example.json`.
+Đây là NAS-local administration config thực sự được dùng. PF-A2.1 không tạo file cấu hình nào: hãy tạo
+nó bằng tay từ `<root>/releases/<id>/pf-config.example.json` trước `pf install register` (mục 5 (a));
+`pf install migrate-legacy` chỉ copy nguyên byte một file cũ đã có.
 
 Default:
 
@@ -846,8 +892,9 @@ chờ, hãy chạy checkpoint tương tác rồi copy ra ngoài NAS:
 sudo pf --instance <slug> backup
 ```
 
-Khi đã có grant, một DSM task root-owned phải nêu instance và chạy wrapper mà installer PF-A2 đặt
-cạnh launcher đã cài, hoặc chạy chính launcher:
+Khi đã có grant, một DSM task root-owned phải nêu instance và chạy wrapper mà `install-control.sh init`
+đặt trong `<root>/bootstrap/` cạnh launcher đã cài (PF-A2.1), hoặc chạy chính launcher; trước đó các wrapper
+đã đặt bị từ chối như mọi lệnh không người trực khác:
 
 ```sh
 <root>/bootstrap/backup.sh --instance <slug>
@@ -925,31 +972,36 @@ docker volume prune
 
 ## 15. Update control plane
 
-Application `update` cố ý không self-update `control/`.
-
-Khi một reviewed repository revision có Admin version mới:
+Application `update` cố ý không update control plane. Cài một control release đã review một cách
+explicit:
 
 ```sh
-cd /volume1/docker/partflow/repo
-# Review deployment/control changes và Git status trước.
-sudo sh ./deploy/synology/install-control.sh
-sudo pf doctor
+sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
 ```
 
-Installer archive control cũ tại:
+- Summary hiển thị release đang bind và release mới (checkpoint, số file, inventory hash), mọi instance
+  được rebind (mỗi root một control release), default (không đổi) và việc application có cần một operation
+  riêng hay không.
+- Sau `INSTALL CONTROL <release-id>`, release được stage riêng tư và smoke-check bằng interpreter đã đăng
+  ký: code mới phải import được, load được registry và mọi record, và chấp nhận `pf-config.json` và `.env`
+  live của mọi instance mà release đang chạy chấp nhận. Release được verify lại, publish, bind
+  (`bootstrap.conf`, rồi mọi record) và verify end-to-end qua bootstrap thật. Nếu verify đó thất bại,
+  binding trước đó được tự động khôi phục (`install-verify-failed`, operation `rolled_back`); release mới vẫn
+  được giữ lại và không hoạt động.
+- `app_operation_required: update` nghĩa là release mới thay đổi `compose.nas.yaml`: application đang chạy
+  giữ nguyên container, và lần `pf --instance <slug> update` tiếp theo áp dụng topology mới.
+- Quay lại (hoặc tiến tới) một release đã giữ bằng
+  `sudo <root>/bootstrap/pf install control --release r-<16 hex>` (`SELECT CONTROL <id>`), chạy đúng các
+  kiểm tra smoke, contract và bootstrap như trên. Source tree có release đã được publish cũng được chọn theo
+  cách đó.
+- Operation bị gián đoạn được tiếp tục bằng `pf install resume` hoặc hủy bằng
+  `pf install resume --abandon`; rollback bị gián đoạn luôn hoàn tất việc khôi phục.
+- Byte của launcher và verifier bị đóng băng: candidate thay đổi `pf.sh` hoặc `pf_bootstrap.py` bị từ chối
+  với `bootstrap-change-unsupported` (launcher migration thuộc PF-A4.3).
+- Archive cũ `recovery/control-upgrades/` không còn áp dụng; release cũ nằm dưới `<root>/releases/`.
 
-```text
-recovery/control-upgrades/
-```
-
-Explicit install step chính là security boundary cho phép `repo/` writable bởi users.
-Không chạy `install-control.sh` chưa review/không rõ nguồn bằng `sudo`.
-
-> **Cảnh báo (PF-A1.4).** Ở checkpoint này `install-control.sh` cài layout cũ có launcher chỉ
-> read-only: nó từ chối mọi lệnh trừ báo cáo chẩn đoán, kể cả lệnh `pf permissions` cuối cùng của
-> chính installer. Chạy nó trên NAS v2.5 đang hoạt động sẽ thay thư mục control v2.5 đang chạy (được
-> archive vào `recovery/control-upgrades/`) bằng một thư mục read-only cho tới khi installer PF-A2
-> thay thế.
+Bước install explicit này chính là security boundary cho phép `repo/` writable bởi users.
+Không cài tree chưa review/không rõ nguồn bằng `sudo`.
 
 ## 16. Troubleshooting
 
@@ -970,20 +1022,55 @@ trí khác.
 
 ### `sudo sh ./pf.sh ...` bị từ chối
 
-Đúng behavior của v2.5. Bản trong repo chỉ là source. Dùng:
+Đúng thiết kế. Bản trong repo chỉ là source. Chạy launcher đã cài:
 
 ```sh
-sudo pf ...
+sudo <root>/bootstrap/pf ...
 ```
 
-hoặc cài/update control trước:
+hoặc tạo installation root mới trước (mục 5 (a)):
 
 ```sh
-sudo sh ./deploy/synology/install-control.sh
+sudo sh ./deploy/synology/install-control.sh init --root <root>
 ```
 
-Ở checkpoint này installer đó cài layout read-only cũ (xem cảnh báo ở mục 15); không chạy nó trên
-NAS v2.5 đang hoạt động.
+### `install-preflight-refused`
+
+Preflight liệt kê mọi conflict cùng lúc, mỗi dòng dạng `code: subject: detail`, và không thay đổi gì.
+Giải quyết mọi mục rồi chạy lại đúng lệnh đó. Các code thường gặp: `root-exists`, `init-leftover-unknown`,
+`source-*`, `install-contract-incompatible`, `release-not-retained`, `release-id-collision`,
+`interpreter-*`, `free-space`, `registry-*`, `slug-*`, `project-*`, `daemon-*`, `registered-path-missing`,
+`path-*`, `storage-replaceable`, `acl-*`, `admin-config-*`, `group-missing`, `legacy-*`,
+`instance-operation-pending`, `instance-effects-unresolved`, `launcher-parent-untrusted`.
+`legacy-env-conflict`/`legacy-admin-config-conflict`: không bản nào được tự động chọn; giữ bản đúng trong
+`config/`, chuyển bản kia ra khỏi cả hai vị trí.
+
+### `install-operation-pending`, `legacy-control-active` hoặc `control-binding-changed`
+
+`install-operation-pending`: một install operation đang mở (bị gián đoạn, crash hoặc `needs_operator`).
+Xem bằng `sudo <root>/bootstrap/pf install status` và làm theo bước tiếp theo của nó; cho tới khi nó kết
+thúc, `control` hoặc `init` đang mở từ chối route mutating của mọi instance, còn `register`/`migrate-legacy`
+đang mở từ chối chính instance của nó. `legacy-control-active`: instance được migrate từ v2.5 và `control/`
+v2.5 của nó vẫn còn; tiếp tục dùng v2.5 để thay đổi cho tới khi có legacy adoption.
+`control-binding-changed`: một lần cài control đã hoàn tất trong lúc lệnh đang khởi động; không thay đổi
+gì, hãy chạy lại.
+
+### `install-needs-operator`, `bootstrap-change-unsupported` hoặc `install-busy`
+
+`install-needs-operator`: resume gặp một target ở trạng thái mà installer không ghi; thông báo nêu target,
+các hash kỳ vọng và thứ đã gặp, và journal ghi lại bằng chứng. Khôi phục target, rồi chạy
+`pf install resume` (hoặc `pf install resume --abandon` khi được đề xuất). `bootstrap-change-unsupported`:
+candidate thay đổi launcher hoặc verifier; cài vào root mới hoặc giữ nguyên các byte đó. `install-busy`: một
+operation khác đang giữ lock cần dùng (registry, instance, v2.5 hoặc thư mục build của init); không thay đổi
+gì, thử lại khi nó xong.
+
+### `install-smoke-failed`, `install-verify-failed` hoặc `abandon-not-possible`
+
+`install-smoke-failed`: candidate không qua smoke check (ví dụ từ chối cấu hình live của một instance); nó
+không được kích hoạt và staging của nó đã bị xóa. `install-verify-failed`: với `control`, binding trước đó
+được khôi phục (`rolled_back`); với kind khác, operation ở lại `needs_operator` kèm bước tiếp theo.
+`abandon-not-possible`: một `init` đã publish root, hoặc một registration đã được dùng (đã đặt default, đã
+ghi operation, record đã đổi, lock đang bị giữ), không thể abandon; hoàn tất nó bằng `pf install resume`.
 
 ### `compose-route-removed`, `compose-override-refused`, `unknown-option` hoặc `unknown-command`
 
@@ -1137,6 +1224,12 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | `sudo pf resume` | Resume chỉ khi early-failure state chưa thay đổi |
 | `sudo pf ps [options] [SERVICE...]` | View container Compose read-only của instance (mục 14) |
 | `sudo pf logs [options] [SERVICE...]` | Log service có giới hạn và được redact (mục 14) |
+| `sudo sh ./deploy/synology/install-control.sh init --root <root>` | Khởi tạo protected installation root mới (mục 5 (a)) |
+| `sudo <root>/bootstrap/pf install status` | Liệt kê install operation, phase và bước tiếp theo (read-only) |
+| `sudo <root>/bootstrap/pf install register …` | Đăng ký instance với các thư mục đã có (`REGISTER <slug>`) |
+| `sudo <root>/bootstrap/pf install migrate-legacy …` | Copy cấu hình v2.5 và đăng ký; v2.5 vẫn là control plane (`MIGRATE <slug>`) |
+| `sudo <root>/bootstrap/pf install control --source DIR \| --release ID` | Cài hoặc chọn control release (`INSTALL CONTROL`/`SELECT CONTROL <id>`) |
+| `sudo <root>/bootstrap/pf install resume [--operation ID] [--abandon]` | Tiếp tục hoặc abandon install operation đang mở (`RESUME`/`ABANDON <op>`) |
 
 Lệnh khởi động không có terminal phải truyền `--instance <slug|uuid>`; cho tới khi có grant
 PF-A4.3, mọi lệnh có lock đều bị từ chối khi không có terminal (`terminal-required`,
@@ -1167,10 +1260,20 @@ PF-A1.4 bổ sung các giới hạn sau:
   TTY); `ssh` không có `-t` được tính là không người trực;
 - không thao tác không người trực nào, kể cả scheduled backup và release check, chạy trên instance
   do pf quản lý cho tới khi có grant trong protected policy của PF-A4.3;
-- checkpoint này không cài wrapper của scheduler (installer PF-A2 sẽ đặt chúng);
-- `install-control.sh` vẫn là installer cũ (mục 5 và 15);
 - các label one-off của Compose `run` mà `fail_closed` dựa vào mới chỉ được chứng minh offline;
 - không có route managed để chạy CLI của ứng dụng trong container backend.
+
+Giới hạn của PF-A2.1:
+
+- chỉ offline: không có gì được cài lên, hay chạy với, NAS, DSM host hoặc Docker daemon thật;
+- global launcher thật `/usr/local/bin/pf` chưa được kiểm thử (test dùng launcher path cô lập);
+- A2-T04 với Docker daemon thật chưa chạy (chỉ có bằng chứng identity offline);
+- không khẳng định độ bền khi mất điện hoặc reboot ngoài fsync và rename trên filesystem đã kiểm thử;
+- mỗi installation root một control release;
+- byte của launcher và verifier bị đóng băng cho tới PF-A4.3 (`bootstrap-change-unsupported`);
+- không adoption Docker resource cũ, không retire control v2.5, không import state v2.5;
+- không tạo cấu hình (PF-A2.2) và không thay đổi quyền truy cập (PF-A2.3);
+- release cũ và registration đã discard không được dọn dẹp (PF-A5.1).
 
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;
@@ -1179,14 +1282,14 @@ daemon thật (owner PF-A3.4/PF-A5.1, kể cả label one-off thật của Compo
 chứng DSM ACL/SMB (owner PF-A2.3/PF-A5.1). Không finding nào được đóng toàn bộ và không có gì ở đây
 là production-ready.
 
-Trước khi dựa vào v2.5 recovery cho data quan trọng, nên chạy ít nhất một vòng disposable
-staging trên NAS thật. Vòng dưới đây bắt đầu bằng `install-control` nên **cần installer PF-A2**;
-trước khi có nó, hãy bắt đầu từ một protected layout và chạy tương tác
-`<root>/bootstrap/pf --instance <slug> doctor → backup → update → purge → restore-instance →
-verify UI/data`.
+Trước khi dựa vào v2.5 recovery cho data quan trọng, nên chạy tương tác ít nhất một vòng disposable
+staging trên NAS thật. Con đường cho NAS v2.5 cần legacy adoption (OD-A21-05) trước khi migrate một NAS v2.5
+đang chạy.
 
 ```text
-install-control
+install-control.sh init
+→ (configuration by hand)
+→ pf install register
 → doctor
 → backup
 → update

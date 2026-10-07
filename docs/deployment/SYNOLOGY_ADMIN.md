@@ -172,6 +172,41 @@
 > (`recovery-state-file-refused`).
 > This block **supersedes** the passthrough sentences of the PF-A1.2 and PF-A1.3 blocks above.
 
+> **Deployment Admin checkpoint PF-A2.1 (2026-10-07) — installer and control generations; still a
+> development state, not a NAS release.**
+> *New installation root.* `sudo sh ./deploy/synology/install-control.sh init --root <root>` is the only
+> repository installer verb: it reads the reviewed repository files as data, shows every conflict before
+> anything moves, asks for `INSTALL CONTROL <release-id>`, builds the root in a locked private sibling
+> directory, smoke-checks the new release with the registered interpreter and publishes the root with one
+> rename. It writes the staging policy and the `partflow-staging-legacy` profile, places the scheduler
+> wrappers in `<root>/bootstrap/`, and creates the global launcher (default `/usr/local/bin/pf`) only when
+> that path is absent; an existing launcher (a v2.5 one, another root's or anything else) is never replaced.
+> *Installed verbs.* From the installed control: `pf install status | register | migrate-legacy | control |
+> resume`. Every verb but `status` needs a terminal; inputs that are not given are asked one by one, a
+> read-only preflight reports **every** conflict at once (exit 1, nothing changed), and the frozen plan is
+> confirmed with a typed phrase (`REGISTER <slug>`, `MIGRATE <slug>`, `INSTALL CONTROL <id>`,
+> `SELECT CONTROL <id>`, `RESUME <op>`, `ABANDON <op>`).
+> *Journal and resume.* Each operation writes `plan.json` and `journal.json` under
+> `<root>/install-operations/<id>/` before its first effect and journals every effect before and after it.
+> An interrupted operation stays open; `pf install resume` observes every effect on disk before it
+> decides, and `pf install resume --abandon` restores the previous state where that is legal. An effect
+> found in a state the installer did not write stops in `needs_operator`, which names the target and
+> the next step; it is never a dead end. While an install operation is open, the routes it affects are
+> refused with `install-operation-pending`.
+> *Control generations.* `pf install control --source <reviewed tree>` stages a content-addressed release
+> (`releases/r-<16 hex>`), smoke-checks it (including the live configuration of every instance),
+> re-verifies it, then switches `bootstrap.conf` and every instance record as one binding set under the
+> registry and instance locks, verifies end to end through the real bootstrap and restores the previous
+> binding automatically if that fails. Exactly one generation is bound; old releases are retained and can
+> be selected again with `--release`. No application restart, build, pull or migration happens; a changed
+> `compose.nas.yaml` is reported as a separate application operation.
+> *Defaults and v2.5.* No install operation changes the registry default. `migrate-legacy` copies legacy-only
+> `.env`/`pf-config.json` into `config/` byte for byte (the legacy copies stay), registers the instance with
+> the user's paths and leaves the v2.5 `control/` and its launcher as the working control plane: pf mutating
+> commands on that instance stay refused (`legacy-control-active`) until legacy adoption is installed
+> (OD-A21-05); `status`, `doctor`, `ps` and `logs` work.
+> This block **supersedes** the `install-control.sh` warnings of the PF-A1.4 block and of sections 5 and 15.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -309,21 +344,33 @@ repo/
     └── tests/
 ```
 
-`install-control.sh` copies the reviewed lifecycle sources to `control/`, changes them to
-root-owned/read-only-to-users permissions, and installs a small root-owned launcher:
+Since PF-A2.1 the installed control plane is a protected installation root:
 
 ```text
-/usr/local/bin/pf
+<root>/
+├── bootstrap/            # pf (launcher), pf_bootstrap.py (verifier), bootstrap.conf, tools.conf,
+│                         # backup.sh, release-check.sh (scheduler wrappers)
+├── releases/r-<16 hex>/  # immutable, content-addressed control releases (control-manifest.json)
+├── install-operations/   # one plan.json + journal.json per install operation (kept as the audit record)
+├── profiles/             # partflow-staging-legacy.json
+├── policies/             # staging.json
+├── registry/, locks/, instances/<uuid>/, staging/, sources/, home/
 ```
+
+`install-control.sh init` is the trust boundary: the administrator chooses and runs these reviewed
+repository bytes. It reads the candidate files as data (no-follow, size-bounded, parsed as Python 3.9,
+literals only) and runs new code only in the smoke check after the typed confirmation; what is installed
+is exactly what the summary showed. Every later change runs from the installed, verified control
+(`<root>/bootstrap/pf install …`), never from the repository.
 
 After installation, the repository `pf.sh` intentionally refuses operational execution.
 Use:
 
 ```sh
-sudo pf status
+sudo <root>/bootstrap/pf status
 ```
 
-not:
+(or `sudo pf status` when `init` created the global launcher for this root), not:
 
 ```sh
 sudo sh ./pf.sh status
@@ -331,76 +378,74 @@ sudo sh ./pf.sh status
 
 Application updates do **not** silently update the privileged control plane. If a later
 PartFlow revision changes `pf-admin.py`, `compose.nas.yaml`, or another lifecycle source,
-review that revision and explicitly reinstall the control plane.
+review that revision and install it explicitly with `pf install control` (section 15).
 
-## 5. Install or migrate from Admin v2.4.x
+## 5. Install or migrate
 
-Run this from the repository root:
+Every command below that names `<root>/bootstrap/pf` may be written `sudo pf …` only when the global
+launcher was created by `init` for this root. On a NAS that still runs v2.5, `/usr/local/bin/pf` is the
+v2.5 launcher (or another root's) and does not reach the new root.
 
-```sh
-cd /volume1/docker/partflow/repo
-```
+### (a) New installation
 
-Before running a root installer from a users-writable working tree, verify that the source
-revision is one you trust. At minimum inspect the changed deployment files and Git status.
-The installer itself is intentionally explicit because installing it grants the reviewed
-code lifecycle authority on the NAS.
+1. From a reviewed repository checkout, initialize a new root (absent or empty):
 
-Then run:
+   ```sh
+   sudo sh ./deploy/synology/install-control.sh init --root <root>
+   ```
 
-```sh
-sudo sh ./deploy/synology/install-control.sh
-```
+   Missing inputs are asked; `--interpreter`, `--tool <id>=<path>`, `--launcher-path <path>` and
+   `--no-launcher` override the detected defaults shown in the summary. Confirm with
+   `INSTALL CONTROL <release-id>`. Any other verb of `install-control.sh` is refused with
+   `installer-verb-installed-only`.
+2. Create `<config>/pf-config.json` and `<config>/.env` by hand from
+   `<root>/releases/<id>/pf-config.example.json` and `nas.env.example` (owner, group and modes as in
+   section 6). PF-A2.1 creates no configuration; the PF-A2.2 wizard will.
+3. Register the instance with its existing directories:
 
-> **Warning (PF-A1.4).** `install-control.sh` installs the legacy v2.5 layout, whose launcher is
-> read-only in this checkpoint (section 15). On a live v2.5 NAS it replaces the working v2.5
-> `control/` directory (archived under `recovery/control-upgrades/`) with a read-only one until the
-> PF-A2 installer exists. Do not run it on a NAS you still administer with v2.5.
+   ```sh
+   sudo <root>/bootstrap/pf install register --slug <slug> --project <project> --workspace <checkout> \
+     --configuration <config> --backups <backups> --recovery <recovery>
+   ```
 
-It shows the target paths and requires this exact confirmation:
+   The preflight checks the paths (nothing is created), the admin configuration and its groups, the
+   managed-path inventory and the Docker daemon (one read-only `docker info`). Confirm with
+   `REGISTER <slug>`. The registry default is never changed.
 
-```text
-INSTALL CONTROL
-```
-
-The installer performs these migrations safely:
-
-1. Creates `/volume1/docker/partflow/config/`.
-2. Moves old `repo/.env` to `config/.env` when present.
-3. Moves/copies old `deploy/synology/pf-config.json` into `config/pf-config.json`.
-4. Refuses installation if old and new copies of `.env` or `pf-config.json` both exist and differ.
-5. Archives an existing `control/` under `recovery/control-upgrades/` before replacement.
-6. Installs a new root-owned `control/` copy.
-7. Installs `/usr/local/bin/pf` when that path is free or already PartFlow-managed.
-8. Runs `pf permissions` to normalize repository/config/backup/recovery modes. In this
-   checkpoint that call reaches the legacy read-only launcher, which refuses `permissions` on an
-   unregistered installation; under `set -eu` the installer stops there and its "installation
-   complete" message is not printed. The control directory stays the legacy read-only one until
-   PF-A2.
-
-The installer preserves Docker containers, volumes, databases, revision backups, and
-application source. It is not a redeploy or database reset.
-
-Validate afterward:
+### (b) v2.5 home
 
 ```sh
-sudo pf doctor
-sudo pf status
+sudo <root>/bootstrap/pf install migrate-legacy --legacy-home <home> --workspace <checkout> --slug <slug>
 ```
 
-If `/usr/local/bin/pf` could not be installed because an unrelated file already uses that
-name, run the installed launcher directly:
+- `configuration`, `backups` and `recovery` are `<home>/config`, `<home>/backups` and `<home>/recovery`;
+  the workspace is the checkout you name, whatever its name; the project comes from the effective
+  `pf-config.json`.
+- Conflicts are never resolved automatically: when `<checkout>/.env` and `<home>/config/.env` (or
+  `<checkout>/deploy/synology/pf-config.json` and `<home>/config/pf-config.json`) both exist and differ,
+  the preflight refuses and names both. A legacy-only file is copied byte for byte (source mode and group)
+  into a private staged name, validated, then published without overwriting; the legacy copy stays where
+  it was (v2.5 still reads it).
+- The v2.5 operation lock `<home>/.pf-state-<project>/operation.lock` is held during the operation; a v2.5
+  `pending.json` refuses the migration (finish or resolve it with v2.5 first). The other v2.5 state files
+  are reported, not imported.
+- What is migrated: the configuration copies and the registration. What is not: v2.5 state, Docker
+  resources (no adoption), permissions, the v2.5 `control/` directory and the v2.5 launcher.
+- v2.5 stays the control plane for every change to the instance; pf gives read-only views (`status`,
+  `doctor`, `ps`, `logs`) and refuses mutation with `legacy-control-active` until legacy adoption is
+  installed.
 
-```sh
-sudo /volume1/docker/partflow/control/pf.sh status
-```
+> **Warning (PF-A2.1).** This is a development checkpoint. A live v2.5 NAS is not migrated before the PF-A2
+> adoption sub-slice (OD-A21-05) and the unattended-grant decision (OD-A14-13) exist. DSM shared-folder ACLs
+> and a group-writable `backups/` are refused by the preflight until PF-A2.3/PF-A5 (A1-T17).
 
 ## 6. Configuration files
 
 ### `config/pf-config.json`
 
-This is the actual NAS-local administration configuration. It is created from the
-root-owned `control/pf-config.example.json` if absent.
+This is the actual NAS-local administration configuration. PF-A2.1 creates no configuration file:
+create it by hand from `<root>/releases/<id>/pf-config.example.json` before `pf install register`
+(section 5 (a)); `pf install migrate-legacy` only copies an existing legacy file byte for byte.
 
 Default template:
 
@@ -871,8 +916,9 @@ proposal only. Until then run the checkpoint interactively and copy it off-NAS:
 sudo pf --instance <slug> backup
 ```
 
-Once grants exist, a root-owned DSM task names its instance and runs the wrapper the PF-A2
-installer places next to the installed launcher, or the launcher itself:
+Once grants exist, a root-owned DSM task names its instance and runs the wrapper that
+`install-control.sh init` places in `<root>/bootstrap/` next to the installed launcher (PF-A2.1), or the
+launcher itself; until then the placed wrappers are refused like any other unattended command:
 
 ```sh
 <root>/bootstrap/backup.sh --instance <slug>
@@ -956,31 +1002,37 @@ as a PartFlow reset mechanism on a NAS that may host other workloads.
 
 ## 15. Updating the control plane
 
-Application `update` intentionally does not self-update `control/`.
-
-When a reviewed repository revision contains a new Admin version:
+Application `update` intentionally does not update the control plane. Install a reviewed control
+release explicitly:
 
 ```sh
-cd /volume1/docker/partflow/repo
-# Review the deployment/control changes and Git status first.
-sudo sh ./deploy/synology/install-control.sh
-sudo pf doctor
+sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
 ```
 
-The installer archives the previous control directory under:
-
-```text
-recovery/control-upgrades/
-```
+- The summary shows the bound and the new release (checkpoint, file count, inventory hash), every
+  instance that is rebound (one control release per root), the default (unchanged) and whether the
+  application needs a separate operation.
+- After `INSTALL CONTROL <release-id>` the release is staged privately and smoke-checked with the
+  registered interpreter: the new code must import, load the registry and every record, and accept the
+  live `pf-config.json` and `.env` of every instance that the running release accepts. It is verified
+  again, published, bound (`bootstrap.conf`, then every record) and verified end to end through the real
+  bootstrap. If that verification fails the previous binding is restored automatically
+  (`install-verify-failed`, operation `rolled_back`); the new release stays retained and inert.
+- `app_operation_required: update` means the new release changes `compose.nas.yaml`: the running
+  application keeps its containers, and the next `pf --instance <slug> update` applies the new topology.
+- Go back to (or forward to) a retained release with
+  `sudo <root>/bootstrap/pf install control --release r-<16 hex>` (`SELECT CONTROL <id>`), which runs the
+  same smoke, contract and bootstrap checks. A source tree whose release is already published is selected
+  the same way.
+- An interrupted operation is continued with `pf install resume` or undone with
+  `pf install resume --abandon`; an interrupted rollback always finishes the restore.
+- The launcher and verifier bytes are frozen: a candidate that changes `pf.sh` or `pf_bootstrap.py` is
+  refused with `bootstrap-change-unsupported` (a launcher migration is PF-A4.3).
+- The legacy `recovery/control-upgrades/` archive no longer applies; old releases stay under
+  `<root>/releases/`.
 
 This explicit step is the security boundary that permits `repo/` to remain users-writable.
-Do not run an unreviewed or unknown `install-control.sh` with `sudo`.
-
-> **Warning (PF-A1.4).** In this checkpoint `install-control.sh` installs the legacy layout, whose
-> launcher is read-only: it refuses every command except the diagnostics report, including the
-> installer's own final `pf permissions`. Running it on a live v2.5 NAS replaces the working v2.5
-> control directory (archived under `recovery/control-upgrades/`) with a read-only one until the
-> PF-A2 installer replaces it.
+Do not install an unreviewed or unknown tree with `sudo`.
 
 ## 16. Troubleshooting
 
@@ -1001,20 +1053,56 @@ elsewhere if an editable copy is needed.
 
 ### `sudo sh ./pf.sh ...` refuses to run
 
-Expected in v2.5. The repo copy is source only. Run:
+Expected. The repo copy is source only. Run the installed launcher:
 
 ```sh
-sudo pf ...
+sudo <root>/bootstrap/pf ...
 ```
 
-or install/update control first:
+or create a new installation root first (section 5 (a)):
 
 ```sh
-sudo sh ./deploy/synology/install-control.sh
+sudo sh ./deploy/synology/install-control.sh init --root <root>
 ```
 
-In this checkpoint that installer installs the legacy read-only layout (see the warning in
-section 15); do not run it on a live v2.5 NAS.
+### `install-preflight-refused`
+
+The preflight lists every conflict at once, each as `code: subject: detail`, and nothing was changed.
+Resolve every item and run the same command again. Frequent codes: `root-exists`, `init-leftover-unknown`,
+`source-*`, `install-contract-incompatible`, `release-not-retained`, `release-id-collision`,
+`interpreter-*`, `free-space`, `registry-*`, `slug-*`, `project-*`, `daemon-*`, `registered-path-missing`,
+`path-*`, `storage-replaceable`, `acl-*`, `admin-config-*`, `group-missing`, `legacy-*`,
+`instance-operation-pending`, `instance-effects-unresolved`, `launcher-parent-untrusted`.
+`legacy-env-conflict`/`legacy-admin-config-conflict`: neither copy is chosen automatically; keep the
+correct one in `config/`, move the other out of both locations.
+
+### `install-operation-pending`, `legacy-control-active` or `control-binding-changed`
+
+`install-operation-pending`: an install operation is open (interrupted, crashed or `needs_operator`).
+Inspect it with `sudo <root>/bootstrap/pf install status` and follow its next step; until it is terminal an
+open `control` or `init` refuses every instance's mutating route, and an open `register`/`migrate-legacy`
+refuses its own instance. `legacy-control-active`: the instance was migrated from v2.5 and its v2.5
+`control/` still exists; keep using v2.5 for changes until legacy adoption is installed. `control-binding-
+changed`: a control installation completed while the command was starting; nothing was changed, run it
+again.
+
+### `install-needs-operator`, `bootstrap-change-unsupported` or `install-busy`
+
+`install-needs-operator`: resume found a target in a state the installer did not write; the message names
+the target, the expected hashes and what it found, and the journal records the evidence. Restore the
+target, then `pf install resume` (or `pf install resume --abandon` where offered).
+`bootstrap-change-unsupported`: the candidate changes the launcher or verifier; reinstall into a new root
+or keep those bytes. `install-busy`: another operation holds a needed lock (registry, instance, v2.5 or
+an init build directory); nothing was changed, retry after it finishes.
+
+### `install-smoke-failed`, `install-verify-failed` or `abandon-not-possible`
+
+`install-smoke-failed`: the candidate did not pass its smoke check (for example it rejects an instance's
+live configuration); it was not activated and its staging was removed. `install-verify-failed`: for
+`control` the previous binding was restored (`rolled_back`); for other kinds the operation stays in
+`needs_operator` with its next step. `abandon-not-possible`: an `init` that already published its root, or
+a registration that has been used (default set, operations recorded, record changed, lock held), cannot be
+abandoned; finish it with `pf install resume`.
 
 ### `compose-route-removed`, `compose-override-refused`, `unknown-option` or `unknown-command`
 
@@ -1164,6 +1252,12 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 | `sudo pf resume` | Resume only an unchanged early-failure state |
 | `sudo pf ps [options] [SERVICE...]` | Read-only Compose container view of the instance (section 14) |
 | `sudo pf logs [options] [SERVICE...]` | Bounded, redacted service logs (section 14) |
+| `sudo sh ./deploy/synology/install-control.sh init --root <root>` | Initialize a new protected installation root (section 5 (a)) |
+| `sudo <root>/bootstrap/pf install status` | List install operations, their phase and next step (read-only) |
+| `sudo <root>/bootstrap/pf install register …` | Register an instance with existing directories (`REGISTER <slug>`) |
+| `sudo <root>/bootstrap/pf install migrate-legacy …` | Copy legacy v2.5 configuration and register it; v2.5 stays in control (`MIGRATE <slug>`) |
+| `sudo <root>/bootstrap/pf install control --source DIR \| --release ID` | Install or select a control release (`INSTALL CONTROL`/`SELECT CONTROL <id>`) |
+| `sudo <root>/bootstrap/pf install resume [--operation ID] [--abandon]` | Continue or abandon an open install operation (`RESUME`/`ABANDON <op>`) |
 
 Commands started without a terminal must pass `--instance <slug|uuid>`; until PF-A4.3 policy
 grants exist every locked command is refused without a terminal (`terminal-required`,
@@ -1194,10 +1288,20 @@ PF-A1.4 adds these limits:
   counts as unattended;
 - no unattended operation, scheduled backup or release check included, runs on a pf-managed
   instance until a PF-A4.3 protected policy grant exists;
-- the scheduler wrappers are not installed by this checkpoint (the PF-A2 installer places them);
-- `install-control.sh` is still the legacy installer (sections 5 and 15);
 - the Compose `run` one-off labels that `fail_closed` relies on are proven offline only;
 - there is no managed route for an application CLI in the backend container.
+
+PF-A2.1 limits:
+
+- offline only: nothing was installed on, or run against, a real NAS, DSM host or Docker daemon;
+- the real global launcher `/usr/local/bin/pf` is untested (tests use an isolated launcher path);
+- A2-T04 with a real Docker daemon is not run (offline identity evidence only);
+- no power-loss or reboot durability claim beyond fsync and rename on the tested filesystem;
+- one control release per installation root;
+- the launcher and verifier bytes are frozen until PF-A4.3 (`bootstrap-change-unsupported`);
+- no legacy Docker resource adoption, v2.5 control retirement or v2.5 state import;
+- no configuration creation (PF-A2.2) and no permission change (PF-A2.3);
+- old releases and discarded registrations are not cleaned up (PF-A5.1).
 
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
 instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose
@@ -1207,13 +1311,13 @@ on DSM ACL/SMB evidence (owners PF-A2.3/PF-A5.1). No finding is closed overall a
 is production-ready.
 
 Before relying on v2.5 recovery on important data, perform at least one disposable staging
-cycle on the actual NAS. The cycle below starts with `install-control` and therefore **requires the
-PF-A2 installer**; until it exists, start from a protected layout and run
-`<root>/bootstrap/pf --instance <slug> doctor → backup → update → purge → restore-instance →
-verify UI/data` interactively.
+cycle on the actual NAS, interactively. A v2.5 NAS path requires legacy adoption (OD-A21-05) before a
+live v2.5 NAS is migrated.
 
 ```text
-install-control
+install-control.sh init
+→ (configuration by hand)
+→ pf install register
 → doctor
 → backup
 → update

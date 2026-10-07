@@ -2072,16 +2072,17 @@ class CommandEffectGuard(ScopeBase):
 
 
 RELEASE_MODULES = ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_runner.py", "pf_config.py", "pf_source.py",
-                   "pf_docker.py")
+                   "pf_docker.py", "pf_install.py")
 
 
 class ReleaseWiring(unittest.TestCase):
 
     def test_rw1_pf_docker_is_a_required_installed_release_file(self):
         self.assertIn("pf_docker.py", pf_bootstrap.REQUIRED_RELEASE_FILES)
-        installer = (PACKAGE / "install-control.sh").read_text()
-        self.assertIn('    "$SCRIPT_DIR/pf_docker.py" \\\n', installer)
-        self.assertIn('cp "$SCRIPT_DIR/pf_docker.py" "$TEMP/pf_docker.py"\n', installer)
+        # PF-A2.1: the installer (pf_install.py, run by the thin install-control.sh init wrapper) stages exactly
+        # CONTROL_RELEASE_FILES; the shell script no longer copies files itself.
+        self.assertEqual(pf.pf_install.CONTROL_RELEASE_FILES["pf_docker.py"], "deploy/synology/pf_docker.py")
+        self.assertIn('"$SCRIPT_DIR/pf_install.py" "$@"', (PACKAGE / "install-control.sh").read_text())
         self.assertIn("pf_docker.py", pfx.release_files())
         self.assertNotIn("fixtures", json.dumps(sorted(pfx.release_files())))
 
@@ -2114,7 +2115,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A1.4")
+        self.assertEqual(pf.CHECKPOINT, "PF-A2.1")
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ def release_files():
         "pf_config.py": (PACKAGE / "pf_config.py").read_bytes(),
         "pf_source.py": (PACKAGE / "pf_source.py").read_bytes(),
         "pf_docker.py": (PACKAGE / "pf_docker.py").read_bytes(),
+        "pf_install.py": (PACKAGE / "pf_install.py").read_bytes(),
         "compose.nas.yaml": (REPO_PACKAGE / "compose.nas.yaml").read_bytes(),
         "pf-config.example.json": (PACKAGE / "pf-config.example.json").read_bytes(),
         "nas.env.example": (PACKAGE / "nas.env.example").read_bytes(),
@@ -135,15 +136,34 @@ def install_daemon_socket(base):
     return "unix://" + str(var / "run" / "docker.sock"), path
 
 
-def install_root(base, *, launcher=None, interpreter=None, tools=None):
-    """Initialize <base>/install as a trusted installation root (plus the fixture daemon socket)."""
+WRAPPER_NAMES = ("backup.sh", "release-check.sh")
+
+
+def wrapper_files():
+    """The repository scheduler wrappers, placed in bootstrap/ by the installer (PF-A2.1, OD-A14-05)."""
+    return {name: (PACKAGE / name).read_bytes() for name in WRAPPER_NAMES}
+
+
+def content_release_id():
+    """The content-addressed release id (PF-A2.1) of the repository control files."""
+    files = release_files()
+    return pf.pf_install.release_id_for(pf.pf_install.content_digest(
+        {name: pf_instance.sha256_bytes(data) for name, data in files.items()}))
+
+
+def install_root(base, *, launcher=None, interpreter=None, tools=None, wrappers=True, release_id=RELEASE_ID):
+    """Initialize <base>/install as a trusted installation root (plus the fixture daemon socket).
+
+    ``wrappers``: place the repository scheduler wrappers in bootstrap/ as the PF-A2.1 installer does.
+    ``release_id``: the fixture id by default; content_release_id() gives the installer's own id."""
     endpoint, socket_path = install_daemon_socket(base)
     values = pf_instance.initialize_installation_root(
         Path(base) / "install",
         launcher=launcher if launcher is not None else (REPO_PACKAGE / "pf.sh").read_bytes(),
         interpreter=interpreter or os.path.realpath(sys.executable),
-        release_id=RELEASE_ID,
+        release_id=release_id,
         release_files=release_files(),
+        wrappers=wrapper_files() if wrappers else None,
         profile=(PROFILE_NAME, profile_document()),
         policy_documents={
             POLICY_NAME: policy_document(),
@@ -215,7 +235,7 @@ def registration_spec(layout, slug, paths, *, project=None, engine_id=ENGINE_ID,
         "approved_environment": environment,
         "daemon": {"endpoint": layout.daemon_endpoint, "engine_id": engine_id},
         "paths": paths,
-        "control_release_id": RELEASE_ID,
+        "control_release_id": Path(layout.release_dir).name,
         "profile_path": layout.profile_path,
         "policy_path": layout.policy_paths.get(environment + ".json", layout.policy_path),
     }
@@ -472,3 +492,189 @@ def daemon_shell_lines(directory):
 
 def write_daemon_answers(directory, context, **kwargs):
     (Path(directory) / "compose-render.json").write_text(expected_render(context, **kwargs), encoding="utf-8")
+
+
+# ------------------------------------------------------------------ PF-A2.1 installer fixtures
+
+
+def candidate_copy(base, *, mutate=None, block_on=None, name="candidate"):
+    """A repository-shaped copy of every candidate file the installer reads (pf_install.CONTROL_RELEASE_FILES and
+    BOOTSTRAP_FILES), root-owned, under ``<base>/<name>``.
+
+    ``mutate``: {relative path: bytes | callable(bytes) -> bytes | None (remove)}. ``block_on``: "import" (the
+    candidate's pf-admin.py blocks on the FIFO ``<base>/<name>.fifo`` whenever it is imported: reached by the smoke)
+    or "instances" (it blocks only when run as __main__ with ``instances``: reached only by the installer's
+    end-to-end verify). Before blocking it writes ``<base>/<name>.reached``. Test-only; no production hook.
+    """
+    pf_install = pf.pf_install
+    base = Path(base)
+    root = base / name
+    # install-control.sh too, so a candidate tree can also run the repository init entry (RS-2/RS-4).
+    relatives = sorted(set(pf_install.CONTROL_RELEASE_FILES.values()) | set(pf_install.BOOTSTRAP_FILES.values())
+                       | {"deploy/synology/install-control.sh"})
+    for relative in relatives:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_PACKAGE / relative).read_bytes())
+    for current, dirs, files in os.walk(root):
+        os.chmod(current, 0o755)
+    if block_on is not None:
+        fifo = base / (name + ".fifo")
+        reached = base / (name + ".reached")
+        if not fifo.exists():
+            os.mkfifo(str(fifo), 0o600)
+        condition = "True" if block_on == "import" else \
+            '__name__ == "__main__" and "instances" in __import__("sys").argv'
+        # Blocks once: a later import (a resume after the test released the FIFO) runs straight through.
+        hook = ("if " + condition + " and not __import__('os').path.exists(" + repr(str(reached)) + "):\n"
+                "    open(" + repr(str(reached)) + ", 'w').write('blocked')\n"
+                "    open(" + repr(str(fifo)) + ", 'rb').read()\n")
+        admin = root / "deploy/synology/pf-admin.py"
+        text = admin.read_text(encoding="utf-8")
+        marker = "from __future__ import annotations\n"
+        admin.write_text(text.replace(marker, marker + hook, 1), encoding="utf-8")
+    for relative, change in (mutate or {}).items():
+        target = root / relative
+        data = change(target.read_bytes()) if callable(change) else change
+        if data is None:
+            target.unlink()
+        else:
+            target.write_bytes(data)
+    return root
+
+
+def release_fifo(base, name="candidate"):
+    """Let a blocked candidate continue: open the FIFO for writing once (the reader sees EOF), then close it."""
+    fifo = Path(base) / (name + ".fifo")
+    try:
+        fd = os.open(str(fifo), os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:  # ENXIO: no reader is blocked on it (any more)
+        return False
+    os.close(fd)
+    return True
+
+
+def legacy_home(base, *, workspace_name="my-checkout", env_repo=None, env_config=None, admin_legacy=None,
+                admin_config=None, state=True, pending=False, launcher=None, lock_held=False,
+                project="partflow-legacy", group=None, state_files=None, name="legacyhome"):
+    """A v2.5 home: control/ (the v2.5 launcher target), config/, backups/ and recovery/ (0750), the checkout
+    ``<home>/<workspace_name>`` and, with ``state``, ``.pf-state-<project>/`` (0700) holding operation.lock.
+
+    ``env_repo``/``env_config``: text of ``<workspace>/.env`` / ``config/.env``; ``admin_legacy``/``admin_config``:
+    pf-config.json fields (dicts, merged over a valid staging document) at ``<workspace>/deploy/synology/`` /
+    ``config/``. ``pending`` writes a v2.5 ``pending.json``; ``launcher`` names a path that receives the v2.5
+    launcher template of this home; ``lock_held`` returns an open descriptor holding the v2.5 lock (closed by
+    the caller).
+    """
+    import fcntl
+    import grp
+    group = group or grp.getgrgid(os.getgid()).gr_name
+    home = Path(base) / name
+    home.mkdir(parents=True)
+    os.chmod(home, 0o755)
+    control = home / "control"
+    control.mkdir()
+    (control / "pf.sh").write_text("#!/bin/sh\n# v2.5 control (legacy fixture; never executed by these tests)\n")
+    os.chmod(control / "pf.sh", 0o740)
+    config = home / "config"
+    config.mkdir()
+    workspace = home / workspace_name
+    (workspace / "deploy" / "synology").mkdir(parents=True)
+    for directory in ("backups", "recovery"):
+        (home / directory).mkdir()
+        os.chmod(home / directory, 0o750)
+
+    def admin(document):
+        values = {"project": project, "environment": "staging", "backup_read_group": group,
+                  "workspace_write_group": group}
+        values.update(document or {})
+        return json.dumps(values) + "\n"
+
+    if env_repo is not None:
+        (workspace / ".env").write_text(env_repo)
+        os.chmod(workspace / ".env", 0o640)
+    if env_config is not None:
+        (config / ".env").write_text(env_config)
+    if admin_legacy is not None:
+        (workspace / "deploy" / "synology" / "pf-config.json").write_text(admin(admin_legacy))
+        os.chmod(workspace / "deploy" / "synology" / "pf-config.json", 0o644)
+    if admin_config is not None:
+        (config / "pf-config.json").write_text(admin(admin_config))
+    state_dir = home / (".pf-state-" + project)
+    held = None
+    if state:
+        state_dir.mkdir()
+        os.chmod(state_dir, 0o700)
+        lock = state_dir / "operation.lock"
+        lock.write_bytes(b"")
+        os.chmod(lock, 0o600)
+        for state_name, text in (state_files or {}).items():
+            (state_dir / state_name).write_text(text)
+            os.chmod(state_dir / state_name, 0o600)
+        if pending:
+            (state_dir / "pending.json").write_text('{"operation": "update", "phase": "paused"}\n')
+            os.chmod(state_dir / "pending.json", 0o600)
+        if lock_held:
+            held = os.open(str(lock), os.O_RDONLY | os.O_CLOEXEC)
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if launcher is not None:
+        launcher = Path(launcher)
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text('#!/bin/sh\n# PartFlow NAS installed launcher\nexec "' + str(control)
+                            + '/pf.sh" "$@"\n')
+        os.chmod(launcher, 0o700)
+    return {"home": home, "control": control, "config": config, "workspace": workspace, "state": state_dir,
+            "backups": home / "backups", "recovery": home / "recovery", "project": project, "lock_fd": held}
+
+
+@contextlib.contextmanager
+def typed_terminal(answers=()):
+    """A fresh pty whose slave is a child's stdin; ``answers`` are typed into the master in advance."""
+    try:
+        master, slave = pty.openpty()
+    except OSError as exc:
+        raise unittest.SkipTest("pty unavailable: " + str(exc))
+    try:
+        if answers:
+            os.write(master, ("\n".join(answers) + "\n").encode("utf-8"))
+        yield slave
+    finally:
+        os.close(slave)
+        os.close(master)
+
+
+def run_installer(arguments, *, answers=(), env=None, timeout=300, cwd=None, preexec_fn=None, terminal=True,
+                  script=None):
+    """``sh install-control.sh <arguments>`` with a pty as stdin (``answers`` typed in advance, one per line).
+    ``script``: another copy of install-control.sh (a candidate tree's); the repository's by default."""
+    import subprocess
+    environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
+    environment.update(env or {})
+    command = ["sh", str(script or PACKAGE / "install-control.sh"), *arguments]
+    with (typed_terminal(answers) if terminal else contextlib.nullcontext(subprocess.DEVNULL)) as stdin:
+        return subprocess.run(command, env=environment, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, check=False, timeout=timeout, cwd=cwd, preexec_fn=preexec_fn)
+
+
+@contextlib.contextmanager
+def forked_crash(seam, when, index):
+    """Inside a forked child only: the ``index``-th call (0-based) of ``pf_install.<seam>`` ends the process with
+    ``os._exit(137)`` ``before`` or ``after`` the real call, so no finally/except/last_error handler runs.
+    Yields the call counter (a one-element list)."""
+    from unittest import mock
+    module = pf.pf_install
+    real = getattr(module, seam)
+    calls = [0]
+
+    def wrapper(*args, **kwargs):
+        number = calls[0]
+        calls[0] += 1
+        if number == index and when == "before":
+            os._exit(137)
+        result = real(*args, **kwargs)
+        if number == index and when == "after":
+            os._exit(137)
+        return result
+
+    with mock.patch.object(module, seam, wrapper):
+        yield calls
