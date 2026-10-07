@@ -88,11 +88,12 @@
 > child đầu tiên của mỗi process, controller chạy `docker info` một lần và bắt buộc đúng engine
 > ID đã đăng ký và daemon rootful; drift (`daemon-drift`), rootless (`daemon-rootless`), câu trả
 > lời không dùng được (`daemon-info-invalid`) hoặc không trả lời (`daemon-unreachable`) chặn mọi
-> mutation trước bất kỳ confirmation, ghi journal, pause hay Docker effect nào. `status`/`doctor`
+> mutation trước bất kỳ confirmation (kể cả prompt `RESUME PURGE`/`RESUME ABORT DEPLOY` của một
+> purge hoặc abort bị gián đoạn), ghi journal, pause hay Docker effect nào. `status`/`doctor`
 > in dòng daemon, đánh dấu mọi mục Docker sau đó là `unavailable: <code>` mà không liên lạc lại
 > daemon, và vẫn in mọi mục không liên quan Docker.
-> *Compose envelope.* Trước mọi `up`, `run`, `build`, `create`, `start` hoặc `restart` (managed
-> hay passthrough), controller render `docker compose … config --format json` với đúng input của
+> *Compose envelope.* Trước mọi `up`, `run`, `build`, `create`, `start`, `restart`, `scale` hoặc
+> `watch` (managed hay passthrough), controller render `docker compose … config --format json` với đúng input của
 > lời gọi đó (installed `compose.nas.yaml`, image override được bảo vệ, frozen env-file và các
 > child value hiệu lực, kể cả tên database tạm theo từng lời gọi) vào file riêng 0600
 > `compose-<n>.json`, kiểm tra theo allowlist topology PartFlow (ba service, chỉ `postgres_data`
@@ -106,17 +107,21 @@
 > sinh từ registration được bảo vệ.
 > *Exact inventory.* Mọi container (kể cả container đã dừng, không bao giờ đọc `Config.Env`), các
 > tên volume/network của topology và volume, network, image tag có label được phân loại thành
-> owned, excluded (reference, bind path, resource owned ngoài topology, tag ngoại lai hoặc sai
-> ngữ pháp) hoặc blocker (`resource-legacy-unlabeled`, `resource-name-collision`,
+> owned, excluded (reference, bind path, resource owned ngoài topology, tag sai ngữ pháp, và tag
+> foreign-in-use: container của ứng dụng khác dùng tag đó, hoặc dùng image ID đó khi container
+> được tạo từ image ID) hoặc blocker (`resource-legacy-unlabeled`, `resource-name-collision`,
 > `resource-foreign-claim`, `resource-label-conflict`, `resource-shared`,
 > `resource-unsupported-driver`). Tiền tố tên không bao giờ chọn resource nào. `deploy` và
 > `restore-instance` exact yêu cầu target trống (`resource-target-not-empty`); `backup`, `update`,
 > `rollback`, `reset-db`, `resume`, restore side-by-side, `release-check --apply` và passthrough có
 > mutation chạy ownership preflight ngay sau lock (`resource-not-owned`). Resource legacy hoặc
-> ngoại lai không bao giờ được tự động adopt (adoption thuộc PF-A2).
+> ngoại lai không bao giờ được tự động adopt (adoption thuộc PF-A2). Container biến mất giữa
+> `docker ps -a` và lệnh inspect của nó (container ngắn hạn của ứng dụng khác) khiến inventory
+> liệt kê lại; sau ba lần như vậy bước đó dừng với `inventory-unstable`.
 > *Closed deletion plan.* `purge` và `abort-deploy` chỉ xóa đúng một plan đã đóng băng
 > (`deletion-plan.json`, hash nằm trong journal): mỗi item và mọi container đang dùng volume hoặc
-> network được kiểm tra lại ngay trước effect của nó, thay đổi thì dừng với `plan-drift`, resume
+> network được kiểm tra lại ngay trước effect của nó và item còn tồn tại phải vẫn là owned (ví dụ
+> image tag mà một container ngoại lai bắt đầu dùng), thay đổi thì dừng với `plan-drift`, resume
 > chạy đúng plan đó và không bao giờ thêm resource, và image tag chỉ bị xóa khi purge recovery
 > bundle bao phủ image ID của nó. Không prune, không dùng `compose down -v`, không ép xóa image,
 > và không bao giờ xóa đường dẫn bind mount. `abort-deploy` không còn chạy
@@ -626,7 +631,11 @@ Từ PF-A1.3 trình tự là:
    tra, controller inventory lại, dựng binding plan (image tag có image ID được lưu trong bundle
    trở thành candidate; owned tag khác được giữ lại và báo cáo) và so với preliminary plan, chỉ
    bỏ qua các tag do chính lần purge này tạo. Có khác biệt thì dừng với `plan-changed` và mở lại
-   application; khi đó thư mục bundle không có `manifest.json`. Nếu không, `resources_before_purge`
+   application; khi đó thư mục bundle không có `manifest.json`. Resource trở thành blocker trong
+   khoảng này cũng là `plan-changed` (không bao giờ là thông báo `resource-blocked` trước
+   confirmation): user ngoại lai của volume hoặc network (`resource-shared`) thì application được
+   mở lại; blocker khác thì service vẫn dừng và journal ở `paused`, vì Compose có thể adopt hoặc
+   tạo lại resource đó; xử lý xong thì chạy `pf resume`. Nếu không, `resources_before_purge`
    được niêm phong vào manifest từ binding plan.
 5. **Destructive confirmation**, sau khi in đầy đủ binding plan:
 
@@ -640,7 +649,8 @@ Từ PF-A1.3 trình tự là:
 6. **Thực thi khép kín.** Plan được ghi bền vững (`deletion-plan.json`, hash trong journal) trước
    lần xóa đầu tiên. Container, rồi network, volume và các image tag được bao phủ bị xóa lần
    lượt; mỗi item, và mọi container dùng volume hoặc network đó (kể cả container đã dừng), được
-   kiểm tra lại ngay trước effect của nó, thay đổi thì dừng với `plan-drift`. Không prune, không
+   kiểm tra lại ngay trước effect của nó, thay đổi (kể cả item còn tồn tại nhưng không còn owned)
+   thì dừng với `plan-drift`. Không prune, không
    bao giờ dùng `compose down -v`, không ép xóa image, và không bao giờ xóa bind-mounted path.
 
 Bảo đảm này giả định daemon tin cậy và không có hoạt động song song: Docker không có
@@ -831,7 +841,7 @@ cho mọi resource mà Compose tạo sau đó**: các resource này bị phân l
 hoặc `resource-label-conflict` và chặn `purge`, `abort-deploy` cùng mọi guarded command cho tới
 khi được review.
 
-Qua controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart` phải qua Compose
+Qua controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart`/`scale`/`watch` phải qua Compose
 envelope (**model** đã resolve), và mọi passthrough verb có mutation chạy ownership preflight
 trước. **CLI flag** của passthrough (ví dụ `run -v`, `--cap-add`, `exec --privileged`) không được
 model envelope bao phủ cho tới khi PF-A1.4 bỏ route này.
@@ -952,7 +962,10 @@ có gì được build, create hay start.
 `sudo pf status`; resource legacy chưa có label (ví dụ từ bản cài v2.5), trùng tên và resource
 thuộc instance khác không bao giờ được tự động adopt hay xóa (adoption thuộc PF-A2). `plan-drift`
 trong purge hoặc abort nghĩa là một resource trong plan hoặc một user của nó đã thay đổi sau khi
-plan được đóng băng; journal giữ nguyên plan.
+plan được đóng băng (hoặc một item trong plan còn tồn tại nhưng không còn owned); journal giữ
+nguyên plan. `inventory-unstable` nghĩa là container liên tục biến mất giữa `docker ps -a` và lệnh
+inspect của nó trong ba lần thử; chạy lại khi host bớt bận (purge hoặc abort bị gián đoạn sẽ resume
+đúng plan đã đóng băng).
 
 ### Có local source edit trước update
 

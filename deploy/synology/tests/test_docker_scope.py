@@ -385,6 +385,20 @@ class InventoryRules(unittest.TestCase):
         self.assertEqual(excluded, {"otherapp:latest": "grammar", "partflow-frontend:backup-2": "foreign-in-use",
                                     "partflow-backend:candidate-3": "unlabelled"})
 
+    def test_image_used_by_id_by_a_foreign_container_is_foreign_in_use(self):
+        """Audit F4: a foreign container created from an image ID (config_image is the ID) keeps every
+        tag of that image out of the candidates; an owned container using the same ID does not."""
+        label = {pf_docker.INSTANCE_LABEL: INSTANCE}
+        images = [pfx.image("sha256:1", ["partflow-backend:candidate-1", "partflow-backend:backup-1"], label),
+                  pfx.image("sha256:2", ["partflow-frontend:candidate-2"], label)]
+        foreign = pfx.container("8" * 64, "x", {}, status="exited", image="sha256:1", config_image="sha256:1")
+        inventory = classify(containers=[foreign], images=images)
+        self.assertEqual(inventory.owned_image_tags, {"partflow-frontend:candidate-2"})
+        self.assertEqual({item.key: item.reason for item in inventory.excluded if item.kind == "image"},
+                         {"partflow-backend:candidate-1": "foreign-in-use", "partflow-backend:backup-1": "foreign-in-use"})
+        owned_user = topology()
+        self.assertEqual(len(classify_topology(owned_user).owned_image_tags), 2)
+
     def test_container_fields_never_request_the_environment(self):
         """RI-19 (static)."""
         for template in (pf_docker.CONTAINER_FIELDS, pf_docker.VOLUME_FIELDS, pf_docker.NETWORK_FIELDS,
@@ -978,15 +992,18 @@ class ComposeEnvelope(ScopeBase):
         code, out, err = run_main(["--instance", "staging", "up", "-d"], self.layout)
         self.assertEqual(code, 0, err)
         self.assertEqual([verb[0] for verb in self.verbs() if verb[0] in ("config", "up")], ["config", "up"])
-        for verb in ("up", "run"):
+        # Audit F2: scale and watch create, build or start containers from the model as well.
+        for verb, arguments in (("up", ["-d", "db"]), ("run", ["-d", "db"]), ("scale", ["backend=2"]), ("watch", [])):
             with self.subTest(verb):
                 state = self.state(topology(self.context))
                 state["compose"]["render_patch"] = [{"op": "set", "path": ["services", "db", "privileged"], "value": True}]
                 self.fake.write_state(state)
-                code, out, err = run_main(["--instance", "staging", verb, "-d", "db"], self.layout)
+                code, out, err = run_main(["--instance", "staging", verb, *arguments], self.layout)
                 self.assertEqual(code, 1)
                 self.assertIn("envelope-forbidden", err)
+                self.assertIn(["config", "--format", "json"], self.verbs())
                 self.assertFalse([item for item in self.verbs() if item[:1] == [verb]])
+        self.assertTrue(pf_docker.ENVELOPE_VERBS <= pf.COMPOSE_MUTATING_VERBS)
 
     def test_ce7_instance_label_positions_and_generated_variable(self):
         text = (pfx.REPO_PACKAGE / "compose.nas.yaml").read_text()
@@ -1443,6 +1460,43 @@ class ResourceInventory(PurgeHarness):
             self.assertNotIn("--force", argv)
             self.assertFalse(argv[:1] == ["compose"] and "down" in argv)
 
+    def test_ri11_an_image_a_foreign_container_uses_by_id_is_retained(self):
+        """Audit F4: the foreign container references the image only by its ID."""
+        fragment = topology(self.context)
+        fragment["containers"].append(pfx.container("8" * 64, "other-app", {}, status="exited",
+                                                    image="sha256:abackend", config_image="sha256:abackend"))
+        self.state(fragment)
+        code, out, err, _ = self.purge()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("retained: foreign-in-use image partflow-backend:candidate-a00000000000-abcdef", out)
+        backend = next(item for item in self.fake.state()["images"] if item["id"] == "sha256:abackend")
+        removals = [argv[2] for argv in self.fake.argvs() if argv[:2] == ["image", "rm"]]
+        self.assertTrue(removals)
+        self.assertFalse(set(removals) & set(backend["repo_tags"]))
+        self.assertIn("partflow-backend:candidate-a00000000000-abcdef", backend["repo_tags"])
+        self.assertTrue(all(argv.startswith("partflow-frontend:") for argv in removals))
+        self.assertIn("8" * 64, [item["id"] for item in self.fake.state()["containers"]])
+
+    def test_ri11_a_planned_tag_a_foreign_container_starts_using_after_the_freeze_is_drift(self):
+        """Audit F8: a planned image item still present but no longer owned is never removed."""
+        tag = "partflow-backend:candidate-a00000000000-abcdef"
+        for label, late in (("by reference", pfx.container("8" * 64, "other-app", {}, status="exited",
+                                                            config_image=tag)),
+                            ("by image ID", pfx.container("8" * 64, "other-app", {}, status="exited",
+                                                          image="sha256:abackend", config_image="sha256:abackend"))):
+            with self.subTest(label):
+                if self.context.journal_path.exists():
+                    self.context.journal_path.unlink()
+                self.state(topology(self.context), hooks=[{"after_argv_prefix": ["volume", "rm"], "mutate": [
+                    {"op": "append", "list": "containers", "value": late}]}])
+                code, out, err, _ = self.purge()
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("plan-drift: Planned image partflow-backend:", err)
+                self.assertIn("now excluded: foreign-in-use", err)
+                self.assertNotIn(["image", "rm", tag], self.fake.argvs())
+                self.assertIn(tag, [name for item in self.fake.state()["images"] for name in item["repo_tags"]])
+                self.assertEqual(self.journal()["phase"], "deleting")
+
     def test_ri12_bind_paths_are_retained_and_a_legacy_bind_container_blocks(self):
         exports = self.base / "exports"
         (exports / "sub").mkdir(parents=True)
@@ -1710,6 +1764,117 @@ class ResourceInventory(PurgeHarness):
                 self.assertFalse([bundle for bundle in bundles if (bundle / "manifest.json").exists()])
                 self.assertFalse(self.context.journal_path.exists())
                 self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["rm"]])
+
+    def test_ri21_a_blocker_appearing_during_the_bundle_is_plan_changed_after_the_pause(self):
+        """Audit F1: never the pre-confirmation 'resource-blocked' copy once PURGE was confirmed and
+        services were stopped. A foreign user of the volume/network reopens the application; a blocker
+        Compose could adopt or recreate keeps the services stopped and the journal paused."""
+        variants = (
+            ("foreign volume user", pfx.container("2" * 64, "other-app", {}, status="exited",
+                                                  volumes=("partflow_postgres_data",)), True),
+            ("foreign network user", pfx.container("2" * 64, "other-app", {}, status="exited",
+                                                   networks=(("partflow_default", "a" * 64),)), True),
+            ("legacy project container", pfx.container("6" * 64, "partflow-backend-9",
+                                                       {pf_docker.COMPOSE_PROJECT_LABEL: PROJECT,
+                                                        pf_docker.COMPOSE_SERVICE_LABEL: "backend"}), False),
+        )
+        for label, newcomer, reopened in variants:
+            with self.subTest(label):
+                if self.context.journal_path.exists():
+                    self.context.journal_path.unlink()
+                before = self.operation_dirs()
+                self.state(topology(self.context), hooks=[{"after_argv_prefix": ["image", "save"], "mutate": [
+                    {"op": "append", "list": "containers", "value": newcomer}]}])
+                self.activated.clear()
+                code, out, err, confirmations = self.purge()
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(confirmations, ["PURGE partflow"])
+                self.assertIn("plan-changed: 1 resource(s) became blocked while the recovery bundle was created, "
+                              "after 'PURGE' was confirmed and the application services were stopped", err)
+                self.assertNotIn("before any confirmation", err)
+                self.assertNotIn("Nothing was stopped", err)
+                self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["rm"] or argv[1:2] == ["rm"]])
+                bundles = list((self.context.paths.recovery / PROJECT).iterdir())
+                self.assertFalse([bundle for bundle in bundles if (bundle / "manifest.json").exists()])
+                operation = self.context.operations_dir / sorted(self.operation_dirs() - before)[-1]
+                binding = json.loads((operation / "inventory-binding.json").read_text())
+                self.assertEqual(binding["compare_plans"], "resource-blocked")
+                if reopened:
+                    self.assertIn("The application is reopened.", err)
+                    self.assertEqual(len(self.activated), 1)
+                    self.assertFalse(self.context.journal_path.exists())
+                else:
+                    self.assertIn("The application is NOT reopened", err)
+                    self.assertEqual(self.activated, [])
+                    self.assertEqual(self.journal()["phase"], "paused")
+
+    def test_db5_resume_routes_verify_the_daemon_before_the_resume_confirmation(self):
+        """Audit F3: a deleting purge journal and an aborting abort-deploy journal refuse a drifted
+        daemon with the daemon-drift copy before the RESUME prompt."""
+        original_run = pf.pf_runner.ProcessRunner.run
+
+        def interrupt_after_first_rm(runner, spec):
+            result = original_run(runner, spec)
+            if list(spec.argv[:2]) == ["rm", "-f"]:
+                raise KeyboardInterrupt("Interrupted by signal 15")
+            return result
+
+        def drift():
+            state = self.fake.state()
+            state["info"] = pfx.daemon_info("OTHER-ENGINE-9999")
+            self.fake.write_state(state)
+            self.fake.clear_calls()
+
+        for route in ("purge", "abort-deploy"):
+            with self.subTest(route):
+                self.state(topology(self.context))
+                if route == "abort-deploy":
+                    (self.context.state_dir / "deployed.json").unlink()
+                    pf.write_json(self.context.journal_path, {
+                        "operation": "deploy", "phase": "migrating-database", "database": "partflow_staging",
+                        "started": "20261006T000000Z"})
+                with mock.patch.object(pf.pf_runner.ProcessRunner, "run", interrupt_after_first_rm):
+                    if route == "purge":
+                        code, out, err, _ = self.purge()
+                    else:
+                        code, out, err, _ = self.main("abort-deploy")
+                self.assertEqual(code, 1)
+                journal_before = self.context.journal_path.read_bytes()
+                self.assertEqual(self.journal()["phase"], "deleting" if route == "purge" else "aborting")
+                drift()
+                if route == "purge":
+                    code, out, err, confirmations = self.purge(confirm=refuse_confirmation)
+                else:
+                    code, out, err, confirmations = self.main("abort-deploy", confirm=refuse_confirmation)
+                self.assertEqual(code, 1, err)
+                self.assertIn("ERROR: daemon-drift: Docker daemon drift: instance staging is bound to engine "
+                              + pfx.ENGINE_ID, err)
+                self.assertEqual(confirmations, [])
+                self.assertEqual(self.fake.argvs(), [PROBE])
+                self.assertEqual(self.context.journal_path.read_bytes(), journal_before)
+                self.context.journal_path.unlink()
+                pfx.deployed_record(self.context)
+
+    def test_ri25_inventory_tolerates_a_container_vanishing_between_listing_and_inspect(self):
+        """Audit F9: another application's short-lived container is not an inventory failure; endless
+        churn is refused with a specific code after a bounded number of listings."""
+        fragment = topology(self.context)
+        fragment["containers"].append(pfx.container("9" * 64, "cron-job", {}, status="exited"))
+        self.state(fragment, hooks=[{"after_argv_prefix": ["ps", "-a"], "mutate": [
+            {"op": "remove", "list": "containers", "match": {"id": "9" * 64}}]}])
+        inventory = self.controller().docker_inventory()
+        self.assertEqual(len(inventory.owned_of("container")), 3)
+        self.assertEqual(len([argv for argv in self.fake.argvs() if argv[:2] == ["ps", "-a"]]), 2)
+        churn = [pfx.container(str(index) * 64, "cron-" + str(index), {}, status="exited") for index in (7, 8, 9)]
+        fragment = topology(self.context)
+        fragment["containers"] += churn
+        self.state(fragment, hooks=[{"after_argv_prefix": ["ps", "-a"], "nth": number,
+                                     "mutate": [{"op": "remove", "list": "containers", "match": {"id": item["id"]}}]}
+                                    for number, item in enumerate(churn, start=1)])
+        with self.assertRaisesRegex(pf.Failure, "^inventory-unstable: Docker inventory could not be completed"):
+            self.controller().docker_inventory()
+        self.assertEqual(len([argv for argv in self.fake.argvs() if argv[:2] == ["ps", "-a"]]), pf.INVENTORY_ATTEMPTS)
+        self.assertEqual(self.mutations(), [])
 
     def test_db11_engine_drift_between_freeze_and_execution_is_plan_drift(self):
         self.state(topology(self.context), hooks=[{"after_argv_prefix": ["image", "save"], "mutate": [

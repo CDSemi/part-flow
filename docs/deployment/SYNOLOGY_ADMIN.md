@@ -90,12 +90,13 @@
 > failure. Before the first Docker/Compose child of every process the controller runs
 > `docker info` once and requires the registered engine ID and a rootful daemon; drift
 > (`daemon-drift`), rootless mode (`daemon-rootless`), an unusable answer (`daemon-info-invalid`)
-> or no answer (`daemon-unreachable`) refuses every mutation before any confirmation, journal
+> or no answer (`daemon-unreachable`) refuses every mutation before any confirmation (the
+> `RESUME PURGE`/`RESUME ABORT DEPLOY` prompts of an interrupted purge or abort included), journal
 > write, pause or Docker effect. `status`/`doctor` print the daemon line, mark every later
 > Docker section `unavailable: <code>` without contacting the daemon again, and still print
 > every non-Docker section.
-> *Compose envelope.* Before any `up`, `run`, `build`, `create`, `start` or `restart` (managed or
-> passthrough) the controller renders `docker compose … config --format json` with exactly the
+> *Compose envelope.* Before any `up`, `run`, `build`, `create`, `start`, `restart`, `scale` or
+> `watch` (managed or passthrough) the controller renders `docker compose … config --format json` with exactly the
 > inputs of that call (installed `compose.nas.yaml`, protected image override, frozen env-file
 > and the effective child values, per-call temporary database names included) into a private
 > 0600 `compose-<n>.json`, validates it against the PartFlow topology allowlist (three
@@ -110,17 +111,22 @@
 > `DEPLOY_ADMIN_INSTANCE_ID`, which the controller generates from the protected registration.
 > *Exact inventory.* All containers (stopped ones included, `Config.Env` never read), the topology
 > volume/network names and the labelled volumes, networks and image tags are classified as
-> owned, excluded (references, bind paths, owned resources outside the topology, foreign or
-> ungrammatical tags) or blockers (`resource-legacy-unlabeled`, `resource-name-collision`,
+> owned, excluded (references, bind paths, owned resources outside the topology, ungrammatical
+> tags, and foreign-in-use tags: a container of another application uses the tag or, when it
+> was created from an image ID, that image ID) or blockers (`resource-legacy-unlabeled`, `resource-name-collision`,
 > `resource-foreign-claim`, `resource-label-conflict`, `resource-shared`,
 > `resource-unsupported-driver`). Name prefixes never select anything. `deploy` and exact
 > `restore-instance` require an empty target (`resource-target-not-empty`); `backup`, `update`,
 > `rollback`, `reset-db`, `resume`, side-by-side restore, `release-check --apply` and mutating
 > passthrough run an ownership preflight right after the lock (`resource-not-owned`). Legacy or
-> foreign resources are never adopted automatically (adoption is PF-A2).
+> foreign resources are never adopted automatically (adoption is PF-A2). A container that
+> disappears between `docker ps -a` and its inspect (another application's short-lived
+> container) makes the inventory list again; after three such attempts the step stops with
+> `inventory-unstable`.
 > *Closed deletion plan.* `purge` and `abort-deploy` delete exactly a frozen plan
 > (`deletion-plan.json`, hashed in the journal): every item and every container that uses a
-> volume or network is reinspected before its effect, a change stops with `plan-drift`, resume
+> volume or network is reinspected before its effect and a present item must still be owned (for
+> example an image tag a foreign container started to use), a change stops with `plan-drift`, resume
 > runs the same plan and never adds a resource, and an image tag is deleted only when the
 > purge recovery bundle covers its image ID. Nothing prunes, nothing uses `compose down -v`,
 > image removal is never forced, and bind-mounted paths are never deleted. `abort-deploy` no
@@ -643,7 +649,11 @@ Since PF-A1.3 the sequence is:
    an image ID saved in the bundle become candidates; other owned tags are retained and
    reported) and compares it with the preliminary plan, ignoring only the tags this purge
    created itself. A difference stops with `plan-changed` and reopens the application; the
-   bundle folder then has no `manifest.json`. Otherwise `resources_before_purge` is sealed
+   bundle folder then has no `manifest.json`. A resource that became a blocker in this window
+   is also `plan-changed` (never the pre-confirmation `resource-blocked` copy): a foreign user
+   of the volume or network (`resource-shared`) reopens the application, any other blocker
+   keeps the services stopped with the journal `paused`, because Compose could adopt or
+   recreate it; resolve it, then run `pf resume`. Otherwise `resources_before_purge` is sealed
    into the manifest from the binding plan.
 5. **Destructive confirmations**, after the full binding plan is printed:
 
@@ -658,7 +668,8 @@ Since PF-A1.3 the sequence is:
    journal) before the first deletion. Containers, then the network, the volume and the
    covered image tags are removed one by one; each item, and every container that uses the
    volume or network (stopped ones included), is reinspected immediately before its effect,
-   and a change stops with `plan-drift`. Nothing is pruned, `compose down -v` is never used,
+   and a change (including a present item that is no longer owned) stops with `plan-drift`.
+   Nothing is pruned, `compose down -v` is never used,
    image removal is never forced, and bind-mounted paths are never deleted.
 
 The guarantee assumes a quiescent, trusted daemon: Docker has no atomic compare-and-delete,
@@ -857,7 +868,7 @@ mislabels every resource Compose then creates**: those resources are classified
 `resource-foreign-claim` or `resource-label-conflict` and block `purge`, `abort-deploy` and every
 guarded command until they are reviewed.
 
-Through the controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart` must pass the
+Through the controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart`/`scale`/`watch` must pass the
 Compose envelope (the resolved **model**), and every mutating passthrough verb runs the
 ownership preflight first. Passthrough **CLI flags** (for example `run -v`, `--cap-add`,
 `exec --privileged`) are not covered by the model envelope until PF-A1.4 removes the route.
@@ -975,7 +986,10 @@ and is unsupported). Nothing was built, created or started.
 them with `sudo pf status`; legacy unlabeled resources (for example from a v2.5 installation),
 name collisions and resources claimed by another instance are never adopted or deleted
 automatically (adoption is PF-A2). `plan-drift` during a purge or abort means a planned
-resource or one of its users changed after the plan was frozen; the journal keeps the plan.
+resource or one of its users changed after the plan was frozen (or a present planned item is
+no longer owned); the journal keeps the plan. `inventory-unstable` means containers kept
+disappearing between `docker ps -a` and their inspect on three attempts; retry when the host is
+quieter (an interrupted purge or abort resumes its frozen plan).
 
 ### Local source edits exist before an update
 

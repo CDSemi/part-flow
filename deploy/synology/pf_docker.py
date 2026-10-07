@@ -26,7 +26,8 @@ COMPOSE_VOLUME_LABEL = "com.docker.compose.volume"
 COMPOSE_NETWORK_LABEL = "com.docker.compose.network"
 SERVICES = ("db", "backend", "frontend")
 BUILT_SERVICES = ("backend", "frontend")
-ENVELOPE_VERBS = frozenset({"up", "run", "build", "create", "start", "restart"})
+# Every Compose verb that creates, builds, (re)starts or scales containers from the resolved model.
+ENVELOPE_VERBS = frozenset({"up", "run", "build", "create", "start", "restart", "scale", "watch"})
 DELETION_ORDER = ("container", "network", "volume", "image")
 DAEMON_PROBE_ARGV = ("docker", "info", "--format", "{{json .}}")
 RENDER_LIMIT = 4 * 1024 * 1024
@@ -749,7 +750,11 @@ def classify_inventory(*, project, instance_id, containers, volumes, networks, i
                                          tuple(sorted(volume_users.get(mount["name"], ())))))
     # Image tags.
     pattern = image_tag_pattern(project)
-    foreign_images = {container["config_image"] for container in containers if container["id"] not in owned_containers}
+    # A foreign container uses an image by the reference it was created from (config_image) or,
+    # when created from an image ID, only by that ID; either way its tags are not candidates.
+    foreign = [container for container in containers if container["id"] not in owned_containers]
+    foreign_images = {container["config_image"] for container in foreign}
+    foreign_image_ids = {container["image"] for container in foreign}
     for image in images:
         reference = image["reference"]
         identity = {"reference": reference, "image_id": image["id"]}
@@ -757,7 +762,7 @@ def classify_inventory(*, project, instance_id, containers, volumes, networks, i
             excluded.append(Resource("image", reference, identity, "excluded", "unlabelled"))
         elif not pattern.fullmatch(reference):
             excluded.append(Resource("image", reference, identity, "excluded", "grammar"))
-        elif reference in foreign_images:
+        elif reference in foreign_images or image["id"] in foreign_image_ids:
             excluded.append(Resource("image", reference, identity, "excluded", "foreign-in-use"))
         else:
             owned.append(Resource("image", reference, identity, "owned", "instance image tag"))

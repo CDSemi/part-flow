@@ -71,6 +71,8 @@ TIMEOUT_GIT_FETCH = 1800.0
 TIMEOUT_PASSTHROUGH = 3600.0
 # PF-A1.3: the daemon identity probe (`docker info`), run once per process before any other Docker child.
 TIMEOUT_DAEMON_PROBE = 30.0
+# Container listings taken when a container vanishes between `ps -a` and inspect (inventory churn).
+INVENTORY_ATTEMPTS = 3
 # Per-call Compose value overrides: only the temporary databases of the update rehearsal and of
 # reset-db (fullmatch). Any other key or value is refused before rendering (OD-A13-13).
 COMPOSE_VALUE_OVERRIDES = {"POSTGRES_DB": r"pf_(migrate|clean)_[0-9a-f]{20}"}
@@ -126,7 +128,8 @@ class Deferred(Failure):
 
 class PlanChanged(Failure):
     """The binding inventory differs from the preliminary plan (PF-A1.3). Raised inside the bundle
-    creation after the checkpoint exists, so purge reopens that exact application before re-raising."""
+    creation after the checkpoint exists, so purge reopens that exact application before re-raising.
+    ``checkpoint`` is None when reopening is unsafe (a new blocker Compose could adopt or recreate)."""
 
     def __init__(self, message, checkpoint):
         super().__init__(message)
@@ -1097,17 +1100,40 @@ class Controller:
                 "inventory-invalid", kind, "ls row without a name")])
         return sorted(names)
 
+    def _observe_containers(self, batch):
+        """Every container (`ps -a`, then batched inspect). A container removed between the two calls
+        (another application's short-lived container) makes inspect fail with "No such container";
+        the whole listing is then taken again, a bounded number of times, and never partially used."""
+        vanished = None
+        for _ in range(INVENTORY_ATTEMPTS):
+            ids = [line.strip() for line in self.docker("ps", "-a", "--no-trunc", "--format", "{{.ID}}").splitlines()
+                   if line.strip()]
+            containers = []
+            try:
+                for start in range(0, len(ids), batch):
+                    containers += pf_docker.parse_field_lines(self.docker(
+                        "container", "inspect", "--format", pf_docker.CONTAINER_FIELDS, *ids[start:start + batch]),
+                        kind="container")
+            except DaemonFailure:
+                raise
+            except Failure as exc:
+                if "No such container" not in str(exc):
+                    raise
+                vanished = exc
+                continue
+            return containers
+        raise Failure(
+            f"inventory-unstable: Docker inventory could not be completed: containers disappeared between "
+            f"'docker ps -a' and 'docker container inspect' on {INVENTORY_ATTEMPTS} consecutive attempts (another "
+            "application is creating and removing containers). This step stopped before any further Docker change; "
+            "retry the command when the host is quieter (an interrupted purge or abort-deploy resumes its frozen "
+            "plan).") from vanished
+
     def _observe_inventory(self):
         project, instance_id = self.context.compose_project, self.context.instance_id
         label_filter = f"label={pf_docker.INSTANCE_LABEL}={instance_id}"
         batch = 50
-        ids = [line.strip() for line in self.docker("ps", "-a", "--no-trunc", "--format", "{{.ID}}").splitlines()
-               if line.strip()]
-        containers = []
-        for start in range(0, len(ids), batch):
-            containers += pf_docker.parse_field_lines(self.docker(
-                "container", "inspect", "--format", pf_docker.CONTAINER_FIELDS, *ids[start:start + batch]),
-                kind="container")
+        containers = self._observe_containers(batch)
         names = pf_docker.topology_names(project)
         observed = {}
         for kind, fields in (("volume", pf_docker.VOLUME_FIELDS), ("network", pf_docker.NETWORK_FIELDS)):
@@ -1287,6 +1313,17 @@ class Controller:
                        f"stopped. Already removed: {removed}. The journal keeps the frozen plan; inspect with "
                        f"'pf status --instance {self.context.slug}'.")
 
+    def require_plan_engine(self, plan, observation, deleted):
+        """The verified daemon must be the engine the frozen plan was built on."""
+        if plan["daemon"]["engine_id"] != observation.engine_id:
+            raise self.plan_drift("daemon", plan["daemon"]["engine_id"],
+                                  "the endpoint answers as engine " + observation.engine_id, deleted)
+
+    def verify_resume_daemon(self, plan, journal):
+        """Resume routes: the bound daemon and the plan's engine are verified before the RESUME prompt,
+        so a drifted, rootless or unreachable daemon refuses with its daemon-* copy and no confirmation."""
+        self.require_plan_engine(plan, self.verify_daemon(), list(journal.get("deleted") or []))
+
     def execute_deletion_plan(self, plan):
         """Execute exactly the frozen plan: re-observe every item and its users before its effect.
 
@@ -1304,20 +1341,26 @@ class Controller:
                 raise
             raise self.plan_drift("daemon", plan["daemon"]["engine_id"],
                                   "the endpoint now answers as engine " + exc.detail, deleted) from exc
-        if plan["daemon"]["engine_id"] != observation.engine_id:
-            raise self.plan_drift("daemon", plan["daemon"]["engine_id"],
-                                  "the endpoint answers as engine " + observation.engine_id, deleted)
+        self.require_plan_engine(plan, observation, deleted)
         done = {(entry.get("kind"), entry.get("key")) for entry in deleted}
 
         def prove(inventory, items):
             if inventory.blockers:
                 item = inventory.blockers[0]
                 raise self.plan_drift(item.kind, self.resource_name(item), item.cls, deleted)
+            owned = {(entry.kind, entry.key) for entry in inventory.owned}
             for item in items:
                 by_id, by_name = inventory.index(item["kind"])
                 outcome = pf_docker.compare_identity(item, by_id, by_name)
                 if isinstance(outcome, tuple):
                     raise self.plan_drift(item["kind"], item["key"], outcome[1], deleted)
+                if outcome == "identical" and (item["kind"], item["key"]) not in owned:
+                    # Still present but no longer owned, e.g. an image tag a foreign container
+                    # started to use after the freeze (excluded foreign-in-use, not a blocker).
+                    observed = next((entry for entry in inventory.excluded
+                                     if (entry.kind, entry.key) == (item["kind"], item["key"])), None)
+                    detail = f"now {observed.cls}: {observed.reason}" if observed is not None else "no longer owned"
+                    raise self.plan_drift(item["kind"], item["key"], detail, deleted)
                 if item["kind"] in ("volume", "network"):
                     violations = pf_docker.users_violations(plan, item, inventory.users_of(item["kind"], item["key"]))
                     if violations:
@@ -2801,6 +2844,7 @@ class Controller:
             if "deletion_plan" not in pending:
                 raise self.plan_missing("abort-deploy")
             plan = self.load_deletion_plan(pending, kind="abort-deploy")
+            self.verify_resume_daemon(plan, pending)
             self._topology_checked = True
             self.log_plan(plan, title="Frozen abort-deploy plan (resume; only these items are removed):")
             confirm(
@@ -2955,6 +2999,29 @@ class Controller:
                     missing.append(reference)
         return sorted(refs), sorted(set(missing))
 
+    def binding_blocked(self, inventory, created, checkpoint):
+        """A blocker that appeared after ``PURGE`` was confirmed and services were stopped (RI-21).
+
+        It is a plan change, not a pre-confirmation refusal. The application is reopened only
+        when every blocker is ``resource-shared`` (a foreign user of this instance's volume or
+        network, which the activation never touches); any other blocker is a resource Compose
+        could adopt or recreate, so the services stay stopped and the journal stays paused.
+        """
+        self.write_private_json("inventory-binding.json", dict(
+            inventory.record(), created_image_refs=created, compare_plans="resource-blocked"))
+        lines = [f"  - {item.cls}: {item.kind} {self.resource_name(item)}: {item.reason}"
+                 for item in inventory.blockers]
+        head = (f"plan-changed: {len(inventory.blockers)} resource(s) became blocked while the recovery bundle was "
+                "created, after 'PURGE' was confirmed and the application services were stopped:\n"
+                + "\n".join(lines) + "\nPurge stops before deletion; nothing was deleted. ")
+        if all(item.cls == "resource-shared" for item in inventory.blockers):
+            return PlanChanged(head + "The application is reopened.", checkpoint)
+        return PlanChanged(
+            head + "The application is NOT reopened: Compose could adopt or recreate a blocking resource. Review "
+            f"them with 'pf status --instance {self.context.slug}', remove or resolve them, then run "
+            f"'pf resume --instance {self.context.slug}'. Legacy or foreign resources are never adopted "
+            "automatically (adoption is PF-A2).", None)
+
     def create_purge_recovery(self, preliminary):
         """Create a verified recovery bundle before destructive project purge; return (manifest, binding plan).
 
@@ -3070,9 +3137,11 @@ class Controller:
             archive.getmembers()
 
         binding_inventory = self.docker_inventory()
+        created = sorted(set(self.created_image_refs))
+        if binding_inventory.blockers:
+            raise self.binding_blocked(binding_inventory, created, checkpoint)
         binding = self.plan_for("purge", binding_inventory, command="purge", recovery_id=recovery_id,
                                 covered_image_refs=set(image_refs))
-        created = sorted(set(self.created_image_refs))
         try:
             pf_docker.compare_plans(preliminary, binding, created_image_refs=set(created))
             comparison = "equal"
@@ -3263,6 +3332,7 @@ class Controller:
                     raise Failure("Interrupted purge recovery bundle is missing or ambiguous; manual recovery is required.")
                 self.verify_recovery(matches[0])
                 plan = self.load_deletion_plan(pending, kind="purge")
+                self.verify_resume_daemon(plan, pending)
                 self._topology_checked = True
                 self.log_plan(plan, title="Frozen purge plan (resume; only these items are removed):")
                 confirm(

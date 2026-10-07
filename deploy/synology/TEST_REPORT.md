@@ -125,6 +125,29 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > container-marker labels are not calibrated on a real daemon; image coverage by image ID assumes
 > a quiescent daemon between `image save` and the binding inventory; passthrough CLI flags
 > (`run -v`, `--cap-add`, `exec --privileged`) are not covered by the model envelope until PF-A1.4.
+>
+> **PF-A1.3 audit-fix addendum (2026-10-06).** An independent audit of `2d75f65..4466ea8` found
+> six defects, fixed in the working tree with one regression test each (each new test was run
+> against the `4466ea8` controller and failed there):
+> (1) a blocker that appears in the binding inventory after `PURGE` was confirmed and services
+> were stopped is now `plan-changed` with post-pause copy (no longer the pre-confirmation
+> "Nothing was stopped" refusal); the application is reopened only when every new blocker is
+> `resource-shared`, otherwise it stays stopped with the journal `paused` because Compose could
+> adopt or recreate the resource (RI-21 blocker test);
+> (2) passthrough `scale` and `watch` now pass the Compose envelope (`ENVELOPE_VERBS`; CE-6);
+> (3) the `RESUME PURGE`/`RESUME ABORT DEPLOY` routes verify the daemon and the plan's engine before
+> the prompt (DB-5 resume test);
+> (4) an owned tag whose image ID a foreign container uses (created from the ID) is excluded
+> `foreign-in-use` (inventory unit test and an RI-11 variant);
+> (5) the per-item proof also requires a planned item that is still present to be classified
+> owned, so a tag a foreign container starts using after the freeze stops with `plan-drift`
+> (RI-11 late-user test);
+> (6) a container that vanishes between `ps -a` and `container inspect` makes the inventory list
+> again (3 attempts), then `inventory-unstable` (RI-25).
+> Executed: the same command and images (CPython 3.12.15 and 3.9.25, uid 0, read-only source
+> copied to `/tmp/r`): **332 tests OK, 0 skipped** on both (`test_docker_scope.py` 84); `sh -n` and
+> the Python 3.9 `ast` parse of the 13 Python files under `deploy/synology` passed. The Docker-daemon
+> and NAS host gates remain `not_run`.
 
 ## Executed checks
 
