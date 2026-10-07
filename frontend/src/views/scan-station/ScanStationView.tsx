@@ -377,6 +377,9 @@ const UNRECOGNIZED_BARCODE_NOTICE: Notice = {
     'Scan a PartFlow Part Number or Machine barcode, or a registered Worker badge. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
 };
 
+/** The title of the failed station-theme save warning (slice 10). */
+const THEME_NOT_CONFIRMED = 'Theme not confirmed for this Scan Station';
+
 /** One confirmed action of this station session (Last Action block).
  * `deviceEventId` identifies the complete application command, so the
  * Undo of §4.5 reverses exactly it; the station keeps the session's
@@ -621,12 +624,20 @@ function StationView({
       onSaveFailed: (theme) => {
         const shown = theme === 'dark' ? 'Dark' : 'Light';
         const other = theme === 'dark' ? 'Light' : 'Dark';
-        setNotice({
-          kind: 'warn',
-          icon: '⚠',
-          title: 'Theme not confirmed for this Scan Station',
-          detail: `${shown} mode applies to this browser session only — ${stationId} did not confirm saving it. To save ${shown} for this station, switch to ${other} and back.`,
-        });
+        // A display preference never replaces a production warning or
+        // error still on screen (e.g. an outcome-unknown notice).
+        setNotice((current) =>
+          current !== null &&
+          (current.kind === 'warn' || current.kind === 'err') &&
+          current.title !== THEME_NOT_CONFIRMED
+            ? current
+            : {
+                kind: 'warn',
+                icon: '⚠',
+                title: THEME_NOT_CONFIRMED,
+                detail: `${shown} mode applies to this browser session only — ${stationId} did not confirm saving it. To save ${shown} for this station, switch to ${other} and back.`,
+              },
+        );
       },
     },
   );

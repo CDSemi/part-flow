@@ -84,6 +84,8 @@ let contextFailure: number | null;
 /** Held context reads, one per read, in send order. */
 let contextHolds: Promise<void>[];
 let putPlans: PutPlan[];
+/** The status every transfer POST answers with while set (no write). */
+let transferFailure: number | null;
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -328,6 +330,9 @@ function handle(
     };
     const refused = sessionRequired();
     if (refused) return refused;
+    if (transferFailure !== null) {
+      return json({ detail: 'The server is restarting.' }, transferFailure);
+    }
     const flow = flows.find((f) => f.id === request.quantity_flow_id)!;
     flow.areaId = 2;
     recorded.set(request.device_event_id, {
@@ -482,6 +487,7 @@ beforeEach(() => {
   contextFailure = null;
   contextHolds = [];
   putPlans = [];
+  transferFailure = null;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -852,6 +858,35 @@ test('FE-6b: a connection lost before the failure sends no newer choice and show
   expect(puts()).toHaveLength(1);
 });
 
+test('FE-6c: a failed save never replaces an unresolved production warning', async () => {
+  await renderStation();
+  const { hold, release } = holdUntilReleased();
+  putPlans.push({ hold, status: 500 });
+  toggle();
+  await waitFor(() => expect(putBodies()).toEqual(['LIGHT']));
+
+  // A transfer whose answer is lost leaves the outcome-unknown warning.
+  transferFailure = 503;
+  const box = await openTransferSummary('PN-W');
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await waitFor(() =>
+    expect(box).toHaveTextContent('may or may not have been recorded'),
+  );
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Leave — check the Area' }),
+  );
+  expect(await toast()).toHaveTextContent('Transfer outcome unknown');
+
+  release();
+  await settle();
+  expect(await toast()).toHaveTextContent('Transfer outcome unknown');
+  expect(themeNotice()).toBeNull();
+  expect(shown()).toBe('light');
+  expect(puts()).toHaveLength(1);
+});
+
 /* ============ Reads after a command ============ */
 
 test('FE-7: an unchanged reload keeps an offline session-only choice', async () => {
@@ -975,6 +1010,69 @@ test('FE-9: a toggle elsewhere is session-only; returning to the station applies
   await screen.findByText('Total PNs');
   await waitFor(() => expect(shown()).toBe('light'));
   expect(puts()).toHaveLength(0);
+});
+
+test('FE-9b: returning while the station save is in flight keeps the choice being saved; no later flip', async () => {
+  await renderStation();
+  const { hold, release } = holdUntilReleased();
+  putPlans.push({ hold });
+  toggle();
+  await waitFor(() => expect(putBodies()).toEqual(['LIGHT']));
+  // The PUT has not committed yet: the re-entry read answers no preference.
+  themePreference = null;
+
+  go('/management/area-board');
+  await waitFor(
+    () => expect(screen.queryByLabelText('Scan barcode')).toBeNull(),
+    { timeout: 5000 },
+  );
+  const reentry = contextReads();
+  go(`/scan-station/${STATION}`);
+  await screen.findByText('Total PNs');
+  await settle();
+  expect(contextReads()).toBe(reentry + 1);
+  expect(shown()).toBe('light');
+
+  themePreference = 'LIGHT';
+  release();
+  await settle();
+  expect(shown()).toBe('light');
+
+  // The next fresh read reports the committed LIGHT: nothing flips.
+  const reads = contextReads();
+  await completeTransfer('PN-W');
+  await waitFor(() => expect(contextReads()).toBeGreaterThan(reads));
+  await settle();
+  expect(shown()).toBe('light');
+  expect(puts()).toHaveLength(1);
+});
+
+test('FE-9b: when that save fails, the next fresh read applies the stored theme', async () => {
+  await renderStation();
+  const { hold, release } = holdUntilReleased();
+  putPlans.push({ hold, status: 500 });
+  toggle();
+  await waitFor(() => expect(putBodies()).toEqual(['LIGHT']));
+
+  go('/management/area-board');
+  await waitFor(
+    () => expect(screen.queryByLabelText('Scan barcode')).toBeNull(),
+    { timeout: 5000 },
+  );
+  const reentry = contextReads();
+  go(`/scan-station/${STATION}`);
+  await screen.findByText('Total PNs');
+  await settle();
+  expect(contextReads()).toBe(reentry + 1);
+  expect(shown()).toBe('light');
+
+  release();
+  await settle();
+  expect(shown()).toBe('light');
+
+  await completeTransfer('PN-W');
+  await waitFor(() => expect(shown()).toBe('dark'));
+  expect(puts()).toHaveLength(1);
 });
 
 /* ============ Worker Sessions never affect the theme (R62) ============ */

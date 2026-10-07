@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject, ReactNode } from 'react';
 
 import { DEFAULT_THEME, ThemeContext, resolveTheme } from './theme-context';
-import type { StationThemeBinding, Theme } from './theme-context';
+import type {
+  StationThemeBinding,
+  StationThemeRead,
+  Theme,
+} from './theme-context';
 
 // Dark is the default: PartFlow is shop-floor first (GUI_DESIGN §2.1).
 // The theme resolves authenticated User preference → Scan Station
@@ -12,7 +16,8 @@ import type { StationThemeBinding, Theme } from './theme-context';
 //   station loads, and the toggle there saves it for that station — only
 //   while the station context is loaded and the connection is up, with
 //   at most one request in flight. A context read that overlaps a save
-//   of the bound station never reverts the screen.
+//   of that station never reverts the screen — also after leaving the
+//   station and returning while its save is still in flight.
 // - Offline, while the station context is loading or in error, or when a
 //   save fails, the change applies to this browser session only and
 //   nothing is queued.
@@ -27,8 +32,10 @@ const USER_PREFERENCE: Theme | null = null;
  * binding starts with nothing in flight and nothing desired. */
 interface BoundStation {
   stationId: string;
-  /** The server value last adopted (a fresh read or a settled save). */
-  applied: Theme | null;
+  /** The server value last adopted (a fresh read or a settled save);
+   * undefined = nothing adopted yet (the binding's first read overlapped
+   * a save of this station). */
+  applied: Theme | null | undefined;
   writable: boolean;
   save: (theme: Theme) => Promise<unknown>;
   onSaveFailed: (displayed: Theme) => void;
@@ -37,11 +44,38 @@ interface BoundStation {
   desired: Theme | null;
 }
 
+/** Saves of one station across its bindings: a save of a released
+ * binding still overlaps the reads of the station's next binding. */
+interface StationSaves {
+  /** Saves started and not yet settled. */
+  inFlight: number;
+  /** The epoch at the latest start or settle of a save. */
+  epoch: number;
+}
+
 /** The station tier's mutable state. `epoch` is +1 when a save starts
  * and +1 when it settles. */
 interface StationTier {
   epoch: number;
   bound: BoundStation | null;
+  saves: Map<string, StationSaves>;
+}
+
+function noteSave(tier: StationTier, stationId: string, delta: 1 | -1): void {
+  tier.epoch += 1;
+  const saves = tier.saves.get(stationId) ?? { inFlight: 0, epoch: 0 };
+  saves.inFlight += delta;
+  saves.epoch = tier.epoch;
+  tier.saves.set(stationId, saves);
+}
+
+/** Rule 1c: a read is fresh only if no save of its station was in flight
+ * when it was sent, started since, or settled since. */
+function isFresh(tier: StationTier, stationId: string, read: StationThemeRead) {
+  const saves = tier.saves.get(stationId);
+  return (
+    saves === undefined || (saves.inFlight === 0 && read.epoch >= saves.epoch)
+  );
 }
 
 /** Single-flight save of one binding: the latest choice wins, so quick
@@ -54,9 +88,9 @@ function sendSave(
   const target = bound.desired;
   if (target === null) return;
   bound.inFlight = true;
-  tier.epoch += 1;
+  noteSave(tier, bound.stationId, 1);
   const settle = (saved: boolean) => {
-    tier.epoch += 1;
+    noteSave(tier, bound.stationId, -1);
     bound.inFlight = false;
     if (tier.bound !== bound) return;
     // The server echoes the requested value (never a later writer's).
@@ -84,7 +118,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Mirrors the theme on screen synchronously, for toggles within one
   // render and for the failure notice.
   const themeRef = useRef<Theme>(DEFAULT_THEME);
-  const tier = useRef<StationTier>({ epoch: 0, bound: null });
+  const tier = useRef<StationTier>({
+    epoch: 0,
+    bound: null,
+    saves: new Map(),
+  });
 
   // The theme class lives on <body> so every surface — navigation,
   // dialogs, banners and view content — follows the selected mode.
@@ -126,18 +164,22 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         }
         return;
       }
+      const fresh = isFresh(tier.current, next.stationId, next.read);
       if (!same) {
-        // Entering a station route applies its saved theme (none → Dark).
+        // Entering a station route applies its saved theme (none → Dark)
+        // — unless the read overlaps a save of this station still in
+        // flight from before the route was left: then the screen keeps
+        // the choice being saved and the next fresh read applies.
         tier.current.bound = {
           stationId: next.stationId,
-          applied: next.read.preference,
+          applied: fresh ? next.read.preference : undefined,
           writable: next.writable,
           save: next.save,
           onSaveFailed: next.onSaveFailed,
           inFlight: false,
           desired: null,
         };
-        show(resolveTheme(USER_PREFERENCE, next.read.preference));
+        if (fresh) show(resolveTheme(USER_PREFERENCE, next.read.preference));
         return;
       }
       bound.writable = next.writable;
@@ -147,11 +189,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       // overrides a session-only choice, and a read that overlaps a save
       // of this station (sent before it started, or while it was in
       // flight) never reverts it.
-      if (
-        !bound.inFlight &&
-        next.read.epoch === tier.current.epoch &&
-        next.read.preference !== bound.applied
-      ) {
+      if (fresh && next.read.preference !== bound.applied) {
         bound.applied = next.read.preference;
         show(resolveTheme(USER_PREFERENCE, next.read.preference));
       }

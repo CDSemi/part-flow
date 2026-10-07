@@ -33,8 +33,9 @@ export interface ThemeValue {
   theme: Theme;
   toggleTheme: () => void;
   /** The station save epoch: +1 when a save starts and +1 when it settles
-   * (stable function). A read is fresh only if no save started or settled
-   * since it was sent (theme-provider rule 1c). */
+   * (stable function). A read is fresh only if no save of its station
+   * was in flight when it was sent, or started or settled since
+   * (theme-provider rule 1c). */
   stationThemeEpoch: () => number;
   /** Registers or refreshes the station tier (theme-provider rules). */
   bindStation: (binding: StationThemeBinding) => void;
