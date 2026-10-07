@@ -13,6 +13,7 @@ from app.domain.password_policy import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
     InvalidPasswordError,
+    is_encodable,
     is_over_long,
     normalize_password,
     validate_new_password,
@@ -20,6 +21,7 @@ from app.domain.password_policy import (
 
 _P1 = "A password must be at least 12 characters long."
 _P2 = "A password can be at most 256 characters long."
+_P8 = "A password can contain only valid text characters."
 _DOMAIN_DIR = Path(__file__).resolve().parent.parent / "app" / "domain"
 
 
@@ -47,6 +49,16 @@ def test_length_counts_the_nfkc_form() -> None:
         validate_new_password("ﬃ" * 86)  # 86 raw, 258 after NFKC
     assert is_over_long("ﬃ" * 86)
     assert not is_over_long("x" * 256)
+
+
+def test_a_lone_surrogate_is_refused() -> None:
+    # JSON can carry "\ud800"; UTF-8 cannot encode it, so it could never be hashed.
+    lone = "\ud800" + "x" * 13
+    assert not is_encodable(lone)
+    assert is_encodable("x" * 12) and is_encodable("mật-khẩu-đủ-dài-\U0001f600")
+    with pytest.raises(InvalidPasswordError) as raised:
+        validate_new_password(lone)
+    assert str(raised.value) == _P8
 
 
 def test_nothing_is_stripped_and_no_composition_rule_applies() -> None:

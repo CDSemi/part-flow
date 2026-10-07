@@ -1,6 +1,6 @@
 import './account-dialogs.css';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import { changeOwnPassword, signInWriteOutcomeUnknown } from '../api/session';
@@ -22,7 +22,9 @@ const UNKNOWN_OUTCOME =
  * sign-in, so a resend would be refused or counted as a failed attempt.
  * The dialog clears the fields and re-reads the sign-in instead — signed
  * out means the change went through (sign in again); still signed in
- * means it did not, and the submit is available again.
+ * means it did not, and the submit is available again. A re-read that
+ * could not be answered is repeated once the connection is regained
+ * (once per regained connection — never a polling loop).
  */
 export function ChangePasswordDialog({
   forced,
@@ -57,6 +59,30 @@ export function ChangePasswordDialog({
     currentField.current?.focus();
   }, []);
 
+  // Settle an unanswered change by re-reading the sign-in: signed out
+  // means it went through; still signed in means it did not.
+  const settling = useRef(false);
+  const settle = useCallback(async () => {
+    settling.current = true;
+    try {
+      const after = await onRefresh();
+      if (after && after.user === null) {
+        onEnded(UNKNOWN_OUTCOME);
+      } else if (after?.user) {
+        setUnsettled(false);
+      }
+    } finally {
+      settling.current = false;
+    }
+  }, [onRefresh, onEnded]);
+
+  const wasConnected = useRef(!offline);
+  useEffect(() => {
+    const regained = !offline && !wasConnected.current;
+    wasConnected.current = !offline;
+    if (regained && unsettled && !settling.current) void settle();
+  }, [offline, unsettled, settle]);
+
   const currentMissing = current === '';
   const nextError = newPasswordError(next, repeat);
 
@@ -83,12 +109,7 @@ export function ChangePasswordDialog({
         setError(UNKNOWN_OUTCOME);
         setUnsettled(true);
         setBusy(false);
-        const after = await onRefresh();
-        if (after && after.user === null) {
-          onEnded(UNKNOWN_OUTCOME);
-        } else if (after?.user) {
-          setUnsettled(false);
-        }
+        await settle();
         return;
       }
       // A definite refusal: the current password is entered again.

@@ -32,6 +32,7 @@ import base64
 import datetime
 import hashlib
 import http.cookiejar
+import json
 import logging
 import os
 import threading
@@ -80,6 +81,8 @@ _P1 = "A password must be at least 12 characters long."
 _P3 = "The current password is not correct."
 _P4 = "Choose a new password that is different from the current one."
 _P5 = "Use Change password to change your own password."
+_P8 = "A password can contain only valid text characters."
+_LONE_SURROGATE = "\ud800" + "x" * 13
 _P7 = (
     "This account is locked after too many failed attempts. Try again later or ask an"
     " administrator."
@@ -1147,6 +1150,68 @@ def test_no_secret_is_ever_logged_or_answered(
     assert not {name for name in columns if "password" in name or "credential" in name}
 
 
+def _raw(
+    client: TestClient, method: str, url: str, body: dict[str, Any], token: str | None = None
+) -> Any:
+    """Send ``body`` as ASCII-escaped JSON, so a lone surrogate travels as ``\\ud800``."""
+    headers = {"Content-Type": "application/json", **(_auth(token) if token else _CSRF)}
+    return client.request(method, url, content=json.dumps(body), headers=headers)
+
+
+def test_a_lone_surrogate_password_is_refused_cleanly(
+    client: TestClient, db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit F1: refused as invalid input — never a 500, a count or a corrupt-hash alarm."""
+    caplog.set_level(logging.DEBUG)
+    admin = _make_user(client, db_engine, ["MANAGE_USERS_AND_ROLES"], password=_PASSWORD)
+    admin_token = _signed_in(client, admin)
+    target = _make_user(client, db_engine, [], password=_PASSWORD)
+    target_token = _signed_in(client, target)
+    before, count = _credential(db_engine, target.user_id), _audit_count(db_engine)
+
+    for login in (target.login, f"nobody-{_suffix()}"):
+        body = {"login_name": login, "password": _LONE_SURROGATE}
+        _refused(_raw(client, "POST", "/api/session", body), 401, _A5, "sign_in_failed")
+    own = {"current_password": _PASSWORD, "new_password": _LONE_SURROGATE}
+    _refused(_raw(client, "PUT", "/api/session/password", own, target_token), 422, _P8)
+    url = f"/api/users/{target.user_id}/password"
+    _refused(_raw(client, "PUT", url, {"new_password": _LONE_SURROGATE}, admin_token), 422, _P8)
+
+    assert _credential(db_engine, target.user_id) == before
+    assert _audit_count(db_engine) == count
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_validation_refusals_never_echo_a_secret(client: TestClient, db_engine: Engine) -> None:
+    """Audit F2: a 422 body keeps type, loc and msg only — never the submitted value."""
+    admin = _make_user(client, db_engine, ["MANAGE_USERS_AND_ROLES"], password=_PASSWORD)
+    admin_token = _signed_in(client, admin)
+    target = _make_user(client, db_engine, [], password=_PASSWORD)
+    target_token = _signed_in(client, target)
+    over_long = "over-long-secret-" + "y" * 1100
+    responses = [
+        _sign_in(client, target.login, over_long),
+        client.post("/api/session", json={"password": _PASSWORD}, headers=_CSRF),
+        _change_own(client, target_token, _PASSWORD, over_long),
+        client.put(
+            "/api/session/password",
+            json={"current_password": _PASSWORD},
+            headers=_auth(target_token),
+        ),
+        _set_password(client, admin_token, target.user_id, over_long),
+        client.put(
+            f"/api/users/{target.user_id}/password",
+            json={"new_password": _NEW_PASSWORD, "extra": _PASSWORD},
+            headers=_auth(admin_token),
+        ),
+    ]
+    for response in responses:
+        assert response.status_code == 422, response.text
+        assert "over-long-secret" not in response.text and _PASSWORD not in response.text
+        detail = response.json()["detail"]
+        assert detail and all(set(error) == {"type", "loc", "msg"} for error in detail)
+
+
 def _scalar_list(engine: Engine, sql: str) -> list[Any]:
     with engine.connect() as connection:
         return list(connection.execute(sa.text(sql)).scalars())
@@ -1299,6 +1364,45 @@ def test_a_concurrent_deactivation_refuses_the_own_change(
         holder.commit()
     _refused(_finish(thread, results), 401, _A1)
     assert _credential(db_engine, account.user_id)["password_hash"] == before
+
+
+@pytest.mark.parametrize("revocation", ["deactivation", "grant_removal"])
+def test_a_revocation_during_the_hashing_wait_refuses_the_password_set(
+    client: TestClient, db_engine: Engine, revocation: str
+) -> None:
+    """Audit F4: the locked phase re-reads the actor the route checked before hashing."""
+    admin = _make_user(client, db_engine, ["MANAGE_USERS_AND_ROLES"], password=_PASSWORD)
+    admin_token = _signed_in(client, admin)
+    target = _make_user(client, db_engine, [], password=_PASSWORD)
+    target_token = _signed_in(client, target)
+    before, count = _credential(db_engine, target.user_id), _audit_count(db_engine)
+    with db_engine.connect() as holder:
+        holder.begin()
+        holder.execute(
+            sa.text(
+                "SELECT pg_advisory_xact_lock(hashtextextended('partflow:user-administration', 0))"
+            )
+        )
+        thread, results = _start(
+            lambda: _set_password(client, admin_token, target.user_id, _NEW_PASSWORD)
+        )
+        _assert_blocked(thread)
+        if revocation == "deactivation":
+            _hold_deactivation(holder, admin.user_id)
+        else:
+            holder.execute(
+                sa.text("DELETE FROM role_permissions WHERE role_id = :id"), {"id": admin.role_id}
+            )
+        holder.commit()
+    response = _finish(thread, results)
+    if revocation == "deactivation":
+        _refused(response, 401, _A1, "authentication_required")
+    else:
+        denied = _refused(response, 403, _A2, "permission_denied")
+        assert denied["required_permissions"] == ["MANAGE_USERS_AND_ROLES"]
+    assert _credential(db_engine, target.user_id) == before
+    assert _audit_count(db_engine) == count
+    assert _session_of(db_engine, target_token)["ended_at"] is None
 
 
 @pytest.mark.parametrize("rename", [False, True])

@@ -3,7 +3,8 @@
 Presentation adapter: parses arguments, builds the engine from Settings,
 calls one Application function, renders its result. No business rule here.
 Exit codes shared by every command: 0 success/clean, 1 refusal or mismatch,
-2 could not run (usage error, configuration, database unreachable, internal error).
+2 could not run (usage error, configuration, database unreachable, internal error)
+or its outcome is unknown (the database connection failed during COMMIT).
 
 Commands:
 
@@ -30,15 +31,16 @@ from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.application import authentication
-from app.application.errors import ApplicationError
+from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
 from app.core.config import get_settings
 from app.infrastructure.database import build_engine
 
 _DATABASE_UNAVAILABLE = "PartFlow could not reach its database. Nothing was changed."
+_DATABASE_ERROR = "The database refused the reset (internal error). Nothing was changed."
 _CONFIGURATION_INVALID = "PartFlow is not configured: check DATABASE_URL. Nothing was changed."
 _PASSWORDS_DIFFER = "The passwords do not match. Nothing was changed."
 
@@ -85,11 +87,19 @@ def _run_reset_password(args: argparse.Namespace) -> int:
             outcome = authentication.reset_password_for_login(
                 session, args.login_name, new_password=password
             )
+    except RecoveryOutcomeUnknownError as exc:
+        # Raised only when COMMIT itself failed: never "nothing was changed".
+        print(exc.message, file=sys.stderr)
+        return 2
     except ApplicationError as exc:
         print(exc.message, file=sys.stderr)
         return 1
-    except SQLAlchemyError:
+    except (OperationalError, InterfaceError):
+        # Before COMMIT (connect or a statement): the transaction is discarded.
         print(_DATABASE_UNAVAILABLE, file=sys.stderr)
+        return 2
+    except SQLAlchemyError:
+        print(_DATABASE_ERROR, file=sys.stderr)
         return 2
     finally:
         engine.dispose()

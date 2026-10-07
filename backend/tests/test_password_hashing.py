@@ -6,6 +6,7 @@ verification for unknown accounts, and the admission / compute bounds
 that keep hashing from stalling the shared threadpool (OD-S1-13).
 """
 
+import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -71,6 +72,19 @@ def test_the_nfkc_form_is_what_is_hashed() -> None:
 
 def test_dummy_verify_spends_a_verification_and_never_raises() -> None:
     password_hashing.dummy_verify("whatever the password")
+
+
+def test_an_unencodable_password_is_never_a_malformed_stored_hash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lone surrogate is the caller's input error, never logged as a corrupt hash."""
+    lone = "\ud800" + "x" * 13
+    caplog.set_level(logging.DEBUG)
+    password_hashing.dummy_verify(lone)
+    stored = password_hashing.hash_password("x" * 13)
+    with pytest.raises(UnicodeEncodeError):
+        password_hashing.verify_password(lone, stored)
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
 def test_secret_fields_are_capped_at_1024_raw_characters() -> None:

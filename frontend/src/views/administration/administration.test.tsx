@@ -4598,6 +4598,39 @@ test('FA-S3: the editor saves only the changed setting and re-reads', async () =
   expect(writes).toHaveLength(2);
 });
 
+test('FA-S3b: an invalid day count never blocks turning expiry Off and is not sent', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openSignInSettings();
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Edit user sign-in settings…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'User sign-in settings' });
+  const save = within(dialog).getByRole('button', { name: 'Save changes' });
+  const days = within(dialog).getByLabelText('Expire after (days)');
+  fireEvent.change(days, { target: { value: '' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'User sign-ins must expire after a whole number of days from 1 to 365.',
+  );
+  expect(save).toBeDisabled();
+
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'User sign-ins expire' }),
+  );
+  expect(days).toBeDisabled();
+  expect(within(dialog).queryByRole('alert')).toBeNull();
+  expect(save).toBeEnabled();
+  fireEvent.click(save);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/sign-in',
+      body: { user_session_expires: false },
+    },
+  ]);
+  expect(signInPolicy.user_session_days).toBe(30);
+});
+
 test('FA-S4: invalid values are refused in place, offline blocks editing and a failed read offers Retry', async () => {
   session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
   await openSignInSettings();

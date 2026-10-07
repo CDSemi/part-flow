@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -959,6 +960,28 @@ test('a scanned PN elsewhere resolves on the server and transfers as a whole flo
   expect(document.querySelector('.ss-lastpn .d')).toHaveTextContent(
     'TRANSFERRED · Material → Lathe queue (awaiting Machine) · qty 12',
   );
+});
+
+test('an account dialog over a standard-mode station keeps the keyboard — the wedge capture never pulls focus out of it', async () => {
+  const input = await renderStation();
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  const signIn = screen.getByRole('dialog', { name: 'Sign in' });
+  const cancel = within(signIn).getByRole('button', { name: 'Cancel (Esc)' });
+  cancel.focus();
+
+  for (const key of 'PF:PN:2027-60-8114-00') fireEvent.keyDown(cancel, { key });
+  fireEvent.keyDown(cancel, { key: 'Enter' });
+  await act(async () => {});
+
+  expect(document.activeElement).toBe(cancel);
+  expect(input).toHaveValue('');
+  expect(requests.filter((r) => r.url.endsWith('/scans/resolve'))).toEqual([]);
+
+  // With the dialog closed the capture works again.
+  fireEvent.click(cancel);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  fireEvent.keyDown(document.body, { key: 'P' });
+  expect(input).toHaveValue('P');
 });
 
 test('manual PN entry resolves on the server and Back returns to the entry', async () => {

@@ -165,7 +165,10 @@ function SignInPolicyDialog({
   const days = parseWhole(daysText, 1, 365);
   const attempts = parseWhole(attemptsText, 3, 100);
   const minutes = parseWhole(minutesText, 1, 1440);
-  const invalid = days === null || attempts === null || minutes === null;
+  // While expiry is Off the days field is disabled and its stored value
+  // kept: whatever it holds neither blocks the save nor is sent.
+  const daysInvalid = expires && days === null;
+  const invalid = daysInvalid || attempts === null || minutes === null;
 
   // Cancel, Escape and the backdrop are ignored while a save is in
   // flight.
@@ -178,7 +181,9 @@ function SignInPolicyDialog({
     // Only the settings whose value differs from the stored policy.
     const patch = {
       ...(expires !== saved.sessionExpires ? { sessionExpires: expires } : {}),
-      ...(days !== saved.sessionDays ? { sessionDays: days } : {}),
+      ...(expires && days !== null && days !== saved.sessionDays
+        ? { sessionDays: days }
+        : {}),
       ...(attempts !== saved.lockoutAttempts
         ? { lockoutAttempts: attempts }
         : {}),
@@ -234,7 +239,7 @@ function SignInPolicyDialog({
             onChange={(event) => setDaysText(event.target.value)}
           />
         </AdminField>
-        {days === null ? (
+        {daysInvalid ? (
           <div className="err" role="alert">
             {DAYS_ERROR}
           </div>

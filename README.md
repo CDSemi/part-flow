@@ -706,7 +706,9 @@ docker compose exec backend uv run python -m app.cli reset-password --login-name
 The new password is typed at the prompt, never on the command line. The command
 works only for a user that already has a password and only while an
 Administrator exists; it never creates an Administrator. It sets a temporary
-password, ends the user's sign-ins and clears a lock.
+password, ends the user's sign-ins and clears a lock. If the database connection
+fails while the reset is being saved, the command says the outcome is unknown
+(exit code 2); run it again, because it sets the password again either way.
 
 The backend reads `SESSION_COOKIE_SECURE` (default `false`, because the
 development stack runs over plain HTTP). Set it to `true` in the backend

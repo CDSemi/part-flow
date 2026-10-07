@@ -1186,6 +1186,9 @@ function StationView({
       const input = inputRef.current;
       if (!input || event.defaultPrevented) return;
       if (event.ctrlKey || event.altKey || event.metaKey) return;
+      // A modal the station does not own (the account dialogs of the top
+      // navigation in standard mode) keeps the keyboard and its focus.
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const target = event.target;
       if (target === input) return;
       if (target instanceof HTMLElement) {

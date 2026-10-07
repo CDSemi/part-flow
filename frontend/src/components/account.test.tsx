@@ -621,6 +621,40 @@ test('an unanswered change that did not commit re-enables the submit after the r
   expect(sent('PUT', '/api/session/password')).toHaveLength(1);
 });
 
+test('an unanswered change whose re-read also fails is re-read once the connection is regained', async () => {
+  fake.user = JANE;
+  const shell = await renderShell();
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  );
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change password…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Change password' });
+  failures['PUT /api/session/password'] = 'network';
+  failures['GET /api/session'] = 'network';
+  fillChange(dialog, PASSWORD, NEW_PASSWORD);
+  const submit = within(dialog).getByRole('button', {
+    name: 'Change password',
+  });
+  fireEvent.click(submit);
+
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    CHANGE_UNKNOWN,
+  );
+  const reads = sent('GET', '/api/session').length;
+  await act(async () => {});
+  expect(submit).toBeDisabled();
+
+  // The connection drops and comes back: the sign-in is read again.
+  shell.rerender(tree('unavailable'));
+  await act(async () => {});
+  expect(sent('GET', '/api/session')).toHaveLength(reads);
+  shell.rerender(tree('connected'));
+  await waitFor(() => expect(submit).toBeEnabled());
+  expect(sent('GET', '/api/session')).toHaveLength(reads + 1);
+  expect(screen.getByRole('dialog', { name: 'Change password' })).toBe(dialog);
+  expect(sent('PUT', '/api/session/password')).toHaveLength(1);
+});
+
 /* ============ Set up PartFlow (FC-7) ============ */
 
 function openSetup() {

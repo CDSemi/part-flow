@@ -23,10 +23,12 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session
 
 from alembic import command
 from app import cli
-from app.application import password_hashing
+from app.application import authentication, password_hashing
 from app.core.config import get_settings
 from app.main import create_app
 
@@ -274,6 +276,65 @@ def test_usage_and_unreachable_database(
     out, err = capsys.readouterr()
     assert err.strip() == "PartFlow could not reach its database. Nothing was changed."
     assert "secret-pw" not in out + err and "127.0.0.1" not in out + err
+
+
+def test_an_undecodable_stdin_byte_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    db_engine: Engine,
+    administrator: int,
+) -> None:
+    """Audit F1: a byte decoded with surrogateescape is invalid input, never a traceback."""
+    target = _insert_user(db_engine, "Operator", password=_PASSWORD)
+    before = _write_counts(db_engine)
+    assert _run(monkeypatch, _login(db_engine, target), "\udcff" + "x" * 13) == 1
+    assert capsys.readouterr().err.strip() == "A password can contain only valid text characters."
+    assert _write_counts(db_engine) == before
+
+
+def test_a_commit_failure_reports_an_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    db_engine: Engine,
+    administrator: int,
+) -> None:
+    """Audit F3: COMMIT stored the reset but its answer was lost — never "Nothing was changed"."""
+    target = _insert_user(db_engine, "Operator", password=_PASSWORD)
+
+    def answer_lost(session: Session, conflict_messages: dict[str, str]) -> None:
+        session.commit()
+        raise OperationalError("COMMIT", {}, Exception("server closed the connection"))
+
+    monkeypatch.setattr(authentication, "commit", answer_lost)
+    assert _run(monkeypatch, _login(db_engine, target), _RESET) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "unknown whether the password was reset" in err
+    assert "Nothing was changed" not in err
+    [credential] = _rows(db_engine, "SELECT * FROM user_credentials WHERE user_id = :id", id=target)
+    assert password_hashing.verify_password(_RESET, credential["password_hash"])
+
+
+def test_an_unexpected_integrity_error_is_not_reported_as_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    db_engine: Engine,
+    administrator: int,
+) -> None:
+    """Audit F3: rolled back, so nothing changed — but the database was reachable."""
+    target = _insert_user(db_engine, "Operator", password=_PASSWORD)
+    before = _write_counts(db_engine)
+
+    def refused(session: Session, conflict_messages: dict[str, str]) -> None:
+        session.rollback()
+        raise IntegrityError("COMMIT", {}, Exception("unexpected constraint"))
+
+    monkeypatch.setattr(authentication, "commit", refused)
+    assert _run(monkeypatch, _login(db_engine, target), _RESET) == 2
+    assert capsys.readouterr().err.strip() == (
+        "The database refused the reset (internal error). Nothing was changed."
+    )
+    assert _write_counts(db_engine) == before
 
 
 def test_the_cli_reads_no_model() -> None:

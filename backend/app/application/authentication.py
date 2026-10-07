@@ -11,8 +11,8 @@ token (session fixation).
 Rules owned here:
 
 - One generic refusal (``SignInFailedError``) for an unknown login name,
-  a User without a password, an inactive or locked User, a wrong or
-  over-long password — the response never tells which; an unknown login
+  a User without a password, an inactive or locked User, a wrong,
+  over-long or unencodable password — the response never tells which; an unknown login
   name costs the same scrypt work (``password_hashing.dummy_verify``).
 - Failed attempts are counted per credential under its row lock; at
   the policy's threshold (``>=``) the account locks for the policy's
@@ -31,8 +31,11 @@ Rules owned here:
 Every hashing command first reads the plain values it needs, releases
 its database connection (``session.rollback()``), hashes or verifies
 outside any transaction and lock, then starts its locked phase, which
-re-checks everything it relies on (a concurrent password set,
-deactivation or lock). Lock order: the ``partflow:user-administration``
+re-reads what it relies on (a concurrent password set, deactivation or
+lock; for an administrator's password set, the actor's own sign-in and
+grant). Deactivation and grant changes do not take the advisory lock
+yet, so that actor re-read narrows the stale-authority window to the
+locked phase rather than closing it. Lock order: the ``partflow:user-administration``
 advisory lock → the ``users`` row → the ``user_credentials`` row →
 INSERT ``user_sessions`` → UPDATE ``user_sessions`` → audit.
 
@@ -49,7 +52,8 @@ import math
 import secrets
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import Interval, case, func, or_, select, update
+from sqlalchemy import ColumnElement, Interval, case, func, or_, select, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.application import audit, password_hashing, user_access, users
@@ -59,6 +63,9 @@ from app.application.errors import (
     AuthenticationRequiredError,
     ConflictError,
     InvalidInputError,
+    PasswordChangeRequiredError,
+    PermissionDeniedError,
+    RecoveryOutcomeUnknownError,
     RecoveryUnavailableError,
     SignInFailedError,
     UnknownLoginError,
@@ -66,6 +73,7 @@ from app.application.errors import (
 from app.domain.enums import AuditEntityType, AuditEventType, Permission, UserSessionEndReason
 from app.domain.password_policy import (
     InvalidPasswordError,
+    is_encodable,
     is_over_long,
     normalize_password,
     validate_new_password,
@@ -116,6 +124,11 @@ _NO_ADMINISTRATOR: Final = (
 _NO_PASSWORD_YET: Final = (
     "This user has no password yet. An administrator gives it one with Set password… in"
     " Administration → Users."
+)
+_RECOVERY_OUTCOME_UNKNOWN: Final = (
+    "The connection to the database failed while the reset was being saved, so it is"
+    " unknown whether the password was reset. Run the same command again: it sets the"
+    " password again either way."
 )
 
 
@@ -176,6 +189,11 @@ def resolve_principal(session: Session, token: str | None) -> Principal | None:
     usable = _usable_token(token)
     if usable is None:
         return None
+    return _principal_where(session, UserSession.token_digest == _digest(usable))
+
+
+def _principal_where(session: Session, which: ColumnElement[bool]) -> Principal | None:
+    """The principal of the one usable session ``which`` selects, or None."""
     expires_at = case(
         (
             ApplicationPolicy.user_session_expires,
@@ -203,7 +221,7 @@ def resolve_principal(session: Session, token: str | None) -> Principal | None:
         .join(UserCredential, UserCredential.user_id == User.id)
         .join(ApplicationPolicy, ApplicationPolicy.id == _POLICY_ID)
         .where(
-            UserSession.token_digest == _digest(usable),
+            which,
             UserSession.ended_at.is_(None),
             User.is_active,
             or_(expires_at.is_(None), func.now() < expires_at),
@@ -263,6 +281,11 @@ def _login_or_none(value: object) -> str | None:
         return normalize_login_name(value)
     except InvalidLoginNameError:
         return None
+
+
+def _cannot_match(password: str) -> bool:
+    """Whether ``password`` can match no stored hash: over-long or unencodable."""
+    return is_over_long(password) or not is_encodable(password)
 
 
 def _new_password(raw: str) -> None:
@@ -365,6 +388,26 @@ def open_first_session(session: Session, user_id: int) -> SessionGrant:
     return _grant(session, token)
 
 
+def _recheck_actor(session: Session, actor: Principal, key: Permission) -> None:
+    """Under the advisory lock: the actor's sign-in is still usable and grants ``key``.
+
+    A fresh read (READ COMMITTED) of what the route checked before the
+    hashing wait: the session is not ended or expired, the User is still
+    active, no forced change is pending and the role still holds ``key``.
+    A refusal rolls back; nothing was written.
+    """
+    current = _principal_where(session, UserSession.id == actor.session_id)
+    if current is None or current.user_id != actor.user_id:
+        session.rollback()
+        raise AuthenticationRequiredError(AUTHENTICATION_REQUIRED_MESSAGE)
+    if current.must_change_password:
+        session.rollback()
+        raise PasswordChangeRequiredError(PASSWORD_CHANGE_REQUIRED_MESSAGE)
+    if key not in current.permissions:
+        session.rollback()
+        raise PermissionDeniedError(PERMISSION_DENIED_MESSAGE, required=(str(key),))
+
+
 def _apply_password_set(
     session: Session,
     user: User,
@@ -410,7 +453,7 @@ def sign_in(
 ) -> SessionGrant:
     """Sign a User in; ends the session ``replaced_token`` names (REPLACED)."""
     login = _login_or_none(login_name)
-    over_long = is_over_long(password)
+    unusable = _cannot_match(password)
     user_id: int | None = None
     stored: str | None = None
     if login is not None:
@@ -423,7 +466,7 @@ def sign_in(
             user_id, stored = found
     # Release the connection before any scrypt work.
     session.rollback()
-    if user_id is None or stored is None or over_long:
+    if user_id is None or stored is None or unusable:
         password_hashing.dummy_verify(password)
         raise _refuse_sign_in(user_id)
     ok = password_hashing.verify_password(password, stored)
@@ -488,7 +531,7 @@ def change_own_password(
     session.rollback()
     ok = False
     new_hash: str | None = None
-    if stored is None or is_over_long(current_password):
+    if stored is None or _cannot_match(current_password):
         password_hashing.dummy_verify(current_password)
     else:
         ok = password_hashing.verify_password(current_password, stored)
@@ -546,7 +589,9 @@ def set_user_password(
 
     Gives a first password to a User without one, ends every sign-in of
     the User and clears a lock. Setting an inactive User's password is
-    allowed (it cannot sign in until reactivated).
+    allowed (it cannot sign in until reactivated). The actor's sign-in
+    and ``MANAGE_USERS_AND_ROLES`` are re-read after the advisory lock,
+    so a revocation committed during the hashing wait refuses the set.
     """
     if actor.user_id == user_id:
         raise ConflictError(_OWN_PASSWORD)
@@ -556,6 +601,8 @@ def set_user_password(
     new_hash = password_hashing.hash_password(new_password)
 
     user_access.acquire_user_administration_lock(session)
+    # The route checked the actor before the hashing wait; check again.
+    _recheck_actor(session, actor, Permission.MANAGE_USERS_AND_ROLES)
     user = users.lock_user(session, user_id)
     credential = user_access.lock_credential(session, user.id)
     _apply_password_set(
@@ -618,5 +665,12 @@ def reset_password_for_login(
     outcome = RecoveryOutcome(
         user_id=user.id, display_name=user.display_name, is_active=user.is_active
     )
-    commit(session, {})
+    try:
+        commit(session, {})
+    except IntegrityError:
+        raise  # rolled back by ``commit``: a definite failure
+    except DBAPIError as exc:
+        # COMMIT was sent; its answer was lost (the server may have
+        # stored the reset). Never reported as "nothing was changed".
+        raise RecoveryOutcomeUnknownError(_RECOVERY_OUTCOME_UNKNOWN) from exc
     return outcome

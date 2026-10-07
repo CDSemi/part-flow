@@ -35,11 +35,17 @@ clears the session cookie —, ``permission_denied`` with
 ``sign_in_failed``, ``account_locked``, ``password_check_busy``,
 ``setup_closed``, ``setup_token_invalid``), so the client opens the
 right dialog without parsing the message.
+
+Request-validation refusals (422) keep FastAPI's ``detail`` list but
+only each error's ``type``, ``loc`` and ``msg``: the default body also
+echoes the submitted ``input`` (and ``ctx``), which would return a
+password or the setup token in clear text (Phase 14 slice 1).
 """
 
-from typing import cast
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.authorization import clear_session_cookie
@@ -82,8 +88,22 @@ _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
 }
 
 
+def _validation_detail(error: dict[str, Any]) -> dict[str, Any]:
+    """One validation error without the submitted value or its context."""
+    return {key: error[key] for key in ("type", "loc", "msg") if key in error}
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register the application-error → HTTP status translation."""
+
+    async def request_validation_handler(request: Request, exc: Exception) -> JSONResponse:
+        errors = cast(RequestValidationError, exc).errors()
+        return JSONResponse(
+            status_code=422,
+            content={"detail": [_validation_detail(dict(error)) for error in errors]},
+        )
+
+    app.add_exception_handler(RequestValidationError, request_validation_handler)
 
     def _register(error_type: type[ApplicationError], status_code: int) -> None:
         async def handler(request: Request, exc: Exception) -> JSONResponse:

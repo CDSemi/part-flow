@@ -39,7 +39,7 @@ from contextlib import contextmanager
 from typing import Final, NamedTuple
 
 from app.application.errors import PasswordCheckBusyError
-from app.domain.password_policy import normalize_password
+from app.domain.password_policy import is_encodable, normalize_password
 
 logger = logging.getLogger(__name__)
 
@@ -142,10 +142,13 @@ def _verify(password: str, stored: str) -> bool:
     if parameters is None:
         logger.error("A stored password hash is malformed; the password check failed")
         return False
+    # Outside the guard below: an unencodable password is the caller's
+    # error (callers refuse it first), never a malformed stored hash.
+    password_bytes = _password_bytes(password)
     with _hashing_slot():
         try:
             key = _derive(
-                _password_bytes(password),
+                password_bytes,
                 parameters.salt,
                 parameters.n,
                 parameters.r,
@@ -190,7 +193,8 @@ def dummy_verify(password: str) -> None:
     """Spend one verification's work and discard the result.
 
     Used for an unknown login name, a User without a password or an
-    over-long password, so the response timing never tells them apart
-    from a wrong password.
+    over-long or unencodable password, so the response timing never
+    tells them apart from a wrong password. An unencodable password
+    (a lone surrogate) is replaced by a stand-in of the same work.
     """
-    _verify(password, _DUMMY_HASH)
+    _verify(password if is_encodable(password) else "", _DUMMY_HASH)

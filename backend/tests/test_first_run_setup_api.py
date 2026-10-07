@@ -18,6 +18,7 @@ Production code has no test-only accessor.
 """
 
 import http.cookiejar
+import json
 import logging
 import os
 import re
@@ -56,6 +57,7 @@ _A4 = (
     " Reload the page and try again."
 )
 _P1 = "A password must be at least 12 characters long."
+_P8 = "A password can contain only valid text characters."
 _FALLBACK = (
     "First-run state could not be determined at startup; the setup token is announced when"
     " the setup screen is first requested."
@@ -447,6 +449,24 @@ def test_setup_refusals_write_nothing_and_keep_the_token(
     ]
     for body, headers, status, detail in cases:
         _refused(_create(client, body, headers), status, detail)
+    # Audit F1: a lone surrogate (ASCII-escaped JSON) is invalid input, never a 500.
+    surrogate = _body(token, role_id, password="\ud800" + "x" * 13)
+    _refused(
+        client.post(
+            "/api/setup/administrator",
+            content=json.dumps(surrogate),
+            headers={**_CSRF, "Content-Type": "application/json"},
+        ),
+        422,
+        _P8,
+    )
+    # Audit F2: a validation refusal never echoes the token or the password.
+    for missing in ("role_id", "login_name"):
+        body = _body(token, role_id)
+        del body[missing]
+        response = _create(client, body)
+        _refused(response, 422)
+        assert token not in response.text and _PASSWORD not in response.text
     assert _counts(db_engine) == before
     assert _ok(client.get("/api/setup"))["open"] is True
     # The gate was never rotated: the same token still works.

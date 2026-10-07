@@ -313,6 +313,8 @@ docker compose exec backend uv run python -m app.cli reset-password --login-name
 Mật khẩu mới được gõ ở prompt, không bao giờ trên command line. Lệnh chỉ chạy với
 user đã có mật khẩu và chỉ khi đã có Administrator; nó không bao giờ tạo
 Administrator. Nó đặt mật khẩu tạm, kết thúc các sign-in của user và xóa khóa.
+Nếu kết nối database bị lỗi đúng lúc đang lưu việc reset, lệnh báo kết quả không
+xác định (exit code 2); hãy chạy lại lệnh, vì nó đặt lại mật khẩu trong mọi trường hợp.
 
 Backend đọc `SESSION_COOKIE_SECURE` (mặc định `false`, vì development stack chạy
 trên HTTP thuần). Đặt `true` trong environment của backend khi PartFlow được phục

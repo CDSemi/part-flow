@@ -169,3 +169,8 @@ class UnknownLoginError(ApplicationError):
 class RecoveryUnavailableError(ApplicationError):
     """The recovery reset may not run for this User or in this state
     (recovery command only; never HTTP)."""
+
+
+class RecoveryOutcomeUnknownError(ApplicationError):
+    """The recovery reset's COMMIT failed without an answer: the reset may
+    or may not have been stored (recovery command only; never HTTP)."""
