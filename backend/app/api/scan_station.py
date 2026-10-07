@@ -11,8 +11,14 @@ Surface:
 
 - ``GET  /scan-stations/{station_id}/context`` — what the station
   renders on load: the bound Area (with Department and color), its
-  active Operations, and whether it has Machines. An unknown station
-  is 404, an inactive station or Area 409 — never a silent fallback.
+  active Operations, whether it has Machines, and the station's saved
+  theme preference. An unknown station is 404, an inactive station or
+  Area 409 — never a silent fallback.
+- ``PUT  /scan-stations/{station_id}/theme-preference`` — the station's
+  own Dark/Light preference (Phase 13 slice 10, GUI_DESIGN §2.1 station
+  tier): a display preference, not configuration — not audited (OD-13),
+  accepted for any existing station (404 unknown), an absolute value
+  (a repeat is a no-op) echoed back as this request saved or kept.
 - ``POST /scan-stations/{station_id}/scans/resolve`` — a PN barcode
   (``PF:PN:…``) or a manual PN entry resolved at the station: the PN's
   quantity already in the Area and the explicit transfer candidates
@@ -245,6 +251,7 @@ from app.api.area_inventory import (
 from app.api.dependencies import SessionDep
 from app.application import (
     direct_processing,
+    environment,
     intake,
     machine_processing,
     merges,
@@ -256,6 +263,7 @@ from app.application import (
 )
 from app.application.station_identity import FinalGate, SensitiveAction
 from app.application.worker_sessions import OpenSession
+from app.domain.enums import ThemePreference
 from app.infrastructure.models import Worker
 
 router = APIRouter(prefix="/api")
@@ -276,6 +284,9 @@ class DepartmentRef(BaseModel):
 
 
 WorkerIdentificationModeLiteral = Literal["DISABLED", "FIXED", "SCANNED"]
+
+# The saved theme vocabulary (GUI_DESIGN §2.1; app.domain.enums.ThemePreference).
+ThemePreferenceLiteral = Literal["DARK", "LIGHT"]
 
 
 class WorkerRef(BaseModel):
@@ -357,6 +368,9 @@ class StationContextResponse(BaseModel):
     # The Area's Worker ID mode and Fixed Worker (Phase 13, GUI_DESIGN
     # §4.3 Worker pill) — the configuration as read now.
     worker_identification: WorkerIdentificationResponse
+    # The station's own saved theme (Phase 13 slice 10, GUI_DESIGN §2.1
+    # station tier); null = no preference (the Dark default applies).
+    theme_preference: ThemePreferenceLiteral | None
 
 
 @router.get("/scan-stations/{station_id}/context")
@@ -374,7 +388,43 @@ def get_station_context(station_id: str, session: SessionDep) -> StationContextR
             session=worker_session_response(context.worker_identification.session),
             final_gates=final_gates_response(context.worker_identification.final_gates),
         ),
+        theme_preference=_theme_preference(context.station.theme_preference),
     )
+
+
+def _theme_preference(stored: str | None) -> ThemePreferenceLiteral | None:
+    # The CHECK admits exactly the enum members; NULL = no preference.
+    return None if stored is None else ThemePreference(stored).value
+
+
+# ---------------------------------------------------------------------------
+# Station theme preference (Phase 13 slice 10 — GUI_DESIGN §2.1)
+# ---------------------------------------------------------------------------
+
+
+class StationThemePreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    theme_preference: ThemePreferenceLiteral
+
+
+class StationThemePreferenceResponse(BaseModel):
+    station_id: str
+    theme_preference: ThemePreferenceLiteral
+
+
+@router.put("/scan-stations/{station_id}/theme-preference")
+def save_station_theme_preference(
+    station_id: str, body: StationThemePreferenceRequest, session: SessionDep
+) -> StationThemePreferenceResponse:
+    """The station's own Dark/Light preference — a display preference, not
+    configuration: not audited (OD-13), accepted for any existing station,
+    absolute value (a repeat is a no-op); the response echoes the value
+    this request saved or kept."""
+    saved = environment.update_scan_station_theme_preference(
+        session, station_id, theme_preference=body.theme_preference
+    )
+    return StationThemePreferenceResponse(station_id=station_id, theme_preference=saved.value)
 
 
 # ---------------------------------------------------------------------------

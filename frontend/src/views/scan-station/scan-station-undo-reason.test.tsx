@@ -357,6 +357,7 @@ function handle(url: string, method: string, body: unknown): Response {
         session: sessionWire(),
         final_gates: { ...contextGates },
       },
+      theme_preference: null,
     });
   }
   if (/^\/api\/areas\/\d+\/inventory$/.test(url)) return inventory();

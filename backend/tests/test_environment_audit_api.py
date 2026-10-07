@@ -58,9 +58,12 @@ _ENVIRONMENT_SERVICE = _BACKEND_DIR / "app" / "application" / "environment.py"
 _ENVIRONMENT_ENTITIES = ("Department", "Area", "Operation", "ScanStation", "MachineAssetTagConfig")
 _ASSET_TAG_PATH = "/api/barcode-configuration/machine-asset-tag-format"
 # Public environment setters that deliberately write no audit row, each
-# with its reason. Empty in S2; a later slice adding one (for example a
-# station theme, OD-13) names it here.
-_NON_AUDITED_SETTERS: dict[str, str] = {}
+# with its reason.
+_NON_AUDITED_SETTERS: dict[str, str] = {
+    "update_scan_station_theme_preference": (
+        "The station's Dark/Light display preference is not configuration (PLAN CD2, OD-13)."
+    ),
+}
 
 
 def _alembic_config(database_url: URL) -> Config:

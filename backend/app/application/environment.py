@@ -85,7 +85,9 @@ the singleton), with the explicit-field snapshots below and
 ``actor_reference`` NULL until Phase 14. An update locks its row first,
 in the mode its own UPDATE takes, so every ``before_data`` is the
 committed predecessor. Rejected writes, lost races and no-ops append
-nothing, and ``next_sequence`` is never audited.
+nothing, and ``next_sequence`` is never audited. The Scan Station theme
+preference (``update_scan_station_theme_preference``) is a display
+preference, not configuration, and is never audited (OD-13).
 """
 
 import datetime
@@ -110,6 +112,7 @@ from app.domain.enums import (
     AuditEntityType,
     AuditEventType,
     QuantityFlowStatus,
+    ThemePreference,
     WorkerIdentificationMode,
     WorkerSessionEndReason,
 )
@@ -999,6 +1002,42 @@ def update_scan_station(
             )
         commit(session, _SCAN_STATION_CONFLICTS)
     return station
+
+
+def update_scan_station_theme_preference(
+    session: Session, station_id: str, *, theme_preference: object
+) -> ThemePreference:
+    """Save the station's own Dark/Light preference (GUI_DESIGN §2.1, station tier).
+
+    A display preference, not configuration (PLAN CD2, OD-13): no audit
+    row, ``updated_at`` unchanged, the configuration snapshot never
+    carries it. Any existing station may save it, active or not — it is
+    not a production update. Absolute value: a repeat is a no-op, so a
+    retry after an unknown outcome is safe. Returns the value written
+    or kept — never re-read after COMMIT, so a later concurrent writer's
+    value is never reported as this request's result. Worker Sessions
+    never call it.
+
+    One lock, taken first and held to COMMIT: the station row FOR NO
+    KEY UPDATE (the mode the UPDATE takes anyway). It serializes with
+    production commands and configuration edits of the station, never
+    waits on FK checks (FOR KEY SHARE), and as a transaction's only lock
+    it cannot be part of a deadlock.
+    """
+    # Wire vocabulary, case-sensitive like every enum on this API; the
+    # shape is judged before any lock.
+    if not isinstance(theme_preference, str) or theme_preference not in ThemePreference:
+        raise InvalidInputError("Theme preference must be DARK or LIGHT.")
+    value = ThemePreference(theme_preference)
+    station = session.get(
+        ScanStation, station_id, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if station is None:
+        raise NotFoundError(f"Scan Station '{station_id}' does not exist.")
+    if station.theme_preference != value:
+        station.theme_preference = value.value
+        commit(session, _SCAN_STATION_CONFLICTS)
+    return value
 
 
 # ---------------------------------------------------------------------------

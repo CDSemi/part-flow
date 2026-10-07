@@ -154,6 +154,7 @@ function handle(url: string, method: string, body: unknown): Response {
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
         ...identification,
       },
+      theme_preference: null,
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

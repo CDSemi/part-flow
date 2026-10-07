@@ -7,13 +7,13 @@ verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
 `0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation`,
 `0022_phase13_undo_reason_policy`, `0023_phase13_part_number_master`,
-`0024_phase13_planned_routes` and `0025_phase13_display_settings` add
-(IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.1, §8.4,
-§8.8–§8.11, §8.12, §8.13, §10, §16, §19, §21, §28; owner decisions
-OD-2, OD-3, OD-5, OD-6, OD-10, OD-11, S2-F6). Later Phase 13 slices
-extend this module:
+`0024_phase13_planned_routes`, `0025_phase13_display_settings` and
+`0026_phase13_station_theme` add (IMPLEMENTATION_ROADMAP Phase 13;
+PROJECT_PROFILE §7, §8.1, §8.4, §8.8–§8.11, §8.12, §8.13, §10, §16,
+§19, §21, §28; GUI_DESIGN §2.1; owner decisions OD-2, OD-3, OD-5, OD-6,
+OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
 
-- exact head boundary: `0025_phase13_display_settings` is the single
+- exact head boundary: `0026_phase13_station_theme` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -97,7 +97,14 @@ extend this module:
   earlier policy values and audit rows; the downgrade restores the 0024
   boundary and refuses while a value differs from its default, a
   `due-soon` audit row exists or a Department audit row changed a
-  rotation setting.
+  rotation setting;
+- the station theme preference (0026): `scan_stations.theme_preference`
+  (text, nullable, no default, no index) with the CHECK
+  `ck_scan_stations_theme_preference` admitting exactly `DARK` and
+  `LIGHT` (NULL passes), repeated verbatim from the model; the upgrade
+  leaves every existing station without a preference (never
+  backfilled); the downgrade restores the 0025 boundary and refuses
+  while any station holds a saved preference.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -141,7 +148,8 @@ _BADGE_CONFIRMATION_REVISION = "0021_phase13_badge_confirmation"
 _UNDO_REASON_POLICY_REVISION = "0022_phase13_undo_reason_policy"
 _PART_NUMBER_MASTER_REVISION = "0023_phase13_part_number_master"
 _PLANNED_ROUTES_REVISION = "0024_phase13_planned_routes"
-_HEAD_REVISION = "0025_phase13_display_settings"
+_DISPLAY_SETTINGS_REVISION = "0025_phase13_display_settings"
+_HEAD_REVISION = "0026_phase13_station_theme"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -155,6 +163,7 @@ _UNDO_REASON_POLICY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0022_phase13_undo
 _PART_NUMBER_MASTER_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0023_phase13_part_number_master.py"
 _PLANNED_ROUTES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0024_phase13_planned_routes.py"
 _DISPLAY_SETTINGS_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0025_phase13_display_settings.py"
+_STATION_THEME_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0026_phase13_station_theme.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -3104,6 +3113,202 @@ def test_upgrade_gives_departments_and_the_policy_their_defaults(admin_engine: E
                 assert _policy_row(connection) == (1, 30, True, True, True)
                 assert _undo_reason_required(connection) is True
                 assert _rows(connection, "audit_events") == audits
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# Scan Station theme preference (0026)
+# ---------------------------------------------------------------------------
+
+_THEME_CHECK = "ck_scan_stations_theme_preference"
+
+
+def _insert_station(connection: Connection, station_id: str) -> None:
+    """A Department, an Area and one Scan Station by raw SQL (valid at 0025 and at head)."""
+    department = _scalar_id(
+        connection,
+        "INSERT INTO departments (name) VALUES (:name) RETURNING id",
+        name=f"Theme {station_id}",
+    )
+    area = _scalar_id(
+        connection,
+        "INSERT INTO areas (department_id, name) VALUES (:department, 'Theme Area') RETURNING id",
+        department=department,
+    )
+    _execute(
+        connection,
+        "INSERT INTO scan_stations (station_id, area_id) VALUES (:station, :area)",
+        station=station_id,
+        area=area,
+    )
+
+
+def _station_themes(connection: Connection) -> list[tuple[object, ...]]:
+    return [
+        tuple(row)
+        for row in connection.execute(
+            sa.text("SELECT station_id, theme_preference FROM scan_stations ORDER BY station_id")
+        )
+    ]
+
+
+def _station_rows(connection: Connection) -> list[dict[str, object]]:
+    return [
+        dict(row._mapping)
+        for row in connection.execute(sa.text("SELECT * FROM scan_stations ORDER BY station_id"))
+    ]
+
+
+def test_station_theme_column_shape(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    columns = {str(column["name"]): column for column in inspector.get_columns("scan_stations")}
+    column = columns["theme_preference"]
+    assert isinstance(column["type"], sa.Text)
+    assert column["nullable"] is True
+    assert column["default"] is None
+    # Only ever read by primary key: no index.
+    for index in inspector.get_indexes("scan_stations"):
+        assert "theme_preference" not in index["column_names"], index["name"]
+
+
+def test_station_theme_check_has_exact_name_and_literal(migrated_engine: Engine) -> None:
+    checks = {
+        str(check["name"]): str(check["sqltext"])
+        for check in inspect(migrated_engine).get_check_constraints("scan_stations")
+    }
+    assert set(re.findall(r"'([^']*)'", checks[_THEME_CHECK])) == {"DARK", "LIGHT"}
+    with migrated_engine.connect() as connection:
+        definition = str(
+            connection.execute(
+                sa.text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"
+                ),
+                {"name": _THEME_CHECK},
+            ).scalar_one()
+        )
+    assert set(re.findall(r"'([^']*)'", definition)) == {"DARK", "LIGHT"}
+    model_checks = {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in cast(sa.Table, models.ScanStation.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    assert model_checks[_THEME_CHECK] == models.SCAN_STATION_THEME_PREFERENCE_SQL
+
+
+def test_migration_repeats_the_model_theme_check_verbatim() -> None:
+    migration = _load_migration(_STATION_THEME_MIGRATION_FILE)
+    assert migration.down_revision == _DISPLAY_SETTINGS_REVISION
+    assert migration._THEME_CHECK == _THEME_CHECK
+    assert migration._THEME_PREFERENCE_SQL == models.SCAN_STATION_THEME_PREFERENCE_SQL
+
+
+@pytest.mark.parametrize("theme", [None, "DARK", "LIGHT"])
+def test_database_theme_check_admits(connection: Connection, theme: str | None) -> None:
+    _insert_station(connection, "THEME-OK")
+    _execute(
+        connection,
+        "UPDATE scan_stations SET theme_preference = :theme WHERE station_id = 'THEME-OK'",
+        theme=theme,
+    )
+    assert ("THEME-OK", theme) in _station_themes(connection)
+
+
+@pytest.mark.parametrize("theme", ["dark", "Light", "", "AUTO"])
+def test_database_theme_check_refuses(connection: Connection, theme: str) -> None:
+    _insert_station(connection, "THEME-BAD")
+    _refused_by(
+        connection,
+        _THEME_CHECK,
+        lambda: _execute(
+            connection,
+            "UPDATE scan_stations SET theme_preference = :theme WHERE station_id = 'THEME-BAD'",
+            theme=theme,
+        ),
+    )
+
+
+def test_downgrade_to_display_settings_revision_drops_the_theme_column(
+    admin_engine: Engine,
+) -> None:
+    """A station without a preference never blocks the downgrade; the
+    re-upgrade restores the head with the station still unset."""
+    name = "partflow_test_phase13_downgrade_s10"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _insert_station(connection, "KEPT-1")
+            command.downgrade(config, _DISPLAY_SETTINGS_REVISION)
+            inspector = inspect(engine)
+            assert "theme_preference" not in {
+                str(column["name"]) for column in inspector.get_columns("scan_stations")
+            }
+            assert _THEME_CHECK not in {
+                str(check["name"]) for check in inspector.get_check_constraints("scan_stations")
+            }
+            with engine.connect() as connection:
+                assert _version(connection) == _DISPLAY_SETTINGS_REVISION
+                kept = connection.execute(sa.text("SELECT station_id FROM scan_stations"))
+                assert kept.scalar_one() == "KEPT-1"
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _station_themes(connection) == [("KEPT-1", None)]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_downgrade_refuses_while_a_station_theme_is_saved(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_station(connection, "THEMED-1")
+            _execute(
+                connection,
+                "UPDATE scan_stations SET theme_preference = 'LIGHT' WHERE station_id = 'THEMED-1'",
+            )
+        with pytest.raises(ProgrammingError, match="hold a saved theme preference"):
+            command.downgrade(_alembic_config(refused_database), _DISPLAY_SETTINGS_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert _station_themes(connection) == [("THEMED-1", "LIGHT")]
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_keeps_existing_stations_without_preference(admin_engine: Engine) -> None:
+    """0025 → head: every existing station keeps its row with no preference."""
+    name = "partflow_test_phase13_station_theme_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _DISPLAY_SETTINGS_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _insert_station(connection, "OLD-1")
+                _insert_station(connection, "OLD-2")
+                _execute(
+                    connection,
+                    "UPDATE scan_stations SET is_active = false WHERE station_id = 'OLD-2'",
+                )
+                stations = _station_rows(connection)
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _station_rows(connection) == [
+                    {**row, "theme_preference": None} for row in stations
+                ]
         finally:
             engine.dispose()
     finally:

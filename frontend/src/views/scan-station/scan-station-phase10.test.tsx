@@ -260,6 +260,7 @@ function handle(url: string, method: string, body: unknown): Response {
         session: null,
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
+      theme_preference: null,
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

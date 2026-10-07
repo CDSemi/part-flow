@@ -52,6 +52,7 @@ function stationFixture(url: string): Promise<Response> {
         session: null,
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
+      theme_preference: null,
     });
   }
   if (url === '/api/policies/due-soon') {

@@ -7,7 +7,9 @@ import { useTheme } from '../app/theme-context';
  * moves into the station header's actions group). Both variants use
  * the same ThemeProvider state: toggling updates the entire
  * application instantly, and the choice survives switching between
- * standard and production routes (session state, GUI_DESIGN §2.1).
+ * standard and production routes; on a Scan Station route the provider
+ * also saves the choice as that station's preference while connected
+ * (Phase 13); elsewhere it lasts for the session (GUI_DESIGN §2.1).
  */
 export function ThemeToggle({ compact = false }: { compact?: boolean }) {
   const { theme, toggleTheme } = useTheme();

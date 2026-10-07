@@ -14,6 +14,7 @@ import type { ReactNode } from 'react';
 
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
+import { useStationTheme, useTheme } from '../../app/theme-context';
 import { isMockPreviewRequested } from '../../app/view-state';
 import { ApiError, errorMessage } from '../../api/client';
 import {
@@ -34,6 +35,7 @@ import {
   resolveMachineScan,
   resolveScan,
   routeDeviationConfirmation,
+  saveStationThemePreference,
   scanBadge,
   stockAtStationArea,
   transferOutcomeUnknown,
@@ -538,12 +540,17 @@ function StationView({
     apply: applySession,
     markRequired,
   } = sessionClock;
+  const { stationThemeEpoch } = useTheme();
   const loadContext = useCallback(async () => {
     const sent = sessionTicket();
+    // Taken before the request is sent: a read that overlaps this
+    // station's own theme save never overrides it (theme-provider
+    // rule 1c).
+    const themeEpoch = stationThemeEpoch();
     const loaded = await getStationContext(stationId);
     applySession(loaded.workerIdentification.session, sent);
-    return loaded;
-  }, [stationId, sessionTicket, applySession]);
+    return { ...loaded, themeEpoch };
+  }, [stationId, sessionTicket, applySession, stationThemeEpoch]);
   const context = useApiData(loadContext);
   const { revalidate: revalidateContext } = context;
   const ready = context.state.status === 'ready' ? context.state.data : null;
@@ -599,6 +606,30 @@ function StationView({
   const inputRef = useRef<HTMLInputElement>(null);
   const [touchPrimary] = useState(isTouchPrimaryDevice);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // The station tier of the theme (GUI_DESIGN §2.1, Phase 13): the saved
+  // preference applies when the context loads; the toggle saves it only
+  // while the context is loaded and the connection is up (session-only
+  // otherwise, nothing queued).
+  useStationTheme(
+    stationId,
+    ready
+      ? { preference: ready.themePreference, epoch: ready.themeEpoch }
+      : undefined,
+    {
+      writable: !writeBlocked,
+      save: (theme) => saveStationThemePreference(stationId, theme),
+      onSaveFailed: (theme) => {
+        const shown = theme === 'dark' ? 'Dark' : 'Light';
+        const other = theme === 'dark' ? 'Light' : 'Dark';
+        setNotice({
+          kind: 'warn',
+          icon: '⚠',
+          title: 'Theme not confirmed for this Scan Station',
+          detail: `${shown} mode applies to this browser session only — ${stationId} did not confirm saving it. To save ${shown} for this station, switch to ${other} and back.`,
+        });
+      },
+    },
+  );
   const [flow, setFlow] = useState<Flow | null>(null);
   const [resolving, setResolving] = useState(false);
   // A Worker badge check is in flight (set together with `resolving`,

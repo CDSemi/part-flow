@@ -92,6 +92,7 @@ from app.domain.enums import (
     QuantityFlowStatus,
     RequestType,
     RouteMode,
+    ThemePreference,
     WorkerIdentificationMode,
     WorkerSessionEndReason,
 )
@@ -136,6 +137,14 @@ AREA_BARCODE_SQL = "barcode_value ~ '^PF:AREA:[^[:space:]]+$'"
 # Movements from Phase 5 on — so it is a simple URL-safe identifier:
 # ASCII letters, digits, '.', '_' and '-' only.
 SCAN_STATION_ID_SQL = "station_id ~ '^[A-Za-z0-9._-]+$'"
+
+# The Scan Station's own saved Dark/Light preference (Phase 13 slice 10,
+# GUI_DESIGN §2.1 station tier) in its full canonical vocabulary; NULL
+# (no preference) passes a CHECK. Repeated verbatim by migration
+# `0026_phase13_station_theme`.
+SCAN_STATION_THEME_PREFERENCE_SQL = (
+    "theme_preference IN (" + ", ".join(f"'{theme}'" for theme in ThemePreference) + ")"
+)
 
 # Machine Asset Tag shape (PROJECT_PROFILE §8.6/§10): generated from a
 # configured prefix (whitespace and ':' rejected) plus a zero-padded
@@ -534,6 +543,10 @@ class ScanStation(Base):
     No database trigger freezes the binding: rebinding a Scan Station
     is a configuration workflow controlled at the Application layer.
     Scan Stations carry no barcode namespace (PROJECT_PROFILE §10).
+    ``theme_preference`` (Phase 13 slice 10) is the station's own
+    Dark/Light display preference — the station tier of GUI_DESIGN §2.1;
+    NULL = no preference. Not configuration: never audited (OD-13), never
+    part of the audit snapshot, never changes ``updated_at``.
     """
 
     __tablename__ = "scan_stations"
@@ -551,9 +564,13 @@ class ScanStation(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    theme_preference: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(SCAN_STATION_ID_SQL, name=conv("ck_scan_stations_station_id_canonical")),
+        CheckConstraint(
+            SCAN_STATION_THEME_PREFERENCE_SQL, name=conv("ck_scan_stations_theme_preference")
+        ),
     )
 
 

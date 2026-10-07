@@ -385,6 +385,7 @@ function handle(url: string, method: string, body: unknown): Response {
         session: sessionWire(),
         final_gates: { ...contextGates },
       },
+      theme_preference: null,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

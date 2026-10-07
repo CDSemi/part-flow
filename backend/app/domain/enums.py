@@ -335,3 +335,15 @@ class WorkerSessionEndReason(StrEnum):
     AREA_MODE_CHANGED = "AREA_MODE_CHANGED"
     STATION_CHANGED = "STATION_CHANGED"
     WORKER_DEACTIVATED = "WORKER_DEACTIVATED"
+
+
+class ThemePreference(StrEnum):
+    """A saved Dark/Light theme choice (GUI_DESIGN §2.1).
+
+    Phase 13 slice 10 stores the Scan Station tier; a NULL station value
+    means no preference (the Dark default applies). Never affected by
+    Worker Sessions.
+    """
+
+    DARK = "DARK"
+    LIGHT = "LIGHT"

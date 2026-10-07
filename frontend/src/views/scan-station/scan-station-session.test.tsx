@@ -253,6 +253,7 @@ function handle(url: string, method: string, body: unknown): Response {
         session: sessionWire(),
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
+      theme_preference: null,
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -957,6 +958,7 @@ test('the allocation dialog treats worker_session_required the same way: modal r
       session: null,
       finalGates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
     },
+    themePreference: null,
   };
   const stocked = {
     movementId: 1,

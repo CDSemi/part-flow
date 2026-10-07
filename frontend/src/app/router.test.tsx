@@ -68,6 +68,7 @@ beforeEach(() => {
               undo: 'QUESTION',
             },
           },
+          theme_preference: null,
         });
       }
       if (/\/api\/areas\/\d+\/inventory$/.test(url)) {

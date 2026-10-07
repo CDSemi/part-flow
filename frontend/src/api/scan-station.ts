@@ -94,6 +94,8 @@ export interface StationContext {
   /** The Area's Worker ID mode as the server reports it; the server
    * judges the recorded identity again at every confirmation. */
   workerIdentification: StationWorkerIdentification;
+  /** The station's saved theme (GUI_DESIGN §2.1 station tier); null = no preference. */
+  themePreference: 'dark' | 'light' | null;
 }
 
 export interface StationWorkerIdentification {
@@ -175,6 +177,7 @@ interface StationContextWire {
     session: WorkerSessionWire | null;
     final_gates: { done: FinalGate; queue: FinalGate; undo: FinalGate };
   };
+  theme_preference: ThemePreferenceWire | null;
 }
 
 export async function getStationContext(
@@ -201,7 +204,40 @@ export async function getStationContext(
         undo: wire.worker_identification.final_gates.undo,
       },
     },
+    themePreference: toThemePreference(wire.theme_preference),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Station theme preference (Phase 13)
+// ---------------------------------------------------------------------------
+
+/** The saved theme vocabulary on the wire (GUI_DESIGN §2.1). */
+type ThemePreferenceWire = 'DARK' | 'LIGHT';
+
+function toThemePreference(
+  wire: ThemePreferenceWire | null,
+): 'dark' | 'light' | null {
+  if (wire === 'DARK') return 'dark';
+  if (wire === 'LIGHT') return 'light';
+  return null;
+}
+
+/** Save the station's own Dark/Light preference. Not a production
+ * write and not audited; an absolute value, so resending is safe. */
+export async function saveStationThemePreference(
+  stationId: string,
+  theme: 'dark' | 'light',
+): Promise<'dark' | 'light'> {
+  const wire = await apiRequest<{
+    station_id: string;
+    theme_preference: ThemePreferenceWire;
+  }>(`/api/scan-stations/${encodeURIComponent(stationId)}/theme-preference`, {
+    method: 'PUT',
+    body: { theme_preference: theme === 'dark' ? 'DARK' : 'LIGHT' },
+  });
+  // The server echoes the value this request saved or kept.
+  return toThemePreference(wire.theme_preference) ?? theme;
 }
 
 // ---------------------------------------------------------------------------

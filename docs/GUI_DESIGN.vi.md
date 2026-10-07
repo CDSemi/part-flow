@@ -53,7 +53,7 @@ theme. Status text có variant bảo đảm contrast; Area identity color không
 Toggle ở top nav; production-mode Scan Station và kiosk board dùng compact
 borderless control trong header. Persistence đã chốt: authenticated User preference
 → Scan Station preference → Dark default. Worker Session không ảnh hưởng theme.
-Phase 2 chỉ giữ session; persistence đến khi User/Station config hoàn chỉnh.
+**Ranh giới triển khai (Phase 13).** Tier Scan Station là thật: trên `/scan-station/<id>` và route production của nó, preference đã lưu của station được áp khi station load (chưa có preference → Dark), và toggle ở đó lưu nó cho station đó khi station đã load và đang kết nối; khi offline, khi station không load được, hoặc khi save không được xác nhận (một notice cảnh báo nói rõ điều đó và cách lưu lại), thay đổi chỉ áp cho session browser hiện tại và không queue gì. Các route khác giữ lựa chọn trong session. User tier đến cùng authentication (IMPLEMENTATION_ROADMAP Phase 14).
 
 ## 2.2 Color token
 
