@@ -1201,6 +1201,44 @@ def _create_lock_file(path):
     _fsync_directory(Path(path).parent)
 
 
+def publish_private_dir(parent_fd, staging_name, final_name):
+    """PF-A3.1 seal: rename the private staging directory ``staging_name`` to ``final_name`` relative to the held
+    parent descriptor, then fsync the parent. An existing final name (even an empty directory, which rename(2) would
+    replace) is refused: a sealed directory is never replaced."""
+    try:
+        os.lstat(final_name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    else:
+        raise ContextError(f"{final_name} already exists; a sealed directory is never replaced")
+    os.rename(staging_name, final_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def remove_private_tree_at(parent_fd, name):
+    """PF-A3.1: descriptor-relative removal of the tree ``name`` below ``parent_fd`` that this process just created
+    (a refused extraction). Links are removed, never followed; an absent name is already removed."""
+    try:
+        info = os.lstat(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    try:
+        with os.scandir(fd) as listing:
+            children = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in listing]
+        for child, is_dir in children:
+            if is_dir:
+                remove_private_tree_at(fd, child)
+            else:
+                os.unlink(child, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
 def render_bootstrap_conf(interpreter, control_release, control_release_sha256):
     return (
         "# Deployment Admin bootstrap configuration. Data only; never sourced by a shell.\n"

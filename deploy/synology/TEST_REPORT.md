@@ -458,6 +458,52 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > `PASS_WITH_DECLARED_LIMITS` (offline). Nothing was run against a NAS, DSM, SMB client, Docker daemon or the running
 > stack.
 
+> **PF-A3.1 checkpoint addendum (2026-10-07) — deployed artifacts, lifecycle schemas, emergency preservation.**
+> Contracts first: `contracts/lifecycle-records.schema.json` (five frozen records — `operation_plan`,
+> `operation_journal`, `deployment_record`, `recovery_manifest`, `verification_record` — with shared `$defs`), equal
+> to `pf_config.LIFECYCLE_SCHEMA`, with valid examples, legacy format 1/2 inputs and their migrated outputs, an invalid
+> corpus and `cases.json` (54 rows) under `contracts/examples/lifecycle/`. `pf_config` adds the cross-field validators
+> and the pure, deterministic `migrate_legacy_manifest`; `pf_source` the fd-safe archive writer, the streaming
+> inspector and the descriptor-relative exclusive extractor (`ArchiveLimits`); `pf_instance` `publish_private_dir` and
+> `remove_private_tree_at`. `pf-admin.py`: strict bundle reader (exact manifest bytes, payload size/hash/no-follow/
+> single link, unlisted files refused) before any extraction, confirmation or journal; the deployed artifact store
+> (preflight before the confirmation, staging after it and before the first effect, seal after activation, pointer
+> keys, non-wedging seal failure); healthy/emergency/partial captures with deployment image binding; `preserve_current`
+> in every rollback (`preservation-failed`); verification records outside the bundle; PostgreSQL facts, connection
+> window and locale-aware candidates; purge bundle schema 1 with the db image saved by ID and its own-payload restore
+> verification gating deletion (`purge-bundle-unverified`); restore-instance from the source payload; `pf backup
+> --emergency`; status/doctor `Deployment:` lines; `CHECKPOINT = "PF-A3.1"`. `pf_bootstrap.py`, `pf.sh`,
+> `pf_install.py`, `pf_runner.py`, `pf_docker.py`, `compose.nas.yaml` and the shell wrappers are unchanged (BF-1:
+> `84a824c8…0281`, `aadc41db…3532`).
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (CPython 3.12.15,
+> git 2.47.3) and `python:3.9` (CPython 3.9.25, git 2.47.3) containers, uid 0, source mounted read-only and copied to `/tmp/r`:
+> **771 tests OK, 0 skipped** on both (1088.240 s and 1086.951 s). Baseline: the 662 PF-A2.3 tests pass, updated without
+> weakening per SPEC section 6.2 (`test_pf_admin`, `test_docker_scope`, `test_entry_routes` incl. the SS-3 allowlist
+> reclassified with reasons and 23 DISPATCH rows, `test_permissions`, `test_config`, and the real-signal backup test of
+> `test_runner_config_source`, which now records the deployed workspace manifest because `backup` proves the source in
+> its preflight). New: 109 tests — 108 in `test_artifacts.py` (Contracts 6, Pinning 1, ManifestStrict 12, Legacy 9,
+> ArchiveImport 17, ArchiveRoundTrip 6, DeployedArtifact 19, Emergency 11, Verification 4, Postgres 8, PurgeBundle 10,
+> Routes 5; some methods cover two case IDs) and one purge deletion-gate regression in `test_pf_admin.py`. Evidence
+> outside the suite: ARCHIVE-FS-1 (every AX/AR archive imported as uid 0 on a real filesystem: 39 imports, 37
+> refusals, sentinel and destination parent unchanged after each), ARTIFACT-FS-1 (simulated daemon: deploy → delete
+> `repo/` and `.git` → backup → rollback → update; the checkpoint and rollback deployment carry the byte-identical
+> source archive of the first deployment; record and pointer hashes agree), DOWNGRADE-1 (the A2.3 listing of `26b6ed4`
+> raises `KeyError: 'id'` on a schema-1 checkpoint, as declared), SCHEMA-CASES (54/54 rows hold; legacy pairs
+> byte-equal), static checks in both images (`ast` (3, 9) on 19 files, `sh -n` on 4 scripts, strict JSON of 86
+> contract files with the three intended invalid examples refused, schema equality, BF-1) and a secret scan of the
+> logs and the checkpoint package. No daemon, NAS, `/usr/local/bin/pf`, running stack or development database was
+> contacted.
+> Gates: A3-T01 **passed** (offline); A3-T02 **passed** (filesystem, simulated daemon); A3-T13 **passed**
+> (filesystem); A3-T03 **blocked**: its offline part passed (EP-*), its required `docker_postgresql` level is not run
+> (PF-A3.4). Earlier A1/A2 offline cases re-run **passed**; A2-T04, the A2-T09 SMB part, the A1-T17 DSM part,
+> A1-T11…T14, the launcher and reboot/power loss stay `not_run`/`blocked`. Declared limits: no real Docker, Compose or
+> PostgreSQL claim; no `functional_recovery_verified` writer (purge deletion is gated on the bundle's own
+> `data_restore_verified` record; PF-A3.3); emergency preservation only in `rollback` and `backup --emergency`;
+> unsealed staging and superseded deployments are never cleaned (PF-A3.2/PF-A5.1); archived db layers unused at
+> restore (PF-A3.3); downgrade to the A2.3 control unsupported while schema-1 bundles exist; checksums are integrity,
+> not authorship. Recommended verdict: `PASS_WITH_DECLARED_LIMITS` (offline/filesystem). Not production-ready; F04,
+> F06, F07, F10, F15 and F16 are not closed overall.
+
 ## Executed checks
 
 | Check | Actual result |

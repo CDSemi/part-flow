@@ -16,9 +16,14 @@ the journaled workspace generation switch are PF-A3.
 
 Python standard library only, Python 3.9 language baseline. Git itself is started
 only through the caller-supplied runner callable.
+
+PF-A3.1: the fd-safe archive writer (``archive_tree``), the streaming member inspector
+(``inspect_archive``) and the descriptor-relative, exclusive-create extractor
+(``extract_archive``) replace every path-based tar extraction of the control release.
 """
 import dataclasses
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -26,9 +31,29 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import sys
 import tarfile
 import tempfile
 import uuid
+import zlib
+
+
+def _load_sibling_module(name):
+    """The already loaded sibling module (pf-admin loads pf_instance first), else this directory's own copy."""
+    path = Path(__file__).resolve().parent / (name + ".py")
+    if name in sys.modules and getattr(sys.modules[name], "__file__", None) == str(path):
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load control module: " + str(path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# PF-A3.1: the descriptor-relative removal of a tree the extractor just created (pf_instance never loads pf_source).
+pf_instance = _load_sibling_module("pf_instance")
 
 SOURCES_DIR = "sources"
 STORE_SUFFIX = ".git"
@@ -509,6 +534,9 @@ def archive_verified_tree(root, manifest, destination, *, excludes=DEFAULT_EXCLU
     missing, changed or unsupported entry aborts the archive. This is how a workspace
     without the commit in the protected store can still produce an exact deployed-source
     archive: the archive is the manifest-verified tree, not a second independent read.
+
+    PF-A3.1: members are regular files only (parents implied), PAX format, uid/gid 0 and empty owner names.
+    Returns ``(count, expanded_bytes, members_sha256)`` (section 3.2); existing callers use ``[0]``.
     """
     validate_manifest(manifest)
     expected = {entry["path"]: entry for entry in manifest["entries"]}
@@ -516,8 +544,9 @@ def archive_verified_tree(root, manifest, destination, *, excludes=DEFAULT_EXCLU
         raise SourceError("manifest contains unsupported entries; the tree cannot be archived as verified")
     destination = Path(destination)
     seen = set()
+    members = []
     try:
-        with tarfile.open(str(destination), "w:gz") as archive:
+        with tarfile.open(str(destination), "w:gz", format=tarfile.PAX_FORMAT) as archive:
             for relative, kind, fd, info in walk_tree(root, excludes=excludes):
                 if kind != "file":
                     raise SourceError(f"unsupported entry in the workspace: {relative}")
@@ -539,11 +568,8 @@ def archive_verified_tree(root, manifest, destination, *, excludes=DEFAULT_EXCLU
                         or executable != entry["executable"]):
                     raise SourceError(f"workspace file differs from the manifest: {relative}")
                 seen.add(relative)
-                member = tarfile.TarInfo(name=relative)
-                member.size = len(data)
-                member.mode = 0o755 if executable else 0o644
-                member.mtime = int(info.st_mtime)
-                archive.addfile(member, io.BytesIO(data))
+                archive.addfile(_file_member(relative, len(data), executable, info), io.BytesIO(data))
+                members.append((relative, "file", len(data), executable))
         missing = sorted(set(expected) - seen)
         if missing:
             raise SourceError("workspace lacks manifest files: " + ", ".join(missing[:10]))
@@ -554,7 +580,7 @@ def archive_verified_tree(root, manifest, destination, *, excludes=DEFAULT_EXCLU
         except OSError:
             pass
         raise
-    return len(seen)
+    return len(seen), sum(member[2] for member in members), members_digest(members)
 
 
 def manifest_bytes(manifest):
@@ -563,6 +589,368 @@ def manifest_bytes(manifest):
 
 def manifest_digest(manifest):
     return hashlib.sha256(manifest_bytes(manifest)).hexdigest()
+
+
+def entries_digest(manifest):
+    """Tree content identity (PF-A3.1 section 2.3): SHA-256 of ``manifest_bytes(manifest["entries"])``, without the
+    provenance dict, so a tree extracted with unknown provenance compares equal to the same tree recorded as a
+    commit."""
+    return hashlib.sha256(manifest_bytes(manifest["entries"])).hexdigest()
+
+
+# ---------------------------------------------------------------- archives (PF-A3.1)
+
+ARCHIVE_PAX_KEYS = frozenset({"path", "size", "mtime", "atime", "ctime", "uid", "gid", "uname", "gname"})
+ARCHIVE_TYPES = (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE)
+COPY_BLOCK = 1024 * 1024
+
+
+@dataclasses.dataclass(frozen=True)
+class ArchiveLimits:
+    members: int
+    total_bytes: int
+    file_bytes: int
+    path_bytes: int
+    component_bytes: int
+    depth: int
+
+
+SOURCE_LIMITS = ArchiveLimits(MANIFEST_ENTRY_LIMIT, EXPORT_TOTAL_LIMIT, EXPORT_FILE_LIMIT, 1024, 255, 64)
+HISTORY_LIMITS = ArchiveLimits(200000, 64 * 1024 ** 3, 64 * 1024 ** 3, 1024, 255, 64)
+
+
+class ArchiveRefused(SourceError):
+    """An archive refused before or during extraction: ``code`` (archive-member-refused, archive-unreadable,
+    archive-changed), the member name and the reason of the section 3.2 refusal table."""
+
+    def __init__(self, code, member, reason):
+        self.code, self.member, self.reason = code, member, reason
+        super().__init__(f"{code}: {reason}: {member!r}"[:400])
+
+
+@dataclasses.dataclass(frozen=True)
+class ArchiveInventory:
+    """Pass 1 of an archive: explicit members ((path, kind, size, executable), ...) in archive order."""
+    members: tuple
+    expanded_bytes: int
+    members_sha256: str
+
+
+def _normalized_json(value):
+    # The bytes of pf_instance.normalize_json (sorted keys, no whitespace, UTF-8, no NaN).
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False).encode("utf-8", "surrogateescape")
+
+
+def members_digest(members):
+    """SHA-256 of normalize_json([[path, "file"|"dir", size, executable], ...]) over explicit members in order."""
+    return hashlib.sha256(_normalized_json([list(member) for member in members])).hexdigest()
+
+
+def member_name_problem(name, limits):
+    """(normalized name, refusal reason or None) for one archive member name (section 3.2 refusal table)."""
+    if not isinstance(name, str) or not name:
+        return name, "empty-component"
+    if "\\" in name or "\x00" in name or any("\udc80" <= char <= "\udcff" for char in name):
+        return name, "traversal"
+    if name.startswith("/"):
+        return name, "absolute"
+    while name.startswith("./"):
+        name = name[2:]
+    if name.endswith("/"):
+        name = name[:-1]
+    if not name:
+        return name, "empty-component"
+    parts = name.split("/")
+    if any(part in (".", "..") for part in parts):
+        return name, "traversal"
+    if any(part == "" for part in parts):
+        return name, "empty-component"
+    if len(name.encode("utf-8")) > limits.path_bytes:
+        return name, "path-length"
+    if any(len(part.encode("utf-8")) > limits.component_bytes for part in parts):
+        return name, "component-length"
+    if len(parts) > limits.depth:
+        return name, "depth"
+    return name, None
+
+
+def _file_member(relative, size, executable, info):
+    member = tarfile.TarInfo(name=relative)
+    member.size = size
+    member.mode = 0o755 if executable else 0o644
+    member.mtime = int(info.st_mtime)
+    member.uid = member.gid = 0
+    member.uname = member.gname = ""
+    return member
+
+
+class _HashingReader:
+    """Exactly ``size`` bytes of a descriptor, hashed while tarfile copies them (a shrinking file fails the copy)."""
+
+    def __init__(self, fd, size):
+        self.fd, self.remaining, self.digest = fd, size, hashlib.sha256()
+
+    def read(self, size=-1):
+        if self.remaining <= 0:
+            return b""
+        wanted = self.remaining if size is None or size < 0 else min(size, self.remaining)
+        block = os.read(self.fd, min(wanted, COPY_BLOCK))
+        self.remaining -= len(block)
+        self.digest.update(block)
+        return block
+
+
+def archive_tree(root, destination, *, excludes=DEFAULT_EXCLUDES, unsupported="refuse", limits=SOURCE_LIMITS):
+    """fd-safe ``tar.gz`` of the regular files under ``root`` (walk_tree: no-follow, descriptor-relative).
+
+    Members are regular files only (parents implied), mode 0755 with any execute bit else 0644, uid/gid 0, empty
+    owner names, ``mtime`` from fstat, PAX format; each file is hashed while it is archived. ``unsupported="refuse"``
+    raises on a link or special entry; ``"record"`` skips and returns it (only `pf backup --emergency`). A name or
+    size the importer would refuse (``limits``) is refused here too, so every archive pf writes can be imported.
+    Returns {"manifest" (pf_source manifest of exactly what was archived, source unknown), "unsupported",
+    "expanded_bytes", "members", "members_sha256"}; a partial destination is removed on failure.
+    """
+    if unsupported not in ("refuse", "record"):
+        raise ValueError("unsupported must be refuse or record")
+    destination = Path(destination)
+    fd = os.open(str(destination), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    entries, skipped, members, total = [], [], [], 0
+    try:
+        with os.fdopen(fd, "wb") as handle, \
+                tarfile.open(fileobj=handle, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+            for relative, kind, file_fd, info in walk_tree(root, excludes=excludes):
+                if kind != "file":
+                    if unsupported == "refuse":
+                        raise SourceError(f"unsupported entry (link or special file): {relative}")
+                    skipped.append(relative)
+                    continue
+                try:
+                    _, problem = member_name_problem(relative, limits)
+                    if problem is not None:
+                        raise SourceError(f"the name {relative!r} cannot be archived ({problem})")
+                    if info.st_size > limits.file_bytes or total + info.st_size > limits.total_bytes:
+                        raise SourceError(f"{relative}: the tree exceeds the archive size limits")
+                    executable = bool(info.st_mode & 0o111)
+                    reader = _HashingReader(file_fd, info.st_size)
+                    archive.addfile(_file_member(relative, info.st_size, executable, info), reader)
+                    if reader.remaining:
+                        raise SourceError(f"{relative} changed while it was archived")
+                finally:
+                    os.close(file_fd)
+                entries.append({"path": relative, "kind": "file", "executable": executable, "size": info.st_size,
+                                "sha256": reader.digest.hexdigest()})
+                members.append((relative, "file", info.st_size, executable))
+                total += info.st_size
+                if len(members) > limits.members:
+                    raise SourceError("the tree has more members than the archive limit")
+    except BaseException:
+        try:
+            os.unlink(str(destination))
+        except OSError:
+            pass
+        raise
+    entries.sort(key=lambda item: item["path"])
+    return {"manifest": {"schema_version": MANIFEST_SCHEMA, "source": {"kind": "unknown"}, "entries": entries},
+            "unsupported": skipped, "expanded_bytes": total, "members": len(members),
+            "members_sha256": members_digest(members)}
+
+
+def _archive_stream(fd):
+    """A private read handle on ``fd`` from offset 0 (``os.dup``; the path is never re-opened)."""
+    duplicate = os.dup(fd)
+    try:
+        os.lseek(duplicate, 0, os.SEEK_SET)
+        return os.fdopen(duplicate, "rb")
+    except BaseException:
+        os.close(duplicate)
+        raise
+
+
+_UNREADABLE = (tarfile.TarError, EOFError, zlib.error, OSError, UnicodeError)
+
+
+def _members(handle):
+    """Yield every member of a streaming ``tar.gz`` (``next()``, never ``getmembers()``) with its archive."""
+    try:
+        archive = tarfile.open(fileobj=handle, mode="r|gz", encoding="utf-8", errors="surrogateescape")
+    except _UNREADABLE as exc:
+        raise ArchiveRefused("archive-unreadable", "", str(exc) or type(exc).__name__) from exc
+    with archive:
+        while True:
+            try:
+                member = archive.next()
+            except _UNREADABLE as exc:
+                raise ArchiveRefused("archive-unreadable", "", str(exc) or type(exc).__name__) from exc
+            if archive.pax_headers:
+                raise ArchiveRefused("archive-member-refused", "<global header>", "pax-key")
+            if member is None:
+                return
+            archive.members = []  # streaming: no member list is kept
+            yield archive, member
+
+
+def _check_member(member, limits, explicit, implied):
+    """(name, kind, size, executable) of one member after every pass 1 refusal of the section 3.2 table."""
+    if member.type not in ARCHIVE_TYPES:
+        raise ArchiveRefused("archive-member-refused", member.name, "type")
+    name, problem = member_name_problem(member.name, limits)
+    if problem is not None:
+        raise ArchiveRefused("archive-member-refused", member.name, problem)
+    if set(member.pax_headers) - ARCHIVE_PAX_KEYS:
+        raise ArchiveRefused("archive-member-refused", member.name, "pax-key")
+    kind = "dir" if member.type == tarfile.DIRTYPE else "file"
+    if kind == "file" and member.mode & 0o7000:
+        raise ArchiveRefused("archive-member-refused", member.name, "mode-bits")
+    parts = name.split("/")
+    parents = ["/".join(parts[:index]) for index in range(1, len(parts))]
+    if name in explicit or (kind == "file" and name in implied) \
+            or any(explicit.get(parent) == "file" for parent in parents):
+        raise ArchiveRefused("archive-member-refused", member.name, "duplicate")
+    explicit[name] = kind
+    implied.update(parents)
+    size = member.size if kind == "file" else 0
+    return name, kind, size, kind == "file" and bool(member.mode & 0o111)
+
+
+def inspect_archive(fd, *, limits, expected=None):
+    """Pass 1 (section 3.2): stream every header and consume every byte of ``fd`` (a ``tar.gz``) without storing or
+    extracting anything; ArchiveRefused on the first refused member. ``expected``: (expanded_bytes, members,
+    members_sha256) declared by a manifest (None entries are not compared) -> ``declared-mismatch``."""
+    explicit, implied, members, total = {}, set(), [], 0
+    with _archive_stream(fd) as handle:
+        for archive, member in _members(handle):
+            if len(members) >= limits.members:
+                raise ArchiveRefused("archive-member-refused", member.name, "member-count")
+            name, kind, size, executable = _check_member(member, limits, explicit, implied)
+            if kind == "file":
+                if size > limits.file_bytes:
+                    raise ArchiveRefused("archive-member-refused", member.name, "file-size")
+                if total + size > limits.total_bytes:
+                    raise ArchiveRefused("archive-member-refused", member.name, "total-size")
+                counted = 0
+                try:
+                    source = archive.extractfile(member)
+                    while True:
+                        block = source.read(COPY_BLOCK)
+                        if not block:
+                            break
+                        counted += len(block)
+                except _UNREADABLE as exc:
+                    raise ArchiveRefused("archive-unreadable", member.name, str(exc) or type(exc).__name__) from exc
+                if counted != size:
+                    raise ArchiveRefused("archive-unreadable", member.name, "truncated member data")
+                total += size
+            members.append((name, kind, size, executable))
+    inventory = ArchiveInventory(tuple(members), total, members_digest(members))
+    if expected is not None:
+        declared = (inventory.expanded_bytes, len(inventory.members), inventory.members_sha256)
+        if any(want is not None and want != got for want, got in zip(expected, declared)):
+            raise ArchiveRefused("archive-member-refused", "", "declared-mismatch")
+    return inventory
+
+
+def _open_created(root_fd, parts, created):
+    """The directory ``parts`` below ``root_fd``: missing components are created 0700 relative to their parent's
+    descriptor; an existing component must be one this extraction created (``created``), else archive-changed."""
+    current = os.dup(root_fd)
+    try:
+        for index, part in enumerate(parts):
+            path = "/".join(parts[:index + 1])
+            if path not in created:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=current)
+                except FileExistsError as exc:
+                    raise ArchiveRefused("archive-changed", path, "an entry appeared that this extraction did not "
+                                                                  "create") from exc
+                created.add(path)
+            child = os.open(part, DIR_FLAGS, dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _extract_into(fd, root_fd, inventory, limits):
+    entries, created, total, index = [], set(), 0, 0
+    with _archive_stream(fd) as handle:
+        for archive, member in _members(handle):
+            if index >= len(inventory.members) or member.type not in ARCHIVE_TYPES:
+                raise ArchiveRefused("archive-changed", member.name, "the archive differs from pass 1")
+            name, problem = member_name_problem(member.name, limits)
+            kind = "dir" if member.type == tarfile.DIRTYPE else "file"
+            size = member.size if kind == "file" else 0
+            observed = (name, kind, size, kind == "file" and bool(member.mode & 0o111))
+            if problem is not None or observed != tuple(inventory.members[index]):
+                raise ArchiveRefused("archive-changed", member.name, "the archive differs from pass 1")
+            index += 1
+            parts = name.split("/")
+            if kind == "dir":
+                os.close(_open_created(root_fd, parts, created))
+                continue
+            parent = _open_created(root_fd, parts[:-1], created)
+            try:
+                try:
+                    target = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     0o600, dir_fd=parent)
+                except FileExistsError as exc:
+                    raise ArchiveRefused("archive-changed", member.name, "the member exists already") from exc
+            finally:
+                os.close(parent)
+            digest, counted = hashlib.sha256(), 0
+            try:
+                source = archive.extractfile(member)
+                while True:
+                    try:
+                        block = source.read(COPY_BLOCK)
+                    except _UNREADABLE as exc:
+                        raise ArchiveRefused("archive-unreadable", member.name,
+                                             str(exc) or type(exc).__name__) from exc
+                    if not block:
+                        break
+                    counted += len(block)
+                    total += len(block)
+                    if counted > size:
+                        raise ArchiveRefused("archive-changed", member.name, "more bytes than its header")
+                    if total > limits.total_bytes:
+                        raise ArchiveRefused("archive-member-refused", member.name, "total-size")
+                    digest.update(block)
+                    view = memoryview(block)
+                    while view:
+                        written = os.write(target, view)
+                        view = view[written:]
+                if counted != size:
+                    raise ArchiveRefused("archive-changed", member.name, "fewer bytes than its header")
+                os.fchmod(target, 0o700 if observed[3] else 0o600)
+            finally:
+                os.close(target)
+            entries.append({"path": name, "kind": "file", "executable": observed[3], "size": size,
+                            "sha256": digest.hexdigest()})
+    if index != len(inventory.members):
+        raise ArchiveRefused("archive-changed", "", "the archive differs from pass 1")
+    return entries
+
+
+def extract_archive(fd, parent_fd, name, inventory, *, limits):
+    """Pass 2 (section 3.2): extract ``fd`` into the new private directory ``name`` (0700, must not exist) below
+    ``parent_fd``. Every member must equal pass 1 (``inventory``) in order; parents are created 0700 relative to their
+    parent's descriptor; files are created exclusively without following links (0600, 0700 with an execute bit);
+    nothing is chowned, timestamped or linked. On any failure the new directory is removed descriptor-relatively.
+    Returns the pf_source manifest of the written bytes with ``source: {"kind": "unknown"}``."""
+    os.mkdir(name, 0o700, dir_fd=parent_fd)
+    try:
+        root_fd = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+        try:
+            entries = _extract_into(fd, root_fd, inventory, limits)
+        finally:
+            os.close(root_fd)
+    except BaseException:
+        pf_instance.remove_private_tree_at(parent_fd, name)
+        raise
+    entries.sort(key=lambda item: item["path"])
+    return {"schema_version": MANIFEST_SCHEMA, "source": {"kind": "unknown"}, "entries": entries}
 
 
 def validate_manifest(value, label="manifest"):

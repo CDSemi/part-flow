@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -27,6 +28,34 @@ OLD = pfx.OLD
 NEW = pfx.NEW
 TEST_GROUP = grp.getgrgid(os.getgid()).gr_name
 source_fixture = pfx.source_fixture
+# PF-A3.1: realistic image IDs (sha256:<64 hex>) and project-prefixed tags; every lifecycle record requires them.
+OLD_BACKEND, OLD_FRONTEND = pfx.image_id("old-backend"), pfx.image_id("old-frontend")
+NEW_BACKEND, NEW_FRONTEND = pfx.image_id("new-backend"), pfx.image_id("new-frontend")
+DB_IMAGE_ID = pfx.image_id("postgres-16")
+PROJECT = "partflow-staging"
+
+
+def checkpoint(controller, reason="scheduled-or-manual-backup"):
+    """A healthy checkpoint taken the way every route takes one: inside a locked operation."""
+    with contextlib.redirect_stdout(io.StringIO()), controller.lock():
+        return controller.snapshot(reason)
+
+
+def rewrite_manifest(folder, mutate):
+    """Rewrite a schema 1 manifest in place (normalized bytes and manifest.sha256), as an attacker with write access
+    to the protected folder could: ``mutate(manifest)`` edits the parsed manifest."""
+    folder = Path(folder)
+    manifest = json.loads((folder / "manifest.json").read_bytes())
+    mutate(manifest)
+    data = pf_instance.normalize_json(manifest)
+    (folder / "manifest.json").write_bytes(data)
+    (folder / "manifest.sha256").write_text(pf_instance.sha256_bytes(data) + "\n")
+    return manifest
+
+
+def payload_entry(folder, path):
+    data = (Path(folder) / path).read_bytes()
+    return {"size": len(data), "sha256": pf_instance.sha256_bytes(data)}
 
 
 def fixture(root, revision=OLD, new_migration=False):
@@ -103,9 +132,10 @@ class FakeController(pf.Controller):
         super().__init__(context)
         self.config["minimum_free_mb"] = 1
         self.dbs = {"partflow_staging": {"heads": ["r1"], "rows": ["old-record"], "connections": True}}
-        self.tags = {"backend:old": "sha256:old-backend", "frontend:old": "sha256:old-frontend"}
-        self.contracts = {"sha256:old-backend": {"files": pf.migration_files(self.root), "heads": ["r1"]}}
-        self.current_images = {"backend": "sha256:old-backend", "frontend": "sha256:old-frontend"}
+        self.tags = {PROJECT + "-backend:old": OLD_BACKEND, PROJECT + "-frontend:old": OLD_FRONTEND,
+                     "postgres:16": DB_IMAGE_ID}
+        self.contracts = {OLD_BACKEND: {"files": pf.migration_files(self.root), "heads": ["r1"]}}
+        self.current_images = {"backend": OLD_BACKEND, "frontend": OLD_FRONTEND, "db": DB_IMAGE_ID}
         self.running = {"db": True, "backend": True, "frontend": True}
         self.calls = []
         self.fail = None
@@ -116,6 +146,7 @@ class FakeController(pf.Controller):
         self.resources = {"containers": [], "volumes": []}
         self.workspace_head = OLD
         self.workspace_dirty = False
+        self.droppable = set()  # PF-A3.1: databases a restore-instance test lets the fake drop (the empty init db)
         pfx.trust_daemon(self)
 
     def verify_daemon(self, *, refresh=False):
@@ -139,21 +170,64 @@ class FakeController(pf.Controller):
         return {"head": self.target["sha"], "dirty": False, "changes": [], "provenance": "git_commit",
                 "manifest_commit": self.target["sha"]}
 
-    def create_deployed_source_archive(self, destination, revision):
+    def deployed_source_origin(self, revision):
+        # The fake protected store holds every commit the fixture deployed (create_deployed_source_archive below).
+        return "protected-store" if isinstance(revision, str) and pf.SHA_RE.fullmatch(revision) else None
+
+    def prove_tree_commit(self, tree, revision):
+        # The fake protected store exports the fixture tree of a commit: the proof compares byte for byte.
+        if self.deployed_source_origin(revision) is None:
+            return False
         with tempfile.TemporaryDirectory() as tmp:
             exact = Path(tmp) / "exact"
             source_fixture(exact, revision)
-            pf.create_source_archive(exact, destination)
+            expected = self.candidate_manifest(exact, revision, verified=True)
+            return bool(pf.pf_source.compare_manifest(tree, expected, excludes=pf.SOURCE_EXCLUDES)["matches"])
+
+    def create_deployed_source_archive(self, destination, revision):
+        if self.deployed_source_origin(revision) is None:
+            raise pf.Failure(self.CANNOT_RECONSTRUCT)
+        with tempfile.TemporaryDirectory() as tmp:
+            exact = Path(tmp) / "exact"
+            source_fixture(exact, revision)
+            manifest = self.candidate_manifest(exact, revision, verified=True)
+            _, expanded, members_sha256 = pf.pf_source.archive_verified_tree(exact, manifest, destination)
+        return {"origin": "protected-store", "manifest": manifest, "expanded_bytes": expanded,
+                "members": len(manifest["entries"]), "members_sha256": members_sha256}
 
     def replace_source(self, candidate, revision, *, verified=True):
         super().replace_source(candidate, revision, verified=verified)
-        self.workspace_head = revision
+        self.workspace_head = revision if verified else None
         self.workspace_dirty = False
 
     def inspect(self, service):
-        return {"Image": self.current_images.get(service, "sha256:postgres"),
+        return {"Image": self.current_images.get(service, DB_IMAGE_ID),
                 "State": {"Running": self.running[service], "Health": {"Status": "healthy"}},
                 "Config": {"Env": ["POSTGRES_DB=partflow_staging", "POSTGRES_USER=partflow_staging"]}}
+
+    def record_render(self, root, override):
+        """What require_envelope records for an approved render (PF-A1.3): the seal selects it by its input key."""
+        if self.operation_dir is None:
+            return
+        selected = Path(override) if override else self.override
+        selected = selected if selected.exists() else None
+        compose_bytes = pf_instance.read_bytes_nofollow(self.control_dir / "compose.nas.yaml")
+        model = {"name": self.context.compose_project, "services": {"render": len(self.calls)}}
+        self._envelope_sequence += 1
+        name = f"compose-{self._envelope_sequence}.json"
+        pf_instance._write_private_file(self.operation_dir / name, pf_instance.normalize_json(model), 0o600)
+        self._append_envelope_record({
+            "sequence": self._envelope_sequence, "compose_version": "Docker Compose version v2.40.2-fixture",
+            "inputs": {"compose_file": str(self.control_dir / "compose.nas.yaml"),
+                       "compose_file_sha256": pf_instance.sha256_bytes(compose_bytes),
+                       "override": str(selected) if selected else None,
+                       "override_sha256": pf_instance.sha256_bytes(selected.read_bytes()) if selected else None,
+                       "project_directory": str(Path(root or self.root)), "repo_root": str(Path(root or self.root)),
+                       "frozen_env_sha256": self.frozen.env_sha256 if self.frozen is not None else None,
+                       "instance_id": self.context.instance_id, "effective_values_sha256": "0" * 64,
+                       "value_overrides": []},
+            "resolved_file": name, "resolved_sha256": pf_instance.sha256_bytes(pf_instance.normalize_json(model)),
+            "escape_mode": "doubled", "result": "approved"})
 
     def docker(self, *args, **kwargs):
         self.calls.append(("docker", args))
@@ -182,9 +256,13 @@ class FakeController(pf.Controller):
             self.tags[args[2]] = args[1]
             return ""
         if args[:2] == ("image", "inspect"):
-            if args[2] not in self.tags:
+            if args[2] in self.tags:
+                found = self.tags[args[2]]
+            elif args[2] in self.tags.values():
+                found = args[2]
+            else:
                 raise pf.Failure("image missing")
-            return json.dumps([{"Id": self.tags[args[2]]}])
+            return json.dumps([{"Id": found, "Os": "linux", "Architecture": "amd64", "RepoDigests": []}])
         if args[:2] == ("ps", "-q"):
             return ""
         raise AssertionError(("docker", args))
@@ -202,6 +280,22 @@ class FakeController(pf.Controller):
             return "\n".join(self.dbs[database]["heads"])
         if "pg_stat_activity" in sql:
             return str(self.connected_sessions)
+        # PF-A3.1 section 3.8 read-only inventory statements and the journaled connection window.
+        if sql == pf.FACTS_SQL:
+            return "\n".join(f"{name}|partflow_staging|UTF8|en_US.utf8|en_US.utf8|"
+                             f"{'t' if item.get('connections', True) else 'f'}" for name, item in sorted(self.dbs.items()))
+        if sql == pf.EXTENSIONS_SQL:
+            return "plpgsql|1.0"
+        if sql == pf.ROW_COUNTS_SQL:
+            return f"public.records|{len(self.dbs[database]['rows'])}"
+        if sql == pf.ROLES_SQL:
+            return "partflow_staging|f|f|t|t|f|f"
+        if sql == pf.AVAILABLE_EXTENSIONS_SQL:
+            return "pg_trgm\nplpgsql"
+        if sql.startswith("ALTER DATABASE") and "ALLOW_CONNECTIONS" in sql:
+            name = re.search(r'ALTER DATABASE "([^"]+)"', sql).group(1)
+            self.dbs[name]["connections"] = "ALLOW_CONNECTIONS true" in sql
+            return "ALTER DATABASE"
         if sql.startswith("BEGIN;"):
             if self.fail == "swap":
                 raise pf.Failure("simulated transaction failure")
@@ -251,6 +345,7 @@ class FakeController(pf.Controller):
             self.dbs[database]["heads"] = list(contract["heads"])
             return ""
         if args[0] == "up":
+            self.record_render(root, override)
             service = args[-1]
             if service == "db":
                 self.running["db"] = True
@@ -276,7 +371,10 @@ class FakeController(pf.Controller):
             if program == "pg_dump":
                 if self.fail == "dump":
                     raise pf.Failure("simulated dump failure")
-                output.write(json.dumps(self.dbs["partflow_staging"]).encode())
+                output.write(json.dumps(self.dbs[args[args.index("-d") + 1]]).encode())
+                return ""
+            if program == "pg_dumpall":
+                output.write(b"-- globals\n")
                 return ""
             if program == "pg_restore":
                 if self.fail == "restore":
@@ -290,7 +388,8 @@ class FakeController(pf.Controller):
                 return ""
             if program == "dropdb":
                 name = args[-1]
-                assert name.startswith(("pf_verify_", "pf_migrate_"))
+                # PF-A3.1: a pf_restore_ candidate is dropped when the selected checkpoint is incompatible.
+                assert name.startswith(("pf_verify_", "pf_migrate_", "pf_restore_")) or name in self.droppable
                 del self.dbs[name]
                 return ""
         raise AssertionError(args)
@@ -317,11 +416,11 @@ class FakeController(pf.Controller):
     def build_target(self, candidate, sha):
         images = {}
         for service in ("backend", "frontend"):
-            image_id = "sha256:new-" + service
-            reference = service + ":candidate"
+            image_id = pfx.image_id("new-" + service)
+            reference = f"{PROJECT}-{service}:candidate"
             self.tags[reference] = image_id
             images[service] = {"reference": reference, "id": image_id}
-        self.contracts["sha256:new-backend"] = {
+        self.contracts[NEW_BACKEND] = {
             "files": pf.migration_files(candidate), "heads": ["r2" if self.new_migration else "r1"]}
         override = self.state / "candidate-images.yaml"
         self.make_override(images, override)
@@ -490,8 +589,9 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(all(self.c.running.values()))
         self.assertFalse(self.c.pending.exists())
         saved = self.c.snapshots()[0]
-        self.assertEqual(saved["source_revision"], OLD)
-        self.assertEqual(saved["restore_test"], "passed")
+        # PF-A3.1 mapping: source_revision -> the proven commit, restore_test -> the external verification level.
+        self.assertEqual(saved.manifest["source"]["commit"], OLD)
+        self.assertEqual(saved.level, "data_restore_verified")
         self.assertEqual(self.c.ci_calls, [NEW])
         self.assertEqual((self.root / "pf.sh").read_text(), "# repository source copy\n")
         self.assertEqual((self.root / "deploy/synology/pf-admin.py").read_text(), "# repository source helper\n")
@@ -630,8 +730,8 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(file.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)
 
     def test_completed_checkpoint_is_group_readable_but_not_group_writable(self):
-        checkpoint = self.c.snapshot("permission-test")
-        folder = self.c.backups_dir / checkpoint["id"]
+        view = checkpoint(self.c, "scheduled-or-manual-backup")
+        folder = self.c.backups_dir / view.bundle_id
 
         for directory in (self.c.backups_root, self.c.revisions_root, self.c.backups_dir, folder):
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
@@ -712,7 +812,9 @@ class AdminTests(unittest.TestCase):
         self.c.fail = "dump"
         self.assertEqual(self.invoke(["update", "--latest"]), 1)
         self.assertEqual(self.c.revision(), OLD)
-        self.assertEqual(self.c.snapshots()[0]["status"], "incomplete")
+        # PF-A3.1: a capture interrupted before its manifest seal is listed as invalid and never selectable.
+        self.assertIsInstance(self.c.snapshots()[0], pf.InvalidBundle)
+        self.assertEqual(self.c.snapshots()[0].code, "manifest-missing")
         self.assertFalse(self.c.running["frontend"])
 
     def test_failed_restore_check_blocks_database_reset(self):
@@ -729,7 +831,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(len(retained), 1)
         self.assertEqual(self.c.dbs[retained[0]]["rows"], ["old-record"])
         self.assertFalse(self.c.dbs[retained[0]]["connections"])
-        self.assertEqual(self.c.snapshots()[0]["reason"], "before-reset")
+        self.assertEqual(self.c.snapshots()[0].reason, "before-reset")
 
     def test_reset_refuses_external_sessions_without_killing_them(self):
         self.c.connected_sessions = 1
@@ -745,7 +847,7 @@ class AdminTests(unittest.TestCase):
 
     def test_code_rollback_preserves_newer_rows(self):
         self.assertEqual(self.invoke(["update", "--latest"]), 0)
-        selected = self.c.snapshots()[0]["id"]
+        selected = self.c.snapshots()[0].bundle_id
         self.c.dbs["partflow_staging"]["rows"].append("newer-record")
         self.assertEqual(self.invoke(["rollback", selected]), 0)
         self.assertEqual(self.c.revision(), OLD)
@@ -755,7 +857,7 @@ class AdminTests(unittest.TestCase):
     def test_code_rollback_refuses_schema_mismatch(self):
         self.c.new_migration = True
         self.assertEqual(self.invoke(["update", "--latest", "--allow-migrations"]), 0)
-        selected = self.c.snapshots()[0]["id"]
+        selected = self.c.snapshots()[0].bundle_id
         self.assertEqual(self.invoke(["rollback", selected]), 1)
         self.assertTrue(self.c.running["frontend"])
         self.assertEqual(self.c.db_heads(), ["r2"])
@@ -763,7 +865,7 @@ class AdminTests(unittest.TestCase):
     def test_full_rollback_restores_old_schema_and_keeps_new_database(self):
         self.c.new_migration = True
         self.assertEqual(self.invoke(["update", "--latest", "--allow-migrations"]), 0)
-        selected = self.c.snapshots()[0]["id"]
+        selected = self.c.snapshots()[0].bundle_id
         self.c.dbs["partflow_staging"]["rows"].append("newer-record")
         self.assertEqual(self.invoke(["rollback", selected, "--restore-db"]), 0)
         self.assertEqual(self.c.revision(), OLD)
@@ -783,7 +885,7 @@ class AdminTests(unittest.TestCase):
         self.c.new_migration = True
         self.c.fail = "health"
         self.assertEqual(self.invoke(["update", "--latest", "--allow-migrations"]), 1)
-        selected = self.c.snapshots()[0]["id"]
+        selected = self.c.snapshots()[0].bundle_id
         self.c.fail = None
         self.assertEqual(self.invoke(["rollback", selected, "--restore-db"]), 0)
         self.assertFalse(self.c.pending.exists())
@@ -807,41 +909,46 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(self.c.pending.exists())
 
     def test_checkpoint_checksum_corruption_is_detected(self):
-        checkpoint = self.c.snapshot("test")
-        (self.c.backups_dir / checkpoint["id"] / "database.dump").write_bytes(b"corrupted")
-        with self.assertRaises(pf.Failure):
-            self.c.verify_snapshot(checkpoint["id"])
+        view = checkpoint(self.c)
+        (self.c.backups_dir / view.bundle_id / "database.dump").write_bytes(b"corrupted")
+        # PF-A3.1: the coded refusal of the strict reader (section 3.1 step 7).
+        with self.assertRaisesRegex(pf.Failure, "^bundle-payload-mismatch: " + view.bundle_id + ": database.dump: size"):
+            self.c.verify_snapshot(view.bundle_id)
 
     def test_manifest_tampering_is_detected(self):
-        checkpoint = self.c.snapshot("test")
-        path = self.c.backups_dir / checkpoint["id"] / "manifest.json"
+        view = checkpoint(self.c)
+        path = self.c.backups_dir / view.bundle_id / "manifest.json"
         path.write_text(path.read_text() + " ")
-        with self.assertRaises(pf.Failure):
-            self.c.verify_snapshot(checkpoint["id"])
+        with self.assertRaisesRegex(pf.Failure, "^manifest-checksum-mismatch: " + view.bundle_id + ": manifest.json "
+                                    "does not match manifest.sha256. Nothing was changed."):
+            self.c.verify_snapshot(view.bundle_id)
 
     def test_rollback_refuses_checkpoint_source_with_reserved_paths_before_any_effect(self):
         """A12-R02: a checkpoint archive carrying a path the manifest cannot verify is refused
         before confirmation, pause, safety snapshot or database swap."""
-        checkpoint = self.c.snapshot("test")
-        folder = self.c.backups_dir / checkpoint["id"]
+        view = checkpoint(self.c)
+        folder = self.c.backups_dir / view.bundle_id
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp) / "tree"
             source_fixture(tree, OLD)
             (tree / "nested" / "node_modules").mkdir(parents=True)
             (tree / "nested" / "node_modules" / "tracked.js").write_text("module.exports = 1;\n")
-            with tarfile.open(folder / "source.tar.gz", "w:gz") as archive:
-                for item in sorted(tree.iterdir()):
-                    archive.add(item, arcname=item.name)
-        manifest = pf.load_json(folder / "manifest.json")
-        manifest["checksums"]["source.tar.gz"] = pf.digest(folder / "source.tar.gz")
-        pf.write_json(folder / "manifest.json", manifest)
-        (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
+            (folder / "source.tar.gz").write_bytes(pfx.tar_gz_bytes(tree))
+
+        def swap_payload(manifest):
+            for payload in manifest["payloads"]:
+                if payload["path"] == "source.tar.gz":
+                    payload.update(payload_entry(folder, "source.tar.gz"), expanded_bytes=None, members=None,
+                                   members_sha256=None)
+
+        rewrite_manifest(folder, swap_payload)
         with mock.patch.object(self.c, "snapshot", side_effect=AssertionError("snapshot must not run")), \
+             mock.patch.object(self.c, "_capture", side_effect=AssertionError("capture must not run")), \
              mock.patch.object(self.c, "pause", side_effect=AssertionError("pause must not run")), \
              mock.patch.object(self.c, "swap_database", side_effect=AssertionError("swap must not run")):
             with self.assertRaisesRegex(pf.Failure, "cannot verify.*nested/node_modules/tracked.js"):
-                self.c.rollback(checkpoint["id"], restore_database=True)
-            self.assertEqual(self.invoke(["rollback", checkpoint["id"], "--restore-db"]), 1)
+                self.c.rollback(view.bundle_id, restore_database=True)
+            self.assertEqual(self.invoke(["rollback", view.bundle_id, "--restore-db"]), 1)
         self.assertFalse(self.c.pending.exists())
         self.assertTrue(self.c.running["frontend"])
         self.assertEqual(self.c.revision(), OLD)
@@ -851,16 +958,17 @@ class AdminTests(unittest.TestCase):
     def test_rollback_proves_source_provenance_before_any_confirmation_or_effect(self):
         """A12r2-F02: the store proof can refuse (a legacy commit tracking a reserved name); that
         refusal must come before confirmation, pause, safety snapshot or database swap."""
-        checkpoint = self.c.snapshot("test")
+        view = checkpoint(self.c)
         refusal = pf.Failure("Source provenance check failed: unsupported source path (tracked reserved "
                              "workspace artifact name): node_modules/x.js")
         with mock.patch.object(self.c, "prove_tree_commit", side_effect=refusal) as proof, \
              mock.patch.object(pf, "confirm", side_effect=AssertionError("confirmation must not be asked")), \
              mock.patch.object(self.c, "snapshot", side_effect=AssertionError("snapshot must not run")), \
+             mock.patch.object(self.c, "_capture", side_effect=AssertionError("capture must not run")), \
              mock.patch.object(self.c, "pause", side_effect=AssertionError("pause must not run")), \
              mock.patch.object(self.c, "swap_database", side_effect=AssertionError("swap must not run")):
             with self.assertRaisesRegex(pf.Failure, "tracked reserved workspace artifact name"):
-                self.c.rollback(checkpoint["id"], restore_database=True)
+                self.c.rollback(view.bundle_id, restore_database=True)
         proof.assert_called_once()
         self.assertFalse(self.c.pending.exists())
         self.assertTrue(self.c.running["frontend"])
@@ -877,18 +985,18 @@ class AdminTests(unittest.TestCase):
             pf.write_json(self.c.pending, {"operation": "rollback", "phase": "paused", "started": pf.utc()})
             raise KeyboardInterrupt("Interrupted by signal 1")
 
-        checkpoint = self.c.snapshot("test")
+        view = checkpoint(self.c)
         with mock.patch.object(self.c, "rollback", side_effect=interrupted_rollback), \
              mock.patch.object(self.c, "fail_closed") as fail_closed, \
              mock.patch.object(sys, "stderr", GoneTerminal()):
             with self.assertRaises(OSError):
-                self.invoke(["rollback", checkpoint["id"], "--restore-db"])
+                self.invoke(["rollback", view.bundle_id, "--restore-db"])
         fail_closed.assert_called_once_with()
 
     def test_missing_retained_image_blocks_rollback(self):
-        checkpoint = self.c.snapshot("test")
-        del self.c.tags[checkpoint["images"]["backend"]["reference"]]
-        self.assertEqual(self.invoke(["rollback", checkpoint["id"]]), 1)
+        view = checkpoint(self.c)
+        del self.c.tags[view.images["backend"]["reference"]]
+        self.assertEqual(self.invoke(["rollback", view.bundle_id]), 1)
         self.assertTrue(self.c.running["frontend"])
 
     def test_release_check_default_is_nonmutating(self):
@@ -1014,9 +1122,9 @@ class AdminTests(unittest.TestCase):
         (self.root / "frontend/app.txt").write_text("local-edit")
         self.assertEqual(self.invoke(["update", "--latest"]), 0)
         saved = self.c.snapshots()[0]
-        self.assertTrue(saved["workspace_differs_from_deployed"])
-        self.assertTrue(saved["workspace_archive"])
-        self.assertTrue((self.c.backups_dir / saved["id"] / saved["workspace_archive"]).is_file())
+        self.assertTrue(saved.manifest["workspace"]["differs_from_deployed"])
+        self.assertTrue(saved.workspace_payload)
+        self.assertTrue((self.c.backups_dir / saved.bundle_id / saved.workspace_payload).is_file())
         self.assertEqual(self.c.workspace_head, OLD)
         self.assertFalse(self.c.workspace_dirty)
         self.assertEqual(self.c.ci_calls, [OLD])
@@ -1032,7 +1140,7 @@ class AdminTests(unittest.TestCase):
     def test_code_rollback_can_recover_failed_update_without_migrations(self):
         self.c.fail = "health"
         self.assertEqual(self.invoke(["update", "--latest"]), 1)
-        selected = self.c.snapshots()[0]["id"]
+        selected = self.c.snapshots()[0].bundle_id
         self.c.fail = None
         self.assertEqual(self.invoke(["rollback", selected]), 0)
         self.assertFalse(self.c.pending.exists())
@@ -1046,7 +1154,7 @@ class AdminTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("pf_keep_") for name in self.c.dbs))
 
     def test_interactive_backup_selection_has_ten_item_pages(self):
-        items = [{"id": str(i), "status": "complete"} for i in range(25)]
+        items = [pf.InvalidBundle(Path(str(i)), "manifest-missing", "") for i in range(25)]
         with mock.patch.object(self.c, "snapshots", return_value=items), mock.patch("sys.stdin.isatty", return_value=True), \
              mock.patch("builtins.input", side_effect=["n", "12"]), \
              mock.patch.object(self.c, "verify_snapshot", side_effect=lambda value: value):
@@ -1054,8 +1162,14 @@ class AdminTests(unittest.TestCase):
         self.assertIn("page 1/3", self.output.getvalue())
         self.assertIn("page 2/3", self.output.getvalue())
 
+    @staticmethod
+    def listed(bundle_id, commit):
+        """A listing entry whose recorded source commit is ``commit`` (the section 3.6 provenance hypothesis)."""
+        return pf.BundleView(Path(bundle_id), {"bundle_id": bundle_id, "legacy": None,
+                                               "source": {"commit": commit}}, "0" * 64, None, "captured")
+
     def test_explicit_backup_id_never_opens_selection_menu(self):
-        item = {"id": "specific", "source_revision": OLD}
+        item = self.listed("specific", OLD)
         with mock.patch.object(self.c, "snapshots", return_value=[item]), \
              mock.patch.object(self.c, "verify_snapshot", return_value=item), \
              mock.patch("builtins.input") as prompt:
@@ -1063,8 +1177,7 @@ class AdminTests(unittest.TestCase):
             prompt.assert_not_called()
 
     def test_ambiguous_full_sha_requires_backup_id(self):
-        with mock.patch.object(self.c, "snapshots", return_value=[
-                {"id": "one", "source_revision": OLD}, {"id": "two", "source_revision": OLD}]):
+        with mock.patch.object(self.c, "snapshots", return_value=[self.listed("one", OLD), self.listed("two", OLD)]):
             with self.assertRaises(pf.Failure):
                 self.c.choose_snapshot(OLD)
 
@@ -1273,6 +1386,18 @@ class PureTests(unittest.TestCase):
         self.assertNotIn("DROP DATABASE", sql)
         self.assertEqual(sql.count("RENAME TO"), 2)
 
+    @staticmethod
+    def import_archive(path, parent, name):
+        """PF-A3.1: the importer that replaced extract_source (pass 1 inspection, then pass 2 extraction)."""
+        fd = os.open(str(path), os.O_RDONLY)
+        parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            inventory = pf.pf_source.inspect_archive(fd, limits=pf.pf_source.SOURCE_LIMITS)
+            return pf.pf_source.extract_archive(fd, parent_fd, name, inventory, limits=pf.pf_source.SOURCE_LIMITS)
+        finally:
+            os.close(parent_fd)
+            os.close(fd)
+
     def test_tar_traversal_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.tar.gz"
@@ -1280,8 +1405,10 @@ class PureTests(unittest.TestCase):
                 item = tarfile.TarInfo("../../escape")
                 item.size = 1
                 tar.addfile(item, io.BytesIO(b"x"))
-            with self.assertRaises(pf.Failure):
-                pf.extract_source(path, Path(tmp) / "out")
+            with self.assertRaises(pf.pf_source.ArchiveRefused) as caught:
+                self.import_archive(path, tmp, "out")
+            self.assertEqual((caught.exception.code, caught.exception.reason), ("archive-member-refused", "traversal"))
+            self.assertFalse((Path(tmp) / "out").exists())
 
     def test_tar_symlink_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1291,8 +1418,10 @@ class PureTests(unittest.TestCase):
                 item.type = tarfile.SYMTYPE
                 item.linkname = "/etc/passwd"
                 tar.addfile(item)
-            with self.assertRaises(pf.Failure):
-                pf.extract_source(path, Path(tmp) / "out")
+            with self.assertRaises(pf.pf_source.ArchiveRefused) as caught:
+                self.import_archive(path, tmp, "out")
+            self.assertEqual((caught.exception.code, caught.exception.reason), ("archive-member-refused", "type"))
+            self.assertFalse((Path(tmp) / "out").exists())
 
     def test_source_archive_excludes_git_and_runtime_env_is_external(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1303,9 +1432,8 @@ class PureTests(unittest.TestCase):
             (root / ".env").write_text("STALE_REPO_SECRET=must-not-be-backed-up\n")
             archive = Path(tmp) / "source.tar.gz"
             pf.create_source_archive(root, archive)
+            self.import_archive(archive, tmp, "out")
             dest = Path(tmp) / "out"
-            dest.mkdir()
-            pf.extract_source(archive, dest)
             self.assertFalse((dest / ".env").exists())
             self.assertFalse((dest / ".git").exists())
             self.assertTrue((root.parent / "config/.env").is_file())
@@ -1413,23 +1541,14 @@ class PurgeRecoveryTests(unittest.TestCase):
             "containers": ["c1"], "volumes": ["v1"], "networks": ["n1"], "images": ["i1"],
             "checkpoints": 0, "state_present": True, "env_present": True,
         }
-        recovery = {
-            "id": "purge-20260910T120000Z-" + OLD[:12] + "-abcdef",
-            "active_checkpoint": "20260910T115900Z-" + OLD[:12] + "-aaaaaa",
-            "database": "partflow_staging", "databases": [{"name": "partflow_staging"}],
-            "saved_image_refs": ["backend:test", "frontend:test"],
-        }
-        checkpoint = {"id": recovery["active_checkpoint"], "images": {
-            "backend": {"reference": "backend:old", "id": "sha256:old-backend"},
-            "frontend": {"reference": "frontend:old", "id": "sha256:old-frontend"},
-        }, "database_heads": ["r1"]}
+        recovery, checkpoint = self.purge_views()
         confirmations = []
         def record_confirm(phrase, warning):
             confirmations.append(phrase)
 
         self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
         with self.c.lock():
-            plan = self.binding_plan(recovery["id"])
+            plan = self.binding_plan(recovery.bundle_id)
             with mock.patch.object(self.c, "instance_summary", return_value=summary), \
                  mock.patch.object(self.c, "log_instance_summary"), \
                  mock.patch.object(self.c, "database_ready", return_value=16), \
@@ -1439,6 +1558,7 @@ class PurgeRecoveryTests(unittest.TestCase):
                  mock.patch.object(self.c, "durable_phase") as durable, \
                  mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)) as create, \
                  mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
+                 mock.patch.object(self.c, "verify_recovery", return_value=recovery) as gate, \
                  mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
                  mock.patch.object(pf, "confirm", side_effect=record_confirm), \
                  mock.patch.object(pf, "prompt_yes_no", return_value=False):
@@ -1451,7 +1571,60 @@ class PurgeRecoveryTests(unittest.TestCase):
         self.assertEqual(create.call_args.args[0]["image_coverage"], "pending")
         self.assertEqual(durable.call_args.args[0], "deleting")
         self.assertEqual(durable.call_args.kwargs["deletion_plan"]["sha256"], pf.pf_docker.plan_sha256(plan))
-        cleanup.assert_called_once_with(recovery["id"], plan, delete_backups=False, reset_admin_config=False)
+        cleanup.assert_called_once_with(recovery.bundle_id, plan, delete_backups=False, reset_admin_config=False)
+        # PF-A3.1 deletion gate: the bundle is re-read strictly right before the durable deleting phase.
+        gate.assert_called_once_with(recovery.folder)
+
+    def purge_views(self, level="data_restore_verified"):
+        """Stand-ins for the purge bundle and its before-purge checkpoint (the BundleView accessors purge reads)."""
+        recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
+        recovery = types.SimpleNamespace(
+            bundle_id=recovery_id, folder=self.c.recovery_root / recovery_id,
+            derived_from="20260910T115900Z-" + OLD[:12] + "-aaaaaa", database="partflow_staging",
+            stores=[{"database": "partflow_staging"}], level=level,
+            purge={"saved_image_refs": [PROJECT + "-backend:test", PROJECT + "-frontend:test"]})
+        checkpoint = types.SimpleNamespace(bundle_id=recovery.derived_from, database_heads=["r1"], images={
+            "backend": {"reference": PROJECT + "-backend:old", "id": OLD_BACKEND},
+            "frontend": {"reference": PROJECT + "-frontend:old", "id": OLD_FRONTEND}})
+        return recovery, checkpoint
+
+    def test_purge_bundle_without_a_passed_record_is_refused_before_deleting_and_reopens(self):
+        """PB-7: no passed data_restore_verified record of the bundle's own manifest -> purge-bundle-unverified,
+        no deleting journal, and the application is reopened from the before-purge checkpoint."""
+        summary = {
+            "project": "partflow-staging", "root": str(self.root), "database": "partflow_staging",
+            "database_user": "partflow_staging", "revision": OLD,
+            "containers": ["c1"], "volumes": ["v1"], "networks": [], "images": [],
+            "checkpoints": 1, "state_present": True, "env_present": True,
+        }
+        for level in ("captured", "failed"):
+            with self.subTest(level=level):
+                recovery, checkpoint = self.purge_views(level=level)
+                with self.c.lock():
+                    plan = self.binding_plan(recovery.bundle_id)
+                    with mock.patch.object(self.c, "instance_summary", return_value=summary), \
+                         mock.patch.object(self.c, "log_instance_summary"), \
+                         mock.patch.object(self.c, "database_ready", return_value=16), \
+                         mock.patch.object(self.c, "ensure_local_contract"), \
+                         mock.patch.object(self.c, "pause"), \
+                         mock.patch.object(self.c, "phase"), \
+                         mock.patch.object(self.c, "durable_phase") as durable, \
+                         mock.patch.object(self.c, "write_deletion_plan") as write_plan, \
+                         mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)), \
+                         mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
+                         mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
+                         mock.patch.object(self.c, "activate") as activate, \
+                         mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
+                         mock.patch.object(pf, "confirm"):
+                        with self.assertRaisesRegex(pf.Failure, "^purge-bundle-unverified: " + recovery.bundle_id
+                                                    + ": no passed data_restore_verified record for this bundle's "
+                                                    "manifest; deletion is blocked. The purge stops before deletion; "
+                                                    "the application is reopened."):
+                            self.c.purge(delete_backups=False)
+                durable.assert_not_called()
+                write_plan.assert_not_called()
+                cleanup.assert_not_called()
+                activate.assert_called_once_with(checkpoint.images, ["r1"])
 
     def binding_plan(self, recovery_id):
         plan = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge", operation_id=self.c.operation_id,
@@ -1467,16 +1640,10 @@ class PurgeRecoveryTests(unittest.TestCase):
             "containers": ["c1"], "volumes": ["v1"], "networks": [], "images": [],
             "checkpoints": 1, "state_present": True, "env_present": True,
         }
-        recovery = {
-            "id": "purge-20260910T120000Z-" + OLD[:12] + "-abcdef",
-            "active_checkpoint": "20260910T115900Z-" + OLD[:12] + "-aaaaaa",
-            "database": "partflow_staging", "databases": [{"name": "partflow_staging"}],
-            "saved_image_refs": ["backend:test", "frontend:test"],
-        }
-        checkpoint = {"id": recovery["active_checkpoint"], "images": {}, "database_heads": ["r1"]}
+        recovery, checkpoint = self.purge_views()
         confirmations = []
         with self.c.lock():
-            plan = self.binding_plan(recovery["id"])
+            plan = self.binding_plan(recovery.bundle_id)
             with mock.patch.object(self.c, "instance_summary", return_value=summary), \
                  mock.patch.object(self.c, "log_instance_summary"), \
                  mock.patch.object(self.c, "database_ready", return_value=16), \
@@ -1486,6 +1653,7 @@ class PurgeRecoveryTests(unittest.TestCase):
                  mock.patch.object(self.c, "durable_phase"), \
                  mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)), \
                  mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
+                 mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
                  mock.patch.object(self.c, "finish_purge_cleanup"), \
                  mock.patch.object(pf, "confirm", side_effect=lambda phrase, warning: confirmations.append(phrase)):
                 self.c.purge(delete_backups=True)
@@ -1501,14 +1669,16 @@ class PurgeRecoveryTests(unittest.TestCase):
             "operation": "purge", "phase": "deleting", "recovery": recovery_id, "deletion_plan": reference,
             "deleted": [], "delete_backups": True, "reset_admin_config": False,
         })
-        item = {"id": recovery_id, "project": "partflow-staging", "status": "complete"}
+        item = pf.InvalidBundle(self.c.recovery_root / recovery_id, "", "")
         with mock.patch.object(self.c, "recoveries", return_value=[item]), \
-             mock.patch.object(self.c, "verify_recovery", return_value=item), \
+             mock.patch.object(self.c, "verify_recovery", return_value=item) as reread, \
              mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
              mock.patch.object(pf, "confirm") as confirmation:
             self.c.purge()
         confirmation.assert_called_once()
-        # Resume executes exactly the frozen plan the journal references (PF-A1.3).
+        # Resume executes exactly the frozen plan the journal references (PF-A1.3); PF-A3.1 PB-8: the bundle is
+        # re-read strictly (no new verification).
+        reread.assert_called_once_with(item.folder)
         cleanup.assert_called_once_with(recovery_id, plan, delete_backups=True, reset_admin_config=False)
 
     def test_pre_plan_deleting_journal_is_refused_with_plan_missing(self):
@@ -1530,10 +1700,9 @@ class PurgeRecoveryTests(unittest.TestCase):
         dump = folder / "databases/active.dump"
         dump.parent.mkdir()
         dump.write_bytes(b"dump")
-        recovery = {
-            "id": recovery_id, "_folder": str(folder), "project": "partflow-staging",
-            "postgres_major": 16, "database": "partflow_staging",
-        }
+        recovery = types.SimpleNamespace(bundle_id=recovery_id, folder=folder, compose_project="partflow-staging",
+                                         postgres_major=16, database="partflow_staging",
+                                         active_store={"dump": "databases/active.dump"})
         with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
              mock.patch.object(self.c, "database_ready", return_value=16), \
              mock.patch.object(self.c, "restore_into") as restore, \
@@ -1546,11 +1715,9 @@ class PurgeRecoveryTests(unittest.TestCase):
 
     def test_exact_restore_refuses_nonempty_project(self):
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
-        recovery = {
-            "id": recovery_id, "_folder": self.temp.name, "project": "partflow-staging",
-            "root": str(self.root), "postgres_major": 16, "database": "partflow_staging",
-            "database_user": "partflow_staging", "source_revision": OLD, "databases": [],
-        }
+        recovery = types.SimpleNamespace(bundle_id=recovery_id, folder=Path(self.temp.name),
+                                         compose_project="partflow-staging", workspace_root=str(self.root),
+                                         postgres_major=16, database="partflow_staging")
         self.c.resources = {"containers": ["c"], "volumes": []}
         (self.c.state / "deployed.json").unlink()
         with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
@@ -1559,22 +1726,18 @@ class PurgeRecoveryTests(unittest.TestCase):
                 self.c.restore_instance(recovery)
 
     def exact_restore_bundle(self, tree_extra=None):
+        """PF-A3.1: a complete legacy format 2 purge bundle of this instance, strictly read (BundleView)."""
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
-        folder = Path(self.temp.name) / "bundle"
-        folder.mkdir()
         tree = Path(self.temp.name) / "tree"
         source_fixture(tree, OLD)
         if tree_extra:
             tree_extra(tree)
-        with tarfile.open(folder / "source.tar.gz", "w:gz") as archive:
-            for item in sorted(tree.iterdir()):
-                archive.add(item, arcname=item.name)
+        folder = pfx.legacy_purge_bundle(self.c.recovery_root / recovery_id, project=PROJECT, root=self.root,
+                                         tree=tree)
         (self.c.state / "deployed.json").unlink()
         if self.c.pending.exists():
             self.c.pending.unlink()
-        return {"id": recovery_id, "_folder": str(folder), "project": "partflow-staging", "root": str(self.root),
-                "postgres_major": 16, "database": "partflow_staging", "database_user": "partflow_staging",
-                "source_revision": OLD, "source_verified": True, "databases": []}
+        return self.c.verify_recovery(folder)
 
     def assert_exact_restore_refused_before_any_effect(self, recovery, pattern):
         env_path = self.c.config_dir / ".env"
@@ -1609,22 +1772,22 @@ class PurgeRecoveryTests(unittest.TestCase):
         proof.assert_called_once()
 
     def test_verify_recovery_detects_modified_payload(self):
+        # PF-A3.1 (D19): a complete format 1 purge bundle (active dump/list, globals, history, images, state and the
+        # runtime .env inside the source archive) is accepted; after tampering the coded refusal follows.
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
-        folder = self.c.recovery_root / recovery_id
-        folder.mkdir(parents=True)
-        payload = folder / "source.tar.gz"
-        payload.write_bytes(b"original")
-        metadata = {
-            "format": 1, "kind": "partflow-purge-recovery", "status": "complete",
-            "id": recovery_id, "project": "partflow-staging",
-            "checksums": {"source.tar.gz": pf.digest(payload)},
-        }
-        pf.write_json(folder / "manifest.json", metadata)
-        (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
-        item = dict(metadata, _folder=str(folder))
-        self.assertEqual(self.c.verify_recovery(item)["id"], recovery_id)
-        payload.write_bytes(b"tampered")
-        with self.assertRaisesRegex(pf.Failure, "checksum mismatch"):
+        tree = Path(self.temp.name) / "tree"
+        source_fixture(tree, OLD)
+        folder = pfx.legacy_purge_bundle(self.c.recovery_root / recovery_id, project=PROJECT, root=self.root,
+                                         tree=tree, fmt=1)
+        item = {"_folder": str(folder), "id": recovery_id}
+        view = self.c.verify_recovery(item)
+        self.assertEqual(view.bundle_id, recovery_id)
+        self.assertEqual(view.manifest["legacy"]["format"], 1)
+        self.assertEqual(view.capture_class, "healthy_checkpoint")
+        (folder / "source.tar.gz").write_bytes(b"tampered")
+        # A legacy manifest records no sizes: the whole-file hash refuses.
+        with self.assertRaisesRegex(pf.Failure, "^bundle-payload-mismatch: " + recovery_id + ": source.tar.gz: hash. "
+                                    "Nothing was changed."):
             self.c.verify_recovery(item)
 
 class PurgeRecoveryBundleTests(unittest.TestCase):
@@ -1639,60 +1802,25 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_create_purge_recovery_builds_checksum_verified_bundle(self):
-        backup_id = "20260910T115900Z-" + OLD[:12] + "-aaaaaa"
-        checkpoint_dir = self.c.backups_dir / backup_id
-        checkpoint_dir.mkdir(parents=True)
-        with tarfile.open(checkpoint_dir / "source.tar.gz", "w:gz") as archive:
-            source_file = Path(self.temp.name) / "source.txt"
-            source_file.write_text("source\n")
-            archive.add(source_file, arcname="source.txt")
-        (checkpoint_dir / "database.dump").write_bytes(b"active-dump")
-        (checkpoint_dir / "database.list").write_text("mock-list\n")
-        workspace_archive = checkpoint_dir / "workspace.tar.gz"
-        with tarfile.open(workspace_archive, "w:gz") as archive:
-            workspace_file = Path(self.temp.name) / "workspace.txt"
-            workspace_file.write_text("local edits\n")
-            archive.add(workspace_file, arcname="workspace.txt")
-        checkpoint = {
-            "id": backup_id,
-            "source_revision": OLD,
-            "database_heads": ["r1"],
-            "postgres_major": 16,
-            "workspace_archive": "workspace.tar.gz",
-            "workspace_head": OLD,
-            "workspace_dirty": True,
-            "images": {
-                "backend": {"reference": "backend:recovery", "id": "sha256:old-backend"},
-                "frontend": {"reference": "frontend:recovery", "id": "sha256:old-frontend"},
-            },
-        }
-
-        def fake_compose(*args, **kwargs):
-            output = kwargs.get("output")
-            if output is not None and any("pg_dumpall" in str(value) for value in args):
-                output.write(b"-- globals\n")
-                return ""
-            raise AssertionError(args)
-
+        # PF-A3.1: the real before-purge checkpoint and schema 1 purge bundle through the fake database plane;
+        # only the image save is simulated (the fake controller has no image layers).
         def fake_command(argv, **kwargs):
             if argv[:4] == ["docker", "image", "save", "-o"]:
                 target = Path(argv[4])
                 dummy = Path(self.temp.name) / "image-manifest.json"
-                dummy.write_text("{}\n")
+                dummy.write_text(json.dumps(argv[5:]) + "\n")
                 with tarfile.open(target, "w") as archive:
                     archive.add(dummy, arcname="manifest.json")
                 return ""
             raise AssertionError(argv)
 
-        with mock.patch.object(self.c, "database_ready", return_value=16), \
-             mock.patch.object(self.c, "snapshot", return_value=checkpoint), \
-             mock.patch.object(self.c, "database_inventory", return_value=[
-                 {"name": "partflow_staging", "allow_connections": True}
-             ]), \
-             mock.patch.object(self.c, "db_heads", return_value=["r1"]), \
+        self.c.workspace_dirty = True
+        (self.root / "frontend/app.txt").write_text("local edits\n")
+        self.c.running.update(backend=False, frontend=False)  # purge pauses writers before the bundle
+        self.c.dbs["pf_keep_20260901t000000z_abcdef"] = {"heads": ["r1"], "rows": ["kept"], "connections": False}
+        with contextlib.redirect_stdout(io.StringIO()), \
              mock.patch.object(self.c, "available_snapshot_image_refs", return_value=([], [])), \
-             mock.patch.object(self.c, "compose", side_effect=fake_compose), \
-             mock.patch.object(self.c, "command", side_effect=fake_command), \
+             mock.patch.object(self.c, "command", side_effect=fake_command) as command, \
              self.c.lock():
             self.c.resources = {"containers": ["c"], "volumes": ["partflow-staging_postgres_data"],
                                 "networks": ["partflow-staging_default"]}
@@ -1700,10 +1828,12 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
             recovery, binding = self.c.create_purge_recovery(preliminary)
             frozen_values = dict(self.c.frozen.values)
 
-        verified = self.c.verify_recovery({**recovery, "_folder": str(self.c.recovery_root / recovery["id"])})
-        self.assertEqual(verified["database"], "partflow_staging")
-        self.assertEqual(verified["source_revision"], OLD)
-        folder = Path(verified["_folder"])
+        verified = self.c.verify_recovery(recovery.folder)
+        self.assertEqual(verified.manifest_sha256, recovery.manifest_sha256)
+        self.assertEqual(verified.level, "data_restore_verified")
+        self.assertEqual(verified.database, "partflow_staging")
+        self.assertEqual(verified.manifest["source"]["commit"], OLD)
+        folder = verified.folder
         self.assertTrue((folder / "images.tar").is_file())
         self.assertTrue((folder / "revision-checkpoints.tar.gz").is_file())
         self.assertTrue((folder / "workspace.tar.gz").is_file())
@@ -1711,13 +1841,28 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
         # The bundle carries the frozen configuration (literal values), strictly parseable.
         self.assertEqual(pf.read_app_env(folder / "configuration/.env"), frozen_values)
         self.assertTrue((folder / "configuration/pf-config.json").is_file())
-        self.assertEqual(verified["workspace_archive"], "workspace.tar.gz")
-        # PF-A1.3: resources_before_purge is sealed from the binding plan's candidates (v2 shape).
+        self.assertEqual(verified.workspace_payload, "workspace.tar.gz")
+        # PF-A1.3: resources_before_purge is sealed from the binding plan's candidates.
         self.assertEqual(binding["image_coverage"], "bound")
-        self.assertEqual(verified["resources_before_purge"], {
+        self.assertEqual(verified.purge["resources_before_purge"], {
             kind + "s": [item["key"] for item in binding["candidates"] if item["kind"] == kind]
             for kind in ("container", "volume", "network", "image")})
-        self.assertEqual(verified["resources_before_purge"]["volumes"], ["partflow-staging_postgres_data"])
+        self.assertEqual(verified.purge["resources_before_purge"]["volumes"], ["partflow-staging_postgres_data"])
+        # PB-1: the retained store with its real heads (inside the connection window), the db image saved by ID,
+        # the sensitive payloads, one writers-stopped group, and the window closed again.
+        stores = {store["database"]: store for store in verified.stores}
+        kept = stores["pf_keep_20260901t000000z_abcdef"]
+        self.assertEqual((kept["role"], kept["allow_connections"], kept["alembic_heads"]), ("retained", False, ["r1"]))
+        self.assertFalse(self.c.dbs["pf_keep_20260901t000000z_abcdef"]["connections"])
+        self.assertEqual(command.call_args.args[0][-1], DB_IMAGE_ID)
+        self.assertTrue(verified.manifest["images"]["db"]["archived"])
+        sensitive = {item["path"] for item in verified.manifest["payloads"] if item["sensitive"]}
+        self.assertTrue({"configuration/.env", "configuration/pf-config.json", "postgres-globals.sql",
+                         "state/deployed.json"} <= sensitive)
+        self.assertEqual(verified.manifest["consistency_groups"], [
+            {"group_id": "purge", "stores": sorted(stores_id for stores_id in
+                                                   (store["store_id"] for store in verified.stores)),
+             "claim": "writers-stopped"}])
 
 class RecoverySourceTests(unittest.TestCase):
     def setUp(self):
@@ -1762,7 +1907,7 @@ class RecoverySourceTests(unittest.TestCase):
             "POSTGRES_PASSWORD=old-secret\nSITE_TIMEZONE=America/Los_Angeles\n"
             "PARTFLOW_BIND_IP=127.0.0.1\nPARTFLOW_HTTP_PORT=5173\nPARTFLOW_ALLOWED_HOST=localhost\n"
         )
-        self.c.restore_runtime_environment({"_folder": str(recovery_dir), "format": 2})
+        self.c.restore_runtime_environment(recovery_dir)
         restored = self.c.config_dir / ".env"
         self.assertIn("POSTGRES_PASSWORD=old-secret", restored.read_text())
         self.assertEqual(stat.S_IMODE(restored.stat().st_mode), 0o660)

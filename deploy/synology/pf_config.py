@@ -1420,3 +1420,1068 @@ def effect_problems(line):
         return ["effect: not an object"]
     problem = _relative_problem(line.get("path"))
     return [] if problem is None else ["effect: " + problem]
+
+
+# ------------------------------------------------------------ lifecycle records (PF-A3.1)
+# Frozen wire schemas of the five lifecycle records (contracts/lifecycle-records.schema.json, equal as parsed JSON),
+# the pure cross-field rules (lifecycle_problems) and the pure, deterministic legacy manifest migration. Validation
+# order for every record: pf_install.validate_marked(value, LIFECYCLE_SCHEMA["$defs"][name], defs=...) and then
+# lifecycle_problems(value, name). Nothing here reads a clock, a daemon or a filesystem.
+
+_L_SHA = "^[0-9a-f]{64}$"
+_L_STAMP = "^[0-9]{8}T[0-9]{6}Z$"
+_L_COMMIT = "^[0-9a-f]{40}$"
+_L_IMAGE_ID = "^sha256:[0-9a-f]{64}$"
+_L_IMAGE_REF = "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+$"
+_L_HEAD = "^[A-Za-z0-9_]{1,64}$"
+_L_RELATIVE = "^[A-Za-z0-9._/-]{1,512}$"
+_L_DEPLOYMENT = "^dep-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+_L_VERIFICATION = "^ver-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+_L_CHECKPOINT = "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+_L_PURGE = "^purge-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+_L_BUNDLE = "^(?:purge-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+_L_OPERATION = "^[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}$"
+_L_EFFECT = "^e[0-9]{4}$"
+_L_PG_NAME = "^[A-Za-z0-9_]{1,63}$"
+_L_SLUG = "^[a-z0-9][a-z0-9_-]{0,39}$"
+_L_STORE_ID = "^postgresql:[A-Za-z0-9_]{1,63}$"
+_PLATFORM_RE = re.compile(r"[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9]+)?\Z")
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+LIFECYCLE_RECORDS = ("operation_plan", "operation_journal", "deployment_record", "recovery_manifest",
+                     "verification_record")
+OPERATION_KINDS = ("deploy", "update", "backup", "rollback", "reset-db", "purge", "restore-instance", "abort-deploy")
+JOURNAL_PHASE_NAMES = ("planned", "preparing", "initializing", "activating", "preserving", "migrating",
+                       "syncing-workspace", "workspace_sync_pending", "capturing", "verifying", "preserving-current",
+                       "restoring-candidate", "switching", "deleting", "finalizing", "preparing-target",
+                       "restoring-data", "completed", "failed_preserved", "needs_operator", "cancelled")
+TERMINAL_PHASES = frozenset({"completed", "failed_preserved", "needs_operator", "cancelled"})
+# Allowed phases per operation kind (the LIFECYCLE section 2 phase table as the A3.1 contract reads it); every
+# terminal phase is allowed for every kind. A3.2 owns the runtime journal and may amend this table only through the
+# reviewed SPEC amendment of the section 2.4.2 freeze rule, before its first writer ships.
+JOURNAL_PHASES = {
+    "deploy": frozenset({"planned", "preparing", "initializing", "activating", "finalizing"}) | TERMINAL_PHASES,
+    "update": frozenset({"planned", "preparing", "preserving", "migrating", "activating", "syncing-workspace",
+                         "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
+    "backup": frozenset({"planned", "capturing", "verifying", "finalizing"}) | TERMINAL_PHASES,
+    "rollback": frozenset({"planned", "preparing", "preserving-current", "restoring-candidate", "switching",
+                           "activating", "syncing-workspace", "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
+    "reset-db": frozenset({"planned", "preparing", "preserving", "initializing", "switching", "activating",
+                           "finalizing"}) | TERMINAL_PHASES,
+    "purge": frozenset({"planned", "preparing", "preserving", "capturing", "verifying", "deleting",
+                        "finalizing"}) | TERMINAL_PHASES,
+    "restore-instance": frozenset({"planned", "preparing-target", "restoring-data", "activating",
+                                   "syncing-workspace", "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
+    "abort-deploy": frozenset({"planned", "deleting", "finalizing"}) | TERMINAL_PHASES,
+}
+EFFECT_TYPES = ("source-stage", "source-switch", "image-build", "image-tag", "image-load", "service-change",
+                "database-create", "database-migrate", "database-restore", "database-switch", "database-drop",
+                "database-alter", "resource-delete", "artifact-seal", "capture", "verification", "file-write")
+MANIFEST_REASONS = ("scheduled-or-manual-backup", "emergency-manual", "before-update", "before-rollback",
+                    "before-reset", "before-purge", "legacy")
+CAPTURE_CLASSES = ("healthy_checkpoint", "emergency_preservation", "partial")
+SOURCE_ORIGINS = ("deployment-artifact", "protected-store", "workspace-proven", "workspace-unverified",
+                  "legacy-claim", "none")
+PAYLOAD_TYPES = ("source_archive", "workspace_archive", "database_dump", "database_list", "postgres_globals",
+                 "checkpoint_history", "image_archive", "config_env", "admin_config", "state_file",
+                 "deployment_record", "compose_resolved")
+SENSITIVE_PAYLOAD_TYPES = frozenset({"config_env", "admin_config", "postgres_globals", "state_file",
+                                     "deployment_record", "compose_resolved"})
+CHECKPOINT_FORBIDDEN_TYPES = frozenset({"config_env", "admin_config", "compose_resolved", "deployment_record",
+                                        "postgres_globals"})
+REQUIRED_ARTIFACT_ITEMS = frozenset({"image:backend", "image:frontend", "image:db", "source", "migration-files"})
+VERIFICATION_LEVELS = ("captured", "data_restore_verified", "functional_recovery_verified")
+STRATEGY = {"id": "postgresql-logical", "version": 1}
+DB_IMAGE_REFERENCE = "postgres:16"
+# The protected state files a purge bundle may carry for a restore into protected state (PF-A1.4).
+RESTORABLE_STATE_FILES = ("deployed.json", "last-reset.json", "observed-tags.json")
+# Fixed limitation strings of migrated legacy manifests (section 3.7).
+LEGACY_LIMITATIONS = {
+    "no-verification": "legacy manifest: no verification record; restore_test claim is not evidence",
+    "provenance": "legacy manifest: provenance claim is not evidence",
+    "source-instance": "legacy manifest: instance identity or workspace path not recorded",
+    "producer": "legacy manifest: producing control release, profile and instance record not recorded",
+    "quiescence": "legacy manifest: writer state (quiescence) not recorded",
+    "server-version": "legacy manifest: PostgreSQL server version and database image identity not recorded",
+    "roles": "legacy manifest: role inventory not recorded (postgres-globals.sql, when present, is evidence only)",
+    "locale-extensions": "locale and extensions not recorded; checked on the restored candidate only",
+    "retained-heads": "legacy manifest: Alembic heads of a non-connectable retained database were not recorded",
+    "migration-files": "legacy manifest: migration file fingerprint not recorded",
+    "format-1-env": "format 1 stores the runtime .env inside the source archive",
+}
+_LEGACY_REQUIRED_LIMITATIONS = ("no-verification", "provenance", "producer", "quiescence", "server-version", "roles",
+                                "locale-extensions")
+
+
+def _l_str(pattern=None, minimum=None, maximum=None):
+    value = {"type": "string"}
+    if pattern is not None:
+        value["pattern"] = pattern
+    if minimum is not None:
+        value["minLength"] = minimum
+    if maximum is not None:
+        value["maxLength"] = maximum
+    return value
+
+
+def _l_int(minimum=0):
+    return {"type": "integer", "minimum": minimum}
+
+
+def _l_null(target):
+    return {"description": "null or " + target}
+
+
+def _l_items(target):
+    return {"type": "array", "description": "items " + target}
+
+
+def _l_map(target):
+    return {"type": "object", "description": "map " + target}
+
+
+_L_BOOL = {"type": "boolean"}
+_L_IMAGE = _record({"reference": _l_str(_L_IMAGE_REF), "id": _l_str(_L_IMAGE_ID), "platform": _l_null("string"),
+                    "repo_digests": _l_items("string"), "archived": _L_BOOL})
+_L_PRODUCER = _record({"control_release_id": _l_str(None, 1, 128), "control_sha256": _l_str(_L_SHA),
+                       "profile_id": _l_str(None, 1, 128), "profile_version": _l_str(None, 1, 128),
+                       "profile_sha256": _l_str(_L_SHA), "instance_record_sha256": _l_str(_L_SHA)})
+_L_STRATEGY = _record({"id": {"const": "postgresql-logical"}, "version": {"const": 1}})
+_L_STATE = {"enum": ["running", "stopped", "absent"]}
+
+# Embedded copy of contracts/lifecycle-records.schema.json (section 2.4); a test asserts the two stay equal.
+LIFECYCLE_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Deployment Admin lifecycle records v1 (PF-A3.1)",
+    "description": (
+        "Frozen wire schemas of the lifecycle records: $defs.operation_plan and $defs.operation_journal (frozen v1, "
+        "no runtime writer in PF-A3.1), $defs.deployment_record (<private_state>/artifacts/deployments/<id>/"
+        "deployment-record.json), $defs.recovery_manifest (manifest.json of a checkpoint or purge bundle) and "
+        "$defs.verification_record (<private_state>/artifacts/verifications/<bundle-id>/<verification-id>.json). "
+        "Strict UTF-8 JSON written as exactly pf_instance.normalize_json(value) (sorted keys, no whitespace, no "
+        "trailing newline); duplicate keys, non-finite numbers and unknown keys are rejected; booleans are not "
+        "integers. Normative markers: a nullable value, an array item rule and a map value rule are written as the "
+        "description \"null or <target>\", \"items <target>\" or \"map <target>\" (<target>: $defs.<name>, string, "
+        "sha256, path or scalar), enforced by pf_install.validate_marked. Cross-field rules, array limits, path "
+        "canonical forms and patterns of nullable values are enforced by pf_config.lifecycle_problems. "
+        "manifest.sha256 holds the hex SHA-256 of the exact manifest.json file bytes plus a newline."),
+    "$defs": {
+        "sha256": _l_str(_L_SHA),
+        "stamp": _l_str(_L_STAMP),
+        "uuid": _l_str(_UUID),
+        "slug": _l_str(_L_SLUG),
+        "commit": _l_str(_L_COMMIT),
+        "image_id": _l_str(_L_IMAGE_ID),
+        "image_ref": _l_str(_L_IMAGE_REF),
+        "head": _l_str(_L_HEAD),
+        "heads": {"type": "array"},
+        "relative_path": _l_str(_L_RELATIVE),
+        "deployment_id": _l_str(_L_DEPLOYMENT),
+        "verification_id": _l_str(_L_VERIFICATION),
+        "bundle_id": _l_str(_L_BUNDLE),
+        "operation_id": _l_str(_L_OPERATION),
+        "effect_id": _l_str(_L_EFFECT),
+        "pg_name": _l_str(_L_PG_NAME),
+        "image": _L_IMAGE,
+        "producer": _L_PRODUCER,
+        "quiescence": _record({"mode": {"enum": ["writers_stopped", "single_store_snapshot"]},
+                               "observed_at": _l_str(_L_STAMP), "backend": _L_STATE, "frontend": _L_STATE}),
+        "strategy_ref": _L_STRATEGY,
+        "extension": _record({"name": _l_str(_L_PG_NAME), "version": _l_str(None, 1, 64)}),
+        "role": _record({"name": _l_str(_L_PG_NAME), "superuser": _L_BOOL, "create_role": _L_BOOL,
+                         "create_db": _L_BOOL, "login": _L_BOOL, "replication": _L_BOOL, "bypass_rls": _L_BOOL}),
+        "row_counts": _record({"tables": _l_int(), "total_rows": _l_int(), "sha256": _l_str(_L_SHA)}),
+        "store": _record({
+            "store_id": _l_str(_L_STORE_ID), "kind": {"const": "postgresql_logical"}, "strategy": _L_STRATEGY,
+            "database": _l_str(_L_PG_NAME), "role": {"enum": ["active", "retained"]},
+            "allow_connections": _L_BOOL, "owner": _l_null("$defs.pg_name"), "encoding": _l_null("string"),
+            "collate": _l_null("string"), "ctype": _l_null("string"), "extensions": _l_items("$defs.extension"),
+            "alembic_heads": _l_items("$defs.head"), "row_counts": _l_null("$defs.row_counts"),
+            "dump": _l_str(_L_RELATIVE), "list": _l_null("$defs.relative_path"),
+            "consistency_group": _l_str(None, 1, 40)}),
+        "payload": _record({
+            "path": _l_str(_L_RELATIVE), "type": {"enum": list(PAYLOAD_TYPES)}, "size": _l_int(),
+            "sha256": _l_str(_L_SHA), "store": _l_null("string"), "sensitive": _L_BOOL,
+            "expanded_bytes": _l_null("scalar"), "members": _l_null("scalar"),
+            "members_sha256": _l_null("sha256")}),
+        "exclusion": _record({"item": _l_str(None, 1, 200), "reason": _l_str(None, 1, 500)}),
+        "check": _record({"name": _l_str(None, 1, 80), "result": {"enum": ["passed", "failed", "not_run"]},
+                          "detail": _l_str(None, 0, 500)}),
+        "effect": _record({"effect_id": _l_str(_L_EFFECT), "type": {"enum": list(EFFECT_TYPES)},
+                           "target": _l_str(None, 1, 300), "preconditions": _l_items("string"),
+                           "postcondition": _l_str(None, 1, 300), "preservation_refs": _l_items("$defs.bundle_id")}),
+        "effect_state": _record({"effect_id": _l_str(_L_EFFECT),
+                                 "state": {"enum": ["not_started", "complete", "partial", "unknown"]},
+                                 "observed_at": _l_null("$defs.stamp"), "evidence": _l_null("string")}),
+        "approval": _record({"plan_sha256": _l_str(_L_SHA), "confirmed_at": _l_str(_L_STAMP),
+                             "method": {"enum": ["typed-phrase", "policy-grant"]}}),
+        "retained_artifact": _record({"kind": {"enum": ["checkpoint", "purge-bundle", "deployment", "database",
+                                                        "image-tag", "staging"]},
+                                      "name": _l_str(None, 1, 300), "sha256": _l_null("sha256")}),
+        "policy_ref": _record({"revision": _l_int(1), "sha256": _l_str(_L_SHA)}),
+        "config_ref": _record({"sha256": _l_str(_L_SHA), "bytes": _l_int()}),
+        "coverage_entry": _record({"store_id": _l_str(None, 1, 200), "strategy_id": _l_str(None, 1, 80),
+                                   "included": _L_BOOL, "reason": {"type": "string"}}),
+        "confirmation": _record({"phrase": _l_str(None, 1, 120), "summary_sha256": _l_str(_L_SHA)}),
+        "error": _record({"code": _l_str("^[a-z0-9-]{1,64}$"), "message": _l_str(None, 1, 2000)}),
+        "terminal": _record({"outcome": {"enum": ["succeeded", "failed_preserved", "needs_operator", "cancelled"]},
+                             "deployment_id": _l_null("$defs.deployment_id")}),
+        "deployment_ref": _record({"deployment_id": _l_str(_L_DEPLOYMENT), "record_sha256": _l_str(_L_SHA)}),
+        "bundle_ref": _record({"bundle_id": _l_str(_L_BUNDLE), "manifest_sha256": _l_str(_L_SHA)}),
+        "consistency_group": _record({"group_id": _l_str("^[a-z0-9-]{1,40}$"), "stores": _l_items("string"),
+                                      "claim": {"enum": ["transactional-single-store", "writers-stopped", "none"]}}),
+        "mismatch": _record({"kind": {"enum": ["schema-image-mismatch", "deployment-image-mismatch"]},
+                             "live_heads": _l_items("$defs.head"), "image_heads": _l_null("$defs.heads"),
+                             "backend_image_id": _l_null("$defs.image_id"),
+                             "expected_backend_image_id": _l_null("$defs.image_id"), "detail": {"type": "string"}}),
+        "legacy": _record({"format": {"enum": [1, 2]}, "manifest_sha256": _l_str(_L_SHA),
+                           "claimed_reason": _l_null("string"), "claimed_source_revision": _l_null("string"),
+                           "claimed_source_verified": _l_null("scalar"), "claimed_restore_test": _l_null("string"),
+                           "limitations": _l_items("string")}),
+        "purge_section": _record({
+            "resources_before_purge": _record({"containers": _l_items("string"), "volumes": _l_items("string"),
+                                               "networks": _l_items("string"), "images": _l_items("string")}),
+            "saved_image_refs": _l_items("string"), "missing_historical_image_refs": _l_items("string"),
+            "state_files": _l_items("string"), "restore_scope": {"type": "string"}}),
+        "operation_plan": _record({
+            "schema_version": {"const": 1}, "operation_id": _l_str(_L_OPERATION),
+            "kind": {"enum": list(OPERATION_KINDS)}, "created_at": _l_str(_L_STAMP),
+            "instance": _record({"instance_id": _l_str(_UUID), "slug": _l_str(_L_SLUG),
+                                 "compose_project": _l_str(_L_SLUG), "daemon_engine_id": _l_str(None, 1, 256),
+                                 "record_sha256": _l_str(_L_SHA)}),
+            "producer": _L_PRODUCER,
+            "environment_policy": _record({"revision": _l_int(1), "sha256": _l_str(_L_SHA)}),
+            "permission_policy": _l_null("$defs.policy_ref"),
+            "source": _record({"provenance": {"enum": ["git_commit", "unknown", "not_applicable"]},
+                               "commit": _l_null("$defs.commit"), "entries_sha256": _l_null("sha256"),
+                               "deployment_id": _l_null("$defs.deployment_id")}),
+            "images": _l_map("$defs.image"),
+            "frozen_config": _l_null("$defs.config_ref"),
+            "resources": _record({"inventory_sha256": _l_null("sha256"), "deletion_plan_sha256": _l_null("sha256")}),
+            "coverage": _l_items("$defs.coverage_entry"),
+            "confirmation": _l_null("$defs.confirmation"),
+            "limits": _record({"timeout_seconds": _l_int(1), "minimum_free_bytes": _l_int()}),
+            "effects": _l_items("$defs.effect"),
+            "recovery_route": _l_items("string")}),
+        "operation_journal": _record({
+            "schema_version": {"const": 1}, "operation_id": _l_str(_L_OPERATION), "plan_sha256": _l_str(_L_SHA),
+            "kind": {"enum": list(OPERATION_KINDS)}, "sequence": _l_int(1),
+            "phase": {"enum": list(JOURNAL_PHASE_NAMES)}, "updated_at": _l_str(_L_STAMP),
+            "approvals": _l_items("$defs.approval"), "effects": _l_items("$defs.effect_state"),
+            "unresolved_effect": _l_null("$defs.effect_id"),
+            "retained_artifacts": _l_items("$defs.retained_artifact"), "last_error": _l_null("$defs.error"),
+            "legal_next": _l_items("string"), "result": _l_null("$defs.terminal")}),
+        "deployment_record": _record({
+            "schema_version": {"const": 1}, "deployment_id": _l_str(_L_DEPLOYMENT), "instance_id": _l_str(_UUID),
+            "compose_project": _l_str(_L_SLUG), "created_at": _l_str(_L_STAMP),
+            "operation": _record({"kind": {"enum": ["deploy", "update", "rollback", "restore-instance"]},
+                                  "operation_id": _l_str(_L_OPERATION)}),
+            "previous_deployment_id": _l_null("$defs.deployment_id"),
+            "source": _record({
+                "provenance": {"enum": ["git_commit", "unknown", "not_applicable"]},
+                "commit": _l_null("$defs.commit"), "remote": _l_null("string"), "ref": _l_null("string"),
+                "archive": _record({"path": {"const": "source.tar.gz"}, "size": _l_int(1), "sha256": _l_str(_L_SHA)}),
+                "manifest": _record({"path": {"const": "source-manifest.json"}, "sha256": _l_str(_L_SHA),
+                                     "entries_sha256": _l_str(_L_SHA), "files": _l_int(1)})}),
+            "images": _record({"backend": _L_IMAGE, "frontend": _L_IMAGE, "db": _L_IMAGE}),
+            "helpers": _l_items("$defs.image"),
+            "strategy": _L_STRATEGY,
+            "compose": _record({"path": {"const": "compose-resolved.json"}, "file_sha256": _l_str(_L_SHA),
+                                "model_sha256": _l_str(_L_SHA), "compose_version": {"type": "string"},
+                                "installed_file_sha256": _l_str(_L_SHA), "override_sha256": _l_str(_L_SHA)}),
+            "config": _record({"path": {"const": "config.env"}, "sha256": _l_str(_L_SHA), "bytes": _l_int(1),
+                               "admin_config_sha256": _l_null("sha256")}),
+            "producer": _L_PRODUCER,
+            "database": _record({"server_version_num": _l_int(90000), "alembic_heads": _l_items("$defs.head"),
+                                 "migration_files_sha256": _l_str(_L_SHA)}),
+            "activation": _record({"result": {"const": "activated"}, "health": {"const": "passed"},
+                                   "completed_at": _l_str(_L_STAMP)}),
+            "restored_from": _l_null("$defs.bundle_ref")}),
+        "recovery_manifest": _record({
+            "schema_version": {"const": 1}, "bundle_id": _l_str(_L_BUNDLE),
+            "bundle_kind": {"enum": ["checkpoint", "purge-bundle"]}, "created_at": _l_str(_L_STAMP),
+            "reason": {"enum": list(MANIFEST_REASONS)}, "capture_class": {"enum": list(CAPTURE_CLASSES)},
+            "source_instance": _record({"instance_id": _l_null("$defs.uuid"), "slug": _l_null("$defs.slug"),
+                                        "compose_project": _l_str(_L_SLUG), "environment": _l_str(None, 1, 64),
+                                        "repository": _l_str(None, 1, 300), "workspace": _l_null("path")}),
+            "producer": _l_null("$defs.producer"),
+            "quiescence": _l_null("$defs.quiescence"),
+            "source": _record({"provenance": {"enum": ["git_commit", "unknown"]}, "commit": _l_null("$defs.commit"),
+                               "remote": _l_null("string"), "origin": {"enum": list(SOURCE_ORIGINS)},
+                               "payload": _l_null("$defs.relative_path"), "entries_sha256": _l_null("sha256")}),
+            "deployment": _l_null("$defs.deployment_ref"),
+            "images": _record({"backend": _l_null("$defs.image"), "frontend": _l_null("$defs.image"),
+                               "db": _l_null("$defs.image")}),
+            "postgresql": _record({"server_version_num": _l_null("scalar"), "major": _l_int(9),
+                                   "image_id": _l_null("$defs.image_id")}),
+            "roles": _l_items("$defs.role"),
+            "stores": _l_items("$defs.store"),
+            "consistency_groups": _l_items("$defs.consistency_group"),
+            "compatibility": _record({"alembic_heads_live": _l_items("$defs.head"),
+                                      "alembic_heads_image": _l_null("$defs.heads"),
+                                      "migration_files": _l_map("sha256"), "mismatch": _l_null("$defs.mismatch")}),
+            "payloads": _l_items("$defs.payload"),
+            "workspace": _record({"differs_from_deployed": _L_BOOL, "payload": _l_null("$defs.relative_path"),
+                                  "unsupported_entries": _l_items("string")}),
+            "exclusions": _l_items("$defs.exclusion"),
+            "manual_prerequisites": _l_items("string"),
+            "derived_from": _l_null("$defs.bundle_id"),
+            "purge": _l_null("$defs.purge_section"),
+            "legacy": _l_null("$defs.legacy")}),
+        "verification_record": _record({
+            "schema_version": {"const": 1}, "verification_id": _l_str(_L_VERIFICATION),
+            "bundle_id": _l_str(_L_BUNDLE), "bundle_kind": {"enum": ["checkpoint", "purge-bundle"]},
+            "manifest_sha256": _l_str(_L_SHA), "level": {"enum": list(VERIFICATION_LEVELS)},
+            "result": {"enum": ["passed", "failed"]},
+            "target": _record({"kind": {"enum": ["isolated-database", "none"]}, "names": _l_items("$defs.pg_name"),
+                               "removed": _L_BOOL}),
+            "checks": _l_items("$defs.check"), "producer": _L_PRODUCER, "strategy": _L_STRATEGY,
+            "environment": _record({"server_version_num": _l_null("scalar"), "engine_id": _l_str(None, 1, 256),
+                                    "compose_version": _l_null("string")}),
+            "operation_id": _l_str(_L_OPERATION), "started_at": _l_str(_L_STAMP), "finished_at": _l_str(_L_STAMP)}),
+    },
+}
+
+
+def _match(pattern, value):
+    return isinstance(value, str) and re.fullmatch(pattern[1:-1], value) is not None
+
+
+def relative_path_problem(value):
+    """Why ``value`` is not a canonical bundle-relative path (section 2.4), or None."""
+    if not _match(_L_RELATIVE, value):
+        return f"{value!r} is not a relative path of [A-Za-z0-9._/-]"
+    if value.startswith("/") or value.endswith("/") or any(part in ("", ".", "..") for part in value.split("/")):
+        return f"{value!r} is not canonical (leading or trailing '/', empty, '.' or '..' component)"
+    return None
+
+
+def _count(value):
+    return type(value) is int and value >= 0
+
+
+def _heads_problems(value, where):
+    if not isinstance(value, list):
+        return [f"{where}: expected an array of Alembic heads"]
+    problems = [f"{where}[{index}]: not an Alembic head" for index, item in enumerate(value)
+                if not _match(_L_HEAD, item)]
+    if not problems and (value != sorted(set(value)) or len(value) > 16):
+        problems.append(f"{where}: heads must be sorted, unique and at most 16")
+    return problems
+
+
+def _image_problems(image, where):
+    if image is None:
+        return []
+    platform = image.get("platform")
+    if platform is not None and not _PLATFORM_RE.match(platform):
+        return [f"{where}.platform: {platform!r} is not os/architecture[/variant]"]
+    return []
+
+
+def _manifest_problems(m):
+    problems = []
+    add = problems.append
+    legacy = m["legacy"]
+    is_legacy = legacy is not None
+    kind, cls, reason = m["bundle_kind"], m["capture_class"], m["reason"]
+    excluded = {item["item"] for item in m["exclusions"]}
+    if _match(_L_PURGE, m["bundle_id"]) != (kind == "purge-bundle"):
+        add("bundle_id does not match bundle_kind")
+    # Rule 12 (array limits) first: the later rules iterate these arrays.
+    for key, limit in (("stores", 256), ("roles", 1024), ("exclusions", 256), ("manual_prerequisites", 64),
+                       ("consistency_groups", 256), ("payloads", 4096)):
+        if len(m[key]) > limit:
+            add(f"{key}: more than {limit} entries (rule 12)")
+    if len(m["compatibility"]["migration_files"]) > 20000:
+        add("compatibility.migration_files: more than 20000 entries (rule 12)")
+    if len(m["compatibility"]["alembic_heads_live"]) > 16:
+        add("compatibility.alembic_heads_live: more than 16 heads (rule 12)")
+    if len(m["workspace"]["unsupported_entries"]) > 200:
+        add("workspace.unsupported_entries: more than 200 entries")
+    for index, store in enumerate(m["stores"]):
+        if len(store["extensions"]) > 256:
+            add(f"stores[{index}].extensions: more than 256 entries (rule 12)")
+        if len(store["alembic_heads"]) > 16:
+            add(f"stores[{index}].alembic_heads: more than 16 heads (rule 12)")
+    compatibility = m["compatibility"]
+    if compatibility["alembic_heads_image"] is not None:
+        problems += _heads_problems(compatibility["alembic_heads_image"], "compatibility.alembic_heads_image")
+    mismatch = compatibility["mismatch"]
+    if mismatch is not None and mismatch["image_heads"] is not None:
+        problems += _heads_problems(mismatch["image_heads"], "compatibility.mismatch.image_heads")
+    # Rule 1: the payload inventory.
+    payloads = m["payloads"]
+    if not payloads:
+        add("payloads: empty (rule 1)")
+    seen = set()
+    for index, payload in enumerate(payloads):
+        where = f"payloads[{index}]"
+        problem = relative_path_problem(payload["path"])
+        if problem:
+            add(f"{where}.path: {problem}")
+        if payload["path"] in seen:
+            add(f"{where}.path: duplicate path {payload['path']!r} (rule 1)")
+        seen.add(payload["path"])
+        kind_ = payload["type"]
+        if kind_ != "state_file" and payload["size"] < 1:
+            add(f"{where}: an empty {kind_} payload (rule 1)")
+        if kind_ in ("database_dump", "source_archive", "image_archive") and payload["sha256"] == EMPTY_SHA256:
+            add(f"{where}: the SHA-256 of an empty file is never a {kind_} (rule 1)")
+        sensitive = kind_ in SENSITIVE_PAYLOAD_TYPES or (is_legacy and legacy["format"] == 1
+                                                         and kind_ == "source_archive")
+        if sensitive and not payload["sensitive"]:
+            add(f"{where}: a {kind_} payload must be sensitive (rule 1)")
+        for key in ("expanded_bytes", "members"):
+            if payload[key] is not None and not _count(payload[key]):
+                add(f"{where}.{key}: not a non-negative integer")
+    by_path = {payload["path"]: payload for payload in payloads}
+    types = {payload["type"] for payload in payloads}
+    # Rule 2: stores and their payloads.
+    stores = m["stores"]
+    store_ids = [store["store_id"] for store in stores]
+    if not stores:
+        add("stores: empty; an empty checksum map is never a stateful recovery (rule 2)")
+    if len(set(store_ids)) != len(store_ids):
+        add("stores: duplicate store_id")
+    referenced = {}
+    quiescence = m["quiescence"]
+    for index, store in enumerate(stores):
+        where = f"stores[{index}]"
+        if store["store_id"] != "postgresql:" + store["database"]:
+            add(f"{where}.store_id: must be postgresql:<database>")
+        for key, kind_ in (("dump", "database_dump"), ("list", "database_list")):
+            path = store[key]
+            if path is None:
+                continue
+            problem = relative_path_problem(path)
+            if problem:
+                add(f"{where}.{key}: {problem}")
+            payload = by_path.get(path)
+            if payload is None or payload["type"] != kind_ or payload["store"] != store["store_id"]:
+                add(f"{where}.{key}: no {kind_} payload {path!r} of this store (rule 2)")
+            referenced[path] = store["store_id"]
+        if store["encoding"] is not None and not 1 <= len(store["encoding"]) <= 32:
+            add(f"{where}.encoding: must be 1-32 characters")
+        for key in ("collate", "ctype"):
+            if store[key] is not None and not 1 <= len(store[key]) <= 128:
+                add(f"{where}.{key}: must be 1-128 characters")
+        if store["row_counts"] is not None and (quiescence is None or quiescence["mode"] != "writers_stopped"):
+            add(f"{where}.row_counts: recorded without quiescence mode writers_stopped (rule 9)")
+    for index, payload in enumerate(payloads):
+        if payload["type"] in ("database_dump", "database_list"):
+            if payload["store"] not in store_ids or referenced.get(payload["path"]) != payload["store"]:
+                add(f"payloads[{index}]: {payload['type']} {payload['path']!r} names no store that references it "
+                    "(rule 2)")
+        elif payload["store"] is not None:
+            add(f"payloads[{index}].store: only database dumps and lists name a store")
+    for section, kind_ in (("source", "source_archive"), ("workspace", "workspace_archive")):
+        path = m[section]["payload"]
+        if path is not None:
+            problem = relative_path_problem(path)
+            if problem:
+                add(f"{section}.payload: {problem}")
+            if path not in by_path or by_path[path]["type"] != kind_:
+                add(f"{section}.payload: no {kind_} payload {path!r} (rule 2)")
+    # Rule 3: one active store; every store in exactly the one group it names.
+    if len([store for store in stores if store["role"] == "active"]) != 1:
+        add("stores: exactly one active store is required (rule 3)")
+    groups = {}
+    for index, group in enumerate(m["consistency_groups"]):
+        if group["group_id"] in groups:
+            add(f"consistency_groups[{index}]: duplicate group_id")
+        groups[group["group_id"]] = group
+        for store_id in group["stores"]:
+            if store_id not in store_ids:
+                add(f"consistency_groups[{index}]: unknown store {store_id!r} (rule 3)")
+    for store in stores:
+        holders = [group["group_id"] for group in m["consistency_groups"] if store["store_id"] in group["stores"]]
+        if holders != [store["consistency_group"]]:
+            add(f"store {store['store_id']}: must be in exactly the one consistency group it names (rule 3)")
+    # Rule 9: quiescence and claims (claim none is the legacy branch and is exempt from the multi-store rule).
+    if quiescence is not None:
+        stopped = quiescence["backend"] in ("stopped", "absent") and quiescence["frontend"] in ("stopped", "absent")
+        if (quiescence["mode"] == "writers_stopped") != stopped:
+            add("quiescence: mode writers_stopped exactly when backend and frontend are stopped or absent (rule 9)")
+    for index, group in enumerate(m["consistency_groups"]):
+        claim = group["claim"]
+        if (claim == "none") != is_legacy:
+            add(f"consistency_groups[{index}]: claim none exactly for a legacy manifest (rule 9)")
+        if claim == "transactional-single-store" and len(group["stores"]) != 1:
+            add(f"consistency_groups[{index}]: transactional-single-store needs a one-store group (rule 9)")
+        if claim != "none" and len(group["stores"]) > 1 and claim != "writers-stopped":
+            add(f"consistency_groups[{index}]: a multi-store group claims writers-stopped (rule 9)")
+        if claim == "writers-stopped" and (quiescence is None or quiescence["mode"] != "writers_stopped"):
+            add(f"consistency_groups[{index}]: writers-stopped needs quiescence mode writers_stopped (rule 9)")
+    # Images and the exclusions that stand for a missing artifact.
+    images = m["images"]
+    for service in ("backend", "frontend", "db"):
+        problems += _image_problems(images[service], f"images.{service}")
+        if images[service] is None and "image:" + service not in excluded:
+            add(f"images.{service}: null without the exclusion image:{service}")
+    if m["source"]["payload"] is None and "source" not in excluded:
+        add("source.payload: null without the exclusion source")
+    # Rule 4: healthy checkpoint.
+    if cls == "healthy_checkpoint":
+        if mismatch is not None:
+            add("healthy_checkpoint: compatibility.mismatch must be null (rule 4)")
+        if images["backend"] is None or images["frontend"] is None:
+            add("healthy_checkpoint: images.backend and images.frontend are required (rule 4)")
+        if not is_legacy:
+            if images["db"] is None:
+                add("healthy_checkpoint: images.db is required (rule 4)")
+            if any(image is not None and image["platform"] is None for image in images.values()):
+                add("healthy_checkpoint: every image needs a platform (rule 4)")
+            if compatibility["alembic_heads_image"] != compatibility["alembic_heads_live"]:
+                add("healthy_checkpoint: alembic_heads_image must equal alembic_heads_live (rule 4)")
+            if m["source"]["origin"] not in ("deployment-artifact", "protected-store", "workspace-proven"):
+                add("healthy_checkpoint: the source must be the exact deployed source (rule 4)")
+            if m["deployment"] is None and "deployment-record" not in excluded:
+                add("healthy_checkpoint: deployment or the exclusion deployment-record is required (rule 4)")
+            if kind == "checkpoint" and not compatibility["migration_files"]:
+                add("healthy_checkpoint: migration_files is empty (rule 4)")
+        else:
+            if images["db"] is not None or "image:db" not in excluded:
+                add("legacy healthy_checkpoint: images.db is null with the exclusion image:db (rule 4)")
+            if compatibility["alembic_heads_image"] is not None:
+                add("legacy healthy_checkpoint: alembic_heads_image is null (rule 4)")
+            if m["source"]["origin"] != "legacy-claim":
+                add("legacy healthy_checkpoint: source.origin is legacy-claim (rule 4)")
+            if m["deployment"] is not None or "deployment-record" not in excluded:
+                add("legacy healthy_checkpoint: deployment is null with the exclusion deployment-record (rule 4)")
+            if kind == "checkpoint" and (not compatibility["migration_files"] or legacy["format"] != 2):
+                add("legacy healthy_checkpoint: a format 2 migration fingerprint is required (rule 4)")
+    # Rule 5: emergency preservation.
+    if cls == "emergency_preservation":
+        if kind != "checkpoint":
+            add("emergency_preservation: only a checkpoint (rule 5)")
+        if any(store["list"] is None for store in stores):
+            add("emergency_preservation: every store needs a dump and a list (rule 5)")
+        if not is_legacy and reason not in ("emergency-manual", "before-rollback"):
+            add("emergency_preservation: reason must be emergency-manual or before-rollback (rule 5)")
+    # Rule 6: partial.
+    if cls == "partial":
+        if not excluded & REQUIRED_ARTIFACT_ITEMS:
+            add("partial: needs an exclusion naming a required artifact (rule 6)")
+        if kind == "purge-bundle":
+            add("partial: never a purge bundle (rule 6)")
+    # Rule 7: purge bundle.
+    if kind == "purge-bundle":
+        if cls != "healthy_checkpoint":
+            add("purge-bundle: class must be healthy_checkpoint (rule 7)")
+        if m["purge"] is None or not _match(_L_CHECKPOINT, m["derived_from"]):
+            add("purge-bundle: purge and a checkpoint derived_from are required (rule 7)")
+        for required in ("source_archive", "postgres_globals", "checkpoint_history", "image_archive"):
+            if required not in types:
+                add(f"purge-bundle: a {required} payload is required (rule 7)")
+        for service in ("backend", "frontend"):
+            if images[service] is not None and not images[service]["archived"]:
+                add(f"purge-bundle: images.{service} must be archived (rule 7)")
+        if not is_legacy:
+            if "config_env" not in types:
+                add("purge-bundle: a config_env payload is required (rule 7)")
+            if not ({"deployment_record", "compose_resolved"} <= types) and "deployment-record" not in excluded:
+                add("purge-bundle: deployment_record and compose_resolved payloads or the exclusion "
+                    "deployment-record are required (rule 7)")
+            if images["db"] is not None and not images["db"]["archived"]:
+                add("purge-bundle: images.db must be archived (rule 7)")
+            if quiescence is None or quiescence["mode"] != "writers_stopped":
+                add("purge-bundle: quiescence writers_stopped is required (rule 7)")
+            if len(m["consistency_groups"]) != 1 or m["consistency_groups"][0]["claim"] != "writers-stopped" \
+                    or sorted(m["consistency_groups"][0]["stores"]) != sorted(store_ids):
+                add("purge-bundle: one writers-stopped consistency group holding every store (rule 7)")
+            if any(store["row_counts"] is None for store in stores):
+                add("purge-bundle: every store needs row_counts (rule 7)")
+        else:
+            env_excluded = (legacy["format"] == 1 and "config_env" in excluded
+                            and LEGACY_LIMITATIONS["format-1-env"] in legacy["limitations"])
+            if "config_env" not in types and not env_excluded:
+                add("legacy purge-bundle: a config_env payload or the format 1 exclusion config_env (rule 7)")
+            if types & {"deployment_record", "compose_resolved"} or "deployment-record" not in excluded:
+                add("legacy purge-bundle: no deployment record payloads, with the exclusion deployment-record "
+                    "(rule 7)")
+            if images["db"] is not None or "image:db" not in excluded:
+                add("legacy purge-bundle: images.db is null with the exclusion image:db (rule 7)")
+    # Rule 8: checkpoint (the backups share is group-readable).
+    if kind == "checkpoint":
+        if m["purge"] is not None or m["derived_from"] is not None:
+            add("checkpoint: purge and derived_from must be null (rule 8)")
+        forbidden = sorted(types & CHECKPOINT_FORBIDDEN_TYPES)
+        if forbidden:
+            add("checkpoint: the group-readable checkpoint carries no " + ", ".join(forbidden) + " (rule 8)")
+        if any(image is not None and image["archived"] for image in images.values()):
+            add("checkpoint: images are never archived in a checkpoint (rule 8)")
+    # Rule 10: provenance and origin.
+    source = m["source"]
+    if (source["provenance"] == "git_commit") != (source["commit"] is not None and source["remote"] is not None):
+        add("source: provenance git_commit exactly when commit and remote are set (rule 10)")
+    if source["provenance"] == "unknown" and source["commit"] is not None:
+        add("source: unknown provenance names no commit (rule 10)")
+    if source["origin"] in ("workspace-unverified", "legacy-claim") and source["provenance"] != "unknown":
+        add(f"source: origin {source['origin']} has unknown provenance (rule 10)")
+    if (source["origin"] == "none") != (source["payload"] is None):
+        add("source: origin none exactly when the source payload is null (rule 10)")
+    if (source["origin"] == "legacy-claim") != is_legacy:
+        add("source: origin legacy-claim exactly for a legacy manifest (rule 10)")
+    hashed = source["origin"] in ("deployment-artifact", "protected-store", "workspace-proven", "workspace-unverified")
+    if (source["entries_sha256"] is not None) != hashed:
+        add("source: entries_sha256 exactly for a tree pf archived (rule 10)")
+    # Rule 11: legacy-unknowable fields.
+    if is_legacy != (reason == "legacy"):
+        add("reason legacy exactly for a legacy manifest (rule 11)")
+    postgresql = m["postgresql"]
+    if postgresql["server_version_num"] is not None and not _count(postgresql["server_version_num"]):
+        add("postgresql.server_version_num: not a non-negative integer")
+    instance = m["source_instance"]
+    if is_legacy:
+        limitations = set(legacy["limitations"])
+        required = [LEGACY_LIMITATIONS[key] for key in _LEGACY_REQUIRED_LIMITATIONS]
+        if None in (instance["instance_id"], instance["slug"], instance["workspace"]):
+            required.append(LEGACY_LIMITATIONS["source-instance"])
+        for text in required:
+            if text not in limitations:
+                add(f"legacy.limitations: missing {text!r} (rule 11)")
+        if source["provenance"] != "unknown":
+            add("legacy: a legacy claim is never a proof; provenance is unknown (rule 11)")
+        if m["producer"] is not None or quiescence is not None or postgresql["server_version_num"] is not None \
+                or postgresql["image_id"] is not None or m["roles"]:
+            add("legacy: producer, quiescence, server version, database image and roles are null (rule 11)")
+        if any(store["encoding"] is not None or store["collate"] is not None or store["ctype"] is not None
+               or store["extensions"] or store["row_counts"] is not None for store in stores):
+            add("legacy: store locale, extensions and row counts are null (rule 11)")
+    else:
+        if m["producer"] is None or quiescence is None or postgresql["server_version_num"] is None \
+                or postgresql["image_id"] is None:
+            add("producer, quiescence, postgresql.server_version_num and postgresql.image_id are required (rule 11)")
+        if None in (instance["instance_id"], instance["slug"], instance["workspace"]):
+            add("source_instance: instance_id, slug and workspace are required (rule 11)")
+        for store in stores:
+            if store["owner"] is None or not store["encoding"] or not store["collate"] or not store["ctype"]:
+                add(f"store {store['store_id']}: owner, encoding, collate and ctype are required (rule 11)")
+    return problems
+
+
+def _deployment_problems(record):
+    problems = []
+    add = problems.append
+    source = record["source"]
+    if source["provenance"] == "not_applicable":
+        add("source-required: the PartFlow profile deploys a source tree (not_applicable is reserved)")
+    if (source["provenance"] == "git_commit") != (source["commit"] is not None and source["remote"] is not None):
+        add("source: provenance git_commit exactly when commit and remote are set")
+    if source["provenance"] == "unknown" and source["commit"] is not None:
+        add("source: unknown provenance names no commit")
+    heads = record["database"]["alembic_heads"]
+    if len(heads) != 1:
+        add("database.alembic_heads: exactly one head")
+    project = record["compose_project"]
+    for service in ("backend", "frontend", "db"):
+        image = record["images"][service]
+        problems += _image_problems(image, f"images.{service}")
+        if image["platform"] is None:
+            add(f"images.{service}.platform: required")
+        if image["archived"]:
+            add(f"images.{service}.archived: false in a deployment record")
+    for service in ("backend", "frontend"):
+        if not record["images"][service]["reference"].startswith(f"{project}-{service}:"):
+            add(f"images.{service}.reference: must be {project}-{service}:<tag>")
+    if record["images"]["db"]["reference"] != DB_IMAGE_REFERENCE:
+        add(f"images.db.reference: must be {DB_IMAGE_REFERENCE}")
+    if record["helpers"]:
+        add("helpers: the PartFlow profile declares no helper image")
+    if (record["restored_from"] is not None) != (record["operation"]["kind"] == "restore-instance"):
+        add("restored_from: set exactly for restore-instance")
+    return problems
+
+
+def _verification_problems(record):
+    problems = []
+    add = problems.append
+    checks = record["checks"]
+    target = record["target"]
+    if not checks:
+        add("checks: at least one check")
+    names = [check["name"] for check in checks]
+    if len(set(names)) != len(names):
+        add("checks: duplicate check name")
+    level = record["level"]
+    if level == "captured" and target["kind"] != "none":
+        add("captured: target kind none")
+    if level == "data_restore_verified":
+        if target["kind"] != "isolated-database" or not target["names"]:
+            add("data_restore_verified: an isolated-database target with at least one name")
+        stores = [name[len("restore:"):] for name in names if name.startswith("restore:")]
+        if not stores:
+            add("data_restore_verified: at least one restore:<store_id> check")
+        by_name = {check["name"]: check for check in checks}
+        for store in stores:
+            for prefix in ("restore", "heads", "locale", "rows"):
+                check = by_name.get(f"{prefix}:{store}")
+                if check is None:
+                    add(f"data_restore_verified: check {prefix}:{store} is missing")
+                elif prefix in ("restore", "heads") and check["result"] == "not_run":
+                    add(f"data_restore_verified: check {prefix}:{store} must run")
+    passed = all(check["result"] in ("passed", "not_run") for check in checks) \
+        and any(check["result"] == "passed" for check in checks)
+    if (record["result"] == "passed") != passed:
+        add("result: passed exactly when every check passed or did not run and one passed")
+    server = record["environment"]["server_version_num"]
+    if server is not None and not _count(server):
+        add("environment.server_version_num: not a non-negative integer")
+    if record["finished_at"] < record["started_at"]:
+        add("finished_at precedes started_at")
+    return problems
+
+
+def _plan_problems(plan):
+    problems = []
+    add = problems.append
+    effects = plan["effects"]
+    if len(effects) > 1024:
+        add("effects: more than 1024 entries")
+    if len(plan["coverage"]) > 256:
+        add("coverage: more than 256 entries")
+    ids = [effect["effect_id"] for effect in effects]
+    if ids != sorted(set(ids)):
+        add("effects: effect ids must be unique and increasing")
+    if (plan["kind"] in ("purge", "abort-deploy")) != (plan["resources"]["deletion_plan_sha256"] is not None):
+        add("resources.deletion_plan_sha256: set exactly for purge and abort-deploy")
+    if (plan["source"]["provenance"] == "git_commit") != (plan["source"]["commit"] is not None):
+        add("source: provenance git_commit exactly when commit is set")
+    for key, image in plan["images"].items():
+        if key not in ("backend", "frontend", "db"):
+            add(f"images.{key}: not a PartFlow service")
+        elif image["platform"] is None:
+            add(f"images.{key}.platform: required")
+        else:
+            problems += _image_problems(image, f"images.{key}")
+    return problems
+
+
+def _journal_problems(journal):
+    problems = []
+    add = problems.append
+    phase = journal["phase"]
+    if phase not in JOURNAL_PHASES[journal["kind"]]:
+        add(f"phase {phase} is not a phase of {journal['kind']}")
+    if (journal["result"] is not None) != (phase in TERMINAL_PHASES):
+        add("result: set exactly in a terminal phase")
+    unresolved = journal["unresolved_effect"]
+    if unresolved is not None and not any(effect["effect_id"] == unresolved
+                                          and effect["state"] in ("partial", "unknown")
+                                          for effect in journal["effects"]):
+        add("unresolved_effect: names no partial or unknown effect")
+    if any(approval["plan_sha256"] != journal["plan_sha256"] for approval in journal["approvals"]):
+        add("approvals: every approval binds plan_sha256")
+    return problems
+
+
+_LIFECYCLE_RULES = {"recovery_manifest": _manifest_problems, "deployment_record": _deployment_problems,
+                    "verification_record": _verification_problems, "operation_plan": _plan_problems,
+                    "operation_journal": _journal_problems}
+
+
+def lifecycle_problems(value, name):
+    """The cross-field rules of section 2.4 for one schema-valid record (run after pf_install.validate_marked); []
+    when valid. Pure. A value that is not schema-valid is reported, never repaired."""
+    if name not in _LIFECYCLE_RULES:
+        raise ConfigError(f"lifecycle-record-unknown: {name!r}")
+    try:
+        return _LIFECYCLE_RULES[name](value)
+    except (KeyError, TypeError, AttributeError, IndexError) as exc:
+        return [f"$: cross-field rules not evaluated ({type(exc).__name__}: {exc}); validate the schema first"]
+
+
+# ------------------------------------------------------------ legacy manifests (PF-A3.1 section 3.7)
+
+_LEGACY_FIXED_TYPES = {
+    "source.tar.gz": "source_archive", "workspace.tar.gz": "workspace_archive", "database.dump": "database_dump",
+    "database.list": "database_list", "postgres-globals.sql": "postgres_globals",
+    "revision-checkpoints.tar.gz": "checkpoint_history", "images.tar": "image_archive",
+    "configuration/.env": "config_env", "configuration/pf-config.json": "admin_config",
+}
+_LEGACY_DATABASE_FILE = re.compile(r"databases/[A-Za-z0-9._-]+\.(dump|list)\Z")
+_PURGE_ONLY_TYPES = frozenset({"postgres_globals", "checkpoint_history", "image_archive", "config_env",
+                               "admin_config", "state_file"})
+
+
+def payload_type_for(name):
+    """The payload type of one legacy ``checksums`` name (the fixed section 3.7 map), or None."""
+    if not isinstance(name, str):
+        return None
+    if name in _LEGACY_FIXED_TYPES:
+        return _LEGACY_FIXED_TYPES[name]
+    match = _LEGACY_DATABASE_FILE.match(name)
+    if match is not None and relative_path_problem(name) is None:
+        return "database_dump" if match.group(1) == "dump" else "database_list"
+    if name.startswith("state/") and name[len("state/"):] in RESTORABLE_STATE_FILES:
+        return "state_file"
+    return None
+
+
+def _legacy_image(entry, *, archived):
+    if not isinstance(entry, dict) or not _match(_L_IMAGE_REF, entry.get("reference")) \
+            or not _match(_L_IMAGE_ID, entry.get("id")):
+        return None
+    return {"reference": entry["reference"], "id": entry["id"], "platform": None, "repo_digests": [],
+            "archived": bool(archived)}
+
+
+def _legacy_strings(value):
+    return list(value) if isinstance(value, list) and all(isinstance(item, str) for item in value) else None
+
+
+def _legacy_stores(legacy, *, purge, types, database, heads, owner, limitations, refuse):
+    """The migrated stores and the dump/list payload -> store map (section 3.7 table)."""
+    stores, payload_store = [], {}
+    if purge:
+        databases = legacy.get("databases")
+        if not isinstance(databases, list) or not databases:
+            raise refuse("databases is missing or empty")
+        names = set()
+        for item in databases:
+            if not isinstance(item, dict) or not _match(_L_PG_NAME, item.get("name")) \
+                    or type(item.get("allow_connections")) is not bool \
+                    or types.get(item.get("dump")) != "database_dump":
+                raise refuse("a databases entry is malformed or names no dump payload")
+            store_heads = item.get("heads", [])
+            if not isinstance(store_heads, list) or len(store_heads) > 16 \
+                    or not all(_match(_L_HEAD, head) for head in store_heads):
+                raise refuse(f"database {item['name']}: heads are malformed")
+            if item["name"] in names:
+                raise refuse(f"database {item['name']} is listed twice")
+            names.add(item["name"])
+            active = item["name"] == database
+            store_id = "postgresql:" + item["name"]
+            listing = "databases/active.list" if active and "databases/active.list" in types else None
+            if not item["allow_connections"] and not store_heads \
+                    and LEGACY_LIMITATIONS["retained-heads"] not in limitations:
+                limitations.append(LEGACY_LIMITATIONS["retained-heads"])
+            stores.append({"store_id": store_id, "database": item["name"],
+                           "role": "active" if active else "retained", "allow_connections": item["allow_connections"],
+                           "owner": owner if active else None,
+                           "alembic_heads": sorted(set(heads if active else store_heads)),
+                           "dump": item["dump"], "list": listing})
+            payload_store[item["dump"]] = store_id
+            if listing:
+                payload_store[listing] = store_id
+        if database not in names:
+            raise refuse("the active database has no databases entry")
+    else:
+        if types.get("database.dump") != "database_dump":
+            raise refuse("a checkpoint stores its database as database.dump")
+        listing = "database.list" if "database.list" in types else None
+        store_id = "postgresql:" + database
+        stores.append({"store_id": store_id, "database": database, "role": "active", "allow_connections": True,
+                       "owner": owner, "alembic_heads": sorted(set(heads)), "dump": "database.dump",
+                       "list": listing})
+        payload_store["database.dump"] = store_id
+        if listing:
+            payload_store[listing] = store_id
+    for name, kind in types.items():
+        if kind in ("database_dump", "database_list") and name not in payload_store:
+            raise refuse(f"payload {name!r} belongs to no listed database")
+    for store in stores:
+        store.update(kind="postgresql_logical", strategy=dict(STRATEGY), encoding=None, collate=None, ctype=None,
+                     extensions=[], row_counts=None, consistency_group="legacy")
+    return stores, payload_store
+
+
+def _legacy_purge_section(legacy, refuse):
+    state_files = _legacy_strings(legacy.get("state_files", []))
+    if state_files is None or any(name not in RESTORABLE_STATE_FILES for name in state_files):
+        raise refuse("state_files is not a list of restorable state file names")
+    resources = legacy.get("resources_before_purge", {})
+    if not isinstance(resources, dict):
+        raise refuse("resources_before_purge is malformed")
+    section = {}
+    for key in ("containers", "volumes", "networks", "images"):
+        values = _legacy_strings(resources.get(key, []))
+        if values is None:
+            raise refuse(f"resources_before_purge.{key} is malformed")
+        section[key] = values
+    lists = {}
+    for key in ("saved_image_refs", "missing_historical_image_refs"):
+        values = _legacy_strings(legacy.get(key, []))
+        if values is None:
+            raise refuse(f"{key} is malformed")
+        lists[key] = values
+    scope = legacy.get("restore_scope", "")
+    return {"resources_before_purge": section, "saved_image_refs": lists["saved_image_refs"],
+            "missing_historical_image_refs": lists["missing_historical_image_refs"], "state_files": state_files,
+            "restore_scope": scope if isinstance(scope, str) else ""}
+
+
+def migrate_legacy_manifest(legacy, *, legacy_sha256, bundle_kind, payload_sizes, unlisted_entries=()):
+    """(manifest, record): the schema 1 RecoveryManifest of a verified legacy format 1/2 manifest (section 3.7).
+
+    Pure and deterministic: the result depends only on the parsed legacy value, its on-disk SHA-256 and the verified
+    payload sizes ({name: size}); no clock, daemon or filesystem. ``unlisted_entries`` (folder names the reader saw
+    and never opened) are copied into the migration record only. Raises ConfigError("manifest-schema-unsupported:
+    ...") when the legacy document lacks or malforms an input the migration needs; nothing is invented.
+    """
+    bundle_id = legacy.get("id") if isinstance(legacy, dict) else None
+
+    def refuse(detail):
+        return ConfigError(f"manifest-schema-unsupported: {bundle_id}: {detail}")
+
+    if not isinstance(legacy, dict):
+        raise refuse("the legacy manifest is not an object")
+    fmt = legacy.get("format")
+    if type(fmt) is not int or fmt not in (1, 2):
+        raise refuse("format is not 1 or 2")
+    if legacy.get("status") != "complete":
+        raise refuse("status is not complete")
+    purge = bundle_kind == "purge-bundle"
+    if not _match(_L_PURGE if purge else _L_CHECKPOINT, bundle_id):
+        raise refuse("id does not match the bundle kind")
+    if purge and legacy.get("kind") != "partflow-purge-recovery":
+        raise refuse("kind is not partflow-purge-recovery")
+    if not _match(_L_STAMP, legacy.get("created_at")):
+        raise refuse("created_at is not a UTC stamp")
+    checksums = legacy.get("checksums")
+    if not isinstance(checksums, dict) or not checksums:
+        raise refuse("checksums is missing or empty; an empty checksum map is never a stateful recovery")
+    types = {}
+    for name, digest in checksums.items():
+        kind = payload_type_for(name)
+        if kind is None:
+            raise refuse(f"payload {name!r} has no payload type")
+        if not _match(_L_SHA, digest):
+            raise refuse(f"payload {name!r} has no SHA-256")
+        if not _count(payload_sizes.get(name)):
+            raise refuse(f"payload {name!r} was not verified")
+        if kind in _PURGE_ONLY_TYPES and not purge:
+            raise refuse(f"payload {name!r} does not belong to a checkpoint")
+        types[name] = kind
+    if "source.tar.gz" not in types:
+        raise refuse("no source.tar.gz payload")
+    if "database_dump" not in types.values():
+        raise refuse("no database dump payload")
+    project, repository = legacy.get("project"), legacy.get("repository")
+    environment, database = legacy.get("environment"), legacy.get("database")
+    major, heads = legacy.get("postgres_major"), legacy.get("database_heads")
+    if not _match(_L_SLUG, project):
+        raise refuse("project is missing or malformed")
+    if not isinstance(repository, str) or not 1 <= len(repository) <= 300:
+        raise refuse("repository is missing or malformed")
+    if not isinstance(environment, str) or not 1 <= len(environment) <= 64:
+        raise refuse("environment is missing or malformed")
+    if not _match(_L_PG_NAME, database):
+        raise refuse("database is missing or malformed")
+    if type(major) is not int or major < 9:
+        raise refuse("postgres_major is missing or malformed")
+    if not isinstance(heads, list) or len(heads) > 16 or not all(_match(_L_HEAD, head) for head in heads):
+        raise refuse("database_heads is missing or malformed")
+    owner = legacy["database_user"] if _match(_L_PG_NAME, legacy.get("database_user")) else None
+    limitations = [LEGACY_LIMITATIONS["no-verification"], LEGACY_LIMITATIONS["provenance"]]
+    exclusions = [{"item": "deployment-record",
+                   "reason": "legacy manifest: no deployment record (the bundle predates PF-A3.1)"},
+                  {"item": "image:db", "reason": f"db image identity not recorded by format {fmt}"}]
+    # Images: the legacy IDs, never a daemon observation (R3).
+    saved = (_legacy_strings(legacy.get("saved_image_refs")) or []) if purge else []
+    recorded = legacy.get("active_images" if purge else "images")
+    recorded = recorded if isinstance(recorded, dict) else {}
+    images = {}
+    for service in ("backend", "frontend"):
+        entry = recorded.get(service)
+        images[service] = _legacy_image(entry, archived=purge and isinstance(entry, dict)
+                                        and entry.get("reference") in saved)
+        if images[service] is None:
+            exclusions.append({"item": "image:" + service,
+                               "reason": f"the legacy manifest has no well-formed {service} image entry"})
+    images["db"] = None
+    stores, payload_store = _legacy_stores(legacy, purge=purge, types=types, database=database, heads=heads,
+                                           owner=owner, limitations=limitations, refuse=refuse)
+    workspace_archive = legacy.get("workspace_archive")
+    if workspace_archive is not None and types.get(workspace_archive) != "workspace_archive":
+        raise refuse("workspace_archive names no workspace archive payload")
+    if purge:
+        root = legacy.get("root")
+        instance = {"instance_id": legacy.get("instance_id") if _match(_UUID, legacy.get("instance_id")) else None,
+                    "slug": legacy.get("slug") if _match(_L_SLUG, legacy.get("slug")) else None,
+                    "compose_project": project, "environment": environment, "repository": repository,
+                    "workspace": root if isinstance(root, str) and pf_instance.canonical_path_error(root) is None
+                    else None}
+        differs = workspace_archive is not None
+    else:
+        instance = {"instance_id": None, "slug": None, "compose_project": project, "environment": environment,
+                    "repository": repository, "workspace": None}
+        differs = legacy.get("workspace_differs_from_deployed")
+        differs = differs if type(differs) is bool else workspace_archive is not None
+    if None in (instance["instance_id"], instance["slug"], instance["workspace"]):
+        limitations.append(LEGACY_LIMITATIONS["source-instance"])
+    limitations += [LEGACY_LIMITATIONS[key] for key in ("producer", "quiescence", "server-version", "roles",
+                                                         "locale-extensions")]
+    migration = {}
+    if purge:
+        limitations.append(LEGACY_LIMITATIONS["migration-files"])
+    elif fmt == 2:
+        files = legacy.get("migration_files")
+        if not isinstance(files, dict) or not all(isinstance(key, str) and _match(_L_SHA, value)
+                                                  for key, value in files.items()):
+            raise refuse("migration_files is missing or malformed")
+        migration = dict(files)
+    else:
+        exclusions.append({"item": "migration-files", "reason": "format 1 recorded no migration file fingerprint"})
+        limitations.append(LEGACY_LIMITATIONS["migration-files"])
+    if purge and fmt == 1 and "configuration/.env" not in types:
+        exclusions.append({"item": "config_env", "reason": LEGACY_LIMITATIONS["format-1-env"]})
+        limitations.append(LEGACY_LIMITATIONS["format-1-env"])
+    payloads = [{"path": name, "type": types[name], "size": payload_sizes[name], "sha256": checksums[name],
+                 "store": payload_store.get(name),
+                 "sensitive": types[name] in SENSITIVE_PAYLOAD_TYPES or (fmt == 1 and types[name] == "source_archive"),
+                 "expanded_bytes": None, "members": None, "members_sha256": None} for name in sorted(types)]
+    prerequisites = [f"PostgreSQL major {major} server",
+                     "legacy bundle: verify locale and extensions on the restored candidate"]
+    purge_section = derived_from = None
+    if purge:
+        prerequisites.append("roles in postgres-globals.sql are evidence; recreate any role other than "
+                             f"{owner or database} manually")
+        derived_from = legacy.get("active_checkpoint")
+        if not _match(_L_CHECKPOINT, derived_from):
+            raise refuse("active_checkpoint is missing or malformed")
+        purge_section = _legacy_purge_section(legacy, refuse)
+    # Class (section 3.7): a purge bundle is complete (rule 7, checked by the reader) or not restorable.
+    claimed_reason = legacy.get("reason") if isinstance(legacy.get("reason"), str) else None
+    verified_claim = legacy.get("source_verified")
+    lists_complete = all(store["list"] is not None for store in stores)
+    images_complete = images["backend"] is not None and images["frontend"] is not None
+    if purge:
+        capture_class = "healthy_checkpoint"
+    elif (fmt == 2 and claimed_reason != "before-rollback" and verified_claim is True
+          and legacy.get("restore_test") == "passed" and lists_complete and images_complete and migration):
+        capture_class = "healthy_checkpoint"
+    elif lists_complete and (claimed_reason == "before-rollback" or verified_claim is not True) and migration:
+        capture_class = "emergency_preservation"
+    else:
+        capture_class = "partial"
+    revision = legacy.get("source_revision")
+    restore_test = legacy.get("restore_test")
+    manifest = {
+        "schema_version": 1, "bundle_id": bundle_id, "bundle_kind": bundle_kind, "created_at": legacy["created_at"],
+        "reason": "legacy", "capture_class": capture_class, "source_instance": instance, "producer": None,
+        "quiescence": None,
+        "source": {"provenance": "unknown", "commit": None, "remote": None, "origin": "legacy-claim",
+                   "payload": "source.tar.gz", "entries_sha256": None},
+        "deployment": None, "images": images,
+        "postgresql": {"server_version_num": None, "major": major, "image_id": None},
+        "roles": [], "stores": stores,
+        "consistency_groups": [{"group_id": "legacy", "stores": [store["store_id"] for store in stores],
+                                "claim": "none"}],
+        "compatibility": {"alembic_heads_live": sorted(set(heads)), "alembic_heads_image": None,
+                          "migration_files": migration, "mismatch": None},
+        "payloads": payloads,
+        "workspace": {"differs_from_deployed": differs, "payload": workspace_archive, "unsupported_entries": []},
+        "exclusions": exclusions, "manual_prerequisites": prerequisites, "derived_from": derived_from,
+        "purge": purge_section,
+        "legacy": {"format": fmt, "manifest_sha256": legacy_sha256, "claimed_reason": claimed_reason,
+                   "claimed_source_revision": revision if isinstance(revision, str) else None,
+                   "claimed_source_verified": verified_claim if isinstance(verified_claim, (str, int)) else None,
+                   "claimed_restore_test": restore_test if isinstance(restore_test, str) else None,
+                   "limitations": limitations},
+    }
+    record = {"schema_version": 1, "bundle_id": bundle_id, "legacy_format": fmt, "before_sha256": legacy_sha256,
+              "after_sha256": _sha256(pf_instance.normalize_json(manifest)), "class": capture_class,
+              "limitations": list(limitations), "unlisted_entries": sorted(unlisted_entries)}
+    return manifest, record

@@ -242,7 +242,10 @@ def dispatch(state, argv, env):
         if "--format" in argv:
             return Result(0, "".join(json.dumps({"id": image["id"], "repo_tags": image["repo_tags"],
                                                  "labels": image.get("labels")}) + "\n" for image in found))
-        return Result(0, json.dumps([{"Id": image["id"], "RepoTags": image["repo_tags"]} for image in found]) + "\n")
+        # PF-A3.1: the platform and digest fields a $defs.image identity reads.
+        return Result(0, json.dumps([{"Id": image["id"], "RepoTags": image["repo_tags"],
+                                      "Os": image.get("os", "linux"), "Architecture": image.get("architecture", "amd64"),
+                                      "RepoDigests": image.get("repo_digests", [])} for image in found]) + "\n")
     if verb == "image" and argv[1:2] == ["rm"]:
         if any(word in ("-f", "--force") for word in argv):
             return violation(state, "image rm with force")

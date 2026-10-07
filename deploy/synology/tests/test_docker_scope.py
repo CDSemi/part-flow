@@ -612,14 +612,13 @@ class ScopeBase(unittest.TestCase):
         return [argv for argv in self.fake.argvs() if pf.unclassified_mutation("docker", argv) is not None]
 
     def prepare_restore_bundle(self):
+        """PF-A3.1: a complete legacy format 2 purge bundle of this instance (the strict reader accepts it)."""
         recovery_id = "purge-20261006T000000Z-" + pfx.OLD[:12] + "-abcdef"
-        folder = self.context.paths.recovery / PROJECT / recovery_id
-        folder.mkdir(parents=True)
-        manifest = {"format": 2, "kind": "partflow-purge-recovery", "status": "complete", "id": recovery_id,
-                    "project": PROJECT, "root": str(self.context.paths.workspace), "postgres_major": 16,
-                    "checksums": {}}
-        pf.write_json(folder / "manifest.json", manifest)
-        (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
+        tree = self.base / "bundle-tree"
+        if not tree.exists():
+            pfx.source_fixture(tree)
+        pfx.legacy_purge_bundle(self.context.paths.recovery / PROJECT / recovery_id, project=PROJECT,
+                                root=self.context.paths.workspace, tree=tree)
         return recovery_id
 
     def operation_dirs(self):
@@ -771,6 +770,9 @@ class DaemonBinding(ScopeBase):
                 new = self.operation_dirs() - before
                 self.assertEqual(len(new), 1)
                 for files in self.operation_files(new).values():
+                    # PF-A3.1: the strict read of a legacy bundle records its migration (and only that) inside the
+                    # operation directory, before any Docker child.
+                    files = [name for name in files if not name.startswith(("manifest-migration-", "migrated-"))]
                     self.assertTrue(set(files) <= {"operation.json", "app.env", "frozen-config.json"}, files)
                 self.assertEqual(self.fake.state_bytes(), state_before)
                 pfx.deployed_record(self.context)
@@ -1113,63 +1115,80 @@ class PurgeHarness(ScopeBase):
     def setUp(self):
         super().setUp()
         self.activated = []
-        self.image_ids = {"backend": "sha256:abackend", "frontend": "sha256:afrontend"}
+        self.image_ids = {"backend": pfx.topology_image_id("a", "backend"),
+                          "frontend": pfx.topology_image_id("a", "frontend"), "db": pfx.DB_IMAGE_ID}
+        self.paused = False
+        self.databases = set()
+
+    def state(self, *fragments, **extra):
+        # PF-A3.1: the database image the bundle saves by ID (an untagged image is not part of the inventory).
+        return super().state(*fragments, {"images": [pfx.image(pfx.DB_IMAGE_ID, [], {})]}, **extra)
 
     @contextlib.contextmanager
     def plane(self):
+        """PF-A3.1: the real captures and bundle (checkpoint, verification records, purge bundle) run; only the
+        database programs, the image contract and the writer state are simulated."""
         harness = self
+        harness.paused = False
+        row = {"owner": "partflow_staging", "encoding": "UTF8", "collate": "C.UTF-8", "ctype": "C.UTF-8",
+               "allow_connections": True}
 
         def inspect(controller, service):
-            return {"Image": harness.image_ids.get(service, "sha256:postgres"),
-                    "State": {"Running": True, "Health": {"Status": "healthy"}}, "Config": {"Env": []}}
-
-        def snapshot(controller, reason, source_verified=True):
-            backup_id = f"{pf.utc()}-{pfx.OLD[:12]}-{uuid.uuid4().hex[:6]}"
-            controller.ensure_backup_tree()
-            folder = controller.backups_dir / backup_id
-            folder.mkdir(mode=0o700)
-            images = controller.retain_images(backup_id)
-            (folder / "database.dump").write_bytes(b"dump")
-            (folder / "database.list").write_bytes(b"list")
-            payload = folder / "payload.txt"
-            payload.write_text("source")
-            with tarfile.open(folder / "source.tar.gz", "w:gz") as archive:
-                archive.add(payload, arcname="payload.txt")
-            payload.unlink()
-            metadata = {
-                "format": 2, "id": backup_id, "created_at": pf.utc(), "reason": reason, "status": "complete",
-                "source_revision": pfx.OLD, "source_provenance": "git_commit", "source_verified": True,
-                "project": controller.config["project"], "repository": controller.config["repository"],
-                "environment": "staging", "database": "partflow_staging", "database_user": "partflow_staging",
-                "postgres_major": 16, "database_heads": ["r1"], "images": images, "migration_files": {},
-                "checksums": {name: pf.digest(folder / name) for name in ("source.tar.gz", "database.dump",
-                                                                          "database.list")},
-            }
-            pf.write_json(folder / "manifest.json", metadata)
-            (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
-            return metadata
+            running = not (harness.paused and service in pf_docker.BUILT_SERVICES)
+            return {"Image": harness.image_ids[service], "State": {"Running": running, "Health": {"Status": "healthy"}},
+                    "Config": {"Env": []}}
 
         def pause(controller, kind, **extra):
             pf.write_json(controller.pending, {"operation": kind, "phase": "paused", "started": pf.utc(), **extra})
+            harness.paused = True
+
+        def activate(controller, images, heads):
+            harness.activated.append(images)
+            harness.paused = False
 
         def database_program(controller, program, *arguments, **kwargs):
+            if program == "createdb":
+                harness.databases.add(arguments[-1])
+            if program == "dropdb":
+                harness.databases.discard(arguments[-1])
             if kwargs.get("output") is not None:
-                kwargs["output"].write(b"-- globals\n")
+                kwargs["output"].write(b"-- " + program.encode() + b" output\n")
             return ""
+
+        def database_rows(controller):
+            return {name: dict(row, name=name) for name in {"partflow_staging"} | harness.databases}
+
+        def write_dump_list(controller, dump, listing):
+            Path(listing).write_bytes(b"; mock archive list\n")
+
+        def create_deployed_source_archive(controller, destination, revision):
+            tree = harness.base / "deployed-source"
+            if not tree.exists():
+                pfx.source_fixture(tree, revision)
+            manifest = controller.candidate_manifest(tree, revision, verified=True)
+            _, expanded, members_sha256 = pf.pf_source.archive_verified_tree(tree, manifest, destination)
+            return {"origin": "protected-store", "manifest": manifest, "expanded_bytes": expanded,
+                    "members": len(manifest["entries"]), "members_sha256": members_sha256}
 
         patches = (
             mock.patch.object(pf.Controller, "database_ready", lambda controller: 16),
+            mock.patch.object(pf.Controller, "server_version_num", lambda controller: 160004),
             mock.patch.object(pf.Controller, "inspect", inspect),
             mock.patch.object(pf.Controller, "image_contract",
-                              lambda controller, root=None, override=None: {"files": {}, "heads": ["r1"]}),
+                              lambda controller, root=None, override=None: {"files": {"alembic.ini": "0" * 64},
+                                                                            "heads": ["r1"]}),
             mock.patch.object(pf.Controller, "db_heads", lambda controller, database=None: ["r1"]),
-            mock.patch.object(pf.Controller, "snapshot", snapshot),
             mock.patch.object(pf.Controller, "pause", pause),
-            mock.patch.object(pf.Controller, "database_inventory",
-                              lambda controller: [{"name": "partflow_staging", "allow_connections": True}]),
+            mock.patch.object(pf.Controller, "database_rows", database_rows),
+            mock.patch.object(pf.Controller, "extensions", lambda controller, database: []),
+            mock.patch.object(pf.Controller, "row_counts",
+                              lambda controller, database: {"tables": 1, "total_rows": 1, "sha256": "0" * 64}),
+            mock.patch.object(pf.Controller, "role_inventory", lambda controller: []),
             mock.patch.object(pf.Controller, "database_program", database_program),
-            mock.patch.object(pf.Controller, "activate",
-                              lambda controller, images, heads: harness.activated.append(images)),
+            mock.patch.object(pf.Controller, "write_dump_list", write_dump_list),
+            mock.patch.object(pf.Controller, "create_deployed_source_archive", create_deployed_source_archive),
+            mock.patch.object(pf.Controller, "deployed_source_origin", lambda controller, revision: "protected-store"),
+            mock.patch.object(pf.Controller, "activate", activate),
         )
         with contextlib.ExitStack() as stack:
             for patch in patches:
@@ -1227,17 +1246,19 @@ class ResourceInventory(PurgeHarness):
         recovery = sorted((self.context.paths.recovery / PROJECT).iterdir())[-1]
         controller = self.controller()
         verified = controller.verify_recovery({"_folder": str(recovery), "id": recovery.name})
+        self.assertEqual(verified.level, "data_restore_verified")
+        sealed = verified.purge
         operation = sorted(self.context.operations_dir.iterdir())[-1]
         plan = json.loads((operation / "deletion-plan.json").read_text())
         self.assertEqual(plan["image_coverage"], "bound")
-        self.assertEqual(verified["resources_before_purge"], {
+        self.assertEqual(sealed["resources_before_purge"], {
             kind + "s": [item["key"] for item in plan["candidates"] if item["kind"] == kind]
             for kind in ("container", "volume", "network", "image")})
         expected_containers = [item["id"] for item in topology(self.context, "a")["containers"]]
-        self.assertEqual(sorted(verified["resources_before_purge"]["containers"]), sorted(expected_containers))
-        self.assertEqual(verified["resources_before_purge"]["volumes"], ["partflow_postgres_data"])
-        self.assertEqual(verified["resources_before_purge"]["networks"], ["partflow_default"])
-        images = verified["resources_before_purge"]["images"]
+        self.assertEqual(sorted(sealed["resources_before_purge"]["containers"]), sorted(expected_containers))
+        self.assertEqual(sealed["resources_before_purge"]["volumes"], ["partflow_postgres_data"])
+        self.assertEqual(sealed["resources_before_purge"]["networks"], ["partflow_default"])
+        images = sealed["resources_before_purge"]["images"]
         self.assertEqual(len(images), 6)  # candidate, backup and the purge's own -inspect- alias per service
         self.assertTrue(all(image.startswith(("partflow-backend:", "partflow-frontend:")) for image in images))
         binding = json.loads((operation / "inventory-binding.json").read_text())
@@ -1475,12 +1496,12 @@ class ResourceInventory(PurgeHarness):
         """Audit F4: the foreign container references the image only by its ID."""
         fragment = topology(self.context)
         fragment["containers"].append(pfx.container("8" * 64, "other-app", {}, status="exited",
-                                                    image="sha256:abackend", config_image="sha256:abackend"))
+                                                    image=pfx.topology_image_id("a", "backend"), config_image=pfx.topology_image_id("a", "backend")))
         self.state(fragment)
         code, out, err, _ = self.purge()
         self.assertEqual(code, 0, out + err)
         self.assertIn("retained: foreign-in-use image partflow-backend:candidate-a00000000000-abcdef", out)
-        backend = next(item for item in self.fake.state()["images"] if item["id"] == "sha256:abackend")
+        backend = next(item for item in self.fake.state()["images"] if item["id"] == pfx.topology_image_id("a", "backend"))
         removals = [argv[2] for argv in self.fake.argvs() if argv[:2] == ["image", "rm"]]
         self.assertTrue(removals)
         self.assertFalse(set(removals) & set(backend["repo_tags"]))
@@ -1494,7 +1515,7 @@ class ResourceInventory(PurgeHarness):
         for label, late in (("by reference", pfx.container("8" * 64, "other-app", {}, status="exited",
                                                             config_image=tag)),
                             ("by image ID", pfx.container("8" * 64, "other-app", {}, status="exited",
-                                                          image="sha256:abackend", config_image="sha256:abackend"))):
+                                                          image=pfx.topology_image_id("a", "backend"), config_image=pfx.topology_image_id("a", "backend")))):
             with self.subTest(label):
                 if self.context.journal_path.exists():
                     self.context.journal_path.unlink()
@@ -1674,7 +1695,8 @@ class ResourceInventory(PurgeHarness):
         self.assertFalse(self.context.journal_path.exists())
         state = self.fake.state()
         self.assertFalse(state["containers"] or state["volumes"] or state["networks"])
-        self.assertEqual(len(state["images"]), 2)
+        # The harness's untagged database image (PF-A3.1) is not part of the instance inventory.
+        self.assertEqual(len([image for image in state["images"] if image["repo_tags"]]), 2)
         self.assertIn("abort-retains-images", out)
         self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["compose"] and "down" in argv])
         self.assertTrue((self.paths["configuration"] / ".env").exists())
@@ -1736,11 +1758,13 @@ class ResourceInventory(PurgeHarness):
         self.state(fragment)
         controller = self.controller()
         controller.ensure_backup_tree()
-        folder = controller.backups_dir / old
-        folder.mkdir()
-        pf.write_json(folder / "manifest.json", {"id": old, "status": "complete", "images": {
-            "backend": {"reference": "partflow-backend:backup-" + old.lower(), "id": "sha256:abackend"},
-            "frontend": {"reference": "partflow-frontend:backup-" + old.lower(), "id": "sha256:afrontend"}}})
+        tree = self.base / "old-tree"
+        pfx.source_fixture(tree)
+        # PF-A3.1: a complete legacy checkpoint; its recorded tags are covered once its strict read succeeds.
+        pfx.legacy_checkpoint(controller.backups_dir / old, project=PROJECT, tree=tree, extra={"images": {
+            "backend": {"reference": "partflow-backend:backup-" + old.lower(), "id": pfx.topology_image_id("a", "backend")},
+            "frontend": {"reference": "partflow-frontend:backup-" + old.lower(),
+                         "id": pfx.topology_image_id("a", "frontend")}}})
         code, out, err, _ = self.purge()
         self.assertEqual(code, 0, out + err)
         self.assertNotIn("plan-changed", err)
@@ -1758,7 +1782,7 @@ class ResourceInventory(PurgeHarness):
     def test_ri21_a_candidate_appearing_during_the_bundle_is_plan_changed_without_a_sealed_manifest(self):
         fragment = topology(self.context)
         newcomer = pfx.container("7" * 64, "partflow-backend-2", pfx.labels_for(self.context, "backend"))
-        new_tag = {"op": "update", "list": "images", "match": {"id": "sha256:abackend"},
+        new_tag = {"op": "update", "list": "images", "match": {"id": pfx.topology_image_id("a", "backend")},
                    "set": {"repo_tags": ["partflow-backend:candidate-a00000000000-abcdef", "partflow-backend:candidate-new"]}}
         for label, mutation in (("container appears", {"op": "append", "list": "containers", "value": newcomer}),
                                 ("owned tag appears", new_tag)):
@@ -2120,7 +2144,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A2.3")
+        self.assertEqual(pf.CHECKPOINT, "PF-A3.1")
 
 
 if __name__ == "__main__":

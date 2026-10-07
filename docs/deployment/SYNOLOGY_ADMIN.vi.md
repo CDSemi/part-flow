@@ -253,6 +253,29 @@
 > Khối này **thay thế** các bước `sudo pf permissions` ở mục 2 và 16 và ghi chú `backup_read_group` của khối
 > PF-A2.2 và mục 6.
 
+> **Warning (PF-A3.1).** Checkpoint Deployment Admin PF-A3.1 (2026-10-07) — deployed-source artifact bất biến,
+> lifecycle wire schema chặt và emergency preservation; vẫn là **trạng thái phát triển, chưa phải bản phát hành
+> NAS**. Chỉ có bằng chứng offline và filesystem: Docker và PostgreSQL được mô phỏng, không có gì được chạy trên DSM
+> host, Docker daemon hay PostgreSQL server thật.
+> *Deployment record.* Mỗi lần `deploy`, `update`, `rollback` và `restore-instance` thành công giờ seal một
+> **deployment record** trong `<root>/instances/<uuid>/artifacts/deployments/<deployment-id>/` (chỉ root,
+> `0700`/`0600`): source archive đúng như đã deploy và manifest của nó, Compose model đã resolve, `.env` đã freeze
+> (có secret) và chính record. `deployed.json` trỏ tới nó. Record còn nguyên khi checkout đổi, khi mất `repo/.git`
+> và sau `purge`.
+> *Bundle.* Checkpoint và purge recovery bundle mới được ghi theo manifest `schema_version` 1
+> (`contracts/lifecycle-records.schema.json`) và được đọc chặt: đúng byte của manifest, size và hash của từng
+> payload, không link, không file ngoài danh sách, trước khi extract, xác nhận hay ghi journal bất cứ gì. Bundle cũ
+> format 1 và 2 vẫn dùng được qua một migration tường minh, tất định, chỉ trong bộ nhớ; không có gì trên đĩa bị ghi lại.
+> *Class và level.* Một capture là **healthy checkpoint**, **emergency preservation** hoặc **partial**; verification
+> level (`captured`, `failed`, `data-restore`) lấy từ verification record riêng trong `artifacts/verifications/`.
+> Chỉ healthy checkpoint mới là rollback target.
+> *Emergency.* `pf backup --emergency` (chỉ với terminal, `EMERGENCY BACKUP <project>`) giữ lại data thực tế khi
+> healthy checkpoint bị từ chối, và mọi `rollback` giờ preserve database hiện tại trước và từ chối
+> (`preservation-failed`) khi không làm được.
+> *Downgrade.* Quay về control PF-A2.3 là **không được hỗ trợ** khi đã có bundle schema 1 (listing, chọn rollback và
+> purge của bản cũ lỗi trên manifest mới).
+> Khối này **thay thế** nội dung checkpoint ở mục 10 và dòng `Deployed source` ở mục 8.
+
 ## 1. Mục đích
 
 PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
@@ -768,6 +791,21 @@ Flow new deploy:
 11. Start frontend, check `/api/health` qua frontend proxy.
 12. Ghi deployed revision vào external `.pf-state-<project>/deployed.json`.
 
+Từ PF-A3.1, trước bước 7 có kiểm tra dung lượng của deployment artifact store (`artifact-capacity`: cần trống kích
+thước source cộng 64 MiB trong `<root>/instances/<uuid>/artifacts/deployments`), và ngay sau bước 7, trước mọi thay
+đổi, deployment được **stage**: cây source chính xác được archive cùng manifest vào thư mục private `.staging-<id>`.
+Stage lỗi (`deployment-stage-failed`) không đổi application, database hay workspace. Sau khi health check pass,
+staging được **seal**: thêm identity của database image, Compose model đã resolve và `.env` đã freeze, thư mục được
+đổi tên thành deployment ID và `deployed.json` có thêm `deployment_id` và `deployment_record_sha256`. Record chứa
+secret và chỉ root đọc được; nó không bao giờ nằm trong checkpoint (checkpoint tham chiếu nó bằng ID và hash) và còn
+nguyên khi checkout đổi, khi mất `repo/.git` và sau `purge`.
+
+Seal lỗi sau một lần activate healthy không dừng application: operation được đóng, `deployed.json` ghi
+`deployment_seal_failed` thay cho record, lệnh exit 1 với `deployment-record-incomplete`, và `status` báo
+`Deployment: not recorded (…)`. Lần `deploy`, `update`, `rollback` hay `restore-instance` kế tiếp sẽ seal record. Thư
+mục staging còn lại sau một lần chạy bị ngắt được `status` báo (`Unsealed deployment staging: N`) và không bao giờ
+được dùng; PF-A3.2 sẽ dọn.
+
 Từ PF-A2.3, cây source mới được copy chỉ phần nội dung và chỉ các tên mà `deploy` đã copy nhận target của
 workspace. Việc copy đi qua các handle thư mục được giữ và không follow link ở cả hai phía: một entry nguồn bị tráo
 thành link hay file khác, hoặc một thư mục mới bị người sửa tráo thành link trong lúc đang được ghi, sẽ làm việc copy
@@ -812,7 +850,23 @@ Nó hiển thị:
 ```text
 Deployed source: <SHA>
 Workspace: provenance git_commit|unknown | manifest commit <SHA hoặc none> | differs from deployed: True/False | changes: ...
+Deployment: <deployment-id> (git_commit <sha12>|unknown), sealed <stamp>
 ```
+
+Từ PF-A3.1, deployed source lấy từ **deployment record** (mục 7), không từ `repo/` hay `.git` của nó.
+`Deployed source:` chỉ in commit khi protected source store đã chứng minh được; nếu không nó in
+`unknown provenance (…)` và không bao giờ in commit chỉ được claim. `deployed.json` `sha` cũng chỉ được ghi cho commit
+đã chứng minh (ngược lại là `null`). Dòng `Deployment:` là một trong:
+
+```text
+Deployment: <id> (git_commit <sha12>|unknown), sealed <stamp>
+Deployment: legacy (no deployment record; created before PF-A3.1)
+Deployment: not recorded (seal failed in operation <op>; the next deploy/update/rollback seals one)
+Deployment: <id> deployment-artifact-mismatch: <file>: <detail>
+```
+
+kèm `Unsealed deployment staging: N` và `Unreferenced deployments: N` khi khác 0. Deployment có file khác với record
+của nó được giữ làm bằng chứng và không bao giờ được dùng làm source (mục 16).
 
 Không lifecycle command nào đổi permission của file workspace có sẵn (PF-A2.3); `pf permissions check
 --scope workspace` báo chúng và `pf permissions apply` đổi chúng dưới một editor freeze.
@@ -879,6 +933,14 @@ bị từ chối với `resource-not-owned` ngay sau lock, trước mọi confir
 
 `--skip-ci` chỉ là manual staging exception, không được coi là CI pass.
 
+Từ PF-A3.1, trước confirmation `UPDATE`, update kiểm tra backend/frontend image đang chạy đúng là của deployment
+record hiện tại (`deployment-image-mismatch`) và deployment artifact store còn chỗ (`artifact-capacity`); nó stage
+deployment mới ngay sau confirmation, trước khi dừng application write, và seal sau health check (mục 7). Commit hiện
+tại được đọc từ deployment record (rồi tới `deployed.json` `sha` đã chứng minh). Khi không biết commit, **manual**
+update vẫn chạy — pre-update checkpoint lấy source từ deployment record — còn automatic update bị hoãn (`Automatic
+update refuses a deployment whose source commit is unknown; run a manual update.`). Pre-update checkpoint là healthy
+checkpoint schema 1 có verification record (mục 10).
+
 ## 10. Backup và rollback
 
 Tạo verified revision checkpoint:
@@ -887,7 +949,7 @@ Tạo verified revision checkpoint:
 sudo pf backup
 ```
 
-Checkpoint v2.5 gồm:
+Checkpoint gồm:
 
 ```text
 source.tar.gz          exact deployed source revision
@@ -901,6 +963,81 @@ manifest.sha256
 Active DB dump được restore thử vào temporary DB để verify. Normal revision `source.tar.gz`
 không còn chứa runtime `.env`; file đó nằm ngoài repo. Full purge-recovery bundle sẽ lưu
 `.env` riêng.
+
+**Manifest schema 1 (PF-A3.1).** `manifest.json` của checkpoint mới theo record `recovery_manifest` của
+`deploy/synology/contracts/lifecycle-records.schema.json`; `manifest.sha256` là SHA-256 của đúng byte của file. Nó
+ghi:
+
+- **capture class**: `healthy_checkpoint` (schema live khớp image đã deploy, biết chính xác deployed source và mọi
+  image đều được nhận diện), `emergency_preservation` (data thực tế, mismatch được ghi làm bằng chứng) hoặc
+  `partial` (emergency capture mà một image hay source không nhận diện được);
+- quiescence (backend/frontend có đang chạy không), origin và provenance của source, deployment mà nó gắn với (ID
+  và hash của record; bản thân record không bao giờ được copy vào checkpoint vì chứa secret), identity của image
+  backend/frontend/db (ID, platform, repo digest), version của PostgreSQL server, và với từng database store: owner,
+  encoding/collation/ctype, extension, Alembic head và — chỉ khi writer đã dừng (trước `update`, `reset-db`,
+  `rollback`, `purge`) — row count chính xác; `pf backup` khi writer đang chạy không ghi row count;
+- mọi payload với type, size và hash, cùng các exclusion và manual prerequisite mà restore cần.
+
+**Verification level.** Restore test ghi một **verification record** riêng trong
+`<root>/instances/<uuid>/artifacts/verifications/<bundle-id>/` (chỉ root); bundle không bao giờ bị sửa sau đó. Level
+mà `backup`, `backups` và `recoveries` hiển thị được tính từ các record này: `captured` (đã seal, chưa có record),
+`failed` (restore test gần nhất lỗi), `data-restore` (mọi store được restore từ chính dump của bundle, có kiểm tra
+head, locale và row count) và `functional` (dành cho PF-A3.3; chưa có writer). Record hỏng được báo là
+`note: verification-record-invalid: …; ignored.` và không nâng level. `pf backup` giờ in:
+
+```text
+Checkpoint class: healthy_checkpoint
+Verification level: data_restore_verified (record <verification-id>)
+```
+
+**Đọc chặt.** Mọi consumer (listing, rollback, purge, restore) trước hết đọc bundle chặt: byte của manifest phải khớp
+`manifest.sha256`, manifest phải hợp lệ, và mọi payload phải là file thường một link với đúng size và hash đã ghi;
+file mà manifest không liệt kê bị từ chối. Không có gì được extract, xác nhận hay ghi journal trước bước này. Sau đó
+archive được extract bằng importer an toàn, từ chối mọi link hay special file, path tuyệt đối hoặc `..`, member trùng
+hay quá lớn và archive thay đổi trong lúc đọc (`archive-member-refused`, `archive-unreadable`, `archive-changed`,
+`archive-capacity`).
+
+**Trước một capture.** `pf backup`, `update`, `reset-db` và `purge` từ chối healthy checkpoint trước mọi thay đổi khi
+backend/frontend image đang chạy không phải của deployment hiện tại (`deployment-image-mismatch`), hoặc khi hoàn toàn
+không chứng minh được deployed source (refusal `deployment-artifact-mismatch`, hoặc refusal cũ "Cannot reconstruct
+the exact deployed source revision" cho deployment không có record). Khi chỉ file của deployment record bị hỏng
+nhưng source vẫn chứng minh được từ protected source store hoặc workspace, capture tiếp tục với
+`note: deployment-artifact-mismatch: …` và ghi record là excluded.
+
+**Emergency preservation.** Khi healthy checkpoint bị từ chối nhưng data cần được giữ, chạy tương tác:
+
+```sh
+sudo pf --instance <slug> backup --emergency
+```
+
+Lệnh in contract quan sát được (live head, image head, image ID đang chạy và kỳ vọng), hỏi
+`EMERGENCY BACKUP <project>`, capture và restore-test database hiện tại rồi in `Emergency preservation <id> captured
+(<level>). It is evidence and data for repair or export, not a rollback target.` Lệnh bị từ chối khi không có
+terminal và không bao giờ được `backup.sh` chạy. Khi một deploy, update, rollback hay reset-db bị ngắt, `status` liệt
+kê nó như một route hợp lệ; nó không thay đổi operation bị ngắt. Emergency hay partial capture **không bao giờ là
+rollback target** (`checkpoint-not-rollback-target`).
+
+**Preservation khi rollback.** Mọi `rollback`, code-only hay `--restore-db`, giờ preserve database hiện tại sau khi
+dừng application write và trước khi restore hay switch bất cứ gì: healthy checkpoint khi live contract khớp, ngược
+lại là emergency preservation. Nếu database hiện tại không capture **và** restore-test được, rollback dừng với
+`preservation-failed`: không có gì được restore hay switch, service vẫn dừng, và `pf resume` mở lại deployment không
+đổi (mục 16 có bước `pg_dump` thủ công).
+
+**Kiểm tra khi rollback.** Checkpoint được chọn phải là healthy checkpoint; image ID backend/frontend của nó phải vẫn
+được giữ; database image khác chỉ in `note: db-image-changed: …` khi PostgreSQL major khớp. Source được extract bằng
+importer an toàn và so với source manifest đã ghi (`source-manifest-mismatch`). Code-only rollback không dùng dump,
+nên level `failed` chỉ là note (`note: verification-failed: …`). `--restore-db` restore vào candidate được tạo với
+encoding và locale của store, kiểm tra head, locale, extension sẵn có, owner và (khi có ghi) row count, ghi
+verification record **trước** khi switch, và khi có khác biệt thì drop candidate và từ chối với
+`checkpoint-incompatible`, database hiện tại không đổi.
+
+**Checkpoint cũ (legacy).** Checkpoint format 1 và 2 ghi trước PF-A3.1 được đọc qua migration tường minh, tất định
+(`note: legacy-manifest-migrated: <id> format <n> read as <class>; limitations: …`), không bao giờ bị ghi lại.
+Checkpoint format 2 chỉ là healthy khi nó đã ghi source verified, restore test passed, cả hai image và migration
+fingerprint; nó được liệt kê với `legacy-format-2` và `source=claimed <sha12>`: commit được claim chỉ là giả thuyết
+mà protected store phải chứng minh lại trước khi dùng. Mọi checkpoint format 1 đọc ra là `partial` (trước đây cũng
+không rollback được). Không có verification record nào được tổng hợp từ claim `restore_test` cũ: level giữ ở
+`captured` cho tới khi một `--restore-db` verify nó trên candidate.
 
 Từ PF-A2.3, checkpoint mới nhận backups target của permission policy đang hiệu lực (group của thư mục backups,
 hoặc của revision đã duyệt; Xem và sao chép cho directory `0750` và file `0640`), được đặt tường minh và verify.
@@ -934,6 +1071,13 @@ sudo pf rollback BACKUP_ID --restore-db
 Database form có confirmation mạnh hơn, restore dump cũ vào DB mới rồi giữ active DB trước đó
 với tên `pf_keep_*`, không âm thầm xóa newer writes.
 
+`pf backups` in mỗi checkpoint một dòng (PF-A3.1):
+
+```text
+<n>. <bundle-id>  [<healthy|emergency|partial>|<captured|failed|data-restore|functional>]  <reason>  DB=<heads>  source=<git_commit <sha12>|unknown|claimed <sha12>>  [legacy-format-N]
+<n>. <folder>  [invalid: <code>]
+```
+
 ## 11. Reset staging data
 
 Muốn giữ application/version hiện tại nhưng dùng database sạch:
@@ -953,6 +1097,11 @@ transactionally và giữ lại DB cũ. Nó không xóa PostgreSQL Docker volume
 
 Dùng `reset-db` khi chỉ muốn clear test data. Dùng `purge` khi muốn đưa instance thật sự
 về trạng thái có thể new deploy lại từ đầu.
+
+Từ PF-A3.1, checkpoint `before-reset` là healthy checkpoint schema 1 có verification record, và `reset-db` trước hết
+chạy cùng kiểm tra gắn image với deployment như `pf backup` (`deployment-image-mismatch` trước mọi thay đổi).
+Emergency preservation bên trong `reset-db` thuộc PF-A3.3: khi healthy checkpoint bị từ chối, chạy
+`pf backup --emergency` và xử lý mismatch trước.
 
 ## 12. Full purge, recovery và clean redeploy
 
@@ -1040,6 +1189,26 @@ manifest.sha256
 Database dump được restore-test. Nếu PostgreSQL data volume tồn tại nhưng không tạo được
 recoverable backup, purge refuse xóa volume đó.
 
+Từ PF-A3.1, bundle là manifest `purge-bundle` schema 1 và chứa thêm:
+
+```text
+deployment/deployment-record.json    deployment record hiện tại (khi đã seal và còn nguyên)
+deployment/compose-resolved.json     Compose model đã resolve (nhạy cảm)
+```
+
+`images.tar` giờ chứa cả layer của database image, được save theo image ID (chưa được dùng khi restore; PF-A3.3).
+Mọi payload copy từ checkpoint `before-purge` hay từ deployment record đều được hash lại (`bundle-payload-mismatch`
+dừng purge trước khi xóa và mở lại application). Database `pf_keep_*` được giữ lại được dump với head thật (chỉ cho
+phép connection trong lúc dump rồi đóng lại); `postgres-globals.sql` và danh sách role chỉ là bằng chứng và không bao
+giờ được thực thi. Sau khi bundle được seal, mọi store được restore **từ chính payload của bundle** vào database tạm
+và được kiểm tra; record `data_restore_verified` thu được, gắn với hash manifest của bundle này, là bắt buộc trước lần
+xóa đầu tiên (nếu không: `purge-bundle-unverified`, purge dừng trước khi xóa và application được mở lại). Dòng của
+`pf recoveries` là:
+
+```text
+<n>. <bundle-id>  [<level>]  project=<project>  db=<active database>  source=<git_commit <sha12>|unknown|claimed <sha12>>  derived_from=<checkpoint id>  [legacy-format-N]
+```
+
 Recovery bundle nhằm dựng lại **functional PartFlow state**, không cố khôi phục Docker
 container ID/network ID giống từng byte.
 
@@ -1120,6 +1289,10 @@ mọi confirmation.
 
 Restore sẽ đưa saved repository workspace trở lại, restore `config/.env`, load saved image,
 recreate/restore database set, restore checkpoint history/state rồi health-check backend/frontend.
+Từ PF-A3.1, bundle được đọc chặt trước mọi confirmation, deployed source được extract từ source payload của bundle
+bằng importer an toàn và so với manifest đã ghi, và chính source đó (không phải workspace đã lưu) được stage thành
+deployment mới; sau health check một deployment record mới được seal với `restored_from` ghi tên bundle, và một
+`deployed.json` mới trỏ tới nó. `state/deployed.json` trong bundle chỉ còn là bằng chứng.
 Installed root-owned control plane hiện tại được giữ; recovery không downgrade lifecycle
 controller giữa operation. `config/pf-config.json` hiện tại cũng tiếp tục là authoritative config;
 bản được lưu trong recovery chỉ để compare/reapply thủ công, không bị activate giữa restore.
@@ -1180,6 +1353,10 @@ review, và workspace vẫn khớp deployed revision.
 
 Không schedule `reset-db`, `purge`, `restore-instance` hay destructive interactive command; không
 có terminal thì chúng vẫn bị từ chối (`terminal-required`).
+
+Từ PF-A3.1, output của `backup` có thêm dòng `Checkpoint class:` và `Verification level:` (mục 10), và `backup` theo
+lịch, khi đã được cấp grant, từ chối `deployment-image-mismatch` giống hệt lệnh chạy tay. `backup --emergency` không
+bao giờ được schedule: nó cần terminal và `backup.sh` không truyền cờ này.
 
 ## 14. Raw Compose nâng cao
 
@@ -1588,6 +1765,50 @@ nguyên plan. `inventory-unstable` nghĩa là container liên tục biến mất
 inspect của nó trong ba lần thử; chạy lại khi host bớt bận (purge hoặc abort bị gián đoạn sẽ resume
 đúng plan đã đóng băng).
 
+### Code của lifecycle bundle và deployment record (PF-A3.1)
+
+Refusal trước mọi tác động kết thúc bằng `Nothing was changed.`; refusal muộn hơn nêu trạng thái thực tế.
+
+- `manifest-checksum-mismatch`, `manifest-invalid`, `manifest-schema-unsupported`, `bundle-payload-mismatch`,
+  `bundle-unlisted-file`: thư mục bundle đã bị sửa, hỏng hoặc được ghi bởi control không được hỗ trợ. Đừng sửa hay
+  "vá" nó; copy ra ngoài NAS làm bằng chứng và dùng checkpoint hay recovery bundle khác. `pf backups` và
+  `pf recoveries` liệt kê thư mục như vậy là `[invalid: <code>]`. Bundle copy ngược từ ngoài NAS về phải giống từng
+  byte (không thêm file như `.DS_Store` hay `Thumbs.db`).
+- `archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`: archive payload chứa link,
+  special file, path không an toàn hay trùng, vượt giới hạn của importer, thay đổi trong lúc đọc, hoặc không đủ chỗ;
+  không có gì được extract. Với `archive-capacity` hãy giải phóng dung lượng rồi chạy lại.
+- `source-manifest-mismatch`: source đã extract khác source manifest đã ghi; dùng checkpoint khác.
+- `checkpoint-not-rollback-target`: checkpoint được chọn là emergency hay partial capture. Restore data của nó thủ
+  công hoặc export từ nó; chọn healthy checkpoint cho `rollback`.
+- `checkpoint-incompatible`: candidate của `--restore-db` không qua một kiểm tra (locale, extension, owner, head hay
+  row count); candidate đã bị drop và database hiện tại không đổi.
+- `preservation-failed`: rollback không capture và restore-test được database hiện tại; không có gì được restore hay
+  switch và service vẫn dừng. Preserve database thủ công — một `pg_dump --format=custom` của database được nêu tên từ
+  service `db` vào chỗ được bảo vệ, chỉ root đọc được — hoặc sửa nguyên nhân rồi chạy
+  `pf --instance <slug> backup --emergency`; sau đó chạy lại, hoặc chạy `pf --instance <slug> resume` để mở lại
+  deployment không đổi.
+- `deployment-artifact-mismatch`: một file của deployment record hiện tại khác record. **Đừng xóa thư mục**; giữ làm
+  bằng chứng. Ở dạng note, capture đã tiếp tục với source từ protected source store hoặc workspace đã chứng minh và
+  lần `update` kế tiếp seal record mới. Ở dạng refusal, deployed source không chứng minh được: khôi phục protected
+  source store, hoặc rollback về một healthy checkpoint (rollback preserve data hiện tại trước).
+- `deployment-image-mismatch`: backend/frontend image đang chạy không phải của deployment hiện tại, nên healthy
+  checkpoint sẽ gắn sai image. Tìm ai đã đổi container, preserve data bằng `pf backup --emergency` nếu cần, rồi
+  deploy lại hoặc rollback. Sau pause, thông báo nêu trạng thái đã dừng và `pf resume` mở lại deployment không đổi.
+- `deployment-stage-failed`: không stage được deployment; application, database và workspace không đổi. Sửa theo
+  chi tiết (thường là dung lượng hay permission trong `artifacts/deployments`) rồi chạy lại.
+- `deployment-record-incomplete`: application đã được activate và healthy, nhưng record không seal được. `status` báo
+  `Deployment: not recorded (…)`; trong lúc đó capture dùng bằng chứng từ protected store hay workspace, và khi không
+  chứng minh được commit nào thì healthy checkpoint và `update` từ chối trong preflight — dùng `rollback` (nó lùi về
+  emergency preservation) hoặc `backup --emergency`. Lần deploy, update, rollback hay restore-instance kế tiếp seal
+  record.
+- `artifact-capacity`: deployment artifact store cần kích thước source cộng 64 MiB; giải phóng dung lượng rồi chạy
+  lại. Không có gì trong PF-A3.1 xóa deployment artifact (retention là PF-A5.1).
+- `purge-bundle-unverified`: purge bundle không có record `data_restore_verified` passed cho manifest của nó; việc
+  xóa bị chặn và application được mở lại. Chạy lại `purge` sau khi sửa lỗi restore được in trước đó.
+- Note: `verification-record-invalid` (verification record hỏng bị bỏ qua; level lùi lại), `legacy-manifest-migrated`
+  (bundle cũ được đọc qua migration), `db-image-changed` (PostgreSQL image khác nhưng cùng major),
+  `verification-failed` (code-only rollback của checkpoint có restore test gần nhất lỗi; dump không được dùng).
+
 ### Có local source edit trước update
 
 Xem:
@@ -1627,14 +1848,15 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | `sudo pf update --latest` | Managed staging update theo latest branch SHA |
 | `sudo pf update --commit FULL_SHA` | Update tới exact commit |
 | `sudo pf update --release TAG` | Update tới release |
-| `sudo pf backup` | Tạo và restore-test revision checkpoint |
-| `sudo pf backups --page N` | List checkpoint, 10/trang |
+| `sudo pf backup` | Tạo và restore-test healthy revision checkpoint (in class và level) |
+| `sudo pf backup --emergency` | Giữ data thực tế khi healthy checkpoint bị từ chối (`EMERGENCY BACKUP <project>`; chỉ với terminal; không bao giờ là rollback target) |
+| `sudo pf backups --page N` | List checkpoint, 10/trang: `[class\|level]`, reason, DB head, source provenance, legacy format |
 | `sudo pf rollback [BACKUP_ID]` | Code rollback, giữ current DB |
 | `sudo pf rollback BACKUP_ID --restore-db` | Restore code + selected database state |
 | `sudo pf reset-db` | Kích hoạt clean migrated DB, vẫn giữ recoverability |
 | `sudo pf instances` | List managed PartFlow instances |
 | `sudo pf purge [--project NAME]` | Full recoverable purge một staging instance |
-| `sudo pf recoveries` | List purge recovery bundles |
+| `sudo pf recoveries` | List purge recovery bundles: `[level]`, project, active database, source provenance, `derived_from` |
 | `sudo pf restore-instance RECOVERY_ID` | Dựng lại functional instance đã purge |
 | `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB bên cạnh current instance |
 | `sudo pf release-check` | Check eligible release, không apply |
@@ -1722,6 +1944,22 @@ quyền root trong container dùng một lần; không có khẳng định nào 
 - control release được kiểm tra, không bao giờ bị đổi, và cố định ở Không truy cập qua group;
 - file cấu hình có ACL vẫn bị config wizard từ chối (PF-A5.1);
 - permission policy record không hợp lệ chỉ có cách xử lý bằng tay (mục 16).
+
+Giới hạn PF-A3.1 (chỉ có bằng chứng offline và filesystem; Docker và PostgreSQL được mô phỏng):
+
+- không khẳng định hành vi Docker, Compose hay PostgreSQL thật nào; case emergency preservation A3-T03 bị blocked ở
+  mức Docker/PostgreSQL thật mà nó yêu cầu (PF-A3.4);
+- chưa có functional recovery verification: việc xóa của purge được gate bằng record `data_restore_verified` từ chính
+  payload của purge bundle; invariant query của application và việc dựng lại runtime/image/config chưa được verify
+  (PF-A3.3);
+- emergency preservation chỉ được nối vào `rollback` và `backup --emergency`; `reset-db`, `purge` và
+  `restore-instance` vẫn gate bằng healthy checkpoint (PF-A3.3);
+- staging chưa seal và deployment bị thay thế không bao giờ được dọn (PF-A3.2/PF-A5.1); việc thay workspace vẫn làm tại
+  chỗ (PF-A3.2); layer database image đã archive chưa được dùng khi restore (PF-A3.3);
+- downgrade về control PF-A2.3 không được hỗ trợ khi còn bất kỳ bundle schema 1 nào;
+- checksum chứng minh tính toàn vẹn, không chứng minh tác giả: bundle không có trust anchor nào ngoài các thư mục
+  được bảo vệ, thuộc root.
+
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;
 phạm vi an toàn của PF-A1 mới chỉ được chứng minh offline. A1-T11…T14 vẫn bị chặn vì cần Docker

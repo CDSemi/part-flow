@@ -1,0 +1,34 @@
+{
+  "checksums": {
+    "database.dump": "8ab373e79ea32ad066945a070c7b2af42f437ac17448f86e767ec629874c881f",
+    "database.list": "a81c177ddd56acc4072f7029c18b6e25b95a6b78417febb05b5b3cb8c3e083f9",
+    "source.tar.gz": "0de140103981650b4adeba115804df6be2008f4077859d40073910ec6cd0283d"
+  },
+  "created_at": "20260901T120000Z",
+  "database": "partflow_staging",
+  "database_heads": [
+    "r1"
+  ],
+  "database_user": "partflow_staging",
+  "environment": "staging",
+  "format": 1,
+  "id": "20260801T120000Z-111111111111-c3d4e5",
+  "images": {
+    "backend": {
+      "id": "sha256:c69884b276a198c4e04ffa8d56ccfb2402205bfd0942bf449a7ccc6f6f77b02a",
+      "reference": "partflow-staging-backend:backup-20260901t120000z-111111111111-a1b2c3"
+    },
+    "frontend": {
+      "id": "sha256:52c2e8cc8b3f19d8bc064704b43a5c5407e6e7334a14acd297f48a1c6c131601",
+      "reference": "partflow-staging-frontend:backup-20260901t120000z-111111111111-a1b2c3"
+    }
+  },
+  "postgres_major": 16,
+  "project": "partflow-staging",
+  "reason": "before-update",
+  "repository": "CDSemi/part-flow",
+  "restore_test": "passed",
+  "source_revision": "1111111111111111111111111111111111111111",
+  "source_verified": true,
+  "status": "complete"
+}

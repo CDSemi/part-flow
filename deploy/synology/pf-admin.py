@@ -62,7 +62,7 @@ pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A2.3"
+CHECKPOINT = "PF-A3.1"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -97,8 +97,33 @@ SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 BACKUP_RE = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{6}\Z")
 RECOVERY_RE = re.compile(r"purge-\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{6}\Z")
 # The protected state files create_purge_recovery() copies into a bundle; the only names a bundle's
-# state_files may list for a restore into protected state (PF-A1.4).
-RESTORABLE_STATE_FILES = ("deployed.json", "last-reset.json", "observed-tags.json")
+# state_files may list for a restore into protected state (PF-A1.4). PF-A3.1: one tuple, owned by pf_config.
+RESTORABLE_STATE_FILES = pf_config.RESTORABLE_STATE_FILES
+# PF-A3.1: deployed-source artifacts, verification records and the strict bundle reader (SPEC sections 2.2, 3.1).
+DEPLOYMENT_ID_RE = re.compile(r"dep-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
+VERIFICATION_ID_RE = re.compile(r"ver-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
+MANIFEST_READ_LIMIT = 8 * 1024 * 1024
+ARTIFACT_MARGIN = 64 * 1024 * 1024
+ARCHIVE_MARGIN = 256 * 1024 * 1024
+LIFECYCLE_DEFS = pf_config.LIFECYCLE_SCHEMA["$defs"]
+CLASS_NAMES = {"healthy_checkpoint": "healthy", "emergency_preservation": "emergency", "partial": "partial"}
+LEVEL_NAMES = {"captured": "captured", "failed": "failed", "data_restore_verified": "data-restore",
+               "functional_recovery_verified": "functional"}
+PASSED_LEVELS = ("data_restore_verified", "functional_recovery_verified")
+# Read-only PostgreSQL inventory statements (section 3.8); every answer is checked before it is used.
+FACTS_SQL = ("SELECT d.datname, pg_get_userbyid(d.datdba), pg_encoding_to_char(d.encoding), d.datcollate, "
+             "d.datctype, d.datallowconn FROM pg_database d WHERE NOT d.datistemplate AND d.datname <> 'postgres' "
+             "ORDER BY d.datname;")
+EXTENSIONS_SQL = "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
+ROW_COUNTS_SQL = ("SELECT n.nspname || '.' || c.relname, (xpath('/row/c/text()', query_to_xml(format('SELECT "
+                  "count(*) AS c FROM %I.%I', n.nspname, c.relname), false, true, '')))[1]::text FROM pg_class c "
+                  "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND n.nspname NOT IN "
+                  "('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' ORDER BY 1;")
+ROLES_SQL = ("SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls FROM "
+             "pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname;")
+AVAILABLE_EXTENSIONS_SQL = "SELECT name FROM pg_available_extensions ORDER BY name;"
+ROW_NAME_RE = re.compile(r"[A-Za-z0-9_]+\.[A-Za-z0-9_]+\Z")
+PG_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
 # Compose project names (pf-config.json grammar); --project is validated by it before any selection.
 PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}\Z")
 # `pf logs --since/--until`: a relative duration or an RFC 3339 date/time; nothing else reaches Compose.
@@ -420,40 +445,200 @@ def prompt_yes_no(label, default=True):
 
 
 def create_source_archive(root, destination):
-    root = Path(root)
-    def select(info):
-        relative = Path(info.name)
-        if any(part in SOURCE_EXCLUDES for part in relative.parts):
-            return None
-        if not (info.isfile() or info.isdir()):
-            raise Failure(f"Source backup refuses links/special files: {info.name}")
-        return info
-    with tarfile.open(destination, "w:gz") as archive:
-        for item in sorted(root.iterdir()):
-            if item.name not in SOURCE_EXCLUDES:
-                archive.add(item, arcname=item.name, filter=select)
+    """PF-A3.1: a thin wrapper over the fd-safe writer (links and special files refused, as before)."""
+    try:
+        return pf_source.archive_tree(root, destination, excludes=SOURCE_EXCLUDES, unsupported="refuse")
+    except pf_source.SourceError as exc:
+        raise Failure(f"Source backup refuses this tree: {exc}") from exc
 
 
-def extract_source(archive_path, destination):
-    destination = Path(destination).resolve()
-    with tarfile.open(archive_path, "r:gz") as archive:
-        members = archive.getmembers()
-        for member in members:
-            target = (destination / member.name).resolve()
-            if (target != destination and destination not in target.parents
-                    or Path(member.name).is_absolute()
-                    or not (member.isfile() or member.isdir())):
-                raise Failure("Unsafe source archive member; extraction refused.")
-        # Members were explicitly constrained to regular files/directories above.
-        for member in members:
-            target = destination / member.name
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.extractfile(member) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
-                os.chmod(target, member.mode & 0o777 & ~0o022)
+def lifecycle_errors(value, name):
+    """Schema (A1 subset + A2.1 markers) and then cross-field problems of one lifecycle record; [] when valid."""
+    errors = pf_install.validate_marked(value, LIFECYCLE_DEFS[name], defs=LIFECYCLE_DEFS)
+    return errors or pf_config.lifecycle_problems(value, name)
+
+
+def bundle_failure(code, bundle_id, detail, *, tail="Nothing was changed."):
+    """A coded bundle refusal (section 4.6); ``code`` is also its listing tag."""
+    exc = Failure(f"{code}: {bundle_id}: {detail}. {tail}")
+    exc.code = code
+    return exc
+
+
+def failure_code(exc):
+    """The section 4.6 code of a refusal (the attribute, else the copy's leading token), for listings."""
+    code = getattr(exc, "code", None)
+    if code:
+        return code
+    head = str(exc).split(":", 1)[0]
+    return head if re.fullmatch(r"[a-z0-9-]{3,64}", head) else "unreadable"
+
+
+@dataclasses.dataclass(frozen=True)
+class BundleView:
+    """One strictly read checkpoint or purge bundle (section 3.1): the schema 1 manifest (migrated in memory for a
+    legacy one), its on-disk manifest hash and the computed verification level. Accessors follow the section 3.6
+    mapping of the former format 2 keys."""
+
+    folder: Path
+    manifest: dict
+    manifest_sha256: str
+    legacy: object
+    level: str
+    latest_verification_id: object = None
+
+    @property
+    def bundle_id(self):
+        return self.manifest["bundle_id"]
+
+    @property
+    def bundle_kind(self):
+        return self.manifest["bundle_kind"]
+
+    @property
+    def capture_class(self):
+        return self.manifest["capture_class"]
+
+    @property
+    def reason(self):
+        return self.manifest["reason"]
+
+    @property
+    def display_reason(self):
+        legacy = self.manifest["legacy"]
+        return "legacy:" + str(legacy["claimed_reason"]) if legacy is not None else self.reason
+
+    @property
+    def compose_project(self):
+        return self.manifest["source_instance"]["compose_project"]
+
+    @property
+    def repository(self):
+        return self.manifest["source_instance"]["repository"]
+
+    @property
+    def environment(self):
+        return self.manifest["source_instance"]["environment"]
+
+    @property
+    def workspace_root(self):
+        return self.manifest["source_instance"]["workspace"]
+
+    @property
+    def images(self):
+        """{service: {"reference", "id"}} of the backend/frontend images the bundle recorded (non-null only)."""
+        return {service: {"reference": image["reference"], "id": image["id"]}
+                for service in pf_docker.BUILT_SERVICES for image in [self.manifest["images"][service]]
+                if image is not None}
+
+    def image(self, service):
+        return self.manifest["images"][service]
+
+    @property
+    def database_heads(self):
+        return list(self.manifest["compatibility"]["alembic_heads_live"])
+
+    @property
+    def migration_files(self):
+        return dict(self.manifest["compatibility"]["migration_files"])
+
+    @property
+    def postgres_major(self):
+        return self.manifest["postgresql"]["major"]
+
+    @property
+    def source_hypothesis(self):
+        """The commit a provenance proof is attempted for: the recorded commit, or a legacy 40-hex claim. It is never
+        written into a record or pointer (section 3.6 mapping)."""
+        commit = self.manifest["source"]["commit"]
+        if commit is not None:
+            return commit
+        legacy = self.manifest["legacy"]
+        claim = legacy["claimed_source_revision"] if legacy is not None else None
+        return claim if isinstance(claim, str) and SHA_RE.fullmatch(claim) else None
+
+    @property
+    def source_display(self):
+        commit = self.manifest["source"]["commit"]
+        if commit is not None:
+            return "git_commit " + commit[:12]
+        claim = self.source_hypothesis
+        return "claimed " + claim[:12] if claim else "unknown"
+
+    @property
+    def stores(self):
+        return list(self.manifest["stores"])
+
+    @property
+    def active_store(self):
+        return next(store for store in self.manifest["stores"] if store["role"] == "active")
+
+    @property
+    def database(self):
+        return self.active_store["database"]
+
+    @property
+    def database_user(self):
+        return self.active_store["owner"]
+
+    @property
+    def source_payload(self):
+        return self.manifest["source"]["payload"]
+
+    @property
+    def workspace_payload(self):
+        return self.manifest["workspace"]["payload"]
+
+    @property
+    def derived_from(self):
+        return self.manifest["derived_from"]
+
+    @property
+    def purge(self):
+        return self.manifest["purge"]
+
+    def payload(self, path):
+        return next((item for item in self.manifest["payloads"] if item["path"] == path), None)
+
+    def payloads_of(self, kind):
+        return [item for item in self.manifest["payloads"] if item["type"] == kind]
+
+
+@dataclasses.dataclass(frozen=True)
+class InvalidBundle:
+    """A bundle folder whose strict read failed (listed as ``[invalid: <code>]``, never selectable)."""
+
+    folder: Path
+    code: str
+    detail: str
+
+    @property
+    def bundle_id(self):
+        return self.folder.name
+
+
+@dataclasses.dataclass(frozen=True)
+class DeploymentView:
+    """The deployment ``deployed.json`` points to (section 3.3 Read): ``mismatch`` is None for a verified record."""
+
+    deployment_id: str
+    folder: Path
+    record: object
+    record_sha256: str
+    mismatch: object
+
+
+@dataclasses.dataclass(frozen=True)
+class StagedDeployment:
+    """An unsealed deployment staged after the final confirmation (section 3.3 Stage)."""
+
+    deployment_id: str
+    kind: str
+    staging: Path
+    source: dict
+    images: object
+    previous_deployment_id: object
+    migration_files_sha256: str
 
 
 def schema_gate(current_files, target_files, live_heads, target_heads, allow=False):
@@ -1226,7 +1411,15 @@ PENDING_ROUTES = {
         "resume (--resume) or compensate (--abandon) the interrupted permission apply; once its permission policy "
         "revision is written only --resume is legal",
     ),
+    # PF-A3.1: an attended emergency capture next to an interrupted lifecycle operation; it never reads or writes
+    # pending.json (section 4.2).
+    "backup emergency": (
+        lambda journal: journal.get("operation") in ("deploy", "update", "rollback", "reset-db"),
+        "capture the current data as emergency preservation (does not change the interrupted operation)",
+    ),
 }
+# The CLI spelling of a route whose DISPATCH key is not its command line (section 4.2).
+PENDING_ROUTE_COMMANDS = {"backup emergency": "backup --emergency"}
 # Journal keys shown by diagnostics. Anything else is reported by name only.
 JOURNAL_PUBLIC_KEYS = (
     "operation", "phase", "started", "recovery", "active_checkpoint", "checkpoint", "selected",
@@ -2246,7 +2439,8 @@ class Controller:
             except (TypeError, AttributeError):
                 accepted = False
             if accepted:
-                routes.append(f"pf {command} --instance {self.context.slug}: {description}")
+                routes.append(f"pf {PENDING_ROUTE_COMMANDS.get(command, command)} --instance {self.context.slug}: "
+                              f"{description}")
         return routes
 
     def check_pending_route(self, journal, command):
@@ -4221,6 +4415,16 @@ class Controller:
             raise Failure("Candidate source carries files the workspace manifest cannot verify (reserved "
                           "artifact names): " + ", ".join(reserved[:10]) + ". Nothing was replaced.")
 
+    def candidate_manifest(self, tree, revision, *, verified):
+        """The pf_source manifest of a private candidate tree with its proven provenance (a commit only when the
+        protected store proved it); a pure read."""
+        source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} \
+            if verified and isinstance(revision, str) and SHA_RE.fullmatch(revision) else {"kind": "unknown"}
+        try:
+            return pf_source.build_manifest(tree, source=source, excludes=SOURCE_EXCLUDES)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
+
     def record_source_manifest(self, tree, revision, *, verified):
         """Write the manifest of the tree that was deployed (built from the private candidate)."""
         source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
@@ -4291,12 +4495,43 @@ class Controller:
             )
         return {"sha": hint, "ref": "current-checkout", "release_id": None, "published_at": None, "prerelease": None}
 
+    CANNOT_RECONSTRUCT = (
+        "Cannot reconstruct the exact deployed source revision: it is neither in the protected source store "
+        "nor proven equal to the workspace by the protected manifest. No destructive operation will continue "
+        "until the deployed source can be archived.")
+
+    def deployed_source_origin(self, revision):
+        """Read-only (section 3.4 preflight): "protected-store" or "workspace-proven" when the exact tree of
+        ``revision`` can be archived as proven deployed source, else None."""
+        if not isinstance(revision, str) or not SHA_RE.fullmatch(revision):
+            return None
+        store = self.source_store()
+        if store.exists():
+            try:
+                store.verify()
+                if store.has_commit(revision):
+                    return "protected-store"
+            except pf_source.SourceError:
+                pass
+        manifest = self.load_source_manifest()
+        if manifest is not None and manifest["source"]["kind"] == "git_commit" \
+                and manifest["source"]["commit"] == revision:
+            try:
+                if pf_source.compare_manifest(self.root, manifest, excludes=SOURCE_EXCLUDES)["matches"]:
+                    return "workspace-proven"
+            except (pf_source.SourceError, OSError):
+                return None
+        return None
+
     def create_deployed_source_archive(self, destination, revision):
-        """Archive the exact deployed revision from the protected store, or from a workspace proven equal to it."""
+        """Archive the exact deployed revision from the protected store, or from a workspace proven equal to it.
+
+        PF-A3.1: both paths archive with archive_verified_tree (bytes proven equal to a manifest while archived) and
+        return {"origin", "manifest", "expanded_bytes", "members", "members_sha256"} for the payload entry."""
         destination = Path(destination)
         store = self.source_store()
         store_has_commit = False
-        if store.exists():
+        if isinstance(revision, str) and SHA_RE.fullmatch(revision) and store.exists():
             try:
                 store.verify()
                 store_has_commit = store.has_commit(revision)
@@ -4307,25 +4542,28 @@ class Controller:
                 tree = Path(folder) / "tree"
                 try:
                     store.export(revision, tree, timeout=TIMEOUT_GIT_FETCH)
+                    manifest = pf_source.build_manifest(
+                        tree, source={"kind": "git_commit", "commit": revision, "remote": self.approved_remote()},
+                        excludes=SOURCE_EXCLUDES)
+                    _, expanded, members_sha256 = pf_source.archive_verified_tree(tree, manifest, destination,
+                                                                                  excludes=SOURCE_EXCLUDES)
                 except pf_source.SourceError as exc:
                     raise Failure(str(exc)) from exc
-                create_source_archive(tree, destination)
-            return
+            return {"origin": "protected-store", "manifest": manifest, "expanded_bytes": expanded,
+                    "members": len(manifest["entries"]), "members_sha256": members_sha256}
         manifest = self.load_source_manifest()
         if manifest is not None and manifest["source"]["kind"] == "git_commit" \
                 and manifest["source"]["commit"] == revision:
             # The archive is built from the workspace bytes while each file is proven equal to
             # the manifest (one read per file): no separate compare-then-copy window.
             try:
-                pf_source.archive_verified_tree(self.root, manifest, destination, excludes=SOURCE_EXCLUDES)
+                _, expanded, members_sha256 = pf_source.archive_verified_tree(self.root, manifest, destination,
+                                                                              excludes=SOURCE_EXCLUDES)
             except pf_source.SourceError as exc:
                 raise Failure("Cannot archive the deployed source from the workspace: " + str(exc)) from exc
-            return
-        raise Failure(
-            "Cannot reconstruct the exact deployed source revision: it is neither in the protected source store "
-            "nor proven equal to the workspace by the protected manifest. No destructive operation will continue "
-            "until the deployed source can be archived."
-        )
+            return {"origin": "workspace-proven", "manifest": manifest, "expanded_bytes": expanded,
+                    "members": len(manifest["entries"]), "members_sha256": members_sha256}
+        raise Failure(self.CANNOT_RECONSTRUCT)
 
     def prove_tree_commit(self, tree, revision):
         """True only when the protected store holds ``revision`` and its exported tree equals ``tree`` byte/mode.
@@ -4351,6 +4589,1099 @@ class Controller:
                 return bool(pf_source.compare_manifest(tree, manifest, excludes=SOURCE_EXCLUDES)["matches"])
         except (pf_source.SourceError, OSError) as exc:
             raise Failure("Source provenance check failed: " + str(exc)) from exc
+
+    # ------------------------------------------- deployed-source artifact store (PF-A3.1 section 3.3)
+
+    @property
+    def deployments_dir(self):
+        return self.context.artifacts_dir / "deployments"
+
+    @property
+    def verifications_dir(self):
+        return self.context.artifacts_dir / "verifications"
+
+    def producer(self):
+        """$defs.producer: the control release, profile and instance record this process runs with."""
+        context = self.context
+        return {"control_release_id": context.control.release_id, "control_sha256": context.control.sha256,
+                "profile_id": context.profile.id, "profile_version": context.profile.version,
+                "profile_sha256": context.profile.sha256, "instance_record_sha256": context.record_sha256}
+
+    def read_pointer(self):
+        """``state/deployed.json`` (strict JSON object) or None when absent. Read-only."""
+        path = self.state / "deployed.json"
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise Failure(f"Protected deployment pointer is unreadable: {path}: {exc.strerror or exc}") from exc
+        try:
+            value = pf_instance.parse_strict_json(data, label=str(path))
+        except pf_instance.ContextError as exc:
+            raise Failure(f"Protected deployment pointer is invalid: {exc}") from exc
+        if not isinstance(value, dict):
+            raise Failure(f"Protected deployment pointer is invalid: {path} is not a JSON object")
+        return value
+
+    @staticmethod
+    def private_dir(path):
+        """A private (0700) directory pf creates under protected private state; an existing one must be real."""
+        path = Path(path)
+        if not real_directory(path):
+            os.mkdir(str(path), 0o700)
+            os.chmod(str(path), 0o700)
+        return path
+
+    def current_deployment(self):
+        """The deployment ``deployed.json`` points to (read-only; never raises on a mismatch): None for a pointer
+        without ``deployment_id`` (a deployment created before PF-A3.1, or a failed seal), else a DeploymentView whose
+        ``mismatch`` names the first file that differs from the record ("<file>: <detail>")."""
+        pointer = self.read_pointer()
+        if pointer is None or "deployment_id" not in pointer:
+            return None
+        deployment_id = pointer["deployment_id"]
+        if not isinstance(deployment_id, str) or not DEPLOYMENT_ID_RE.fullmatch(deployment_id):
+            return DeploymentView(str(deployment_id), None, None, None, "deployed.json: deployment_id is malformed")
+        folder = self.deployments_dir / deployment_id
+        try:
+            dir_fd = os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return DeploymentView(deployment_id, folder, None, None, "deployment folder: missing or not a directory")
+        try:
+            record, record_sha256, mismatch = self._deployment_check(dir_fd, deployment_id,
+                                                                     pointer.get("deployment_record_sha256"))
+        finally:
+            os.close(dir_fd)
+        return DeploymentView(deployment_id, folder, record, record_sha256, mismatch)
+
+    def _deployment_check(self, dir_fd, deployment_id, expected_sha256):
+        try:
+            data = self._bundle_file(dir_fd, "deployment-record.json", MANIFEST_READ_LIMIT)
+        except (OSError, ValueError) as exc:
+            return None, None, f"deployment-record.json: {getattr(exc, 'strerror', None) or exc}"
+        record_sha256 = pf_instance.sha256_bytes(data)
+        if record_sha256 != expected_sha256:
+            return None, record_sha256, "deployment-record.json: differs from deployed.json"
+        try:
+            record = pf_instance.parse_strict_json(data, label="deployment-record.json")
+        except pf_instance.ContextError as exc:
+            return None, record_sha256, f"deployment-record.json: {exc}"
+        problems = [] if data == pf_instance.normalize_json(record) else ["not normalized"]
+        problems = problems or lifecycle_errors(record, "deployment_record")
+        if not problems and (record["deployment_id"] != deployment_id
+                             or record["instance_id"] != self.context.instance_id):
+            problems = ["names another deployment or instance"]
+        if problems:
+            return None, record_sha256, f"deployment-record.json: {problems[0]}"
+        for path, size, sha256 in (("source.tar.gz", record["source"]["archive"]["size"],
+                                    record["source"]["archive"]["sha256"]),
+                                   ("source-manifest.json", None, record["source"]["manifest"]["sha256"]),
+                                   ("compose-resolved.json", None, record["compose"]["file_sha256"]),
+                                   ("config.env", record["config"]["bytes"], record["config"]["sha256"])):
+            try:
+                self._verify_payload(dir_fd, deployment_id, path, size, sha256)
+            except Failure as exc:
+                return record, record_sha256, getattr(exc, "detail", None) or path
+        return record, record_sha256, None
+
+    def deployed_commit(self):
+        """The deployed source commit (section 3.3 Read): a valid record's ``source.commit`` (may be None), else the
+        legacy ``deployed.json`` ``sha`` when it is a full SHA, else None. Never a claim."""
+        view = self.current_deployment()
+        if view is not None and view.mismatch is None:
+            return view.record["source"]["commit"]
+        pointer = self.read_pointer() or {}
+        sha = pointer.get("sha")
+        return sha if isinstance(sha, str) and SHA_RE.fullmatch(sha) else None
+
+    def describe_deployed_source(self):
+        commit = self.deployed_commit()
+        return commit if commit is not None else "unknown provenance (no proven commit is recorded)"
+
+    def deployment_inventory(self, view):
+        """(unsealed staging count, unreferenced sealed deployments): read-only, best effort while an operation may
+        be writing. A sealed deployment is referenced when it is current or in the current record's chain."""
+        try:
+            names = os.listdir(str(self.deployments_dir)) if real_directory(self.deployments_dir) else []
+        except OSError:
+            names = []
+        staging = sum(1 for name in names if name.startswith(".staging-"))
+        referenced = set()
+        record = view.record if view is not None else None
+        if view is not None:
+            referenced.add(view.deployment_id)
+        while record is not None and record.get("previous_deployment_id") and len(referenced) < 1000:
+            previous = record["previous_deployment_id"]
+            referenced.add(previous)
+            try:
+                record = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(
+                    self.deployments_dir / previous / "deployment-record.json"), label=previous)
+                record = record if isinstance(record, dict) else None
+            except (OSError, pf_instance.ContextError):
+                record = None
+        unreferenced = sum(1 for name in names if DEPLOYMENT_ID_RE.fullmatch(name) and name not in referenced)
+        return staging, unreferenced
+
+    def describe_deployment(self):
+        """The status/doctor deployment line (read-only, no lock, no write)."""
+        pointer = self.read_pointer()
+        view = self.current_deployment()
+        if view is None:
+            if pointer is None:
+                text = "none (no deployed.json)"
+            elif pointer.get("deployment_seal_failed"):
+                text = (f"not recorded (seal failed in operation {pointer['deployment_seal_failed']}; the next "
+                        "deploy/update/rollback seals one)")
+            else:
+                text = "legacy (no deployment record; created before PF-A3.1)"
+        elif view.mismatch is not None:
+            text = f"{view.deployment_id} deployment-artifact-mismatch: {view.mismatch}"
+        else:
+            source = view.record["source"]
+            provenance = "git_commit " + source["commit"][:12] if source["provenance"] == "git_commit" else "unknown"
+            text = f"{view.deployment_id} ({provenance}), sealed {view.record['created_at']}"
+        staging, unreferenced = self.deployment_inventory(view)
+        if staging:
+            text += f"\nUnsealed deployment staging: {staging}"
+        if unreferenced:
+            text += f"\nUnreferenced deployments: {unreferenced}"
+        return text
+
+    @staticmethod
+    def artifact_free_bytes(path):
+        info = os.statvfs(str(path))
+        return info.f_bavail * info.f_frsize
+
+    def deployment_preflight(self, manifest):
+        """Read-only, before the final confirmation (section 3.3): room for one deployed-source artifact."""
+        directory = self.deployments_dir if real_directory(self.deployments_dir) else self.context.artifacts_dir
+        need = sum(entry.get("size", 0) for entry in manifest["entries"]) + ARTIFACT_MARGIN
+        mib = 1024 * 1024
+        try:
+            free = self.artifact_free_bytes(directory)
+        except OSError as exc:
+            raise Failure(f"artifact-capacity: free space in {directory} cannot be measured "
+                          f"({exc.strerror or exc}). Nothing was changed.") from exc
+        if free < need:
+            raise Failure(f"artifact-capacity: {-(-need // mib)} MiB needed in {directory}, {free // mib} MiB free. "
+                          "Nothing was changed.")
+
+    def image_identity(self, image, *, reference):
+        """$defs.image of one local image (ID or reference): one ``docker image inspect``; never archived."""
+        data = json.loads(self.docker("image", "inspect", image))[0]
+        image_id = data.get("Id")
+        if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise Failure(f"Image {str(image)[:80]} has no image ID of the form sha256:<64 hex>.")
+        platform = None
+        os_name, architecture, variant = data.get("Os"), data.get("Architecture"), data.get("Variant")
+        if isinstance(os_name, str) and os_name and isinstance(architecture, str) and architecture:
+            platform = os_name + "/" + architecture + ("/" + variant if isinstance(variant, str) and variant else "")
+        digests = sorted(item for item in (data.get("RepoDigests") or []) if isinstance(item, str))
+        return {"reference": reference, "id": image_id, "platform": platform, "repo_digests": digests,
+                "archived": False}
+
+    def stage_deployment(self, candidate, manifest, *, kind, images=None, ref=None):
+        """Stage the deployed-source artifact right after the final confirmation, before the first effect.
+
+        ``manifest`` is the candidate's pf_source manifest with its proven provenance; ``images`` the backend/
+        frontend images ({service: {"reference", "id"}}) known without effect (restore-instance: observed at seal).
+        Any failure -> ``deployment-stage-failed`` (no journal exists yet)."""
+        candidate = Path(candidate)
+        pointer = self.read_pointer() or {}
+        previous = pointer.get("deployment_id")
+        previous = previous if isinstance(previous, str) and DEPLOYMENT_ID_RE.fullmatch(previous) else None
+        deployment_id = f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
+        staging = self.deployments_dir / (".staging-" + deployment_id)
+        try:
+            self.refuse_reserved_candidate_paths(candidate)
+            if any(entry["kind"] != "file" for entry in manifest["entries"]):
+                raise Failure("the candidate contains an unsupported link or special file")
+            self.private_dir(self.deployments_dir)
+            os.mkdir(str(staging), 0o700)
+            os.chmod(str(staging), 0o700)
+            archive = staging / "source.tar.gz"
+            count, expanded, members_sha256 = pf_source.archive_verified_tree(candidate, manifest, archive,
+                                                                              excludes=SOURCE_EXCLUDES)
+            fd = os.open(str(archive), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(fd)
+                archive_sha256, archive_size = self._fd_sha256(fd), os.fstat(fd).st_size
+            finally:
+                os.close(fd)
+            manifest_data = pf_source.manifest_bytes(manifest)
+            pf_instance._write_private_file(staging / "source-manifest.json", manifest_data, 0o600)
+            source = manifest["source"]
+            git = source["kind"] == "git_commit"
+            staged_source = {
+                "provenance": "git_commit" if git else "unknown", "commit": source.get("commit") if git else None,
+                "remote": source.get("remote") if git else None, "ref": ref,
+                "archive": {"path": "source.tar.gz", "size": archive_size, "sha256": archive_sha256},
+                "manifest": {"path": "source-manifest.json", "sha256": pf_instance.sha256_bytes(manifest_data),
+                             "entries_sha256": pf_source.entries_digest(manifest), "files": count},
+                "expanded_bytes": expanded, "members_sha256": members_sha256}
+            identities = None
+            if images is not None:
+                identities = {service: dict(images[service]) if kind == "restore-instance" else
+                              self.image_identity(images[service]["id"], reference=images[service]["reference"])
+                              for service in pf_docker.BUILT_SERVICES}
+            staged = StagedDeployment(deployment_id, kind, staging, staged_source, identities, previous,
+                                      pf_instance.sha256_bytes(pf_instance.normalize_json(migration_files(candidate))))
+            problems = lifecycle_errors(self._deployment_record(staged, draft=True), "deployment_record")
+            if problems:
+                raise Failure(f"the draft deployment record is invalid ({problems[0]})")
+            self.write_private_json("deployment-artifact.json", {
+                "deployment_id": deployment_id, "state": "staged", "source_sha256": archive_sha256,
+                "entries_sha256": staged_source["manifest"]["entries_sha256"]})
+            return staged
+        except DaemonFailure:
+            raise
+        except (Failure, OSError, pf_source.SourceError, pf_instance.ContextError, ValueError, KeyError) as exc:
+            detail = (str(exc).splitlines() or [type(exc).__name__])[0]
+            raise Failure(f"deployment-stage-failed: {detail}. The application, database and workspace were not "
+                          f"changed; an unsealed staging directory may remain under {self.deployments_dir} "
+                          "(PF-A3.2 cleans it).") from exc
+
+    def _deployment_record(self, staged, *, draft=False, images=None, compose=None, config=None, heads=None,
+                           server=None, restored_from=None):
+        """The DeploymentRecord of ``staged``; ``draft`` fills the seal-time values with placeholders so a writer bug
+        fails before any effect (section 3.3 step 5)."""
+        placeholder = "0" * 64
+        if draft:
+            images = {}
+            for service in pf_docker.BUILT_SERVICES:
+                known = (staged.images or {}).get(service) or {}
+                images[service] = dict({"reference": f"{self.context.compose_project}-{service}:draft",
+                                        "id": "sha256:" + placeholder, "repo_digests": [], "archived": False},
+                                       **{key: known[key] for key in ("reference", "id") if key in known})
+                images[service]["platform"] = known.get("platform") or "linux/amd64"
+                images[service].setdefault("repo_digests", [])
+                images[service]["archived"] = False
+            images["db"] = {"reference": pf_docker.DB_IMAGE, "id": "sha256:" + placeholder, "platform": "linux/amd64",
+                            "repo_digests": [], "archived": False}
+            compose = {"path": "compose-resolved.json", "file_sha256": placeholder, "model_sha256": placeholder,
+                       "compose_version": "draft", "installed_file_sha256": placeholder,
+                       "override_sha256": placeholder}
+            config = {"path": "config.env", "sha256": placeholder, "bytes": 1, "admin_config_sha256": None}
+            heads, server = ["draft"], 160000
+            if staged.kind == "restore-instance":
+                restored_from = {"bundle_id": "purge-00000000T000000Z-000000000000-000000",
+                                 "manifest_sha256": placeholder}
+        source = {key: staged.source[key] for key in ("provenance", "commit", "remote", "ref", "archive", "manifest")}
+        stamp = utc()
+        return {
+            "schema_version": 1, "deployment_id": staged.deployment_id, "instance_id": self.context.instance_id,
+            "compose_project": self.context.compose_project, "created_at": stamp,
+            "operation": {"kind": staged.kind, "operation_id": self.operation_id or "00000000T000000Z-draft-00000000"},
+            "previous_deployment_id": staged.previous_deployment_id, "source": source, "images": images,
+            "helpers": [], "strategy": dict(pf_config.STRATEGY), "compose": compose, "config": config,
+            "producer": self.producer(),
+            "database": {"server_version_num": server, "alembic_heads": heads,
+                         "migration_files_sha256": staged.migration_files_sha256},
+            "activation": {"result": "activated", "health": "passed", "completed_at": stamp},
+            "restored_from": restored_from,
+        }
+
+    def _seal_compose(self, staging):
+        """Step 2: the newest approved render whose full input key is the activation's, copied and re-hashed."""
+        record_path = self.operation_dir / "compose-envelope.json"
+        document = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(record_path), label=str(record_path))
+        installed = pf_instance.sha256_bytes(pf_instance.read_bytes_nofollow(self.control_dir / "compose.nas.yaml"))
+        override = pf_instance.sha256_bytes(pf_instance.read_bytes_nofollow(self.override))
+        key = {"override_sha256": override, "frozen_env_sha256": self.frozen.env_sha256,
+               "project_directory": str(self.root), "instance_id": self.context.instance_id,
+               "compose_file_sha256": installed}
+        renders = [render for render in document.get("renders", []) if isinstance(render, dict)
+                   and render.get("result") == "approved" and isinstance(render.get("resolved_file"), str)
+                   and re.fullmatch(r"compose-[0-9]+\.json", render["resolved_file"])
+                   and isinstance(render.get("inputs"), dict)
+                   and all(render["inputs"].get(name) == value for name, value in key.items())]
+        if not renders:
+            raise Failure("no approved resolved Compose render of the activation's inputs was recorded")
+        render = renders[-1]
+        data = pf_instance.read_bytes_nofollow(self.operation_dir / render["resolved_file"])
+        model = pf_instance.parse_strict_json(data, label=render["resolved_file"])
+        if pf_instance.sha256_bytes(pf_instance.normalize_json(model)) != render.get("resolved_sha256"):
+            raise Failure("the recorded resolved Compose model does not re-hash to its approval")
+        target = staging / "compose-resolved.json"
+        pf_instance._write_private_file(target, data, 0o600)
+        if pf_instance.sha256_bytes(pf_instance.read_bytes_nofollow(target)) != pf_instance.sha256_bytes(data):
+            raise Failure("the copied resolved Compose model differs from its source")
+        return {"path": "compose-resolved.json", "file_sha256": pf_instance.sha256_bytes(data),
+                "model_sha256": render["resolved_sha256"],
+                "compose_version": str(render.get("compose_version") or self.compose_version or "unknown"),
+                "installed_file_sha256": installed, "override_sha256": override}
+
+    def _seal_config(self, staging):
+        """Step 3: the operation's frozen app snapshot, verified, as config.env (secrets: private state only)."""
+        try:
+            pf_config.verify_frozen(self.frozen)
+        except pf_config.ConfigError as exc:
+            raise Failure(str(exc)) from exc
+        data = pf_instance.read_bytes_nofollow(self.frozen.env_file)
+        pf_instance._write_private_file(staging / "config.env", data, 0o600)
+        try:
+            admin = pf_instance.sha256_bytes(pf_instance.read_bytes_nofollow(self.config_dir / "pf-config.json"))
+        except FileNotFoundError:
+            admin = None
+        return {"path": "config.env", "sha256": pf_instance.sha256_bytes(data), "bytes": len(data),
+                "admin_config_sha256": admin}
+
+    def seal_deployment(self, staged, *, restored_from=None):
+        """Seal ``staged`` after ``activate()`` passed, before the pointer is written (section 3.3 Seal)."""
+        images = dict(staged.images or {})
+        for service in pf_docker.BUILT_SERVICES:
+            known = images.get(service)
+            if known is None or "platform" not in known:
+                running = self.inspect(service)["Image"]
+                if known is not None and running != known["id"]:
+                    raise Failure(f"the running {service} image {running[:19]} is not the restored {known['id'][:19]}")
+                reference = known["reference"] if known is not None else self.inspect_reference(service)
+                images[service] = self.image_identity(running, reference=reference)
+        images["db"] = self.image_identity(self.inspect("db")["Image"], reference=pf_docker.DB_IMAGE)
+        compose = self._seal_compose(staged.staging)
+        config = self._seal_config(staged.staging)
+        record = self._deployment_record(staged, images=images, compose=compose, config=config,
+                                         heads=self.db_heads(), server=self.server_version_num(),
+                                         restored_from=restored_from)
+        problems = lifecycle_errors(record, "deployment_record")
+        if problems:
+            raise Failure(f"the deployment record is invalid ({problems[0]})")
+        data = pf_instance.normalize_json(record)
+        pf_instance._write_private_file(staged.staging / "deployment-record.json", data, 0o600)
+        pf_instance._fsync_directory(staged.staging)
+        parent_fd = os.open(str(self.deployments_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            pf_instance.publish_private_dir(parent_fd, staged.staging.name, staged.deployment_id)
+        finally:
+            os.close(parent_fd)
+        self.publish_fresh("private_state", self.deployments_dir / staged.deployment_id)
+        return {"deployment_id": staged.deployment_id, "record_sha256": pf_instance.sha256_bytes(data)}
+
+    def inspect_reference(self, service):
+        """The tag the active override names for ``service`` (for an image observed at seal)."""
+        try:
+            images = pf_docker.parse_image_override(pf_instance.read_bytes_nofollow(self.override),
+                                                    project=self.context.compose_project)
+        except (OSError, pf_docker.DockerScopeError) as exc:
+            raise Failure(f"the active image override cannot be read ({exc})") from exc
+        return images[service]
+
+    def finish_deployment(self, staged, pointer, *, restored_from=None):
+        """Seal, then the pointer, then the journal (order: record -> pointer -> journal). A seal failure after a
+        healthy activation is non-wedging (section 3.3): the pointer is written without a record, the journal is
+        closed and ``deployment-record-incomplete`` is raised without stopping the application."""
+        try:
+            sealed = self.seal_deployment(staged, restored_from=restored_from)
+        except (Failure, OSError, pf_instance.ContextError, pf_config.ConfigError, pf_docker.DockerScopeError,
+                ValueError, KeyError, TypeError) as exc:
+            detail = (str(exc).splitlines() or [type(exc).__name__])[0][:300]
+            write_json(self.state / "deployed.json", dict(pointer, deployment_seal_failed=self.operation_id))
+            self.pending.unlink()
+            self.write_private_json("deployment-artifact.json", {"deployment_id": staged.deployment_id,
+                                                                 "state": "seal-failed", "detail": detail})
+            raise Failure(
+                f"deployment-record-incomplete: the application was activated and passed health checks, but its "
+                f"deployment record could not be sealed ({detail}). The operation was closed and the deployment is "
+                "treated as one without a record; the next deploy, update, rollback or restore-instance seals one. "
+                f"Run 'pf --instance {self.context.slug} status'.") from exc
+        write_json(self.state / "deployed.json", dict(pointer, deployment_id=sealed["deployment_id"],
+                                                      deployment_record_sha256=sealed["record_sha256"]))
+        if staged.kind == "restore-instance":
+            # PF-A2.3 FL-9: a restore publishes the private state files it (re)creates with the policy target.
+            self.publish_fresh("private_state", self.state / "deployed.json")
+        self.pending.unlink()
+        self.write_private_json("deployment-artifact.json", {"deployment_id": sealed["deployment_id"],
+                                                             "state": "sealed",
+                                                             "record_sha256": sealed["record_sha256"]})
+        log(f"Deployment {sealed['deployment_id']} sealed (record {sealed['record_sha256'][:12]}).")
+        return sealed
+
+    # ------------------------------------------- PostgreSQL facts (PF-A3.1 section 3.8)
+
+    def server_version_num(self):
+        text = self.sql("postgres", "SHOW server_version_num;")
+        if not re.fullmatch(r"[0-9]{5,7}", text or ""):
+            raise Failure("Unexpected PostgreSQL server version output.")
+        return int(text)
+
+    def database_rows(self):
+        """{name: per-database facts} of every non-template database except ``postgres`` (read-only)."""
+        rows = {}
+        for line in self.sql("postgres", FACTS_SQL).splitlines():
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) != 6 or not PG_IDENTIFIER_RE.fullmatch(parts[0]) or not PG_IDENTIFIER_RE.fullmatch(parts[1]) \
+                    or parts[5] not in ("t", "f") or not 1 <= len(parts[2]) <= 32 \
+                    or not all(1 <= len(value) <= 128 for value in parts[3:5]):
+                raise Failure("Unexpected PostgreSQL inventory output.")
+            rows[parts[0]] = {"name": parts[0], "owner": parts[1], "encoding": parts[2], "collate": parts[3],
+                              "ctype": parts[4], "allow_connections": parts[5] == "t"}
+        return rows
+
+    def extensions(self, database):
+        result = []
+        for line in self.sql(database, EXTENSIONS_SQL).splitlines():
+            if not line:
+                continue
+            name, separator, version = line.partition("|")
+            if not separator or not PG_IDENTIFIER_RE.fullmatch(name) or not 1 <= len(version) <= 64:
+                raise Failure("Unexpected PostgreSQL inventory output.")
+            result.append({"name": name, "version": version})
+        return result
+
+    def row_counts(self, database):
+        """$defs.row_counts of ``database``: one read-only statement over every user table."""
+        pairs = []
+        for line in self.sql(database, ROW_COUNTS_SQL).splitlines():
+            if not line:
+                continue
+            name, separator, count = line.partition("|")
+            if not separator or not ROW_NAME_RE.fullmatch(name) or not re.fullmatch(r"[0-9]+", count):
+                raise Failure("Unexpected PostgreSQL inventory output.")
+            pairs.append([name, int(count)])
+        pairs.sort()
+        return {"tables": len(pairs), "total_rows": sum(count for _, count in pairs),
+                "sha256": pf_instance.sha256_bytes(pf_instance.normalize_json(pairs))}
+
+    def role_inventory(self):
+        """Role evidence (no password, no hash); never executed at restore (OD-16-28)."""
+        roles = []
+        for line in self.sql("postgres", ROLES_SQL).splitlines():
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) != 7 or not PG_IDENTIFIER_RE.fullmatch(parts[0]) or any(item not in ("t", "f")
+                                                                                   for item in parts[1:]):
+                raise Failure("Unexpected PostgreSQL inventory output.")
+            flags = [item == "t" for item in parts[1:]]
+            roles.append(dict(zip(("name", "superuser", "create_role", "create_db", "login", "replication",
+                                   "bypass_rls"), [parts[0]] + flags)))
+        return roles
+
+    def available_extensions(self):
+        names = set()
+        for line in self.sql("postgres", AVAILABLE_EXTENSIONS_SQL).splitlines():
+            if not line:
+                continue
+            if not PG_IDENTIFIER_RE.fullmatch(line):
+                raise Failure("Unexpected PostgreSQL inventory output.")
+            names.add(line)
+        return names
+
+    @contextlib.contextmanager
+    def connection_window(self, database, allow_connections):
+        """A store that refuses connections (``pf_keep_*``) is opened for the queries and dumps inside the block and
+        closed again in ``finally`` (both changes are journaled mutations)."""
+        if allow_connections:
+            yield
+            return
+        self.sql("postgres", f"ALTER DATABASE {quote_identifier(database)} ALLOW_CONNECTIONS true;", mutation=True)
+        try:
+            yield
+        finally:
+            self.sql("postgres", f"ALTER DATABASE {quote_identifier(database)} ALLOW_CONNECTIONS false;",
+                     mutation=True)
+
+    def store_facts(self, row, *, counts):
+        """Extensions, heads and (writers stopped) row counts of one connectable store."""
+        name = row["name"]
+        return dict(row, extensions=self.extensions(name), heads=self.db_heads(name),
+                    row_counts=self.row_counts(name) if counts else None)
+
+    def database_facts(self, databases, *, counts=False):
+        """Section 3.8 facts of ``databases`` (window-aware: a non-connectable store is opened for its queries)."""
+        rows = self.database_rows()
+        facts = []
+        for name in databases:
+            row = rows.get(name)
+            if row is None:
+                raise Failure(f"Unexpected PostgreSQL inventory output: database {name} is not listed.")
+            with self.connection_window(name, row["allow_connections"]):
+                facts.append(self.store_facts(row, counts=counts))
+        return facts
+
+    @staticmethod
+    def store_record(facts, *, role, dump, listing, group):
+        """$defs.store of one captured database."""
+        return {"store_id": "postgresql:" + facts["name"], "kind": "postgresql_logical",
+                "strategy": dict(pf_config.STRATEGY), "database": facts["name"], "role": role,
+                "allow_connections": facts["allow_connections"], "owner": facts["owner"],
+                "encoding": facts["encoding"], "collate": facts["collate"], "ctype": facts["ctype"],
+                "extensions": facts["extensions"], "alembic_heads": sorted(set(facts["heads"])),
+                "row_counts": facts["row_counts"], "dump": dump, "list": listing, "consistency_group": group}
+
+    def dump_store(self, database, folder, relative):
+        """``pg_dump --format=custom`` of ``database`` to ``<relative>.partial`` then ``relative`` (non-empty)."""
+        target = Path(folder) / relative
+        partial = target.with_name(target.name + ".partial")
+        with partial.open("xb") as stream:
+            self.database_program("pg_dump", "-d", database, "--format=custom", "--no-owner", "--no-privileges",
+                                  output=stream)
+        if not partial.stat().st_size:
+            raise Failure("The database dump is empty; checkpoint is incomplete.")
+        os.replace(str(partial), str(target))
+        return target
+
+    def write_dump_list(self, dump, listing):
+        """``pg_restore --list`` of a dump into ``listing`` (the store's list payload)."""
+        with Path(dump).open("rb") as stream, Path(listing).open("xb") as output:
+            self.compose("exec", "-T", "db", "pg_restore", "--list", input_file=stream, output=output)
+        if not Path(listing).stat().st_size:
+            raise Failure("The database dump list is empty; the dump is unreadable.")
+
+    # ------------------------------------------- captures (PF-A3.1 section 3.4)
+
+    def observe_contract(self):
+        """Read-only (no raise on mismatch): live heads, the running backend image, its image contract (on a retained
+        tag of that ID) and, with a valid deployment record, the record's backend image (section 3.4)."""
+        observation = {"live_heads": self.db_heads(), "image_heads": None, "files": None, "backend_image_id": None,
+                       "expected_backend_image_id": None, "matches": False, "kind": "schema-image-mismatch",
+                       "detail": ""}
+        view = self.current_deployment()
+        if view is not None and view.mismatch is None:
+            observation["expected_backend_image_id"] = view.record["images"]["backend"]["id"]
+        try:
+            observation["backend_image_id"] = self.inspect("backend")["Image"]
+        except DaemonFailure:
+            raise
+        except Failure as exc:
+            observation["detail"] = "the backend image cannot be identified: " + str(exc).splitlines()[0]
+            return observation
+        try:
+            images = self.retain_images(utc().lower() + "-observe-" + uuid.uuid4().hex[:6])
+            override = self.state / "inspect-images.yaml"
+            self.make_override(images, override)
+            contract = self.image_contract(override=override)
+            observation["image_heads"] = sorted(set(contract["heads"]))
+            observation["files"] = dict(contract["files"])
+        except DaemonFailure:
+            raise
+        except (Failure, ValueError, KeyError, TypeError) as exc:
+            observation["detail"] = "the image contract cannot be read: " + (str(exc).splitlines() or ["?"])[0]
+            return observation
+        if observation["image_heads"] != observation["live_heads"]:
+            observation["detail"] = (f"live Alembic heads {','.join(observation['live_heads']) or 'none'} differ from "
+                                     f"the image's {','.join(observation['image_heads']) or 'none'}")
+        elif observation["expected_backend_image_id"] not in (None, observation["backend_image_id"]):
+            observation.update(kind="deployment-image-mismatch",
+                               detail="the running backend image is not the deployment record's")
+        else:
+            observation.update(matches=True, kind=None)
+        return observation
+
+    def deployment_image_mismatch(self, service, running, view, *, paused):
+        head = (f"deployment-image-mismatch: the running {service} image {running[7:19]} is not deployment "
+                f"{view.deployment_id}'s {view.record['images'][service]['id'][7:19]}")
+        if paused:
+            return Failure(head + f"; the checkpoint was not created. Application services are stopped; 'pf --instance "
+                           f"{self.context.slug} resume' reopens the unchanged deployment.")
+        return Failure(head + ". A healthy checkpoint would bind the wrong images. Nothing was changed.")
+
+    def capture_preflight(self, kind):
+        """Read-only, before any confirmation, pause or effect of `pf backup`, update, reset-db, purge and rollback
+        (section 3.4): the deployment image binding and the provable deployed source of a healthy capture."""
+        view = self.current_deployment()
+        if view is not None and view.mismatch is None:
+            for service in pf_docker.BUILT_SERVICES:
+                try:
+                    running = self.inspect(service)["Image"]
+                except DaemonFailure:
+                    raise
+                except Failure:
+                    continue  # an absent container is refused by the capture itself
+                if running != view.record["images"][service]["id"] and kind != "rollback":
+                    raise self.deployment_image_mismatch(service, running, view, paused=False)
+            return
+        if kind == "rollback":
+            return  # preserve_current falls back to an emergency preservation
+        origin = self.deployed_source_origin(self.deployed_commit())
+        if view is not None:
+            if origin is None:
+                raise Failure(f"deployment-artifact-mismatch: {view.deployment_id}: {view.mismatch.split(':', 1)[0]} "
+                              "differs from the deployment record, and the deployed source cannot be proven from the "
+                              "protected source store or the workspace either. Keep the folder as evidence; see "
+                              "SYNOLOGY_ADMIN §16. Nothing was changed.")
+            label = "protected source store" if origin == "protected-store" else "proven workspace"
+            log(f"note: deployment-artifact-mismatch: {view.deployment_id}: {view.mismatch.split(':', 1)[0]} differs "
+                f"from the deployment record; it is kept as evidence and not used. The checkpoint takes the source "
+                f"from the {label}.")
+            return
+        if origin is None:
+            raise Failure(self.CANNOT_RECONSTRUCT)
+
+    def observe_quiescence(self):
+        """$defs.quiescence: writers are stopped when neither backend nor frontend runs (missing = absent)."""
+        states = {}
+        for service in pf_docker.BUILT_SERVICES:
+            try:
+                states[service] = "running" if self.inspect(service)["State"].get("Running") else "stopped"
+            except DaemonFailure:
+                raise
+            except Failure:
+                states[service] = "absent"
+        mode = "writers_stopped" if "running" not in states.values() else "single_store_snapshot"
+        return {"mode": mode, "observed_at": utc(), "backend": states["backend"], "frontend": states["frontend"]}
+
+    def retain_image(self, service, backup_id):
+        """Tag the running ``service`` image for this bundle and return its $defs.image identity."""
+        image_id = self.inspect(service)["Image"]
+        reference = f"{self.config['project']}-{service}:backup-{backup_id.lower()}"
+        self.docker("tag", image_id, reference)
+        self.created_image_refs.append(reference)
+        identity = self.image_identity(reference, reference=reference)
+        if identity["id"] != image_id:
+            raise Failure(f"The retained {service} tag {reference} does not name the running image.")
+        return identity
+
+    def _capture_images(self, backup_id, *, healthy, deployment, exclusions):
+        """Images of a capture: backend/frontend tagged, db identified (not tagged); returns (images, binding)."""
+        images = {}
+        for service in pf_docker.BUILT_SERVICES:
+            try:
+                images[service] = self.retain_image(service, backup_id)
+            except DaemonFailure:
+                raise
+            except (Failure, ValueError, KeyError, IndexError) as exc:
+                if healthy:
+                    raise
+                images[service] = None
+                exclusions.append({"item": "image:" + service, "reason": "the running image could not be identified: "
+                                   + (str(exc).splitlines() or ["?"])[0][:300]})
+        db_id = self.inspect("db")["Image"]
+        try:
+            images["db"] = self.image_identity(db_id, reference=pf_docker.DB_IMAGE)
+        except DaemonFailure:
+            raise
+        except (Failure, ValueError, KeyError, IndexError) as exc:
+            if healthy:
+                raise
+            images["db"] = None
+            exclusions.append({"item": "image:db", "reason": "the database image could not be identified: "
+                               + (str(exc).splitlines() or ["?"])[0][:300]})
+        binding = None
+        if deployment is not None:
+            for service in pf_docker.BUILT_SERVICES:
+                image = images[service]
+                if image is not None and image["id"] != deployment.record["images"][service]["id"]:
+                    if healthy:
+                        raise self.deployment_image_mismatch(service, image["id"], deployment, paused=True)
+                    binding = binding or (service, image["id"])
+        return images, binding, db_id
+
+    def _capture_source(self, folder, *, healthy, deployment, mismatch_view, unsupported, exclusions):
+        """The source payload of a capture (section 3.4 step 4): (source section, payload entry or None)."""
+        target = folder / "source.tar.gz"
+        if deployment is not None:
+            record = deployment.record["source"]
+            try:
+                copy_fresh(deployment.folder / "source.tar.gz", target)
+                entry = self._archive_payload(folder, "source.tar.gz", "source_archive",
+                                              expected=(record["archive"]["size"], record["archive"]["sha256"]))
+                return ({"provenance": record["provenance"], "commit": record["commit"], "remote": record["remote"],
+                         "origin": "deployment-artifact", "payload": "source.tar.gz",
+                         "entries_sha256": record["manifest"]["entries_sha256"]}, entry)
+            except (Failure, OSError, pf_source.SourceError) as exc:
+                if healthy:
+                    raise Failure("The deployment artifact could not be copied: " + str(exc).splitlines()[0]) from exc
+                self._discard(target)
+        commit = self.deployed_commit() if deployment is None else None
+        try:
+            result = self.create_deployed_source_archive(target, commit)
+        except DaemonFailure:
+            raise
+        except Failure:
+            if healthy:
+                raise
+            self._discard(target)
+            result = None
+        if result is not None:
+            if mismatch_view is not None:
+                reason = (f"deployment {mismatch_view.deployment_id}: {mismatch_view.mismatch.split(':', 1)[0]} "
+                          "differs from its record; kept as evidence")
+                exclusions.append({"item": "deployment-record", "reason": reason[:500]})
+            elif deployment is None:
+                exclusions.append({"item": "deployment-record",
+                                   "reason": "the deployment predates PF-A3.1 or its seal failed; no record exists"})
+            entry = self._archive_payload(folder, "source.tar.gz", "source_archive", archive=result)
+            return ({"provenance": "git_commit", "commit": commit, "remote": result["manifest"]["source"]["remote"],
+                     "origin": result["origin"], "payload": "source.tar.gz",
+                     "entries_sha256": pf_source.entries_digest(result["manifest"])}, entry)
+        exclusions.append({"item": "deployment-record", "reason": "no verified deployment record bound the source"})
+        try:
+            archived = pf_source.archive_tree(self.root, target, excludes=SOURCE_EXCLUDES, unsupported=unsupported)
+        except pf_source.SourceError as exc:
+            if unsupported == "refuse" and "unsupported entry" in str(exc):
+                raise Failure("the workspace holds a link or special file that a source replacement would destroy ("
+                              + str(exc) + ")") from exc
+            exclusions.append({"item": "source", "reason": "neither the deployed source nor the workspace could be "
+                               "archived: " + str(exc)[:300]})
+            return ({"provenance": "unknown", "commit": None, "remote": None, "origin": "none", "payload": None,
+                     "entries_sha256": None}, None)
+        entry = self._archive_payload(folder, "source.tar.gz", "source_archive", archive=archived)
+        return ({"provenance": "unknown", "commit": None, "remote": None, "origin": "workspace-unverified",
+                 "payload": "source.tar.gz", "entries_sha256": pf_source.entries_digest(archived["manifest"])},
+                dict(entry, unsupported=archived["unsupported"]))
+
+    @staticmethod
+    def _discard(path):
+        try:
+            os.unlink(str(path))
+        except FileNotFoundError:
+            pass
+
+    def _archive_payload(self, folder, path, kind, *, archive=None, expected=None):
+        """$defs.payload of a tar.gz pf extracts: size, hash and the pass 1 member inventory of its bytes."""
+        fd = os.open(str(Path(folder) / path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            size, sha256 = os.fstat(fd).st_size, self._fd_sha256(fd)
+            if expected is not None and (size, sha256) != tuple(expected):
+                raise Failure(f"{path} does not re-hash to its source after the copy")
+            if archive is None:
+                inventory = pf_source.inspect_archive(fd, limits=pf_source.SOURCE_LIMITS)
+                counts = (inventory.expanded_bytes, len(inventory.members), inventory.members_sha256)
+            else:
+                counts = (archive["expanded_bytes"], archive["members"], archive["members_sha256"])
+        finally:
+            os.close(fd)
+        return {"path": path, "type": kind, "size": size, "sha256": sha256, "store": None, "sensitive": False,
+                "expanded_bytes": counts[0], "members": counts[1], "members_sha256": counts[2]}
+
+    @staticmethod
+    def file_payload(folder, path, kind, *, store=None, sensitive=False):
+        """$defs.payload of a file pf never extracts (dumps, lists, globals, images, configuration, state)."""
+        target = Path(folder) / path
+        return {"path": path, "type": kind, "size": target.stat().st_size, "sha256": digest(target), "store": store,
+                "sensitive": sensitive, "expanded_bytes": None, "members": None, "members_sha256": None}
+
+    def _record_capture(self, view, record, mismatch):
+        if self.operation_dir is None:
+            return
+        path = self.operation_dir / "captures.json"
+        entries = []
+        if os.path.lexists(str(path)):
+            entries = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(path), label=str(path))
+        entries.append({"bundle_id": view.bundle_id, "bundle_kind": view.bundle_kind,
+                        "capture_class": view.capture_class, "manifest_sha256": view.manifest_sha256,
+                        "verification_id": record["verification_id"] if record else None,
+                        "level": record["level"] if record else None, "result": record["result"] if record else None,
+                        "mismatch": mismatch})
+        self.write_private_json("captures.json", entries)
+
+    def write_manifest(self, folder, manifest):
+        """Seal a bundle: exactly normalize_json(manifest) (no newline) and its manifest.sha256, both fsynced."""
+        problems = lifecycle_errors(manifest, "recovery_manifest")
+        if problems:
+            raise Failure(f"Internal error: the {manifest['bundle_kind']} manifest of {manifest['bundle_id']} is "
+                          f"invalid ({len(problems)} problem(s): {'; '.join(problems[:3])}); nothing was sealed.")
+        data = pf_instance.normalize_json(manifest)
+        pf_instance._write_private_file(Path(folder) / "manifest.json", data, 0o600)
+        sha256 = pf_instance.sha256_bytes(data)
+        pf_instance._write_private_file(Path(folder) / "manifest.sha256", (sha256 + "\n").encode("ascii"), 0o600)
+        return sha256
+
+    def _capture(self, reason, *, capture_class, observation=None, unsupported="refuse"):
+        """The common capture body (section 3.4 steps 1-9) of a checkpoint: healthy, emergency or partial."""
+        if self.operation_dir is None:
+            raise Failure("Internal error: a capture runs inside a locked operation.")
+        healthy = capture_class == "healthy_checkpoint"
+        self.free_space()
+        view = self.current_deployment()
+        deployment = view if view is not None and view.mismatch is None else None
+        mismatch_view = view if view is not None and view.mismatch is not None else None
+        commit = deployment.record["source"]["commit"] if deployment is not None else self.deployed_commit()
+        backup_id = f"{utc()}-{(commit or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
+        self.ensure_backup_tree()
+        folder = self.backups_dir / backup_id
+        folder.mkdir(mode=0o700)
+        log(("Creating deployed-source + database checkpoint: " if healthy else
+             "Creating emergency preservation: ") + backup_id)
+        major = self.database_ready()
+        server = self.server_version_num()
+        quiescence = self.observe_quiescence()
+        exclusions = []
+        images, binding, db_id = self._capture_images(backup_id, healthy=healthy, deployment=deployment,
+                                                      exclusions=exclusions)
+        live_heads = sorted(set(self.db_heads()))
+        mismatch = None
+        if healthy:
+            contract = self.ensure_local_contract({service: images[service] for service in pf_docker.BUILT_SERVICES})
+            image_heads, files = sorted(set(contract["heads"])), dict(contract["files"])
+        else:
+            observation = observation or self.observe_contract()
+            image_heads, files = observation["image_heads"], dict(observation["files"] or {})
+            if not observation["matches"] or binding is not None:
+                kind = observation["kind"] if not observation["matches"] else "deployment-image-mismatch"
+                detail = observation["detail"] if not observation["matches"] else \
+                    f"the running {binding[0]} image is not the deployment record's"
+                mismatch = {"kind": kind, "live_heads": live_heads, "image_heads": image_heads,
+                            "backend_image_id": observation["backend_image_id"]
+                            if re.fullmatch(r"sha256:[0-9a-f]{64}", observation["backend_image_id"] or "") else None,
+                            "expected_backend_image_id": observation["expected_backend_image_id"],
+                            "detail": detail[:500]}
+            if not files:
+                exclusions.append({"item": "migration-files", "reason": "the image contract could not be read"})
+        source, source_entry = self._capture_source(folder, healthy=healthy, deployment=deployment,
+                                                    mismatch_view=mismatch_view, unsupported=unsupported,
+                                                    exclusions=exclusions)
+        payloads = []
+        unsupported_entries = []
+        if source_entry is not None:
+            unsupported_entries = list(source_entry.pop("unsupported", []))
+            payloads.append(source_entry)
+        workspace = self.workspace_status()
+        drift = bool(workspace["dirty"] or (workspace["head"] is not None and workspace["head"] != commit))
+        workspace_payload = None
+        if drift and source["origin"] != "workspace-unverified":
+            try:
+                archived = pf_source.archive_tree(self.root, folder / "workspace.tar.gz", excludes=SOURCE_EXCLUDES,
+                                                  unsupported=unsupported)
+            except pf_source.SourceError as exc:
+                raise Failure("Source backup refuses this workspace: " + str(exc)) from exc
+            unsupported_entries += archived["unsupported"]
+            payloads.append(self._archive_payload(folder, "workspace.tar.gz", "workspace_archive", archive=archived))
+            workspace_payload = "workspace.tar.gz"
+            log("Writable repository differs from the deployed revision; current workspace was archived separately.")
+        database = self.env()["POSTGRES_DB"]
+        dump = self.dump_store(database, folder, "database.dump")
+        self.write_dump_list(dump, folder / "database.list")
+        facts = self.database_facts([database], counts=quiescence["mode"] == "writers_stopped")[0]
+        store = self.store_record(facts, role="active", dump="database.dump", listing="database.list",
+                                  group="active")
+        payloads += [self.file_payload(folder, "database.dump", "database_dump", store=store["store_id"]),
+                     self.file_payload(folder, "database.list", "database_list", store=store["store_id"])]
+        exclusions += [{"item": "bind-mounts", "reason": "never captured (no bind paths in this profile)"},
+                       {"item": "retained-databases", "reason": "a checkpoint captures the active database only; "
+                        "retained pf_keep_* databases are captured by a purge bundle"},
+                       {"item": "external-databases", "reason": "databases outside the db service are not captured"}]
+        if not healthy and exclusions and {item["item"] for item in exclusions} & pf_config.REQUIRED_ARTIFACT_ITEMS:
+            capture_class = "partial"
+        extension_names = ", ".join(item["name"] for item in store["extensions"]) or "none"
+        manifest = {
+            "schema_version": 1, "bundle_id": backup_id, "bundle_kind": "checkpoint", "created_at": utc(),
+            "reason": reason, "capture_class": capture_class,
+            "source_instance": self.source_instance(), "producer": self.producer(), "quiescence": quiescence,
+            "source": source,
+            "deployment": {"deployment_id": deployment.deployment_id, "record_sha256": deployment.record_sha256}
+            if deployment is not None and source["origin"] == "deployment-artifact" else None,
+            "images": images, "postgresql": {"server_version_num": server, "major": major, "image_id": db_id},
+            "roles": self.role_inventory(), "stores": [store],
+            "consistency_groups": [{"group_id": "active", "stores": [store["store_id"]],
+                                    "claim": "transactional-single-store"}],
+            "compatibility": {"alembic_heads_live": live_heads, "alembic_heads_image": image_heads,
+                              "migration_files": files, "mismatch": mismatch},
+            "payloads": sorted(payloads, key=lambda item: item["path"]),
+            "workspace": {"differs_from_deployed": drift, "payload": workspace_payload,
+                          "unsupported_entries": unsupported_entries[:200]},
+            "exclusions": exclusions,
+            "manual_prerequisites": [f"PostgreSQL major {major} server with extensions: {extension_names}"],
+            "derived_from": None, "purge": None, "legacy": None,
+        }
+        manifest_sha256 = self.write_manifest(folder, manifest)
+        sealed = BundleView(folder, manifest, manifest_sha256, None, "captured")
+        record, passed = self.verify_bundle(sealed, {store["store_id"]: dump}, started_at=manifest["created_at"])
+        self._record_capture(sealed, record, mismatch["kind"] if mismatch else None)
+        if not passed:
+            failed = next(check for check in record["checks"] if check["result"] == "failed")
+            raise Failure(f"Verification of {backup_id} failed ({failed['name']}: {failed['detail']}). Verification "
+                          "database retained.")
+        # PF-A2.3: explicit backups targets for the fresh checkpoint only, verified after the change.
+        self.publish_fresh("backups", folder)
+        view = dataclasses.replace(sealed, level=record["level"], latest_verification_id=record["verification_id"])
+        log(f"Checkpoint {backup_id}: {capture_class}, {record['level']}")
+        return view
+
+    def source_instance(self):
+        return {"instance_id": self.context.instance_id, "slug": self.context.slug,
+                "compose_project": self.context.compose_project, "environment": self.config["environment"],
+                "repository": self.config["repository"], "workspace": str(self.root)}
+
+    def verify_store(self, store, dump, candidate, *, compatibility=False, drop=True):
+        """Restore one store's dump into ``candidate`` (created with the store's locale) and check heads, locale and
+        row counts (section 3.5/3.8): (checks, passed, candidate created). The candidate is dropped when ``drop`` and
+        every check passed; otherwise it is retained (evidence) and the caller decides."""
+        store_id = store["store_id"]
+        checks = []
+
+        def check(name, result, detail=""):
+            checks.append({"name": f"{name}:{store_id}", "result": result, "detail": detail[:500]})
+
+        if compatibility:
+            owner, user = store["owner"], self.env()["POSTGRES_USER"]
+            if owner is not None and owner != user:
+                check("owner", "failed", f"owner {owner} is not the frozen POSTGRES_USER {user}")
+            else:
+                check("owner", "passed")
+            available = self.available_extensions()
+            missing = [item["name"] for item in store["extensions"] if item["name"] not in available]
+            check("extensions", "failed" if missing else "passed",
+                  f"extension {missing[0]} is not available on this server" if missing else "")
+            if missing or (owner is not None and owner != user):
+                return self._remaining(checks, store_id, "not reached: compatibility failed"), False, False
+        locale = (store["encoding"], store["collate"], store["ctype"])
+        locale = None if None in locale else locale
+        try:
+            self.create_database(candidate, locale=locale)
+        except DaemonFailure:
+            raise
+        except Failure as exc:
+            detail = (f"locale {store['collate']}/{store['ctype']} is not available on this server" if locale
+                      else (str(exc).splitlines() or ["createdb failed"])[0])
+            check("restore", "failed", detail)
+            return self._remaining(checks, store_id, "not reached: the candidate could not be created"), False, False
+        try:
+            fd = os.open(str(dump), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                self.database_program("pg_restore", "-d", candidate, "--exit-on-error", "--no-owner",
+                                      "--no-privileges", input_file=stream)
+            check("restore", "passed")
+        except DaemonFailure:
+            raise
+        except (Failure, OSError) as exc:
+            check("restore", "failed", (str(exc).splitlines() or ["pg_restore failed"])[0])
+            return self._remaining(checks, store_id, "not reached: the restore failed"), False, True
+        heads = sorted(set(self.db_heads(candidate)))
+        check("heads", "passed" if heads == store["alembic_heads"] else "failed",
+              "" if heads == store["alembic_heads"] else
+              f"restored heads {','.join(heads) or 'none'} vs captured {','.join(store['alembic_heads']) or 'none'}")
+        if locale is None:
+            check("locale", "not_run", "the store recorded no locale (legacy)")
+        else:
+            row = self.database_rows().get(candidate) or {}
+            differing = [field for field, value in zip(("encoding", "collate", "ctype"), locale)
+                         if row.get(field) != value]
+            check("locale", "failed" if differing else "passed",
+                  f"{differing[0]} differs ({store[differing[0]]} vs {row.get(differing[0])})" if differing else "")
+        if store["row_counts"] is None:
+            check("rows", "not_run", "no row counts were recorded (writers were not stopped)")
+        else:
+            counts = self.row_counts(candidate)
+            expected = store["row_counts"]
+            check("rows", "passed" if counts == expected else "failed", "" if counts == expected else
+                  f"row counts differ ({expected['tables']}/{expected['total_rows']} vs "
+                  f"{counts['tables']}/{counts['total_rows']})")
+        passed = all(item["result"] != "failed" for item in checks)
+        if passed and drop:
+            self.drop_database(candidate)
+            checks.append({"name": f"drop:{candidate}", "result": "passed", "detail": ""})
+        return checks, passed, True
+
+    @staticmethod
+    def _remaining(checks, store_id, detail):
+        present = {item["name"] for item in checks}
+        for name in ("restore", "heads", "locale", "rows"):
+            if f"{name}:{store_id}" not in present:
+                checks.append({"name": f"{name}:{store_id}", "result": "failed", "detail": detail})
+        return checks
+
+    def verify_bundle(self, view, dumps, *, started_at):
+        """Restore every store of ``view`` from its own dump (``dumps``: {store_id: path}) into a fresh
+        ``pf_verify_*`` candidate, then write the data_restore_verified record bound to the manifest hash."""
+        checks, names, passed = [], [], True
+        for store in view.manifest["stores"]:
+            candidate = "pf_verify_" + uuid.uuid4().hex[:20]
+            names.append(candidate)
+            store_checks, ok, _ = self.verify_store(store, dumps[store["store_id"]], candidate)
+            checks += store_checks
+            if not ok:
+                passed = False
+                break
+        record = self.write_verification(view, level="data_restore_verified", result="passed" if passed else "failed",
+                                         target={"kind": "isolated-database", "names": names, "removed": passed},
+                                         checks=checks, started_at=started_at)
+        return record, passed
+
+    def write_verification(self, view, *, level, result, target, checks, started_at):
+        """An external VerificationRecord bound to ``view``'s exact manifest hash (section 3.5); the bundle and its
+        manifest are never edited. A3.1 writes data_restore_verified records only."""
+        if level != "data_restore_verified":
+            raise Failure("Internal error: PF-A3.1 writes data_restore_verified verification records only.")
+        record = {
+            "schema_version": 1, "verification_id": f"ver-{utc()}-{uuid.uuid4().hex[:8]}",
+            "bundle_id": view.bundle_id, "bundle_kind": view.bundle_kind, "manifest_sha256": view.manifest_sha256,
+            "level": level, "result": result, "target": target, "checks": checks, "producer": self.producer(),
+            "strategy": dict(pf_config.STRATEGY),
+            "environment": {"server_version_num": self.server_version_num(), "engine_id": self.context.daemon.engine_id,
+                            "compose_version": self.compose_version},
+            "operation_id": self.operation_id, "started_at": started_at, "finished_at": utc(),
+        }
+        problems = lifecycle_errors(record, "verification_record")
+        if problems:
+            raise Failure(f"Internal error: the verification record of {view.bundle_id} is invalid ({problems[0]}).")
+        directory = self.private_dir(self.private_dir(self.verifications_dir) / view.bundle_id)
+        pf_instance._write_private_file(directory / (record["verification_id"] + ".json"),
+                                        pf_instance.normalize_json(record), 0o600)
+        return record
+
+    def snapshot(self, reason):
+        """A healthy checkpoint (name kept; section 3.4): today's equality gate, the exact deployed source and the
+        deployment image binding; returns the sealed BundleView with its data_restore_verified level."""
+        return self._capture(reason, capture_class="healthy_checkpoint")
+
+    def capture_emergency(self, reason="emergency-manual", *, observation=None):
+        """Emergency preservation (section 3.4): the actual database, images and source with mismatch evidence and
+        no schema/image equality gate. `pf backup --emergency` (reason emergency-manual) shows the observed contract
+        and asks one typed confirmation first; a link in the workspace is then recorded instead of refused."""
+        manual = reason == "emergency-manual"
+        if manual:
+            self.database_ready()
+        observation = observation or self.observe_contract()
+        if manual:
+            log("Observed contract: live heads " + (",".join(observation["live_heads"]) or "none") + " | image heads "
+                + (",".join(observation["image_heads"] or []) or "unknown") + " | running backend image "
+                + (observation["backend_image_id"] or "unknown") + " | deployment backend image "
+                + (observation["expected_backend_image_id"] or "not recorded") + " | match: "
+                + ("yes" if observation["matches"] else "no (" + observation["detail"] + ")"))
+            confirm("EMERGENCY BACKUP " + self.context.compose_project,
+                    "Capture the current database, images and source as emergency preservation. Nothing is "
+                    "switched, restored or replaced; the capture is evidence and data for repair or export, never a "
+                    "rollback target.")
+        view = self._capture(reason, capture_class="emergency_preservation", observation=observation,
+                             unsupported="record" if manual else "refuse")
+        if manual:
+            log(f"Emergency preservation {view.bundle_id} captured ({view.level}). It is evidence and data for repair "
+                "or export, not a rollback target.")
+        return view
+
+    def preservation_failed(self, database, detail):
+        slug = self.context.slug
+        return Failure(
+            f"preservation-failed: the current database {database} could not be preserved ({detail}); the rollback did "
+            "not restore or switch anything and the current data is unchanged. Application services stay stopped. "
+            f"Preserve it manually (a pg_dump of {database} to a protected location) or fix the cause and run "
+            f"'pf --instance {slug} backup --emergency', then retry; 'pf --instance {slug} resume' reopens the "
+            "unchanged deployment.")
+
+    def preserve_current(self, reason, *, stores):
+        """INV-09 before an overwrite: a healthy checkpoint when the contract holds, else emergency preservation; the
+        active store must be sealed with a passed data_restore_verified record, else ``preservation-failed``."""
+        database = stores[0] if stores else self.env()["POSTGRES_DB"]
+        view = None
+        try:
+            observation = self.observe_contract()
+            if observation["matches"]:
+                try:
+                    view = self._capture(reason, capture_class="healthy_checkpoint", observation=observation)
+                except DaemonFailure:
+                    raise
+                except (Failure, OSError, pf_source.SourceError) as exc:
+                    log("note: a healthy checkpoint was not possible (" + (str(exc).splitlines() or ["?"])[0]
+                        + "); capturing emergency preservation instead.")
+            if view is None:
+                view = self.capture_emergency(reason, observation=observation)
+        except DaemonFailure:
+            raise
+        except (Failure, OSError, pf_source.SourceError, pf_config.ConfigError) as exc:
+            raise self.preservation_failed(database, (str(exc).splitlines() or [type(exc).__name__])[0][:300]) from exc
+        covered = {store["database"] for store in view.stores}
+        if view.level not in PASSED_LEVELS or not set(stores) <= covered:
+            raise self.preservation_failed(database, f"bundle {view.bundle_id} has level {view.level}")
+        if view.capture_class != "healthy_checkpoint":
+            mismatch = view.manifest["compatibility"]["mismatch"]
+            log(f"Current data preserved as {view.capture_class} {view.bundle_id}"
+                + (f" ({mismatch['kind']}: {mismatch['detail']})." if mismatch else "."))
+        return view
 
     def compose(self, *args, root=None, override=None, timeout=None, env=None, **kwargs):
         """One Compose invocation with frozen inputs: fixed project, files, env-file and directory.
@@ -4521,7 +5852,7 @@ class Controller:
             if actual_env.get(key) != values[key]:
                 raise Failure(f"The database container and .env disagree on {key}; refusing to target a different database.")
         self.sql(values["POSTGRES_DB"], "SELECT 1;")
-        major = int(self.sql("postgres", "SHOW server_version_num;")) // 10000
+        major = self.server_version_num() // 10000
         if major != 16:
             raise Failure("This package was designed for PostgreSQL 16; major-version upgrades require manual planning.")
         return major
@@ -4537,17 +5868,13 @@ class Controller:
         os.replace(temporary, path)
 
     def retain_images(self, backup_id):
-        images = {}
-        for service in ("backend", "frontend"):
-            image_id = self.inspect(service)["Image"]
-            reference = f"{self.config['project']}-{service}:backup-{backup_id.lower()}"
-            self.docker("tag", image_id, reference)
-            self.created_image_refs.append(reference)
-            images[service] = {"id": image_id, "reference": reference}
-        return images
+        """Tag the running backend/frontend images; PF-A3.1: each value is the enriched $defs.image identity."""
+        return {service: self.retain_image(service, backup_id) for service in pf_docker.BUILT_SERVICES}
 
     def verify_images(self, images):
-        for value in images.values():
+        """Every built service's retained tag still names the recorded image ID (a re-pointed tag is refused)."""
+        for service in pf_docker.BUILT_SERVICES:
+            value = images[service]
             actual = json.loads(self.docker("image", "inspect", value["reference"]))[0]["Id"]
             if actual != value["id"]:
                 raise Failure("A retained image is missing or changed. Rollback refuses an unverified rebuild.")
@@ -4583,101 +5910,20 @@ class Controller:
         if free < self.config["minimum_free_mb"] * 1024 * 1024:
             raise Failure("Insufficient free space on the backup volume.")
 
-    def create_database(self, name):
+    def create_database(self, name, *, locale=None):
+        """``createdb`` from template0; ``locale`` (encoding, collate, ctype) of a captured store when known."""
         quote_identifier(name)
-        self.database_program("createdb", "--owner=" + self.env()["POSTGRES_USER"], "--template=template0", name)
+        arguments = ["--owner=" + self.env()["POSTGRES_USER"], "--template=template0"]
+        if locale is not None and None not in locale:
+            arguments += ["--encoding=" + locale[0], "--lc-collate=" + locale[1], "--lc-ctype=" + locale[2]]
+        self.database_program("createdb", *arguments, name)
 
-    def restore_into(self, database, dump):
-        self.create_database(database)
-        with Path(dump).open("rb") as stream:
+    def restore_into(self, database, dump, *, locale=None):
+        self.create_database(database, locale=locale)
+        fd = os.open(str(dump), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
             self.database_program("pg_restore", "-d", database, "--exit-on-error", "--no-owner", "--no-privileges",
                                   input_file=stream)
-
-    def snapshot(self, reason, source_verified=True):
-        self.free_space()
-        try:
-            revision = self.revision()
-        except Failure:
-            if source_verified:
-                raise
-            # Unknown provenance: no commit is invented; the id carries a zero placeholder only.
-            revision = None
-        backup_id = f"{utc()}-{(revision or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
-        self.ensure_backup_tree()
-        folder = self.backups_dir / backup_id
-        folder.mkdir(mode=0o700)
-        log("Creating deployed-source + database checkpoint: " + backup_id)
-        images = self.retain_images(backup_id)
-        contract = self.ensure_local_contract(images)
-        workspace = self.workspace_status()
-        workspace_drift = bool(
-            workspace["dirty"] or (workspace["head"] is not None and workspace["head"] != revision)
-        )
-        metadata = {
-            "format": 2, "id": backup_id, "created_at": utc(), "reason": reason,
-            "status": "incomplete", "source_revision": revision,
-            "source_provenance": "git_commit" if (source_verified and revision) else "unknown",
-            "source_verified": source_verified, "project": self.config["project"],
-            "repository": self.config["repository"], "environment": self.config["environment"],
-            "database": self.env()["POSTGRES_DB"], "database_user": self.env()["POSTGRES_USER"],
-            "postgres_major": self.database_ready(), "database_heads": self.db_heads(),
-            "images": images, "migration_files": contract["files"],
-            "workspace_head": workspace["head"], "workspace_dirty": workspace["dirty"],
-            "workspace_differs_from_deployed": workspace_drift,
-        }
-        write_json(folder / "manifest.json", metadata)
-
-        source = folder / "source.tar.gz"
-        if source_verified:
-            try:
-                self.create_deployed_source_archive(source, revision)
-            except Failure:
-                if reason != "before-rollback":
-                    raise
-                source_verified = False
-                metadata["source_verified"] = False
-                metadata["source_provenance"] = "unknown"
-                create_source_archive(self.root, source)
-                log("Exact deployed source could not be reconstructed; preserving an emergency data/workspace checkpoint.")
-        else:
-            create_source_archive(self.root, source)
-
-        files = ["source.tar.gz"]
-        if workspace_drift:
-            workspace_archive = folder / "workspace.tar.gz"
-            create_source_archive(self.root, workspace_archive)
-            files.append("workspace.tar.gz")
-            metadata["workspace_archive"] = "workspace.tar.gz"
-            log("Writable repository differs from the deployed revision; current workspace was archived separately.")
-
-        partial = folder / "database.dump.partial"
-        with partial.open("wb") as stream:
-            self.database_program("pg_dump", "-d", self.env()["POSTGRES_DB"], "--format=custom", "--no-owner",
-                                  "--no-privileges", output=stream)
-        if not partial.stat().st_size:
-            raise Failure("The database dump is empty; checkpoint is incomplete.")
-        dump = folder / "database.dump"
-        partial.rename(dump)
-        with dump.open("rb") as stream, (folder / "database.list").open("wb") as output:
-            self.compose("exec", "-T", "db", "pg_restore", "--list", input_file=stream, output=output)
-        files.extend(["database.dump", "database.list"])
-        verification_db = "pf_verify_" + uuid.uuid4().hex[:20]
-        log("Verifying the dump with a full restore into " + verification_db)
-        self.restore_into(verification_db, dump)
-        if self.db_heads(verification_db) != metadata["database_heads"]:
-            raise Failure("Restored Alembic revisions do not match the snapshot. Verification database retained.")
-        self.drop_database(verification_db)
-        metadata.update({
-            "status": "complete", "restore_test": "passed",
-            "source_verified": source_verified,
-            "checksums": {name: digest(folder / name) for name in files},
-        })
-        write_json(folder / "manifest.json", metadata)
-        (folder / "manifest.sha256").write_text(digest(folder / "manifest.json") + "\n")
-        # PF-A2.3: explicit backups targets for the fresh checkpoint only, verified after the change.
-        self.publish_fresh("backups", folder)
-        log("Checkpoint verified: " + str(folder))
-        return metadata
 
     def ensure_backup_tree(self):
         """Create the checkpoint tree inside an explicit mutation; construction never does this. PF-A2.3: each
@@ -4693,25 +5939,40 @@ class Controller:
                 directory.mkdir(mode=0o750)
             self.apply_single("recovery", directory, "dir")
 
+    # ------------------------------------------- strict bundle reader (PF-A3.1 section 3.1)
+
+    def _listed(self, kind, folder):
+        """One listing entry: the strict read, or the folder with the code of its refusal (never raised here)."""
+        try:
+            return self.read_bundle(kind, folder, quiet=True)
+        except Failure as exc:
+            return InvalidBundle(Path(folder), failure_code(exc), str(exc))
+
     def snapshots(self):
-        result = []
-        if not self.backups_dir.is_dir():
-            return result
-        for folder in self.backups_dir.iterdir():
-            if folder.is_dir() and BACKUP_RE.fullmatch(folder.name):
-                try:
-                    metadata = load_json(folder / "manifest.json")
-                    result.append(metadata)
-                except (OSError, ValueError):
-                    result.append({"id": folder.name, "status": "invalid", "source_revision": "unknown"})
-        return sorted(result, key=lambda m: m["id"], reverse=True)
+        """Every checkpoint folder of this instance, newest first: a BundleView or an InvalidBundle. Read-only: a
+        legacy manifest migrates in memory and nothing is written."""
+        if not real_directory(self.backups_dir):
+            return []
+        self.ensure_config()  # the instance binding (step 6) reads the configured repository
+        items = [self._listed("checkpoint", folder) for folder in self.backups_dir.iterdir()
+                 if BACKUP_RE.fullmatch(folder.name)]
+        return sorted(items, key=lambda item: item.bundle_id, reverse=True)
+
+    @staticmethod
+    def bundle_suffix(item):
+        legacy = item.manifest["legacy"]
+        return f"  legacy-format-{legacy['format']}" if legacy is not None else ""
 
     def display_page(self, items, page):
         selected, pages, start = page_items(items, page)
         log(f"Backups: newest first | page {page}/{pages} | {len(items)} total")
         for number, item in enumerate(selected, start + 1):
-            log(f"{number:>3}. {item['id']}  [{item['status']}]  "
-                f"{item.get('reason', '')}  DB={','.join(item.get('database_heads', [])) or 'uninitialized'}")
+            if isinstance(item, InvalidBundle):
+                log(f"{number:>3}. {item.bundle_id}  [invalid: {item.code}]")
+                continue
+            log(f"{number:>3}. {item.bundle_id}  [{CLASS_NAMES[item.capture_class]}|{LEVEL_NAMES[item.level]}]  "
+                f"{item.display_reason}  DB={','.join(item.database_heads) or 'uninitialized'}  "
+                f"source={item.source_display}{self.bundle_suffix(item)}")
         return pages
 
     def choose_snapshot(self, requested=None):
@@ -4719,10 +5980,11 @@ class Controller:
         if not items:
             raise Failure("No revision checkpoints exist yet. Legacy dump-only backups cannot restore source.")
         if requested:
-            matches = [item for item in items if item["id"] == requested or item.get("source_revision") == requested]
+            matches = [item for item in items if item.bundle_id == requested
+                       or (isinstance(item, BundleView) and item.source_hypothesis == requested)]
             if len(matches) != 1:
                 raise Failure("Specify an exact backup ID, or a full SHA with exactly one matching backup.")
-            return self.verify_snapshot(matches[0]["id"])
+            return self.verify_snapshot(matches[0].bundle_id)
         if unattended():
             raise Failure("Interactive selection requires a terminal; pass a backup ID instead.")
         page = 1
@@ -4736,28 +5998,305 @@ class Controller:
             elif answer == "p":
                 page = max(1, page - 1)
             elif answer.isdigit() and 1 <= int(answer) <= len(items):
-                return self.verify_snapshot(items[int(answer) - 1]["id"])
+                return self.verify_snapshot(items[int(answer) - 1].bundle_id)
 
     def verify_snapshot(self, backup_id):
-        if not BACKUP_RE.fullmatch(backup_id):
+        """The strict read of one checkpoint of this instance (name kept; section 3.1)."""
+        if not isinstance(backup_id, str) or not BACKUP_RE.fullmatch(backup_id):
             raise Failure("Invalid backup ID.")
-        folder = self.backups_dir / backup_id
-        if digest(folder / "manifest.json") != (folder / "manifest.sha256").read_text().strip():
-            raise Failure("Backup manifest checksum mismatch.")
-        metadata = load_json(folder / "manifest.json")
-        if metadata.get("status") != "complete" or metadata.get("format") not in (1, 2) or metadata.get("id") != backup_id:
-            raise Failure("The selected checkpoint is incomplete or unsupported.")
-        if metadata.get("project") != self.config["project"] or metadata.get("repository") != self.config["repository"]:
-            raise Failure("Checkpoint belongs to a different deployment.")
-        required = ("source.tar.gz", "database.dump", "database.list")
-        for name in required:
-            if digest(folder / name) != metadata["checksums"].get(name):
-                raise Failure("Backup checksum mismatch: " + name)
-        if metadata.get("format") == 2 and metadata.get("workspace_archive"):
-            name = metadata["workspace_archive"]
-            if digest(folder / name) != metadata["checksums"].get(name):
-                raise Failure("Backup checksum mismatch: " + name)
-        return metadata
+        return self.read_bundle("checkpoint", self.backups_dir / backup_id)
+
+    def read_bundle(self, kind, folder, *, quiet=False):
+        """Steps 1-9 of section 3.1 before any confirmation, journal, extraction, image load or database effect.
+        Writes nothing except, inside an open operation, a legacy manifest's migration record and migrated bytes.
+        ``quiet``: listings (no notes are logged)."""
+        folder = Path(folder)
+        name = folder.name
+        if kind == "purge-bundle":
+            if folder.parent != self.recovery_root or not real_directory(folder):
+                raise Failure(
+                    f"recovery-outside-instance: {folder} is not a bundle directory of instance {self.context.slug} "
+                    f"({self.recovery_root}); only the selected instance's own recovery bundles can be listed or "
+                    "restored. Nothing was changed.")
+            if not RECOVERY_RE.fullmatch(name):
+                raise Failure("Invalid recovery bundle path.")
+        else:
+            if folder.parent != self.backups_dir or not BACKUP_RE.fullmatch(name):
+                raise Failure("Invalid backup ID.")
+            if not real_directory(folder):
+                raise bundle_failure("manifest-missing", name, "the checkpoint folder is missing or not a directory")
+        try:
+            dir_fd = os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise bundle_failure("manifest-missing", name, f"the bundle folder cannot be opened ({exc.strerror})") \
+                from exc
+        try:
+            return self._read_bundle_at(kind, folder, dir_fd, quiet=quiet)
+        except OSError as exc:
+            raise bundle_failure("bundle-unreadable", name, f"{exc.strerror or exc}") from exc
+        finally:
+            os.close(dir_fd)
+
+    @staticmethod
+    def _bundle_file(dir_fd, name, limit):
+        """A protected manifest file of a bundle folder: no-follow, regular, root-owned, not group/other writable."""
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit or info.st_uid != pf_instance.TRUSTED_UID \
+                    or stat.S_IMODE(info.st_mode) & 0o022:
+                raise ValueError(f"{name} is not a protected regular file of at most {limit} bytes")
+            data = b""
+            while len(data) <= limit:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                data += block
+            if len(data) > limit:
+                raise ValueError(f"{name} exceeds {limit} bytes")
+            return data
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def open_bundle_payload(dir_fd, path):
+        """A payload of a bundle folder opened component by component without following any link (section 3.1
+        step 7); FileNotFoundError, or OSError(ELOOP/ENOTDIR) for a link on the way."""
+        parts = path.split("/")
+        current = os.dup(dir_fd)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=current)
+                os.close(current)
+                current = child
+            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=current)
+        finally:
+            os.close(current)
+
+    @staticmethod
+    def _fd_sha256(fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        hasher = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                return hasher.hexdigest()
+            hasher.update(block)
+
+    def _check_payload(self, dir_fd, bundle_id, path, size, sha256, *, tail="Nothing was changed."):
+        """Step 7 for one payload: an open descriptor of a no-follow, unlinked regular file with exactly ``size``
+        (None: any) bytes and ``sha256``; the caller closes it. Returns (fd, size)."""
+        try:
+            fd = self.open_bundle_payload(dir_fd, path)
+        except FileNotFoundError as exc:
+            raise bundle_failure("bundle-payload-mismatch", bundle_id, f"{path}: missing", tail=tail) from exc
+        except OSError as exc:
+            reason = "missing" if exc.errno == errno.ENOENT else "not a regular file"
+            raise bundle_failure("bundle-payload-mismatch", bundle_id, f"{path}: {reason}", tail=tail) from exc
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise bundle_failure("bundle-payload-mismatch", bundle_id, f"{path}: not a regular file", tail=tail)
+            if info.st_nlink != 1:
+                raise bundle_failure("bundle-payload-mismatch", bundle_id, f"{path}: linked", tail=tail)
+            if size is not None and info.st_size != size:
+                raise bundle_failure("bundle-payload-mismatch", bundle_id, f"{path}: size", tail=tail)
+            if self._fd_sha256(fd) != sha256:
+                raise bundle_failure("bundle-payload-mismatch", bundle_id, f"{path}: hash", tail=tail)
+            os.lseek(fd, 0, os.SEEK_SET)
+            return fd, info.st_size
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _verify_payload(self, dir_fd, bundle_id, path, size, sha256):
+        fd, actual = self._check_payload(dir_fd, bundle_id, path, size, sha256)
+        os.close(fd)
+        return actual
+
+    @staticmethod
+    def _folder_entries(dir_fd, limit=20000):
+        """Every entry below a bundle folder descriptor (no-follow walk; files are never opened): [(path, is_dir)]."""
+        found = []
+        stack = [(os.dup(dir_fd), "")]
+        try:
+            while stack:
+                fd, prefix = stack.pop()
+                try:
+                    with os.scandir(fd) as listing:
+                        entries = sorted((entry.name, entry.is_dir(follow_symlinks=False)) for entry in listing)
+                    for name, is_dir in entries:
+                        path = prefix + name
+                        found.append((path, is_dir))
+                        if len(found) > limit:
+                            raise ValueError("the bundle folder has too many entries")
+                        if is_dir:
+                            stack.append((os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                                  dir_fd=fd), path + "/"))
+                finally:
+                    os.close(fd)
+        finally:
+            for fd, _ in stack:
+                os.close(fd)
+        return found
+
+    @staticmethod
+    def _unlisted(entries, payload_paths):
+        allowed = {"manifest.json", "manifest.sha256"} | set(payload_paths)
+        for path in payload_paths:
+            parts = path.split("/")
+            allowed.update("/".join(parts[:index]) for index in range(1, len(parts)))
+        return [path for path, _ in entries if path not in allowed]
+
+    def _refuse_state_files(self, bundle_id, state_files):
+        """The PF-A1.4 restore allowlist of a purge bundle's state files (checked value = consumed value)."""
+        if not isinstance(state_files, list):
+            raise Failure(
+                f"recovery-state-file-refused: bundle {bundle_id} lists state files as {type(state_files).__name__}, "
+                f"not a list of file names; only {', '.join(RESTORABLE_STATE_FILES)} can be restored into protected "
+                "state. Nothing was changed.")
+        for item in state_files:
+            if item not in RESTORABLE_STATE_FILES:
+                raise Failure(
+                    f"recovery-state-file-refused: bundle {bundle_id} lists state file {item!r}; only "
+                    f"{', '.join(RESTORABLE_STATE_FILES)} can be restored into protected state. Nothing was changed.")
+
+    def _read_bundle_at(self, kind, folder, dir_fd, *, quiet):
+        name = folder.name
+        try:
+            data = self._bundle_file(dir_fd, "manifest.json", MANIFEST_READ_LIMIT)
+            hash_text = self._bundle_file(dir_fd, "manifest.sha256", 4096)
+        except FileNotFoundError as exc:
+            raise bundle_failure("manifest-missing", name, "manifest.json or manifest.sha256 is missing") from exc
+        except (OSError, ValueError) as exc:
+            raise bundle_failure("manifest-invalid", name, f"1 problem(s): {exc}") from exc
+        manifest_sha256 = pf_instance.sha256_bytes(data)
+        lines = hash_text.decode("ascii", "replace").splitlines()
+        if not lines or lines[0].strip() != manifest_sha256:
+            raise bundle_failure("manifest-checksum-mismatch", name, "manifest.json does not match manifest.sha256")
+        try:
+            parsed = pf_instance.parse_strict_json(data, label=f"{name}/manifest.json")
+        except pf_instance.ContextError as exc:
+            raise bundle_failure("manifest-invalid", name, f"1 problem(s): {exc}") from exc
+        supported = ("this control reads schema_version 1 and legacy formats 1 and 2")
+        legacy_record = None
+        if isinstance(parsed, dict) and "schema_version" in parsed:
+            if type(parsed["schema_version"]) is not int or parsed["schema_version"] != 1:
+                raise bundle_failure("manifest-schema-unsupported", name,
+                                     f"schema_version {parsed['schema_version']!r} ({supported})")
+            problems = [] if data == pf_instance.normalize_json(parsed) else ["not normalized"]
+            problems = problems or lifecycle_errors(parsed, "recovery_manifest")
+            if not problems and parsed["bundle_id"] != name:
+                problems.append(f"bundle_id {parsed['bundle_id']} is not the folder name")
+            if not problems and parsed["bundle_kind"] != kind:
+                problems.append(f"bundle_kind {parsed['bundle_kind']} is not {kind}")
+            if problems:
+                raise bundle_failure("manifest-invalid", name,
+                                     f"{len(problems)} problem(s): " + "; ".join(problems[:10]))
+            manifest = parsed
+            if kind == "purge-bundle":
+                self._refuse_state_files(name, manifest["purge"]["state_files"])
+            self._bind_instance(kind, name, manifest)
+            for payload in manifest["payloads"]:
+                self._verify_payload(dir_fd, name, payload["path"], payload["size"], payload["sha256"])
+            unlisted = self._unlisted(self._folder_entries(dir_fd), [item["path"] for item in manifest["payloads"]])
+            if unlisted:
+                raise bundle_failure("bundle-unlisted-file", name, f"{unlisted[0]} is not listed in the manifest")
+        elif isinstance(parsed, dict) and type(parsed.get("format")) is int and parsed["format"] in (1, 2):
+            if parsed.get("id") != name:
+                raise bundle_failure("manifest-schema-unsupported", name,
+                                     f"legacy id {parsed.get('id')!r} is not the folder name ({supported})")
+            if kind == "purge-bundle":
+                self._refuse_state_files(name, parsed.get("state_files", []))
+            checksums = parsed.get("checksums")
+            if not isinstance(checksums, dict) or not checksums:
+                raise bundle_failure("manifest-schema-unsupported", name,
+                                     f"the legacy checksum map is empty or missing ({supported})")
+            sizes = {}
+            for path, digest_value in sorted(checksums.items()):
+                if pf_config.payload_type_for(path) is None or not isinstance(digest_value, str):
+                    raise bundle_failure("manifest-schema-unsupported", name,
+                                         f"legacy payload {path!r} has no payload type ({supported})")
+                sizes[path] = self._verify_payload(dir_fd, name, path, None, digest_value)
+            unlisted = self._unlisted(self._folder_entries(dir_fd), list(checksums))
+            try:
+                manifest, legacy_record = pf_config.migrate_legacy_manifest(
+                    parsed, legacy_sha256=manifest_sha256, bundle_kind=kind, payload_sizes=sizes,
+                    unlisted_entries=unlisted)
+            except pf_config.ConfigError as exc:
+                raise Failure(f"{exc} ({supported}). Nothing was changed.") from exc
+            problems = lifecycle_errors(manifest, "recovery_manifest")
+            if problems:
+                raise bundle_failure("manifest-schema-unsupported", name,
+                                     f"legacy manifest cannot be migrated ({problems[0]})")
+            self._bind_instance(kind, name, manifest)
+        else:
+            raise bundle_failure("manifest-schema-unsupported", name, f"unrecognized manifest shape ({supported})")
+        level, latest = self.verification_level(name, manifest_sha256, quiet=quiet)
+        view = BundleView(folder, manifest, manifest_sha256, legacy_record, level, latest)
+        if legacy_record is not None and self.operation_dir is not None:
+            pf_instance._write_private_file(self.operation_dir / f"manifest-migration-{name}.json",
+                                            pf_instance.normalize_json(legacy_record), 0o600)
+            pf_instance._write_private_file(self.operation_dir / f"migrated-{name}.json",
+                                            pf_instance.normalize_json(manifest), 0o600)
+            if not quiet:
+                log(f"note: legacy-manifest-migrated: {name} format {legacy_record['legacy_format']} read as "
+                    f"{manifest['capture_class']}; limitations: {'; '.join(legacy_record['limitations'])}.")
+        return view
+
+    def _bind_instance(self, kind, name, manifest):
+        """Step 6: the bundle names this instance's project and repository (data checks; never a target)."""
+        source = manifest["source_instance"]
+        if source["compose_project"] != self.context.compose_project or source["repository"] != self.config["repository"]:
+            if kind == "checkpoint":
+                raise Failure("Checkpoint belongs to a different deployment.")
+            raise Failure(f"Recovery bundle {name} belongs to a different deployment (project "
+                          f"{source['compose_project']}). Exact restore must be run from the bootstrap root/config for "
+                          "the same project.")
+
+    def verification_level(self, bundle_id, manifest_sha256, *, quiet=False):
+        """Step 9 (read-only): (level, latest verification id) of the valid records bound to this manifest hash.
+        An invalid record is reported and ignored, never repaired."""
+        directory = self.context.artifacts_dir / "verifications" / bundle_id
+        records = []
+        try:
+            names = sorted(os.listdir(str(directory))) if real_directory(directory) else []
+        except OSError:
+            names = []
+        for file_name in names:
+            if ".tmp-" in file_name:
+                continue  # an atomic _write_private_file temporary: absent or complete, never half a record
+            detail = None
+            try:
+                data = pf_instance.read_bytes_nofollow(directory / file_name)
+                record = pf_instance.parse_strict_json(data, label=file_name)
+                problems = ([] if data == pf_instance.normalize_json(record) else ["not normalized"]) \
+                    or (lifecycle_errors(record, "verification_record") if isinstance(record, dict)
+                        else ["not an object"])
+                if not problems and (record["bundle_id"] != bundle_id
+                                     or file_name != record["verification_id"] + ".json"):
+                    problems = ["the record names another bundle or file"]
+                if problems:
+                    detail = problems[0]
+            except (OSError, pf_instance.ContextError) as exc:
+                detail = str(exc)
+            if detail is not None:
+                if not quiet:
+                    log(f"note: verification-record-invalid: {file_name}: {detail}; ignored.")
+                continue
+            if record["manifest_sha256"] == manifest_sha256:
+                records.append(record)
+        records.sort(key=lambda item: item["verification_id"])
+        passed = {item["level"] for item in records if item["result"] == "passed"}
+        if "functional_recovery_verified" in passed:
+            level = "functional_recovery_verified"
+        elif "data_restore_verified" in passed:
+            level = "data_restore_verified"
+        elif any(item["result"] == "failed" for item in records):
+            level = "failed"
+        else:
+            level = "captured"
+        return level, (records[-1]["verification_id"] if records else None)
 
     def pause(self, kind, **extra):
         write_json(self.pending, {"operation": kind, "phase": "paused", "started": utc(), **extra})
@@ -5037,6 +6576,10 @@ class Controller:
                 raise Failure("Built backend image does not contain the selected migration source.")
             if len(contract["heads"]) != 1:
                 raise Failure("Initial deployment requires exactly one Alembic head in the selected source.")
+            # PF-A3.1: the candidate's manifest (provenance proven by the protected store above), the read-only
+            # artifact capacity preflight before the confirmation, then staging before the first effect.
+            manifest = self.candidate_manifest(source, target["sha"], verified=True)
+            self.deployment_preflight(manifest)
 
             confirm(
                 "DEPLOY " + target["sha"][:12],
@@ -5044,6 +6587,7 @@ class Controller:
                 + f"Source: {target['ref']} -> {target['sha']}\n"
                 + self.environment_summary(values),
             )
+            staged = self.stage_deployment(source, manifest, kind="deploy", images=images, ref=target["ref"])
             write_json(self.pending, {
                 "operation": "deploy", "phase": "confirmed", "started": utc(),
                 "target": target, "database": values["POSTGRES_DB"],
@@ -5076,11 +6620,10 @@ class Controller:
 
             self.phase("activating")
             self.activate(images, contract["heads"])
-            write_json(self.state / "deployed.json", {
+            self.finish_deployment(staged, {
                 **target, "deployed_at": utc(), "checkpoint": None,
                 "initial_deploy": True, "database_heads": contract["heads"],
             })
-            self.pending.unlink()
             log("Initial deployment complete.")
             log("Run the UI/workflow and firewall smoke tests, then create the first baseline checkpoint with: sudo pf backup")
 
@@ -5191,77 +6734,48 @@ class Controller:
             log("  Retained bind path (never deleted): " + path)
         log("  Revision checkpoints: " + str(summary["checkpoints"]))
 
-    def database_inventory(self):
-        rows = self.sql(
-            "postgres",
-            "SELECT datname, datallowconn FROM pg_database "
-            "WHERE NOT datistemplate AND datname <> 'postgres' ORDER BY datname;",
-        )
-        result = []
-        for line in rows.splitlines():
-            if not line:
-                continue
-            parts = line.split("|", 1)
-            if len(parts) != 2:
-                raise Failure("Unexpected PostgreSQL database inventory output.")
-            quote_identifier(parts[0])
-            result.append({"name": parts[0], "allow_connections": parts[1] == "t"})
-        return result
-
-    def dump_database(self, database, destination):
-        quote_identifier(database)
-        destination = Path(destination)
-        with destination.open("wb") as output:
-            self.database_program("pg_dump", "-d", database, "--format=custom", "--no-owner", "--no-privileges",
-                                  output=output)
-        if not destination.is_file() or not destination.stat().st_size:
-            raise Failure("Database dump is empty: " + database)
-        with destination.open("rb") as stream:
-            self.compose("exec", "-T", "db", "pg_restore", "--list", input_file=stream)
-
     def create_tree_archive(self, source, destination, arcname):
+        """The revision-checkpoint history archive (``<arcname>/...``). PF-A3.1: links and special entries are
+        refused while writing, and pass 1 of the importer measures the written archive for its payload entry; an
+        archive the importer would refuse is never sealed into a bundle. Returns (expanded_bytes, members, sha)."""
         source, destination = Path(source), Path(destination)
-        with tarfile.open(destination, "w:gz") as archive:
-            if source.exists():
-                archive.add(source, arcname=arcname, recursive=True)
-        # Read every member to catch truncated/corrupt archives before deletion.
-        with tarfile.open(destination, "r:gz") as archive:
-            archive.getmembers()
 
-    def extract_tree_archive(self, archive_path, destination):
-        destination = Path(destination).resolve()
-        with tarfile.open(archive_path, "r:gz") as archive:
-            members = archive.getmembers()
-            for member in members:
-                member_path = Path(member.name)
-                target = (destination / member_path).resolve()
-                if (member_path.is_absolute()
-                        or (target != destination and destination not in target.parents)
-                        or not (member.isdir() or member.isfile())):
-                    raise Failure("Unsafe recovery archive member: " + member.name)
-            for member in members:
-                target = destination / member.name
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.extractfile(member) as source, target.open("wb") as output:
-                        shutil.copyfileobj(source, output)
-                    os.chmod(target, member.mode & 0o777 & ~0o022)
+        def select(info):
+            if not (info.isfile() or info.isdir()):
+                raise Failure(f"The checkpoint history holds a link or special file: {info.name}")
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mode &= 0o777
+            return info
+
+        with tarfile.open(destination, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            if real_directory(source):
+                archive.add(source, arcname=arcname, recursive=True, filter=select)
+        fd = os.open(str(destination), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            inventory = pf_source.inspect_archive(fd, limits=pf_source.HISTORY_LIMITS)
+        except pf_source.ArchiveRefused as exc:
+            raise self.archive_failure("revision-checkpoints.tar.gz", exc) from exc
+        finally:
+            os.close(fd)
+        return inventory.expanded_bytes, len(inventory.members), inventory.members_sha256
 
     def available_snapshot_image_refs(self):
+        """Retained image tags of every checkpoint whose strict read succeeds (legacy migrated in memory); an
+        unreadable checkpoint is skipped with a note."""
         refs = set()
         missing = []
         for item in self.snapshots():
-            if item.get("status") != "complete":
+            if isinstance(item, InvalidBundle):
+                log(f"note: checkpoint {item.bundle_id} is unreadable ({item.code}); its image tags are not covered.")
                 continue
-            for value in item.get("images", {}).values():
-                reference = value.get("reference") if isinstance(value, dict) else None
-                if not reference:
-                    continue
+            for value in item.images.values():
+                reference = value["reference"]
                 try:
                     self.docker("image", "inspect", reference)
                     refs.add(reference)
+                except DaemonFailure:
+                    raise
                 except Failure:
                     missing.append(reference)
         return sorted(refs), sorted(set(missing))
@@ -5290,40 +6804,92 @@ class Controller:
             "automatically (adoption is PF-A2).", None)
 
     def create_purge_recovery(self, preliminary):
-        """Create a verified recovery bundle before destructive project purge; return (manifest, binding plan).
+        """Create a verified recovery bundle before destructive project purge; return (BundleView, binding plan).
 
         PF-A1.3: after ``images.tar`` is verified the binding inventory and plan are built, the
         plan must equal the preliminary one (owned tags modulo the tags this operation created),
         and ``resources_before_purge`` is sealed from the binding candidates. The manifest is
         written once and never rewritten.
 
-        The active database/source and current images are mandatory. Historical
-        rollback image tags are included when still present. All non-template
-        databases in this project's dedicated PostgreSQL container are preserved.
-        PostgreSQL globals are archived for manual recovery but are not executed
-        automatically during restore.
+        PF-A3.1 (section 3.6): a schema 1 purge bundle. Payloads copied from the before-purge checkpoint and the
+        current deployment are re-hashed after the copy; every store (active and retained, inside its connection
+        window) carries its facts, heads and row counts; the db image is saved by ID with the application images;
+        the manifest is sealed and then every store is restored from the bundle's own payloads into a
+        ``pf_verify_*`` candidate (data_restore_verified record bound to this manifest's hash). PostgreSQL globals
+        are archived as evidence and never executed automatically during restore.
         """
         self.database_ready()
         checkpoint = self.snapshot("before-purge")
-        recovery_id = f"purge-{utc()}-{(checkpoint['source_revision'] or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
+        commit = checkpoint.manifest["source"]["commit"]
+        recovery_id = f"purge-{utc()}-{(commit or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
         self.ensure_recovery_tree()
         folder = self.recovery_root / recovery_id
         folder.mkdir(mode=0o700)
-        db_dir = folder / "databases"
-        state_dir = folder / "state"
-        saved_config_dir = folder / "configuration"
-        db_dir.mkdir(mode=0o700)
-        state_dir.mkdir(mode=0o700)
-        saved_config_dir.mkdir(mode=0o700)
+        for name in ("databases", "configuration"):
+            (folder / name).mkdir(mode=0o700)
         log("Creating full purge recovery bundle: " + recovery_id)
+        tail = "The purge stops before deletion; the application is reopened."
+        try:
+            return self._purge_bundle(preliminary, checkpoint, recovery_id, folder, tail)
+        except PlanChanged:
+            raise
+        except Failure as exc:
+            if failure_code(exc) in ("bundle-payload-mismatch", "purge-bundle-verification-failed"):
+                raise PlanChanged(str(exc), checkpoint) from exc
+            raise
 
-        checkpoint_folder = self.backups_dir / checkpoint["id"]
+    def _rehashed(self, folder, recovery_id, path, size, sha256, tail):
+        """A payload copied into the bundle re-hashes to its source entry (no-follow, below the bundle folder)."""
+        dir_fd = os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            return self._verify_payload_tail(dir_fd, recovery_id, path, size, sha256, tail)
+        finally:
+            os.close(dir_fd)
+
+    def _verify_payload_tail(self, dir_fd, bundle_id, path, size, sha256, tail):
+        fd, actual = self._check_payload(dir_fd, bundle_id, path, size, sha256, tail=tail)
+        os.close(fd)
+        return actual
+
+    def _purge_bundle(self, preliminary, checkpoint, recovery_id, folder, tail):
+        payloads, exclusions, prerequisites = [], [], []
+        active_store = checkpoint.active_store
+
+        def copied(source, target, entry, **changes):
+            copy_fresh(source, folder / target)
+            self._rehashed(folder, recovery_id, target, entry["size"], entry["sha256"], tail)
+            payloads.append(dict(entry, path=target, **changes))
+
         # PF-A2.3: content-only copies (no mode, owner or ACL xattr); publish_fresh sets the recovery targets.
-        copy_fresh(checkpoint_folder / "source.tar.gz", folder / "source.tar.gz")
-        if checkpoint.get("workspace_archive"):
-            copy_fresh(checkpoint_folder / checkpoint["workspace_archive"], folder / "workspace.tar.gz")
-        copy_fresh(checkpoint_folder / "database.dump", db_dir / "active.dump")
-        copy_fresh(checkpoint_folder / "database.list", db_dir / "active.list")
+        copied(checkpoint.folder / checkpoint.source_payload, "source.tar.gz", checkpoint.payload(checkpoint.source_payload))
+        workspace_payload = None
+        if checkpoint.workspace_payload:
+            copied(checkpoint.folder / checkpoint.workspace_payload, "workspace.tar.gz",
+                   checkpoint.payload(checkpoint.workspace_payload))
+            workspace_payload = "workspace.tar.gz"
+        copied(checkpoint.folder / active_store["dump"], "databases/active.dump", checkpoint.payload(active_store["dump"]))
+        copied(checkpoint.folder / active_store["list"], "databases/active.list", checkpoint.payload(active_store["list"]))
+
+        deployment = self.current_deployment()
+        deployment_ref = None
+        if deployment is not None and deployment.mismatch is None:
+            (folder / "deployment").mkdir(mode=0o700)
+            copied(deployment.folder / "deployment-record.json", "deployment/deployment-record.json",
+                   {"size": None, "sha256": deployment.record_sha256, "type": "deployment_record", "store": None,
+                    "sensitive": True, "expanded_bytes": None, "members": None, "members_sha256": None})
+            copied(deployment.folder / "compose-resolved.json", "deployment/compose-resolved.json",
+                   {"size": None, "sha256": deployment.record["compose"]["file_sha256"], "type": "compose_resolved",
+                    "store": None, "sensitive": True, "expanded_bytes": None, "members": None,
+                    "members_sha256": None})
+            for item in payloads[-2:]:
+                item["size"] = (folder / item["path"]).stat().st_size
+            deployment_ref = {"deployment_id": deployment.deployment_id, "record_sha256": deployment.record_sha256}
+        else:
+            reason = ("the deployment predates PF-A3.1 or its seal failed" if deployment is None else
+                      f"deployment {deployment.deployment_id}: {deployment.mismatch}")
+            exclusions.append({"item": "deployment-record", "reason": reason[:500]})
+            prerequisites.append("no deployment record is bundled: verify the restored source, images and "
+                                 "configuration manually before relying on the restored instance")
 
         # The bundle preserves the configuration this operation consumed: the frozen
         # snapshot rendering (literal values), not whatever the editable file holds now.
@@ -5333,76 +6899,82 @@ class Controller:
             frozen_bytes = pf_config.render_app_env(self.frozen.values)
         except pf_config.ConfigError as exc:
             raise Failure(str(exc)) from exc
-        with (saved_config_dir / ".env").open("wb") as handle:
-            handle.write(frozen_bytes)
+        pf_instance._write_private_file(folder / "configuration" / ".env", frozen_bytes, 0o600)
+        payloads.append(self.file_payload(folder, "configuration/.env", "config_env", sensitive=True))
         admin_config = self.config_dir / "pf-config.json"
         if admin_config.is_file():
-            copy_fresh(admin_config, saved_config_dir / "pf-config.json")
+            copy_fresh(admin_config, folder / "configuration" / "pf-config.json")
+            payloads.append(self.file_payload(folder, "configuration/pf-config.json", "admin_config", sensitive=True))
 
-        inventory = self.database_inventory()
+        quiescence = self.observe_quiescence()
+        if quiescence["mode"] != "writers_stopped":
+            raise Failure("Application writers are running; a purge bundle needs stopped writers (pause first).")
+        rows = self.database_rows()
         active = self.env()["POSTGRES_DB"]
-        databases = []
-        for item in inventory:
-            name = item["name"]
-            record = dict(item)
+        if active not in rows:
+            raise Failure(f"Unexpected PostgreSQL inventory output: the active database {active} is not listed.")
+        stores = []
+        for name in sorted(rows):
+            row = rows[name]
             if name == active:
-                record["dump"] = "databases/active.dump"
-                record["heads"] = self.db_heads(name)
-                databases.append(record)
-                continue
-            dump_name = "db-" + hashlib.sha256(name.encode()).hexdigest()[:16] + ".dump"
-            dump_path = db_dir / dump_name
-            changed_connections = False
-            try:
-                if not item["allow_connections"]:
-                    self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS true;",
-                             mutation=True)
-                    changed_connections = True
-                self.dump_database(name, dump_path)
-                verify_name = "pf_verify_" + uuid.uuid4().hex[:20]
-                self.restore_into(verify_name, dump_path)
-                self.drop_database(verify_name)
-            finally:
-                if changed_connections:
-                    self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS false;",
-                             mutation=True)
-            record["dump"] = "databases/" + dump_name
-            record["heads"] = self.db_heads(name) if item["allow_connections"] else []
-            databases.append(record)
+                facts = self.store_facts(row, counts=True)
+                store = self.store_record(facts, role="active", dump="databases/active.dump",
+                                          listing="databases/active.list", group="purge")
+                if store["alembic_heads"] != active_store["alembic_heads"]:
+                    raise Failure("The active database changed after the before-purge checkpoint (Alembic heads).")
+            else:
+                stem = "databases/db-" + hashlib.sha256(name.encode()).hexdigest()[:16]
+                with self.connection_window(name, row["allow_connections"]):
+                    dump = self.dump_store(name, folder, stem + ".dump")
+                    self.write_dump_list(dump, folder / (stem + ".list"))
+                    facts = self.store_facts(row, counts=True)
+                store = self.store_record(facts, role="retained", dump=stem + ".dump", listing=stem + ".list",
+                                          group="purge")
+                payloads += [self.file_payload(folder, stem + ".dump", "database_dump", store=store["store_id"]),
+                             self.file_payload(folder, stem + ".list", "database_list", store=store["store_id"])]
+            stores.append(store)
+        for item in payloads:
+            if item["path"] in ("databases/active.dump", "databases/active.list"):
+                item["store"] = "postgresql:" + active
 
         globals_path = folder / "postgres-globals.sql"
-        with globals_path.open("wb") as output:
+        with globals_path.open("xb") as output:
             self.database_program("pg_dumpall", "-d", "postgres", "--globals-only", output=output)
         if not globals_path.stat().st_size:
             raise Failure("PostgreSQL globals archive is empty; purge recovery is incomplete.")
+        payloads.append(self.file_payload(folder, "postgres-globals.sql", "postgres_globals", sensitive=True))
+        roles = self.role_inventory()
 
         # Preserve the whole rollback/checkpoint history independently from the
         # normal backups tree so --delete-backups remains recoverable.
-        self.create_tree_archive(
-            self.backups_dir,
-            folder / "revision-checkpoints.tar.gz",
-            self.config["project"],
-        )
+        counts = self.create_tree_archive(self.backups_dir, folder / "revision-checkpoints.tar.gz",
+                                          self.config["project"])
+        payloads.append(dict(self.file_payload(folder, "revision-checkpoints.tar.gz", "checkpoint_history"),
+                             expanded_bytes=counts[0], members=counts[1], members_sha256=counts[2]))
 
         state_files = []
-        for name in ("deployed.json", "last-reset.json", "observed-tags.json"):
+        for name in RESTORABLE_STATE_FILES:
             source = self.state / name
             if source.is_file():
-                copy_fresh(source, state_dir / name)
+                if not state_files:
+                    (folder / "state").mkdir(mode=0o700)
+                copy_fresh(source, folder / "state" / name)
                 state_files.append(name)
+                payloads.append(self.file_payload(folder, "state/" + name, "state_file", sensitive=True))
 
         image_refs, missing_history_images = self.available_snapshot_image_refs()
-        for value in checkpoint["images"].values():
-            image_refs.append(value["reference"])
-        image_refs = sorted(set(image_refs))
+        image_refs = sorted(set(image_refs) | {value["reference"] for value in checkpoint.images.values()})
+        db_image = checkpoint.image("db")
         images_path = folder / "images.tar"
         if not image_refs:
             raise Failure("No active PartFlow application images were available for recovery.")
-        self.docker("image", "save", "-o", images_path, *image_refs)
+        # PF-A3.1: the database image layers are saved by ID with the application tags (never re-tagged).
+        self.docker("image", "save", "-o", images_path, *image_refs, db_image["id"])
         if not images_path.stat().st_size:
             raise Failure("Docker image recovery archive is empty.")
         with tarfile.open(images_path, "r:") as archive:
             archive.getmembers()
+        payloads.append(self.file_payload(folder, "images.tar", "image_archive"))
 
         binding_inventory = self.docker_inventory()
         created = sorted(set(self.created_image_refs))
@@ -5426,131 +6998,101 @@ class Controller:
         def candidates(kind):
             return [item["key"] for item in binding["candidates"] if item["kind"] == kind]
 
-        resources = {"containers": candidates("container"), "volumes": candidates("volume"),
-                     "networks": candidates("network"), "images": candidates("image")}
+        images = {service: dict(checkpoint.image(service), archived=True) for service in ("backend", "frontend", "db")}
+        bind_paths = list(binding.get("bind_paths") or [])
+        exclusions += [
+            {"item": "bind-mounts", "reason": "never captured (no bind paths in this profile)" if not bind_paths
+             else ("retained, never captured: " + ", ".join(bind_paths))[:500]},
+            {"item": "external-databases", "reason": "databases outside the db service are not captured"}]
+        extension_names = sorted({item["name"] for store in stores for item in store["extensions"]})
+        prerequisites = [f"PostgreSQL major {checkpoint.postgres_major} server with extensions: "
+                         + (", ".join(extension_names) or "none"),
+                         "roles in postgres-globals.sql are evidence; recreate any role other than "
+                         f"{self.env()['POSTGRES_USER']} manually"] + prerequisites
         manifest = {
-            "format": 2,
-            "kind": "partflow-purge-recovery",
-            "status": "complete",
-            "id": recovery_id,
-            "created_at": utc(),
-            "project": self.config["project"],
-            "environment": self.config["environment"],
-            "repository": self.config["repository"],
-            "root": str(self.root),
-            "instance_id": self.context.instance_id,
-            "slug": self.context.slug,
-            "source_revision": checkpoint["source_revision"],
-            "source_verified": bool(checkpoint.get("source_verified")),
-            "source_provenance": checkpoint.get("source_provenance", "unknown"),
-            "active_checkpoint": checkpoint["id"],
-            "database": active,
-            "database_user": self.env()["POSTGRES_USER"],
-            "database_heads": checkpoint["database_heads"],
-            "postgres_major": checkpoint["postgres_major"],
-            "databases": databases,
-            "active_images": checkpoint["images"],
-            "saved_image_refs": image_refs,
-            "missing_historical_image_refs": missing_history_images,
-            "state_files": state_files,
-            "workspace_archive": "workspace.tar.gz" if checkpoint.get("workspace_archive") else None,
-            "workspace_head": checkpoint.get("workspace_head"),
-            "workspace_dirty": checkpoint.get("workspace_dirty", False),
-            "resources_before_purge": resources,
-            "automatic_merge_supported": False,
-            "restore_scope": (
-                "Functional instance state: exact deployed source, writable workspace when it differs, "
-                "external runtime configuration, active and retained databases, current application images, "
-                "available rollback images, revision checkpoints. "
-                "Docker container/network IDs and extra PostgreSQL roles are not recreated bit-for-bit."
-            ),
+            "schema_version": 1, "bundle_id": recovery_id, "bundle_kind": "purge-bundle", "created_at": utc(),
+            "reason": "before-purge", "capture_class": "healthy_checkpoint",
+            "source_instance": self.source_instance(), "producer": self.producer(), "quiescence": quiescence,
+            "source": dict(checkpoint.manifest["source"]), "deployment": deployment_ref, "images": images,
+            "postgresql": {"server_version_num": self.server_version_num(), "major": checkpoint.postgres_major,
+                           "image_id": checkpoint.manifest["postgresql"]["image_id"]},
+            "roles": roles, "stores": stores,
+            "consistency_groups": [{"group_id": "purge", "stores": [store["store_id"] for store in stores],
+                                    "claim": "writers-stopped"}],
+            "compatibility": {"alembic_heads_live": checkpoint.database_heads,
+                              "alembic_heads_image": checkpoint.manifest["compatibility"]["alembic_heads_image"],
+                              "migration_files": checkpoint.migration_files, "mismatch": None},
+            "payloads": sorted(payloads, key=lambda item: item["path"]),
+            "workspace": {"differs_from_deployed": checkpoint.manifest["workspace"]["differs_from_deployed"],
+                          "payload": workspace_payload, "unsupported_entries": []},
+            "exclusions": exclusions, "manual_prerequisites": prerequisites, "derived_from": checkpoint.bundle_id,
+            "purge": {"resources_before_purge": {"containers": candidates("container"),
+                                                 "volumes": candidates("volume"),
+                                                 "networks": candidates("network"), "images": candidates("image")},
+                      "saved_image_refs": image_refs, "missing_historical_image_refs": missing_history_images,
+                      "state_files": state_files,
+                      "restore_scope": (
+                          "Functional instance state: exact deployed source, writable workspace when it differs, "
+                          "external runtime configuration, deployment record and resolved Compose model, active and "
+                          "retained databases, current application and database images, available rollback images, "
+                          "revision checkpoints. Docker container/network IDs and extra PostgreSQL roles are not "
+                          "recreated bit-for-bit.")},
+            "legacy": None,
         }
-        files = [
-            "source.tar.gz", "postgres-globals.sql", "revision-checkpoints.tar.gz", "images.tar",
-            "databases/active.dump", "databases/active.list", "configuration/.env",
-        ]
-        if checkpoint.get("workspace_archive"):
-            files.append("workspace.tar.gz")
-        if (saved_config_dir / "pf-config.json").is_file():
-            files.append("configuration/pf-config.json")
-        files.extend(record["dump"] for record in databases if record["name"] != active)
-        files.extend("state/" + name for name in state_files)
-        manifest["checksums"] = {name: digest(folder / name) for name in files}
-        write_json(folder / "manifest.json", manifest)
-        (folder / "manifest.sha256").write_text(digest(folder / "manifest.json") + "\n", encoding="utf-8")
+        manifest_sha256 = self.write_manifest(folder, manifest)
+        sealed = BundleView(folder, manifest, manifest_sha256, None, "captured")
+        # Section 3.6 step 6: every store restored from the bundle's own payloads before deletion is possible.
+        record, passed = self.verify_bundle(sealed, {store["store_id"]: folder / store["dump"] for store in stores},
+                                            started_at=manifest["created_at"])
+        self._record_capture(sealed, record, None)
+        if not passed:
+            failed = next(check for check in record["checks"] if check["result"] == "failed")
+            exc = Failure(f"purge-bundle-verification-failed: {recovery_id}: {failed['name']}: {failed['detail']}. "
+                          f"Verification database retained. {tail}")
+            exc.code = "purge-bundle-verification-failed"
+            raise exc
         self.publish_fresh("recovery", folder)
         log("Recovery bundle verified: " + str(folder))
         if missing_history_images:
             log("WARNING: Some old rollback image tags were already missing before purge. Their checkpoint files are preserved, but those old image layers cannot be reconstructed automatically.")
-        return manifest, binding
+        view = dataclasses.replace(sealed, level=record["level"], latest_verification_id=record["verification_id"])
+        return view, binding
 
     def recoveries(self):
-        """Bundle candidates of the selected instance only: ``<recovery>/<compose_project>/purge-*``.
+        """Bundle candidates of the selected instance only: ``<recovery>/<compose_project>/purge-*`` (a real
+        directory, never a link followed elsewhere), newest first, each a BundleView or an InvalidBundle.
 
-        Neither ``--project`` nor any sibling project directory is ever listed (PF-A1.4).
+        Neither ``--project`` nor any sibling project directory is ever listed (PF-A1.4). Read-only.
         """
         base = self.recovery_root
-        result = []
-        if not base.is_dir():
-            return result
-        for folder in base.iterdir():
-            # The same rule as verify_recovery: a real directory, never a link followed elsewhere.
-            if not RECOVERY_RE.fullmatch(folder.name) or not real_directory(folder):
-                continue
-            try:
-                metadata = load_json(folder / "manifest.json")
-                metadata["_folder"] = str(folder)
-                result.append(metadata)
-            except (OSError, ValueError):
-                result.append({"id": folder.name, "project": base.name, "status": "invalid", "_folder": str(folder)})
-        return sorted(result, key=lambda item: item["id"], reverse=True)
+        if not real_directory(base):
+            return []
+        self.ensure_config()
+        items = [self._listed("purge-bundle", folder) for folder in base.iterdir()
+                 if RECOVERY_RE.fullmatch(folder.name) and real_directory(folder)]
+        return sorted(items, key=lambda item: item.bundle_id, reverse=True)
 
     def verify_recovery(self, item):
-        folder = Path(item.get("_folder") or self.recovery_root / item["id"])
-        # PF-A1.4: restore authority is the selected instance's own recovery directory, exactly.
-        if folder.parent != self.recovery_root or not real_directory(folder):
-            raise Failure(
-                f"recovery-outside-instance: {folder} is not a bundle directory of instance {self.context.slug} "
-                f"({self.recovery_root}); only the selected instance's own recovery bundles can be listed or "
-                "restored. Nothing was changed.")
-        if not RECOVERY_RE.fullmatch(folder.name):
-            raise Failure("Invalid recovery bundle path.")
-        manifest_path = folder / "manifest.json"
-        if digest(manifest_path) != (folder / "manifest.sha256").read_text(encoding="utf-8").strip():
-            raise Failure("Recovery manifest checksum mismatch.")
-        metadata = load_json(manifest_path)
-        if metadata.get("kind") != "partflow-purge-recovery" or metadata.get("status") != "complete":
-            raise Failure("Recovery bundle is incomplete or unsupported.")
-        state_files = metadata.get("state_files", [])
-        # The checked value is the value restore_instance consumes: a list, never a string iterated
-        # per character or any other shape normalized here; a non-string entry fails the allowlist.
-        if not isinstance(state_files, list):
-            raise Failure(
-                f"recovery-state-file-refused: bundle {metadata.get('id', folder.name)} lists state files as "
-                f"{type(state_files).__name__}, not a list of file names; only {', '.join(RESTORABLE_STATE_FILES)} "
-                "can be restored into protected state. Nothing was changed.")
-        for name in state_files:
-            if name not in RESTORABLE_STATE_FILES:
-                raise Failure(
-                    f"recovery-state-file-refused: bundle {metadata.get('id', folder.name)} lists state file "
-                    f"{name!r}; only {', '.join(RESTORABLE_STATE_FILES)} can be restored into protected state. "
-                    "Nothing was changed.")
-        for name, checksum in metadata.get("checksums", {}).items():
-            path = folder / name
-            if not path.is_file() or digest(path) != checksum:
-                raise Failure("Recovery bundle checksum mismatch: " + name)
-        metadata["_folder"] = str(folder)
-        return metadata
+        """The strict read of one purge bundle of this instance (name kept). ``item``: a listing entry, a folder
+        path, or {"_folder"|"id"}. PF-A1.4: restore authority is the instance's own recovery directory, exactly."""
+        if isinstance(item, (BundleView, InvalidBundle)):
+            folder = item.folder
+        elif isinstance(item, dict):
+            folder = Path(item.get("_folder") or self.recovery_root / item["id"])
+        else:
+            folder = Path(item)
+        return self.read_bundle("purge-bundle", folder)
 
     def display_recoveries(self, items, page=1):
         selected, pages, start = page_items(items, page)
         log(f"Purge recovery bundles | newest first | page {page}/{pages} | {len(items)} total")
         for number, item in enumerate(selected, start + 1):
-            log(
-                f"{number:>3}. {item['id']}  [{item.get('status', 'unknown')}]  "
-                f"project={item.get('project', 'unknown')}  db={item.get('database', 'unknown')}  "
-                f"source={(item.get('source_revision') or 'unknown')[:12]}"
-            )
+            if isinstance(item, InvalidBundle):
+                log(f"{number:>3}. {item.bundle_id}  [invalid: {item.code}]")
+                continue
+            log(f"{number:>3}. {item.bundle_id}  [{LEVEL_NAMES[item.level]}]  project={item.compose_project}  "
+                f"db={item.database}  source={item.source_display}  derived_from={item.derived_from}"
+                f"{self.bundle_suffix(item)}")
         return pages
 
     def choose_recovery(self, requested=None):
@@ -5558,10 +7100,10 @@ class Controller:
         if not items:
             raise Failure("No purge recovery bundles were found.")
         if requested:
-            matches = [item for item in items if item["id"] == requested]
+            matches = [item for item in items if item.bundle_id == requested]
             if len(matches) != 1:
                 raise Failure("Specify one exact purge recovery ID.")
-            return self.verify_recovery(matches[0])
+            return self.verify_recovery(matches[0].folder)
         if unattended():
             raise Failure("Interactive recovery selection requires a terminal; pass a recovery ID.")
         page = 1
@@ -5575,7 +7117,7 @@ class Controller:
             elif answer == "p":
                 page = max(1, page - 1)
             elif answer.isdigit() and 1 <= int(answer) <= len(items):
-                return self.verify_recovery(items[int(answer) - 1])
+                return self.verify_recovery(items[int(answer) - 1].folder)
 
     def finish_purge_cleanup(self, recovery_id, plan, *, delete_backups, reset_admin_config):
         # Docker deletion runs exactly the frozen plan (PF-A1.3). State/.env are removed last so
@@ -5619,10 +7161,11 @@ class Controller:
                 if "deletion_plan" not in pending:
                     raise self.plan_missing("purge")
                 recovery_id = pending["recovery"]
-                matches = [item for item in self.recoveries() if item.get("id") == recovery_id]
+                matches = [item for item in self.recoveries() if item.bundle_id == recovery_id]
                 if len(matches) != 1:
                     raise Failure("Interrupted purge recovery bundle is missing or ambiguous; manual recovery is required.")
-                self.verify_recovery(matches[0])
+                # PF-A3.1: the strict re-read of the bundle; no new verification.
+                self.verify_recovery(matches[0].folder)
                 plan = self.load_deletion_plan(pending, kind="purge")
                 self.verify_resume_daemon(plan, pending)
                 self._topology_checked = True
@@ -5650,6 +7193,7 @@ class Controller:
         if not (self.config_dir / ".env").is_file():
             raise Failure("config/.env is missing. A database volume cannot be safely destroyed without first proving a recoverable database backup.")
         self.database_ready()
+        self.capture_preflight("purge")
         self.ensure_local_contract()
 
         confirm(
@@ -5663,20 +7207,22 @@ class Controller:
         checkpoint = None
         try:
             recovery, binding = self.create_purge_recovery(preliminary)
-            checkpoint = self.verify_snapshot(recovery["active_checkpoint"])
-            self.phase("recovery-ready", recovery=recovery["id"], active_checkpoint=checkpoint["id"])
+            checkpoint = self.verify_snapshot(recovery.derived_from)
+            self.phase("recovery-ready", recovery=recovery.bundle_id, active_checkpoint=checkpoint.bundle_id)
             log("Recovery summary:")
-            log("  Bundle: " + recovery["id"])
-            log("  Path: " + str(self.recovery_root / recovery["id"]))
-            log("  Active database: " + recovery["database"])
-            log("  Preserved databases: " + ", ".join(item["name"] for item in recovery["databases"]))
-            log("  Saved Docker image tags: " + str(len(recovery["saved_image_refs"])))
+            log("  Bundle: " + recovery.bundle_id)
+            log("  Path: " + str(self.recovery_root / recovery.bundle_id))
+            log("  Active database: " + recovery.database)
+            log("  Preserved databases: " + ", ".join(store["database"] for store in recovery.stores))
+            log("  Saved Docker image tags: " + str(len(recovery.purge["saved_image_refs"])))
             log("  Revision checkpoints archived: yes")
+            log("  Verification: " + LEVEL_NAMES[recovery.level] + " (every store restored from the bundle's own "
+                "payloads)")
             self.log_plan(binding, title="Binding deletion plan (frozen before the final confirmation):")
 
             # Second gate proves the operator understands which database becomes inaccessible.
             confirm(
-                "DELETE " + recovery["database"],
+                "DELETE " + recovery.database,
                 "The verified recovery bundle is complete. Continuing will remove the selected project's PostgreSQL Docker volume. The active database can be restored from the recovery bundle, but automatic merge into a later production history is intentionally not supported.",
             )
 
@@ -5701,12 +7247,19 @@ class Controller:
             confirm(
                 "ERASE " + self.config["project"] + " " + challenge,
                 "FINAL CONFIRMATION. After this point the controller will start deleting Docker resources. Recovery bundle: "
-                + recovery["id"],
+                + recovery.bundle_id,
             )
+            # PF-A3.1 deletion gate (OD-A31-19): the purge bundle's own passed data_restore_verified record, re-read
+            # strictly from disk immediately before the durable deleting phase.
+            gate = self.verify_recovery(recovery.folder)
+            if gate.level not in PASSED_LEVELS:
+                raise Failure(f"purge-bundle-unverified: {gate.bundle_id}: no passed data_restore_verified record for "
+                              "this bundle's manifest; deletion is blocked. The purge stops before deletion; the "
+                              "application is reopened.")
             reference = self.write_deletion_plan(binding)
             self.durable_phase(
                 "deleting",
-                recovery=recovery["id"],
+                recovery=recovery.bundle_id,
                 deletion_plan=reference,
                 deleted=[],
                 delete_backups=bool(delete_backups),
@@ -5719,7 +7272,7 @@ class Controller:
                 checkpoint = exc.checkpoint
             if checkpoint is not None:
                 try:
-                    self.activate(checkpoint["images"], checkpoint["database_heads"])
+                    self.activate(checkpoint.images, checkpoint.database_heads)
                     if self.pending.exists():
                         self.pending.unlink()
                     log("Purge cancelled/failed before deletion; application services were restored.")
@@ -5728,7 +7281,7 @@ class Controller:
             raise
 
         self.finish_purge_cleanup(
-            recovery["id"], binding,
+            recovery.bundle_id, binding,
             delete_backups=bool(delete_backups),
             reset_admin_config=bool(reset_admin_config),
         )
@@ -5760,10 +7313,12 @@ class Controller:
             raise Failure(str(exc)) from exc
 
     def restore_runtime_environment(self, recovery, extracted_source=None):
-        folder = Path(recovery["_folder"])
+        """The runtime .env of a bundle (``configuration/.env``) or, for a format 1 bundle, the ``.env`` taken out of
+        its extracted source tree (``extracted_source``: that file). ``recovery``: a BundleView or a folder."""
+        folder = Path(recovery.folder if isinstance(recovery, BundleView) else recovery)
         source = folder / "configuration" / ".env"
         if not source.is_file() and extracted_source is not None:
-            legacy = Path(extracted_source) / ".env"
+            legacy = Path(extracted_source)
             if legacy.is_file():
                 source = legacy
         if not source.is_file():
@@ -5779,12 +7334,16 @@ class Controller:
         self.apply_single("configuration", temporary, "file")
         os.replace(temporary, self.config_dir / ".env")
 
-    def restore_revision_checkpoints(self, recovery):
-        archive = Path(recovery["_folder"]) / "revision-checkpoints.tar.gz"
+    def restore_revision_checkpoints(self, view):
+        """Restore the archived checkpoint history of a bundle through the safe importer (HISTORY_LIMITS)."""
+        payload = view.payload("revision-checkpoints.tar.gz")
+        if payload is None:
+            return
         temporary = Path(tempfile.mkdtemp(prefix="restore-checkpoints-", dir=self.state))
         try:
-            self.extract_tree_archive(archive, temporary)
-            source = temporary / self.config["project"]
+            self.extract_payload(view, "revision-checkpoints.tar.gz", temporary / "history",
+                                 limits=pf_source.HISTORY_LIMITS)
+            source = temporary / "history" / self.config["project"]
             if source.is_dir():
                 if self.backups_dir.exists():
                     shutil.rmtree(self.backups_dir)
@@ -5795,13 +7354,15 @@ class Controller:
             shutil.rmtree(temporary, ignore_errors=True)
 
     def restore_instance(self, recovery, *, side_by_side=False):
-        recovery = self.verify_recovery(recovery)
-        folder = Path(recovery["_folder"])
-        if recovery["postgres_major"] != 16:
+        """``recovery``: the BundleView of choose_recovery (strictly read before any confirmation)."""
+        if not isinstance(recovery, BundleView):
+            recovery = self.verify_recovery(recovery)
+        folder = recovery.folder
+        if recovery.postgres_major != 16:
             raise Failure("This recovery bundle is not PostgreSQL 16; automatic restore is refused.")
 
         if side_by_side:
-            if recovery["project"] != self.config["project"]:
+            if recovery.compose_project != self.config["project"]:
                 raise Failure("Side-by-side recovery must come from the same PartFlow project.")
             self.database_ready()
             name = "pf_recovery_" + utc().lower().replace("t", "_").replace("z", "") + "_" + uuid.uuid4().hex[:6]
@@ -5810,14 +7371,15 @@ class Controller:
                 "RESTORE COPY " + name,
                 "Restore the purged active database as an isolated recovery database. The current PartFlow application/database will not be changed. No automatic merge into Movement history will be attempted.",
             )
-            self.restore_into(name, folder / "databases/active.dump")
+            self.restore_into(name, folder / recovery.active_store["dump"])
             log("Recovery database created: " + name)
             log("It is intentionally not connected to the active application. Compare/export data explicitly; do not merge immutable Movement history by ad hoc SQL.")
             return
 
-        if recovery["project"] != self.config["project"]:
+        if recovery.compose_project != self.config["project"]:
             raise Failure("Exact restore must be run from the bootstrap root/config for the same project.")
-        if Path(recovery["root"]).resolve() != self.root:
+        root = recovery.workspace_root
+        if root is None or Path(root).resolve() != self.root:
             raise Failure("Exact restore must run from the original repository root recorded in the recovery bundle.")
         if (self.state / "deployed.json").exists():
             raise Failure("A managed deployment record already exists. Exact restore refuses to overwrite it.")
@@ -5826,102 +7388,128 @@ class Controller:
         self.require_empty_target("restore-instance")
 
         log("Restore target summary:")
-        log("  Project: " + recovery["project"])
-        log("  Source: " + str(recovery.get("source_revision") or "unknown provenance"))
-        log("  Active database: " + recovery["database"])
-        log("  Preserved databases: " + ", ".join(item["name"] for item in recovery["databases"]))
-        log("  Recovery bundle: " + recovery["id"])
+        log("  Project: " + recovery.compose_project)
+        log("  Source: " + recovery.source_display)
+        log("  Active database: " + recovery.database)
+        log("  Preserved databases: " + ", ".join(store["database"] for store in recovery.stores))
+        log("  Recovery bundle: " + recovery.bundle_id)
         with tempfile.TemporaryDirectory(prefix="restore-source-", dir=self.state) as temp:
-            candidate = Path(temp)
-            archive = folder / (recovery.get("workspace_archive") or "source.tar.gz")
-            extract_source(archive, candidate)
-            # v1 bundles stored .env inside source.tar.gz; v2 stores it separately. Anything
-            # else the manifest could not verify, and any provenance-proof failure, stops here:
-            # before any confirmation, pending journal or configuration change. restore-instance
-            # has no automatic journal route, so a refusal after the journal would wedge it.
-            self.refuse_reserved_candidate_paths(candidate, allow=(".env",))
-            restored_exact = not recovery.get("workspace_archive")
-            verified = (restored_exact and bool(recovery.get("source_verified"))
-                        and self.prove_tree_commit(candidate, recovery["source_revision"]))
+            # PF-A3.1: the deployed source is always the source payload (never the workspace archive). Anything the
+            # manifest could not verify, and any provenance-proof failure, stops here: before any confirmation,
+            # pending journal or configuration change (restore-instance has no automatic journal route).
+            candidate = Path(temp) / "source"
+            tree = self.extract_payload(recovery, recovery.source_payload, candidate)
+            self.require_source_identity(recovery, tree, recovery.source_payload)
+            legacy_env = None
+            if (candidate / ".env").is_file() and not (candidate / ".env").is_symlink():
+                # Format 1 stored the runtime .env inside source.tar.gz: it leaves the deployed tree here and is
+                # read by restore_runtime_environment after the journal exists.
+                legacy_env = Path(temp) / "legacy.env"
+                os.replace(str(candidate / ".env"), str(legacy_env))
+            marker = candidate / "DEPLOYED_SOURCE.txt"
+            if marker.is_file() and not marker.is_symlink():
+                marker.unlink()
+            self.refuse_reserved_candidate_paths(candidate)
+            hypothesis = recovery.source_hypothesis
+            verified = self.prove_tree_commit(candidate, hypothesis)
+            revision = hypothesis if verified else None
+            manifest = self.candidate_manifest(candidate, revision, verified=verified)
+            workspace = candidate
+            if recovery.workspace_payload:
+                workspace = Path(temp) / "workspace"
+                self.extract_payload(recovery, recovery.workspace_payload, workspace)
+                for name in (".env", "DEPLOYED_SOURCE.txt"):
+                    path = workspace / name
+                    if path.is_file() and not path.is_symlink():
+                        path.unlink()
+                self.refuse_reserved_candidate_paths(workspace)
+            if recovery.payload("revision-checkpoints.tar.gz") is not None:
+                # A hostile checkpoint history is refused here, before any confirmation or journal (PB-4).
+                self.inspect_payload(recovery, "revision-checkpoints.tar.gz", limits=pf_source.HISTORY_LIMITS)
+            self.deployment_preflight(manifest)
             confirm(
-                "RESTORE INSTANCE " + recovery["project"],
+                "RESTORE INSTANCE " + recovery.compose_project,
                 "This recreates the purged functional instance from its recovery bundle. Docker container/network IDs are newly created. PostgreSQL globals are preserved as evidence but extra roles are not automatically executed.",
             )
             confirm(
-                "RESTORE " + recovery["database"] + " " + recovery["id"],
+                "RESTORE " + recovery.database + " " + recovery.bundle_id,
                 "Final restore confirmation. Repository workspace, runtime .env, application images, active database, retained databases, and revision checkpoints will be restored into an empty project. The current pf-config.json remains authoritative.",
             )
+            staged = self.stage_deployment(candidate, manifest, kind="restore-instance", images=recovery.images,
+                                           ref="restore:" + recovery.bundle_id)
 
             write_json(self.pending, {
                 "operation": "restore-instance", "phase": "confirmed", "started": utc(),
-                "recovery": recovery["id"], "database": recovery["database"],
+                "recovery": recovery.bundle_id, "database": recovery.database,
             })
-            self.restore_runtime_environment(recovery, extracted_source=candidate)
+            self.restore_runtime_environment(recovery, extracted_source=legacy_env)
             # The restored .env is the configuration this operation consumes from here on.
             self.freeze_app_config(explicit=True)
-            self.replace_source_for_recovery(candidate, recovery["source_revision"], verified=verified)
+            # The editable workspace receives the workspace archive when the bundle has one (unknown provenance),
+            # else the deployed source tree.
+            exact = workspace == candidate
+            self.replace_source_for_recovery(workspace, revision if exact else None, verified=verified and exact)
 
         self.phase("loading-images")
         self.docker("image", "load", "-i", folder / "images.tar")
-        self.verify_images(recovery["active_images"])
-        self.make_override(recovery["active_images"], self.override)
+        self.verify_images(recovery.images)
+        self.make_override(recovery.images, self.override)
 
         self.phase("starting-database")
         self.compose("up", "-d", "--no-deps", "db")
         self.wait_health("db")
         values = self.env()
-        if values["POSTGRES_DB"] != recovery["database"] or values["POSTGRES_USER"] != recovery["database_user"]:
+        owner = recovery.database_user
+        if values["POSTGRES_DB"] != recovery.database or (owner is not None and values["POSTGRES_USER"] != owner):
             raise Failure("Recovered .env database identity does not match the recovery manifest.")
 
         # Replace the empty init database with the verified logical dump.
-        self.drop_database(recovery["database"])
-        self.restore_into(recovery["database"], folder / "databases/active.dump")
-        if self.db_heads(recovery["database"]) != recovery["database_heads"]:
+        self.drop_database(recovery.database)
+        active = recovery.active_store
+        self.restore_into(recovery.database, folder / active["dump"])
+        if self.db_heads(recovery.database) != recovery.database_heads:
             raise Failure("Restored active database Alembic revision does not match the recovery bundle.")
 
-        for record in recovery["databases"]:
-            if record["name"] == recovery["database"]:
+        for store in recovery.stores:
+            if store["role"] == "active":
                 continue
-            self.restore_into(record["name"], folder / record["dump"])
-            if not record["allow_connections"]:
-                self.sql("postgres", f"ALTER DATABASE {quote_identifier(record['name'])} ALLOW_CONNECTIONS false;",
+            self.restore_into(store["database"], folder / store["dump"])
+            if not store["allow_connections"]:
+                self.sql("postgres", f"ALTER DATABASE {quote_identifier(store['database'])} ALLOW_CONNECTIONS false;",
                          mutation=True)
 
         self.phase("restoring-checkpoints")
         self.restore_revision_checkpoints(recovery)
-        for name in recovery.get("state_files", []):
+        for name in recovery.purge["state_files"]:
             source = folder / "state" / name
             if source.is_file() and name != "deployed.json":
                 copy_fresh(source, self.state / name)
                 self.publish_fresh("private_state", self.state / name)
 
         self.phase("activating")
-        self.activate(recovery["active_images"], recovery["database_heads"])
-        deployed_source = folder / "state/deployed.json"
-        if deployed_source.is_file():
-            copy_fresh(deployed_source, self.state / "deployed.json")
-            self.publish_fresh("private_state", self.state / "deployed.json")
-        else:
-            write_json(self.state / "deployed.json", {
-                "sha": recovery["source_revision"], "ref": "restore:" + recovery["id"],
-                "deployed_at": utc(), "checkpoint": recovery["active_checkpoint"],
-            })
-        if self.pending.exists():
-            self.pending.unlink()
+        self.activate(recovery.images, recovery.database_heads)
+        # PF-A3.1 (OD-A31-16): a fresh pointer to the new record; the bundle's deployed.json stays evidence.
+        self.finish_deployment(staged, {"sha": revision, "ref": "restore:" + recovery.bundle_id,
+                                        "deployed_at": utc(), "checkpoint": recovery.derived_from},
+                               restored_from={"bundle_id": recovery.bundle_id,
+                                              "manifest_sha256": recovery.manifest_sha256})
         log("Instance restore complete. Run UI/workflow/network smoke tests before accepting the recovered staging instance.")
-        if recovery.get("missing_historical_image_refs"):
+        if recovery.purge["missing_historical_image_refs"]:
             log("WARNING: Some historical rollback image tags were already missing when the purge bundle was created. Those old rollback points remain source/data archives but may not be directly activatable.")
         log("postgres-globals.sql is preserved in the bundle for manual review; it was not executed automatically.")
 
     def update(self, target, *, automatic=False, allow_migrations=False, skip_ci=False):
         self.staging()
         self.database_ready()
-        current = self.revision()
+        # PF-A3.1: the deployment record first, then the legacy pointer; never a claimed or unproven commit.
+        current = self.deployed_commit()
         workspace = self.workspace_status()
-        workspace_matches_deployed = workspace["head"] == current and not workspace["dirty"]
+        workspace_matches_deployed = current is not None and workspace["head"] == current and not workspace["dirty"]
         if current == target["sha"] and workspace_matches_deployed:
             log("Already at " + current + " with a clean matching workspace; no update needed.")
             return
+        if automatic and current is None:
+            raise Deferred("Automatic update refuses a deployment whose source commit is unknown; run a manual update.")
         if automatic and not workspace_matches_deployed:
             raise Deferred("Automatic update refuses a workspace that differs from the deployed revision; run a manual update.")
         if not workspace_matches_deployed:
@@ -5932,6 +7520,8 @@ class Controller:
             self.require_ci(target["sha"])
         else:
             log("WARNING: CI verification explicitly bypassed for this manual staging update.")
+        # PF-A3.1: deployment image binding and a provable deployed source, read-only, before any effect.
+        self.capture_preflight("update")
         self.free_space()
         current_contract = self.ensure_local_contract()
         with tempfile.TemporaryDirectory(prefix="candidate-", dir=self.state) as folder:
@@ -5949,16 +7539,19 @@ class Controller:
                 raise Failure("Built candidate image does not contain the selected migration source.")
             changed = schema_gate(current_contract["files"], target_files, self.db_heads(),
                                   target_contract["heads"], allow=allow_migrations and not automatic)
+            manifest = self.candidate_manifest(candidate, target["sha"], verified=True)
+            self.deployment_preflight(manifest)
             if not automatic:
                 confirm("UPDATE " + target["sha"][:12],
                         f"Deploy {target['ref']} -> {target['sha']}\nMigration required: {changed}. Application access will pause.")
+            staged = self.stage_deployment(candidate, manifest, kind="update", images=images, ref=target["ref"])
             self.pause("update", target=target, migration_required=changed)
             checkpoint = self.snapshot("before-update")
-            self.phase("backup-ready", checkpoint=checkpoint["id"])
+            self.phase("backup-ready", checkpoint=checkpoint.bundle_id)
             if changed:
                 # Run on a clone of the data before touching the live database.
                 rehearsal = "pf_migrate_" + uuid.uuid4().hex[:20]
-                self.restore_into(rehearsal, self.backups_dir / checkpoint["id"] / "database.dump")
+                self.restore_into(rehearsal, checkpoint.folder / checkpoint.active_store["dump"])
                 self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
                              root=candidate, override=override, env={"POSTGRES_DB": rehearsal})
                 if self.db_heads(rehearsal) != target_contract["heads"]:
@@ -5968,11 +7561,10 @@ class Controller:
                 self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
                              root=candidate, override=override)
             self.replace_source(candidate, target["sha"])
-            self.phase("activating", checkpoint=checkpoint["id"])
+            self.phase("activating", checkpoint=checkpoint.bundle_id)
             self.activate(images, target_contract["heads"])
-            write_json(self.state / "deployed.json", {**target, "deployed_at": utc(), "checkpoint": checkpoint["id"]})
-            self.pending.unlink()
-            log("Update complete. Previous revision checkpoint: " + checkpoint["id"])
+            self.finish_deployment(staged, {**target, "deployed_at": utc(), "checkpoint": checkpoint.bundle_id})
+            log("Update complete. Previous revision checkpoint: " + checkpoint.bundle_id)
 
     def swap_database(self, prepared):
         current = self.env()["POSTGRES_DB"]
@@ -5986,79 +7578,190 @@ class Controller:
         log("Previous database retained (connections disabled): " + retained)
         return retained
 
+    def archive_failure(self, payload, exc):
+        """Operator copy of an ArchiveRefused (section 4.6)."""
+        if exc.code == "archive-member-refused":
+            member = repr(exc.member)[:200]
+            return Failure(f"archive-member-refused: {payload}: {exc.reason}: {member}. Nothing was extracted.")
+        return Failure(f"{exc.code}: {payload}: {exc.reason}. Nothing was extracted.")
+
+    def extract_payload(self, view, path, destination, *, limits=pf_source.SOURCE_LIMITS):
+        """Import one tar.gz payload of a strictly read bundle into the new private directory ``destination``
+        (section 3.2): the payload is re-verified through one no-follow descriptor, inspected (pass 1), checked for
+        capacity and extracted (pass 2) from that same descriptor. Returns the manifest of the written bytes."""
+        payload = view.payload(path)
+        destination = Path(destination)
+        dir_fd = os.open(str(view.folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd, _ = self._check_payload(dir_fd, view.bundle_id, path, payload["size"], payload["sha256"])
+        finally:
+            os.close(dir_fd)
+        try:
+            expected = (payload["expanded_bytes"], payload["members"], payload["members_sha256"])
+            try:
+                inventory = pf_source.inspect_archive(fd, limits=limits, expected=expected)
+            except pf_source.ArchiveRefused as exc:
+                raise self.archive_failure(path, exc) from exc
+            need = inventory.expanded_bytes + ARCHIVE_MARGIN
+            try:
+                free = self.artifact_free_bytes(destination.parent)
+            except OSError as exc:
+                raise Failure(f"archive-capacity: {path}: free space cannot be measured ({exc.strerror}). Nothing was "
+                              "extracted.") from exc
+            if free < need:
+                raise Failure(f"archive-capacity: {path}: {-(-need // 1048576)} MiB needed in {destination.parent}, "
+                              f"{free // 1048576} MiB free. Nothing was extracted.")
+            parent_fd = os.open(str(destination.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                return pf_source.extract_archive(fd, parent_fd, destination.name, inventory, limits=limits)
+            except pf_source.ArchiveRefused as exc:
+                raise self.archive_failure(path, exc) from exc
+            except (pf_source.SourceError, OSError) as exc:
+                raise Failure(f"archive-changed: {path}: {exc}. Nothing was extracted.") from exc
+            finally:
+                os.close(parent_fd)
+        finally:
+            os.close(fd)
+
+    def inspect_payload(self, view, path, *, limits=pf_source.SOURCE_LIMITS):
+        """Pass 1 only (no byte extracted) of one archive payload of a strictly read bundle: an importer refusal
+        surfaces before any confirmation or journal (the archive is extracted, and inspected again, later)."""
+        payload = view.payload(path)
+        dir_fd = os.open(str(view.folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd, _ = self._check_payload(dir_fd, view.bundle_id, path, payload["size"], payload["sha256"])
+        finally:
+            os.close(dir_fd)
+        try:
+            return pf_source.inspect_archive(fd, limits=limits, expected=(payload["expanded_bytes"],
+                                                                          payload["members"],
+                                                                          payload["members_sha256"]))
+        except pf_source.ArchiveRefused as exc:
+            raise self.archive_failure(path, exc) from exc
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def require_source_identity(view, tree, payload):
+        """An extracted source tree equals the bundle's recorded tree identity when one is recorded."""
+        expected = view.manifest["source"]["entries_sha256"]
+        if expected is not None and pf_source.entries_digest(tree) != expected:
+            raise Failure(f"source-manifest-mismatch: {payload}: the extracted tree differs from the recorded source "
+                          "manifest. Nothing was changed.")
+
+    def restore_candidate(self, view, prepared):
+        """`rollback --restore-db`: restore the selected checkpoint into ``prepared`` (the store's locale), run the
+        section 3.8 compatibility checks and write that checkpoint's verification record before any swap; on
+        failure the candidate is dropped and ``checkpoint-incompatible`` is raised."""
+        store = view.active_store
+        started = utc()
+        checks, passed, created = self.verify_store(store, view.folder / store["dump"], prepared, compatibility=True,
+                                                    drop=False)
+        self.write_verification(view, level="data_restore_verified", result="passed" if passed else "failed",
+                                target={"kind": "isolated-database", "names": [prepared], "removed": False},
+                                checks=checks, started_at=started)
+        if not passed:
+            if created:
+                self.drop_database(prepared)
+            failed = next(check for check in checks if check["result"] == "failed")
+            raise Failure(f"checkpoint-incompatible: {view.bundle_id}: {failed['detail'] or failed['name']}. The "
+                          "candidate database was dropped; the current database is unchanged.")
+
     def rollback(self, requested=None, restore_database=False):
         self.staging()
         selected = self.choose_snapshot(requested)
-        if not selected.get("source_verified"):
-            raise Failure("This is an emergency data checkpoint, not a verified source rollback target.")
-        if selected["database"] != self.env()["POSTGRES_DB"] or selected["database_user"] != self.env()["POSTGRES_USER"]:
+        # PF-A3.1 target rule: only a healthy checkpoint (schema 1 or legacy) is a rollback target.
+        if selected.capture_class != "healthy_checkpoint":
+            raise Failure(f"checkpoint-not-rollback-target: {selected.bundle_id} is a {selected.capture_class} "
+                          "capture: evidence and data for repair or export, never a rollback target. Nothing was "
+                          "changed.")
+        values = self.env()
+        store = selected.active_store
+        if store["database"] != values["POSTGRES_DB"] or (store["owner"] is not None
+                                                           and store["owner"] != values["POSTGRES_USER"]):
             raise Failure("Checkpoint database identity differs from the current instance.")
-        if selected["postgres_major"] != self.database_ready():
+        if selected.postgres_major != self.database_ready():
             raise Failure("Cross-major PostgreSQL restoration is not supported here.")
-        self.verify_images(selected["images"])
+        self.verify_images(selected.images)
+        recorded_db = selected.manifest["postgresql"]["image_id"]
+        running_db = self.inspect("db")["Image"]
+        if recorded_db is not None and running_db != recorded_db:
+            log(f"note: db-image-changed: the running database image {running_db[7:19]} differs from the checkpoint's "
+                f"{recorded_db[7:19]}; PostgreSQL major {selected.postgres_major} matches.")
         incomplete = self.pending.exists()
         previous_operation = load_json(self.pending) if incomplete else {}
         with tempfile.TemporaryDirectory(prefix="rollback-", dir=self.state) as folder:
-            candidate = Path(folder)
-            extract_source(self.backups_dir / selected["id"] / "source.tar.gz", candidate)
+            candidate = Path(folder) / "source"
+            tree = self.extract_payload(selected, selected.source_payload, candidate)
             self.refuse_reserved_candidate_paths(candidate)  # before any confirmation, pause or effect
-            if migration_files(candidate) != selected["migration_files"]:
+            self.require_source_identity(selected, tree, selected.source_payload)
+            if migration_files(candidate) != selected.migration_files:
                 raise Failure("Checkpoint migration fingerprint mismatch.")
             if not restore_database:
                 if incomplete and not (previous_operation.get("operation") == "update"
                                        and previous_operation.get("migration_required") is False):
                     raise Failure("The incomplete operation may have changed data/schema; review recovery with --restore-db.")
                 current_contract = self.ensure_local_contract()
-                if current_contract["files"] != selected["migration_files"] or self.db_heads() != selected["database_heads"]:
+                if current_contract["files"] != selected.migration_files or self.db_heads() != selected.database_heads:
                     raise Failure("Database/schema compatibility is not established. Code-only rollback refused; review --restore-db.")
-            # The checkpoint's own flag does not assign provenance: the tree is `git_commit` only
-            # when the protected store proves it, otherwise it is recorded as unknown. The proof
-            # reads the store (and refuses a commit that tracks a reserved name), so it runs
-            # before any confirmation, pause, snapshot or database swap.
-            verified = self.prove_tree_commit(candidate, selected["source_revision"])
-            phrase =("RESTORE " + self.env()["POSTGRES_DB"] + " " if restore_database else "ROLLBACK ") + selected["id"]
+                if selected.level == "failed":
+                    log(f"note: verification-failed: {selected.bundle_id}'s last restore test failed; code-only rollback "
+                        "does not use its database dump.")
+            # The checkpoint's own claim does not assign provenance: the tree is `git_commit` only
+            # when the protected store proves the hypothesis, otherwise it is recorded as unknown. The
+            # proof reads the store (and refuses a commit that tracks a reserved name), so it runs
+            # before any confirmation, pause, capture or database swap.
+            hypothesis = selected.source_hypothesis
+            verified = self.prove_tree_commit(candidate, hypothesis)
+            revision = hypothesis if verified else None
+            manifest = self.candidate_manifest(candidate, revision, verified=verified)
+            self.capture_preflight("rollback")
+            self.deployment_preflight(manifest)
+            phrase = ("RESTORE " + values["POSTGRES_DB"] + " " if restore_database else "ROLLBACK ") + selected.bundle_id
             confirm(phrase, ("Database will return to the selected backup time. Newer writes will no longer appear in the active app; the current DB is retained."
                              if restore_database else "Only code/images will change. Current data is kept. Schema equality does not prove all business-semantic compatibility."))
-            self.pause("rollback", selected=selected["id"])
-            emergency = self.snapshot("before-rollback", source_verified=not incomplete or not restore_database)
-            self.phase("backup-ready", checkpoint=emergency["id"])
+            staged = self.stage_deployment(candidate, manifest, kind="rollback", images=selected.images,
+                                           ref="rollback:" + selected.bundle_id)
+            self.pause("rollback", selected=selected.bundle_id)
+            # INV-09: every rollback preserves the current data first; inability to preserve blocks it.
+            preserved = self.preserve_current("before-rollback", stores=[values["POSTGRES_DB"]])
+            self.phase("backup-ready", checkpoint=preserved.bundle_id)
             retained = None
             if restore_database:
                 prepared = "pf_restore_" + uuid.uuid4().hex[:20]
-                self.restore_into(prepared, self.backups_dir / selected["id"] / "database.dump")
-                if self.db_heads(prepared) != selected["database_heads"]:
-                    raise Failure("Restored schema does not match the selected checkpoint.")
+                self.restore_candidate(selected, prepared)
                 retained = self.swap_database(prepared)
-            self.replace_source(candidate, selected["source_revision"], verified=verified)
-            self.phase("activating", checkpoint=emergency["id"])
-            self.activate(selected["images"], selected["database_heads"])
-            write_json(self.state / "deployed.json", {"sha": selected["source_revision"], "ref": "rollback:" + selected["id"],
-                       "deployed_at": utc(), "checkpoint": emergency["id"], "retained_database": retained})
-            self.pending.unlink()
-            log("Rollback complete. Safety checkpoint: " + emergency["id"])
+            self.replace_source(candidate, revision, verified=verified)
+            self.phase("activating", checkpoint=preserved.bundle_id)
+            self.activate(selected.images, selected.database_heads)
+            self.finish_deployment(staged, {"sha": revision, "ref": "rollback:" + selected.bundle_id,
+                                            "deployed_at": utc(), "checkpoint": preserved.bundle_id,
+                                            "retained_database": retained})
+            log("Rollback complete. Safety checkpoint: " + preserved.bundle_id)
 
     def reset_database(self):
         self.staging()
         self.database_ready()
+        self.capture_preflight("reset-db")
         contract = self.ensure_local_contract()
         database = self.env()["POSTGRES_DB"]
         confirm("RESET " + database,
                 "All current application data, including configuration/master data, will be removed from the active instance. A verified backup and retained database are created first. This does not make staging production-ready.")
         self.pause("reset-db")
         checkpoint = self.snapshot("before-reset")
-        self.phase("backup-ready", checkpoint=checkpoint["id"])
+        self.phase("backup-ready", checkpoint=checkpoint.bundle_id)
         prepared = "pf_clean_" + uuid.uuid4().hex[:20]
         self.create_database(prepared)
         override = self.state / "reset-images.yaml"
-        self.make_override(checkpoint["images"], override)
+        self.make_override(checkpoint.images, override)
         self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
                      override=override, env={"POSTGRES_DB": prepared})
         if self.db_heads(prepared) != contract["heads"]:
             raise Failure("The clean database did not reach the current schema head.")
         retained = self.swap_database(prepared)
-        self.phase("activating", checkpoint=checkpoint["id"])
-        self.activate(checkpoint["images"], contract["heads"])
-        write_json(self.state / "last-reset.json", {"time": utc(), "checkpoint": checkpoint["id"], "retained_database": retained})
+        self.phase("activating", checkpoint=checkpoint.bundle_id)
+        self.activate(checkpoint.images, contract["heads"])
+        write_json(self.state / "last-reset.json", {"time": utc(), "checkpoint": checkpoint.bundle_id, "retained_database": retained})
         self.pending.unlink()
         log("Clean database is active. Configure Departments/Areas/Operations/Stations again.")
 
@@ -6170,6 +7873,7 @@ class Controller:
             ("Timezone data", self.describe_zone_data),
             ("Compose envelope", self.describe_envelope),
             ("Free space", lambda: self.free_space() or "ok"),
+            ("Deployment", self.describe_deployment),
         ))
         log("Database volume capacity, NAS recovery, and production readiness are not certified by doctor.")
         log("Default doctor is read-only: it created, repaired and migrated nothing.")
@@ -6197,7 +7901,8 @@ class Controller:
             ("Docker daemon", self.describe_daemon),
             ("Managed resources", self.describe_inventory),
             ("Runtime .env", self.env_presence),
-            ("Deployed source", self.revision),
+            ("Deployed source", self.describe_deployed_source),
+            ("Deployment", self.describe_deployment),
             ("Workspace", self.describe_workspace),
             ("Revision checkpoints", lambda: str(len(self.snapshots()))),
             ("Database revisions", lambda: ", ".join(self.db_heads()) or "uninitialized"),
@@ -6316,8 +8021,12 @@ def parser():
     def add(name, **kwargs):
         return subs.add_parser(name, allow_abbrev=False, **kwargs)
 
-    for name in ("doctor", "status", "backup", "reset-db", "resume", "abort-deploy"):
+    for name in ("doctor", "status", "reset-db", "resume", "abort-deploy"):
         add(name)
+    backup = add("backup", help="Create a verified healthy checkpoint (--emergency: emergency preservation)")
+    backup.add_argument("--emergency", action="store_true",
+                        help="Capture the current data even when the schema/image contract does not hold (terminal "
+                             "only; evidence and data, never a rollback target)")
 
     # PF-A2.3: `pf permissions check|plan|apply`; bare `pf permissions` is refused by classify_command.
     permissions = add("permissions", help="Check, preview or apply the semantic permission policy")
@@ -6472,6 +8181,9 @@ DISPATCH = {route.name: route for route in (
     _locked("restore-instance", "mutating", "refuse", "restore", "unless-side-by-side", "terminal", "",
             "Controller.restore_instance"),
     _locked("backup", "mutating", "refuse", "owned", "never", "policy", "backup", "Controller.snapshot"),
+    # PF-A3.1: attended emergency preservation (section 4.2); its own pending route, never a policy grant.
+    _locked("backup emergency", "mutating", "backup emergency", "owned", "never", "terminal", "",
+            "Controller.capture_emergency"),
     _locked("reset-db", "mutating", "refuse", "owned", "always", "terminal", "", "Controller.reset_database"),
     _locked("rollback", "mutating", "rollback", "owned", "always", "terminal", "", "Controller.rollback"),
     _locked("resume", "mutating", "resume", "owned", "always", "terminal", "", "Controller.resume"),
@@ -6614,6 +8326,8 @@ def route_key(args):
     """The DISPATCH key of parsed arguments: the command word, plus the verb for `permissions` (PF-A2.3)."""
     if args.command == "permissions":
         return "permissions " + args.permissions_verb
+    if args.command == "backup" and getattr(args, "emergency", False):
+        return "backup emergency"
     return args.command
 
 
@@ -6662,9 +8376,10 @@ def require_attended(route, args, controller, *, explicit_instance, selected_by)
         return
     slug = controller.context.slug
     if route.unattended == "terminal":
-        raise Failure(f"terminal-required: '{route.name}' asks for a typed confirmation and cannot run without a "
+        spelled = PENDING_ROUTE_COMMANDS.get(route.name, route.name)
+        raise Failure(f"terminal-required: '{spelled}' asks for a typed confirmation and cannot run without a "
                       "terminal (scheduled task, script, or ssh without -t). Run it interactively: sudo pf --instance "
-                      f"{slug} {route.name}. Nothing was changed.")
+                      f"{slug} {spelled}. Nothing was changed.")
     if not explicit_instance:
         raise Failure(f"instance-required-unattended: '{route.name}' is running without a terminal and selected "
                       f"instance {slug} by {selected_by}. Unattended commands must name the instance: pf --instance "
@@ -7069,10 +8784,16 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             recovery = controller.choose_recovery(args.recovery_id)
             controller.restore_instance(recovery, side_by_side=args.side_by_side)
             managed_started = False
+        elif route.name == "backup emergency":
+            controller.capture_emergency()
+            log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though runtime .env is stored separately.")
         elif args.command == "backup":
             controller.database_ready()
+            controller.capture_preflight("backup")
             controller.ensure_local_contract()
-            controller.snapshot("scheduled-or-manual-backup")
+            view = controller.snapshot("scheduled-or-manual-backup")
+            log(f"Checkpoint class: {view.capture_class}")
+            log(f"Verification level: {view.level} (record {view.latest_verification_id})")
             log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though runtime .env is stored separately.")
         elif args.command == "reset-db":
             controller.reset_database()

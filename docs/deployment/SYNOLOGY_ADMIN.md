@@ -260,6 +260,29 @@
 > This block **supersedes** the `sudo pf permissions` steps of sections 2 and 16 and the `backup_read_group`
 > note of the PF-A2.2 block and section 6.
 
+> **Warning (PF-A3.1).** Deployment Admin checkpoint PF-A3.1 (2026-10-07) — immutable deployed-source artifacts,
+> strict lifecycle wire schemas and emergency preservation; still a **development state, not a NAS release**.
+> Offline and filesystem evidence only: Docker and PostgreSQL were simulated, nothing was run against a real DSM
+> host, Docker daemon or PostgreSQL server.
+> *Deployment record.* Every successful `deploy`, `update`, `rollback` and `restore-instance` now seals a
+> **deployment record** in `<root>/instances/<uuid>/artifacts/deployments/<deployment-id>/` (root only, `0700`/`0600`):
+> the exact deployed source archive and its manifest, the resolved Compose model, the frozen `.env` (secrets) and
+> the record itself. `deployed.json` points to it. It survives a checkout change, the loss of `repo/.git` and
+> `purge`.
+> *Bundles.* New checkpoints and purge recovery bundles are written as `schema_version` 1 manifests
+> (`contracts/lifecycle-records.schema.json`) and read strictly: the exact manifest bytes, every payload's size and
+> hash, no link and no unlisted file, before anything is extracted, confirmed or journaled. Older format 1 and 2
+> bundles stay usable through an explicit, deterministic in-memory migration; nothing on disk is rewritten.
+> *Classes and levels.* A capture is a **healthy checkpoint**, an **emergency preservation** or **partial**; its
+> verification level (`captured`, `failed`, `data-restore`) comes from a separate verification record under
+> `artifacts/verifications/`. Only a healthy checkpoint is a rollback target.
+> *Emergency.* `pf backup --emergency` (terminal only, `EMERGENCY BACKUP <project>`) preserves the actual data when
+> a healthy checkpoint is refused, and every `rollback` now preserves the current database first and refuses
+> (`preservation-failed`) when it cannot.
+> *Downgrade.* Going back to the PF-A2.3 control is **unsupported** once a schema-1 bundle exists (its listings,
+> rollback selection and purge fail on the new manifests).
+> This block **supersedes** the checkpoint contents of section 10 and the `Deployed source` line of section 8.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -789,6 +812,22 @@ The new-deploy flow:
 11. Starts frontend and verifies `/api/health` through the frontend proxy.
 12. Writes the deployed revision to external `.pf-state-<project>/deployed.json`.
 
+Since PF-A3.1 step 7 is preceded by a capacity check of the deployment artifact store (`artifact-capacity`: the
+source size plus 64 MiB must be free in `<root>/instances/<uuid>/artifacts/deployments`) and followed, before any
+change, by **staging** the deployment: the exact source tree is archived with its manifest into a private
+`.staging-<id>` folder. A staging failure (`deployment-stage-failed`) leaves the application, database and workspace
+unchanged. After the health checks pass the staging is **sealed**: the database image identity, the resolved
+Compose model and the frozen `.env` are added, the folder is renamed to its deployment ID and `deployed.json` gains
+`deployment_id` and `deployment_record_sha256`. The record holds secrets and is root-only; it is never placed in a
+checkpoint (checkpoints refer to it by ID and hash) and it survives a checkout change, the loss of `repo/.git` and
+`purge`.
+
+A seal failure after a healthy activation does not stop the application: the operation is closed, `deployed.json`
+records `deployment_seal_failed` instead of a record, the command exits 1 with `deployment-record-incomplete`, and
+`status` reports `Deployment: not recorded (…)`. The next `deploy`, `update`, `rollback` or `restore-instance` seals a
+record. A staging folder left by an interrupted run is reported by `status` (`Unsealed deployment staging: N`) and is
+never used; PF-A3.2 cleans it.
+
 Since PF-A2.3 the new source tree is copied content-only and only the names `deploy` copied get the workspace
 targets. The copy works through held, no-follow folder handles on both sides: a source entry swapped for a link
 or another file, or a new folder an editor swaps for a link while it is filled, stops the copy before anything is
@@ -833,7 +872,23 @@ It reports:
 ```text
 Deployed source: <SHA>
 Workspace: provenance git_commit|unknown | manifest commit <SHA or none> | differs from deployed: True/False | changes: ...
+Deployment: <deployment-id> (git_commit <sha12>|unknown), sealed <stamp>
 ```
+
+Since PF-A3.1 the deployed source comes from the **deployment record** (section 7), not from `repo/` or its
+`.git`. `Deployed source:` prints the commit only when the protected source store proved it; otherwise it prints
+`unknown provenance (…)` and never a claimed commit. `deployed.json` `sha` is likewise written only for a proven
+commit (`null` otherwise). The `Deployment:` line is one of:
+
+```text
+Deployment: <id> (git_commit <sha12>|unknown), sealed <stamp>
+Deployment: legacy (no deployment record; created before PF-A3.1)
+Deployment: not recorded (seal failed in operation <op>; the next deploy/update/rollback seals one)
+Deployment: <id> deployment-artifact-mismatch: <file>: <detail>
+```
+
+followed by `Unsealed deployment staging: N` and `Unreferenced deployments: N` when they are not zero. A deployment
+whose files differ from its record is kept as evidence and never used as a source (section 16).
 
 No lifecycle command changes the permissions of existing workspace files (PF-A2.3); `pf permissions check
 --scope workspace` reports them and `pf permissions apply` changes them under an editor freeze.
@@ -902,6 +957,15 @@ with `resource-not-owned` right after the lock, before any confirmation or chang
 
 `--skip-ci` is a manual staging exception, not evidence that CI passed.
 
+Since PF-A3.1 the update checks, before its `UPDATE` confirmation, that the running backend/frontend images are the
+ones of the current deployment record (`deployment-image-mismatch`) and that the deployment artifact store has room
+(`artifact-capacity`); it stages the new deployment right after the confirmation, before application writes stop,
+and seals it after the health checks (section 7). The current commit is read from the deployment record (then from a
+proven `deployed.json` `sha`). When it is unknown, a **manual** update still runs — its pre-update checkpoint takes
+the source from the deployment record — while an automatic update is deferred (`Automatic update refuses a
+deployment whose source commit is unknown; run a manual update.`). The pre-update checkpoint is a schema-1 healthy
+checkpoint with a verification record (section 10).
+
 ## 10. Backups and rollback
 
 Create a verified revision checkpoint:
@@ -910,7 +974,7 @@ Create a verified revision checkpoint:
 sudo pf backup
 ```
 
-A v2.5 checkpoint contains:
+A checkpoint contains:
 
 ```text
 source.tar.gz          exact deployed source revision
@@ -924,6 +988,83 @@ manifest.sha256
 The active database dump is restored into a temporary database as part of verification.
 The runtime `.env` is no longer stored in the normal revision `source.tar.gz`; it is host
 configuration outside the repository. A full purge-recovery bundle preserves it separately.
+
+**Manifest schema 1 (PF-A3.1).** A new checkpoint's `manifest.json` follows the `recovery_manifest` record of
+`deploy/synology/contracts/lifecycle-records.schema.json`; `manifest.sha256` is the SHA-256 of the exact file bytes.
+It records:
+
+- the **capture class**: `healthy_checkpoint` (the live schema matches the deployed images, the exact deployed source
+  is known and every image is identified), `emergency_preservation` (the actual data, with the mismatch recorded as
+  evidence) or `partial` (an emergency capture where an image or the source could not be identified);
+- quiescence (whether backend/frontend were running), the source origin and provenance, the deployment it binds to
+  (ID and record hash; the record itself is never copied into a checkpoint because it holds secrets), the
+  backend/frontend/db image identities (ID, platform, repo digests), the PostgreSQL server version, and per database
+  store its owner, encoding/collation/ctype, extensions, Alembic heads and — only when writers were stopped (before
+  `update`, `reset-db`, `rollback`, `purge`) — exact row counts; `pf backup` with running writers records none;
+- every payload with its type, size and hash, plus the exclusions and manual prerequisites that a restore needs.
+
+**Verification level.** The restore test writes a separate **verification record** in
+`<root>/instances/<uuid>/artifacts/verifications/<bundle-id>/` (root only); the bundle is never edited afterwards.
+The level shown by `backup`, `backups` and `recoveries` is computed from these records: `captured` (sealed, no
+record yet), `failed` (the last restore test failed), `data-restore` (every store restored from the bundle's own
+dump, with heads, locale and row-count checks) and `functional` (reserved for PF-A3.3; no writer yet). A broken
+record is reported as `note: verification-record-invalid: …; ignored.` and does not raise the level. `pf backup` now
+prints:
+
+```text
+Checkpoint class: healthy_checkpoint
+Verification level: data_restore_verified (record <verification-id>)
+```
+
+**Strict reading.** Every consumer (listings, rollback, purge, restore) first reads the bundle strictly: the manifest
+bytes must match `manifest.sha256`, the manifest must validate, and every payload must be a regular, single-link file
+of the recorded size and hash; a file that the manifest does not list is refused. Nothing is extracted, confirmed or
+journaled before that. Archives are then extracted by a safe importer that refuses every link or special file,
+absolute or `..` paths, duplicate or oversized members and archives that change while being read
+(`archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`).
+
+**Before a capture.** `pf backup`, `update`, `reset-db` and `purge` refuse a healthy checkpoint before any change
+when the running backend/frontend images are not the current deployment's (`deployment-image-mismatch`), or when the
+deployed source cannot be proven at all (`deployment-artifact-mismatch` refusal, or the existing "Cannot reconstruct
+the exact deployed source revision" refusal for a deployment without a record). When only the deployment record's
+files are damaged but the source can still be proven from the protected source store or the workspace, the capture
+proceeds with a `note: deployment-artifact-mismatch: …` and records the record as excluded.
+
+**Emergency preservation.** When a healthy checkpoint is refused but the data must be kept, run, interactively:
+
+```sh
+sudo pf --instance <slug> backup --emergency
+```
+
+It prints the observed contract (live heads, image heads, running and expected image IDs), asks
+`EMERGENCY BACKUP <project>`, captures and restore-tests the current database and prints
+`Emergency preservation <id> captured (<level>). It is evidence and data for repair or export, not a rollback
+target.` It is refused without a terminal and is never run by `backup.sh`. While a deploy, update, rollback or
+reset-db is interrupted, `status` lists it as a legal route; it does not change the interrupted operation. An
+emergency or partial capture is **never a rollback target** (`checkpoint-not-rollback-target`).
+
+**Rollback preservation.** Every `rollback`, code-only or `--restore-db`, now preserves the current database after
+application writes stop and before anything is restored or switched: a healthy checkpoint when the live contract
+matches, otherwise an emergency preservation. If the current database cannot be captured **and** restore-tested, the
+rollback stops with `preservation-failed`: nothing was restored or switched, the services stay stopped, and
+`pf resume` reopens the unchanged deployment (section 16 gives the manual `pg_dump` step).
+
+**Rollback checks.** The selected checkpoint must be a healthy checkpoint; its backend/frontend image IDs must still
+be retained; a different database image only prints `note: db-image-changed: …` when the PostgreSQL major matches.
+The source is extracted with the safe importer and compared with the recorded source manifest
+(`source-manifest-mismatch`). A code-only rollback does not use the dump, so a `failed` level is a note
+(`note: verification-failed: …`). `--restore-db` restores into a candidate created with the store's encoding and
+locale, checks heads, locale, available extensions, owner and (when recorded) row counts, writes a verification
+record **before** the switch, and on any difference drops the candidate and refuses with `checkpoint-incompatible`
+while the current database stays unchanged.
+
+**Legacy checkpoints.** Format 1 and 2 checkpoints written before PF-A3.1 are read through an explicit, deterministic
+migration (`note: legacy-manifest-migrated: <id> format <n> read as <class>; limitations: …`), never rewritten. A
+format-2 checkpoint is healthy only when it recorded a verified source, a passed restore test, both images and the
+migration fingerprint; it is listed with `legacy-format-2` and `source=claimed <sha12>`: the claimed commit is only a
+hypothesis that the protected store must prove again before it is used. Every format-1 checkpoint reads as `partial`
+(it was not rollbackable before either). No verification record is synthesized from a legacy `restore_test` claim:
+the level stays `captured` until a `--restore-db` verifies it on its candidate.
 
 Since PF-A2.3 a new checkpoint gets the backups target of the permission policy in force (the group of the
 backups folder, or of the approved revision; View and copy gives directories `0750` and files `0640`), set
@@ -958,6 +1099,13 @@ The database form requires a stronger confirmation, restores the old dump into a
 database, and retains the previously active database under a `pf_keep_*` name rather than
 silently deleting newer writes.
 
+`pf backups` lists one line per checkpoint (PF-A3.1):
+
+```text
+<n>. <bundle-id>  [<healthy|emergency|partial>|<captured|failed|data-restore|functional>]  <reason>  DB=<heads>  source=<git_commit <sha12>|unknown|claimed <sha12>>  [legacy-format-N]
+<n>. <folder>  [invalid: <code>]
+```
+
 ## 11. Reset staging data
 
 To keep the installed application/version but activate a clean migrated database:
@@ -978,6 +1126,11 @@ database. It does not delete the PostgreSQL Docker volume.
 
 Use `reset-db` for clearing test data while keeping the deployment. Use `purge` when the
 goal is to return the instance to a genuinely new-deployment state.
+
+Since PF-A3.1 the `before-reset` checkpoint is a schema-1 healthy checkpoint with a verification record, and
+`reset-db` first runs the same deployment image binding check as `pf backup` (`deployment-image-mismatch` before any
+change). Emergency preservation inside `reset-db` is PF-A3.3: when the healthy checkpoint is refused, take
+`pf backup --emergency` and resolve the mismatch first.
 
 ## 12. Full purge, recovery, and clean redeploy
 
@@ -1066,6 +1219,27 @@ manifest.sha256
 Database dumps are restore-tested. If the PostgreSQL data volume exists but a recoverable
 backup cannot be produced, purge refuses to delete that volume.
 
+Since PF-A3.1 the bundle is a schema-1 `purge-bundle` manifest and also contains:
+
+```text
+deployment/deployment-record.json    the current deployment record (when one is sealed and intact)
+deployment/compose-resolved.json     the resolved Compose model (sensitive)
+```
+
+`images.tar` now also holds the database image layers, saved by image ID (they are not yet used at restore;
+PF-A3.3). Every payload copied from the `before-purge` checkpoint or the deployment record is re-hashed
+(`bundle-payload-mismatch` stops the purge before deletion and reopens the application). Retained `pf_keep_*`
+databases are dumped with their real heads (connections are allowed only for the dump and closed again);
+`postgres-globals.sql` and the role list are evidence only and are never executed. After the bundle is sealed every
+store is restored **from the bundle's own payloads** into temporary databases and checked; the resulting
+`data_restore_verified` record, bound to this bundle's manifest hash, is required before the first deletion
+(`purge-bundle-unverified` otherwise: the purge stops before deletion and the application is reopened). The
+`pf recoveries` line is:
+
+```text
+<n>. <bundle-id>  [<level>]  project=<project>  db=<active database>  source=<git_commit <sha12>|unknown|claimed <sha12>>  derived_from=<checkpoint id>  [legacy-format-N]
+```
+
 The recovery bundle is intended to reconstruct **functional PartFlow state**, not Docker
 container IDs/network IDs bit-for-bit.
 
@@ -1148,7 +1322,11 @@ confirmation.
 
 The restore recreates the saved repository workspace, restores `config/.env`, loads saved
 application images, recreates/restores the database set, restores checkpoint history/state,
-and health-checks backend/frontend. The current installed root-owned control plane is kept;
+and health-checks backend/frontend. Since PF-A3.1 the bundle is read strictly before any confirmation, the deployed
+source is extracted from the bundle's source payload with the safe importer and compared with its recorded manifest,
+and that source (not the saved workspace) is staged as a new deployment; after the health checks a new deployment
+record is sealed with `restored_from` naming the bundle, and a fresh `deployed.json` points to it. The bundle's own
+`state/deployed.json` stays evidence only. The current installed root-owned control plane is kept;
 recovery does not downgrade the lifecycle controller mid-operation. The current
 `config/pf-config.json` also remains authoritative. Its saved recovery copy is retained for
 manual comparison/reapplication rather than being activated in the middle of a restore.
@@ -1213,6 +1391,10 @@ revision.
 
 Do not schedule `reset-db`, `purge`, `restore-instance`, or other interactive destructive
 commands; without a terminal they are refused anyway (`terminal-required`).
+
+Since PF-A3.1 the `backup` output gains the `Checkpoint class:` and `Verification level:` lines (section 10), and a
+scheduled `backup`, once granted, refuses `deployment-image-mismatch` exactly like a manual one. `backup --emergency`
+is never scheduled: it needs a terminal and `backup.sh` does not pass it.
 
 ## 14. Advanced raw Compose access
 
@@ -1627,6 +1809,54 @@ no longer owned); the journal keeps the plan. `inventory-unstable` means contain
 disappearing between `docker ps -a` and their inspect on three attempts; retry when the host is
 quieter (an interrupted purge or abort resumes its frozen plan).
 
+### Lifecycle bundle and deployment record codes (PF-A3.1)
+
+A refusal before any effect ends with `Nothing was changed.`; a later one names the actual state.
+
+- `manifest-checksum-mismatch`, `manifest-invalid`, `manifest-schema-unsupported`, `bundle-payload-mismatch`,
+  `bundle-unlisted-file`: the bundle folder was changed, damaged or written by an unsupported control. Do not edit
+  or "repair" it; copy it off-NAS as evidence and use another checkpoint or recovery bundle. `pf backups` and
+  `pf recoveries` list such a folder as `[invalid: <code>]`. A bundle copied back from off-NAS must be byte-identical
+  (no added files such as `.DS_Store` or `Thumbs.db`).
+- `archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`: an archive payload contains a
+  link, special file, unsafe or duplicate path, exceeds the importer limits, changed while it was read, or does not
+  fit; nothing was extracted. For `archive-capacity` free space on the volume and retry.
+- `source-manifest-mismatch`: the extracted source differs from the recorded source manifest; use another
+  checkpoint.
+- `checkpoint-not-rollback-target`: the selected checkpoint is an emergency or partial capture. Restore its data
+  manually or export from it; choose a healthy checkpoint for `rollback`.
+- `checkpoint-incompatible`: the `--restore-db` candidate failed a check (locale, extension, owner, heads or row
+  counts); the candidate was dropped and the current database is unchanged.
+- `preservation-failed`: the rollback could not capture and restore-test the current database; nothing was restored
+  or switched and the services stay stopped. Preserve the database manually — a `pg_dump --format=custom` of the
+  named database from the `db` service to a protected, root-only location — or fix the cause and run
+  `pf --instance <slug> backup --emergency`; then retry, or run `pf --instance <slug> resume` to reopen the unchanged
+  deployment.
+- `deployment-artifact-mismatch`: a file of the current deployment record differs from the record. **Do not delete
+  the folder**; keep it as evidence. As a note the capture continued with the source from the protected source store
+  or the proven workspace and the next `update` seals a fresh record. As a refusal the deployed source is
+  unprovable: restore the protected source store, or roll back to a healthy checkpoint (the rollback preserves the
+  current data first).
+- `deployment-image-mismatch`: the running backend/frontend image is not the current deployment's, so a healthy
+  checkpoint would bind the wrong images. Find out who changed the containers, preserve the data with
+  `pf backup --emergency` if needed, and redeploy or roll back. After a pause the copy names the stopped state and
+  `pf resume` reopens the unchanged deployment.
+- `deployment-stage-failed`: the deployment could not be staged; the application, database and workspace were not
+  changed. Fix the detail (often space or permissions in `artifacts/deployments`) and rerun.
+- `deployment-record-incomplete`: the application was activated and is healthy, but its record could not be sealed.
+  `status` shows `Deployment: not recorded (…)`; captures use the protected store or workspace proof meanwhile, and
+  when no commit is provable healthy checkpoints and `update` refuse in their preflight — use `rollback` (it falls
+  back to emergency preservation) or `backup --emergency`. The next deploy, update, rollback or restore-instance seals
+  a record.
+- `artifact-capacity`: the deployment artifact store needs the source size plus 64 MiB; free space and retry.
+  Nothing in PF-A3.1 deletes deployment artifacts (retention is PF-A5.1).
+- `purge-bundle-unverified`: the purge bundle has no passed `data_restore_verified` record for its manifest; deletion
+  is blocked and the application is reopened. Rerun `purge` after fixing the restore failure shown before it.
+- Notes: `verification-record-invalid` (a damaged verification record is ignored; the level falls back),
+  `legacy-manifest-migrated` (an older bundle was read through the migration), `db-image-changed` (a different
+  PostgreSQL image of the same major), `verification-failed` (code-only rollback of a checkpoint whose last restore
+  test failed; the dump is not used).
+
 ### Local source edits exist before an update
 
 Check:
@@ -1666,14 +1896,15 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 | `sudo pf update --latest` | Managed staging update from latest branch SHA |
 | `sudo pf update --commit FULL_SHA` | Managed staging update to exact commit |
 | `sudo pf update --release TAG` | Managed staging update to release |
-| `sudo pf backup` | Create and restore-test a revision checkpoint |
-| `sudo pf backups --page N` | List revision checkpoints, 10/page |
+| `sudo pf backup` | Create and restore-test a healthy revision checkpoint (prints class and level) |
+| `sudo pf backup --emergency` | Preserve the actual data when a healthy checkpoint is refused (`EMERGENCY BACKUP <project>`; terminal only; never a rollback target) |
+| `sudo pf backups --page N` | List revision checkpoints, 10/page: `[class\|level]`, reason, DB heads, source provenance, legacy format |
 | `sudo pf rollback [BACKUP_ID]` | Code rollback with current DB retained |
 | `sudo pf rollback BACKUP_ID --restore-db` | Restore code + selected database state |
 | `sudo pf reset-db` | Activate a clean migrated DB while preserving recoverability |
 | `sudo pf instances` | List managed PartFlow instances |
 | `sudo pf purge [--project NAME]` | Full recoverable purge of one staging instance |
-| `sudo pf recoveries` | List purge recovery bundles |
+| `sudo pf recoveries` | List purge recovery bundles: `[level]`, project, active database, source provenance, `derived_from` |
 | `sudo pf restore-instance RECOVERY_ID` | Recreate a purged functional instance |
 | `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB alongside current instance |
 | `sudo pf release-check` | Check eligible release without applying |
@@ -1761,6 +1992,22 @@ filesystem as root in a throwaway container; no DSM or SMB claim):
 - the control release is checked, never changed, and fixed at No group access;
 - ACL-bearing configuration files stay refused by the config wizards (PF-A5.1);
 - an invalid permission policy record has a manual recovery route only (section 16).
+
+PF-A3.1 limits (offline and filesystem evidence only; Docker and PostgreSQL are simulated):
+
+- no real Docker, Compose or PostgreSQL behaviour is claimed; the emergency-preservation case A3-T03 is blocked at
+  its required real Docker/PostgreSQL level (PF-A3.4);
+- there is no functional recovery verification yet: purge deletion is gated on a `data_restore_verified` record of
+  the purge bundle's own payloads; application invariant queries and the runtime/images/config rebuild are not
+  verified (PF-A3.3);
+- emergency preservation is wired into `rollback` and `backup --emergency` only; `reset-db`, `purge` and
+  `restore-instance` stay healthy-gated (PF-A3.3);
+- unsealed staging and superseded deployments are never cleaned (PF-A3.2/PF-A5.1); the workspace replacement stays
+  in place (PF-A3.2); archived database image layers are not used at restore (PF-A3.3);
+- a downgrade to the PF-A2.3 control is unsupported while any schema-1 bundle exists;
+- checksums prove integrity, not authorship: bundles have no trust anchor beyond the protected root-owned
+  directories.
+
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
 instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose
 route remains; the PF-A1 safety scope is proven offline only. A1-T11…T14 stay blocked on a real

@@ -1167,6 +1167,9 @@ class TimeoutAndCancellation(Base):
         PF-A1.4: the catch-all `up` route is gone; the managed `backup` is interrupted at its first
         effect-carrying child (`docker tag` of the running image), run by an operator at a terminal."""
         self.backup_signal_tool()
+        # PF-A3.1: `backup` proves the deployed source in its read-only preflight, before any effect; the
+        # workspace is recorded as the deployed tree (as a deploy would), so the first effect is still reached.
+        self.controller(self.context).record_source_manifest(self.paths["workspace"], pfx.OLD, verified=True)
         operations = self.context.operations_dir
         for signum in (signal.SIGHUP, signal.SIGQUIT, signal.SIGTERM, signal.SIGINT):
             with self.subTest(signal=signum.name):

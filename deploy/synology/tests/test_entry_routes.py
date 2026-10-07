@@ -176,32 +176,25 @@ def write_sites(tree):
 WRITE_SITE_ALLOWLIST = {
     "pf-admin.py": {
         (".mkdir", "Controller.create_purge_recovery"), (".mkdir", "Controller.ensure_backup_tree"),
-        (".mkdir", "Controller.ensure_recovery_tree"), (".mkdir", "Controller.extract_tree_archive"),
+        (".mkdir", "Controller.ensure_recovery_tree"),
         (".mkdir", "Controller.lock"),
         (".mkdir", "Controller.restore_revision_checkpoints"), (".mkdir", "Controller.restore_runtime_environment"),
-        (".mkdir", "Controller.snapshot"), (".mkdir", "extract_source"),
-        (".open", "Controller.create_purge_recovery"), (".open", "Controller.create_tree_archive"),
-        (".open", "Controller.dump_database"), (".open", "Controller.extract_tree_archive"),
-        (".open", "Controller.snapshot"), (".open", "create_source_archive"),
-        (".open", "extract_source"), (".open", "write_json"),
-        (".unlink", "Controller.abort_deploy"), (".unlink", "Controller.deploy"),
+        (".open", "Controller.create_tree_archive"),
+        (".open", "write_json"),
+        (".unlink", "Controller.abort_deploy"),
         (".unlink", "Controller.finish_purge_cleanup"),
         (".unlink", "Controller.purge"), (".unlink", "Controller.replace_source"),
         (".unlink", "Controller.replace_source_for_recovery"), (".unlink", "Controller.reset_database"),
-        (".unlink", "Controller.restore_instance"), (".unlink", "Controller.resume"), (".unlink", "Controller.rollback"),
-        (".unlink", "Controller.update"),
-        (".write_bytes", "Controller.make_override"), (".write_text", "Controller.create_purge_recovery"),
-        (".write_text", "Controller.snapshot"),
+        (".unlink", "Controller.restore_instance"), (".unlink", "Controller.resume"),
+        (".write_bytes", "Controller.make_override"),
         ("_write_private", "Controller.write_deletion_plan"), ("_write_private", "Controller.write_private_json"),
-        ("os.chmod", "Controller.begin_operation"), ("os.chmod", "Controller.extract_tree_archive"),
+        ("os.chmod", "Controller.begin_operation"),
         ("os.chmod", "Controller.freeze_app_config"), ("os.chmod", "Controller.lock"),
-        ("os.chmod", "extract_source"),
         ("os.mkdir", "Controller.begin_operation"), ("os.mkdir", "Controller.freeze_app_config"),
         ("os.replace", "Controller.make_override"),
         ("os.replace", "Controller.restore_runtime_environment"), ("os.replace", "write_json"),
         # PF-A2.2: the config wizard's compare-and-swap publish (replace mode) and its audit record.
         ("os.replace", "write_editable_file"), ("write_private_json", "Controller.write_config_change"),
-        ("shutil.copyfileobj", "Controller.extract_tree_archive"), ("shutil.copyfileobj", "extract_source"),
         ("shutil.rmtree", "Controller.finish_purge_cleanup"), ("shutil.rmtree", "Controller.replace_source"),
         ("shutil.rmtree", "Controller.replace_source_for_recovery"),
         ("shutil.rmtree", "Controller.restore_revision_checkpoints"),
@@ -232,15 +225,33 @@ WRITE_SITE_ALLOWLIST = {
         ("tempfile.TemporaryDirectory", "Controller.deploy"), ("tempfile.TemporaryDirectory", "Controller.prove_tree_commit"),
         ("tempfile.TemporaryDirectory", "Controller.restore_instance"), ("tempfile.TemporaryDirectory", "Controller.rollback"),
         ("tempfile.TemporaryDirectory", "Controller.update"), ("tempfile.mkdtemp", "Controller.restore_revision_checkpoints"),
-        ("write_json", "Controller.begin_operation"), ("write_json", "Controller.create_purge_recovery"),
+        ("write_json", "Controller.begin_operation"),
         ("write_json", "Controller.deploy"), ("write_json", "Controller.pause"), ("write_json", "Controller.phase"),
         ("write_json", "Controller.reset_database"), ("write_json", "Controller.resolve"),
-        ("write_json", "Controller.restore_instance"), ("write_json", "Controller.rollback"),
-        ("write_json", "Controller.snapshot"), ("write_json", "Controller.update"),
+        ("write_json", "Controller.restore_instance"),
         ("write_private_json", "Controller._append_envelope_record"), ("write_private_json", "Controller._record_daemon"),
-        ("write_private_json", "Controller.binding_blocked"), ("write_private_json", "Controller.create_purge_recovery"),
+        ("write_private_json", "Controller.binding_blocked"),
         ("write_private_json", "Controller.purge"), ("write_private_json", "Controller.require_empty_target"),
         ("write_private_json", "Controller.require_topology_owned"),
+        # PF-A3.1 (sections 3.1-3.8), all inside a locked operation unless noted: the private artifact directories
+        # (private_dir: mkdir 0700 + chmod), the deployment staging directory and its files, the seal's copies and
+        # record, the pointer and journal close of finish_deployment, the capture folder, dump (exclusive create, then
+        # the atomic rename of the .partial) and list, the sealed manifest and its hash, the external verification
+        # record, the captures/deployment-artifact audit records, the purge bundle's folders, copies and sealed
+        # manifest, the format 1 .env moved out of a restored source tree, and the legacy migration record and
+        # migrated bytes written by the strict reader only inside an open operation (READ_ONLY_REACHABLE_EXEMPT).
+        ("os.mkdir", "Controller.private_dir"), ("os.chmod", "Controller.private_dir"),
+        ("os.mkdir", "Controller.stage_deployment"), ("os.chmod", "Controller.stage_deployment"),
+        ("_write_private_file", "Controller.stage_deployment"), ("write_private_json", "Controller.stage_deployment"),
+        ("_write_private_file", "Controller._seal_compose"), ("_write_private_file", "Controller._seal_config"),
+        ("_write_private_file", "Controller.seal_deployment"), ("write_json", "Controller.finish_deployment"),
+        (".unlink", "Controller.finish_deployment"), ("write_private_json", "Controller.finish_deployment"),
+        (".mkdir", "Controller._capture"), (".open", "Controller.dump_store"), ("os.replace", "Controller.dump_store"),
+        (".open", "Controller.write_dump_list"), ("_write_private_file", "Controller.write_manifest"),
+        ("_write_private_file", "Controller.write_verification"), ("write_private_json", "Controller._record_capture"),
+        (".mkdir", "Controller._purge_bundle"), (".open", "Controller._purge_bundle"),
+        ("_write_private_file", "Controller._purge_bundle"), ("write_private_json", "Controller._purge_bundle"),
+        ("os.replace", "Controller.restore_instance"), ("_write_private_file", "Controller._read_bundle_at"),
     },
     "pf_instance.py": {
         ("_write_private_file", "_stage_instance_dir"), ("_write_private_file", "_write_registry"),
@@ -248,6 +259,8 @@ WRITE_SITE_ALLOWLIST = {
         ("os.chmod", "_create_lock_file"), ("os.chmod", "_create_private_dir"), ("os.chmod", "_write_private_file"),
         ("os.chmod", "initialize_installation_root"), ("os.mkdir", "_create_private_dir"),
         ("os.rename", "_publish_instance_dir"), ("os.replace", "_write_private_file"),
+        # PF-A3.1: the seal of a deployment staging directory (rename relative to the held parent descriptor).
+        ("os.rename", "publish_private_dir"),
         # PF-A2.3: the one metadata engine (section 3.9): fchown then fchmod of a descriptor opened no-follow relative
         # to its parent, after the identity, link-count, before-state and ACL checks.
         ("os.fchown", "apply_entry_target"), ("os.fchmod", "apply_entry_target"),
@@ -261,6 +274,10 @@ WRITE_SITE_ALLOWLIST = {
         ("os.mkdir", "SourceStore.create"), ("os.mkdir", "SourceStore.export"), ("os.replace", "write_manifest"),
         ("shutil.rmtree", "SourceStore.create"), ("tempfile.TemporaryDirectory", "SourceStore.create"),
         ("tempfile.mkstemp", "SourceStore.export"),
+        # PF-A3.1: the fd-safe archive writer (an exclusive 0600 destination) and the descriptor-relative extractor
+        # (a new private directory, its 0700 parents and the exact mode of each exclusively created file).
+        (".open", "archive_tree"), ("os.mkdir", "extract_archive"), ("os.mkdir", "_open_created"),
+        ("os.fchmod", "_extract_into"),
     },
     "pf_docker.py": set(),
     # PF-A2.1: the journal writer, the staged release, smoke evidence, binding writes and restores, and the three
@@ -347,6 +364,9 @@ READ_ONLY_REACHABLE_EXEMPT = {
     ("write_private_json", "Controller.require_topology_owned"):
         "reached only from command() for an effect-carrying child inside an operation (operation_dir set); "
         "outside one write_private_json is a no-op and effect children are refused",
+    ("_write_private_file", "Controller._read_bundle_at"):
+        "PF-A3.1: the legacy migration record and migrated bytes are written only when self.operation_dir is set; "
+        "the read-only listings migrate in memory and write nothing",
 }
 
 
@@ -484,7 +504,7 @@ class DispatchTables(unittest.TestCase):
         self.assertEqual(pf.READ_ONLY_COMMANDS,
                          {"instances", "status", "doctor", "backups", "recoveries", "ps", "logs", "permissions check",
                           "permissions plan"})
-        self.assertEqual(len(pf.DISPATCH), 22)
+        self.assertEqual(len(pf.DISPATCH), 23)  # PF-A3.1: "backup emergency"
         self.assertNotIn("install", pf.READ_ONLY_COMMANDS)
 
     def test_dt2_every_field_is_in_its_token_set(self):
@@ -531,10 +551,11 @@ class DispatchTables(unittest.TestCase):
                 self.assertEqual(route.pending, name)
         stub = types.SimpleNamespace(legal_routes=lambda journal: [])
         expected = {
-            ("deploy", "paused"): {"resume", "abort-deploy"},
-            ("update", "backup-ready"): {"resume", "rollback"},
+            # PF-A3.1: an attended emergency capture is legal next to an interrupted lifecycle operation.
+            ("deploy", "paused"): {"resume", "abort-deploy", "backup emergency"},
+            ("update", "backup-ready"): {"resume", "rollback", "backup emergency"},
             ("purge", "deleting"): {"purge"},
-            ("rollback", "activating"): {"rollback"},
+            ("rollback", "activating"): {"rollback", "backup emergency"},
             ("permissions", "interrupted"): {"permissions apply"},
             ("permissions", "applying"): {"permissions apply"},
         }
@@ -586,7 +607,7 @@ class DispatchTables(unittest.TestCase):
         self.assertTrue(all(classify.lineno <= line <= classify.end_lineno for line in membership), membership)
 
     def test_dt6_preflight_and_fail_closed_follow_the_table(self):
-        owned = {"backup", "update", "rollback", "reset-db", "resume"}
+        owned = {"backup", "backup emergency", "update", "rollback", "reset-db", "resume"}
         for name, route in pf.DISPATCH.items():
             for side_by_side in (False, True):
                 for apply in (False, True):
@@ -687,7 +708,7 @@ class DispatchTables(unittest.TestCase):
         self.assertIn('_confirm(interaction, f"{verb} {_op8(operation_id)}")', inspect.getsource(pf.pf_install.resume))
         self.assertEqual({route.name for route in terminal},
                          {"deploy", "abort-deploy", "purge", "restore-instance", "reset-db", "rollback", "resume",
-                          "update", "config", "permissions apply"})
+                          "update", "config", "permissions apply", "backup emergency"})
         for route in terminal:
             with self.subTest(route=route.name):
                 # PF-A2.2 (OD-A22-17): the config wizards edit proposal files and confirm with [y/N] (confirm_write);
@@ -1498,17 +1519,13 @@ class CrossInstance(Base):
     """ARCH section 4, DA-08: --project never selects a path; restore authority is the selected instance's own."""
 
     def bundle(self, folder, *, project=None, root=None, state_files=()):
-        folder.mkdir(parents=True)
-        (folder / "source.tar.gz").write_bytes(b"payload " + folder.name.encode())
-        manifest = {"format": 2, "kind": "partflow-purge-recovery", "status": "complete", "id": folder.name,
-                    "project": project or self.context.compose_project,
-                    "root": str(root or self.context.paths.workspace), "postgres_major": 16,
-                    "database": "partflow_staging", "database_user": "partflow_staging", "source_revision": pfx.OLD,
-                    "databases": [], "state_files": list(state_files),
-                    "checksums": {"source.tar.gz": pf.digest(folder / "source.tar.gz")}}
-        pf.write_json(folder / "manifest.json", manifest)
-        (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
-        return folder
+        """PF-A3.1: a complete legacy format 2 purge bundle (the strict reader accepts it before these checks)."""
+        tree = self.base / "bundle-tree"
+        if not tree.exists():
+            pfx.source_fixture(tree)
+        return pfx.legacy_purge_bundle(folder, project=project or self.context.compose_project,
+                                       root=root or self.context.paths.workspace, tree=tree,
+                                       extra={"state_files": list(state_files)})
 
     def own(self, recovery_id=RECOVERY_ID, **kwargs):
         return self.bundle(self.context.paths.recovery / self.context.compose_project / recovery_id, **kwargs)
@@ -1601,7 +1618,7 @@ class CrossInstance(Base):
                     manifest["state_files"] = value
                     pf.write_json(folder / "manifest.json", manifest)
                     (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
-                    (folder / "state").mkdir()
+                    (folder / "state").mkdir(exist_ok=True)
                     (folder / "state" / "o").write_text("planted\n")
                     with self.assertRaisesRegex(pf.Failure, "^recovery-state-file-refused: bundle " + RECOVERY_ID
                                                 + " lists state files as " + label + ", not a list of file names; "):
@@ -1694,8 +1711,7 @@ class PurgeResumeAuthority(docker_scope.PurgeHarness):
         outside = self.base / "outside" / journal["recovery"]
         shutil.copytree(recovery, outside)
         output = io.StringIO()
-        with mock.patch.object(controller, "recoveries", return_value=[{"id": journal["recovery"],
-                                                                         "_folder": str(outside)}]), \
+        with mock.patch.object(controller, "recoveries", return_value=[pf.InvalidBundle(outside, "", "")]), \
                 mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation")), \
                 contextlib.redirect_stdout(output):
             with self.assertRaisesRegex(pf.Failure, "^recovery-outside-instance: "):
@@ -1840,6 +1856,8 @@ class StaticScan(unittest.TestCase):
             ("os.open(O_CREAT)", "_copy_fresh_at"), ("os.unlink", "_copy_fresh_at"),
             # PF-A2.3 audit: the resume's no-follow write open of the original journal for its torn-tail ftruncate.
             ("os.open(write)", "Controller._permissions_resume"),
+            # PF-A3.1: an emergency capture removes its own partial source archive before it falls back.
+            ("os.unlink", "Controller._discard"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")
@@ -1960,7 +1978,7 @@ class StaticScan(unittest.TestCase):
         admin = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
         self.assertEqual(admin.count("sys.stdin.isatty("), 0)
         self.assertEqual(admin.count("stream.isatty()"), 1)
-        self.assertEqual(pf.CHECKPOINT, "PF-A2.3")
+        self.assertEqual(pf.CHECKPOINT, "PF-A3.1")
         self.assertEqual(pf.VERSION, "2.5.0")
 
     def test_ss6_every_parser_refuses_abbreviations(self):

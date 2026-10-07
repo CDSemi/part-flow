@@ -2000,8 +2000,8 @@ class Schema2Purge(unittest.TestCase):
         to_schema2(self.config_path, backup_read_group="users")
         controller = tpa.FakeController(self.context)
         with contextlib.redirect_stdout(io.StringIO()):
-            checkpoint = controller.snapshot("schema-2")
-        folder = controller.backups_dir / checkpoint["id"]
+            checkpoint = tpa.checkpoint(controller)
+        folder = controller.backups_dir / checkpoint.bundle_id
         # PF-A2.3 (OD-A22-20): the schema 2 value is a proposal; the unapproved instance keeps the folder's group.
         root_gid = controller.backups_root.stat().st_gid
         self.assertNotEqual(root_gid, gid)
@@ -2018,8 +2018,8 @@ class Schema2Purge(unittest.TestCase):
         self.assertEqual(code, 0, stdout.getvalue())
         controller = tpa.FakeController(self.context)
         with contextlib.redirect_stdout(io.StringIO()):
-            checkpoint = controller.snapshot("schema-2-approved")
-        folder = controller.backups_dir / checkpoint["id"]
+            checkpoint = tpa.checkpoint(controller)
+        folder = controller.backups_dir / checkpoint.bundle_id
         self.assertEqual(folder.stat().st_gid, gid)
         self.assertTrue(all(item.stat().st_gid == gid for item in folder.iterdir()))
         prefix = pf_install.launcher_prefix(self.layout.root) + " --instance staging"

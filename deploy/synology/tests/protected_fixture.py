@@ -252,6 +252,125 @@ def deployed_record(context, revision=OLD):
     pf.write_json(context.state_dir / "deployed.json", {"sha": revision})
 
 
+def image_id(name):
+    """A realistic image ID (sha256:<64 hex>) for a fixture image name (PF-A3.1 records require the form)."""
+    import hashlib
+    return "sha256:" + hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+
+def tar_gz_bytes(tree, *, arcnames=None):
+    """The bytes of a legacy-style ``tar.gz`` of ``tree`` (``archive.add`` per top-level item, as v2.5 wrote it)."""
+    import io
+    import tarfile
+    tree = Path(tree)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for item in sorted(tree.iterdir()):
+            archive.add(str(item), arcname=(arcnames or {}).get(item.name, item.name))
+    return buffer.getvalue()
+
+
+def write_legacy_bundle(folder, manifest, files):
+    """A legacy (format 1/2) bundle folder: ``files`` ({relative path: bytes}), their checksums, manifest.json
+    (write_json: indented, trailing newline) and manifest.sha256 of the exact file bytes. Returns the folder."""
+    import hashlib
+    folder = Path(folder)
+    folder.mkdir(parents=True)
+    for relative, data in files.items():
+        path = folder / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    manifest = dict(manifest, checksums={relative: hashlib.sha256(data).hexdigest()
+                                         for relative, data in files.items()})
+    pf.write_json(folder / "manifest.json", manifest)
+    (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
+    return folder
+
+
+def legacy_purge_bundle(folder, *, project, root, tree, fmt=2, revision=OLD, extra=None, files=None, env=ENV_TEXT):
+    """A complete legacy purge bundle (format 2, or format 1 with the runtime .env inside the source archive)
+    for the instance of ``project``/``root``: source, active dump/list, globals, history, images, state and .env."""
+    import tempfile
+    recovery_id = Path(folder).name
+    backend, frontend = f"{project}-backend:backup-legacy", f"{project}-frontend:backup-legacy"
+    with tempfile.TemporaryDirectory() as temp:
+        source_tree = Path(temp) / "tree"
+        if fmt == 1:
+            # v1 stored the runtime .env inside source.tar.gz.
+            source_tree.mkdir()
+            for item in Path(tree).iterdir():
+                if item.is_dir():
+                    import shutil
+                    shutil.copytree(str(item), str(source_tree / item.name))
+                else:
+                    (source_tree / item.name).write_bytes(item.read_bytes())
+            (source_tree / ".env").write_text(env)
+        else:
+            source_tree = Path(tree)
+        history = Path(temp) / "history" / project / "20260909T120000Z-aaaaaaaaaaaa-abcdef"
+        history.mkdir(parents=True)
+        (history / "manifest.json").write_text("{}\n")
+        payloads = {
+            "source.tar.gz": tar_gz_bytes(source_tree),
+            "databases/active.dump": json.dumps({"heads": ["r1"], "rows": ["old-record"], "connections": True}).encode(),
+            "databases/active.list": b"mock archive list\n",
+            "postgres-globals.sql": b"-- globals\n",
+            "revision-checkpoints.tar.gz": tar_gz_bytes(Path(temp) / "history"),
+            "images.tar": b"fixture image archive\n",
+            "state/deployed.json": b'{"sha": "' + revision.encode() + b'"}\n',
+        }
+    if fmt == 2:
+        payloads["configuration/.env"] = env.encode()
+    payloads.update(files or {})
+    manifest = {
+        "format": fmt, "kind": "partflow-purge-recovery", "status": "complete", "id": recovery_id,
+        "created_at": "20261006T000000Z", "project": project, "environment": "staging",
+        "repository": "CDSemi/part-flow", "root": str(root), "source_revision": revision, "source_verified": True,
+        "source_provenance": "git_commit", "active_checkpoint": "20261005T235900Z-" + revision[:12] + "-aaaaaa",
+        "database": "partflow_staging", "database_user": "partflow_staging", "database_heads": ["r1"],
+        "postgres_major": 16,
+        "databases": [{"name": "partflow_staging", "allow_connections": True, "dump": "databases/active.dump",
+                       "heads": ["r1"]}],
+        "active_images": {"backend": {"reference": backend, "id": image_id("old-backend")},
+                          "frontend": {"reference": frontend, "id": image_id("old-frontend")}},
+        "saved_image_refs": [backend, frontend], "missing_historical_image_refs": [],
+        "state_files": ["deployed.json"], "workspace_archive": None,
+        "resources_before_purge": {"containers": [], "volumes": [], "networks": [], "images": []},
+        "restore_scope": "fixture",
+    }
+    manifest.update(extra or {})
+    return write_legacy_bundle(folder, manifest, payloads)
+
+
+def legacy_checkpoint(folder, *, project, tree, fmt=2, revision=OLD, extra=None, files=None):
+    """A complete legacy checkpoint (format 2: the v2.5 snapshot shape; format 1: no migration fingerprint)."""
+    backup_id = Path(folder).name
+    tree = Path(tree)
+    payloads = {
+        "source.tar.gz": tar_gz_bytes(tree),
+        "database.dump": json.dumps({"heads": ["r1"], "rows": ["old-record"], "connections": True}).encode(),
+        "database.list": b"mock archive list\n",
+    }
+    payloads.update(files or {})
+    manifest = {
+        "format": fmt, "id": backup_id, "created_at": "20261006T000000Z", "reason": "scheduled-or-manual-backup",
+        "status": "complete", "source_revision": revision, "source_provenance": "git_commit",
+        "source_verified": True, "project": project, "repository": "CDSemi/part-flow", "environment": "staging",
+        "database": "partflow_staging", "database_user": "partflow_staging", "postgres_major": 16,
+        "database_heads": ["r1"],
+        "images": {"backend": {"reference": f"{project}-backend:backup-{backup_id.lower()}",
+                               "id": image_id("old-backend")},
+                   "frontend": {"reference": f"{project}-frontend:backup-{backup_id.lower()}",
+                                "id": image_id("old-frontend")}},
+        "workspace_head": revision, "workspace_dirty": False, "workspace_differs_from_deployed": False,
+        "restore_test": "passed",
+    }
+    if fmt == 2:
+        manifest["migration_files"] = pf.migration_files(tree)
+    manifest.update(extra or {})
+    return write_legacy_bundle(folder, manifest, payloads)
+
+
 def snapshot_tree(*roots):
     """Bytes/mode/owner/inode inventory used to prove read-only behaviour (A1-T03)."""
     result = {}
@@ -389,6 +508,14 @@ def image(iid, tags, labels):
     return {"id": iid, "repo_tags": list(tags), "labels": labels}
 
 
+def topology_image_id(prefix, service):
+    """The image ID of ``service`` in owned_topology(prefix=...) (PF-A3.1: a realistic sha256:<64 hex>)."""
+    return image_id(prefix + service)
+
+
+DB_IMAGE_ID = image_id("postgres-16")
+
+
 def owned_topology(context, *, prefix="a", with_images=True):
     """State fragments for one fully owned Compose deployment of ``context`` (3 services, volume, network)."""
     project = context.compose_project
@@ -399,7 +526,8 @@ def owned_topology(context, *, prefix="a", with_images=True):
     for index, service in enumerate(("db", "backend", "frontend")):
         cid = ((prefix + str(index)) * 32)[:64]
         containers.append(container(cid, f"{project}-{service}-1", labels_for(context, service),
-                                    image=f"sha256:{prefix}{service}", config_image=f"{project}-{service}:candidate-x",
+                                    image=topology_image_id(prefix, service),
+                                    config_image=f"{project}-{service}:candidate-x",
                                     volumes=(volume_name,) if service == "db" else (),
                                     networks=((network_name, net_id),)))
     volumes = [volume(volume_name, dict(labels_for(context), **{pf.pf_docker.COMPOSE_VOLUME_LABEL: "postgres_data"}))]
@@ -408,7 +536,7 @@ def owned_topology(context, *, prefix="a", with_images=True):
     images = []
     if with_images:
         for service in ("backend", "frontend"):
-            images.append(image(f"sha256:{prefix}{service}",
+            images.append(image(topology_image_id(prefix, service),
                                 [f"{project}-{service}:candidate-{prefix}00000000000-abcdef"],
                                 {pf.pf_docker.INSTANCE_LABEL: context.instance_id}))
     return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}

@@ -1,0 +1,2140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin lifecycle records v1 (PF-A3.1)",
+  "description": "Frozen wire schemas of the lifecycle records: $defs.operation_plan and $defs.operation_journal (frozen v1, no runtime writer in PF-A3.1), $defs.deployment_record (<private_state>/artifacts/deployments/<id>/deployment-record.json), $defs.recovery_manifest (manifest.json of a checkpoint or purge bundle) and $defs.verification_record (<private_state>/artifacts/verifications/<bundle-id>/<verification-id>.json). Strict UTF-8 JSON written as exactly pf_instance.normalize_json(value) (sorted keys, no whitespace, no trailing newline); duplicate keys, non-finite numbers and unknown keys are rejected; booleans are not integers. Normative markers: a nullable value, an array item rule and a map value rule are written as the description \"null or <target>\", \"items <target>\" or \"map <target>\" (<target>: $defs.<name>, string, sha256, path or scalar), enforced by pf_install.validate_marked. Cross-field rules, array limits, path canonical forms and patterns of nullable values are enforced by pf_config.lifecycle_problems. manifest.sha256 holds the hex SHA-256 of the exact manifest.json file bytes plus a newline.",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stamp": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "image_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "image_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+$"
+    },
+    "head": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_]{1,64}$"
+    },
+    "heads": {
+      "type": "array"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]{1,512}$"
+    },
+    "deployment_id": {
+      "type": "string",
+      "pattern": "^dep-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+    },
+    "verification_id": {
+      "type": "string",
+      "pattern": "^ver-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+    },
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^(?:purge-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}$"
+    },
+    "effect_id": {
+      "type": "string",
+      "pattern": "^e[0-9]{4}$"
+    },
+    "pg_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_]{1,63}$"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "id",
+        "platform",
+        "repo_digests",
+        "archived"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "platform": {
+          "description": "null or string"
+        },
+        "repo_digests": {
+          "type": "array",
+          "description": "items string"
+        },
+        "archived": {
+          "type": "boolean"
+        }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_release_id",
+        "control_sha256",
+        "profile_id",
+        "profile_version",
+        "profile_sha256",
+        "instance_record_sha256"
+      ],
+      "properties": {
+        "control_release_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "control_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "profile_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "instance_record_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "quiescence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "observed_at",
+        "backend",
+        "frontend"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "writers_stopped",
+            "single_store_snapshot"
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "backend": {
+          "enum": [
+            "running",
+            "stopped",
+            "absent"
+          ]
+        },
+        "frontend": {
+          "enum": [
+            "running",
+            "stopped",
+            "absent"
+          ]
+        }
+      }
+    },
+    "strategy_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "const": "postgresql-logical"
+        },
+        "version": {
+          "const": 1
+        }
+      }
+    },
+    "extension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]{1,63}$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "superuser",
+        "create_role",
+        "create_db",
+        "login",
+        "replication",
+        "bypass_rls"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]{1,63}$"
+        },
+        "superuser": {
+          "type": "boolean"
+        },
+        "create_role": {
+          "type": "boolean"
+        },
+        "create_db": {
+          "type": "boolean"
+        },
+        "login": {
+          "type": "boolean"
+        },
+        "replication": {
+          "type": "boolean"
+        },
+        "bypass_rls": {
+          "type": "boolean"
+        }
+      }
+    },
+    "row_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tables",
+        "total_rows",
+        "sha256"
+      ],
+      "properties": {
+        "tables": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store_id",
+        "kind",
+        "strategy",
+        "database",
+        "role",
+        "allow_connections",
+        "owner",
+        "encoding",
+        "collate",
+        "ctype",
+        "extensions",
+        "alembic_heads",
+        "row_counts",
+        "dump",
+        "list",
+        "consistency_group"
+      ],
+      "properties": {
+        "store_id": {
+          "type": "string",
+          "pattern": "^postgresql:[A-Za-z0-9_]{1,63}$"
+        },
+        "kind": {
+          "const": "postgresql_logical"
+        },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "const": "postgresql-logical"
+            },
+            "version": {
+              "const": 1
+            }
+          }
+        },
+        "database": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]{1,63}$"
+        },
+        "role": {
+          "enum": [
+            "active",
+            "retained"
+          ]
+        },
+        "allow_connections": {
+          "type": "boolean"
+        },
+        "owner": {
+          "description": "null or $defs.pg_name"
+        },
+        "encoding": {
+          "description": "null or string"
+        },
+        "collate": {
+          "description": "null or string"
+        },
+        "ctype": {
+          "description": "null or string"
+        },
+        "extensions": {
+          "type": "array",
+          "description": "items $defs.extension"
+        },
+        "alembic_heads": {
+          "type": "array",
+          "description": "items $defs.head"
+        },
+        "row_counts": {
+          "description": "null or $defs.row_counts"
+        },
+        "dump": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._/-]{1,512}$"
+        },
+        "list": {
+          "description": "null or $defs.relative_path"
+        },
+        "consistency_group": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "type",
+        "size",
+        "sha256",
+        "store",
+        "sensitive",
+        "expanded_bytes",
+        "members",
+        "members_sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._/-]{1,512}$"
+        },
+        "type": {
+          "enum": [
+            "source_archive",
+            "workspace_archive",
+            "database_dump",
+            "database_list",
+            "postgres_globals",
+            "checkpoint_history",
+            "image_archive",
+            "config_env",
+            "admin_config",
+            "state_file",
+            "deployment_record",
+            "compose_resolved"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "store": {
+          "description": "null or string"
+        },
+        "sensitive": {
+          "type": "boolean"
+        },
+        "expanded_bytes": {
+          "description": "null or scalar"
+        },
+        "members": {
+          "description": "null or scalar"
+        },
+        "members_sha256": {
+          "description": "null or sha256"
+        }
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item",
+        "reason"
+      ],
+      "properties": {
+        "item": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "result",
+        "detail"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "result": {
+          "enum": [
+            "passed",
+            "failed",
+            "not_run"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effect_id",
+        "type",
+        "target",
+        "preconditions",
+        "postcondition",
+        "preservation_refs"
+      ],
+      "properties": {
+        "effect_id": {
+          "type": "string",
+          "pattern": "^e[0-9]{4}$"
+        },
+        "type": {
+          "enum": [
+            "source-stage",
+            "source-switch",
+            "image-build",
+            "image-tag",
+            "image-load",
+            "service-change",
+            "database-create",
+            "database-migrate",
+            "database-restore",
+            "database-switch",
+            "database-drop",
+            "database-alter",
+            "resource-delete",
+            "artifact-seal",
+            "capture",
+            "verification",
+            "file-write"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "preconditions": {
+          "type": "array",
+          "description": "items string"
+        },
+        "postcondition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "preservation_refs": {
+          "type": "array",
+          "description": "items $defs.bundle_id"
+        }
+      }
+    },
+    "effect_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effect_id",
+        "state",
+        "observed_at",
+        "evidence"
+      ],
+      "properties": {
+        "effect_id": {
+          "type": "string",
+          "pattern": "^e[0-9]{4}$"
+        },
+        "state": {
+          "enum": [
+            "not_started",
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "observed_at": {
+          "description": "null or $defs.stamp"
+        },
+        "evidence": {
+          "description": "null or string"
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_sha256",
+        "confirmed_at",
+        "method"
+      ],
+      "properties": {
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "confirmed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "method": {
+          "enum": [
+            "typed-phrase",
+            "policy-grant"
+          ]
+        }
+      }
+    },
+    "retained_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "sha256"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "checkpoint",
+            "purge-bundle",
+            "deployment",
+            "database",
+            "image-tag",
+            "staging"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "sha256": {
+          "description": "null or sha256"
+        }
+      }
+    },
+    "policy_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "sha256"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "config_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "coverage_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store_id",
+        "strategy_id",
+        "included",
+        "reason"
+      ],
+      "properties": {
+        "store_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "strategy_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "included": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phrase",
+        "summary_sha256"
+      ],
+      "properties": {
+        "phrase": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "summary_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,64}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "deployment_id"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "failed_preserved",
+            "needs_operator",
+            "cancelled"
+          ]
+        },
+        "deployment_id": {
+          "description": "null or $defs.deployment_id"
+        }
+      }
+    },
+    "deployment_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_id",
+        "record_sha256"
+      ],
+      "properties": {
+        "deployment_id": {
+          "type": "string",
+          "pattern": "^dep-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+        },
+        "record_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "bundle_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_id",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^(?:purge-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "consistency_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group_id",
+        "stores",
+        "claim"
+      ],
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,40}$"
+        },
+        "stores": {
+          "type": "array",
+          "description": "items string"
+        },
+        "claim": {
+          "enum": [
+            "transactional-single-store",
+            "writers-stopped",
+            "none"
+          ]
+        }
+      }
+    },
+    "mismatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "live_heads",
+        "image_heads",
+        "backend_image_id",
+        "expected_backend_image_id",
+        "detail"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "schema-image-mismatch",
+            "deployment-image-mismatch"
+          ]
+        },
+        "live_heads": {
+          "type": "array",
+          "description": "items $defs.head"
+        },
+        "image_heads": {
+          "description": "null or $defs.heads"
+        },
+        "backend_image_id": {
+          "description": "null or $defs.image_id"
+        },
+        "expected_backend_image_id": {
+          "description": "null or $defs.image_id"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "legacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "manifest_sha256",
+        "claimed_reason",
+        "claimed_source_revision",
+        "claimed_source_verified",
+        "claimed_restore_test",
+        "limitations"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "claimed_reason": {
+          "description": "null or string"
+        },
+        "claimed_source_revision": {
+          "description": "null or string"
+        },
+        "claimed_source_verified": {
+          "description": "null or scalar"
+        },
+        "claimed_restore_test": {
+          "description": "null or string"
+        },
+        "limitations": {
+          "type": "array",
+          "description": "items string"
+        }
+      }
+    },
+    "purge_section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resources_before_purge",
+        "saved_image_refs",
+        "missing_historical_image_refs",
+        "state_files",
+        "restore_scope"
+      ],
+      "properties": {
+        "resources_before_purge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "containers",
+            "volumes",
+            "networks",
+            "images"
+          ],
+          "properties": {
+            "containers": {
+              "type": "array",
+              "description": "items string"
+            },
+            "volumes": {
+              "type": "array",
+              "description": "items string"
+            },
+            "networks": {
+              "type": "array",
+              "description": "items string"
+            },
+            "images": {
+              "type": "array",
+              "description": "items string"
+            }
+          }
+        },
+        "saved_image_refs": {
+          "type": "array",
+          "description": "items string"
+        },
+        "missing_historical_image_refs": {
+          "type": "array",
+          "description": "items string"
+        },
+        "state_files": {
+          "type": "array",
+          "description": "items string"
+        },
+        "restore_scope": {
+          "type": "string"
+        }
+      }
+    },
+    "operation_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_id",
+        "kind",
+        "created_at",
+        "instance",
+        "producer",
+        "environment_policy",
+        "permission_policy",
+        "source",
+        "images",
+        "frozen_config",
+        "resources",
+        "coverage",
+        "confirmation",
+        "limits",
+        "effects",
+        "recovery_route"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}$"
+        },
+        "kind": {
+          "enum": [
+            "deploy",
+            "update",
+            "backup",
+            "rollback",
+            "reset-db",
+            "purge",
+            "restore-instance",
+            "abort-deploy"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "instance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instance_id",
+            "slug",
+            "compose_project",
+            "daemon_engine_id",
+            "record_sha256"
+          ],
+          "properties": {
+            "instance_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "slug": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+            },
+            "compose_project": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+            },
+            "daemon_engine_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "record_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "producer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "control_release_id",
+            "control_sha256",
+            "profile_id",
+            "profile_version",
+            "profile_sha256",
+            "instance_record_sha256"
+          ],
+          "properties": {
+            "control_release_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "control_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "profile_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "profile_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "instance_record_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "environment_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "revision",
+            "sha256"
+          ],
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "permission_policy": {
+          "description": "null or $defs.policy_ref"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provenance",
+            "commit",
+            "entries_sha256",
+            "deployment_id"
+          ],
+          "properties": {
+            "provenance": {
+              "enum": [
+                "git_commit",
+                "unknown",
+                "not_applicable"
+              ]
+            },
+            "commit": {
+              "description": "null or $defs.commit"
+            },
+            "entries_sha256": {
+              "description": "null or sha256"
+            },
+            "deployment_id": {
+              "description": "null or $defs.deployment_id"
+            }
+          }
+        },
+        "images": {
+          "type": "object",
+          "description": "map $defs.image"
+        },
+        "frozen_config": {
+          "description": "null or $defs.config_ref"
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inventory_sha256",
+            "deletion_plan_sha256"
+          ],
+          "properties": {
+            "inventory_sha256": {
+              "description": "null or sha256"
+            },
+            "deletion_plan_sha256": {
+              "description": "null or sha256"
+            }
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "description": "items $defs.coverage_entry"
+        },
+        "confirmation": {
+          "description": "null or $defs.confirmation"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "timeout_seconds",
+            "minimum_free_bytes"
+          ],
+          "properties": {
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "minimum_free_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "effects": {
+          "type": "array",
+          "description": "items $defs.effect"
+        },
+        "recovery_route": {
+          "type": "array",
+          "description": "items string"
+        }
+      }
+    },
+    "operation_journal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_id",
+        "plan_sha256",
+        "kind",
+        "sequence",
+        "phase",
+        "updated_at",
+        "approvals",
+        "effects",
+        "unresolved_effect",
+        "retained_artifacts",
+        "last_error",
+        "legal_next",
+        "result"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}$"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "kind": {
+          "enum": [
+            "deploy",
+            "update",
+            "backup",
+            "rollback",
+            "reset-db",
+            "purge",
+            "restore-instance",
+            "abort-deploy"
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "phase": {
+          "enum": [
+            "planned",
+            "preparing",
+            "initializing",
+            "activating",
+            "preserving",
+            "migrating",
+            "syncing-workspace",
+            "workspace_sync_pending",
+            "capturing",
+            "verifying",
+            "preserving-current",
+            "restoring-candidate",
+            "switching",
+            "deleting",
+            "finalizing",
+            "preparing-target",
+            "restoring-data",
+            "completed",
+            "failed_preserved",
+            "needs_operator",
+            "cancelled"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "approvals": {
+          "type": "array",
+          "description": "items $defs.approval"
+        },
+        "effects": {
+          "type": "array",
+          "description": "items $defs.effect_state"
+        },
+        "unresolved_effect": {
+          "description": "null or $defs.effect_id"
+        },
+        "retained_artifacts": {
+          "type": "array",
+          "description": "items $defs.retained_artifact"
+        },
+        "last_error": {
+          "description": "null or $defs.error"
+        },
+        "legal_next": {
+          "type": "array",
+          "description": "items string"
+        },
+        "result": {
+          "description": "null or $defs.terminal"
+        }
+      }
+    },
+    "deployment_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "deployment_id",
+        "instance_id",
+        "compose_project",
+        "created_at",
+        "operation",
+        "previous_deployment_id",
+        "source",
+        "images",
+        "helpers",
+        "strategy",
+        "compose",
+        "config",
+        "producer",
+        "database",
+        "activation",
+        "restored_from"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "deployment_id": {
+          "type": "string",
+          "pattern": "^dep-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+        },
+        "instance_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "compose_project": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "operation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "operation_id"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "deploy",
+                "update",
+                "rollback",
+                "restore-instance"
+              ]
+            },
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}$"
+            }
+          }
+        },
+        "previous_deployment_id": {
+          "description": "null or $defs.deployment_id"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provenance",
+            "commit",
+            "remote",
+            "ref",
+            "archive",
+            "manifest"
+          ],
+          "properties": {
+            "provenance": {
+              "enum": [
+                "git_commit",
+                "unknown",
+                "not_applicable"
+              ]
+            },
+            "commit": {
+              "description": "null or $defs.commit"
+            },
+            "remote": {
+              "description": "null or string"
+            },
+            "ref": {
+              "description": "null or string"
+            },
+            "archive": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "size",
+                "sha256"
+              ],
+              "properties": {
+                "path": {
+                  "const": "source.tar.gz"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            },
+            "manifest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "sha256",
+                "entries_sha256",
+                "files"
+              ],
+              "properties": {
+                "path": {
+                  "const": "source-manifest.json"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "entries_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "files": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "images": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backend",
+            "frontend",
+            "db"
+          ],
+          "properties": {
+            "backend": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reference",
+                "id",
+                "platform",
+                "repo_digests",
+                "archived"
+              ],
+              "properties": {
+                "reference": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+$"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "platform": {
+                  "description": "null or string"
+                },
+                "repo_digests": {
+                  "type": "array",
+                  "description": "items string"
+                },
+                "archived": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "frontend": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reference",
+                "id",
+                "platform",
+                "repo_digests",
+                "archived"
+              ],
+              "properties": {
+                "reference": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+$"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "platform": {
+                  "description": "null or string"
+                },
+                "repo_digests": {
+                  "type": "array",
+                  "description": "items string"
+                },
+                "archived": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "db": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reference",
+                "id",
+                "platform",
+                "repo_digests",
+                "archived"
+              ],
+              "properties": {
+                "reference": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_.-]+$"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "platform": {
+                  "description": "null or string"
+                },
+                "repo_digests": {
+                  "type": "array",
+                  "description": "items string"
+                },
+                "archived": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        },
+        "helpers": {
+          "type": "array",
+          "description": "items $defs.image"
+        },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "const": "postgresql-logical"
+            },
+            "version": {
+              "const": 1
+            }
+          }
+        },
+        "compose": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "file_sha256",
+            "model_sha256",
+            "compose_version",
+            "installed_file_sha256",
+            "override_sha256"
+          ],
+          "properties": {
+            "path": {
+              "const": "compose-resolved.json"
+            },
+            "file_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "model_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "compose_version": {
+              "type": "string"
+            },
+            "installed_file_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "override_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256",
+            "bytes",
+            "admin_config_sha256"
+          ],
+          "properties": {
+            "path": {
+              "const": "config.env"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "admin_config_sha256": {
+              "description": "null or sha256"
+            }
+          }
+        },
+        "producer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "control_release_id",
+            "control_sha256",
+            "profile_id",
+            "profile_version",
+            "profile_sha256",
+            "instance_record_sha256"
+          ],
+          "properties": {
+            "control_release_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "control_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "profile_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "profile_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "instance_record_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "server_version_num",
+            "alembic_heads",
+            "migration_files_sha256"
+          ],
+          "properties": {
+            "server_version_num": {
+              "type": "integer",
+              "minimum": 90000
+            },
+            "alembic_heads": {
+              "type": "array",
+              "description": "items $defs.head"
+            },
+            "migration_files_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "activation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "result",
+            "health",
+            "completed_at"
+          ],
+          "properties": {
+            "result": {
+              "const": "activated"
+            },
+            "health": {
+              "const": "passed"
+            },
+            "completed_at": {
+              "type": "string",
+              "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+            }
+          }
+        },
+        "restored_from": {
+          "description": "null or $defs.bundle_ref"
+        }
+      }
+    },
+    "recovery_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "bundle_id",
+        "bundle_kind",
+        "created_at",
+        "reason",
+        "capture_class",
+        "source_instance",
+        "producer",
+        "quiescence",
+        "source",
+        "deployment",
+        "images",
+        "postgresql",
+        "roles",
+        "stores",
+        "consistency_groups",
+        "compatibility",
+        "payloads",
+        "workspace",
+        "exclusions",
+        "manual_prerequisites",
+        "derived_from",
+        "purge",
+        "legacy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^(?:purge-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+        },
+        "bundle_kind": {
+          "enum": [
+            "checkpoint",
+            "purge-bundle"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "reason": {
+          "enum": [
+            "scheduled-or-manual-backup",
+            "emergency-manual",
+            "before-update",
+            "before-rollback",
+            "before-reset",
+            "before-purge",
+            "legacy"
+          ]
+        },
+        "capture_class": {
+          "enum": [
+            "healthy_checkpoint",
+            "emergency_preservation",
+            "partial"
+          ]
+        },
+        "source_instance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instance_id",
+            "slug",
+            "compose_project",
+            "environment",
+            "repository",
+            "workspace"
+          ],
+          "properties": {
+            "instance_id": {
+              "description": "null or $defs.uuid"
+            },
+            "slug": {
+              "description": "null or $defs.slug"
+            },
+            "compose_project": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+            },
+            "environment": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "workspace": {
+              "description": "null or path"
+            }
+          }
+        },
+        "producer": {
+          "description": "null or $defs.producer"
+        },
+        "quiescence": {
+          "description": "null or $defs.quiescence"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provenance",
+            "commit",
+            "remote",
+            "origin",
+            "payload",
+            "entries_sha256"
+          ],
+          "properties": {
+            "provenance": {
+              "enum": [
+                "git_commit",
+                "unknown"
+              ]
+            },
+            "commit": {
+              "description": "null or $defs.commit"
+            },
+            "remote": {
+              "description": "null or string"
+            },
+            "origin": {
+              "enum": [
+                "deployment-artifact",
+                "protected-store",
+                "workspace-proven",
+                "workspace-unverified",
+                "legacy-claim",
+                "none"
+              ]
+            },
+            "payload": {
+              "description": "null or $defs.relative_path"
+            },
+            "entries_sha256": {
+              "description": "null or sha256"
+            }
+          }
+        },
+        "deployment": {
+          "description": "null or $defs.deployment_ref"
+        },
+        "images": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backend",
+            "frontend",
+            "db"
+          ],
+          "properties": {
+            "backend": {
+              "description": "null or $defs.image"
+            },
+            "frontend": {
+              "description": "null or $defs.image"
+            },
+            "db": {
+              "description": "null or $defs.image"
+            }
+          }
+        },
+        "postgresql": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "server_version_num",
+            "major",
+            "image_id"
+          ],
+          "properties": {
+            "server_version_num": {
+              "description": "null or scalar"
+            },
+            "major": {
+              "type": "integer",
+              "minimum": 9
+            },
+            "image_id": {
+              "description": "null or $defs.image_id"
+            }
+          }
+        },
+        "roles": {
+          "type": "array",
+          "description": "items $defs.role"
+        },
+        "stores": {
+          "type": "array",
+          "description": "items $defs.store"
+        },
+        "consistency_groups": {
+          "type": "array",
+          "description": "items $defs.consistency_group"
+        },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "alembic_heads_live",
+            "alembic_heads_image",
+            "migration_files",
+            "mismatch"
+          ],
+          "properties": {
+            "alembic_heads_live": {
+              "type": "array",
+              "description": "items $defs.head"
+            },
+            "alembic_heads_image": {
+              "description": "null or $defs.heads"
+            },
+            "migration_files": {
+              "type": "object",
+              "description": "map sha256"
+            },
+            "mismatch": {
+              "description": "null or $defs.mismatch"
+            }
+          }
+        },
+        "payloads": {
+          "type": "array",
+          "description": "items $defs.payload"
+        },
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "differs_from_deployed",
+            "payload",
+            "unsupported_entries"
+          ],
+          "properties": {
+            "differs_from_deployed": {
+              "type": "boolean"
+            },
+            "payload": {
+              "description": "null or $defs.relative_path"
+            },
+            "unsupported_entries": {
+              "type": "array",
+              "description": "items string"
+            }
+          }
+        },
+        "exclusions": {
+          "type": "array",
+          "description": "items $defs.exclusion"
+        },
+        "manual_prerequisites": {
+          "type": "array",
+          "description": "items string"
+        },
+        "derived_from": {
+          "description": "null or $defs.bundle_id"
+        },
+        "purge": {
+          "description": "null or $defs.purge_section"
+        },
+        "legacy": {
+          "description": "null or $defs.legacy"
+        }
+      }
+    },
+    "verification_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "verification_id",
+        "bundle_id",
+        "bundle_kind",
+        "manifest_sha256",
+        "level",
+        "result",
+        "target",
+        "checks",
+        "producer",
+        "strategy",
+        "environment",
+        "operation_id",
+        "started_at",
+        "finished_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "verification_id": {
+          "type": "string",
+          "pattern": "^ver-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^(?:purge-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6}$"
+        },
+        "bundle_kind": {
+          "enum": [
+            "checkpoint",
+            "purge-bundle"
+          ]
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "level": {
+          "enum": [
+            "captured",
+            "data_restore_verified",
+            "functional_recovery_verified"
+          ]
+        },
+        "result": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "names",
+            "removed"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "isolated-database",
+                "none"
+              ]
+            },
+            "names": {
+              "type": "array",
+              "description": "items $defs.pg_name"
+            },
+            "removed": {
+              "type": "boolean"
+            }
+          }
+        },
+        "checks": {
+          "type": "array",
+          "description": "items $defs.check"
+        },
+        "producer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "control_release_id",
+            "control_sha256",
+            "profile_id",
+            "profile_version",
+            "profile_sha256",
+            "instance_record_sha256"
+          ],
+          "properties": {
+            "control_release_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "control_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "profile_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "profile_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "profile_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "instance_record_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "const": "postgresql-logical"
+            },
+            "version": {
+              "const": 1
+            }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "server_version_num",
+            "engine_id",
+            "compose_version"
+          ],
+          "properties": {
+            "server_version_num": {
+              "description": "null or scalar"
+            },
+            "engine_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "compose_version": {
+              "description": "null or string"
+            }
+          }
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}$"
+        },
+        "started_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "finished_at": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        }
+      }
+    }
+  }
+}

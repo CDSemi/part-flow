@@ -1,0 +1,78 @@
+{
+  "active_checkpoint": "20260901T120000Z-111111111111-a1b2c3",
+  "active_images": {
+    "backend": {
+      "id": "sha256:c69884b276a198c4e04ffa8d56ccfb2402205bfd0942bf449a7ccc6f6f77b02a",
+      "reference": "partflow-staging-backend:backup-20260901t120000z-111111111111-a1b2c3"
+    },
+    "frontend": {
+      "id": "sha256:52c2e8cc8b3f19d8bc064704b43a5c5407e6e7334a14acd297f48a1c6c131601",
+      "reference": "partflow-staging-frontend:backup-20260901t120000z-111111111111-a1b2c3"
+    }
+  },
+  "checksums": {
+    "databases/active.dump": "a4f59275b73b7818f6bd5723a26c6b6fc0bcf0ffba13c19346ff4a810c149e04",
+    "databases/active.list": "5d00ffb25efc2b167f0a0c13e8dd02e9d9a581c6b6981ae748c81aebdf82d32d",
+    "databases/db-00112233445566aa.dump": "166ba8656101d80a7f48faac35083a25f84b965ea9437629c22af79d4430a795",
+    "images.tar": "3365e27509a71177cf6e1baa86d9038d0e4e1655823c5880af5fc5f38ef575a3",
+    "postgres-globals.sql": "063af489d1c7a5e4aab3f7998a855ae7a5fc978468b061d1011c4df1a81d2bad",
+    "revision-checkpoints.tar.gz": "0d4c58adc6a1adbbde98874e8134fc9c9b546ddb6ff5f62760f9435720535e7a",
+    "source.tar.gz": "9255d2d53825ae2f3eafb767a0f68bda984563e05b0fd415b420587b867714b8",
+    "state/deployed.json": "264c76fb24c216f7d4e0ac5ffd1064401187980e4ff80c1e5ca694abea153878"
+  },
+  "created_at": "20260903T120000Z",
+  "database": "partflow_staging",
+  "database_heads": [
+    "r1"
+  ],
+  "database_user": "partflow_staging",
+  "databases": [
+    {
+      "allow_connections": true,
+      "dump": "databases/active.dump",
+      "heads": [
+        "r1"
+      ],
+      "name": "partflow_staging"
+    },
+    {
+      "allow_connections": false,
+      "dump": "databases/db-00112233445566aa.dump",
+      "heads": [],
+      "name": "pf_keep_20260801t000000z_aa11bb"
+    }
+  ],
+  "environment": "staging",
+  "format": 1,
+  "id": "purge-20260802T120000Z-111111111111-e5f6a7",
+  "kind": "partflow-purge-recovery",
+  "missing_historical_image_refs": [],
+  "postgres_major": 16,
+  "project": "partflow-staging",
+  "repository": "CDSemi/part-flow",
+  "resources_before_purge": {
+    "containers": [
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "images": [],
+    "networks": [
+      "partflow-staging_default"
+    ],
+    "volumes": [
+      "partflow-staging_postgres_data"
+    ]
+  },
+  "restore_scope": "Functional instance state (v2.5 example).",
+  "root": "/volume1/partflow/staging/repo",
+  "saved_image_refs": [
+    "partflow-staging-backend:backup-20260901t120000z-111111111111-a1b2c3",
+    "partflow-staging-frontend:backup-20260901t120000z-111111111111-a1b2c3"
+  ],
+  "source_revision": "1111111111111111111111111111111111111111",
+  "source_verified": true,
+  "state_files": [
+    "deployed.json"
+  ],
+  "status": "complete",
+  "workspace_archive": null
+}

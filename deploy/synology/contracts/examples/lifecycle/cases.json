@@ -1,0 +1,480 @@
+[
+  {
+    "file": "checkpoint-healthy.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "checkpoint-emergency.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "checkpoint-emergency-deployment-image.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "checkpoint-partial.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "purge-bundle.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "deployment-record.json",
+    "record": "deployment_record",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "verification-record.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "verification-functional-schema-valid.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "operation-plan.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "operation-journal.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "legacy-format2-checkpoint.json",
+    "record": "legacy",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "bundle_kind": "checkpoint",
+    "payload_sizes": {
+      "source.tar.gz": 2048,
+      "database.dump": 4096,
+      "database.list": 256
+    },
+    "migrated": "legacy-format2-migrated.json"
+  },
+  {
+    "file": "legacy-format2-migrated.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "legacy-format2-before-rollback.json",
+    "record": "legacy",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "bundle_kind": "checkpoint",
+    "payload_sizes": {
+      "source.tar.gz": 2048,
+      "database.dump": 4096,
+      "database.list": 256
+    },
+    "migrated": "legacy-format2-before-rollback-migrated.json"
+  },
+  {
+    "file": "legacy-format2-before-rollback-migrated.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "legacy-format1-checkpoint.json",
+    "record": "legacy",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "bundle_kind": "checkpoint",
+    "payload_sizes": {
+      "source.tar.gz": 2048,
+      "database.dump": 4096,
+      "database.list": 256
+    },
+    "migrated": "legacy-format1-checkpoint-migrated.json"
+  },
+  {
+    "file": "legacy-format1-checkpoint-migrated.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "legacy-format2-purge.json",
+    "record": "legacy",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "bundle_kind": "purge-bundle",
+    "payload_sizes": {
+      "configuration/.env": 1000,
+      "databases/active.dump": 1001,
+      "databases/active.list": 1002,
+      "databases/db-00112233445566aa.dump": 1003,
+      "images.tar": 1004,
+      "postgres-globals.sql": 1005,
+      "revision-checkpoints.tar.gz": 1006,
+      "source.tar.gz": 1007,
+      "state/deployed.json": 1008
+    },
+    "migrated": "legacy-format2-purge-migrated.json"
+  },
+  {
+    "file": "legacy-format2-purge-migrated.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "legacy-format1-purge.json",
+    "record": "legacy",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "bundle_kind": "purge-bundle",
+    "payload_sizes": {
+      "databases/active.dump": 1001,
+      "databases/active.list": 1002,
+      "databases/db-00112233445566aa.dump": 1003,
+      "images.tar": 1004,
+      "postgres-globals.sql": 1005,
+      "revision-checkpoints.tar.gz": 1006,
+      "source.tar.gz": 1007,
+      "state/deployed.json": 1008
+    },
+    "migrated": "legacy-format1-purge-migrated.json"
+  },
+  {
+    "file": "legacy-format1-purge-migrated.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-empty-payloads.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "payloads: empty (rule 1)"
+    }
+  },
+  {
+    "file": "invalid-store-without-dump.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "no database_dump payload 'database.dump' of this store (rule 2)"
+    }
+  },
+  {
+    "file": "invalid-healthy-missing-db-image.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "healthy_checkpoint: images.db is required (rule 4)"
+    }
+  },
+  {
+    "file": "invalid-healthy-missing-backend-image.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "images.backend and images.frontend are required (rule 4)"
+    }
+  },
+  {
+    "file": "invalid-healthy-null-platform.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "every image needs a platform (rule 4)"
+    }
+  },
+  {
+    "file": "invalid-wrong-schema-version.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "$.schema_version: must equal 1"
+    }
+  },
+  {
+    "file": "invalid-bool-schema-version.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "$.schema_version: must equal 1"
+    }
+  },
+  {
+    "file": "invalid-bundle-id-kind-mismatch.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "bundle_id does not match bundle_kind"
+    }
+  },
+  {
+    "file": "invalid-duplicate-payload-path.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "duplicate path"
+    }
+  },
+  {
+    "file": "invalid-traversal-payload-path.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "is not canonical"
+    }
+  },
+  {
+    "file": "invalid-absolute-payload-path.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "is not canonical"
+    }
+  },
+  {
+    "file": "invalid-bad-sha256.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "payloads[0].sha256: does not match"
+    }
+  },
+  {
+    "file": "invalid-negative-size.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "payloads[0].size: below minimum 0"
+    }
+  },
+  {
+    "file": "invalid-float-size.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "payloads[0].size: expected integer"
+    }
+  },
+  {
+    "file": "invalid-unknown-key.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "unknown keys status"
+    }
+  },
+  {
+    "file": "invalid-duplicate-key.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "Duplicate"
+    }
+  },
+  {
+    "file": "invalid-nan.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "NaN"
+    }
+  },
+  {
+    "file": "invalid-not-normalized.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "not normalized"
+    }
+  },
+  {
+    "file": "invalid-purge-partial.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "partial: never a purge bundle (rule 6)"
+    }
+  },
+  {
+    "file": "invalid-checkpoint-carries-config.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "the group-readable checkpoint carries no config_env (rule 8)"
+    }
+  },
+  {
+    "file": "invalid-provenance-commit-without-git.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "provenance git_commit exactly when commit and remote are set (rule 10)"
+    }
+  },
+  {
+    "file": "invalid-multi-store-without-writers-stopped.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "a multi-store group claims writers-stopped (rule 9)"
+    }
+  },
+  {
+    "file": "invalid-active-store-without-group.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "must be in exactly the one consistency group it names (rule 3)"
+    }
+  },
+  {
+    "file": "invalid-emergency-wrong-reason.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "reason must be emergency-manual or before-rollback (rule 5)"
+    }
+  },
+  {
+    "file": "invalid-nonlegacy-null-producer.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "producer, quiescence, postgresql.server_version_num and postgresql.image_id are required (rule 11)"
+    }
+  },
+  {
+    "file": "invalid-nonlegacy-legacy-claim-origin.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "origin legacy-claim exactly for a legacy manifest (rule 10)"
+    }
+  },
+  {
+    "file": "invalid-legacy-provenance-git-commit.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "a legacy claim is never a proof; provenance is unknown (rule 11)"
+    }
+  },
+  {
+    "file": "invalid-legacy-null-without-limitation.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "legacy.limitations: missing"
+    }
+  },
+  {
+    "file": "invalid-purge-missing-globals.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "a postgres_globals payload is required (rule 7)"
+    }
+  },
+  {
+    "file": "invalid-purge-legacy-missing-globals.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "a postgres_globals payload is required (rule 7)"
+    }
+  },
+  {
+    "file": "invalid-origin-none-with-payload.json",
+    "record": "recovery_manifest",
+    "expect": {
+      "valid": false,
+      "problem": "origin none exactly when the source payload is null (rule 10)"
+    }
+  },
+  {
+    "file": "invalid-verification-missing-rows-check.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": false,
+      "problem": "check rows:postgresql:partflow_staging is missing"
+    }
+  },
+  {
+    "file": "invalid-journal-phase-for-kind.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": false,
+      "problem": "phase deleting is not a phase of update"
+    }
+  },
+  {
+    "file": "invalid-plan-duplicate-effect.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "effect ids must be unique and increasing"
+    }
+  }
+]

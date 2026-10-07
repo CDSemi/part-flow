@@ -726,31 +726,29 @@ class Approval(Instance):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import test_pf_admin
         controller = test_pf_admin.FakeController(self.context)
-        bundle = self.base / "bundle"
-        (bundle / "configuration").mkdir(parents=True)
-        (bundle / "state").mkdir()
         tree = self.base / "tree"
         pfx.source_fixture(tree, pfx.OLD)
-        import tarfile
-        with tarfile.open(bundle / "source.tar.gz", "w:gz") as archive:
-            for item in sorted(tree.iterdir()):
-                archive.add(item, arcname=item.name)
-        (bundle / "configuration/.env").write_text(pfx.ENV_TEXT)
+        state = json.dumps({"sha": pfx.OLD}).encode()
+        # PF-A3.1: a complete legacy bundle of this instance, strictly read; the pointer is written fresh by the seal
+        # path (its record is simulated here) and the bundle's state files are restored as before.
+        folder = pfx.legacy_purge_bundle(
+            controller.recovery_root / ("purge-20260910T120000Z-" + pfx.OLD[:12] + "-abcdef"), project="partflow-staging",
+            root=self.workspace, tree=tree, files={"state/last-reset.json": state, "state/deployed.json": state},
+            extra={"state_files": ["last-reset.json", "deployed.json"]})
         for name in ("last-reset.json", "deployed.json"):
-            (bundle / "state" / name).write_text(json.dumps({"sha": pfx.OLD}))
-            os.chmod(bundle / "state" / name, 0o640)
-        recovery = {"id": "purge-20260910T120000Z-" + pfx.OLD[:12] + "-abcdef", "_folder": str(bundle),
-                    "project": "partflow-staging", "root": str(self.workspace), "postgres_major": 16,
-                    "database": "partflow_staging", "database_user": "partflow_staging", "source_revision": pfx.OLD,
-                    "source_verified": False, "databases": [], "state_files": ["last-reset.json", "deployed.json"],
-                    "active_images": {}, "database_heads": ["r1"], "active_checkpoint": "x"}
+            os.chmod(folder / "state" / name, 0o640)
+        recovery = controller.verify_recovery(folder)
         if (controller.state / "deployed.json").exists():
             (controller.state / "deployed.json").unlink()
+        sealed = {"deployment_id": "dep-20261007T000000Z-0a1b2c3d", "record_sha256": "0" * 64}
         with contextlib.ExitStack() as stack:
-            for name, value in (("verify_recovery", recovery), ("require_empty_target", None), ("docker", ""),
+            for name, value in (("require_empty_target", None), ("docker", ""),
                                 ("verify_images", None), ("make_override", None), ("compose", ""),
                                 ("wait_health", None), ("drop_database", None), ("restore_into", None),
-                                ("db_heads", ["r1"]), ("restore_revision_checkpoints", None), ("activate", None)):
+                                ("db_heads", ["r1"]), ("restore_revision_checkpoints", None), ("activate", None),
+                                ("stage_deployment", types.SimpleNamespace(deployment_id=sealed["deployment_id"],
+                                                                             kind="restore-instance")),
+                                ("seal_deployment", sealed)):
                 stack.enter_context(mock.patch.object(controller, name, return_value=value))
             stack.enter_context(mock.patch.object(pf, "confirm"))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
@@ -2008,14 +2006,15 @@ class Flows(Instance):
         return controller
 
     def test_fl1_snapshot_publishes_the_fresh_checkpoint_only(self):
+        import test_pf_admin
         controller = self.fake()
         pfx.deployed_record(self.context)
         unrelated = self.backups / "operator-notes.txt"
         unrelated.write_text("x")
         os.chmod(unrelated, 0o600)
         with contextlib.redirect_stdout(io.StringIO()):
-            checkpoint = controller.snapshot("permission-flow")
-        folder = controller.backups_dir / checkpoint["id"]
+            checkpoint = test_pf_admin.checkpoint(controller)
+        folder = controller.backups_dir / checkpoint.bundle_id
         for path in (folder, *folder.iterdir()):
             expected = 0o750 if path.is_dir() else 0o640
             self.assertEqual((mode(path), owner(path)), (expected, (0, 0)), path)
@@ -2029,9 +2028,17 @@ class Flows(Instance):
         (source / "manifest.json").write_text("{}")
         os.chmod(source / "manifest.json", 0o604)
         bundle.mkdir()
-        controller.create_tree_archive(source.parent, bundle / "revision-checkpoints.tar.gz", "partflow-staging")
+        counts = controller.create_tree_archive(source.parent, bundle / "revision-checkpoints.tar.gz",
+                                                "partflow-staging")
+        data = (bundle / "revision-checkpoints.tar.gz").read_bytes()
+        # PF-A3.1: the history is imported from a strictly read bundle view through the safe importer.
+        view = pf.BundleView(bundle, {"bundle_id": "purge-20260910T120000Z-" + pfx.OLD[:12] + "-abcdef", "payloads": [
+            {"path": "revision-checkpoints.tar.gz", "type": "checkpoint_history", "size": len(data),
+             "sha256": hashlib.sha256(data).hexdigest(), "store": None, "sensitive": False,
+             "expanded_bytes": counts[0], "members": counts[1], "members_sha256": counts[2]}]}, "0" * 64, None,
+            "data_restore_verified")
         with controller.lock():
-            controller.restore_revision_checkpoints({"_folder": str(bundle)})
+            controller.restore_revision_checkpoints(view)
             restored = controller.backups_dir / source.name
             self.assertEqual((mode(restored), mode(restored / "manifest.json")), (0o750, 0o640))
             state = bundle / "state"
@@ -2080,7 +2087,7 @@ class Flows(Instance):
         other = self.config_dir / "notes.txt"
         other.write_text("x")
         os.chmod(other, 0o600)
-        controller.restore_runtime_environment({"_folder": str(bundle)})
+        controller.restore_runtime_environment(bundle)
         env = self.config_dir / ".env"
         self.assertEqual((mode(env), owner(env)), (0o660, (0, gid_of("users"))))
         self.assertEqual(mode(other), 0o600)
