@@ -439,6 +439,25 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > on a host, PF-A3.4, PF-A5.1); container zone data stays unassigned (OD-A22-21). Not production-ready; F03, F08, F09,
 > F11, F12 and F14 are not closed overall.
 
+> **PF-A2.3 audit addendum (2026-10-07).** The PF-A2.3 package was committed as `2155c95`; its 650-test runs were taken
+> from that tree. The independent audit confirmed 9 distinct findings (none refuted) and fixed them in the OPS paths:
+> (1) the editor-freeze open-handle scan now runs after the authoritative inventory of the fenced scopes, over the
+> union of plan-time and authoritative identities, so a cwd/fd holder on an entry created between plan and fence
+> refuses the apply (FZ-9, FZ-10); (2) `copy_fresh` is descriptor-relative and no-follow on both sides, refuses
+> hard-linked sources and never reads or writes through an entry swapped after its check (FL-11..FL-15); (3) a missing
+> or unsafe backups/recovery root on an unapproved instance blocks only that scope in `check`/`plan` ("group
+> unavailable", FS-7b); (4) a refuse finding at or above the installation root, private state or the control release
+> is context-level even when shared with a data root (RT-9b); (5) SS-3 tracks `ftruncate`/`truncate` and write-mode
+> `os.open`, and the resume truncation is pinned (SS-3d); (6) the walk classifies a directory swapped for a link
+> between lstat and open as `scope-entry-link` (FS-13b, FS-13c); (7) SYNOLOGY_ADMIN(.vi) §2/§3/§16 updated, including
+> eight missing permission codes. Executed on `2155c95` plus these fixes, disposable `python:3.12` (3.12.15) and
+> `python:3.9` (3.9.25) containers, uid 0: **662 tests OK, 0 skipped** on both; the new regressions fail on `2155c95`
+> (FS-13c and FL-15 are coverage only). Static checks unchanged; `pf_bootstrap.py` and `pf.sh` byte-identical (BF-1).
+> A2-T08 is restated **passed** (filesystem) on the FZ-1..FZ-10 and FL-11..FL-14 evidence with the same declared
+> limits (residual hard-link race window; custom daemon roots on the same device). Recommended PF-A2 verdict unchanged:
+> `PASS_WITH_DECLARED_LIMITS` (offline). Nothing was run against a NAS, DSM, SMB client, Docker daemon or the running
+> stack.
+
 ## Executed checks
 
 | Check | Actual result |

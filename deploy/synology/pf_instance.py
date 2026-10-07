@@ -1953,6 +1953,14 @@ def _kind(mode):
     return "dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "other"
 
 
+def _now_link(parent_fd, name):
+    """True when ``name`` below ``parent_fd`` is now a symbolic link (a no-follow lstat; any error is False)."""
+    try:
+        return stat.S_ISLNK(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
 class _Walk:
     """One bounded inventory (section 3.5 step 3); collects entries, blockers and default-ACL directories."""
 
@@ -2017,8 +2025,12 @@ class _Walk:
         except FileNotFoundError:
             return None
         except OSError as exc:
-            if exc.errno == errno.ELOOP:
+            # A directory swapped for a link fails O_DIRECTORY|O_NOFOLLOW with ENOTDIR on Linux, not ELOOP.
+            swapped_dir = exc.errno == errno.ENOTDIR and kind == "dir"
+            if exc.errno == errno.ELOOP or (swapped_dir and _now_link(parent_fd, name)):
                 self.blockers.append(("scope-entry-link", relative, "replaced by a symbolic link (never followed)"))
+            elif swapped_dir:
+                self.blockers.append(("scope-path-unsafe", relative, "replaced while it was inventoried"))
             else:
                 self.blockers.append(("scope-path-unsafe", relative, f"cannot be opened ({exc.strerror or exc})"))
             return None

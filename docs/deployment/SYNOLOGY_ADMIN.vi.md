@@ -362,8 +362,11 @@ mặc định là tất cả).
 
 - `check` và `plan` là read-only: không lock, không thư mục operation, không ghi gì ở bất kỳ đâu. Chúng ánh xạ
   các finding của protected context vào scope: finding nằm tại, phía trên hoặc phía dưới thư mục workspace,
-  configuration, backups hay recovery sẽ chặn scope đó (`scope-path-unsafe`) và các scope còn lại vẫn được báo;
-  mọi finding bị từ chối khác dừng với `permissions-context-refused` trước khi đọc bất kỳ thư mục nào. `check`
+  configuration, backups hay recovery sẽ chặn scope đó (`scope-path-unsafe`) và các scope còn lại vẫn được báo
+  (khi chưa có policy được duyệt, thư mục backups hay recovery bị thiếu hoặc không an toàn hiển thị "group
+  unavailable": group của nó không được đọc từ thư mục đó); mọi finding bị từ chối khác, và finding nằm tại hoặc phía
+  trên installation root (kể cả khi nó cũng nằm phía trên một thư mục scope), dừng với `permissions-context-refused`
+  trước khi đọc bất kỳ thư mục nào. `check`
   exit 1 khi có entry khác biệt hoặc control release vượt ceiling (`permissions-differ`).
 - `plan` in theo từng scope: policy, thành viên group (tối đa 20; thành viên primary-group và directory-service
   không được liệt kê), số lượng (group, mode, special bit), có cần freeze không, các blocker và, với
@@ -385,8 +388,9 @@ hợp là một blocker được `plan` báo, và `apply` không đổi gì khi 
 
 Thay đổi phía dưới root của workspace hoặc configuration (bulk change) cần một editor freeze đã được verify.
 `apply` trước hết đặt root của mỗi scope như vậy thành owner-only (giữ bit setgid), nên người sửa không vào được
-thư mục nữa, rồi quét `/proc` tìm mọi process khác có working directory, root hoặc file đang mở nằm trong một
-thư mục đó. Có holder thì fence được gỡ lại và lệnh bị từ chối với `editor-freeze-refused` (không thay đổi gì).
+thư mục nữa, rồi lấy inventory chính thức của các thư mục đã fence và quét `/proc` tìm mọi process khác có
+working directory, root hoặc file đang mở là một entry của plan hoặc của inventory đó (nên entry mà người sửa tạo
+ra trong lúc plan đang được đọc cũng tính). Có holder thì fence được gỡ lại và lệnh bị từ chối với `editor-freeze-refused` (không thay đổi gì).
 Phép quét cũng báo cả shell đã khởi động lệnh: **hãy chạy `apply` từ ngoài các thư mục scope, ví dụ `cd /`**.
 Freeze không khả dụng khi không đọc được `/proc` hoặc root của scope có ACL; khi đó `plan` báo
 `editor-freeze-unavailable` và bulk apply của scope đó bị chặn. Bỏ chọn scope bằng `--scope`, hoặc đổi bằng tay:
@@ -765,7 +769,9 @@ Flow new deploy:
 12. Ghi deployed revision vào external `.pf-state-<project>/deployed.json`.
 
 Từ PF-A2.3, cây source mới được copy chỉ phần nội dung và chỉ các tên mà `deploy` đã copy nhận target của
-workspace; `deploy` không có selector (`--current`) không đổi permission nào của workspace và in
+workspace. Việc copy đi qua các handle thư mục được giữ và không follow link ở cả hai phía: một entry nguồn bị tráo
+thành link hay file khác, hoặc một thư mục mới bị người sửa tráo thành link trong lúc đang được ghi, sẽ làm việc copy
+dừng trước khi đọc hay ghi bất cứ gì qua nó; `deploy` không có selector (`--current`) không đổi permission nào của workspace và in
 `Workspace permissions were not changed; check them with '<pf> permissions check --scope workspace'.`
 
 Sau khi smoke test UI/workflow/firewall:
@@ -1315,8 +1321,8 @@ Sau đó kiểm tra từ share root rằng DSM Shared Folder permission cho acco
   permission dừng lại. Cách xử lý bằng tay: với quyền root, chuyển nó sang tên khác trong cùng thư mục, ví dụ
   `permission-policy.invalid-<UTC>.json`; khi đó instance dùng derived policy (backup giữ group của thư mục chứa
   chúng, nên không mở rộng quyền), và `pf permissions apply` ghi revision 1 mới.
-- `permissions-context-refused`: finding của protected context nằm ngoài các scope; `check`/`plan` không đọc scope
-  nào. Sửa các finding được hiển thị (`pf doctor`).
+- `permissions-context-refused`: finding của protected context nằm ngoài các scope, hoặc nằm trên một thư mục phía
+  trên installation root (kể cả khi nó cũng nằm phía trên một scope); `check`/`plan` không đọc scope nào. Sửa các finding được hiển thị (`pf doctor`).
 - `scope-path-unsafe`, `scope-entry-link`, `scope-entry-special`, `scope-entry-hardlinked`,
   `scope-mount-boundary`, `scope-contains-app-storage`, `scope-untrusted-owner`, `scope-entry-acl`,
   `scope-too-large`: blocker; `apply` không đổi gì khi còn blocker. Gỡ link, special file, hard link hay ACL, chuyển
@@ -1337,6 +1343,24 @@ Sau đó kiểm tra từ share root rằng DSM Shared Folder permission cho acco
 - `fresh-entry-acl`: entry backup hoặc recovery mới kế thừa ACL từ thư mục chứa nó; thao tác dừng trước khi
   publish. Hãy gỡ default ACL khỏi thư mục đó. Trong workspace hoặc configuration, entry mới giữ mode lúc được tạo
   (một note).
+- `permissions-nothing-pending`: `apply --resume` hoặc `--abandon` không tìm thấy apply nào bị gián đoạn; không
+  thay đổi gì. Chạy `pf permissions check` để xem trạng thái hiện tại.
+- `permissions-option-invalid` (exit 2): `--resume` và `--abandon` làm việc trên plan đã đóng băng của apply bị
+  gián đoạn, nên không kết hợp được với `--scope`. Chạy lại lệnh mà không có `--scope`.
+- `permission-policy-unapproved` (note): chưa có policy nào được duyệt; derived policy đang có hiệu lực (group của
+  backups và recovery lấy từ thư mục của chúng, group của workspace và configuration lấy từ `pf-config.json`). Chạy
+  `pf permissions apply` để duyệt một policy.
+- `permission-entry-unplanned` (note): một entry xuất hiện sau khi plan được hiển thị (trong scope đã fence: sau
+  inventory chính thức, vốn đã đặt target cho các entry mới trước đó) và được giữ nguyên. Chạy
+  `pf permissions check` và apply lại nếu nó khác target.
+- `permission-entry-gone` (note): một entry của plan đã biến mất trước khi được verify; không cần làm gì thêm.
+- `workspace-concurrent-entry` (note): người sửa tạo một entry trong workspace trong lúc một thao tác (ví dụ
+  `deploy` hoặc `update`) publish các entry workspace mới; entry đó được giữ nguyên. Hãy xem lại nó, rồi chạy
+  `pf permissions check --scope workspace`.
+- `workspace-no-source-manifest` (note): chưa có protected source manifest, nên không file workspace nào được chỉ
+  định là executable. Deploy một source (`pf deploy`/`pf update`) để ghi manifest.
+- `permissions-applied`: apply đã hoàn tất và verify mọi scope được chọn; dòng này nêu revision của policy đang có
+  hiệu lực.
 
 ### SMB không sửa/xóa được backup/recovery
 

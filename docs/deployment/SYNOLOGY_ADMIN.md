@@ -371,8 +371,10 @@ default all).
 
 - `check` and `plan` are read-only: no lock, no operation directory, nothing written anywhere. They map the
   protected-context findings onto scopes: a finding at, above or below a workspace, configuration, backups or
-  recovery folder blocks that scope (`scope-path-unsafe`) and the others are still reported; any other refused
-  finding stops with `permissions-context-refused` before any folder is read. `check` exits 1 when an entry
+  recovery folder blocks that scope (`scope-path-unsafe`) and the others are still reported (without an approved
+  policy, a missing or unsafe backups or recovery folder shows "group unavailable": its group is not read from it);
+  any other refused finding, and one at or above the installation root (even when it is above a scope folder too),
+  stops with `permissions-context-refused` before any folder is read. `check` exits 1 when an entry
   differs or the control release breaks its ceiling (`permissions-differ`).
 - `plan` prints, per scope, the policy, the group members (at most 20; primary-group and directory-service
   members are not listed), the counts (group, mode, special bits), whether a freeze is needed, the blockers
@@ -395,8 +397,10 @@ each of these is a blocker reported by `plan`, and `apply` changes nothing while
 
 A change below the root of the workspace or the configuration (a bulk change) needs a verified editor freeze.
 `apply` first sets every such scope root to owner-only (keeping its setgid bit), so editors can no longer enter
-the folder, then scans `/proc` for any other process whose working directory, root or open file is inside one
-of the folders. A holder lifts the fence again and refuses with `editor-freeze-refused` (nothing changed). The
+the folder, then takes the authoritative inventory of the fenced folders and scans `/proc` for any other process
+whose working directory, root or open file is an entry of the plan or of that inventory (so an entry an editor
+created while the plan was being read counts too). A holder lifts the fence again and refuses with
+`editor-freeze-refused` (nothing changed). The
 scan also reports the shell that started the command: **start `apply` from outside the scope folders, for
 example `cd /`**. The freeze is unavailable when `/proc` cannot be read or the scope root carries an ACL;
 `plan` then reports `editor-freeze-unavailable` and bulk apply of that scope is blocked. Deselect the scope
@@ -786,7 +790,9 @@ The new-deploy flow:
 12. Writes the deployed revision to external `.pf-state-<project>/deployed.json`.
 
 Since PF-A2.3 the new source tree is copied content-only and only the names `deploy` copied get the workspace
-targets; `deploy` without a selector (`--current`) changes no workspace permission and prints
+targets. The copy works through held, no-follow folder handles on both sides: a source entry swapped for a link
+or another file, or a new folder an editor swaps for a link while it is filled, stops the copy before anything is
+read or written through it; `deploy` without a selector (`--current`) changes no workspace permission and prints
 `Workspace permissions were not changed; check them with '<pf> permissions check --scope workspace'.`
 
 After UI/workflow/firewall smoke testing, create the first rollback baseline:
@@ -1354,7 +1360,8 @@ Then verify DSM Shared Folder permissions grant the account/group Read/Write acc
   commands stop. Manual route: as root, move it aside in the same directory under a name such as
   `permission-policy.invalid-<UTC>.json`; the instance then uses the derived policy (backups keep the group of
   their folders, so nothing widens), and `pf permissions apply` writes a new revision 1.
-- `permissions-context-refused`: a protected-context finding outside the scopes; `check`/`plan` read no scope.
+- `permissions-context-refused`: a protected-context finding outside the scopes, or one on a folder above the
+  installation root (even when it is above a scope too); `check`/`plan` read no scope.
   Fix the findings shown (`pf doctor`).
 - `scope-path-unsafe`, `scope-entry-link`, `scope-entry-special`, `scope-entry-hardlinked`,
   `scope-mount-boundary`, `scope-contains-app-storage`, `scope-untrusted-owner`, `scope-entry-acl`,
@@ -1379,6 +1386,24 @@ Then verify DSM Shared Folder permissions grant the account/group Read/Write acc
 - `fresh-entry-acl`: a new backup or recovery entry inherited an ACL from its folder; the operation stopped
   before publishing it. Remove the default ACL from that folder. In the workspace or the configuration the new
   entry keeps the mode it was created with (a note).
+- `permissions-nothing-pending`: `apply --resume` or `--abandon` found no interrupted apply; nothing was changed.
+  Run `pf permissions check` to see the current state.
+- `permissions-option-invalid` (exit 2): `--resume` and `--abandon` act on the frozen plan of the interrupted
+  apply, so `--scope` cannot be combined with them. Run the command again without `--scope`.
+- `permission-policy-unapproved` (note): no policy is approved yet; the derived policy is in force (backups and
+  recovery groups come from their folders, workspace and configuration groups from `pf-config.json`). Run
+  `pf permissions apply` to approve one.
+- `permission-entry-unplanned` (note): an entry appeared after the plan was shown (in a fenced scope: after its
+  authoritative inventory, which already gave the earlier new entries their target) and was left as it is. Run
+  `pf permissions check` and apply again if it differs.
+- `permission-entry-gone` (note): an entry of the plan disappeared before it was verified; nothing else is needed.
+- `workspace-concurrent-entry` (note): an editor created an entry in the workspace while an operation (for
+  example `deploy` or `update`) published new workspace entries; it was left untouched. Review it, then run
+  `pf permissions check --scope workspace`.
+- `workspace-no-source-manifest` (note): no protected source manifest exists, so no workspace file is designated
+  executable. Deploy a source (`pf deploy`/`pf update`) to record one.
+- `permissions-applied`: the apply completed and verified every selected scope; the line names the policy
+  revision in force.
 
 ### SMB cannot modify backups/recovery
 

@@ -18,6 +18,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -1040,6 +1041,50 @@ class Inventory(Instance):
         self.assertIn(("scope-entry-link", "frontend"), [item[:2] for item in inventory.blockers])
         self.assertFalse(any("private.txt" in entry.relative for entry in inventory.entries))
 
+    # FS-13 above swaps before the walk's lstat (the lstat classification). The two cases below swap between the lstat
+    # and the no-follow open (PF-A2.3 audit): the O_NOFOLLOW and the opened-identity defences of _Walk.examine.
+    def inventory_swapped_at_open(self, replace):
+        real_open = os.open
+        swapped = []
+
+        def opener(path, flags, *args, **kwargs):
+            if path == "frontend" and kwargs.get("dir_fd") is not None and not swapped:
+                swapped.append(True)
+                replace()
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(pf_instance.os, "open", opener):
+            inventory = self.inventory("workspace", self.workspace)
+        self.assertEqual(swapped, [True])
+        return inventory
+
+    def test_fs13b_a_directory_swapped_for_a_link_after_its_lstat_is_refused_by_the_no_follow_open(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "private.txt").write_text("x\n")
+        frontend = self.workspace / "frontend"
+
+        def replace():
+            os.rename(frontend, self.workspace / "frontend.away")
+            os.symlink(str(outside), str(frontend))
+
+        inventory = self.inventory_swapped_at_open(replace)
+        self.assertIn(("scope-entry-link", "frontend", "replaced by a symbolic link (never followed)"),
+                      inventory.blockers)
+        self.assertFalse(any("private.txt" in entry.relative for entry in inventory.entries))
+
+    def test_fs13c_a_directory_replaced_by_another_after_its_lstat_is_refused_by_the_identity_check(self):
+        frontend = self.workspace / "frontend"
+
+        def replace():
+            os.rename(frontend, self.workspace / "frontend.away")
+            frontend.mkdir()
+            (frontend / "planted.txt").write_text("x\n")
+
+        inventory = self.inventory_swapped_at_open(replace)
+        self.assertIn(("scope-path-unsafe", "frontend", "replaced while it was inventoried"), inventory.blockers)
+        self.assertFalse(any("planted.txt" in entry.relative for entry in inventory.entries))
+
 
 class ContextMapping(Instance):
     """FS-7 / RT-9: check maps refuse findings onto scopes (A1-T17 offline, through the CLI)."""
@@ -1091,6 +1136,62 @@ class ContextMapping(Instance):
         self.assertIn("ERROR: permissions-context-refused: The protected context is refused (see the findings above), "
                       "so the permission policy cannot be read safely; no scope was inspected.", err)
         self.assertIn(str(conf), out)
+
+    def test_rt9b_a_finding_on_an_ancestor_shared_with_the_installation_root_is_context_level(self):
+        """PF-A2.3 audit: the temp base is an ancestor of every data root and of the installation root/private state;
+        a refuse finding there invalidates the approval record too, so check reads neither the record nor a scope."""
+        shared = pf_bootstrap.Finding("refuse", "ancestor-replaceable", str(self.base),
+                                      "owner uid 0 mode 0o777: an editor could replace entries")
+        validation = types.SimpleNamespace(findings=[shared], mutation_allowed=False)
+
+        class Shared(pf.Controller):
+            def ensure_validation(self):
+                return validation
+
+        controller = Shared(self.context)
+        context, unsafe = controller.permission_findings()
+        self.assertEqual(context, [shared])
+        with mock.patch.object(pf_instance, "inventory_scope", side_effect=AssertionError("walked")), \
+                mock.patch.object(pf.Controller, "read_permission_record", side_effect=AssertionError("read")):
+            code, out, err = self.run_cli("permissions", "check", controller_class=Shared)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ERROR: permissions-context-refused:", err)
+        self.assertIn("[refuse] ancestor-replaceable: " + str(self.base), out)
+        # An ancestor of the data roots only (not of the installation root) stays scope-attributable (FS-7).
+        home = pf_bootstrap.Finding("refuse", "ancestor-replaceable", str(self.base / "home"), "mode 0o777")
+        validation.findings = [home]
+        context, unsafe = Shared(self.context).permission_findings()
+        self.assertEqual(context, [])
+        self.assertEqual(sorted(unsafe), ["backups", "configuration", "recovery", "workspace"])
+
+    def test_fs7b_a_missing_or_unsafe_storage_root_blocks_only_that_scope_on_an_unapproved_instance(self):
+        """PF-A2.3 audit: the derived backups/recovery group is never read from an unsafe or unreadable root; the
+        scope is blocked and every other scope is still reported."""
+        self.assertFalse(self.record_path.exists())
+        for scope, root in (("backups", self.backups), ("recovery", self.recovery)):
+            moved = root.with_name(root.name + ".away")
+            os.rename(root, moved)
+            try:
+                for verb in ("check", "plan"):
+                    with self.subTest(scope=scope, verb=verb):
+                        code, out, err = self.run_cli("permissions", verb)
+                        self.assertEqual(code, 1, out + err)
+                        self.assertIn(f"scope-path-unsafe: {scope}: .:", out)
+                        self.assertIn(f"\n{scope} — {root}\n  Policy: group unavailable", out)
+                        self.assertNotIn(f"proposes group users for {scope};", out)
+                        for other in ("workspace", "configuration", "private_state"):
+                            self.assertIn(f"\n{other} — ", out)
+                        self.assertIn("ERROR: permissions-blocked:", err)
+            finally:
+                os.rename(moved, root)
+        real = self.backups.with_name("backups.real")
+        os.rename(self.backups, real)
+        os.symlink(str(real), str(self.backups))
+        code, out, err = self.run_cli("permissions", "check")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("scope-path-unsafe: backups: .: [refuse] registered-path-symlink", out)
+        self.assertIn(f"\nbackups — {self.backups}\n  Policy: group unavailable", out)
+        self.assertIn("\nrecovery — ", out)
 
 
 # ============================================================================ AC: ACL safety (real fs)
@@ -1174,6 +1275,110 @@ class Acl(Instance):
         os.symlink("file", str(tree / "sub/link"))
         with self.assertRaisesRegex(pf.Failure, "links and special files are never copied"):
             pf.copy_fresh(tree, self.base / "tree-copy")
+
+
+# ============================================================================ FL: copy_fresh races (real fs)
+
+
+@REAL_FS
+class CopyFreshRaces(unittest.TestCase):
+    """PF-A2.3 audit: copy_fresh is descriptor-relative and no-follow on both sides (section 3.10). Each case swaps
+    an entry right after the check that used to guard a path-based step."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.source = self.base / "configuration"
+        self.target = self.base / "bundle"
+        self.source.mkdir()
+        self.target.mkdir()
+        self.secret = self.base / "secret"
+        self.secret.write_text("SECRET-CONTENT")
+        os.chmod(self.secret, 0o600)
+        (self.source / "pf-config.json").write_text("{}")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @contextlib.contextmanager
+    def after(self, functions, name, swap):
+        """Run ``swap`` once, right after the first ``os.<function>`` (any of ``functions``) of an entry called
+        ``name`` returns: the check that guards the next step has just passed."""
+        done = []
+
+        def wrap(real):
+            def wrapper(path, *args, **kwargs):
+                result = real(path, *args, **kwargs)
+                if not done and isinstance(path, (str, bytes, os.PathLike))                         and os.path.basename(os.fspath(path)) == name:
+                    done.append(True)
+                    swap()
+                return result
+            return wrapper
+
+        with contextlib.ExitStack() as stack:
+            for function in functions:
+                stack.enter_context(mock.patch.object(os, function, wrap(getattr(os, function))))
+            yield
+
+    def test_fl11_a_source_file_swapped_for_a_link_after_its_lstat_is_never_read_through(self):
+        config = self.source / "pf-config.json"
+
+        def swap():
+            os.unlink(str(config))
+            os.symlink(str(self.secret), str(config))
+
+        with self.assertRaisesRegex(pf.Failure, "links and special files are never copied"):
+            with self.after(("lstat", "stat"), "pf-config.json", swap):
+                pf.copy_fresh(config, self.target / "pf-config.json")
+        self.assertEqual(os.listdir(str(self.target)), [])
+
+    def test_fl12_a_source_file_replaced_after_its_lstat_is_refused_by_the_identity_check(self):
+        config = self.source / "pf-config.json"
+
+        def swap():
+            os.rename(str(config), str(self.source / "pf-config.away"))
+            config.write_text("OTHER")
+
+        with self.assertRaisesRegex(pf.Failure, "replaced while it was copied"):
+            with self.after(("lstat", "stat"), "pf-config.json", swap):
+                pf.copy_fresh(config, self.target / "pf-config.json")
+        self.assertEqual(os.listdir(str(self.target)), [])
+
+    def test_fl13_a_new_directory_swapped_for_a_link_is_never_written_through(self):
+        candidate = self.base / "candidate"
+        (candidate / "frontend").mkdir(parents=True)
+        (candidate / "frontend" / "app.txt").write_text("x")
+        outside = self.base / "outside"
+        outside.mkdir()
+        made = self.target / "frontend"
+
+        def swap():
+            os.rename(str(made), str(self.target / "frontend.away"))
+            os.symlink(str(outside), str(made))
+
+        with self.assertRaisesRegex(pf.Failure, "replaced while it was written"):
+            with self.after(("mkdir",), "frontend", swap):
+                pf.copy_fresh(candidate / "frontend", made)
+        self.assertEqual(os.listdir(str(outside)), [])
+
+    def test_fl14_a_hard_linked_source_file_is_never_copied(self):
+        config = self.source / "pf-config.json"
+        os.link(str(config), str(self.base / "elsewhere"))
+        with self.assertRaisesRegex(pf.Failure, "hard links"):
+            pf.copy_fresh(config, self.target / "pf-config.json")
+        self.assertEqual(os.listdir(str(self.target)), [])
+
+    def test_fl15_a_tree_copy_is_content_only_and_new_inodes(self):
+        tree = self.base / "tree"
+        (tree / "a" / "b").mkdir(parents=True)
+        (tree / "a" / "b" / "file").write_text("deep")
+        os.chmod(str(tree / "a" / "b" / "file"), 0o755)
+        pf.copy_fresh(tree, self.target / "tree")
+        copied = self.target / "tree" / "a" / "b" / "file"
+        self.assertEqual(copied.read_text(), "deep")
+        self.assertEqual(mode(self.target / "tree" / "a"), 0o700)
+        self.assertNotEqual(os.lstat(str(copied)).st_ino, os.lstat(str(tree / "a" / "b" / "file")).st_ino)
+        self.assertEqual(sorted(os.listdir(str(self.target / "tree" / "a" / "b"))), ["file"])
 
 
 # ============================================================================ FZ: editor freeze (real fs)
@@ -1278,6 +1483,39 @@ class Freeze(Instance):
                          [("fence", "workspace"), ("fence", "configuration"), ("fence", "configuration"),
                           ("fence", "workspace")])
         self.assertEqual(self.outcome(self.last_apply())["result"], "abandoned")
+
+    def created_after_the_plan(self, create, **hold):
+        """Apply with an entry created at the after-plan seam and held (cwd or fd) by another process."""
+        self.bulk()
+        before = tree_state(self.workspace, self.config_dir)
+        held = {}
+        with contextlib.ExitStack() as stack:
+            def hook(name):
+                if name == "after-plan":
+                    path = create()
+                    held["pid"] = stack.enter_context(holder(**{key: path for key in hold}))
+
+            code, out, err = self.apply(controller_class=self.seamed(hook=hook))
+        return code, err, held["pid"], before
+
+    def test_fz9_a_working_directory_in_a_directory_created_after_the_plan_refuses(self):
+        """PF-A2.3 audit: the open-handle scan covers the authoritative (post-fence) inventory, not only the plan."""
+        def create():
+            folder = self.workspace / "newdir"
+            folder.mkdir()
+            return folder
+
+        code, err, pid, before = self.created_after_the_plan(create, cwd=True)
+        self.assert_refused_and_restored(code, err, "cwd", pid, before)
+
+    def test_fz10_a_descriptor_on_a_file_created_after_the_plan_refuses(self):
+        def create():
+            path = self.workspace / "frontend" / "newfile.txt"
+            path.write_text("x")
+            return path
+
+        code, err, pid, before = self.created_after_the_plan(create, open_path=True)
+        self.assert_refused_and_restored(code, err, "fd", pid, before)
 
     def test_fz8_a_compliant_root_is_lifted_by_an_explicit_root_operation(self):
         self.assertEqual(self.apply()[0], 0)

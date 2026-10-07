@@ -995,27 +995,97 @@ class _VerifyFailed(Failure):
     """permissions-verify-failed after the re-inventory (section 3.6 step 11): the journal stays interrupted."""
 
 
+_COPY_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_COPY_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _copy_unsupported(shown, detail="links and special files are never copied"):
+    return Failure(f"Unsupported local deployment path: {shown} ({detail})")
+
+
+def _copy_open(dir_fd, name, flags, info, shown):
+    """Open ``name`` below ``dir_fd`` without following a link and require the identity its lstat saw."""
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _copy_unsupported(shown) from exc
+        raise
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)             or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(info.st_mode):
+        os.close(fd)
+        raise _copy_unsupported(shown, "replaced while it was copied; nothing was read through it")
+    return fd
+
+
+def _copy_fresh_at(source_dir_fd, source_name, target_dir_fd, target_name, shown):
+    """One entry of copy_fresh, relative to held directory descriptors on both sides (sections 3.10, S5)."""
+    info = os.stat(source_name, dir_fd=source_dir_fd, follow_symlinks=False)
+    if stat.S_ISDIR(info.st_mode):
+        source_fd = _copy_open(source_dir_fd, source_name, _COPY_DIR_FLAGS, info, shown)
+        try:
+            os.mkdir(target_name, 0o700, dir_fd=target_dir_fd)  # content-only: the mode comes from its scope target
+            try:
+                target_fd = os.open(target_name, _COPY_DIR_FLAGS, dir_fd=target_dir_fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Failure(f"{shown}: the new copy was replaced while it was written; nothing was written "
+                                  "through it.") from exc
+                raise
+            try:
+                made = os.fstat(target_fd)
+                if made.st_uid != os.geteuid() or stat.S_IMODE(made.st_mode) & 0o077:
+                    raise Failure(f"{shown}: the new copy was replaced while it was written; nothing was written "
+                                  "through it.")
+                for name in sorted(os.listdir(source_fd)):
+                    _copy_fresh_at(source_fd, name, target_fd, name, f"{shown}/{name}")
+            finally:
+                os.close(target_fd)
+        finally:
+            os.close(source_fd)
+    elif stat.S_ISREG(info.st_mode):
+        if info.st_nlink != 1:
+            raise _copy_unsupported(shown, f"{info.st_nlink} hard links; a name outside may share the file")
+        source_fd = _copy_open(source_dir_fd, source_name, _COPY_FILE_FLAGS, info, shown)
+        temporary = "." + target_name + ".fresh-" + uuid.uuid4().hex[:8]
+        try:
+            if os.fstat(source_fd).st_nlink != 1:
+                raise _copy_unsupported(shown, "hard links; a name outside may share the file")
+            target_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                                dir_fd=target_dir_fd)
+            try:
+                with os.fdopen(source_fd, "rb", closefd=False) as reader,                         os.fdopen(target_fd, "wb", closefd=False) as writer:
+                    shutil.copyfileobj(reader, writer)  # bytes only: no mode, no owner, no xattr
+                os.replace(temporary, target_name, src_dir_fd=target_dir_fd, dst_dir_fd=target_dir_fd)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=target_dir_fd)
+                raise
+            finally:
+                os.close(target_fd)
+        finally:
+            os.close(source_fd)
+    else:
+        raise _copy_unsupported(shown)
+
+
 def copy_fresh(source, destination):
     """Content-only copy (section 3.10): directories are created 0700 and regular files are copied into new inodes;
-    no mode, owner or extended attribute (ACL) is copied. A link or special file raises Failure. A file is copied to
-    a private temporary sibling and renamed over ``destination``, so the result is always a new inode."""
+    no mode, owner or extended attribute (ACL) is copied. A link, special file or hard-linked file raises Failure.
+    Below the two given parents every step is descriptor-relative and no-follow on both sides: a source entry is
+    opened O_NOFOLLOW and must keep the identity its lstat saw, and a new directory is entered through a no-follow
+    descriptor, so an editor's swap can neither redirect a read nor a write. A file is copied to a private temporary
+    sibling and renamed over ``destination``, so the result is always a new inode."""
     source, destination = Path(source), Path(destination)
-    info = os.lstat(str(source))
-    if stat.S_ISDIR(info.st_mode):
-        os.mkdir(str(destination), 0o700)  # content-only: the copy's mode comes from its scope target
-        for name in sorted(os.listdir(str(source))):
-            copy_fresh(source / name, destination / name)
-    elif stat.S_ISREG(info.st_mode):
-        temporary = destination.with_name("." + destination.name + ".fresh-" + uuid.uuid4().hex[:8])
+    source_parent = os.open(str(source.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        target_parent = os.open(str(destination.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
-            shutil.copyfile(str(source), str(temporary), follow_symlinks=False)  # bytes only: no mode, no xattr
-            os.replace(str(temporary), str(destination))
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(str(temporary))
-            raise
-    else:
-        raise Failure(f"Unsupported local deployment path: {source} (links and special files are never copied)")
+            _copy_fresh_at(source_parent, source.name, target_parent, destination.name, str(source))
+        finally:
+            os.close(target_parent)
+    finally:
+        os.close(source_parent)
 
 
 def permission_confirm(phrase, summary):
@@ -1042,6 +1112,9 @@ class EffectivePolicy:
     record_sha256: object     # sha256 of the record bytes, None when derived
     record: object
     record_bytes: object
+    # Derived policy only (section 3.5): storage scopes whose root is unsafe or unreadable, so no group was read from
+    # it; their group is a placeholder that is never shown, proposed or applied (the scope is blocked).
+    unavailable: frozenset = frozenset()
 
     @property
     def label(self):
@@ -1067,6 +1140,7 @@ class ScopePlan:
     freeze: str = "not needed"
     blockers: list = dataclasses.field(default_factory=list)
     notes: list = dataclasses.field(default_factory=list)
+    group_unavailable: bool = False
 
     @property
     def entries(self):
@@ -2362,8 +2436,12 @@ class Controller:
                           f"are never created. Choose an existing group in '{self.pf_command()} permissions apply'. "
                           "Nothing was changed.") from exc
 
-    def permission_policy(self, admin=None):
-        """The effective permission policy (section 3.3): the approved record, else the derived policy."""
+    def permission_policy(self, admin=None, unsafe=None):
+        """The effective permission policy (section 3.3): the approved record, else the derived policy.
+
+        ``unsafe`` (check/plan only, section 3.5) is the scope-attributable finding map: the derived group of a
+        backups/recovery scope listed there is not read from its untrusted root, and a root that cannot be read is
+        added to it as that scope's blocker instead of failing the whole report."""
         found = self.read_permission_record()
         if found is not None:
             record, data = found
@@ -2373,12 +2451,27 @@ class Controller:
         if values is None:
             raise Failure(f"permission-policy-invalid: The permission policy is invalid: workspace_write_group is "
                           f"unavailable ({problem}).")
-        policy = pf_config.derive_permission_policy(values, backups_group=self.root_group("backups"),
-                                                    recovery_group=self.root_group("recovery"))
+        groups, unavailable = {}, set()
+        for scope in ("backups", "recovery"):
+            if unsafe is not None and scope in unsafe:
+                unavailable.add(scope)
+                continue
+            try:
+                groups[scope] = self.root_group(scope)
+            except Failure as exc:
+                if unsafe is None or not isinstance(exc.__cause__, OSError):
+                    raise
+                unsafe[scope] = [f"{exc}; the derived group of {scope} cannot be read from it"]
+                unavailable.add(scope)
+        # A blocked scope's placeholder is the editable group (already required to resolve); it is never shown.
+        for scope in unavailable:
+            groups[scope] = values["workspace_write_group"]
+        policy = pf_config.derive_permission_policy(values, backups_group=groups["backups"],
+                                                    recovery_group=groups["recovery"])
         problems = pf_config.permission_policy_problems(policy)
         if problems:
             raise Failure(f"permission-policy-invalid: The permission policy is invalid: {problems[0]}.")
-        return EffectivePolicy(policy, 0, "derived", None, None, None)
+        return EffectivePolicy(policy, 0, "derived", None, None, None, frozenset(unavailable))
 
     def resolve_policy_gids(self, policy):
         """{scope: gid or None}; a missing group is permission-group-missing (groups are never created)."""
@@ -2413,6 +2506,10 @@ class Controller:
     def permission_findings(self):
         """Section 3.5: (context-level refuse findings, {scope: [rendered scope-attributable findings]})."""
         roots = {scope: self.scope_root(scope) for scope in ("workspace", "configuration", "backups", "recovery")}
+        # A finding on (or above) the installation root, private state or the control release also invalidates the
+        # approval record and the source manifest, even when it is an ancestor shared with a data root as well.
+        protected = (Path(self.context.installation_root), self.scope_root("private_state"),
+                     self.scope_root("control"))
         context, unsafe = [], {}
         for finding in self.ensure_validation().findings:
             if finding.severity != "refuse":
@@ -2421,7 +2518,7 @@ class Controller:
             hit = [scope for scope, root in roots.items() if path == root or path in root.parents or root in path.parents]
             for scope in hit:
                 unsafe.setdefault(scope, []).append(finding.render())
-            if not hit:
+            if not hit or any(path == item or path in item.parents for item in protected):
                 context.append(finding)
         return context, unsafe
 
@@ -2482,7 +2579,7 @@ class Controller:
         plan.changes.sort(key=lambda item: item[1])
         return plan
 
-    def _permission_plan(self, policy, scopes, *, unsafe=None, fenced=frozenset()):
+    def _permission_plan(self, policy, scopes, *, unsafe=None, fenced=frozenset(), unavailable=frozenset()):
         """The plan of ``policy`` over ``scopes`` (section 3.5): per-scope plans, the change list bytes and hash."""
         try:
             compiled = pf_config.compile_permission_policy(policy)
@@ -2492,6 +2589,8 @@ class Controller:
         gids = self.resolve_policy_gids(policy)
         plans = {scope: self._scope_plan(scope, compiled[scope], gids[scope], unsafe=(unsafe or {}).get(scope),
                                          fenced=scope in fenced) for scope in scopes}
+        for scope in scopes:
+            plans[scope].group_unavailable = scope in unavailable
         changes = [change for scope in scopes for change in plans[scope].changes]
         policy_sha256 = pf_instance.sha256_bytes(pf_instance.normalize_json(policy))
         header = {"schema_version": 1, "policy_sha256": policy_sha256, "scopes": list(scopes),
@@ -2510,7 +2609,7 @@ class Controller:
         rows = []
         scopes = ("backups", "recovery") + (EDITABLE_SCOPES if effective.kind == "approved" else ())
         for scope in PERMISSION_SCOPES:
-            if scope not in scopes:
+            if scope not in scopes or scope in effective.unavailable:
                 continue
             proposed = admin["backup_read_group" if scope in ("backups", "recovery") else "workspace_write_group"]
             current = effective.policy["permissions"][scope]["group"]
@@ -2534,6 +2633,9 @@ class Controller:
         log(f"{plan.scope} — {plan.root}")
         if plan.scope == "private_state":
             log("  Policy: owner only (directories 0700, files 0600; no group)")
+        elif plan.group_unavailable:
+            log("  Policy: group unavailable (the derived group comes from the folder, which is unsafe or unreadable; "
+                f"see its blockers) | {pf_config.ACCESS_LABELS[target.access]}")
         else:
             parts = [f"group {target.group} (gid {plan.gid})", pf_config.ACCESS_LABELS[target.access]]
             if plan.scope in EDITABLE_SCOPES:
@@ -2637,9 +2739,9 @@ class Controller:
         admin, problem = self.admin_values_for_permissions()
         if admin is None:
             log(f"Note: pf-config.json is unavailable ({problem}); its proposals are not shown.")
-        effective = self.permission_policy(admin=(admin, problem))
+        effective = self.permission_policy(admin=(admin, problem), unsafe=unsafe)
         scopes = self.selected_scopes(args)
-        plan = self._permission_plan(effective.policy, scopes, unsafe=unsafe)
+        plan = self._permission_plan(effective.policy, scopes, unsafe=unsafe, unavailable=effective.unavailable)
         title = "Permission plan" if verb == "plan" else "Permission check"
         log(f"{title} for instance {self.context.slug} — {effective.label}")
         journal = self.read_journal()
@@ -2657,7 +2759,8 @@ class Controller:
             log("")
             log(f"== With pf-config.json proposals == candidate (not approved; '{self.pf_command()} permissions apply' "
                 "would ask for it)")
-            self.log_permission_plan(self._permission_plan(candidate, scopes, unsafe=unsafe),
+            self.log_permission_plan(self._permission_plan(candidate, scopes, unsafe=unsafe,
+                                                           unavailable=effective.unavailable),
                                      details=bool(getattr(args, "details", False)))
         log("")
         self.log_permission_status([(scope, self.plan_mode_applied(plan.scope_plans[scope]), plan.scope_plans[scope])
@@ -3077,20 +3180,8 @@ class Controller:
             operations = {}
             if freeze:
                 self._hook("after-fence")
-                identities = frozenset((entry.dev, entry.ino) for scope in freeze
-                                       for entry in plan.scope_plans[scope].entries)
-                try:
-                    holders = pf_instance.open_handles(identities)
-                except pf_instance.ContextError as exc:
-                    raise _EffectFree(f"editor-freeze-unavailable: Bulk change of {', '.join(freeze)} needs a verified "
-                                      f"editor freeze, which is unavailable here ({exc}). Deselect it with --scope or "
-                                      "follow SYNOLOGY_ADMIN §2.") from exc
-                if holders:
-                    shown = ", ".join(f"{pid} {comm} uid {uid} {holder}" for pid, comm, uid, holder in holders[:10])
-                    raise _EffectFree(f"editor-freeze-refused: {', '.join(freeze)} is still in use by {len(holders)} "
-                                      f"process(es) ({shown}); the fence was removed. A shell or sudo whose working "
-                                      "directory is inside the folder counts too: start the command from outside it "
-                                      "(for example 'cd /'). Nothing was changed.")
+                # The authoritative inventory comes first, so the open-handle scan also covers every entry created
+                # between the plan and the fence (a holder there could keep racing the change otherwise).
                 confirmed = {tuple(change[:4]) for change in plan.changes}
                 for scope in freeze:
                     scope_plan = plan.scope_plans[scope]
@@ -3110,6 +3201,21 @@ class Controller:
                         fresh.notes.append(f"{len(skipped)} confirmed change(s) skipped: the entry now complies or is "
                                            "gone: " + ", ".join(skipped[:10]))
                     operations[scope] = fresh
+                identities = frozenset((entry.dev, entry.ino) for scope in freeze
+                                       for scope_plan in (plan.scope_plans[scope], operations[scope])
+                                       for entry in scope_plan.entries)
+                try:
+                    holders = pf_instance.open_handles(identities)
+                except pf_instance.ContextError as exc:
+                    raise _EffectFree(f"editor-freeze-unavailable: Bulk change of {', '.join(freeze)} needs a verified "
+                                      f"editor freeze, which is unavailable here ({exc}). Deselect it with --scope or "
+                                      "follow SYNOLOGY_ADMIN §2.") from exc
+                if holders:
+                    shown = ", ".join(f"{pid} {comm} uid {uid} {holder}" for pid, comm, uid, holder in holders[:10])
+                    raise _EffectFree(f"editor-freeze-refused: {', '.join(freeze)} is still in use by {len(holders)} "
+                                      f"process(es) ({shown}); the fence was removed. A shell or sudo whose working "
+                                      "directory is inside the folder counts too: start the command from outside it "
+                                      "(for example 'cd /'). Nothing was changed.")
             # Step 10: apply scope by scope in the fixed order; entries deepest first, the root last.
             for scope in selected:
                 scope_plan = operations.get(scope, plan.scope_plans[scope])

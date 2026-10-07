@@ -121,7 +121,8 @@ def dotted(node):
 # ------------------------------------------------------------------ SS-3 mutation and write sites
 
 # PF-A2.3: fchmod/fchown joined the tracked vocabulary (the permission engine changes metadata through descriptors).
-OS_WRITES = {"chmod", "chown", "mkdir", "replace", "rename", "fchmod", "fchown"}
+# PF-A2.3 audit: ftruncate/truncate too (the resume cuts a torn journal tail in place), in every module.
+OS_WRITES = {"chmod", "chown", "mkdir", "replace", "rename", "fchmod", "fchown", "ftruncate", "truncate"}
 WRITER_NAMES = {"write_json", "write_private_json", "_write_private", "_write_private_file"}
 TEMP_WRITES = {"TemporaryDirectory", "mkdtemp", "mkstemp", "NamedTemporaryFile"}
 MODE_RE = re.compile(r"[rwxabt+]+(?::[a-z0-9]*)?\Z")
@@ -205,8 +206,9 @@ WRITE_SITE_ALLOWLIST = {
         ("shutil.rmtree", "Controller.replace_source_for_recovery"),
         ("shutil.rmtree", "Controller.restore_revision_checkpoints"),
         # PF-A2.3 (section 3.10): the content-only copy of every flow (no mode or xattr is copied): mkdir 0700 for a
-        # directory, copyfile into a private temporary sibling, then the rename that makes the copy a new inode.
-        ("os.mkdir", "copy_fresh"), ("shutil.copyfile", "copy_fresh"), ("os.replace", "copy_fresh"),
+        # directory, the bytes of a no-follow, identity-checked source descriptor into a private temporary sibling,
+        # then the rename that makes the copy a new inode; all relative to held directory descriptors (audit fix).
+        ("os.mkdir", "_copy_fresh_at"), ("shutil.copyfileobj", "_copy_fresh_at"), ("os.replace", "_copy_fresh_at"),
         # PF-A2.3: the config writer's create path (fchown/fchmod of its own private temporary, then fstat check).
         ("os.fchown", "write_editable_file"), ("os.fchmod", "write_editable_file"),
         # PF-A2.3 `permissions apply` (sections 3.6/3.7), all inside the instance lock and the operation directory:
@@ -223,6 +225,9 @@ WRITE_SITE_ALLOWLIST = {
         (".unlink", "Controller._permission_execute"), (".unlink", "Controller._permissions_abandon"),
         ("os.fchmod", "Controller._permission_execute"), ("os.fchmod", "Controller._restore_fences"),
         ("os.fchown", "Controller._permissions_abandon"), ("os.fchmod", "Controller._permissions_abandon"),
+        # PF-A2.3 audit: --resume cuts only the torn, never-executed final line of the original apply's write-ahead
+        # journal, inside the instance lock and after the RESUME confirmation (implementation report deviation 7).
+        ("os.ftruncate", "Controller._permissions_resume"),
         ("tempfile.TemporaryDirectory", "Controller.create_deployed_source_archive"),
         ("tempfile.TemporaryDirectory", "Controller.deploy"), ("tempfile.TemporaryDirectory", "Controller.prove_tree_commit"),
         ("tempfile.TemporaryDirectory", "Controller.restore_instance"), ("tempfile.TemporaryDirectory", "Controller.rollback"),
@@ -322,6 +327,9 @@ def install_write(call):
         return target
     if target == "os.open" and "O_CREAT" in ast.dump(call):
         return "os.open(O_CREAT)"
+    # PF-A2.3 audit: a write-mode open of an existing file (no O_CREAT) is a write site too.
+    if target == "os.open" and any(flag in ast.dump(call) for flag in ("O_WRONLY", "O_RDWR", "O_TRUNC", "O_APPEND")):
+        return "os.open(write)"
     return None
 # Read-only roots of SS-3 rule 2 (Controller methods by name or prefix, plus module functions).
 READ_ONLY_ROOTS = ("__init__", "status", "doctor", "snapshots", "recoveries", "verify_recovery", "compose_ps",
@@ -1802,6 +1810,18 @@ class StaticScan(unittest.TestCase):
         self.assertNotIn("Controller.lock", reachable)
         self.assertNotIn("Controller.begin_operation", reachable)
 
+    def test_ss3d_truncation_and_write_mode_opens_are_tracked(self):
+        """PF-A2.3 audit: an in-place truncation or a write-mode open of an existing file is a write site."""
+        def call(source):
+            return ast.parse(source).body[0].value
+
+        self.assertEqual([tracked_write(call(text)) for text in ("os.ftruncate(fd, 0)", "os.truncate(path, 0)")],
+                         ["os.ftruncate", "os.truncate"])
+        self.assertEqual([install_write(call(text)) for text in (
+            "os.open(path, os.O_WRONLY | os.O_NOFOLLOW)", "os.open(path, os.O_RDWR)", "os.open(path, os.O_APPEND)",
+            "os.open(path, os.O_RDONLY | os.O_TRUNC)", "os.open(path, os.O_RDONLY | os.O_NOFOLLOW)")],
+            ["os.open(write)", "os.open(write)", "os.open(write)", "os.open(write)", None])
+
     def test_ss3c_config_writer_sites_are_allowlisted_and_the_wizard_readers_write_nothing(self):
         """PF-A2.2: the wider write vocabulary (links, fchown/fchmod, exclusive creates, unlinks) in pf-admin.py is
         confined to the config writer; its read-only helpers and every read-only route reach none of it."""
@@ -1814,9 +1834,12 @@ class StaticScan(unittest.TestCase):
             # Pre-existing (PF-A1.3): the envelope render's private file inside the current operation directory.
             ("os.open(O_CREAT)", "Controller.render_compose"),
             # PF-A2.3: the write-ahead effect journal appender (O_APPEND, 0600, fsync) inside the operation directory,
-            # and copy_fresh's removal of its own private temporary when the copy fails.
+            # and copy_fresh's exclusive private temporary (O_EXCL|O_NOFOLLOW relative to the held destination
+            # directory) and its removal when the copy fails.
             ("os.open(O_CREAT)", "Controller._append_effects"), ("os.write", "Controller._append_effects"),
-            ("os.unlink", "copy_fresh"),
+            ("os.open(O_CREAT)", "_copy_fresh_at"), ("os.unlink", "_copy_fresh_at"),
+            # PF-A2.3 audit: the resume's no-follow write open of the original journal for its torn-tail ftruncate.
+            ("os.open(write)", "Controller._permissions_resume"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")

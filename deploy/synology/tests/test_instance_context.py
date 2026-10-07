@@ -649,7 +649,7 @@ class ProtectedPathChecks(Base):
     def codes(self, validation):
         return sorted({finding.code for finding in validation.findings if finding.severity == "refuse"})
 
-    def assert_mutation_refused_but_status_readable(self, expected_code):
+    def assert_mutation_refused_but_status_readable(self, expected_code, *, context_refused=False):
         validation = self.validation()
         self.assertFalse(validation.mutation_allowed)
         self.assertIn(expected_code, self.codes(validation))
@@ -664,7 +664,8 @@ class ProtectedPathChecks(Base):
             code, out, err = run_main(["permissions", "check"], self.layout)
             self.assertEqual(code, 1)
             self.assertTrue("permissions-context-refused" in err
-                            or ("scope-path-unsafe" in out and "permissions-blocked" in err), out + err)
+                            or (not context_refused and "scope-path-unsafe" in out and "permissions-blocked" in err),
+                            out + err)
             self.assertIn(expected_code, out)
         self.assertEqual(pfx.snapshot_tree(self.base), before)
 
@@ -674,7 +675,8 @@ class ProtectedPathChecks(Base):
 
     def test_root_owned_leaf_under_writable_ancestor_is_refused(self):
         os.chmod(self.base, 0o770)
-        self.assert_mutation_refused_but_status_readable("ancestor-replaceable")
+        # PF-A2.3 audit: the base is an ancestor of the installation root too, so check refuses the context.
+        self.assert_mutation_refused_but_status_readable("ancestor-replaceable", context_refused=True)
 
     def test_leaf_modes_alone_are_no_security_claim(self):
         os.chmod(self.context.paths.private_state, 0o777)
