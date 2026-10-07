@@ -121,20 +121,20 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     subtitle: 'Who may correct, with reasons (§16)',
   },
   {
-    id: 'department-display',
-    phase: 'full',
-    group: 'Policies',
-    label: 'Department display settings',
-    subtitle:
-      'Per-Department display configuration — Production Board rotation timing: seconds per displayed row and minimum page dwell (§21)',
-  },
-  {
     id: 'data-retention',
     phase: 'full',
     group: 'Policies',
     label: 'History archival & purge',
     subtitle:
       'Admin-only Movement-history retention maintenance: configurable retention period, size threshold or manual request — lossless archive export, verification, then purge exactly the archived rows, with scope preview, reason and full audit; normal workflows never delete history',
+  },
+  {
+    id: 'department-display',
+    phase: 'full',
+    group: 'Policies',
+    label: 'Department display settings',
+    subtitle:
+      'Per-Department display configuration — Production Board rotation timing: seconds per displayed row and minimum page dwell (§21)',
   },
   {
     id: 'settings',

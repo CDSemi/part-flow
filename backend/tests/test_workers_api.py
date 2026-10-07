@@ -909,7 +909,8 @@ def test_avatar_bytes_are_never_loaded_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Badge resolver (no route yet — first consumers are the later slices)
+# Badge resolver (no standalone route — consumed by the Scan Station
+# badge sign-in and badge-confirmation paths)
 # ---------------------------------------------------------------------------
 
 

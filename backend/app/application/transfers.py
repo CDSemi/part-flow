@@ -844,9 +844,9 @@ def record_arrival(
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity)
     deviation_confirmed = required_flag(confirm_route_deviation, "confirm_route_deviation")
-    reason = optional_text(route_deviation_reason)
+    reason = optional_text(route_deviation_reason, "The route deviation reason")
     repair_intent = required_flag(repair, "repair")
-    repair_text = optional_text(repair_reason)
+    repair_text = optional_text(repair_reason, "The repair reason")
     stocking = kind == "STOCK"
     nothing = "Nothing was stocked." if stocking else "Nothing was transferred."
     if stocking and (repair_intent or repair_text is not None):

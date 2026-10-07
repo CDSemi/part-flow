@@ -2,6 +2,9 @@
 
 > **Bản gốc chuẩn:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
+> **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
+> đóng Phase 13 (sau commit `dbd42ee`), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth.
 >
 > **Trạng thái:** Đã triển khai. Đây là contract chuẩn của Phase 4, không phải

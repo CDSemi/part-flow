@@ -1830,7 +1830,7 @@ test('a duplicate badge is answered by the server in place, with no further writ
   expect(writeSummary()).toEqual(['POST /api/workers']);
 });
 
-test('editing a Worker sends the full profile with the canonical badge', async () => {
+test('editing a Worker sends only the changed fields, with the canonical badge', async () => {
   await openWorkers();
 
   fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
@@ -1844,11 +1844,11 @@ test('editing a Worker sends the full profile with the canonical badge', async (
   expect(writes[0]).toEqual({
     method: 'PATCH',
     url: '/api/workers/1',
-    body: { name: 'Alex Tran', badge_barcode: 'X-100482', is_active: true },
+    body: { badge_barcode: 'X-100482' },
   });
   expect(await screen.findByText('X-100482')).toBeInTheDocument();
 
-  // Deactivation travels in the same full-profile body.
+  // Deactivation alone sends the active flag alone.
   fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
   dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
   fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Active' }));
@@ -1857,7 +1857,7 @@ test('editing a Worker sends the full profile with the canonical badge', async (
   expect(writes[1]).toEqual({
     method: 'PATCH',
     url: '/api/workers/1',
-    body: { name: 'Alex Tran', badge_barcode: 'X-100482', is_active: false },
+    body: { is_active: false },
   });
   const row = (
     await screen.findByRole('button', { name: 'Edit Alex Tran' })
@@ -1865,6 +1865,31 @@ test('editing a Worker sends the full profile with the canonical badge', async (
   await waitFor(() =>
     expect(within(row).getByText('Inactive')).toBeInTheDocument(),
   );
+});
+
+test('a stale Worker editor never reverts another administrator’s change (S12-F7)', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  // Another administrator deactivates the Worker and corrects the badge
+  // while this editor is open.
+  state.workers[0].is_active = false;
+  state.workers[0].badge_barcode = 'X-200000';
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Alex T. Tran' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PATCH',
+      url: '/api/workers/1',
+      body: { name: 'Alex T. Tran' },
+    },
+  ]);
+  expect(state.workers[0].is_active).toBe(false);
+  expect(state.workers[0].badge_barcode).toBe('X-200000');
 });
 
 test('deactivating a Worker who is an Area Fixed Worker is refused in place', async () => {
@@ -1883,7 +1908,7 @@ test('deactivating a Worker who is an Area Fixed Worker is refused in place', as
   expect(state.workers[0].is_active).toBe(true);
 });
 
-test('a chosen avatar is uploaded after the profile, labelled with its type', async () => {
+test('a chosen avatar alone is uploaded without a profile write, labelled with its type', async () => {
   await openWorkers();
 
   fireEvent.click(screen.getByRole('button', { name: 'Edit Mai' }));
@@ -1901,11 +1926,8 @@ test('a chosen avatar is uploaded after the profile, labelled with its type', as
 
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  expect(writeSummary()).toEqual([
-    'PATCH /api/workers/2',
-    'PUT /api/workers/2/avatar',
-  ]);
-  expect(writes[1].body).toEqual({
+  expect(writeSummary()).toEqual(['PUT /api/workers/2/avatar']);
+  expect(writes[0].body).toEqual({
     contentType: 'image/png',
     size: file.size,
   });
@@ -1919,7 +1941,7 @@ test('a chosen avatar is uploaded after the profile, labelled with its type', as
   );
 });
 
-test('removing the avatar sends DELETE after the profile', async () => {
+test('removing the avatar alone sends only the DELETE', async () => {
   await openWorkers();
 
   fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
@@ -1934,10 +1956,7 @@ test('removing the avatar sends DELETE after the profile', async () => {
   ).toBeNull();
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  expect(writeSummary()).toEqual([
-    'PATCH /api/workers/1',
-    'DELETE /api/workers/1/avatar',
-  ]);
+  expect(writeSummary()).toEqual(['DELETE /api/workers/1/avatar']);
   const row = (
     await screen.findByRole('button', { name: 'Edit Alex Tran' })
   ).closest('tr') as HTMLElement;
@@ -2021,8 +2040,9 @@ test('a refused image file shows its reason inline and stages nothing', async ()
   ).toBeNull();
 
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  // Nothing changed: the editor closes without a write.
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  expect(writeSummary()).toEqual(['PATCH /api/workers/2']);
+  expect(writeSummary()).toEqual([]);
 });
 
 test('a new Worker whose avatar is refused becomes an edit of the saved Worker', async () => {
@@ -2054,21 +2074,16 @@ test('a new Worker whose avatar is refused becomes an edit of the saved Worker',
     'PUT /api/workers/100/avatar',
   ]);
 
-  // Saving again edits the saved Worker: PATCH, then PUT.
+  // Saving again edits the saved Worker: its profile is unchanged, so
+  // only the avatar is sent again.
   delete workerFailures['PUT avatar'];
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(writeSummary()).toEqual([
     'POST /api/workers',
     'PUT /api/workers/100/avatar',
-    'PATCH /api/workers/100',
     'PUT /api/workers/100/avatar',
   ]);
-  expect(writes[2].body).toEqual({
-    name: 'Linh Pham',
-    badge_barcode: 'L-1',
-    is_active: true,
-  });
   // Closing reloads the table.
   expect(
     await screen.findByRole('button', { name: 'Edit Linh Pham' }),

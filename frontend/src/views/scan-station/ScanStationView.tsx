@@ -184,9 +184,10 @@ import type { Notice } from './scan-station-presentation';
  * in development builds only.
  */
 
-// Development-only preview of the mock Scan Station (Phase 6+
-// workflows). The conditional is compiled away in production builds,
-// so the mock view and its datasets never enter the module graph.
+// Development-only preview of the mock Scan Station (the approved
+// design; every workflow is real above). The conditional is compiled
+// away in production builds, so the mock view and its datasets never
+// enter the module graph.
 const MockPreview = import.meta.env.DEV
   ? lazy(() =>
       import('./ScanStationMockView').then((m) => ({

@@ -48,10 +48,17 @@ def required_text(value: object, label: str) -> str:
     return value.strip()
 
 
-def optional_text(value: str | None) -> str | None:
-    """Normalize an optional text field: strip; empty becomes NULL."""
+def optional_text(value: str | None, label: str = "The text") -> str | None:
+    """Normalize an optional text field: strip; empty becomes NULL.
+
+    Like ``required_text``, a value containing NUL (U+0000) is refused
+    as input: PostgreSQL text cannot hold it, and the driver would
+    otherwise fail at flush with an unhandled DataError.
+    """
     if value is None:
         return None
+    if "\x00" in value:
+        raise InvalidInputError(f"{label} must not contain a NUL character.")
     stripped = value.strip()
     return stripped or None
 

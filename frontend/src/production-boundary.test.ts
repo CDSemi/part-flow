@@ -25,9 +25,9 @@ import { REAL_VIEWS } from './app/real-views';
 //  3. this suite walks the production module graph transitively from
 //     the real entry point and verifies at the source level that
 //     nothing it reaches imports from src/mocks/ — the deliberate
-//     exceptions are the development-only previews (the Worker
-//     sessions policy preview and the Completed Work Orders visual
-//     preview), each reachable only through an
+//     exceptions are the development-only conveniences (the
+//     `?preview=mock` Scan Station mock view and the Scan Station demo
+//     badges), each reachable only through an
 //     `import.meta.env.DEV`-guarded lazy import that a production
 //     build compiles away. The walk replaces an earlier fixed list of
 //     view folders, which stopped covering the shared helper modules
@@ -516,11 +516,12 @@ test('the Completed Work Orders page is a real view with no mock history', () =>
 });
 
 test('the dev-only mock Scan Station preview stays behind the DEV boundary', () => {
-  // The Phase 6+ workflows (Machine assignment, DONE / QUEUE, Repair,
-  // Scrap, Undo, Worker sessions) exist only as the mock preview: the
-  // real Scan Station view may reach it only through the guarded lazy
-  // import — never through a static import that would pull the mock
-  // Area state and datasets into the production module graph.
+  // Every approved Scan Station workflow is real; the mock view is only
+  // a retained `?preview=mock` development preview of the approved
+  // design. The real Scan Station view may reach it only through the
+  // guarded lazy import — never through a static import that would
+  // pull the mock Area state and datasets into the production module
+  // graph.
   const scanStationView = readFileSync(
     join(srcDir, 'views', 'scan-station', 'ScanStationView.tsx'),
     'utf8',

@@ -40,8 +40,10 @@ import { ADMIN_SECTIONS } from './sections';
 //
 // A save is up to two audited writes — the profile, then an avatar
 // change on its own binary endpoint — so the editor handles a
-// partially completed save explicitly. The list reloads only when the
-// editor closes, so a failing refresh never unmounts an open editor.
+// partially completed save explicitly. An edit sends only the fields
+// the operator changed, so an editor opened before another
+// administrator's change never reverts it. The list reloads only when
+// the editor closes, so a failing refresh never unmounts an open editor.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'workers')?.subtitle ?? '';
@@ -279,31 +281,40 @@ function WorkerDialog({
       setAttempted(true);
       return;
     }
+    // Only the fields whose value differs from the saved record.
+    const delta = saved
+      ? {
+          ...(trimmedName !== saved.name ? { name: trimmedName } : {}),
+          ...(canonical !== saved.badgeBarcode
+            ? { badgeBarcode: canonical }
+            : {}),
+          ...(isActive !== saved.isActive ? { isActive } : {}),
+        }
+      : null;
+    const sendProfile = delta === null || Object.keys(delta).length > 0;
+    if (!sendProfile && staged === null) {
+      close();
+      return;
+    }
     setBusy(true);
     setServerError(null);
     let step: 'profile' | 'avatar' = 'profile';
     let profileChanged = false;
     try {
-      // Step 1 — the profile: create, or the full profile on edit (the
-      // server answers an unchanged profile as a no-op).
+      // Step 1 — the profile: create, or only the changed fields.
       wroteAny.current = true;
       let record: Worker;
-      if (saved) {
-        record = await updateWorker(saved.id, {
-          name: trimmedName,
-          badgeBarcode: canonical,
-          isActive,
-        });
-        profileChanged =
-          record.name !== saved.name ||
-          record.badgeBarcode !== saved.badgeBarcode ||
-          record.isActive !== saved.isActive;
-      } else {
+      if (!saved) {
         record = await createWorker({
           name: trimmedName,
           badgeBarcode: canonical,
         });
         profileChanged = true;
+      } else if (delta && sendProfile) {
+        record = await updateWorker(saved.id, delta);
+        profileChanged = true;
+      } else {
+        record = saved;
       }
       setSaved(record);
 

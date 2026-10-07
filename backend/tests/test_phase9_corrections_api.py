@@ -478,6 +478,38 @@ def test_repair_requires_the_reason_and_the_explicit_intent(
     assert _movement_count(db_engine, released.part_number) == before
 
 
+@pytest.mark.parametrize(
+    ("field", "label"),
+    [
+        ("repair_reason", "The repair reason"),
+        ("route_deviation_reason", "The route deviation reason"),
+    ],
+)
+def test_a_nul_in_an_optional_reason_is_invalid_input_with_zero_writes(
+    client: TestClient, db_engine: Engine, field: str, label: str
+) -> None:
+    """PostgreSQL text cannot hold NUL (U+0000): the optional transfer
+    reasons are refused as invalid input before any lock, never a 500
+    from the driver at flush (roadmap S6-F4)."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    released = _release(client, material, quantity=4)
+    assert (
+        _transfer(client, material, lathe, released.flow_id, released.part_number, 4).status_code
+        == 201
+    )
+    before = _movement_count(db_engine, released.part_number)
+    extra: dict[str, Any] = {field: f"re{chr(0)}work"}
+    if field == "repair_reason":
+        extra["repair"] = True
+    response = _transfer(
+        client, lathe, material, released.flow_id, released.part_number, 4, **extra
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == f"{label} must not contain a NUL character."
+    assert _movement_count(db_engine, released.part_number) == before
+
+
 def test_partial_repair_splits_and_the_remainder_keeps_its_state(
     client: TestClient, db_engine: Engine
 ) -> None:

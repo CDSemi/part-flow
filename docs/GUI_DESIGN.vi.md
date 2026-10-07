@@ -2,6 +2,9 @@
 
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
 > Baseline upstream: commit `f96bf09` (Production Board — merged quantity theo mọi nhánh lineage).
+> **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
+> đóng Phase 13 (sau commit `dbd42ee`), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
 >

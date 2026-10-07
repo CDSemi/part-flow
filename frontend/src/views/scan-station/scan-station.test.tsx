@@ -13,9 +13,9 @@ import { App } from '../../App';
 import { setBadgeConfirmRequirement } from '../../mocks/scan-station';
 
 // Development-only MOCK Scan Station preview (ScanStationMockView —
-// the approved Phase 6+ one-shot workflows, reachable behind the real
-// Phase 5 view's DEV boundary). The real transfer workflow against the
-// /api surface is covered by scan-station-transfer.test.tsx.
+// the approved design, reachable behind the real view's DEV boundary).
+// Every workflow is real: the real view against the /api surface is
+// covered by the other scan-station-*.test.tsx suites.
 //
 // Scan Station regressions for the PN-centric one-shot redesign and
 // the multi-step confirmation wizards: station selection routing, no
@@ -29,9 +29,9 @@ import { setBadgeConfirmRequirement } from '../../mocks/scan-station';
 let failing = false;
 
 beforeEach(() => {
-  // The Scan Station route is the REAL Phase 5 view; the approved
-  // Phase 6+ workflows under test here live in the development-only
-  // mock preview, which the route serves once the preview flag is set
+  // The Scan Station route is the REAL view; this suite exercises the
+  // development-only mock preview, which the route serves once the
+  // preview flag is set
   // (`?preview=mock`, remembered for the browser session —
   // app/view-state.ts). Set it directly for every test in this file.
   window.sessionStorage.setItem('partflow.dev.mock-preview', 'mock');

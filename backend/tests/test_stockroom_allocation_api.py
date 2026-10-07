@@ -1094,6 +1094,25 @@ def test_confirmation_refusals_write_nothing(
     _assert_projections_match_replay(db_engine)
 
 
+def test_a_nul_in_the_confirmation_reason_is_invalid_input_with_zero_writes(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """PostgreSQL text cannot hold NUL (U+0000): the optional allocation
+    reason is refused as invalid input before any lock, never a 500 from
+    the driver at flush (roadmap S6-F4)."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 5}])
+    _supply(client, material, stockroom, pn, 5)
+    before = _counts(db_engine)
+    response = _allocate(client, pn, [(work_order.demand_id, 5)], reason=f"over{chr(0)}ride")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "The allocation reason must not contain a NUL character."
+    assert _counts(db_engine) == before
+    assert _demand_row(db_engine, work_order.demand_id).allocated_quantity == 0
+
+
 @pytest.mark.parametrize("case", ["missing", "too_high", "too_low", "zero", "negative", "bool"])
 def test_confirmation_requires_the_explicit_allocation_quantity(
     client: TestClient, db_engine: Engine, case: str

@@ -821,7 +821,7 @@ def confirm_allocation(
             " quantity being allocated — adjust the lines until they add up."
             " Nothing was allocated."
         )
-    reason_text = optional_text(reason)
+    reason_text = optional_text(reason, "The allocation reason")
     event_id = device_event_id_text(device_event_id)
     source = AllocationSource.STOCKROOM if station_id is not None else AllocationSource.MANAGEMENT
     fingerprint = _fingerprint(

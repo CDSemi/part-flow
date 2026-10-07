@@ -753,8 +753,8 @@ def retire_machine(
         machine_id=machine.id,
         event_type=MachineLifecycleEventType.RETIRED,
         occurred_at=func.now(),
-        actor=optional_text(actor),
-        reason=optional_text(reason),
+        actor=optional_text(actor, "The actor"),
+        reason=optional_text(reason, "The reason"),
         before_state=MachineLifecycleState.ACTIVE,
         after_state=MachineLifecycleState.RETIRED,
     )

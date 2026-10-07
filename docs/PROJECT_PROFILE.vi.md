@@ -2,6 +2,9 @@
 
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
+> **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
+> đóng Phase 13 (sau commit `dbd42ee`), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
 >
@@ -376,7 +379,8 @@ Thuộc tính minh họa: `id`, `work_order_id`, `part_number`, `request_type`,
 ## 8.4 Area
 
 Thuộc tính: `id`, `department_id`, `barcode_value`, display fields, `is_terminal`,
-`is_active`, `worker_identification_mode`, timestamps.
+`is_active`, `worker_identification_mode`, `fixed_worker_id` (Fixed Worker, có
+đúng khi mode fixed Worker, §19), timestamps.
 
 Identity/barcode stable; display name đổi được. Area có 0..N Machine và 1..N
 Operation. Stockroom thường terminal. Area không Machine xử lý trực tiếp; có ít
@@ -1026,8 +1030,10 @@ open như §8.2 mà vẫn giữ history.
 # 19. Worker Session
 
 Mode theo Area: none, fixed Worker, hoặc barcode session. Badge scan activate/
-switch Worker ngay, không thay last-scanned-PN; session kết thúc khi switch,
-sign-out hoặc expire.
+switch Worker ngay, không thay last-scanned-PN; session kết thúc khi switch hoặc
+expire — không có control sign-out (owner decision Phase 13 OD-4); thay đổi cấu
+hình làm session mất hiệu lực (Area rời mode barcode session, Scan Station bị
+rebind/deactivate, Worker bị deactivate) cũng kết thúc session.
 
 Scanned session dùng **sliding inactivity timeout**, không shift boundary:
 
@@ -1062,8 +1068,8 @@ data trong Management, do authorized specialist quản lý; không bắt buộc 
 
 Role Administrator ban đầu cấp: quản lý Department/Area/Operation, Worker, User/role/permission, Station, barcode,
 scan behavior, Worker session policy, correction permission, settings; có quyền
-quản lý Machine/Route/PartNumber qua Management; edit Demand/Allocation, historical
-correction và archival/purge maintenance.
+quản lý Machine/Route/PartNumber qua Management; edit Demand/Allocation và historical
+correction.
 
 ## Manager
 

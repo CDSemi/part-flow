@@ -742,7 +742,9 @@ def receive_quantity(
             " its route trace is derived from Movement history."
         )
     demand_due_date = _validated_due_date(due_date)
-    receipt_reason = optional_text(reason if isinstance(reason, str) or reason is None else None)
+    receipt_reason = optional_text(
+        reason if isinstance(reason, str) or reason is None else None, "The reason"
+    )
     if reason is not None and not isinstance(reason, str):
         raise InvalidInputError("The reason must be text.")
     # Shape only — the clock judges a FRESH command below, AFTER the

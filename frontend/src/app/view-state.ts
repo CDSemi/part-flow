@@ -25,13 +25,12 @@ export function getViewStatePreview(): ViewStatePreview {
 }
 
 /**
- * Development-only mock preview of a real view's LATER-phase workflows.
+ * Development-only mock preview of the Scan Station's approved design.
  *
- * The Scan Station is a real view since Phase 5 (transfer to an Area
- * queue), while its approved Phase 6+ one-shot workflows (Machine
- * assignment, DONE / QUEUE, Repair, Scrap, Undo, Worker sessions) still
- * exist only as the mock preview. `?preview=mock` on a Scan Station
- * route opts a development build into that preview; the choice is
+ * Every approved Scan Station workflow is implemented by the real view;
+ * the mock view is retained only as a development convenience (its
+ * retirement is roadmap follow-up S5-F1). `?preview=mock` on a Scan
+ * Station route opts a development build into that preview; the choice is
  * remembered for the browser session so the preview's own navigation
  * (station selection, the Ctrl+Shift+K mode switch) stays inside it.
  * Production builds compile the check away and never expose it.

@@ -666,6 +666,7 @@ Typical attributes (illustrative only):
 - `is_terminal`
 - `is_active`
 - `worker_identification_mode`
+- `fixed_worker_id` (the Fixed Worker, present exactly in fixed-Worker mode, §19)
 - `created_at`
 - `updated_at`
 
@@ -1659,7 +1660,7 @@ When Worker scanning is enabled:
 - subsequent scans use the active Worker,
 - a Worker scan never replaces the last-scanned-PN context,
 - scanning a different active Worker's badge switches the active Worker immediately — no sign-out step,
-- the session ends when another Worker signs in, the Worker signs out, or the session expires.
+- the session ends when another Worker signs in or the session expires — there is no sign-out control (Phase 13 owner decision OD-4); a configuration change that invalidates the session (the Area leaving Worker barcode session mode, the Scan Station rebound or deactivated, the Worker deactivated) also ends it.
 
 **Expiration (v18 — the rules are decided):** a scanned Worker Session expires through a **sliding inactivity timeout**, never at a shift boundary — there is no shift-end concept and no shift-schedule management:
 
@@ -2027,7 +2028,7 @@ Administration stays focused on system administration:
 - permissions,
 - barcode configuration (the `PF:` prefix scheme and the Machine Asset Tag format — prefix + zero-padded numeric sequence, §8.6, §10),
 - scan behavior,
-- Worker session policies (the scanned-session sliding inactivity timeout — one default value with per-Area overrides, §19),
+- Worker session policies (the scanned-session sliding inactivity timeout — one default value with per-Area overrides — and the badge-confirmation options of `DONE`, `QUEUE` return and Undo, §19),
 - Department display settings (per Department — including the Production Board rotation timing, §21),
 - history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),
 - application settings.
