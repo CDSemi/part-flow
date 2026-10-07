@@ -63,6 +63,41 @@
   min-width: 0;
 }
 
+/* Sign-in panel (Phase 14): what Administration shows signed out, in
+   place of the sidebar and sections. */
+.ad-gate {
+  flex: 1 0 auto;
+  background: var(--bg);
+  color: var(--text);
+  padding: 24px 28px;
+}
+
+.ad-gatepanel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  max-width: 560px;
+}
+
+.ad-gatepanel h1 {
+  font-size: 22px;
+  margin-bottom: 8px;
+}
+
+.ad-gatepanel p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+
+.ad-gatepanel .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .ad-main h1 {
   font-size: 22px;
   margin-bottom: 4px;

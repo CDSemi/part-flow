@@ -61,6 +61,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_production_board_api"
@@ -112,7 +113,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "PB-", "digits": 4},
     )
@@ -129,13 +130,15 @@ def _unique(prefix: str) -> str:
 
 
 def _create_department(client: TestClient, *, name: str | None = None) -> int:
-    response = client.post("/api/departments", json={"name": name or _unique("DEPT")})
+    response = admin_of(client).post("/api/departments", json={"name": name or _unique("DEPT")})
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
 
 def _deactivate_department(client: TestClient, department_id: int) -> None:
-    response = client.patch(f"/api/departments/{department_id}", json={"is_active": False})
+    response = admin_of(client).patch(
+        f"/api/departments/{department_id}", json={"is_active": False}
+    )
     assert response.status_code == 200, response.text
 
 
@@ -153,7 +156,7 @@ class _Cell:
         external_operation: str | None = None,
         color: str | None = None,
     ) -> None:
-        area = client.post(
+        area = admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department_id,
@@ -168,10 +171,10 @@ class _Cell:
         operation: dict[str, Any] = {"area_id": self.area_id, "code": _unique("OP")}
         if external_operation is not None:
             operation.update(name=external_operation, is_external=True)
-        created = client.post("/api/operations", json=operation)
+        created = admin_of(client).post("/api/operations", json=operation)
         assert created.status_code == 201, created.text
         self.operation_id = int(created.json()["id"])
-        station = client.post(
+        station = admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
         )
         assert station.status_code == 201, station.text
@@ -314,7 +317,7 @@ def _route_template(engine: Engine, steps: list[tuple[_Cell, datetime.timedelta 
 
 def _set_operation_default(client: TestClient, cell: _Cell, duration: str) -> None:
     """The live Operation default (ISO 8601 duration) through Administration."""
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/operations/{cell.operation_id}", json={"default_expected_duration": duration}
     )
     assert response.status_code == 200, response.text

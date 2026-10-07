@@ -81,8 +81,9 @@ SAME transaction (Phase 13, PROJECT_PROFILE §28 "administrative
 configuration changes"): ``CREATED`` or ``UPDATED``, entity
 ``Department``/``Area``/``Operation`` (``entity_id`` the internal id),
 ``ScanStation`` (the Station ID) or ``MachineAssetTagConfig`` (``"1"``,
-the singleton), with the explicit-field snapshots below and
-``actor_reference`` NULL until Phase 14. An update locks its row first,
+the singleton), with the explicit-field snapshots below;
+``actor_user_id`` is the signed-in User (Phase 14 slice 2) and
+``actor_reference`` is legacy and stays NULL. An update locks its row first,
 in the mode its own UPDATE takes, so every ``before_data`` is the
 committed predecessor. Rejected writes, lost races and no-ops append
 nothing, and ``next_sequence`` is never audited. The Scan Station theme
@@ -282,7 +283,7 @@ def is_board_min_page_seconds(value: object) -> TypeGuard[int]:
     )
 
 
-def create_department(session: Session, *, name: object) -> Department:
+def create_department(session: Session, *, name: object, actor_user_id: int | None) -> Department:
     clean_name = required_text(name, "Department name")
     _reject_duplicate_department_name(session, clean_name)
     department = Department(name=clean_name)
@@ -297,6 +298,7 @@ def create_department(session: Session, *, name: object) -> Department:
         entity_id=str(department.id),
         before_data=None,
         after_data=_department_snapshot(department),
+        actor_user_id=actor_user_id,
     )
     commit(session, _DEPARTMENT_CONFLICTS)
     return department
@@ -310,6 +312,7 @@ def update_department(
     is_active: object = UNSET,
     board_seconds_per_row: object = UNSET,
     board_min_page_seconds: object = UNSET,
+    actor_user_id: int | None,
 ) -> Department:
     department = session.get(
         Department, department_id, with_for_update=_EDIT_LOCK, populate_existing=True
@@ -394,6 +397,7 @@ def update_department(
                 entity_id=str(department.id),
                 before_data=before,
                 after_data=after,
+                actor_user_id=actor_user_id,
             )
         commit(session, _DEPARTMENT_CONFLICTS)
     return department
@@ -515,6 +519,7 @@ def create_area(
     worker_identification_mode: object = UNSET,
     fixed_worker_id: int | None | UnsetType = UNSET,
     worker_session_timeout_minutes: object = UNSET,
+    actor_user_id: int | None,
 ) -> Area:
     clean_name = required_text(name, "Area name")
     session_timeout = (
@@ -568,6 +573,7 @@ def create_area(
         entity_id=str(area.id),
         before_data=None,
         after_data=_area_snapshot(area),
+        actor_user_id=actor_user_id,
     )
     commit(session, _AREA_CONFLICTS)
     return area
@@ -586,6 +592,7 @@ def update_area(
     worker_identification_mode: object = UNSET,
     fixed_worker_id: int | None | UnsetType = UNSET,
     worker_session_timeout_minutes: object = UNSET,
+    actor_user_id: int | None,
 ) -> Area:
     # Every edit loads the Area row under its lock FIRST — before the
     # audit snapshot and any field mutation — and re-reads the latest
@@ -740,6 +747,7 @@ def update_area(
                 entity_id=str(area.id),
                 before_data=before,
                 after_data=after,
+                actor_user_id=actor_user_id,
             )
         commit(session, _AREA_CONFLICTS)
     return area
@@ -786,6 +794,7 @@ def create_operation(
     description: str | None = None,
     default_expected_duration: datetime.timedelta | None = None,
     is_external: bool = False,
+    actor_user_id: int | None,
 ) -> Operation:
     clean_code = required_text(code, "Operation code")
     area = require_active_area(session, area_id, "receive new Operations")
@@ -809,6 +818,7 @@ def create_operation(
         entity_id=str(operation.id),
         before_data=None,
         after_data=_operation_snapshot(operation),
+        actor_user_id=actor_user_id,
     )
     commit(session, _OPERATION_CONFLICTS)
     return operation
@@ -824,6 +834,7 @@ def update_operation(
     default_expected_duration: datetime.timedelta | None | UnsetType = UNSET,
     is_external: object = UNSET,
     is_active: object = UNSET,
+    actor_user_id: int | None,
 ) -> Operation:
     # The Area binding is deliberately not updatable: Movement history
     # will reference Operations in their Area context, and moving an
@@ -881,6 +892,7 @@ def update_operation(
                 entity_id=str(operation.id),
                 before_data=before,
                 after_data=after,
+                actor_user_id=actor_user_id,
             )
         commit(session, _OPERATION_CONFLICTS)
     return operation
@@ -925,6 +937,7 @@ def create_scan_station(
     station_id: object,
     area_id: int,
     is_active: bool = True,
+    actor_user_id: int | None,
 ) -> ScanStation:
     clean_station_id = _canonical_station_id(station_id)
     if session.get(ScanStation, clean_station_id) is not None:
@@ -941,6 +954,7 @@ def create_scan_station(
         entity_id=station.station_id,
         before_data=None,
         after_data=_scan_station_snapshot(station),
+        actor_user_id=actor_user_id,
     )
     commit(session, _SCAN_STATION_CONFLICTS)
     return station
@@ -952,6 +966,7 @@ def update_scan_station(
     *,
     area_id: object = UNSET,
     is_active: object = UNSET,
+    actor_user_id: int | None,
 ) -> ScanStation:
     # The Station ID itself is the stable identity (PROJECT_PROFILE
     # §15) and is never renamed; rebinding to another active Area is
@@ -999,6 +1014,7 @@ def update_scan_station(
                 entity_id=station.station_id,
                 before_data=before,
                 after_data=after,
+                actor_user_id=actor_user_id,
             )
         commit(session, _SCAN_STATION_CONFLICTS)
     return station
@@ -1056,7 +1072,7 @@ def get_machine_asset_tag_format(session: Session) -> MachineAssetTagConfig:
 
 
 def upsert_machine_asset_tag_format(
-    session: Session, *, prefix: str, digits: int
+    session: Session, *, prefix: str, digits: int, actor_user_id: int | None
 ) -> MachineAssetTagConfig:
     if re.search(r"[\s:]", prefix):
         raise InvalidInputError("The Asset Tag prefix must not contain whitespace or ':'.")
@@ -1091,6 +1107,7 @@ def upsert_machine_asset_tag_format(
             entity_id=str(_MACHINE_ASSET_TAG_CONFIG_ID),
             before_data=None,
             after_data=_asset_tag_format_snapshot(config),
+            actor_user_id=actor_user_id,
         )
         commit(session, _ASSET_TAG_FORMAT_CONFLICTS)
     elif prefix != config.prefix or digits != config.digits:
@@ -1108,6 +1125,7 @@ def upsert_machine_asset_tag_format(
             entity_id=str(_MACHINE_ASSET_TAG_CONFIG_ID),
             before_data=before,
             after_data=_asset_tag_format_snapshot(config),
+            actor_user_id=actor_user_id,
         )
         commit(session, _ASSET_TAG_FORMAT_CONFLICTS)
     return config

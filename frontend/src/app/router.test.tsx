@@ -362,8 +362,13 @@ test('top-level navigation switches views and updates the URL', async () => {
   fireEvent.click(screen.getByRole('link', { name: 'Administration' }));
 
   expect(window.location.pathname).toBe('/administration');
+  // Signed out: Administration shows its sign-in panel and opens the
+  // Sign-in dialog over it.
   expect(
-    await screen.findByRole('heading', { name: 'Areas' }),
+    await screen.findByRole('heading', { name: 'Administration', level: 1 }),
+  ).toBeInTheDocument();
+  expect(
+    await screen.findByRole('dialog', { name: 'Sign in' }),
   ).toBeInTheDocument();
 });
 

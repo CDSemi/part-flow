@@ -7,13 +7,19 @@ import {
 } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   MACHINE_BARCODE_NAMESPACE,
   formatAssetTag,
   machineBarcode,
 } from '../asset-tags';
-import { SectionHeader, ServerErrorNote } from './section-widgets';
+import {
+  ReadOnlyValues,
+  SectionHeader,
+  ServerErrorNote,
+  ViewOnlyNote,
+} from './section-widgets';
 
 /**
  * Administration → Barcode configuration (Phase 3.5): the PF:
@@ -23,18 +29,25 @@ import { SectionHeader, ServerErrorNote } from './section-widgets';
  * (`PF:MACHINE:<asset-tag>`), so no separate Machine barcode value is
  * ever configured or entered. The Next Asset Tag preview reads the
  * server's persisted never-reuse counter; allocation itself is owned
- * by Machine creation. A settings form, not an entry table.
+ * by Machine creation. A settings form, not an entry table. Without the
+ * Manage barcode configuration permission the format reads as text.
  */
 export function BarcodeConfigurationSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_BARCODE_CONFIGURATION');
   const formatData = useApiData(getMachineAssetTagFormat);
 
   const header = (
-    <SectionHeader
-      title="Barcode configuration"
-      subtitle="PF: prefix scheme, Machine Asset Tag format, label printing"
-    />
+    <>
+      <SectionHeader
+        title="Barcode configuration"
+        subtitle="PF: prefix scheme, Machine Asset Tag format, label printing"
+      />
+      {canWrite ? null : (
+        <ViewOnlyNote permission="MANAGE_BARCODE_CONFIGURATION" />
+      )}
+    </>
   );
 
   if (formatData.state.status === 'loading') {
@@ -63,6 +76,7 @@ export function BarcodeConfigurationSection() {
       {header}
       <FormatPanel
         saved={formatData.state.data}
+        canWrite={canWrite}
         writeBlocked={writeBlocked}
         onSaved={formatData.reload}
       />
@@ -72,11 +86,14 @@ export function BarcodeConfigurationSection() {
 
 function FormatPanel({
   saved,
+  canWrite,
   writeBlocked,
   onSaved,
 }: {
   /** The persisted configuration, or null while none exists yet. */
   saved: { prefix: string; digits: number; nextSequence: number } | null;
+  /** The user may change the format; otherwise it reads as text. */
+  canWrite: boolean;
   writeBlocked: boolean;
   onSaved: () => void;
 }) {
@@ -147,40 +164,53 @@ function FormatPanel({
         change after creation. The Machine barcode is the Asset Tag in the{' '}
         <code>{MACHINE_BARCODE_NAMESPACE}</code> namespace.
       </p>
-      <div className="ad-configgrid">
-        <label>
-          Prefix
-          <input
-            className="field mono"
-            value={prefix}
-            onChange={(event) => {
-              setPrefix(event.target.value);
-              setSavedNote(false);
-            }}
-            placeholder="e.g. CD-"
-          />
-        </label>
-        <label>
-          Number length (digits)
-          <input
-            className="field mono"
-            type="number"
-            min={1}
-            max={8}
-            value={digitsText}
-            onChange={(event) => {
-              setDigitsText(event.target.value);
-              setSavedNote(false);
-            }}
-          />
-        </label>
-      </div>
-      {prefixError ? (
+      {canWrite ? null : (
+        <ReadOnlyValues
+          rows={[
+            { label: 'Prefix', value: saved?.prefix || '—' },
+            {
+              label: 'Number length (digits)',
+              value: saved === null ? '—' : saved.digits,
+            },
+          ]}
+        />
+      )}
+      {canWrite ? (
+        <div className="ad-configgrid">
+          <label>
+            Prefix
+            <input
+              className="field mono"
+              value={prefix}
+              onChange={(event) => {
+                setPrefix(event.target.value);
+                setSavedNote(false);
+              }}
+              placeholder="e.g. CD-"
+            />
+          </label>
+          <label>
+            Number length (digits)
+            <input
+              className="field mono"
+              type="number"
+              min={1}
+              max={8}
+              value={digitsText}
+              onChange={(event) => {
+                setDigitsText(event.target.value);
+                setSavedNote(false);
+              }}
+            />
+          </label>
+        </div>
+      ) : null}
+      {canWrite && prefixError ? (
         <div className="err" role="alert">
           {prefixError}
         </div>
       ) : null}
-      {digitsError ? (
+      {canWrite && digitsError ? (
         <div className="err" role="alert">
           {digitsError}
         </div>
@@ -216,21 +246,23 @@ function FormatPanel({
           ✓ Format saved.
         </div>
       ) : null}
-      <div className="row">
-        <button
-          className="bigbtn primary"
-          disabled={
-            writeBlocked ||
-            busy ||
-            !dirty ||
-            prefixError !== null ||
-            !digitsValid
-          }
-          onClick={() => void submit()}
-        >
-          Save format
-        </button>
-      </div>
+      {canWrite ? (
+        <div className="row">
+          <button
+            className="bigbtn primary"
+            disabled={
+              writeBlocked ||
+              busy ||
+              !dirty ||
+              prefixError !== null ||
+              !digitsValid
+            }
+            onClick={() => void submit()}
+          >
+            Save format
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -43,6 +43,7 @@ from sqlalchemy.engine import URL, make_url
 from alembic import command
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APP_DIR = _BACKEND_DIR / "app"
@@ -127,10 +128,10 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 def approved_policy(client: TestClient) -> Iterator[None]:
     """Every test leaves no retention period and every other section at its defaults."""
     yield
-    _ok(client.put(_POLICY_PATH, json={_KEY: None}))
-    _ok(client.put(_SESSIONS_POLICY_PATH, json=_SESSION_DEFAULTS))
-    _ok(client.put(_CORRECTION_POLICY_PATH, json=_CORRECTION_DEFAULTS))
-    _ok(client.put(_DUE_SOON_POLICY_PATH, json=_DUE_SOON_DEFAULTS))
+    _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: None}))
+    _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json=_SESSION_DEFAULTS))
+    _ok(admin_of(client).put(_CORRECTION_POLICY_PATH, json=_CORRECTION_DEFAULTS))
+    _ok(admin_of(client).put(_DUE_SOON_POLICY_PATH, json=_DUE_SOON_DEFAULTS))
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +214,18 @@ def _finish(thread: threading.Thread, results: list[Any]) -> Any:
 
 def _release(client: TestClient) -> None:
     """Management releases a fresh PN into a fresh Area (no station)."""
-    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    department = _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
     area = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
         ),
         201,
     )
     operation = _ok(
-        client.post("/api/operations", json={"area_id": area["id"], "code": _unique("OP")}), 201
+        admin_of(client).post(
+            "/api/operations", json={"area_id": area["id"], "code": _unique("OP")}
+        ),
+        201,
     )
     pn = _unique("PN")
     work_order = _ok(
@@ -253,7 +257,7 @@ def _release(client: TestClient) -> None:
 
 
 def test_the_retention_period_is_initially_absent(client: TestClient, db_engine: Engine) -> None:
-    policy = _ok(client.get(_POLICY_PATH))
+    policy = _ok(admin_of(client).get(_POLICY_PATH))
     assert set(policy) == {_KEY, "updated_at"}
     assert policy[_KEY] is None
     assert policy["updated_at"]
@@ -262,8 +266,8 @@ def test_the_retention_period_is_initially_absent(client: TestClient, db_engine:
 
 def test_an_effective_put_is_stored_and_audited_once(client: TestClient, db_engine: Engine) -> None:
     before = len(_policy_audits(db_engine, _SECTION))
-    assert _ok(client.put(_POLICY_PATH, json={_KEY: 120}))[_KEY] == 120
-    assert _ok(client.get(_POLICY_PATH))[_KEY] == 120
+    assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 120}))[_KEY] == 120
+    assert _ok(admin_of(client).get(_POLICY_PATH))[_KEY] == 120
 
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
@@ -271,11 +275,11 @@ def test_an_effective_put_is_stored_and_audited_once(client: TestClient, db_engi
 
 
 def test_an_identical_put_writes_nothing(client: TestClient, db_engine: Engine) -> None:
-    stored = _ok(client.put(_POLICY_PATH, json={_KEY: 120}))
+    stored = _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 120}))
     row = _stored_row(db_engine)
     count = _audit_count(db_engine)
 
-    again = _ok(client.put(_POLICY_PATH, json={_KEY: 120}))
+    again = _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 120}))
     assert again == stored
     assert _audit_count(db_engine) == count
     # No UPDATE at all: the row version and its timestamp are unchanged.
@@ -283,16 +287,16 @@ def test_an_identical_put_writes_nothing(client: TestClient, db_engine: Engine) 
 
 
 def test_null_clears_the_period_as_an_audited_change(client: TestClient, db_engine: Engine) -> None:
-    _ok(client.put(_POLICY_PATH, json={_KEY: 120}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 120}))
     before = len(_policy_audits(db_engine, _SECTION))
 
-    assert _ok(client.put(_POLICY_PATH, json={_KEY: None}))[_KEY] is None
+    assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: None}))[_KEY] is None
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
     assert tuple(rows[-1]) == ("UPDATED", _SECTION, {_KEY: 120}, {_KEY: None}, None)
 
     # Clearing again is a no-op.
-    assert _ok(client.put(_POLICY_PATH, json={_KEY: None}))[_KEY] is None
+    assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: None}))[_KEY] is None
     assert len(_policy_audits(db_engine, _SECTION)) == before + 1
 
 
@@ -301,7 +305,7 @@ def test_the_range_boundaries_are_admitted(
     client: TestClient, db_engine: Engine, months: int
 ) -> None:
     before = len(_policy_audits(db_engine, _SECTION))
-    assert _ok(client.put(_POLICY_PATH, json={_KEY: months}))[_KEY] == months
+    assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: months}))[_KEY] == months
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
     assert rows[-1].after_data == {_KEY: months}
@@ -311,11 +315,11 @@ def test_the_range_boundaries_are_admitted(
 def test_out_of_range_periods_are_refused_with_nothing_written(
     client: TestClient, db_engine: Engine, months: int
 ) -> None:
-    _ok(client.put(_POLICY_PATH, json={_KEY: 120}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 120}))
     row = _stored_row(db_engine)
     count = _audit_count(db_engine)
 
-    response = client.put(_POLICY_PATH, json={_KEY: months})
+    response = admin_of(client).put(_POLICY_PATH, json={_KEY: months})
     assert response.status_code == 422, response.text
     assert response.json() == {"detail": _E_T1}
     assert _stored_row(db_engine) == row
@@ -332,7 +336,7 @@ def test_malformed_bodies_are_refused_by_the_schema(
 ) -> None:
     row = _stored_row(db_engine)
     count = _audit_count(db_engine)
-    assert client.put(_POLICY_PATH, json=body).status_code == 422
+    assert admin_of(client).put(_POLICY_PATH, json=body).status_code == 422
     assert _stored_row(db_engine) == row
     assert _audit_count(db_engine) == count
 
@@ -344,18 +348,20 @@ def test_malformed_bodies_are_refused_by_the_schema(
 
 def test_policy_sections_never_touch_each_other(client: TestClient, db_engine: Engine) -> None:
     # (1) The retention write leaves every other section's values unchanged.
-    others = {path: _values(_ok(client.get(path))) for path in _OTHER_SECTION_PATHS}
-    initial_stamp = _stamp(_ok(client.get(_POLICY_PATH)))
-    stored = _ok(client.put(_POLICY_PATH, json={_KEY: 240}))
-    assert {path: _values(_ok(client.get(path))) for path in _OTHER_SECTION_PATHS} == others
+    others = {path: _values(_ok(admin_of(client).get(path))) for path in _OTHER_SECTION_PATHS}
+    initial_stamp = _stamp(_ok(admin_of(client).get(_POLICY_PATH)))
+    stored = _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 240}))
+    assert {
+        path: _values(_ok(admin_of(client).get(path))) for path in _OTHER_SECTION_PATHS
+    } == others
     # The shared row timestamp moved, seen from both sections.
     assert _stamp(stored) > initial_stamp
-    assert _stamp(_ok(client.get(_SESSIONS_POLICY_PATH))) == _stamp(stored)
+    assert _stamp(_ok(admin_of(client).get(_SESSIONS_POLICY_PATH))) == _stamp(stored)
 
     # (2) Another section's write leaves the retention period unchanged.
     retention_audits = len(_policy_audits(db_engine, _SECTION))
-    _ok(client.put(_SESSIONS_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
-    after = _ok(client.get(_POLICY_PATH))
+    _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
+    after = _ok(admin_of(client).get(_POLICY_PATH))
     assert _values(after) == {_KEY: 240}
     assert _stamp(after) > _stamp(stored)
     assert len(_policy_audits(db_engine, _SECTION)) == retention_audits
@@ -381,7 +387,7 @@ def test_the_retention_write_locks_before_it_reads(client: TestClient, db_engine
                 " SET worker_session_timeout_minutes = 30, retention_period_months = 24"
             )
         )
-        thread, results = _start(lambda: client.put(_POLICY_PATH, json={_KEY: 36}))
+        thread, results = _start(lambda: admin_of(client).put(_POLICY_PATH, json={_KEY: 36}))
         try:
             _assert_blocked(thread)
             holder.commit()
@@ -423,5 +429,5 @@ def test_saving_the_period_changes_no_production_table(
     _release(client)
     counts = _row_counts(db_engine)
     assert counts["part_movements"] > 0 and counts["quantity_flows"] > 0
-    _ok(client.put(_POLICY_PATH, json={_KEY: 12}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: 12}))
     assert _row_counts(db_engine) == counts

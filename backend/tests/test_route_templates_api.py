@@ -30,6 +30,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_route_templates_api"
@@ -86,16 +87,18 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
     payload = {"department_id": department.json()["id"], "name": _unique("AREA")}
-    response = client.post("/api/areas", json=payload)
+    response = admin_of(client).post("/api/areas", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _create_operation(client: TestClient, area_id: int) -> dict[str, Any]:
-    response = client.post("/api/operations", json={"area_id": area_id, "code": _unique("OP")})
+    response = admin_of(client).post(
+        "/api/operations", json={"area_id": area_id, "code": _unique("OP")}
+    )
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 

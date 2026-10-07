@@ -2,9 +2,11 @@
 // permissions): named, editable roles and the permissions each one
 // grants. Every application User holds exactly one role.
 //
-// Configuration only: sign-in and permission checks are not available
-// yet, so nothing in PartFlow reads a role to allow or refuse an
-// action. Workers who scan at the Scan Stations hold no role.
+// The server checks the Administration permissions of the signed-in
+// user's role (Phase 14 slice 2); the Management and Scan Station
+// permissions are recorded and checked by later slices. The client only
+// hides what the role does not allow — the server decides. Workers who
+// scan at the Scan Stations hold no role.
 //
 // Wire responses are the backend's snake_case schema; this module maps
 // them to the camelCase application type. Permission edits travel as

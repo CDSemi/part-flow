@@ -357,14 +357,16 @@ class Permission(StrEnum):
     """One key per capability PROJECT_PROFILE §20 lists (Phase 13 slice 12,
     owner decision OD-8).
 
-    Enforced route by route from Phase 14 slice 1. Keys are stable
+    Enforced route by route from Phase 14 slice 1 (every Administration
+    route since slice 2, ``app.api.route_access``). Keys are stable
     identifiers: a later capability is added (CHECK widening), never
     renamed. The correction permissions — UNDO_RECENT_SCANS,
     PERFORM_QUANTITY_CORRECTIONS, EDIT_WORK_ORDER_ALLOCATION,
     PERFORM_HISTORICAL_CORRECTIONS — are edited in Administration →
-    Correction permissions; the backend treats every key alike until
-    Phase 14. Permission keys are the only authority: no behavior is
-    keyed to a role name.
+    Correction permissions; changing who holds one of them or
+    MANAGE_CORRECTION_PERMISSIONS needs MANAGE_CORRECTION_PERMISSIONS
+    (``app.domain.permissions``). Permission keys are the only authority:
+    no behavior is keyed to a role name.
     """
 
     # Administration

@@ -12,7 +12,11 @@ import { useConnectivity } from './connectivity-context';
 import { useRouter } from './router-context';
 import { isChromeHidden } from './router-core';
 import { SessionContext, hasPermission } from './session-context';
-import type { SessionStatus, SessionValue } from './session-context';
+import type {
+  SessionEnd,
+  SessionStatus,
+  SessionValue,
+} from './session-context';
 
 // The user sign-in of this browser (application Users — never Workers,
 // whose Scan Station badge sign-in is separate). The server is the only
@@ -21,7 +25,10 @@ import type { SessionStatus, SessionValue } from './session-context';
 // request. A read that fails (no answer, a malformed body) leaves the
 // state `unknown`; it is read again each time the connection to the
 // server is regained while still unknown. Nothing is polled, queued or
-// retried on its own.
+// retried on its own. `checking` says a read is in flight; `endedBy`
+// says whether the last sign-in ended by signing out or because the
+// server refused it as ended (Administration keeps open work for the
+// latter).
 //
 // The sign-in, change-password and first-run setup dialogs render AFTER
 // the routed view, so they stack above any view dialog and the view
@@ -36,6 +43,7 @@ interface KnownState {
   status: SessionStatus;
   user: SessionUser | null;
   setupOpen: boolean;
+  endedBy: SessionEnd;
 }
 
 const SIGN_OUT_FAILED = 'Sign-out did not complete. Try again.';
@@ -47,7 +55,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     status: 'unknown',
     user: null,
     setupOpen: false,
+    endedBy: null,
   });
+  // The first read starts on mount, so the state is being checked from
+  // the first render on.
+  const [checking, setChecking] = useState(true);
   const [dialog, setDialog] = useState<DialogKind | null>(null);
   const [signInNotice, setSignInNotice] = useState<string | null>(null);
   const { showNotice, noticeElement } = useToastNotice();
@@ -63,19 +75,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const apply = useCallback((next: SessionState) => {
     generation.current += 1;
-    setState({
+    setState((current) => ({
       status: next.user ? 'signed-in' : 'signed-out',
       user: next.user,
       setupOpen: next.setupOpen,
-    });
+      endedBy: next.user ? null : current.endedBy,
+    }));
   }, []);
 
-  const applySignedOut = useCallback(() => {
+  const applySignedOut = useCallback((endedBy: SessionEnd) => {
     generation.current += 1;
     setState((current) => ({
       status: 'signed-out',
       user: null,
       setupOpen: current.setupOpen,
+      endedBy,
     }));
   }, []);
 
@@ -84,6 +98,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const reload = useCallback(async (): Promise<SessionState | null> => {
     const sent = ++generation.current;
     reading.current += 1;
+    setChecking(true);
     try {
       const next = await getSession();
       if (generation.current === sent) apply(next);
@@ -92,6 +107,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       return null;
     } finally {
       reading.current -= 1;
+      if (reading.current === 0) setChecking(false);
     }
   }, [apply]);
 
@@ -117,7 +133,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setAuthFailureListener((kind) => {
       if (kind === 'authentication_required') {
-        applySignedOut();
+        applySignedOut('expired');
         setSignInNotice(null);
         setDialog('sign-in');
       } else {
@@ -132,20 +148,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     try {
       await signOutRequest();
-      applySignedOut();
+      applySignedOut('sign-out');
       setDialog(null);
     } catch {
       const after = await reload();
       if (after === null || after.user !== null) showNotice(SIGN_OUT_FAILED);
+      else applySignedOut('sign-out');
     }
   }, [applySignedOut, reload, showNotice]);
 
-  const { status, user, setupOpen } = state;
+  const { status, user, setupOpen, endedBy } = state;
   const value = useMemo<SessionValue>(
     () => ({
       status,
       user,
       setupOpen,
+      checking,
+      endedBy,
       can: (permission) => hasPermission(user, permission),
       openSignIn: () => {
         setSignInNotice(null);
@@ -158,7 +177,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await reload();
       },
     }),
-    [status, user, setupOpen, signOut, reload],
+    [status, user, setupOpen, checking, endedBy, signOut, reload],
   );
 
   const closeDialog = () => {

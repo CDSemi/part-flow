@@ -11,6 +11,7 @@ import {
 import type { Area, ScanStation } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -21,9 +22,11 @@ import {
 import {
   ActiveField,
   AdminField,
+  RowOpener,
   SectionHeader,
   ServerErrorNote,
   StatusPill,
+  ViewOnlyNote,
 } from './section-widgets';
 
 // Administration → Scan Stations (Phase 3.5): stations bound to one
@@ -31,6 +34,7 @@ import {
 // letters, digits, '.', '_' and '-'). The Station ID is the identity
 // and is never renamed; a station can be rebound to another active
 // Area and deactivated, never deleted. Stations have no barcode.
+// Without the Manage Scan Stations permission the section is view-only.
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; station: ScanStation };
 
@@ -40,29 +44,35 @@ const STATION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 export function ScanStationsSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_SCAN_STATIONS');
   const stationsData = useApiData(listScanStations);
   const areasData = useApiData(listAreas);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
 
   const header = (ready: boolean, canCreate: boolean) => (
-    <SectionHeader
-      title="Scan Stations"
-      subtitle="Stations bound to one Area — Station ID and active status"
-      action={
-        <button
-          className="btn primary"
-          disabled={!ready || !canCreate || writeBlocked}
-          title={
-            ready && !canCreate
-              ? 'Scan Stations need an active Area first'
-              : undefined
-          }
-          onClick={() => setDialog({ kind: 'new' })}
-        >
-          + New Scan Station
-        </button>
-      }
-    />
+    <>
+      <SectionHeader
+        title="Scan Stations"
+        subtitle="Stations bound to one Area — Station ID and active status"
+        action={
+          canWrite ? (
+            <button
+              className="btn primary"
+              disabled={!ready || !canCreate || writeBlocked}
+              title={
+                ready && !canCreate
+                  ? 'Scan Stations need an active Area first'
+                  : undefined
+              }
+              onClick={() => setDialog({ kind: 'new' })}
+            >
+              + New Scan Station
+            </button>
+          ) : undefined
+        }
+      />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_SCAN_STATIONS" />}
+    </>
   );
 
   if (
@@ -131,16 +141,20 @@ export function ScanStationsSection() {
               return (
                 <tr
                   key={station.stationId}
-                  className="selrow"
-                  onClick={() => setDialog({ kind: 'edit', station })}
+                  className={canWrite ? 'selrow' : undefined}
+                  onClick={
+                    canWrite
+                      ? () => setDialog({ kind: 'edit', station })
+                      : undefined
+                  }
                 >
                   <td>
-                    <button
-                      className="rowbtn"
-                      aria-label={`Edit ${station.stationId}`}
+                    <RowOpener
+                      editable={canWrite}
+                      label={`Edit ${station.stationId}`}
                     >
                       <b className="mono">{station.stationId}</b>
-                    </button>
+                    </RowOpener>
                   </td>
                   <td data-label="Area">
                     <AreaDot colorVar={areaColor(area)} size={11} />{' '}

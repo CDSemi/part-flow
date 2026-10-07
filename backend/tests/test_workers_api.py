@@ -52,6 +52,7 @@ from app.core.config import get_settings
 from app.domain.worker_badge import normalize_badge_barcode
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_workers_api"
@@ -135,7 +136,7 @@ def _create_worker(
     client: TestClient, name: str | None = None, badge: str | None = None
 ) -> dict[str, Any]:
     payload = {"name": name or _unique("Worker"), "badge_barcode": badge or _badge()}
-    response = client.post("/api/workers", json=payload)
+    response = admin_of(client).post("/api/workers", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -177,7 +178,7 @@ def _stored(engine: Engine, worker_id: int) -> sa.Row[Any]:
 def _put_avatar(
     client: TestClient, worker_id: int, data: bytes, content_type: str = "image/png"
 ) -> Response:
-    response = client.put(
+    response = admin_of(client).put(
         f"/api/workers/{worker_id}/avatar", content=data, headers={"Content-Type": content_type}
     )
     return cast(Response, response)
@@ -202,7 +203,9 @@ def test_create_trims_the_name_and_canonicalizes_the_badge(
     raw_badge = f" abc{uuid.uuid4().hex[:8]}\r\n"
     canonical = raw_badge.strip().upper()
     name = _unique("Alex Tran")
-    response = client.post("/api/workers", json={"name": f"  {name} ", "badge_barcode": raw_badge})
+    response = admin_of(client).post(
+        "/api/workers", json={"name": f"  {name} ", "badge_barcode": raw_badge}
+    )
     assert response.status_code == 201, response.text
     body = response.json()
     assert set(body) == _RESPONSE_KEYS
@@ -226,10 +229,10 @@ def test_list_includes_inactive_workers_ordered_by_name_then_id(client: TestClie
     second = _create_worker(client, name=f"{stem} B")
     first = _create_worker(client, name=f"{stem} A")
     twin = _create_worker(client, name=f"{stem} A")
-    deactivated = client.patch(f"/api/workers/{second['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(f"/api/workers/{second['id']}", json={"is_active": False})
     assert deactivated.status_code == 200, deactivated.text
 
-    response = client.get("/api/workers")
+    response = admin_of(client).get("/api/workers")
     assert response.status_code == 200
     listed = [worker for worker in response.json() if worker["name"].startswith(stem)]
     assert [worker["id"] for worker in listed] == [first["id"], twin["id"], second["id"]]
@@ -259,7 +262,7 @@ def test_non_ascii_canonical_badges_pass_the_database_check(
     CHECK, even where Python and the OS libc case tables disagree: the
     CHECK compares under the "C" collation, so it never fails with a 500."""
     suffix = uuid.uuid4().hex[:8].upper()
-    response = client.post(
+    response = admin_of(client).post(
         "/api/workers", json={"name": _unique("Unicode"), "badge_barcode": f"{raw}-{suffix}"}
     )
     assert response.status_code == 201, response.text
@@ -273,7 +276,7 @@ def test_non_ascii_canonical_badges_pass_the_database_check_on_edit(
 ) -> None:
     worker = _create_worker(client)
     suffix = uuid.uuid4().hex[:8].upper()
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/workers/{worker['id']}", json={"badge_barcode": f"{raw}-{suffix}"}
     )
     assert response.status_code == 200, response.text
@@ -287,7 +290,7 @@ def test_badges_are_unique_regardless_of_letter_case(client: TestClient, db_engi
     assert holder["badge_barcode"] == lower.upper()
     counts = _write_counts(db_engine)
     for variant in (lower.upper(), lower[:1].upper() + lower[1:], f" {lower} "):
-        response = client.post(
+        response = admin_of(client).post(
             "/api/workers", json={"name": _unique("Other"), "badge_barcode": variant}
         )
         assert response.status_code == 409, response.text
@@ -305,7 +308,7 @@ def test_badges_are_unique_regardless_of_letter_case(client: TestClient, db_engi
 @pytest.mark.parametrize("name", ["", "   "])
 def test_empty_name_is_refused(client: TestClient, db_engine: Engine, name: str) -> None:
     counts = _write_counts(db_engine)
-    response = client.post("/api/workers", json={"name": name, "badge_barcode": _badge()})
+    response = admin_of(client).post("/api/workers", json={"name": name, "badge_barcode": _badge()})
     assert response.status_code == 422
     assert response.json()["detail"] == "Worker name must not be empty."
     assert _write_counts(db_engine) == counts
@@ -318,8 +321,10 @@ def test_a_nul_character_in_the_name_is_refused_never_500(
     worker = _create_worker(client)
     counts = _write_counts(db_engine)
     detail = {"detail": "Worker name must not contain a NUL character."}
-    created = client.post("/api/workers", json={"name": "A\x00B", "badge_barcode": _badge()})
-    edited = client.patch(f"/api/workers/{worker['id']}", json={"name": "A\x00B"})
+    created = admin_of(client).post(
+        "/api/workers", json={"name": "A\x00B", "badge_barcode": _badge()}
+    )
+    edited = admin_of(client).patch(f"/api/workers/{worker['id']}", json={"name": "A\x00B"})
     for response in (created, edited):
         assert (response.status_code, response.json()) == (422, detail)
     assert _write_counts(db_engine) == counts
@@ -328,7 +333,9 @@ def test_a_nul_character_in_the_name_is_refused_never_500(
 @pytest.mark.parametrize("badge", ["", "\r\n"])
 def test_empty_badge_is_refused(client: TestClient, db_engine: Engine, badge: str) -> None:
     counts = _write_counts(db_engine)
-    response = client.post("/api/workers", json={"name": _unique("W"), "badge_barcode": badge})
+    response = admin_of(client).post(
+        "/api/workers", json={"name": _unique("W"), "badge_barcode": badge}
+    )
     assert response.status_code == 422
     assert response.json()["detail"] == "Badge barcode must not be empty."
     assert _write_counts(db_engine) == counts
@@ -339,7 +346,9 @@ def test_partflow_namespace_badge_is_refused_in_any_case(
     client: TestClient, db_engine: Engine, badge: str
 ) -> None:
     counts = _write_counts(db_engine)
-    response = client.post("/api/workers", json={"name": _unique("W"), "badge_barcode": badge})
+    response = admin_of(client).post(
+        "/api/workers", json={"name": _unique("W"), "badge_barcode": badge}
+    )
     assert response.status_code == 422
     assert response.json()["detail"] == (
         "A badge barcode cannot start with PF: — that prefix belongs to PartFlow barcodes."
@@ -352,10 +361,14 @@ def test_over_long_badges_are_refused_never_500(client: TestClient, db_engine: E
     worker = _create_worker(client)
     counts = _write_counts(db_engine)
     for badge in ("A" * 129, "A" * 3000):
-        created = client.post("/api/workers", json={"name": _unique("W"), "badge_barcode": badge})
+        created = admin_of(client).post(
+            "/api/workers", json={"name": _unique("W"), "badge_barcode": badge}
+        )
         assert created.status_code == 422
         assert created.json()["detail"] == "A badge barcode must be at most 128 characters."
-        edited = client.patch(f"/api/workers/{worker['id']}", json={"badge_barcode": badge})
+        edited = admin_of(client).patch(
+            f"/api/workers/{worker['id']}", json={"badge_barcode": badge}
+        )
         assert edited.status_code == 422
         assert edited.json()["detail"] == "A badge barcode must be at most 128 characters."
     assert _write_counts(db_engine) == counts
@@ -375,7 +388,7 @@ def test_create_refuses_unknown_and_server_owned_fields(
     client: TestClient, db_engine: Engine, extra: dict[str, Any]
 ) -> None:
     counts = _write_counts(db_engine)
-    response = client.post(
+    response = admin_of(client).post(
         "/api/workers", json={"name": _unique("W"), "badge_barcode": _badge(), **extra}
     )
     assert response.status_code == 422
@@ -388,7 +401,9 @@ def test_update_refuses_unknown_and_server_owned_fields(
 ) -> None:
     worker = _create_worker(client)
     counts = _write_counts(db_engine)
-    response = client.patch(f"/api/workers/{worker['id']}", json={"name": "Changed", **extra})
+    response = admin_of(client).patch(
+        f"/api/workers/{worker['id']}", json={"name": "Changed", **extra}
+    )
     assert response.status_code == 422
     assert _write_counts(db_engine) == counts
     assert _stored(db_engine, worker["id"]).name == worker["name"]
@@ -407,14 +422,14 @@ def test_update_refuses_explicit_null(
 ) -> None:
     worker = _create_worker(client)
     counts = _write_counts(db_engine)
-    response = client.patch(f"/api/workers/{worker['id']}", json={field: None})
+    response = admin_of(client).patch(f"/api/workers/{worker['id']}", json={field: None})
     assert response.status_code == 422
     assert response.json()["detail"] == detail
     assert _write_counts(db_engine) == counts
 
 
 def test_update_of_an_unknown_worker_is_404(client: TestClient) -> None:
-    response = client.patch("/api/workers/999999", json={"name": "Nobody"})
+    response = admin_of(client).patch("/api/workers/999999", json={"name": "Nobody"})
     assert response.status_code == 404
     assert response.json()["detail"] == "Worker 999999 does not exist."
 
@@ -429,7 +444,7 @@ def test_duplicate_of_an_active_worker_names_the_worker(
 ) -> None:
     holder = _create_worker(client)
     counts = _write_counts(db_engine)
-    response = client.post(
+    response = admin_of(client).post(
         "/api/workers", json={"name": _unique("W"), "badge_barcode": holder["badge_barcode"]}
     )
     assert response.status_code == 409
@@ -443,9 +458,9 @@ def test_duplicate_of_an_inactive_worker_names_it_as_inactive(
     client: TestClient, db_engine: Engine
 ) -> None:
     holder = _create_worker(client)
-    client.patch(f"/api/workers/{holder['id']}", json={"is_active": False})
+    admin_of(client).patch(f"/api/workers/{holder['id']}", json={"is_active": False})
     counts = _write_counts(db_engine)
-    response = client.post(
+    response = admin_of(client).post(
         "/api/workers", json={"name": _unique("W"), "badge_barcode": holder["badge_barcode"]}
     )
     assert response.status_code == 409
@@ -462,7 +477,9 @@ def test_edit_to_another_workers_badge_is_refused_in_any_case(
     editor = _create_worker(client)
     counts = _write_counts(db_engine)
     for variant in (holder["badge_barcode"], holder["badge_barcode"].lower()):
-        response = client.patch(f"/api/workers/{editor['id']}", json={"badge_barcode": variant})
+        response = admin_of(client).patch(
+            f"/api/workers/{editor['id']}", json={"badge_barcode": variant}
+        )
         assert response.status_code == 409
         assert response.json()["detail"] == (
             f"This badge barcode is already assigned to {holder['name']}."
@@ -481,7 +498,9 @@ def test_create_race_lost_at_flush_is_a_conflict(
     first = _create_worker(client, badge=badge)
     counts = _write_counts(db_engine)
     monkeypatch.setattr(workers_service, "_reject_duplicate_badge", lambda *a, **k: None)
-    response = client.post("/api/workers", json={"name": _unique("W"), "badge_barcode": badge})
+    response = admin_of(client).post(
+        "/api/workers", json={"name": _unique("W"), "badge_barcode": badge}
+    )
     assert response.status_code == 409
     assert response.json()["detail"] == _RACE_MESSAGE
     assert _write_counts(db_engine) == counts
@@ -495,7 +514,7 @@ def test_edit_race_lost_at_flush_is_a_conflict_never_500(
     editor = _create_worker(client)
     counts = _write_counts(db_engine)
     monkeypatch.setattr(workers_service, "_reject_duplicate_badge", lambda *a, **k: None)
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/workers/{editor['id']}", json={"badge_barcode": holder["badge_barcode"]}
     )
     assert response.status_code == 409
@@ -513,7 +532,9 @@ def test_edit_race_lost_at_flush_is_a_conflict_never_500(
 def test_name_change_is_audited_with_exact_snapshots(client: TestClient, db_engine: Engine) -> None:
     worker = _create_worker(client)
     new_name = _unique("Renamed")
-    response = client.patch(f"/api/workers/{worker['id']}", json={"name": f" {new_name} "})
+    response = admin_of(client).patch(
+        f"/api/workers/{worker['id']}", json={"name": f" {new_name} "}
+    )
     assert response.status_code == 200, response.text
     assert response.json()["name"] == new_name
     events = _audit_rows(db_engine, worker["id"])
@@ -527,7 +548,9 @@ def test_name_change_is_audited_with_exact_snapshots(client: TestClient, db_engi
 def test_badge_change_is_canonicalized_and_audited(client: TestClient, db_engine: Engine) -> None:
     worker = _create_worker(client)
     new_badge = f"new{uuid.uuid4().hex[:8]}"
-    response = client.patch(f"/api/workers/{worker['id']}", json={"badge_barcode": new_badge})
+    response = admin_of(client).patch(
+        f"/api/workers/{worker['id']}", json={"badge_barcode": new_badge}
+    )
     assert response.status_code == 200, response.text
     assert response.json()["badge_barcode"] == new_badge.upper()
     events = _audit_rows(db_engine, worker["id"])
@@ -539,9 +562,9 @@ def test_deactivation_and_reactivation_are_two_audited_updates(
     client: TestClient, db_engine: Engine
 ) -> None:
     worker = _create_worker(client)
-    off = client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+    off = admin_of(client).patch(f"/api/workers/{worker['id']}", json={"is_active": False})
     assert off.status_code == 200 and off.json()["is_active"] is False
-    on = client.patch(f"/api/workers/{worker['id']}", json={"is_active": True})
+    on = admin_of(client).patch(f"/api/workers/{worker['id']}", json={"is_active": True})
     assert on.status_code == 200 and on.json()["is_active"] is True
     events = _audit_rows(db_engine, worker["id"])
     assert [event.event_type for event in events] == ["CREATED", "UPDATED", "UPDATED"]
@@ -550,9 +573,9 @@ def test_deactivation_and_reactivation_are_two_audited_updates(
 
 
 def _fixed_area(client: TestClient, worker_id: int) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
-    response = client.post(
+    response = admin_of(client).post(
         "/api/areas",
         json={
             "department_id": department.json()["id"],
@@ -573,7 +596,7 @@ def test_the_fixed_worker_of_an_area_cannot_be_deactivated(
     first = _fixed_area(client, worker["id"])
 
     before = _write_counts(db_engine)
-    refused = client.patch(path, json={"is_active": False})
+    refused = admin_of(client).patch(path, json={"is_active": False})
     assert refused.status_code == 409
     assert refused.json()["detail"] == (
         f"Worker '{worker['name']}' is the Fixed Worker of Area '{first['name']}'. Choose"
@@ -584,9 +607,12 @@ def test_the_fixed_worker_of_an_area_cannot_be_deactivated(
 
     # Any Area counts, an inactive one included; both are named, by name.
     second = _fixed_area(client, worker["id"])
-    assert client.patch(f"/api/areas/{second['id']}", json={"is_active": False}).status_code == 200
+    assert (
+        admin_of(client).patch(f"/api/areas/{second['id']}", json={"is_active": False}).status_code
+        == 200
+    )
     before = _write_counts(db_engine)
-    refused = client.patch(path, json={"is_active": False, "name": _unique("Renamed")})
+    refused = admin_of(client).patch(path, json={"is_active": False, "name": _unique("Renamed")})
     assert refused.status_code == 409
     names = ", ".join(f"'{name}'" for name in sorted([first["name"], second["name"]]))
     assert refused.json()["detail"] == (
@@ -598,16 +624,16 @@ def test_the_fixed_worker_of_an_area_cannot_be_deactivated(
     assert _stored(db_engine, worker["id"]).is_active is True
 
     for area in (first, second):
-        response = client.patch(
+        response = admin_of(client).patch(
             f"/api/areas/{area['id']}", json={"worker_identification_mode": "DISABLED"}
         )
         assert response.status_code == 200, response.text
     before = _write_counts(db_engine)
-    deactivated = client.patch(path, json={"is_active": False})
+    deactivated = admin_of(client).patch(path, json={"is_active": False})
     assert deactivated.status_code == 200, deactivated.text
     assert _write_counts(db_engine)["audit_events"] == before["audit_events"] + 1
     # Reactivation has no guard.
-    assert client.patch(path, json={"is_active": True}).status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": True}).status_code == 200
 
 
 def test_no_op_patch_writes_and_audits_nothing(client: TestClient, db_engine: Engine) -> None:
@@ -619,7 +645,7 @@ def test_no_op_patch_writes_and_audits_nothing(client: TestClient, db_engine: En
         {"name": worker["name"], "badge_barcode": worker["badge_barcode"], "is_active": True},
         {},
     ):
-        response = client.patch(f"/api/workers/{worker['id']}", json=body)
+        response = admin_of(client).patch(f"/api/workers/{worker['id']}", json=body)
         assert response.status_code == 200, response.text
         assert response.json() == worker
     assert len(_audit_rows(db_engine, worker["id"])) == 1
@@ -631,11 +657,11 @@ def test_audit_chain_is_continuous_within_each_facet(client: TestClient, db_engi
     committed predecessor."""
     worker = _create_worker(client)
     path = f"/api/workers/{worker['id']}"
-    assert client.patch(path, json={"name": _unique("One")}).status_code == 200
+    assert admin_of(client).patch(path, json={"name": _unique("One")}).status_code == 200
     assert _put_avatar(client, worker["id"], _PNG).status_code == 200
-    assert client.patch(path, json={"badge_barcode": _badge()}).status_code == 200
-    assert client.delete(f"{path}/avatar").status_code == 200
-    assert client.patch(path, json={"is_active": False}).status_code == 200
+    assert admin_of(client).patch(path, json={"badge_barcode": _badge()}).status_code == 200
+    assert admin_of(client).delete(f"{path}/avatar").status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": False}).status_code == 200
 
     updates = _audit_rows(db_engine, worker["id"])[1:]
     assert len(updates) == 5
@@ -670,7 +696,9 @@ def test_concurrent_edit_waits_and_audits_the_committed_predecessor(
         )
         patcher = threading.Thread(
             target=lambda: results.update(
-                patch=client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+                patch=admin_of(client).patch(
+                    f"/api/workers/{worker['id']}", json={"is_active": False}
+                )
             )
         )
         patcher.start()
@@ -715,13 +743,15 @@ def test_failed_audit_write_rolls_back_every_write_path(
 
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     attempts: list[Callable[[], Response]] = [
-        lambda: client.post("/api/workers", json={"name": _unique("W"), "badge_barcode": _badge()}),
-        lambda: client.patch(
+        lambda: admin_of(client).post(
+            "/api/workers", json={"name": _unique("W"), "badge_barcode": _badge()}
+        ),
+        lambda: admin_of(client).patch(
             f"/api/workers/{worker['id']}",
             json={"name": "Changed", "badge_barcode": _badge(), "is_active": False},
         ),
         lambda: _put_avatar(client, worker["id"], _PNG),
-        lambda: client.delete(f"/api/workers/{with_avatar['id']}/avatar"),
+        lambda: admin_of(client).delete(f"/api/workers/{with_avatar['id']}/avatar"),
     ]
     for attempt in attempts:
         with pytest.raises(RuntimeError, match="audit persistence failed"):
@@ -806,7 +836,7 @@ def test_identical_avatar_upload_is_a_no_op(client: TestClient, db_engine: Engin
 def test_removing_the_avatar_is_audited_once(client: TestClient, db_engine: Engine) -> None:
     worker = _create_worker(client)
     _put_avatar(client, worker["id"], _PNG)
-    removed = client.delete(f"/api/workers/{worker['id']}/avatar")
+    removed = admin_of(client).delete(f"/api/workers/{worker['id']}/avatar")
     assert removed.status_code == 200
     assert removed.json()["avatar_updated_at"] is None
     missing = client.get(f"/api/workers/{worker['id']}/avatar")
@@ -823,7 +853,7 @@ def test_removing_the_avatar_is_audited_once(client: TestClient, db_engine: Engi
         None,
     )
 
-    again = client.delete(f"/api/workers/{worker['id']}/avatar")
+    again = admin_of(client).delete(f"/api/workers/{worker['id']}/avatar")
     assert again.status_code == 200
     assert again.json() == removed.json()
     assert len(_audit_rows(db_engine, worker["id"])) == 3
@@ -883,7 +913,7 @@ def test_avatar_refusals_store_nothing(
     stored = _stored(db_engine, worker["id"])
     counts = _write_counts(db_engine)
     headers = {"Content-Type": "image/png", **request_kwargs.get("headers", {})}
-    response = client.put(
+    response = admin_of(client).put(
         f"/api/workers/{worker['id']}/avatar",
         content=request_kwargs["content"],
         headers=headers,
@@ -897,7 +927,7 @@ def test_avatar_refusals_store_nothing(
 def test_avatar_routes_of_an_unknown_worker_are_404(client: TestClient) -> None:
     for response in (
         _put_avatar(client, 999999, _PNG),
-        client.delete("/api/workers/999999/avatar"),
+        admin_of(client).delete("/api/workers/999999/avatar"),
         client.get("/api/workers/999999/avatar"),
     ):
         assert response.status_code == 404
@@ -917,7 +947,7 @@ def test_avatar_bytes_are_never_loaded_by_default() -> None:
 def test_resolve_badge(client: TestClient, db_engine: Engine) -> None:
     active = _create_worker(client, badge=f"RES{uuid.uuid4().hex[:8].upper()}")
     inactive = _create_worker(client)
-    client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False})
+    admin_of(client).patch(f"/api/workers/{inactive['id']}", json={"is_active": False})
     badge = active["badge_barcode"]
     with Session(db_engine) as session:
 

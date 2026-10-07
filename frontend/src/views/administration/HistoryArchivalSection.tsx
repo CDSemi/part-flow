@@ -5,6 +5,7 @@ import { getRetentionPolicy, updateRetentionPolicy } from '../../api/policies';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   RETENTION_MONTHS_MAX,
@@ -12,7 +13,12 @@ import {
   formatRetentionPeriod,
   parseRetentionMonths,
 } from './retention-period';
-import { SectionHeader, ServerErrorNote } from './section-widgets';
+import {
+  ReadOnlyValues,
+  SectionHeader,
+  ServerErrorNote,
+  ViewOnlyNote,
+} from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → History archival & purge (Phase 13; GUI_DESIGN §9
@@ -23,7 +29,8 @@ import { ADMIN_SECTIONS } from './sections';
 // server. It is configuration only: saving it archives, deletes or
 // schedules nothing, and no production workflow reads it. Archival and
 // purge runs are not available yet and the section says so — no
-// control pretends otherwise.
+// control pretends otherwise. Without the Configure system settings
+// permission the period reads as text.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'data-retention')?.subtitle ??
@@ -36,10 +43,16 @@ const UNKNOWN_OUTCOME_MESSAGE =
 export function HistoryArchivalSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('CONFIGURE_SYSTEM_SETTINGS');
   const policyData = useApiData(getRetentionPolicy);
 
   const header = (
-    <SectionHeader title="History archival & purge" subtitle={SUBTITLE} />
+    <>
+      <SectionHeader title="History archival & purge" subtitle={SUBTITLE} />
+      {canWrite ? null : (
+        <ViewOnlyNote permission="CONFIGURE_SYSTEM_SETTINGS" />
+      )}
+    </>
   );
 
   if (policyData.state.status === 'loading') {
@@ -73,12 +86,28 @@ export function HistoryArchivalSection() {
           archival maintenance may move it to archive files. Saving the period
           archives or deletes nothing, and it never affects production scanning.
         </p>
-        <RetentionPeriodForm
-          savedMonths={policyData.state.data.retentionPeriodMonths}
-          writeBlocked={writeBlocked}
-          onSaved={policyData.reload}
-          onOutcomeUnknown={policyData.revalidate}
-        />
+        {canWrite ? (
+          <RetentionPeriodForm
+            savedMonths={policyData.state.data.retentionPeriodMonths}
+            writeBlocked={writeBlocked}
+            onSaved={policyData.reload}
+            onOutcomeUnknown={policyData.revalidate}
+          />
+        ) : (
+          <ReadOnlyValues
+            rows={[
+              {
+                label: 'Retention period',
+                value:
+                  policyData.state.data.retentionPeriodMonths === null
+                    ? 'No retention period'
+                    : formatRetentionPeriod(
+                        policyData.state.data.retentionPeriodMonths,
+                      ),
+              },
+            ]}
+          />
+        )}
         <h2>Archival and purge runs</h2>
         <p className="ad-confighelp">
           Archival and purge runs — by retention period, data-size threshold or

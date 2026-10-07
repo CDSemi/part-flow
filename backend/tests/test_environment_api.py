@@ -44,6 +44,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_environment_api"
@@ -105,7 +106,9 @@ def _unique(prefix: str) -> str:
 
 
 def _create_department(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    response = client.post("/api/departments", json={"name": _unique("DEPT"), **overrides})
+    response = admin_of(client).post(
+        "/api/departments", json={"name": _unique("DEPT"), **overrides}
+    )
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -116,7 +119,7 @@ def _create_area(
     if department_id is None:
         department_id = int(_create_department(client)["id"])
     payload = {"department_id": department_id, "name": _unique("AREA"), **overrides}
-    response = client.post("/api/areas", json=payload)
+    response = admin_of(client).post("/api/areas", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -127,7 +130,7 @@ def _create_operation(
     if area_id is None:
         area_id = int(_create_area(client)["id"])
     payload = {"area_id": area_id, "code": _unique("OP"), **overrides}
-    response = client.post("/api/operations", json=payload)
+    response = admin_of(client).post("/api/operations", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -138,7 +141,7 @@ def _create_scan_station(
     if area_id is None:
         area_id = int(_create_area(client)["id"])
     payload = {"station_id": _unique("ST"), "area_id": area_id, **overrides}
-    response = client.post("/api/scan-stations", json=payload)
+    response = admin_of(client).post("/api/scan-stations", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -177,7 +180,7 @@ def test_department_name_is_trimmed_and_required(client: TestClient) -> None:
     created = _create_department(client, name=f"  {name}  ")
     assert created["name"] == name
 
-    blank = client.post("/api/departments", json={"name": "   "})
+    blank = admin_of(client).post("/api/departments", json={"name": "   "})
     assert blank.status_code == 422
     assert "must not be empty" in blank.json()["detail"]
 
@@ -185,7 +188,7 @@ def test_department_name_is_trimmed_and_required(client: TestClient) -> None:
 def test_department_duplicate_name_conflict(client: TestClient) -> None:
     created = _create_department(client)
 
-    duplicate = client.post("/api/departments", json={"name": created["name"]})
+    duplicate = admin_of(client).post("/api/departments", json={"name": created["name"]})
     assert duplicate.status_code == 409
     assert "already exists" in duplicate.json()["detail"]
 
@@ -195,21 +198,23 @@ def test_department_rename_and_rename_conflict(client: TestClient) -> None:
     second = _create_department(client)
 
     new_name = _unique("DEPT")
-    renamed = client.patch(f"/api/departments/{second['id']}", json={"name": new_name})
+    renamed = admin_of(client).patch(f"/api/departments/{second['id']}", json={"name": new_name})
     assert renamed.status_code == 200
     assert renamed.json()["name"] == new_name
 
-    collision = client.patch(f"/api/departments/{second['id']}", json={"name": first["name"]})
+    collision = admin_of(client).patch(
+        f"/api/departments/{second['id']}", json={"name": first["name"]}
+    )
     assert collision.status_code == 409
 
 
 def test_department_unknown_id_not_found(client: TestClient) -> None:
-    response = client.patch("/api/departments/999999", json={"is_active": False})
+    response = admin_of(client).patch("/api/departments/999999", json={"is_active": False})
     assert response.status_code == 404
 
 
 def test_department_unknown_field_rejected(client: TestClient) -> None:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/departments", json={"name": _unique("DEPT"), "barcode_value": "PF:AREA:1"}
     )
     assert response.status_code == 422
@@ -219,20 +224,24 @@ def test_department_deactivation_blocked_by_active_area(client: TestClient) -> N
     department = _create_department(client)
     area = _create_area(client, department_id=int(department["id"]))
 
-    blocked = client.patch(f"/api/departments/{department['id']}", json={"is_active": False})
+    blocked = admin_of(client).patch(
+        f"/api/departments/{department['id']}", json={"is_active": False}
+    )
     assert blocked.status_code == 409
     assert "active Areas" in blocked.json()["detail"]
 
-    deactivated_area = client.patch(f"/api/areas/{area['id']}", json={"is_active": False})
+    deactivated_area = admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False})
     assert deactivated_area.status_code == 200
 
-    deactivated = client.patch(f"/api/departments/{department['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(
+        f"/api/departments/{department['id']}", json={"is_active": False}
+    )
     assert deactivated.status_code == 200
     assert deactivated.json()["is_active"] is False
 
     # The tree never re-activates bottom-up: the Area cannot come back
     # while its Department is inactive.
-    reactivate_area = client.patch(f"/api/areas/{area['id']}", json={"is_active": True})
+    reactivate_area = admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": True})
     assert reactivate_area.status_code == 409
     assert "Department" in reactivate_area.json()["detail"]
 
@@ -254,14 +263,18 @@ def test_area_create_derives_stable_pf_area_barcode(client: TestClient) -> None:
 
 
 def test_area_create_requires_existing_active_department(client: TestClient) -> None:
-    missing = client.post("/api/areas", json={"department_id": 999999, "name": _unique("AREA")})
+    missing = admin_of(client).post(
+        "/api/areas", json={"department_id": 999999, "name": _unique("AREA")}
+    )
     assert missing.status_code == 422
 
     department = _create_department(client)
-    deactivated = client.patch(f"/api/departments/{department['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(
+        f"/api/departments/{department['id']}", json={"is_active": False}
+    )
     assert deactivated.status_code == 200
 
-    inactive = client.post(
+    inactive = admin_of(client).post(
         "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
     )
     assert inactive.status_code == 409
@@ -270,7 +283,7 @@ def test_area_create_requires_existing_active_department(client: TestClient) -> 
 
 def test_area_barcode_is_never_client_writable(client: TestClient) -> None:
     department = _create_department(client)
-    create = client.post(
+    create = admin_of(client).post(
         "/api/areas",
         json={
             "department_id": department["id"],
@@ -281,14 +294,16 @@ def test_area_barcode_is_never_client_writable(client: TestClient) -> None:
     assert create.status_code == 422
 
     area = _create_area(client, department_id=int(department["id"]))
-    patch = client.patch(f"/api/areas/{area['id']}", json={"barcode_value": "PF:AREA:HIJACK"})
+    patch = admin_of(client).patch(
+        f"/api/areas/{area['id']}", json={"barcode_value": "PF:AREA:HIJACK"}
+    )
     assert patch.status_code == 422
 
 
 def test_area_display_properties_update_keeps_identity(client: TestClient) -> None:
     area = _create_area(client, description="old", color="var(--a1)")
 
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/areas/{area['id']}",
         json={
             "name": _unique("AREA"),
@@ -317,7 +332,7 @@ def test_area_deactivation_blocked_while_holding_quantity(
     other_area = _create_area(client)
     flow_id = _seed_active_quantity_flow(db_engine, int(area["id"]))
 
-    blocked = client.patch(f"/api/areas/{area['id']}", json={"is_active": False})
+    blocked = admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False})
     assert blocked.status_code == 409
     assert "holds active quantity" in blocked.json()["detail"]
 
@@ -328,7 +343,7 @@ def test_area_deactivation_blocked_while_holding_quantity(
             .where(models.QuantityFlow.id == flow_id)
             .values(current_area_id=int(other_area["id"]))
         )
-    deactivated = client.patch(f"/api/areas/{area['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False})
     assert deactivated.status_code == 200
     assert deactivated.json()["is_active"] is False
 
@@ -343,7 +358,7 @@ _E7 = "Worker ID mode must be DISABLED, FIXED or SCANNED."
 
 
 def _create_worker(client: TestClient) -> dict[str, Any]:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/workers",
         json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE").upper()},
     )
@@ -379,7 +394,9 @@ def test_area_create_sets_the_worker_identification_mode(
     assert _identity(listed[fixed["id"]]) == ("FIXED", worker["id"])
 
     inactive = _create_worker(client)
-    deactivated = client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(
+        f"/api/workers/{inactive['id']}", json={"is_active": False}
+    )
     assert deactivated.status_code == 200
     department_id = int(_create_department(client)["id"])
     refusals = [
@@ -401,10 +418,10 @@ def test_area_create_sets_the_worker_identification_mode(
     before = _area_count(db_engine)
     for fields, status, detail in refusals:
         payload = {"department_id": department_id, "name": _unique("AREA"), **fields}
-        response = client.post("/api/areas", json=payload)
+        response = admin_of(client).post("/api/areas", json=payload)
         assert response.status_code == status, (fields, response.text)
         assert response.json()["detail"] == detail
-    unknown = client.post(
+    unknown = admin_of(client).post(
         "/api/areas",
         json={
             "department_id": department_id,
@@ -422,7 +439,7 @@ def test_area_update_changes_and_clears_the_fixed_worker(client: TestClient) -> 
     path = f"/api/areas/{area['id']}"
 
     def patch(**fields: Any) -> Any:
-        return client.patch(path, json=fields)
+        return admin_of(client).patch(path, json=fields)
 
     def fix(worker: dict[str, Any]) -> tuple[Any, Any]:
         response = patch(worker_identification_mode="FIXED", fixed_worker_id=worker["id"])
@@ -455,17 +472,17 @@ def test_area_activation_rejudges_an_inactive_fixed_worker(
     worker = _create_worker(client)
     area = _create_area(client, worker_identification_mode="FIXED", fixed_worker_id=worker["id"])
     path = f"/api/areas/{area['id']}"
-    assert client.patch(path, json={"is_active": False}).status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": False}).status_code == 200
     _force_worker_inactive(db_engine, int(worker["id"]))
 
-    refused = client.patch(path, json={"is_active": True})
+    refused = admin_of(client).patch(path, json={"is_active": True})
     assert refused.status_code == 409
     assert refused.json()["detail"] == (
         f"The Fixed Worker '{worker['name']}' is inactive. Choose an active Fixed Worker"
         " before activating this Area."
     )
     # An unrelated edit never re-judges the Fixed Worker.
-    renamed = client.patch(path, json={"name": _unique("AREA")})
+    renamed = admin_of(client).patch(path, json={"name": _unique("AREA")})
     assert renamed.status_code == 200, renamed.text
     assert renamed.json()["is_active"] is False
 
@@ -489,7 +506,7 @@ def test_area_identity_patch_with_identical_values_is_a_no_op(
             )
 
     before = audit_count()
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/areas/{area['id']}",
         json={"worker_identification_mode": "FIXED", "fixed_worker_id": worker["id"]},
     )
@@ -524,33 +541,40 @@ def test_operation_create_with_duration(client: TestClient) -> None:
 def test_operation_code_unique_per_area_only(client: TestClient) -> None:
     operation = _create_operation(client)
 
-    duplicate = client.post(
+    duplicate = admin_of(client).post(
         "/api/operations", json={"area_id": operation["area_id"], "code": operation["code"]}
     )
     assert duplicate.status_code == 409
     assert "already has an Operation" in duplicate.json()["detail"]
 
     other_area = _create_area(client)
-    elsewhere = client.post(
+    elsewhere = admin_of(client).post(
         "/api/operations", json={"area_id": other_area["id"], "code": operation["code"]}
     )
     assert elsewhere.status_code == 201
 
 
 def test_operation_requires_existing_active_area(client: TestClient) -> None:
-    missing = client.post("/api/operations", json={"area_id": 999999, "code": _unique("OP")})
+    missing = admin_of(client).post(
+        "/api/operations", json={"area_id": 999999, "code": _unique("OP")}
+    )
     assert missing.status_code == 422
 
     area = _create_area(client)
-    assert client.patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code == 200
-    inactive = client.post("/api/operations", json={"area_id": area["id"], "code": _unique("OP")})
+    assert (
+        admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code
+        == 200
+    )
+    inactive = admin_of(client).post(
+        "/api/operations", json={"area_id": area["id"], "code": _unique("OP")}
+    )
     assert inactive.status_code == 409
 
 
 def test_operation_rejects_non_positive_duration(client: TestClient) -> None:
     area = _create_area(client)
     for seconds in (0, -60):
-        response = client.post(
+        response = admin_of(client).post(
             "/api/operations",
             json={
                 "area_id": area["id"],
@@ -566,7 +590,7 @@ def test_operation_area_binding_is_immutable(client: TestClient) -> None:
     operation = _create_operation(client)
     other_area = _create_area(client)
 
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/operations/{operation['id']}", json={"area_id": other_area["id"]}
     )
     assert response.status_code == 422
@@ -577,10 +601,12 @@ def test_operation_update_code_conflict_and_lifecycle(client: TestClient) -> Non
     first = _create_operation(client, area_id=int(area["id"]))
     second = _create_operation(client, area_id=int(area["id"]))
 
-    collision = client.patch(f"/api/operations/{second['id']}", json={"code": first["code"]})
+    collision = admin_of(client).patch(
+        f"/api/operations/{second['id']}", json={"code": first["code"]}
+    )
     assert collision.status_code == 409
 
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/operations/{second['id']}",
         json={"code": _unique("OP"), "is_external": True, "is_active": False},
     )
@@ -612,7 +638,7 @@ def test_scan_station_create_and_resolve_by_station_id(client: TestClient) -> No
 def test_scan_station_id_canonical_url_safe_form(client: TestClient) -> None:
     area = _create_area(client)
 
-    trimmed = client.post(
+    trimmed = admin_of(client).post(
         "/api/scan-stations", json={"station_id": "  ST-TRIM-1  ", "area_id": area["id"]}
     )
     assert trimmed.status_code == 201
@@ -621,7 +647,7 @@ def test_scan_station_id_canonical_url_safe_form(client: TestClient) -> None:
     # The full URL-safe identifier charset is accepted — including
     # the intended floor naming style.
     for good_station_id in ("LATHE-ST-01", "st_0.9-A"):
-        response = client.post(
+        response = admin_of(client).post(
             "/api/scan-stations", json={"station_id": good_station_id, "area_id": area["id"]}
         )
         assert response.status_code == 201, response.text
@@ -630,7 +656,7 @@ def test_scan_station_id_canonical_url_safe_form(client: TestClient) -> None:
     # Anything outside [A-Za-z0-9._-] is rejected and never
     # persisted: the Station ID is one URL path segment.
     for bad_station_id in ("ST 1", "   ", "ST/1", "ST?1", "ST#1", "ST:1", "ST%1", "STÄ-1"):
-        response = client.post(
+        response = admin_of(client).post(
             "/api/scan-stations", json={"station_id": bad_station_id, "area_id": area["id"]}
         )
         assert response.status_code == 422, bad_station_id
@@ -648,7 +674,7 @@ def test_scan_station_duplicate_station_id_conflict(client: TestClient) -> None:
     station = _create_scan_station(client)
     other_area = _create_area(client)
 
-    duplicate = client.post(
+    duplicate = admin_of(client).post(
         "/api/scan-stations",
         json={"station_id": station["station_id"], "area_id": other_area["id"]},
     )
@@ -657,14 +683,17 @@ def test_scan_station_duplicate_station_id_conflict(client: TestClient) -> None:
 
 
 def test_scan_station_requires_existing_active_area(client: TestClient) -> None:
-    missing = client.post(
+    missing = admin_of(client).post(
         "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": 999999}
     )
     assert missing.status_code == 422
 
     area = _create_area(client)
-    assert client.patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code == 200
-    inactive = client.post(
+    assert (
+        admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code
+        == 200
+    )
+    inactive = admin_of(client).post(
         "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area["id"]}
     )
     assert inactive.status_code == 409
@@ -675,36 +704,38 @@ def test_scan_station_rebind_and_active_toggle(client: TestClient) -> None:
     target_area = _create_area(client)
     inactive_area = _create_area(client)
     assert (
-        client.patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
 
     # Rebinding is an allowed configuration workflow — to an active
     # Area only. The Station ID itself is never renamed (no such
     # field), and the binding freeze is deliberately not a DB trigger.
-    rebound = client.patch(
+    rebound = admin_of(client).patch(
         f"/api/scan-stations/{station['station_id']}", json={"area_id": target_area["id"]}
     )
     assert rebound.status_code == 200
     assert rebound.json()["area_id"] == target_area["id"]
 
-    to_inactive = client.patch(
+    to_inactive = admin_of(client).patch(
         f"/api/scan-stations/{station['station_id']}", json={"area_id": inactive_area["id"]}
     )
     assert to_inactive.status_code == 409
 
-    to_missing = client.patch(
+    to_missing = admin_of(client).patch(
         f"/api/scan-stations/{station['station_id']}", json={"area_id": 999999}
     )
     assert to_missing.status_code == 422
 
-    deactivated = client.patch(
+    deactivated = admin_of(client).patch(
         f"/api/scan-stations/{station['station_id']}", json={"is_active": False}
     )
     assert deactivated.status_code == 200
     assert deactivated.json()["is_active"] is False
 
-    reactivated = client.patch(
+    reactivated = admin_of(client).patch(
         f"/api/scan-stations/{station['station_id']}", json={"is_active": True}
     )
     assert reactivated.status_code == 200
@@ -725,7 +756,7 @@ def test_machine_asset_tag_format_singleton_lifecycle(
     assert unconfigured.status_code == 404
     assert "not configured" in unconfigured.json()["detail"]
 
-    created = client.put(
+    created = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -746,7 +777,7 @@ def test_machine_asset_tag_format_singleton_lifecycle(
             .where(models.MachineAssetTagConfig.id == 1)
             .values(next_sequence=7)
         )
-    reformatted = client.put(
+    reformatted = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "MS-", "digits": 6},
     )
@@ -756,7 +787,7 @@ def test_machine_asset_tag_format_singleton_lifecycle(
     assert reformatted.json()["next_sequence"] == 7
 
     # Idempotent PUT: same values, still one configuration row.
-    unchanged = client.put(
+    unchanged = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "MS-", "digits": 6},
     )
@@ -771,19 +802,21 @@ def test_machine_asset_tag_format_validation(client: TestClient) -> None:
         {"prefix": "CD-", "digits": 0},
         {"prefix": "CD-", "digits": 9},
     ):
-        response = client.put("/api/barcode-configuration/machine-asset-tag-format", json=invalid)
+        response = admin_of(client).put(
+            "/api/barcode-configuration/machine-asset-tag-format", json=invalid
+        )
         assert response.status_code == 422, invalid
 
     # The counter is server-owned: submitting it is a shape error, not
     # a silent ignore.
-    counter_write = client.put(
+    counter_write = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4, "next_sequence": 99},
     )
     assert counter_write.status_code == 422
 
     # An empty prefix stays valid (numeric-only Asset Tags).
-    empty_prefix = client.put(
+    empty_prefix = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format", json={"prefix": "", "digits": 4}
     )
     assert empty_prefix.status_code == 200

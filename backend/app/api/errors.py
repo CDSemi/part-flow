@@ -34,7 +34,10 @@ clears the session cookie —, ``permission_denied`` with
 ``required_permissions``, ``password_change_required``,
 ``sign_in_failed``, ``account_locked``, ``password_check_busy``,
 ``setup_closed``, ``setup_token_invalid``), so the client opens the
-right dialog without parsing the message.
+right dialog without parsing the message; a change refused because it
+would leave no active User with a password who may manage users and
+roles, or correction permissions, carries ``last_permission_holder``
+(Phase 14 slice 2).
 
 Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
@@ -59,6 +62,7 @@ from app.application.errors import (
     HotDemandRemovalConfirmationRequiredError,
     HotListChangedError,
     InvalidInputError,
+    LastPermissionHolderError,
     NotFoundError,
     PasswordChangeRequiredError,
     PasswordCheckBusyError,
@@ -244,6 +248,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         (PasswordCheckBusyError, 503, "password_check_busy"),
         (SetupClosedError, 409, "setup_closed"),
         (SetupTokenInvalidError, 403, "setup_token_invalid"),
+        # Phase 14 slice 2: the last-holder rule — nothing was written.
+        (LastPermissionHolderError, 409, "last_permission_holder"),
     )
     for error_type, status_code, flag in _sign_in_refusals:
         _register_gate_refusal(error_type, status_code, flag)

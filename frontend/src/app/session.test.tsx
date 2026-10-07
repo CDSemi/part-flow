@@ -46,8 +46,11 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   window.history.replaceState({}, '', '/administration');
   sessionAnswer = () => json({ user: null, setup_open: false });
-  fetchMock = vi.fn((input: RequestInfo | URL) => {
+  fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === '/api/session' && init?.method === 'DELETE') {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
     if (url === '/api/session') return sessionAnswer();
     if (url === '/api/policies/sign-in') {
       return json(
@@ -94,6 +97,10 @@ function Probe() {
       <span data-testid="can">
         {String(session.can('MANAGE_USERS_AND_ROLES'))}
       </span>
+      <span data-testid="checking">{String(session.checking)}</span>
+      <span data-testid="ended-by">{session.endedBy ?? '-'}</span>
+      <button onClick={() => void session.signOut()}>sign out</button>
+      <button onClick={() => void session.refresh()}>refresh</button>
       <button
         onClick={() => {
           apiRequest('/api/policies/sign-in').catch(() => undefined);
@@ -164,6 +171,8 @@ test('an explicit test value supplies the session', () => {
       status: 'signed-in',
       user,
       setupOpen: false,
+      checking: false,
+      endedBy: null,
       can: (permission) => hasPermission(user, permission),
       openSignIn: vi.fn(),
       openSetup: vi.fn(),
@@ -247,6 +256,44 @@ test('a required password change re-reads the sign-in and opens the forced dialo
     await screen.findByRole('dialog', { name: 'Choose a new password' }),
   ).toBeInTheDocument();
   expect(sessionReads()).toBe(2);
+});
+
+test('checking is true while the sign-in is read; endedBy tells an ended sign-in from a sign-out', async () => {
+  let answer: (response: Response) => void = () => undefined;
+  sessionAnswer = () =>
+    new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+  render(tree());
+  const checking = () => screen.getByTestId('checking').textContent;
+  const endedBy = () => screen.getByTestId('ended-by').textContent;
+  expect(checking()).toBe('true');
+  expect(status()).toBe('unknown');
+  await act(async () => {
+    answer(
+      new Response(JSON.stringify({ user: WIRE_USER, setup_open: false })),
+    );
+  });
+  await waitFor(() => expect(status()).toBe('signed-in'));
+  expect(checking()).toBe('false');
+  expect(endedBy()).toBe('-');
+
+  // The server refuses the sign-in as ended.
+  fireEvent.click(screen.getByRole('button', { name: 'ended' }));
+  await waitFor(() => expect(status()).toBe('signed-out'));
+  expect(endedBy()).toBe('expired');
+
+  // Signed in again (here: read again from the server).
+  sessionAnswer = () => json({ user: WIRE_USER, setup_open: false });
+  fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
+  await waitFor(() => expect(status()).toBe('signed-in'));
+  expect(endedBy()).toBe('-');
+  expect(checking()).toBe('false');
+
+  // An explicit sign-out.
+  fireEvent.click(screen.getByRole('button', { name: 'sign out' }));
+  await waitFor(() => expect(status()).toBe('signed-out'));
+  expect(endedBy()).toBe('sign-out');
 });
 
 test('hasPermission: no user holds nothing; a user holds exactly the role keys', () => {

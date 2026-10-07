@@ -60,6 +60,7 @@ from app.application import projections
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_phase9_corrections_api"
@@ -111,7 +112,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -128,9 +129,9 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
-    response = client.post(
+    response = admin_of(client).post(
         "/api/areas", json={"department_id": department.json()["id"], "name": _unique("AREA")}
     )
     assert response.status_code == 201, response.text
@@ -138,13 +139,15 @@ def _create_area(client: TestClient) -> dict[str, Any]:
 
 
 def _create_operation(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/operations", json={"area_id": area_id, "code": _unique("OP")})
+    response = admin_of(client).post(
+        "/api/operations", json={"area_id": area_id, "code": _unique("OP")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
 
 def _create_station(client: TestClient, area_id: int) -> str:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area_id}
     )
     assert response.status_code == 201, response.text
@@ -1109,7 +1112,9 @@ def test_addition_rejects_a_station_reconfigured_before_its_authoritative_lock(
     # The addition paused after its unlocked station read: the
     # configuration change commits meanwhile.
     assert pause.first_inside.wait(timeout=20)
-    changed = client.patch(f"/api/scan-stations/{cell.station_id}", json=reconfigure(other))
+    changed = admin_of(client).patch(
+        f"/api/scan-stations/{cell.station_id}", json=reconfigure(other)
+    )
     assert changed.status_code == 200, changed.text
     pause.let_first_finish.set()
     addition.join(timeout=30)
@@ -1146,7 +1151,7 @@ def test_addition_rejects_a_station_reconfigured_before_its_authoritative_lock(
     _assert_projection_matches_replay(db_engine)
     # No idempotency residue: with the configuration restored, the SAME
     # id with the SAME payload records a fresh addition.
-    restored = client.patch(f"/api/scan-stations/{cell.station_id}", json=restore(cell))
+    restored = admin_of(client).patch(f"/api/scan-stations/{cell.station_id}", json=restore(cell))
     assert restored.status_code == 200, restored.text
     retried = _add(client, cell, released.part_number, 5, device_event_id=addition_event)
     assert retried.status_code == 201, retried.text
@@ -1188,7 +1193,7 @@ def test_addition_station_lock_serializes_a_concurrent_rebind(
         args=(
             results,
             "rebind",
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/scan-stations/{cell.station_id}", json={"area_id": other.area_id}
             ),
         ),

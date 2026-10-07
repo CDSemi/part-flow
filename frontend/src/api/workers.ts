@@ -6,7 +6,8 @@
 // Wire responses are the backend's snake_case schema; this module maps
 // them to the camelCase application type. The server canonicalizes the
 // badge barcode (trim, uppercase) and stays authoritative over every
-// rule. The avatar travels as a raw image body on its own endpoint and
+// rule. The badge barcode is sent only to users who may manage Workers;
+// for everyone else the key is absent and the client holds null. The avatar travels as a raw image body on its own endpoint and
 // is displayed through a cache-versioned URL; no response ever carries
 // image bytes.
 //
@@ -17,8 +18,9 @@ import { apiRequest, apiUpload } from './client';
 export interface Worker {
   id: number;
   name: string;
-  /** Stored canonical badge barcode (trimmed, uppercase). */
-  badgeBarcode: string;
+  /** Stored canonical badge barcode (trimmed, uppercase); null when
+   * the server withholds it (the reader may not manage Workers). */
+  badgeBarcode: string | null;
   isActive: boolean;
   /** Avatar cache version (ISO 8601); null when there is no avatar. */
   avatarUpdatedAt: string | null;
@@ -45,18 +47,29 @@ export function toWorkerRef(wire: WorkerRefWire): WorkerRef {
 interface WorkerWire {
   id: number;
   name: string;
-  badge_barcode: string;
+  /** Absent unless the caller may manage Workers. */
+  badge_barcode?: unknown;
   is_active: boolean;
   avatar_updated_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
+function toBadgeBarcode(value: unknown): string | null {
+  if (value === undefined) return null;
+  // A present badge is always a string; anything else means this client
+  // is out of date — fail loudly rather than show a wrong badge.
+  if (typeof value !== 'string') {
+    throw new Error('Unexpected badge barcode from the server.');
+  }
+  return value;
+}
+
 function toWorker(wire: WorkerWire): Worker {
   return {
     id: wire.id,
     name: wire.name,
-    badgeBarcode: wire.badge_barcode,
+    badgeBarcode: toBadgeBarcode(wire.badge_barcode),
     isActive: wire.is_active,
     avatarUpdatedAt: wire.avatar_updated_at,
   };

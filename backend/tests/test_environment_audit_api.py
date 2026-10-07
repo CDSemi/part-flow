@@ -51,6 +51,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_environment_audit_api"
@@ -156,7 +157,9 @@ def _created(response: Response) -> dict[str, Any]:
 
 
 def _create_department(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    return _created(client.post("/api/departments", json={"name": _unique("DEPT"), **overrides}))
+    return _created(
+        admin_of(client).post("/api/departments", json={"name": _unique("DEPT"), **overrides})
+    )
 
 
 def _create_area(
@@ -165,7 +168,7 @@ def _create_area(
     if department_id is None:
         department_id = int(_create_department(client)["id"])
     payload = {"department_id": department_id, "name": _unique("AREA"), **overrides}
-    return _created(client.post("/api/areas", json=payload))
+    return _created(admin_of(client).post("/api/areas", json=payload))
 
 
 def _create_operation(
@@ -174,7 +177,7 @@ def _create_operation(
     if area_id is None:
         area_id = int(_create_area(client)["id"])
     payload = {"area_id": area_id, "code": _unique("OP"), **overrides}
-    return _created(client.post("/api/operations", json=payload))
+    return _created(admin_of(client).post("/api/operations", json=payload))
 
 
 def _create_scan_station(
@@ -183,7 +186,7 @@ def _create_scan_station(
     if area_id is None:
         area_id = int(_create_area(client)["id"])
     payload = {"station_id": _unique("ST"), "area_id": area_id, **overrides}
-    return _created(client.post("/api/scan-stations", json=payload))
+    return _created(admin_of(client).post("/api/scan-stations", json=payload))
 
 
 def _audit_rows(engine: Engine, entity_type: str, entity_id: object) -> list[sa.Row[Any]]:
@@ -288,9 +291,9 @@ def test_department_edits_are_audited_as_a_chain(client: TestClient, db_engine: 
     department = _create_department(client)
     path = f"/api/departments/{department['id']}"
     new_name = _unique("DEPT")
-    assert client.patch(path, json={"name": new_name}).status_code == 200
-    assert client.patch(path, json={"is_active": False}).status_code == 200
-    assert client.patch(path, json={"is_active": True}).status_code == 200
+    assert admin_of(client).patch(path, json={"name": new_name}).status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": False}).status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": True}).status_code == 200
 
     rows = _audit_rows(db_engine, "Department", department["id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED", "UPDATED", "UPDATED"]
@@ -309,7 +312,7 @@ def test_department_no_op_patch_audits_nothing(client: TestClient, db_engine: En
     stored = _stored(db_engine, models.Department, department["id"])
     path = f"/api/departments/{department['id']}"
     for body in ({"name": f"  {department['name']}  "}, {"is_active": True}, {}):
-        response = client.patch(path, json=body)
+        response = admin_of(client).patch(path, json=body)
         assert response.status_code == 200, response.text
         assert response.json() == department
     assert len(_audit_rows(db_engine, "Department", department["id"])) == 1
@@ -325,13 +328,13 @@ def test_department_refusals_audit_nothing(client: TestClient, db_engine: Engine
     count = _audit_count(db_engine)
 
     refusals: list[tuple[Callable[[], Response], int]] = [
-        (lambda: client.patch(path, json={"name": other["name"]}), 409),
-        (lambda: client.patch(path, json={"name": "   "}), 422),
-        (lambda: client.patch(path, json={"name": None}), 422),
-        (lambda: client.patch("/api/departments/999999", json={"is_active": False}), 404),
-        (lambda: client.patch(path, json={"barcode_value": "PF:AREA:1"}), 422),
-        (lambda: client.patch(path, json={"is_active": False}), 409),
-        (lambda: client.post("/api/departments", json={"name": other["name"]}), 409),
+        (lambda: admin_of(client).patch(path, json={"name": other["name"]}), 409),
+        (lambda: admin_of(client).patch(path, json={"name": "   "}), 422),
+        (lambda: admin_of(client).patch(path, json={"name": None}), 422),
+        (lambda: admin_of(client).patch("/api/departments/999999", json={"is_active": False}), 404),
+        (lambda: admin_of(client).patch(path, json={"barcode_value": "PF:AREA:1"}), 422),
+        (lambda: admin_of(client).patch(path, json={"is_active": False}), 409),
+        (lambda: admin_of(client).post("/api/departments", json={"name": other["name"]}), 409),
     ]
     for attempt, status in refusals:
         assert attempt().status_code == status
@@ -347,7 +350,9 @@ def test_department_create_race_lost_at_flush_audits_nothing(
     count = _audit_count(db_engine)
     with db_engine.connect() as holder:
         holder.execute(sa.text("INSERT INTO departments (name) VALUES (:name)"), {"name": name})
-        thread, results = _start(lambda: client.post("/api/departments", json={"name": name}))
+        thread, results = _start(
+            lambda: admin_of(client).post("/api/departments", json={"name": name})
+        )
         # The INSERT waits on the holder's uncommitted duplicate.
         _assert_blocked(thread)
         holder.commit()
@@ -380,7 +385,7 @@ def test_department_rename_race_maps_to_conflict_not_autoflush_500(
     with db_engine.connect() as holder:
         holder.execute(sa.text("INSERT INTO departments (name) VALUES (:name)"), {"name": new_name})
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/departments/{department['id']}",
                 json={"name": new_name, "is_active": False},
             )
@@ -431,7 +436,9 @@ def test_operation_code_rename_race_lost_at_commit_leaves_no_orphan_audit_row(
             {"area_id": area["id"], "code": code},
         )
         thread, results = _start(
-            lambda: client.patch(f"/api/operations/{operation['id']}", json={"code": code})
+            lambda: admin_of(client).patch(
+                f"/api/operations/{operation['id']}", json={"code": code}
+            )
         )
         # Waits at COMMIT, its UPDATED row staged, on the unique index.
         _assert_blocked(thread)
@@ -489,8 +496,11 @@ def test_area_display_edit_and_terminal_toggle_are_audited(
 ) -> None:
     area = _create_area(client, description="old")
     path = f"/api/areas/{area['id']}"
-    assert client.patch(path, json={"description": "new", "color": "var(--a2)"}).status_code == 200
-    assert client.patch(path, json={"is_terminal": True}).status_code == 200
+    assert (
+        admin_of(client).patch(path, json={"description": "new", "color": "var(--a2)"}).status_code
+        == 200
+    )
+    assert admin_of(client).patch(path, json={"is_terminal": True}).status_code == 200
 
     rows = _audit_rows(db_engine, "Area", area["id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED", "UPDATED"]
@@ -511,7 +521,7 @@ def test_area_display_edit_and_terminal_toggle_are_audited(
 
 def _create_worker(client: TestClient) -> dict[str, Any]:
     return _created(
-        client.post(
+        admin_of(client).post(
             "/api/workers",
             json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE").upper()},
         )
@@ -521,13 +531,18 @@ def _create_worker(client: TestClient) -> dict[str, Any]:
 def test_area_worker_id_mode_changes_are_audited(client: TestClient, db_engine: Engine) -> None:
     worker = _create_worker(client)
     inactive = _create_worker(client)
-    deactivated = client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(
+        f"/api/workers/{inactive['id']}", json={"is_active": False}
+    )
     assert deactivated.status_code == 200
     area = _create_area(client)
     path = f"/api/areas/{area['id']}"
     fixed = {"worker_identification_mode": "FIXED", "fixed_worker_id": worker["id"]}
-    assert client.patch(path, json=fixed).status_code == 200
-    assert client.patch(path, json={"worker_identification_mode": "DISABLED"}).status_code == 200
+    assert admin_of(client).patch(path, json=fixed).status_code == 200
+    assert (
+        admin_of(client).patch(path, json={"worker_identification_mode": "DISABLED"}).status_code
+        == 200
+    )
 
     rows = _audit_rows(db_engine, "Area", area["id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED", "UPDATED"]
@@ -541,8 +556,14 @@ def test_area_worker_id_mode_changes_are_audited(client: TestClient, db_engine: 
     _assert_chain(rows)
 
     # Scanned session mode is selectable (Phase 13 slice 5), audited like any mode change.
-    assert client.patch(path, json={"worker_identification_mode": "SCANNED"}).status_code == 200
-    assert client.patch(path, json={"worker_identification_mode": "DISABLED"}).status_code == 200
+    assert (
+        admin_of(client).patch(path, json={"worker_identification_mode": "SCANNED"}).status_code
+        == 200
+    )
+    assert (
+        admin_of(client).patch(path, json={"worker_identification_mode": "DISABLED"}).status_code
+        == 200
+    )
     rows = _audit_rows(db_engine, "Area", area["id"])
     assert [row.event_type for row in rows] == ["CREATED"] + ["UPDATED"] * 4
     scanned = {"worker_identification_mode": "SCANNED", "fixed_worker_id": None}
@@ -558,7 +579,7 @@ def test_area_worker_id_mode_changes_are_audited(client: TestClient, db_engine: 
         {"worker_identification_mode": "FIXED", "fixed_worker_id": 999_999_999},
         {"worker_identification_mode": "FIXED", "fixed_worker_id": inactive["id"]},
     ):
-        assert client.patch(path, json=body).status_code in (409, 422), body
+        assert admin_of(client).patch(path, json=body).status_code in (409, 422), body
     assert _audit_count(db_engine) == before
 
 
@@ -580,7 +601,7 @@ def test_area_deactivation_is_audited_only_once_it_succeeds(
     stored = _stored(db_engine, models.Area, area["id"])
     count = _audit_count(db_engine)
 
-    blocked = client.patch(path, json={"is_active": False})
+    blocked = admin_of(client).patch(path, json={"is_active": False})
     assert blocked.status_code == 409
     assert "holds active quantity" in blocked.json()["detail"]
     assert _audit_count(db_engine) == count
@@ -592,7 +613,7 @@ def test_area_deactivation_is_audited_only_once_it_succeeds(
             .where(models.QuantityFlow.id == flow_id)
             .values(status="SCRAPPED", closed_at=sa.func.now())
         )
-    assert client.patch(path, json={"is_active": False}).status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": False}).status_code == 200
 
     rows = _audit_rows(db_engine, "Area", area["id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED"]
@@ -604,15 +625,20 @@ def test_area_activation_under_an_inactive_department_audits_nothing(
 ) -> None:
     department = _create_department(client)
     area = _create_area(client, department_id=int(department["id"]))
-    assert client.patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code == 200
     assert (
-        client.patch(f"/api/departments/{department['id']}", json={"is_active": False}).status_code
+        admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code
+        == 200
+    )
+    assert (
+        admin_of(client)
+        .patch(f"/api/departments/{department['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
     stored = _stored(db_engine, models.Area, area["id"])
     count = _audit_count(db_engine)
 
-    response = client.patch(f"/api/areas/{area['id']}", json={"is_active": True})
+    response = admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": True})
     assert response.status_code == 409
     assert _audit_count(db_engine) == count
     assert _stored(db_engine, models.Area, area["id"]) == stored
@@ -642,7 +668,7 @@ def test_operation_create_and_edits_are_audited_with_duration_seconds(
         {"is_external": True},
         {"is_active": False},
     ):
-        assert client.patch(path, json=body).status_code == 200
+        assert admin_of(client).patch(path, json=body).status_code == 200
 
     rows = _audit_rows(db_engine, "Operation", operation["id"])
     assert [row.event_type for row in rows] == ["CREATED"] + ["UPDATED"] * 4
@@ -668,7 +694,9 @@ def test_operation_refusals_audit_nothing(client: TestClient, db_engine: Engine)
     area = _create_area(client)
     inactive_area = _create_area(client)
     assert (
-        client.patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
     first = _create_operation(client, area_id=int(area["id"]))
@@ -680,28 +708,31 @@ def test_operation_refusals_audit_nothing(client: TestClient, db_engine: Engine)
 
     refusals: list[tuple[Callable[[], Response], int]] = [
         (
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/operations",
                 json={"area_id": area["id"], "code": _unique("OP"), "default_expected_duration": 0},
             ),
             422,
         ),
-        (lambda: client.patch(path, json={"default_expected_duration": -60}), 422),
+        (lambda: admin_of(client).patch(path, json={"default_expected_duration": -60}), 422),
         (
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/operations", json={"area_id": area["id"], "code": first["code"]}
             ),
             409,
         ),
-        (lambda: client.patch(path, json={"code": first["code"]}), 409),
-        (lambda: client.post("/api/operations", json={"area_id": 999999, "code": "X"}), 422),
+        (lambda: admin_of(client).patch(path, json={"code": first["code"]}), 409),
         (
-            lambda: client.post(
+            lambda: admin_of(client).post("/api/operations", json={"area_id": 999999, "code": "X"}),
+            422,
+        ),
+        (
+            lambda: admin_of(client).post(
                 "/api/operations", json={"area_id": inactive_area["id"], "code": "X"}
             ),
             409,
         ),
-        (lambda: client.patch(path, json={"area_id": inactive_area["id"]}), 422),
+        (lambda: admin_of(client).patch(path, json={"area_id": inactive_area["id"]}), 422),
     ]
     for attempt, status in refusals:
         assert attempt().status_code == status
@@ -723,7 +754,9 @@ def test_operation_create_race_lost_at_flush_audits_nothing(
             {"area_id": area["id"], "code": code},
         )
         thread, results = _start(
-            lambda: client.post("/api/operations", json={"area_id": area["id"], "code": code})
+            lambda: admin_of(client).post(
+                "/api/operations", json={"area_id": area["id"], "code": code}
+            )
         )
         _assert_blocked(thread)
         holder.commit()
@@ -746,8 +779,8 @@ def test_scan_station_create_rebind_and_reactivation_are_audited(
     target = _create_area(client)
     station = _create_scan_station(client, area_id=int(area["id"]), is_active=False)
     path = f"/api/scan-stations/{station['station_id']}"
-    assert client.patch(path, json={"area_id": target["id"]}).status_code == 200
-    assert client.patch(path, json={"is_active": True}).status_code == 200
+    assert admin_of(client).patch(path, json={"area_id": target["id"]}).status_code == 200
+    assert admin_of(client).patch(path, json={"is_active": True}).status_code == 200
 
     rows = _audit_rows(db_engine, "ScanStation", station["station_id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED", "UPDATED"]
@@ -769,7 +802,9 @@ def test_scan_station_refusals_audit_nothing(client: TestClient, db_engine: Engi
     station = _create_scan_station(client)
     inactive_area = _create_area(client)
     assert (
-        client.patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
     path = f"/api/scan-stations/{station['station_id']}"
@@ -779,20 +814,25 @@ def test_scan_station_refusals_audit_nothing(client: TestClient, db_engine: Engi
 
     refusals: list[tuple[Callable[[], Response], int]] = [
         (
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/scan-stations",
                 json={"station_id": station["station_id"], "area_id": station["area_id"]},
             ),
             409,
         ),
         (
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/scan-stations", json={"station_id": "ST 1", "area_id": station["area_id"]}
             ),
             422,
         ),
-        (lambda: client.patch(path, json={"area_id": inactive_area["id"]}), 409),
-        (lambda: client.patch("/api/scan-stations/does-not-exist", json={"is_active": False}), 404),
+        (lambda: admin_of(client).patch(path, json={"area_id": inactive_area["id"]}), 409),
+        (
+            lambda: admin_of(client).patch(
+                "/api/scan-stations/does-not-exist", json={"is_active": False}
+            ),
+            404,
+        ),
     ]
     for attempt, status in refusals:
         assert attempt().status_code == status
@@ -816,7 +856,7 @@ def test_scan_station_create_race_lost_at_commit_leaves_no_orphan_audit_row(
             {"id": station_id, "area_id": area["id"]},
         )
         thread, results = _start(
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/scan-stations", json={"station_id": station_id, "area_id": area["id"]}
             )
         )
@@ -906,7 +946,7 @@ def test_concurrent_edit_waits_and_audits_the_committed_predecessor(
             ),
             {"value": case.holder_value, "key": key},
         )
-        thread, results = _start(lambda: client.patch(path, json=body))
+        thread, results = _start(lambda: admin_of(client).patch(path, json=body))
         _assert_blocked(thread)
         holder.commit()
     response = _finish(thread, results)
@@ -961,7 +1001,7 @@ def test_lock_mode_never_waits_on_key_share_except_area_deactivation(
         holder.execute(
             sa.text(f"SELECT 1 FROM {table} WHERE {column} = :key FOR KEY SHARE"), {"key": key}
         )
-        thread, results = _start(lambda: client.patch(path, json=case.body))
+        thread, results = _start(lambda: admin_of(client).patch(path, json=case.body))
         if case.blocks:
             _assert_blocked(thread)
         else:
@@ -986,12 +1026,24 @@ def test_asset_tag_format_lifecycle_is_audited_without_next_sequence(
     unconfigured_client: _Deployment,
 ) -> None:
     client, engine = unconfigured_client
-    first = client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4})
+    first = admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4})
     assert first.status_code == 200, first.text
-    assert client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5}).status_code == 200
-    assert client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5}).status_code == 200
-    assert client.put(_ASSET_TAG_PATH, json={"prefix": "A B", "digits": 5}).status_code == 422
-    assert client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 9}).status_code == 422
+    assert (
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5}).status_code
+        == 200
+    )
+    assert (
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5}).status_code
+        == 200
+    )
+    assert (
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "A B", "digits": 5}).status_code
+        == 422
+    )
+    assert (
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 9}).status_code
+        == 422
+    )
 
     rows = _audit_rows(engine, "MachineAssetTagConfig", 1)
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED"]
@@ -1031,7 +1083,10 @@ def test_asset_tag_format_edit_waits_and_audits_the_committed_predecessor(
     format edit or Machine creation's counter UPDATE, then audits the
     committed row and never overwrites ``next_sequence``."""
     client, engine = unconfigured_client
-    assert client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4}).status_code == 200
+    assert (
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4}).status_code
+        == 200
+    )
     expected_before = {"prefix": "CD-", "digits": 4}
     sequence = _stored(engine, models.MachineAssetTagConfig, 1).next_sequence
     with engine.connect() as connection:
@@ -1048,7 +1103,7 @@ def test_asset_tag_format_edit_waits_and_audits_the_committed_predecessor(
                 sa.text("UPDATE machine_asset_tag_config SET next_sequence = next_sequence + 1")
             )
         thread, results = _start(
-            lambda: client.put(_ASSET_TAG_PATH, json={"prefix": "AB-", "digits": 5})
+            lambda: admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "AB-", "digits": 5})
         )
         _assert_blocked(thread)
         connection.commit()
@@ -1076,7 +1131,7 @@ def test_concurrent_first_asset_tag_format_save_is_a_conflict(
             )
         )
         thread, results = _start(
-            lambda: client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5})
+            lambda: admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5})
         )
         # The INSERT waits on the holder's uncommitted singleton row.
         _assert_blocked(thread)
@@ -1102,7 +1157,7 @@ def test_concurrent_first_asset_tag_format_save_is_a_conflict(
 def test_multi_field_patch_is_one_audit_row(client: TestClient, db_engine: Engine) -> None:
     department = _create_department(client)
     new_name = _unique("DEPT")
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/departments/{department['id']}", json={"name": new_name, "is_active": False}
     )
     assert response.status_code == 200, response.text
@@ -1113,7 +1168,7 @@ def test_multi_field_patch_is_one_audit_row(client: TestClient, db_engine: Engin
     assert rows[1].after_data == {"name": new_name, "is_active": False, **settings}
 
     area = _create_area(client, description="old")
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/areas/{area['id']}",
         json={"description": "new", "color": "var(--a3)", "is_active": False},
     )
@@ -1135,7 +1190,7 @@ def test_deactivation_already_committed_by_a_concurrent_writer(
             sa.text("UPDATE areas SET is_active = false WHERE id = :id"), {"id": area["id"]}
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/areas/{area['id']}", json={"description": "new", "is_active": False}
             )
         )
@@ -1196,29 +1251,31 @@ def test_failed_audit_write_rolls_back_every_department_area_operation_station_p
 
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     attempts: list[Callable[[], Response]] = [
-        lambda: client.post("/api/departments", json={"name": _unique("DEPT")}),
-        lambda: client.patch(
+        lambda: admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}),
+        lambda: admin_of(client).patch(
             f"/api/departments/{department['id']}", json={"name": _unique("DEPT")}
         ),
-        lambda: client.patch(
+        lambda: admin_of(client).patch(
             f"/api/departments/{department['id']}",
             json={"board_seconds_per_row": 2, "board_min_page_seconds": 10},
         ),
-        lambda: client.post(
+        lambda: admin_of(client).post(
             "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
         ),
-        lambda: client.patch(
+        lambda: admin_of(client).patch(
             f"/api/areas/{area['id']}", json={"description": "changed", "is_terminal": True}
         ),
-        lambda: client.post("/api/operations", json={"area_id": area["id"], "code": _unique("OP")}),
-        lambda: client.patch(
+        lambda: admin_of(client).post(
+            "/api/operations", json={"area_id": area["id"], "code": _unique("OP")}
+        ),
+        lambda: admin_of(client).patch(
             f"/api/operations/{operation['id']}",
             json={"code": _unique("OP"), "default_expected_duration": "PT5M"},
         ),
-        lambda: client.post(
+        lambda: admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area["id"]}
         ),
-        lambda: client.patch(
+        lambda: admin_of(client).patch(
             f"/api/scan-stations/{station['station_id']}",
             json={"area_id": target["id"], "is_active": False},
         ),
@@ -1239,16 +1296,19 @@ def test_failed_audit_write_rolls_back_both_asset_tag_paths(
 
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     with pytest.raises(RuntimeError, match="audit persistence failed"):
-        client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4})
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4})
     monkeypatch.undo()
     assert _snapshot_tables(engine) == empty
     assert _row_count(engine, models.MachineAssetTagConfig) == 0
 
-    assert client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4}).status_code == 200
+    assert (
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4}).status_code
+        == 200
+    )
     seeded = _snapshot_tables(engine)
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     with pytest.raises(RuntimeError, match="audit persistence failed"):
-        client.put(_ASSET_TAG_PATH, json={"prefix": "MS-", "digits": 6})
+        admin_of(client).put(_ASSET_TAG_PATH, json={"prefix": "MS-", "digits": 6})
     monkeypatch.undo()
     assert _snapshot_tables(engine) == seeded
     assert _row_count(engine, models.MachineAssetTagConfig) == 1
@@ -1274,7 +1334,7 @@ def test_audit_chain_over_a_mixed_sequence(client: TestClient, db_engine: Engine
         ({"is_active": False}, 200),
     ]
     for body, status in steps:
-        assert client.patch(path, json=body).status_code == status, body
+        assert admin_of(client).patch(path, json=body).status_code == status, body
 
     rows = _audit_rows(db_engine, "Area", area["id"])
     assert [row.event_type for row in rows] == ["CREATED"] + ["UPDATED"] * 5

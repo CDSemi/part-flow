@@ -10,6 +10,7 @@ import {
 import type { Department } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
   EmptyState,
@@ -19,40 +20,49 @@ import {
 import {
   ActiveField,
   AdminField,
+  RowOpener,
   SectionHeader,
   ServerErrorNote,
   StatusPill,
+  ViewOnlyNote,
 } from './section-widgets';
 
 // Administration → Departments (Phase 3.5): organizational production
 // units. The standard table + editor pattern — Departments are
 // created and edited here and deactivated, never deleted. The server
 // owns the hierarchy rule: a Department with active Areas cannot be
-// deactivated (the rejected save shows its explanation).
+// deactivated (the rejected save shows its explanation). Without the
+// Manage Departments permission the section is view-only.
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; department: Department };
 
 export function DepartmentsSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_DEPARTMENTS');
   const departmentsData = useApiData(listDepartments);
   const areasData = useApiData(listAreas);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
 
   const header = (ready: boolean) => (
-    <SectionHeader
-      title="Departments"
-      subtitle="Organizational production units"
-      action={
-        <button
-          className="btn primary"
-          disabled={!ready || writeBlocked}
-          onClick={() => setDialog({ kind: 'new' })}
-        >
-          + New Department
-        </button>
-      }
-    />
+    <>
+      <SectionHeader
+        title="Departments"
+        subtitle="Organizational production units"
+        action={
+          canWrite ? (
+            <button
+              className="btn primary"
+              disabled={!ready || writeBlocked}
+              onClick={() => setDialog({ kind: 'new' })}
+            >
+              + New Department
+            </button>
+          ) : undefined
+        }
+      />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_DEPARTMENTS" />}
+    </>
   );
 
   if (
@@ -119,16 +129,20 @@ export function DepartmentsSection() {
             {departments.map((department) => (
               <tr
                 key={department.id}
-                className="selrow"
-                onClick={() => setDialog({ kind: 'edit', department })}
+                className={canWrite ? 'selrow' : undefined}
+                onClick={
+                  canWrite
+                    ? () => setDialog({ kind: 'edit', department })
+                    : undefined
+                }
               >
                 <td>
-                  <button
-                    className="rowbtn"
-                    aria-label={`Edit ${department.name}`}
+                  <RowOpener
+                    editable={canWrite}
+                    label={`Edit ${department.name}`}
                   >
                     <b>{department.name}</b>
-                  </button>
+                  </RowOpener>
                 </td>
                 <td className="mono" data-label="Areas">
                   {areaCount(department.id)}

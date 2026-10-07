@@ -55,6 +55,7 @@ from alembic import command
 from app.application import password_hashing
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_authentication_api"
@@ -236,14 +237,16 @@ def _make_user(
     password: str | None = None,
     temporary: bool = False,
 ) -> Account:
-    """A role (unique name) and a User through the S12 routes; a credential
-    row directly when asked."""
+    """A role (unique name) and a User through the S12 routes (as the
+    harness administrator, Phase 14 slice 2); a credential row directly
+    when asked."""
     suffix = _suffix()
+    admin = admin_of(client)
     role = _ok(
-        client.post("/api/roles", json={"name": f"Role {suffix}", "permissions": role_keys}), 201
+        admin.post("/api/roles", json={"name": f"Role {suffix}", "permissions": role_keys}), 201
     )
     user = _ok(
-        client.post(
+        admin.post(
             "/api/users",
             json={
                 "login_name": f"user-{suffix}",
@@ -461,7 +464,7 @@ def test_every_sign_in_failure_answers_the_same(
     """A-2."""
     known = _make_user(client, db_engine, [], password=_PASSWORD)
     inactive = _make_user(client, db_engine, [], password=_PASSWORD)
-    _ok(client.patch(f"/api/users/{inactive.user_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/users/{inactive.user_id}", json={"is_active": False}))
     locked = _make_user(client, db_engine, [], password=_PASSWORD)
     _execute(
         db_engine,
@@ -844,10 +847,12 @@ def test_sign_in_state_is_shown_only_to_user_administrators(
         id=locked.user_id,
     )
 
-    for headers in ({}, _cookie_header(plain_token)):
-        listed = _listed(client.get("/api/users", headers=headers))
-        assert listed and all(set(item) == _USER_KEYS for item in listed)
-        assert all(item["avatar_updated_at"] is None for item in listed)
+    # Phase 14 slice 2: anonymous is refused; signed in without the key
+    # keeps the slice 12 shape.
+    _refused(client.get("/api/users"), 401, _A1, "authentication_required")
+    listed = _listed(client.get("/api/users", headers=_cookie_header(plain_token)))
+    assert listed and all(set(item) == _USER_KEYS for item in listed)
+    assert all(item["avatar_updated_at"] is None for item in listed)
     listed = _listed(client.get("/api/users", headers=_cookie_header(admin_token)))
     assert all(set(item) == _USER_KEYS | {"sign_in_state"} for item in listed)
     states = {item["id"]: item["sign_in_state"] for item in listed}
@@ -866,10 +871,12 @@ def test_sign_in_state_is_shown_only_to_user_administrators(
         )
     )
     assert patched["sign_in_state"] == "NO_PASSWORD"
-    anonymous = _ok(
-        client.patch(f"/api/users/{no_password.user_id}", json={"display_name": "Anon"})
+    _refused(
+        client.patch(f"/api/users/{no_password.user_id}", json={"display_name": "Anon"}),
+        401,
+        _A1,
+        "authentication_required",
     )
-    assert set(anonymous) == _USER_KEYS
 
 
 def test_forced_change_follows_the_policy(client: TestClient, db_engine: Engine) -> None:
@@ -940,16 +947,16 @@ def test_deactivation_ends_every_sign_in(client: TestClient, db_engine: Engine) 
     """A-11."""
     account = _make_user(client, db_engine, [], password=_PASSWORD)
     tokens = [_signed_in(client, account), _signed_in(client, account)]
-    _ok(client.patch(f"/api/users/{account.user_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/users/{account.user_id}", json={"is_active": False}))
     assert {row["end_reason"] for row in _sessions(db_engine, account.user_id)} == {
         "USER_DEACTIVATED"
     }
-    _ok(client.patch(f"/api/users/{account.user_id}", json={"is_active": True}))
+    _ok(admin_of(client).patch(f"/api/users/{account.user_id}", json={"is_active": True}))
     for token in tokens:
         assert _ok(client.get("/api/session", headers=_cookie_header(token)))["user"] is None
 
     inactive = _make_user(client, db_engine, [], password=_PASSWORD)
-    _ok(client.patch(f"/api/users/{inactive.user_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/users/{inactive.user_id}", json={"is_active": False}))
     lingering = "lingering-" + _suffix()
     _execute(
         db_engine,
@@ -967,7 +974,7 @@ def test_role_and_grant_changes_apply_at_the_next_request(
     account = _make_user(client, db_engine, ["MANAGE_WORKERS"], password=_PASSWORD)
     token = _signed_in(client, account)
     _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/roles/{account.role_id}",
             json={
                 "grant_permissions": ["EXPORT_REPORTS"],
@@ -1013,17 +1020,20 @@ def test_cookie_requests_need_the_csrf_header(client: TestClient, db_engine: Eng
     assert _session_of(db_engine, token)["ended_at"] is None
     assert int(_scalar(db_engine, "SELECT count(*) FROM departments")) == departments
 
-    _ok(
-        client.post("/api/departments", json={"name": "Csrf " + _suffix()}, headers=_auth(token)),
-        201,
-    )
+    # With the header the request is handled (as a User who may manage Departments).
+    _ok(admin_of(client).post("/api/departments", json={"name": "Csrf " + _suffix()}), 201)
     _refused(
         client.post("/api/session", json={"login_name": admin.login, "password": _PASSWORD}),
         403,
         _A4,
     )
-    # Anonymous requests without the cookie keep working unchanged.
-    _ok(client.post("/api/departments", json={"name": "Anonymous " + _suffix()}), 201)
+    # Anonymous requests without the cookie are not CSRF-checked: a route
+    # that stays anonymous (a Scan Station command, Phase 14 slice 2)
+    # answers with its own outcome.
+    unknown_station = client.post(
+        "/api/scan-stations/999999/scans/resolve", json={"part_number": "PN-" + _suffix()}
+    )
+    assert unknown_station.status_code == 404, unknown_station.text
 
 
 def test_sign_in_policy_section(client: TestClient, db_engine: Engine) -> None:
@@ -1345,7 +1355,7 @@ def test_a_concurrent_deactivation_refuses_the_sign_in(
         holder.commit()
     _refused(_finish(thread, results), 401, _A5)
     assert not [row for row in _sessions(db_engine, account.user_id) if row["ended_at"] is None]
-    _ok(client.patch(f"/api/users/{account.user_id}", json={"is_active": True}))
+    _ok(admin_of(client).patch(f"/api/users/{account.user_id}", json={"is_active": True}))
     assert _ok(client.get("/api/session", headers=_cookie_header(earlier)))["user"] is None
 
 
@@ -1425,7 +1435,9 @@ def test_deactivation_waits_for_a_sign_in_in_progress(
             sa.text("INSERT INTO user_sessions (user_id, token_digest) VALUES (:id, :digest)"),
             {"id": account.user_id, "digest": _digest(pending)},
         )
-        thread, results = _start(lambda: client.patch(f"/api/users/{account.user_id}", json=body))
+        thread, results = _start(
+            lambda: admin_of(client).patch(f"/api/users/{account.user_id}", json=body)
+        )
         _assert_blocked(thread)
         holder.commit()
     response = _finish(thread, results)

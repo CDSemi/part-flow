@@ -1,9 +1,13 @@
 import type { ReactNode } from 'react';
 
+import type { Permission } from '../../api/roles';
+import { PERMISSION_LABELS } from './permissions';
+
 // Small shared presentation pieces of the Administration sections —
-// the section header row, the table + editor form primitives, the
-// status pill and the policy switch. Components only (React Fast Refresh), no data fetching
-// and no business rules.
+// the section header row, the view-only note, the table + editor form
+// primitives, the status pill, the policy switch and its read-only
+// form. Components only (React Fast Refresh), no data fetching and no
+// business rules.
 
 /**
  * One section's heading row: title, subtitle, and the section-owned
@@ -28,6 +32,43 @@ export function SectionHeader({
       <span className="spacer" />
       {action}
     </div>
+  );
+}
+
+/**
+ * The one line a view-only section shows under its header: the
+ * signed-in user may read the section, and changing it needs the named
+ * permission (the server checks it; the controls are hidden).
+ */
+export function ViewOnlyNote({ permission }: { permission: Permission }) {
+  return (
+    <p className="ad-confighelp">
+      View only — changing this needs the {PERMISSION_LABELS[permission]}{' '}
+      permission.
+    </p>
+  );
+}
+
+/**
+ * The name cell content of a configuration table row: the keyboard and
+ * screen-reader entry point of the row's editor when the row is
+ * editable, plain content otherwise.
+ */
+export function RowOpener({
+  editable,
+  label,
+  children,
+}: {
+  editable: boolean;
+  /** Accessible name of the editor entry point (e.g. "Edit Lathe"). */
+  label: string;
+  children: ReactNode;
+}) {
+  if (!editable) return <>{children}</>;
+  return (
+    <button className="rowbtn" aria-label={label}>
+      {children}
+    </button>
   );
 }
 
@@ -124,6 +165,27 @@ export function PolicySwitch({
       </span>
       <span className="swstate">{on ? 'On' : 'Off'}</span>
     </button>
+  );
+}
+
+/**
+ * Stored settings shown as text (the read-only form of a settings panel
+ * for a user who may not change them).
+ */
+export function ReadOnlyValues({
+  rows,
+}: {
+  rows: readonly { label: string; value: ReactNode }[];
+}) {
+  return (
+    <div className="ad-configpreview">
+      {rows.map((row) => (
+        <div key={row.label} className="prow">
+          <span className="k">{row.label}</span>
+          <span className="v">{row.value}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

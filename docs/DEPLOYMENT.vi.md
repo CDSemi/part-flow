@@ -47,11 +47,25 @@ giới hạn đã quan sát được gồm:
 - database và ứng dụng dùng chung PostgreSQL role do Compose tạo;
 - chưa có production reverse proxy, TLS policy, secret store, log rotation,
   release image tag, scheduled backup job, restore drill hoặc command rollback;
-- Phase 14 đã có sign-in cho application User, nhưng permission check phía server chỉ bao phủ việc đặt mật khẩu và đổi user sign-in settings; mọi màn hình và write khác vẫn mở cho bất kỳ ai truy cập được service;
+- Phase 14 đã có sign-in cho application User và permission check phía server bao phủ mọi đọc và write Administration; các route Management, master-data và monitoring vẫn mở đến Phase 14 slice 3, và write của Scan Station gọi được từ bất kỳ client nào trên mạng cho đến khi thiết bị station được enroll (slice 4);
 - một số view đã duyệt vẫn là preview chỉ có ở development hoặc còn chờ tích
   hợp backend/frontend thật.
 
 Không được che các giới hạn này bằng reverse proxy của NAS hoặc public DNS name.
+
+**Bước nâng cấp cho Phase 14 slice 2 (Administration enforcement).** Trước và sau khi deploy nó, đếm các active user có mật khẩu mà role giữ từng permission-management key (chạy trong database shell, ví dụ `docker compose exec db psql -U <POSTGRES_USER> -d partflow -c "..."`):
+
+```sql
+SELECT rp.permission, count(*) AS holders
+FROM users u
+JOIN user_credentials c ON c.user_id = u.id
+JOIN role_permissions rp ON rp.role_id = u.role_id
+WHERE u.is_active
+  AND rp.permission IN ('MANAGE_USERS_AND_ROLES', 'MANAGE_CORRECTION_PERMISSIONS')
+GROUP BY rp.permission;
+```
+
+Thiếu row nghĩa là không có holder. Kỳ vọng cả hai số đếm ít nhất là 1, hoặc hoàn toàn không có row `MANAGE_USERS_AND_ROLES` (khi đó first-run setup đang mở). Thiếu row `MANAGE_CORRECTION_PERMISSIONS` trong khi `MANAGE_USERS_AND_ROLES` có holder nghĩa là không ai được quản lý correction permission: trước khi deploy, cấp nó trong Administration; sau khi deploy, chạy `docker compose exec backend uv run python -m app.cli restore-correction-permission-management --role-name <role>` (xem `README.md`). Backend cũng ghi cảnh báo lúc khởi động ở trạng thái đó.
 
 ## 3. Topology portable đích
 

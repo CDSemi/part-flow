@@ -137,7 +137,8 @@ def is_setup_open(session: Session, gate: SetupGate) -> bool:
 
 
 def announce_if_open(engine: Engine, gate: SetupGate) -> None:
-    """Startup: announce the token when no administrator exists.
+    """Startup: announce the token when no administrator exists, and warn
+    when no one may manage correction permissions (Phase 14 slice 2).
 
     A database error never stops startup: the token is then announced
     when the setup screen or the session state is first requested.
@@ -145,6 +146,7 @@ def announce_if_open(engine: Engine, gate: SetupGate) -> None:
     try:
         with Session(engine) as session:
             is_setup_open(session, gate)
+            user_access.warn_if_correction_management_lost(session)
     except DBAPIError:
         logger.warning(_STARTUP_UNKNOWN)
 

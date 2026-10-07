@@ -44,9 +44,10 @@ def append_audit_event(
     ``UPDATED`` row and never rewrite prior rows (the append-only
     trigger owned by migration 0004 enforces this in PostgreSQL).
     ``actor_user_id`` is server-derived from the session principal only,
-    never from a request body. ``actor_reference`` is the legacy text
-    column, kept for history and never backfilled; existing callers keep
-    passing it until their Phase 14 slice converts them.
+    never from a request body; the Administration writers pass it since
+    Phase 14 slice 2. ``actor_reference`` is the legacy text column, kept
+    for history and never backfilled; the remaining callers keep passing
+    it until their Phase 14 slice converts them.
     """
     session.add(
         AuditEvent(

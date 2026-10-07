@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 from alembic import command
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -134,7 +135,7 @@ def badge_confirmation_off(db_engine: Engine) -> None:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "WS-", "digits": 4},
     )
@@ -145,7 +146,7 @@ def asset_tag_format(client: TestClient) -> None:
 def default_policy(client: TestClient) -> Iterator[None]:
     """A test that changes the global default restores the approved 15 minutes."""
     yield
-    _ok(client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": 15}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 15}))
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +169,11 @@ class _Cell:
     def __init__(
         self, client: TestClient, *, machine_count: int = 0, is_terminal: bool = False
     ) -> None:
-        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        department = _ok(
+            admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201
+        )
         self.area = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/areas",
                 json={
                     "department_id": department["id"],
@@ -183,7 +186,9 @@ class _Cell:
         self.area_id = int(self.area["id"])
         self.area_name = str(self.area["name"])
         operation = _ok(
-            client.post("/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}),
+            admin_of(client).post(
+                "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
+            ),
             201,
         )
         self.operation_id = int(operation["id"])
@@ -214,7 +219,9 @@ def _second_station(client: TestClient, cell: _Cell) -> _Cell:
 
 def _station(client: TestClient, area_id: int) -> str:
     station = _ok(
-        client.post("/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area_id}),
+        admin_of(client).post(
+            "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area_id}
+        ),
         201,
     )
     return str(station["station_id"])
@@ -222,7 +229,7 @@ def _station(client: TestClient, area_id: int) -> str:
 
 def _worker(client: TestClient, name: str | None = None) -> dict[str, Any]:
     return _ok(
-        client.post(
+        admin_of(client).post(
             "/api/workers",
             json={"name": name or _unique("Worker"), "badge_barcode": _unique("BADGE")},
         ),
@@ -234,7 +241,7 @@ def _set_mode(
     client: TestClient, area_id: int, mode: str, worker_id: int | None = None
 ) -> dict[str, Any]:
     return _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/areas/{area_id}",
             json={"worker_identification_mode": mode, "fixed_worker_id": worker_id},
         )
@@ -641,7 +648,9 @@ def test_sign_in_opens_a_session_with_the_effective_timeout(
 
     overridden = _scanned_cell(client, db_engine)
     _ok(
-        client.patch(f"/api/areas/{overridden.area_id}", json={"worker_session_timeout_minutes": 5})
+        admin_of(client).patch(
+            f"/api/areas/{overridden.area_id}", json={"worker_session_timeout_minutes": 5}
+        )
     )
     _sign_in(client, overridden, worker)
     other = _open(db_engine, overridden.station_id)
@@ -712,7 +721,7 @@ def test_unknown_and_inactive_badges_record_and_refresh_nothing(
     client: TestClient, db_engine: Engine
 ) -> None:
     worker, inactive = _worker(client), _worker(client)
-    _ok(client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/workers/{inactive['id']}", json={"is_active": False}))
     cell = _scanned_cell(client, db_engine, worker)
     row = _open(db_engine, cell.station_id)
     before = _row_counts(db_engine)
@@ -994,7 +1003,7 @@ def test_the_timeout_follows_the_override_else_the_default(
     area_path = f"/api/areas/{cell.area_id}"
 
     opened = _open(db_engine, cell.station_id)
-    _ok(client.patch(area_path, json={"worker_session_timeout_minutes": 1}))
+    _ok(admin_of(client).patch(area_path, json={"worker_session_timeout_minutes": 1}))
     # A configuration change never moves an open session.
     assert _open(db_engine, cell.station_id) == opened
     session = _ok(_resolve(client, cell, pn))["worker_session"]
@@ -1003,8 +1012,8 @@ def test_the_timeout_follows_the_override_else_the_default(
     )
 
     refreshed = _open(db_engine, cell.station_id)
-    _ok(client.patch(area_path, json={"worker_session_timeout_minutes": None}))
-    _ok(client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
+    _ok(admin_of(client).patch(area_path, json={"worker_session_timeout_minutes": None}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
     assert _open(db_engine, cell.station_id) == refreshed
     session = _ok(_resolve(client, cell, pn))["worker_session"]
     assert _parse(session["expires_at"]) - _parse(session["server_now"]) == datetime.timedelta(
@@ -1135,7 +1144,7 @@ def test_a_station_rebind_or_deactivation_closes_its_session(
     elsewhere = _Cell(client)
     audits = _audit_count(db_engine, "ScanStation", rebound.station_id)
     _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/scan-stations/{rebound.station_id}", json={"area_id": elsewhere.area_id}
         )
     )
@@ -1144,7 +1153,11 @@ def test_a_station_rebind_or_deactivation_closes_its_session(
     assert _audit_count(db_engine, "ScanStation", rebound.station_id) == audits + 1
 
     deactivated = _scanned_cell(client, db_engine, worker)
-    _ok(client.patch(f"/api/scan-stations/{deactivated.station_id}", json={"is_active": False}))
+    _ok(
+        admin_of(client).patch(
+            f"/api/scan-stations/{deactivated.station_id}", json={"is_active": False}
+        )
+    )
     (row,) = _sessions(db_engine, deactivated.station_id)
     assert row.end_reason == "STATION_CHANGED"
 
@@ -1158,7 +1171,7 @@ def test_a_worker_deactivation_closes_the_worker_sessions(
     third = _scanned_cell(client, db_engine, bystander)
     untouched = _open(db_engine, third.station_id)
     audits = _audit_count(db_engine, "Worker", worker["id"])
-    _ok(client.patch(f"/api/workers/{worker['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/workers/{worker['id']}", json={"is_active": False}))
     for cell in (first, second):
         (row,) = _sessions(db_engine, cell.station_id)
         assert row.end_reason == "WORKER_DEACTIVATED"
@@ -1172,31 +1185,31 @@ def test_other_configuration_writes_close_nothing(
     worker = _worker(client)
     cell = _scanned_cell(client, db_engine, worker)
     other = _scanned_cell(client, db_engine, worker)
-    _ok(client.patch(f"/api/scan-stations/{other.station_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/scan-stations/{other.station_id}", json={"is_active": False}))
     rows = {
         station: _sessions(db_engine, station) for station in (cell.station_id, other.station_id)
     }
 
     area_path = f"/api/areas/{cell.area_id}"
-    _ok(client.patch(area_path, json={"name": _unique("RENAMED")}))
-    _ok(client.patch(area_path, json={"worker_session_timeout_minutes": 7}))
-    _ok(client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": 20}))
-    _ok(client.patch(f"/api/scan-stations/{other.station_id}", json={"is_active": True}))
-    _ok(client.patch(f"/api/workers/{worker['id']}", json={"name": _unique("Renamed")}))
+    _ok(admin_of(client).patch(area_path, json={"name": _unique("RENAMED")}))
+    _ok(admin_of(client).patch(area_path, json={"worker_session_timeout_minutes": 7}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 20}))
+    _ok(admin_of(client).patch(f"/api/scan-stations/{other.station_id}", json={"is_active": True}))
+    _ok(admin_of(client).patch(f"/api/workers/{worker['id']}", json={"name": _unique("Renamed")}))
     # Refused configuration writes close nothing either: the Worker is the
     # Fixed Worker of another Area (S3), and a rebind into an inactive Area (S2c).
     fixed_area = _Cell(client)
     _set_mode(client, fixed_area.area_id, "FIXED", int(worker["id"]))
-    deactivate = client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+    deactivate = admin_of(client).patch(f"/api/workers/{worker['id']}", json={"is_active": False})
     assert deactivate.status_code == 409
     inactive_area = _Cell(client)
-    _ok(client.patch(f"/api/areas/{inactive_area.area_id}", json={"is_active": False}))
-    rebind = client.patch(
+    _ok(admin_of(client).patch(f"/api/areas/{inactive_area.area_id}", json={"is_active": False}))
+    rebind = admin_of(client).patch(
         f"/api/scan-stations/{cell.station_id}", json={"area_id": inactive_area.area_id}
     )
     assert rebind.status_code == 409
     # An Area deactivation closes nothing (S4-OD5).
-    _ok(client.patch(area_path, json={"is_active": False}))
+    _ok(admin_of(client).patch(area_path, json={"is_active": False}))
     assert {
         station: _sessions(db_engine, station) for station in (cell.station_id, other.station_id)
     } == rows
@@ -1569,7 +1582,7 @@ def test_an_area_deactivation_and_mode_change_waits_for_a_command_without_deadlo
             {"id": session.id},
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/areas/{cell.area_id}",
                 json={"is_active": False, "worker_identification_mode": "DISABLED"},
             )
@@ -1610,13 +1623,13 @@ def test_closers_of_the_same_sessions_never_deadlock(client: TestClient, db_engi
 
         def area_patch(area_id: int = cell.area_id, barrier: Any = barrier) -> Any:
             barrier.wait()
-            return client.patch(
+            return admin_of(client).patch(
                 f"/api/areas/{area_id}", json={"worker_identification_mode": "DISABLED"}
             )
 
         def worker_patch(worker_id: int = int(worker["id"]), barrier: Any = barrier) -> Any:
             barrier.wait()
-            return client.patch(f"/api/workers/{worker_id}", json={"is_active": False})
+            return admin_of(client).patch(f"/api/workers/{worker_id}", json={"is_active": False})
 
         threads = [_start(area_patch), _start(worker_patch)]
         responses = [_finish(thread, results) for thread, results in threads]
@@ -1647,11 +1660,15 @@ def test_closers_wait_in_id_order_behind_a_held_session(
         )
         threads = [
             _start(
-                lambda: client.patch(
+                lambda: admin_of(client).patch(
                     f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "DISABLED"}
                 )
             ),
-            _start(lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})),
+            _start(
+                lambda: admin_of(client).patch(
+                    f"/api/workers/{worker['id']}", json={"is_active": False}
+                )
+            ),
         ]
         try:
             for thread, _ in threads:
@@ -1761,7 +1778,7 @@ def test_an_allocation_and_a_station_deactivation_serialize_on_the_session(
             {"id": session.id},
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/scan-stations/{stockroom.station_id}", json={"is_active": False}
             )
         )
@@ -1901,14 +1918,14 @@ def test_badge_scan_refusals(client: TestClient, db_engine: Engine) -> None:
         assert client.post(path, json=body).status_code == 422, body
     assert _row_counts(db_engine) == before
 
-    _ok(client.patch(f"/api/scan-stations/{cell.station_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/scan-stations/{cell.station_id}", json={"is_active": False}))
     refused = client.post(path, json={"badge": badge})
     assert refused.status_code == 409
     assert refused.json()["detail"] == (
         f"Scan Station '{cell.station_id}' is inactive and accepts no production use."
     )
     inactive_area = _scanned_cell(client, db_engine)
-    _ok(client.patch(f"/api/areas/{inactive_area.area_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/areas/{inactive_area.area_id}", json={"is_active": False}))
     refused = client.post(_badge_path(inactive_area), json={"badge": badge})
     assert refused.status_code == 409
     assert refused.json()["detail"] == (
@@ -1922,7 +1939,7 @@ def test_badge_scan_refusals(client: TestClient, db_engine: Engine) -> None:
 def test_worker_session_policy_api(
     client: TestClient, db_engine: Engine, default_policy: None
 ) -> None:
-    initial = _ok(client.get(_POLICY_PATH))
+    initial = _ok(admin_of(client).get(_POLICY_PATH))
     assert initial["worker_session_timeout_minutes"] == 15
     with db_engine.connect() as connection:
         before = int(
@@ -1930,9 +1947,9 @@ def test_worker_session_policy_api(
                 sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'ApplicationPolicy'")
             ).scalar_one()
         )
-    stored = _ok(client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
+    stored = _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
     assert stored["worker_session_timeout_minutes"] == 30
-    assert _ok(client.get(_POLICY_PATH))["worker_session_timeout_minutes"] == 30
+    assert _ok(admin_of(client).get(_POLICY_PATH))["worker_session_timeout_minutes"] == 30
     with db_engine.connect() as connection:
         rows = list(
             connection.execute(
@@ -1958,11 +1975,11 @@ def test_worker_session_policy_api(
         None,
     )
     # An identical PUT is a no-op.
-    _ok(client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
     assert _audit_count(db_engine, "ApplicationPolicy", "worker-sessions") == before + 1
 
     for value in (0, 721, -5):
-        refused = client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": value})
+        refused = admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": value})
         assert refused.status_code == 422
         assert refused.json() == {"detail": _E_S2}
     for body in (
@@ -1973,22 +1990,22 @@ def test_worker_session_policy_api(
         {"worker_session_timeout_minutes": 15, "extra": 1},
         {},
     ):
-        assert client.put(_POLICY_PATH, json=body).status_code == 422, body
-    assert _ok(client.get(_POLICY_PATH))["worker_session_timeout_minutes"] == 30
+        assert admin_of(client).put(_POLICY_PATH, json=body).status_code == 422, body
+    assert _ok(admin_of(client).get(_POLICY_PATH))["worker_session_timeout_minutes"] == 30
     assert _audit_count(db_engine, "ApplicationPolicy", "worker-sessions") == before + 1
 
 
 def test_area_override_api(client: TestClient, db_engine: Engine) -> None:
-    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    department = _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
     plain = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
         ),
         201,
     )
     assert plain["worker_session_timeout_minutes"] is None
     overridden = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department["id"],
@@ -2000,7 +2017,7 @@ def test_area_override_api(client: TestClient, db_engine: Engine) -> None:
     )
     assert overridden["worker_session_timeout_minutes"] == 45
     for refused_value in (0, 721):
-        refused = client.post(
+        refused = admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department["id"],
@@ -2014,7 +2031,7 @@ def test_area_override_api(client: TestClient, db_engine: Engine) -> None:
     path = f"/api/areas/{plain['id']}"
     audits = _audit_count(db_engine, "Area", plain["id"])
     assert (
-        _ok(client.patch(path, json={"worker_session_timeout_minutes": 5}))[
+        _ok(admin_of(client).patch(path, json={"worker_session_timeout_minutes": 5}))[
             "worker_session_timeout_minutes"
         ]
         == 5
@@ -2031,14 +2048,14 @@ def test_area_override_api(client: TestClient, db_engine: Engine) -> None:
     assert after_data["worker_session_timeout_minutes"] == 5
     assert _audit_count(db_engine, "Area", plain["id"]) == audits + 1
     for value in (0, 721):
-        refused = client.patch(path, json={"worker_session_timeout_minutes": value})
+        refused = admin_of(client).patch(path, json={"worker_session_timeout_minutes": value})
         assert refused.status_code == 422
         assert refused.json() == {"detail": _E_S3}
     for malformed in (True, "5", 1.5):
         body = {"worker_session_timeout_minutes": malformed}
-        assert client.patch(path, json=body).status_code == 422
+        assert admin_of(client).patch(path, json=body).status_code == 422
     assert _audit_count(db_engine, "Area", plain["id"]) == audits + 1
-    cleared = _ok(client.patch(path, json={"worker_session_timeout_minutes": None}))
+    cleared = _ok(admin_of(client).patch(path, json={"worker_session_timeout_minutes": None}))
     assert cleared["worker_session_timeout_minutes"] is None
     assert _audit_count(db_engine, "Area", plain["id"]) == audits + 2
 
@@ -2061,11 +2078,15 @@ def test_the_server_clock_drives_every_session(client: TestClient, db_engine: En
 def test_the_area_editor_accepts_scanned_mode(client: TestClient, db_engine: Engine) -> None:
     cell = _Cell(client)
     accepted = _ok(
-        client.patch(f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "SCANNED"})
+        admin_of(client).patch(
+            f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "SCANNED"}
+        )
     )
     assert accepted["worker_identification_mode"] == "SCANNED"
     scanned = _scanned_cell(client, db_engine)
-    saved = _ok(client.patch(f"/api/areas/{scanned.area_id}", json={"name": _unique("AREA")}))
+    saved = _ok(
+        admin_of(client).patch(f"/api/areas/{scanned.area_id}", json={"name": _unique("AREA")})
+    )
     assert saved["worker_identification_mode"] == "SCANNED"
 
 

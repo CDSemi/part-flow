@@ -48,6 +48,7 @@ from app.application.errors import InvalidInputError
 from app.core.config import get_settings
 from app.domain.enums import ThemePreference
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_station_theme_api"
@@ -124,21 +125,25 @@ class _Cell:
     """An Area without Machines, with one Operation and one Scan Station."""
 
     def __init__(self, client: TestClient) -> None:
-        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        department = _ok(
+            admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201
+        )
         area = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
             ),
             201,
         )
         self.area_id = int(area["id"])
         operation = _ok(
-            client.post("/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}),
+            admin_of(client).post(
+                "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
+            ),
             201,
         )
         self.operation_id = int(operation["id"])
         station = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
             ),
             201,
@@ -148,7 +153,7 @@ class _Cell:
 
 def _worker(client: TestClient) -> dict[str, Any]:
     return _ok(
-        client.post(
+        admin_of(client).post(
             "/api/workers", json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE")}
         ),
         201,
@@ -399,7 +404,9 @@ def test_an_unknown_station_is_404_with_nothing_created(
 def test_an_inactive_station_or_area_still_saves(client: TestClient, db_engine: Engine) -> None:
     inactive_station = _Cell(client)
     _ok(
-        client.patch(f"/api/scan-stations/{inactive_station.station_id}", json={"is_active": False})
+        admin_of(client).patch(
+            f"/api/scan-stations/{inactive_station.station_id}", json={"is_active": False}
+        )
     )
     assert _save(client, inactive_station.station_id, "LIGHT")["theme_preference"] == "LIGHT"
     assert _station(db_engine, inactive_station.station_id).theme_preference == "LIGHT"
@@ -407,7 +414,7 @@ def test_an_inactive_station_or_area_still_saves(client: TestClient, db_engine: 
     assert response.status_code == 409, response.text
 
     inactive_area = _Cell(client)
-    _ok(client.patch(f"/api/areas/{inactive_area.area_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/areas/{inactive_area.area_id}", json={"is_active": False}))
     assert _save(client, inactive_area.station_id, "DARK")["theme_preference"] == "DARK"
     assert _station(db_engine, inactive_area.station_id).theme_preference == "DARK"
     response = client.get(f"/api/scan-stations/{inactive_area.station_id}/context")
@@ -539,7 +546,7 @@ def test_configuration_production_and_session_events_leave_the_theme_alone(
         {"is_active": False},
         {"is_active": True},
     ):
-        _ok(client.patch(f"/api/scan-stations/{station}", json=body))
+        _ok(admin_of(client).patch(f"/api/scan-stations/{station}", json=body))
         assert _station(db_engine, station).theme_preference == "LIGHT"
     audits = _station_audits(db_engine, station)
     assert len(audits) == 5  # CREATED + four UPDATED
@@ -557,7 +564,11 @@ def test_configuration_production_and_session_events_leave_the_theme_alone(
 
     # Worker Sessions: the Area switches to Scanned session mode through
     # the real Area API (slice 5).
-    _ok(client.patch(f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "SCANNED"}))
+    _ok(
+        admin_of(client).patch(
+            f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "SCANNED"}
+        )
+    )
     assert_light()
     first, second = _worker(client), _worker(client)
 

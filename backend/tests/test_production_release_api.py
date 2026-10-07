@@ -65,6 +65,7 @@ from app.application.errors import (
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_production_release_api"
@@ -126,17 +127,17 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
     payload = {"department_id": department.json()["id"], "name": _unique("AREA"), **overrides}
-    response = client.post("/api/areas", json=payload)
+    response = admin_of(client).post("/api/areas", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _create_operation(client: TestClient, area_id: int, **overrides: Any) -> dict[str, Any]:
     payload = {"area_id": area_id, "code": _unique("OP"), **overrides}
-    response = client.post("/api/operations", json=payload)
+    response = admin_of(client).post("/api/operations", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -484,14 +485,16 @@ def test_invalid_inputs_create_nothing(client: TestClient, db_engine: Engine) ->
     other_operation = _create_operation(client, int(other_area["id"]))
     inactive_area = _create_area(client)
     assert (
-        client.patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
     inactive_operation = _create_operation(client, int(area["id"]))
     assert (
-        client.patch(
-            f"/api/operations/{inactive_operation['id']}", json={"is_active": False}
-        ).status_code
+        admin_of(client)
+        .patch(f"/api/operations/{inactive_operation['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
     archived_template = _create_route_template(db_engine, [{"area_id": area["id"]}], archived=True)
@@ -642,7 +645,9 @@ def test_same_device_event_id_replays_original_result(
     # the idempotency check runs before entity validation (SLICE1 §13).
     # (The Area itself cannot be deactivated while it holds active
     # quantity — that guard is part of the environment rules.)
-    deactivated = client.patch(f"/api/operations/{operation['id']}", json={"is_active": False})
+    deactivated = admin_of(client).patch(
+        f"/api/operations/{operation['id']}", json={"is_active": False}
+    )
     assert deactivated.status_code == 200, deactivated.text
     variant = _release(
         client,
@@ -1873,7 +1878,7 @@ def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
         with Session(db_engine) as session:
             try:
                 results["deactivation"] = environment.update_area(
-                    session, int(area["id"]), is_active=False
+                    session, int(area["id"]), is_active=False, actor_user_id=None
                 )
             except Exception as exc:  # noqa: BLE001 — collected for assertions
                 results["deactivation"] = exc
@@ -1904,7 +1909,10 @@ def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
     empty_area = _create_area(client)
     empty_operation = _create_operation(client, int(empty_area["id"]))
     assert (
-        client.patch(f"/api/areas/{empty_area['id']}", json={"is_active": False}).status_code == 200
+        admin_of(client)
+        .patch(f"/api/areas/{empty_area['id']}", json={"is_active": False})
+        .status_code
+        == 200
     )
     wo_2, demand_2, pn_2 = _create_demand(client)
     late_release = _release(
@@ -1949,7 +1957,7 @@ def test_area_deactivation_patch_applies_metadata_edits_atomically(
     """
     area = _create_area(client)  # active, holds no quantity
     new_name = _unique("AREA-RENAMED")
-    response = client.patch(
+    response = admin_of(client).patch(
         f"/api/areas/{area['id']}",
         json={
             "name": new_name,

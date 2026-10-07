@@ -21,6 +21,7 @@ import { listWorkers } from '../../api/workers';
 import type { Worker } from '../../api/workers';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -32,9 +33,11 @@ import {
 import {
   ActiveField,
   AdminField,
+  RowOpener,
   SectionHeader,
   ServerErrorNote,
   StatusPill,
+  ViewOnlyNote,
 } from './section-widgets';
 import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 
@@ -49,7 +52,9 @@ import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 // badge-confirmation gates). The per-Area Worker session timeout
 // override is edited in Administration → Worker sessions. The server
 // judges every rule (an inactive Fixed Worker, deactivating a Worker who
-// is still fixed).
+// is still fixed). Without the Manage Areas permission the section is
+// view-only; a Worker's badge is shown only to users who may manage
+// Workers (the server withholds it from everyone else).
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; area: Area };
 
@@ -57,6 +62,7 @@ export function AreasSection() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_AREAS');
   const areasData = useApiData(listAreas);
   const departmentsData = useApiData(listDepartments);
   const operationsData = useApiData(listOperations);
@@ -65,24 +71,29 @@ export function AreasSection() {
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
 
   const header = (ready: boolean, canCreate: boolean) => (
-    <SectionHeader
-      title="Areas"
-      subtitle="Physical production locations"
-      action={
-        <button
-          className="btn primary"
-          disabled={!ready || !canCreate || writeBlocked}
-          title={
-            ready && !canCreate
-              ? 'Areas need an active Department first'
-              : undefined
-          }
-          onClick={() => setDialog({ kind: 'new' })}
-        >
-          + New Area
-        </button>
-      }
-    />
+    <>
+      <SectionHeader
+        title="Areas"
+        subtitle="Physical production locations"
+        action={
+          canWrite ? (
+            <button
+              className="btn primary"
+              disabled={!ready || !canCreate || writeBlocked}
+              title={
+                ready && !canCreate
+                  ? 'Areas need an active Department first'
+                  : undefined
+              }
+              onClick={() => setDialog({ kind: 'new' })}
+            >
+              + New Area
+            </button>
+          ) : undefined
+        }
+      />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_AREAS" />}
+    </>
   );
 
   const reloadAll = () => {
@@ -161,7 +172,9 @@ export function AreasSection() {
           areas={areas}
           operations={operations}
           machines={machines}
-          onOpenEdit={(area) => setDialog({ kind: 'edit', area })}
+          onOpenEdit={
+            canWrite ? (area) => setDialog({ kind: 'edit', area }) : null
+          }
         />
       )}
       <div className="ad-notice">
@@ -227,7 +240,8 @@ function AreasTable({
   areas: Area[];
   operations: Operation[];
   machines: Machine[];
-  onOpenEdit: (area: Area) => void;
+  /** Open an Area's editor; null when the rows are not editable. */
+  onOpenEdit: ((area: Area) => void) | null;
 }) {
   const operationNames = (area: Area): string => {
     const names = operations
@@ -261,14 +275,17 @@ function AreasTable({
           return (
             <tr
               key={area.id}
-              className="selrow"
-              onClick={() => onOpenEdit(area)}
+              className={onOpenEdit ? 'selrow' : undefined}
+              onClick={onOpenEdit ? () => onOpenEdit(area) : undefined}
             >
               <td>
-                <button className="rowbtn" aria-label={`Edit ${area.name}`}>
+                <RowOpener
+                  editable={onOpenEdit !== null}
+                  label={`Edit ${area.name}`}
+                >
                   <AreaDot colorVar={areaColor(area)} size={14} />{' '}
                   <b>{area.name}</b>
-                </button>
+                </RowOpener>
               </td>
               {/* data-label: inline column captions in the collapsed
                   stacked layout (GUI_DESIGN §2.5) — mode values and a
@@ -514,7 +531,9 @@ function AreaDialog({
                 ) : null}
                 {activeWorkers.map((worker) => (
                   <option key={worker.id} value={String(worker.id)}>
-                    {worker.name} · {worker.badgeBarcode}
+                    {worker.badgeBarcode === null
+                      ? worker.name
+                      : `${worker.name} · ${worker.badgeBarcode}`}
                   </option>
                 ))}
               </select>

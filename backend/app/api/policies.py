@@ -21,7 +21,8 @@ handlers in ``app.api.errors`` translate typed failures.
 - ``GET /policies/correction-permissions`` — Administration → Correction
   permissions (Phase 13 slice 6): the Undo reason policy; role-based
   correction permissions are configured through ``/api/roles`` (slice
-  12) and are not enforced before Phase 14.
+  12; changing who holds them needs ``MANAGE_CORRECTION_PERMISSIONS``
+  since Phase 14 slice 2).
 - ``PUT /policies/correction-permissions`` — exactly
   ``{"undo_reason_required": bool}`` (a missing field, a non-boolean, a
   ``null`` or an extra field is 422); answers with the stored policy,
@@ -52,8 +53,16 @@ handlers in ``app.api.errors`` translate typed failures.
 - ``PUT /policies/sign-in`` — a partial merge like Worker sessions
   (strict integers and booleans; an empty body, a ``null`` or an extra
   field is 422); requires ``CONFIGURE_SYSTEM_SETTINGS``; the audit row
-  names the signed-in administrator. Every other policy route keeps its
-  Phase 13 gate (none) until Phase 14 slice 2.
+  names the signed-in administrator.
+
+Access (Phase 14 slice 2): every read needs a signed-in User except
+``GET /policies/due-soon``, which stays public (the Production Board and
+the Scan Station read it without signing in). Each write needs its
+section's permission — Worker sessions
+``MANAGE_WORKER_SESSION_POLICIES``, Correction permissions
+``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention and user
+sign-in ``CONFIGURE_SYSTEM_SETTINGS`` — and its audit row names the
+signed-in User (``actor_user_id``).
 """
 
 import datetime
@@ -70,6 +79,16 @@ from app.domain.enums import Permission
 from app.infrastructure.models import ApplicationPolicy
 
 router = APIRouter(prefix="/api")
+
+WorkerSessionPolicyManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_WORKER_SESSION_POLICIES))
+]
+CorrectionPermissionsManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_CORRECTION_PERMISSIONS))
+]
+SystemSettingsManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.CONFIGURE_SYSTEM_SETTINGS))
+]
 
 
 class WorkerSessionPolicyResponse(BaseModel):
@@ -170,32 +189,42 @@ def _retention_response(policy: ApplicationPolicy) -> RetentionPolicyResponse:
 
 
 @router.get("/policies/worker-sessions")
-def get_worker_session_policy(session: SessionDep) -> WorkerSessionPolicyResponse:
+def get_worker_session_policy(
+    principal: SignedInDep, session: SessionDep
+) -> WorkerSessionPolicyResponse:
     return _response(policies.get_policy(session))
 
 
 @router.put("/policies/worker-sessions")
 def put_worker_session_policy(
-    body: WorkerSessionPolicyPutRequest, session: SessionDep
+    principal: WorkerSessionPolicyManagerDep,
+    body: WorkerSessionPolicyPutRequest,
+    session: SessionDep,
 ) -> WorkerSessionPolicyResponse:
     fields = body.model_dump(exclude_unset=True)
     if "worker_session_timeout_minutes" in fields:
         fields["timeout_minutes"] = fields.pop("worker_session_timeout_minutes")
-    policy = policies.update_worker_session_policy(session, **fields)
+    policy = policies.update_worker_session_policy(
+        session, actor_user_id=principal.user_id, **fields
+    )
     return _response(policy)
 
 
 @router.get("/policies/correction-permissions")
-def get_correction_permissions_policy(session: SessionDep) -> CorrectionPermissionsPolicyResponse:
+def get_correction_permissions_policy(
+    principal: SignedInDep, session: SessionDep
+) -> CorrectionPermissionsPolicyResponse:
     return _correction_permissions_response(policies.get_policy(session))
 
 
 @router.put("/policies/correction-permissions")
 def put_correction_permissions_policy(
-    body: CorrectionPermissionsPolicyPutRequest, session: SessionDep
+    principal: CorrectionPermissionsManagerDep,
+    body: CorrectionPermissionsPolicyPutRequest,
+    session: SessionDep,
 ) -> CorrectionPermissionsPolicyResponse:
     policy = policies.update_correction_permissions_policy(
-        session, undo_reason_required=body.undo_reason_required
+        session, undo_reason_required=body.undo_reason_required, actor_user_id=principal.user_id
     )
     return _correction_permissions_response(policy)
 
@@ -207,28 +236,31 @@ def get_due_soon_policy(session: SessionDep) -> DueSoonPolicyResponse:
 
 @router.put("/policies/due-soon")
 def put_due_soon_policy(
-    body: DueSoonPolicyPutRequest, session: SessionDep
+    principal: SystemSettingsManagerDep, body: DueSoonPolicyPutRequest, session: SessionDep
 ) -> DueSoonPolicyResponse:
     policy = policies.update_due_soon_policy(
         session,
         min_days=body.due_soon_min_days,
         lead_time_percent=body.due_soon_lead_time_percent,
         max_days=body.due_soon_max_days,
+        actor_user_id=principal.user_id,
     )
     return _due_soon_response(policy)
 
 
 @router.get("/policies/data-retention")
-def get_retention_policy(session: SessionDep) -> RetentionPolicyResponse:
+def get_retention_policy(principal: SignedInDep, session: SessionDep) -> RetentionPolicyResponse:
     return _retention_response(policies.get_policy(session))
 
 
 @router.put("/policies/data-retention")
 def put_retention_policy(
-    body: RetentionPolicyPutRequest, session: SessionDep
+    principal: SystemSettingsManagerDep, body: RetentionPolicyPutRequest, session: SessionDep
 ) -> RetentionPolicyResponse:
     policy = policies.update_retention_policy(
-        session, retention_period_months=body.retention_period_months
+        session,
+        retention_period_months=body.retention_period_months,
+        actor_user_id=principal.user_id,
     )
     return _retention_response(policy)
 
@@ -271,17 +303,13 @@ def _sign_in_response(policy: ApplicationPolicy) -> SignInPolicyResponse:
 
 
 @router.get("/policies/sign-in")
-def get_sign_in_policy(session: SessionDep, principal: SignedInDep) -> SignInPolicyResponse:
+def get_sign_in_policy(principal: SignedInDep, session: SessionDep) -> SignInPolicyResponse:
     return _sign_in_response(policies.get_policy(session))
 
 
 @router.put("/policies/sign-in")
 def put_sign_in_policy(
-    body: SignInPolicyPutRequest,
-    session: SessionDep,
-    principal: Annotated[
-        Principal, Depends(RequirePermission(Permission.CONFIGURE_SYSTEM_SETTINGS))
-    ],
+    principal: SystemSettingsManagerDep, body: SignInPolicyPutRequest, session: SessionDep
 ) -> SignInPolicyResponse:
     policy = policies.update_sign_in_policy(
         session, actor_user_id=principal.user_id, **body.model_dump(exclude_unset=True)

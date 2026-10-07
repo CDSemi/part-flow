@@ -27,8 +27,9 @@ OD-10, OD-14):
   (``WORKER_DEACTIVATED``, Phase 13 slice 4); the session rows are their
   own audit record.
 - Every effective write appends exactly one ``audit_events`` row in the
-  SAME transaction (entity ``Worker``, ``actor_reference`` NULL until
-  Phase 14). Profile rows snapshot ``{name, badge_barcode, is_active}``;
+  SAME transaction (entity ``Worker``; ``actor_user_id`` is the
+  signed-in User (Phase 14 slice 2); ``actor_reference`` is legacy and
+  stays NULL). Profile rows snapshot ``{name, badge_barcode, is_active}``;
   avatar rows snapshot ``{"avatar": digest-or-null}`` — never bytes.
   Rejected writes and no-ops append nothing.
 
@@ -161,7 +162,9 @@ def list_workers(session: Session) -> list[Worker]:
     return list(session.scalars(select(Worker).order_by(Worker.name, Worker.id)))
 
 
-def create_worker(session: Session, *, name: object, badge_barcode: object) -> Worker:
+def create_worker(
+    session: Session, *, name: object, badge_barcode: object, actor_user_id: int | None
+) -> Worker:
     clean_name = required_text(name, "Worker name")
     badge = canonical_badge_barcode(badge_barcode)
     _reject_duplicate_badge(session, badge)
@@ -177,6 +180,7 @@ def create_worker(session: Session, *, name: object, badge_barcode: object) -> W
         entity_id=str(worker.id),
         before_data=None,
         after_data=profile_snapshot(worker),
+        actor_user_id=actor_user_id,
     )
     commit(session, _WORKER_CONFLICTS)
     return worker
@@ -189,6 +193,7 @@ def update_worker(
     name: object = UNSET,
     badge_barcode: object = UNSET,
     is_active: object = UNSET,
+    actor_user_id: int | None,
 ) -> Worker:
     """Apply the provided profile fields; a no-op writes and audits nothing.
 
@@ -239,13 +244,19 @@ def update_worker(
         entity_id=str(worker.id),
         before_data=before,
         after_data=profile_snapshot(worker),
+        actor_user_id=actor_user_id,
     )
     commit(session, _WORKER_CONFLICTS)
     return worker
 
 
 def set_worker_avatar(
-    session: Session, worker_id: int, *, data: bytes, declared_type: str | None
+    session: Session,
+    worker_id: int,
+    *,
+    data: bytes,
+    declared_type: str | None,
+    actor_user_id: int | None,
 ) -> Worker:
     """Store or replace the avatar; identical bytes and type are a no-op.
 
@@ -272,12 +283,13 @@ def set_worker_avatar(
         entity_id=str(worker.id),
         before_data={"avatar": before},
         after_data={"avatar": after},
+        actor_user_id=actor_user_id,
     )
     commit(session, _WORKER_CONFLICTS)
     return worker
 
 
-def remove_worker_avatar(session: Session, worker_id: int) -> Worker:
+def remove_worker_avatar(session: Session, worker_id: int, *, actor_user_id: int | None) -> Worker:
     """Remove the avatar; a Worker without one is a no-op."""
     worker = _lock_worker(session, worker_id, with_avatar=True)
     before = _avatar_digest(worker)
@@ -296,6 +308,7 @@ def remove_worker_avatar(session: Session, worker_id: int) -> Worker:
         entity_id=str(worker.id),
         before_data={"avatar": before},
         after_data={"avatar": None},
+        actor_user_id=actor_user_id,
     )
     commit(session, _WORKER_CONFLICTS)
     return worker

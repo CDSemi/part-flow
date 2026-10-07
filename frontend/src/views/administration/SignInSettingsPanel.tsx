@@ -15,8 +15,10 @@ import { AdminField, PolicySwitch, ServerErrorNote } from './section-widgets';
 // Worker Sessions of the Scan Stations, which live in Policies → Worker
 // sessions): how long a user's sign-in lasts (or that it never expires),
 // how many failed sign-ins lock an account and for how long, and whether
-// a password an administrator set must be replaced. Signed-in users read
-// it; users whose role may configure system settings edit it. Save sends
+// a password an administrator set must be replaced. Administration is
+// shown only to signed-in users, who all read it; users whose role may
+// configure system settings edit it (Settings says once when the user
+// may not). Save sends
 // only the changed settings (the server merges them), so a stale editor
 // never reverts another administrator's change. The server validates and
 // applies every value.
@@ -48,20 +50,7 @@ export function SignInSettingsPanel() {
         a user&apos;s account, and whether users must replace a password an
         administrator set.
       </p>
-      {session.status === 'signed-in' ? (
-        <SignInPolicyView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
-      ) : (
-        <>
-          <p className="ad-confighelp">
-            Sign in to see the user sign-in settings.
-          </p>
-          <div className="row">
-            <button className="btn primary" onClick={session.openSignIn}>
-              Sign in
-            </button>
-          </div>
-        </>
-      )}
+      <SignInPolicyView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
     </>
   );
 }
@@ -120,11 +109,7 @@ function SignInPolicyView({ canEdit }: { canEdit: boolean }) {
             Edit user sign-in settings…
           </button>
         </div>
-      ) : (
-        <p className="ad-confighelp">
-          Only users whose role may configure system settings can change these.
-        </p>
-      )}
+      ) : null}
       {editing ? (
         <SignInPolicyDialog
           saved={policy}

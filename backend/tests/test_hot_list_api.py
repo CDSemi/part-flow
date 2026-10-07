@@ -79,6 +79,7 @@ from app.application import hot_ranks, work_orders
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_hot_list_api"
@@ -152,7 +153,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -169,7 +170,7 @@ def _unique(prefix: str) -> str:
 
 
 def _create_department(client: TestClient) -> int:
-    response = client.post("/api/departments", json={"name": _unique("DEPT")})
+    response = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -197,7 +198,7 @@ class _Cell:
         machine_count: int = 0,
         is_terminal: bool = False,
     ) -> None:
-        area = client.post(
+        area = admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department_id,
@@ -208,12 +209,12 @@ class _Cell:
         )
         assert area.status_code == 201, area.text
         self.area_id = int(area.json()["id"])
-        operation = client.post(
+        operation = admin_of(client).post(
             "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
         )
         assert operation.status_code == 201, operation.text
         self.operation_id = int(operation.json()["id"])
-        station = client.post(
+        station = admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
         )
         assert station.status_code == 201, station.text
@@ -1484,7 +1485,9 @@ def test_a_replay_survives_a_department_configuration_change(
         # A new change is still refused until exactly one is active.
         assert _change(client, "REMOVE", [added], []).status_code == 409
     finally:
-        deactivated = client.patch(f"/api/departments/{second}", json={"is_active": False})
+        deactivated = admin_of(client).patch(
+            f"/api/departments/{second}", json={"is_active": False}
+        )
         assert deactivated.status_code == 200, deactivated.text
 
     _set_department_active(db_engine, shop.department_id, False)
@@ -1758,7 +1761,9 @@ def test_several_active_departments_refuse_every_hot_list_route(
                 " changed until exactly one Department is active."
             )
     finally:
-        deactivated = client.patch(f"/api/departments/{second}", json={"is_active": False})
+        deactivated = admin_of(client).patch(
+            f"/api/departments/{second}", json={"is_active": False}
+        )
         assert deactivated.status_code == 200, deactivated.text
     assert _audit_count(db_engine) == before
     assert _rank_of(db_engine, candidate) is None

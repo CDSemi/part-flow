@@ -41,8 +41,9 @@ A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
 writes nothing, and an effective change appends exactly one
 ``audit_events`` row in the same transaction (entity
-``ApplicationPolicy``, ``entity_id`` the section, ``actor_reference``
-NULL until Phase 14, the full section as the before / after snapshot).
+``ApplicationPolicy``, ``entity_id`` the section, ``actor_user_id`` the
+signed-in User (Phase 14 slices 1–2; ``actor_reference`` is legacy and
+stays NULL), the full section as the before / after snapshot).
 A section write assigns only its own section's columns, so writes of
 two sections serialize on the row lock and never overwrite each other;
 ``updated_at`` is the ONE row-level timestamp every section's effective
@@ -132,6 +133,7 @@ def update_worker_session_policy(
     badge_confirm_done: object = UNSET,
     badge_confirm_queue: object = UNSET,
     badge_confirm_undo: object = UNSET,
+    actor_user_id: int | None,
 ) -> ApplicationPolicy:
     """Merge the given Worker sessions settings; a no-op writes and audits nothing.
 
@@ -178,6 +180,7 @@ def update_worker_session_policy(
         entity_id=WORKER_SESSIONS_SECTION,
         before_data=before,
         after_data=_worker_sessions_snapshot(policy),
+        actor_user_id=actor_user_id,
     )
     commit(session, {})
     return policy
@@ -188,7 +191,7 @@ def _correction_permissions_snapshot(policy: ApplicationPolicy) -> dict[str, Any
 
 
 def update_correction_permissions_policy(
-    session: Session, *, undo_reason_required: object
+    session: Session, *, undo_reason_required: object, actor_user_id: int | None
 ) -> ApplicationPolicy:
     """Turn the Undo reason requirement on or off; a no-op writes and audits nothing."""
     policy = session.get(
@@ -210,6 +213,7 @@ def update_correction_permissions_policy(
         entity_id=CORRECTION_PERMISSIONS_SECTION,
         before_data=before,
         after_data=_correction_permissions_snapshot(policy),
+        actor_user_id=actor_user_id,
     )
     commit(session, {})
     return policy
@@ -242,7 +246,12 @@ def _due_soon_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
 
 
 def update_due_soon_policy(
-    session: Session, *, min_days: object, lead_time_percent: object, max_days: object
+    session: Session,
+    *,
+    min_days: object,
+    lead_time_percent: object,
+    max_days: object,
+    actor_user_id: int | None,
 ) -> ApplicationPolicy:
     """Replace the Due Soon warning policy; a no-op writes and audits nothing."""
     policy = session.get(
@@ -279,6 +288,7 @@ def update_due_soon_policy(
         entity_id=DUE_SOON_SECTION,
         before_data=before,
         after_data=_due_soon_snapshot(policy),
+        actor_user_id=actor_user_id,
     )
     commit(session, {})
     return policy
@@ -298,7 +308,7 @@ def _retention_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
 
 
 def update_retention_policy(
-    session: Session, *, retention_period_months: object
+    session: Session, *, retention_period_months: object, actor_user_id: int | None
 ) -> ApplicationPolicy:
     """Set or clear the Movement-history retention period; a no-op writes and audits nothing.
 
@@ -332,6 +342,7 @@ def update_retention_policy(
         entity_id=DATA_RETENTION_SECTION,
         before_data=before,
         after_data=_retention_snapshot(policy),
+        actor_user_id=actor_user_id,
     )
     commit(session, {})
     return policy

@@ -12,6 +12,7 @@ import {
 import type { Area, Operation } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -22,45 +23,54 @@ import {
 import {
   ActiveField,
   AdminField,
+  RowOpener,
   SectionHeader,
   ServerErrorNote,
   StatusPill,
+  ViewOnlyNote,
 } from './section-widgets';
 
 // Administration → Operations (Phase 3.5): work performed within an
 // Area (PROJECT_PROFILE §8.5). Each Operation belongs to exactly one
 // Area — the binding is fixed after creation because Movement history
 // references Operations in their Area context. Codes stay unique
-// within one Area; the expected duration is optional guidance.
+// within one Area; the expected duration is optional guidance. Without
+// the Manage Operations permission the section is view-only.
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; operation: Operation };
 
 export function OperationsSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_OPERATIONS');
   const operationsData = useApiData(listOperations);
   const areasData = useApiData(listAreas);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
 
   const header = (ready: boolean, canCreate: boolean) => (
-    <SectionHeader
-      title="Operations"
-      subtitle="Work performed within an Area (§8.5)"
-      action={
-        <button
-          className="btn primary"
-          disabled={!ready || !canCreate || writeBlocked}
-          title={
-            ready && !canCreate
-              ? 'Operations need an active Area first'
-              : undefined
-          }
-          onClick={() => setDialog({ kind: 'new' })}
-        >
-          + New Operation
-        </button>
-      }
-    />
+    <>
+      <SectionHeader
+        title="Operations"
+        subtitle="Work performed within an Area (§8.5)"
+        action={
+          canWrite ? (
+            <button
+              className="btn primary"
+              disabled={!ready || !canCreate || writeBlocked}
+              title={
+                ready && !canCreate
+                  ? 'Operations need an active Area first'
+                  : undefined
+              }
+              onClick={() => setDialog({ kind: 'new' })}
+            >
+              + New Operation
+            </button>
+          ) : undefined
+        }
+      />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_OPERATIONS" />}
+    </>
   );
 
   if (
@@ -139,17 +149,21 @@ export function OperationsSection() {
               return (
                 <tr
                   key={operation.id}
-                  className="selrow"
-                  onClick={() => setDialog({ kind: 'edit', operation })}
+                  className={canWrite ? 'selrow' : undefined}
+                  onClick={
+                    canWrite
+                      ? () => setDialog({ kind: 'edit', operation })
+                      : undefined
+                  }
                 >
                   <td>
-                    <button
-                      className="rowbtn"
-                      aria-label={`Edit ${operation.name ?? operation.code}`}
+                    <RowOpener
+                      editable={canWrite}
+                      label={`Edit ${operation.name ?? operation.code}`}
                     >
                       <b>{operation.name ?? operation.code}</b>{' '}
                       <span className="mono ad-opcode">{operation.code}</span>
-                    </button>
+                    </RowOpener>
                   </td>
                   <td data-label="Area">
                     <AreaDot colorVar={areaColor(area)} size={11} />{' '}

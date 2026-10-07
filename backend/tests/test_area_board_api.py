@@ -46,6 +46,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_area_board_api"
@@ -97,7 +98,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "AB-", "digits": 4},
     )
@@ -114,7 +115,7 @@ def _unique(prefix: str) -> str:
 
 
 def _create_department(client: TestClient, *, name: str | None = None) -> int:
-    response = client.post("/api/departments", json={"name": name or _unique("DEPT")})
+    response = admin_of(client).post("/api/departments", json={"name": name or _unique("DEPT")})
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -132,7 +133,7 @@ class _Cell:
         is_terminal: bool = False,
         external_operation: str | None = None,
     ) -> None:
-        area = client.post(
+        area = admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department_id,
@@ -148,11 +149,11 @@ class _Cell:
         operation: dict[str, Any] = {"area_id": self.area_id, "code": _unique("OP")}
         if external_operation is not None:
             operation.update(name=external_operation, is_external=True)
-        created = client.post("/api/operations", json=operation)
+        created = admin_of(client).post("/api/operations", json=operation)
         assert created.status_code == 201, created.text
         self.operation_id = int(created.json()["id"])
         self.operation_code = str(created.json()["code"])
-        station = client.post(
+        station = admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
         )
         assert station.status_code == 201, station.text
@@ -473,7 +474,9 @@ def test_without_an_id_an_ambiguous_department_configuration_is_refused(
         assert f"(id {shop.department_id})" in detail
         assert f"(id {second})" in detail
     finally:
-        deactivated = client.patch(f"/api/departments/{second}", json={"is_active": False})
+        deactivated = admin_of(client).patch(
+            f"/api/departments/{second}", json={"is_active": False}
+        )
         assert deactivated.status_code == 200, deactivated.text
 
     resolved = client.get("/api/area-board")
@@ -516,7 +519,7 @@ def test_a_deactivated_area_leaves_the_board(client: TestClient) -> None:
 
     # An Area holding active quantity cannot be deactivated at all
     # (app.application.environment), so nothing in production is hidden.
-    deactivated = client.patch(f"/api/areas/{spare.area_id}", json={"is_active": False})
+    deactivated = admin_of(client).patch(f"/api/areas/{spare.area_id}", json={"is_active": False})
     assert deactivated.status_code == 200, deactivated.text
     assert spare.area_id not in {
         entry["inventory"]["area"]["id"] for entry in _board(client, shop.department_id)["areas"]
@@ -1128,7 +1131,7 @@ def test_every_flow_reports_when_its_expected_duration_elapses(
     so the Scan Station and the Area Board warn alike (advisory only:
     every action stays available)."""
     shop = _Shop(client)
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/operations/{shop.lathe.operation_id}", json={"default_expected_duration": "PT2H"}
     )
     assert updated.status_code == 200, updated.text

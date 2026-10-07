@@ -56,6 +56,7 @@ from app.application import audit
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -110,7 +111,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "WI-", "digits": 4},
     )
@@ -137,9 +138,11 @@ class _Cell:
     def __init__(
         self, client: TestClient, *, machine_count: int = 0, is_terminal: bool = False
     ) -> None:
-        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        department = _ok(
+            admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201
+        )
         self.area = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/areas",
                 json={
                     "department_id": department["id"],
@@ -152,12 +155,14 @@ class _Cell:
         self.area_id = int(self.area["id"])
         self.area_name = str(self.area["name"])
         operation = _ok(
-            client.post("/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}),
+            admin_of(client).post(
+                "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
+            ),
             201,
         )
         self.operation_id = int(operation["id"])
         station = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
             ),
             201,
@@ -182,7 +187,7 @@ class _Cell:
 
 def _worker(client: TestClient, name: str | None = None) -> dict[str, Any]:
     return _ok(
-        client.post(
+        admin_of(client).post(
             "/api/workers",
             json={"name": name or _unique("Worker"), "badge_barcode": _unique("BADGE")},
         ),
@@ -194,7 +199,7 @@ def _set_mode(
     client: TestClient, area_id: int, mode: str, worker_id: int | None = None
 ) -> dict[str, Any]:
     return _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/areas/{area_id}",
             json={"worker_identification_mode": mode, "fixed_worker_id": worker_id},
         )
@@ -884,7 +889,7 @@ def test_committed_command_replays_with_its_recorded_identity(
 
     # Even after the recorded Worker is no longer fixed and deactivated.
     _set_mode(client, cell.area_id, "DISABLED")
-    _ok(client.patch(f"/api/workers/{original['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/workers/{original['id']}", json={"is_active": False}))
     before = _counts(db_engine)
     assert client.post(path, json=payload).status_code == 200
     assert _counts(db_engine) == before
@@ -1021,7 +1026,9 @@ def test_area_save_first_refuses_the_concurrent_deactivation(
             {"worker": worker["id"], "area": cell.area_id},
         )
         thread, results = _start(
-            lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+            lambda: admin_of(client).patch(
+                f"/api/workers/{worker['id']}", json={"is_active": False}
+            )
         )
         try:
             _assert_blocked(thread)
@@ -1055,7 +1062,7 @@ def test_deactivation_first_refuses_the_concurrent_area_save(
             sa.text("UPDATE workers SET is_active = false WHERE id = :id"), {"id": worker["id"]}
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/areas/{cell.area_id}",
                 json={"worker_identification_mode": "FIXED", "fixed_worker_id": worker["id"]},
             )
@@ -1137,7 +1144,9 @@ def test_deactivation_waits_for_a_command_recording_the_worker(
             sa.text("SELECT 1 FROM workers WHERE id = :id FOR KEY SHARE"), {"id": worker["id"]}
         )
         thread, results = _start(
-            lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+            lambda: admin_of(client).patch(
+                f"/api/workers/{worker['id']}", json={"is_active": False}
+            )
         )
         try:
             _assert_blocked(thread)
@@ -1200,20 +1209,20 @@ def test_area_create_waiting_on_a_deactivation_is_refused(
     Worker FOR SHARE, re-reads the Worker and is refused. Fails if the
     create path stops locking and re-reading the Worker before its
     INSERT (the INSERT's FK check alone passes on the inactive row)."""
-    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    department = _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
     worker = _worker(client)
     name = _unique("AREA")
     before = _counts(db_engine)
     entered, release = _gate(monkeypatch, "Worker", "UPDATED")
     threads: list[threading.Thread] = []
     deactivate, deactivated = _start(
-        lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+        lambda: admin_of(client).patch(f"/api/workers/{worker['id']}", json={"is_active": False})
     )
     threads.append(deactivate)
     try:
         assert entered.wait(timeout=20)
         create, created = _start(
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/areas", json=_fixed_area_body(int(department["id"]), worker["id"], name)
             )
         )
@@ -1247,13 +1256,13 @@ def test_deactivation_waiting_on_an_area_create_is_refused(
     """Create twin of T-10 on the real route: the Fixed Worker create is
     in flight (Department, then Worker FOR SHARE, then its INSERT); the
     deactivation waits on it and then names the new Area."""
-    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    department = _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
     worker = _worker(client)
     name = _unique("AREA")
     entered, release = _gate(monkeypatch, "Area", "CREATED")
     threads: list[threading.Thread] = []
     create, created = _start(
-        lambda: client.post(
+        lambda: admin_of(client).post(
             "/api/areas", json=_fixed_area_body(int(department["id"]), worker["id"], name)
         )
     )
@@ -1261,7 +1270,9 @@ def test_deactivation_waiting_on_an_area_create_is_refused(
     try:
         assert entered.wait(timeout=20)
         deactivate, deactivated = _start(
-            lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+            lambda: admin_of(client).patch(
+                f"/api/workers/{worker['id']}", json={"is_active": False}
+            )
         )
         threads.append(deactivate)
         _assert_blocked(deactivate)
@@ -1322,11 +1333,13 @@ class _LockCase(NamedTuple):
 def _lock_case(client: TestClient, case: str) -> _LockCase:
     worker_id = int(_worker(client)["id"])
     if case == "create":
-        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        department = _ok(
+            admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201
+        )
         body = _fixed_area_body(int(department["id"]), worker_id, _unique("AREA"))
         department_row = ("departments", int(department["id"]))
         return _LockCase(
-            send=lambda: client.post("/api/areas", json=body),
+            send=lambda: admin_of(client).post("/api/areas", json=body),
             status=201,
             worker_id=worker_id,
             first=department_row,
@@ -1337,7 +1350,7 @@ def _lock_case(client: TestClient, case: str) -> _LockCase:
     area_row = ("areas", cell.area_id)
     if case == "update":
         return _LockCase(
-            send=lambda: client.patch(
+            send=lambda: admin_of(client).patch(
                 f"/api/areas/{cell.area_id}",
                 json={"worker_identification_mode": "FIXED", "fixed_worker_id": worker_id},
             ),
@@ -1349,9 +1362,9 @@ def _lock_case(client: TestClient, case: str) -> _LockCase:
         )
     assert case == "activation"
     _set_mode(client, cell.area_id, "FIXED", worker_id)
-    _ok(client.patch(f"/api/areas/{cell.area_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/areas/{cell.area_id}", json={"is_active": False}))
     return _LockCase(
-        send=lambda: client.patch(f"/api/areas/{cell.area_id}", json={"is_active": True}),
+        send=lambda: admin_of(client).patch(f"/api/areas/{cell.area_id}", json={"is_active": True}),
         status=200,
         worker_id=worker_id,
         first=area_row,
@@ -1449,7 +1462,7 @@ def test_badge_scans_are_a_read_that_answers_not_used_or_unknown(
     cell = _Cell(client)
     worker = _worker(client)
     inactive = _worker(client)
-    _ok(client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/workers/{inactive['id']}", json={"is_active": False}))
     path = f"/api/scan-stations/{cell.station_id}/badge-scans"
     badge = str(worker["badge_barcode"])
 
@@ -1484,7 +1497,7 @@ def test_badge_scans_are_a_read_that_answers_not_used_or_unknown(
     assert client.post(path, json={"badge": badge, "worker_id": worker["id"]}).status_code == 422
     assert client.post(path, json={}).status_code == 422
     assert _counts(db_engine) == before
-    _ok(client.patch(f"/api/scan-stations/{cell.station_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/scan-stations/{cell.station_id}", json={"is_active": False}))
     before = _counts(db_engine)
     assert client.post(path, json={"badge": badge}).status_code == 409
     assert _counts(db_engine) == before
@@ -1514,7 +1527,7 @@ def test_undo_preview_names_the_original_and_the_reversing_worker(
     assert preview["reversed_by"] == _worker_ref(reversing)
 
     _set_mode(client, target.area_id, "DISABLED")
-    _ok(client.patch(f"/api/workers/{original['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/workers/{original['id']}", json={"is_active": False}))
     preview = _preview(client, target, transfer)
     # Inactive since, the original Worker is still named: it is history.
     assert preview["worker"] == _worker_ref(original)

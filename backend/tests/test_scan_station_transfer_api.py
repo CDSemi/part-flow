@@ -70,6 +70,7 @@ from app.application.errors import ConflictError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_scan_station_transfer_api"
@@ -128,31 +129,31 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
     payload = {"department_id": department.json()["id"], "name": _unique("AREA"), **overrides}
-    response = client.post("/api/areas", json=payload)
+    response = admin_of(client).post("/api/areas", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _create_operation(client: TestClient, area_id: int, **overrides: Any) -> dict[str, Any]:
     payload = {"area_id": area_id, "code": _unique("OP"), **overrides}
-    response = client.post("/api/operations", json=payload)
+    response = admin_of(client).post("/api/operations", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _create_station(client: TestClient, area_id: int, **overrides: Any) -> str:
     payload = {"station_id": _unique("ST"), "area_id": area_id, **overrides}
-    response = client.post("/api/scan-stations", json=payload)
+    response = admin_of(client).post("/api/scan-stations", json=payload)
     assert response.status_code == 201, response.text
     return str(response.json()["station_id"])
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
     """A Machine makes the Area a QUEUE_AND_ASSIGN Area (PROJECT_PROFILE §12)."""
-    configured = client.put(
+    configured = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format", json={"prefix": "CD-", "digits": 4}
     )
     assert configured.status_code == 200, configured.text
@@ -344,9 +345,9 @@ def test_station_context_reports_the_bound_area_environment(
     second_operation = _create_operation(client, lathe.area_id)
     inactive_operation = _create_operation(client, lathe.area_id)
     assert (
-        client.patch(
-            f"/api/operations/{inactive_operation['id']}", json={"is_active": False}
-        ).status_code
+        admin_of(client)
+        .patch(f"/api/operations/{inactive_operation['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
 
@@ -392,7 +393,10 @@ def test_unknown_and_inactive_stations_are_refused_never_substituted(
 
     # A station bound to an inactive Area accepts no production use either.
     idle = _Cell(client)
-    assert client.patch(f"/api/areas/{idle.area_id}", json={"is_active": False}).status_code == 200
+    assert (
+        admin_of(client).patch(f"/api/areas/{idle.area_id}", json={"is_active": False}).status_code
+        == 200
+    )
     response = client.get(f"/api/scan-stations/{idle.station_id}/context")
     assert response.status_code == 409
     assert "inactive" in response.json()["detail"]
@@ -857,7 +861,9 @@ def test_operation_resolution_at_the_destination(client: TestClient, db_engine: 
     foreign = _create_operation(client, material.area_id)
     inactive = _create_operation(client, lathe.area_id)
     assert (
-        client.patch(f"/api/operations/{inactive['id']}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/operations/{inactive['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
 
@@ -894,7 +900,9 @@ def test_operation_resolution_at_the_destination(client: TestClient, db_engine: 
     # An Area without any active Operation cannot receive quantity.
     bare = _Cell(client)
     assert (
-        client.patch(f"/api/operations/{bare.operation_id}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/operations/{bare.operation_id}", json={"is_active": False})
+        .status_code
         == 200
     )
     other_flow, other_pn = _release(client, material, quantity=1)
@@ -995,7 +1003,10 @@ def test_invalid_station_source_and_target_create_nothing(
     assert attempt(lathe.station_id, confirm_route_deviation="yes").status_code == 422
     # Inactive target Area — the station stays configured but refuses.
     idle = _Cell(client)
-    assert client.patch(f"/api/areas/{idle.area_id}", json={"is_active": False}).status_code == 200
+    assert (
+        admin_of(client).patch(f"/api/areas/{idle.area_id}", json={"is_active": False}).status_code
+        == 200
+    )
     assert attempt(idle.station_id).status_code == 409
 
     assert _counts(db_engine) == before
@@ -1382,7 +1393,7 @@ def test_transfer_versus_area_deactivation_has_one_serial_outcome(
         with Session(db_engine) as session:
             try:
                 results["deactivation"] = environment.update_area(
-                    session, lathe.area_id, is_active=False
+                    session, lathe.area_id, is_active=False, actor_user_id=None
                 )
             except Exception as exc:  # noqa: BLE001
                 results["deactivation"] = exc
@@ -1545,9 +1556,9 @@ def test_confirmed_destination_is_a_precondition_on_the_station_binding(
     # Rebound AFTER the operator confirmed Lathe: refused, nothing moves
     # to Deburr behind the operator's back.
     assert (
-        client.patch(
-            f"/api/scan-stations/{lathe.station_id}", json={"area_id": deburr.area_id}
-        ).status_code
+        admin_of(client)
+        .patch(f"/api/scan-stations/{lathe.station_id}", json={"area_id": deburr.area_id})
+        .status_code
         == 200
     )
     rebound = attempt(target_area_id=lathe.area_id)
@@ -1555,10 +1566,12 @@ def test_confirmed_destination_is_a_precondition_on_the_station_binding(
     assert "no longer bound" in rebound.json()["detail"]
     # Deactivated after confirmation: refused as well.
     assert (
-        client.patch(
+        admin_of(client)
+        .patch(
             f"/api/scan-stations/{lathe.station_id}",
             json={"area_id": lathe.area_id, "is_active": False},
-        ).status_code
+        )
+        .status_code
         == 200
     )
     inactive = attempt(target_area_id=lathe.area_id)
@@ -1570,7 +1583,9 @@ def test_confirmed_destination_is_a_precondition_on_the_station_binding(
     # Re-activated and confirmed against the CURRENT binding: recorded
     # into exactly the confirmed Area.
     assert (
-        client.patch(f"/api/scan-stations/{lathe.station_id}", json={"is_active": True}).status_code
+        admin_of(client)
+        .patch(f"/api/scan-stations/{lathe.station_id}", json={"is_active": True})
+        .status_code
         == 200
     )
     ok = attempt(target_area_id=lathe.area_id)
@@ -1615,7 +1630,7 @@ def test_transfer_versus_station_rebind_has_one_serial_outcome(
         with Session(db_engine) as session:
             try:
                 results["rebind"] = environment.update_scan_station(
-                    session, lathe.station_id, area_id=deburr.area_id
+                    session, lathe.station_id, area_id=deburr.area_id, actor_user_id=None
                 )
             except Exception as exc:  # noqa: BLE001
                 results["rebind"] = exc
@@ -1785,14 +1800,18 @@ def test_replay_is_independent_of_the_current_station_state(
     # Station rebound to another Area AND deactivated; its Operation
     # deactivated too. The retry must still replay.
     assert (
-        client.patch(
+        admin_of(client)
+        .patch(
             f"/api/scan-stations/{lathe.station_id}",
             json={"area_id": deburr.area_id, "is_active": False},
-        ).status_code
+        )
+        .status_code
         == 200
     )
     assert (
-        client.patch(f"/api/operations/{lathe.operation_id}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/operations/{lathe.operation_id}", json={"is_active": False})
+        .status_code
         == 200
     )
     replay = _transfer(client, lathe.station_id, **request)
@@ -1870,7 +1889,7 @@ def test_transfer_versus_operation_deactivation_has_one_serial_outcome(
         with Session(db_engine) as session:
             try:
                 results["deactivation"] = environment.update_operation(
-                    session, lathe.operation_id, is_active=False
+                    session, lathe.operation_id, is_active=False, actor_user_id=None
                 )
             except Exception as exc:  # noqa: BLE001
                 results["deactivation"] = exc
@@ -2045,7 +2064,9 @@ def test_operation_deactivated_between_listing_and_lock_is_seen_under_the_lock(
     # The deactivation commits in the window — no lock is held yet, so it
     # must NOT block.
     with Session(db_engine) as session:
-        environment.update_operation(session, lathe.operation_id, is_active=False)
+        environment.update_operation(
+            session, lathe.operation_id, is_active=False, actor_user_id=None
+        )
     with db_engine.connect() as connection:
         assert (
             connection.execute(

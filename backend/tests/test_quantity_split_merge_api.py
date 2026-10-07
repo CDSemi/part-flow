@@ -59,6 +59,7 @@ from app.core.config import get_settings
 from app.domain.enums import ProcessingState
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_quantity_split_merge_api"
@@ -110,7 +111,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -127,9 +128,9 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
-    response = client.post(
+    response = admin_of(client).post(
         "/api/areas", json={"department_id": department.json()["id"], "name": _unique("AREA")}
     )
     assert response.status_code == 201, response.text
@@ -137,13 +138,15 @@ def _create_area(client: TestClient) -> dict[str, Any]:
 
 
 def _create_operation(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/operations", json={"area_id": area_id, "code": _unique("OP")})
+    response = admin_of(client).post(
+        "/api/operations", json={"area_id": area_id, "code": _unique("OP")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
 
 def _create_station(client: TestClient, area_id: int) -> str:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area_id}
     )
     assert response.status_code == 201, response.text
@@ -1247,7 +1250,9 @@ def test_merge_station_preconditions(client: TestClient, db_engine: Engine) -> N
         },
     )
     assert unknown.status_code == 404
-    deactivated = client.patch(f"/api/scan-stations/{lathe.station_id}", json={"is_active": False})
+    deactivated = admin_of(client).patch(
+        f"/api/scan-stations/{lathe.station_id}", json={"is_active": False}
+    )
     assert deactivated.status_code == 200, deactivated.text
     inactive = _merge(client, lathe, pn, [a.flow_id, b.flow_id])
     assert inactive.status_code == 409 and "inactive" in inactive.json()["detail"]

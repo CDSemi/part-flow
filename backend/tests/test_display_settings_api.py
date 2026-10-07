@@ -52,6 +52,7 @@ from sqlalchemy.engine import URL, make_url
 from alembic import command
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -132,9 +133,9 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 def approved_policy(client: TestClient) -> Iterator[None]:
     """Every test leaves every policy section at its approved defaults."""
     yield
-    _ok(client.put(_POLICY_PATH, json=_DUE_SOON_DEFAULTS))
-    _ok(client.put(_SESSIONS_POLICY_PATH, json=_SESSION_DEFAULTS))
-    _ok(client.put(_CORRECTION_POLICY_PATH, json=_CORRECTION_DEFAULTS))
+    _ok(admin_of(client).put(_POLICY_PATH, json=_DUE_SOON_DEFAULTS))
+    _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json=_SESSION_DEFAULTS))
+    _ok(admin_of(client).put(_CORRECTION_POLICY_PATH, json=_CORRECTION_DEFAULTS))
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +158,7 @@ def _refused(response: Any, detail: str) -> None:
 
 
 def _create_department(client: TestClient) -> dict[str, Any]:
-    return _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    return _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
 
 
 def _due_soon(values: tuple[int, int, int]) -> dict[str, int]:
@@ -246,7 +247,7 @@ def test_the_due_soon_policy_reads_its_defaults(client: TestClient) -> None:
 def test_an_effective_put_is_stored_and_audited_once(client: TestClient, db_engine: Engine) -> None:
     before = len(_policy_audits(db_engine, _SECTION))
     new = _due_soon((1, 20, 5))
-    stored = _ok(client.put(_POLICY_PATH, json=new))
+    stored = _ok(admin_of(client).put(_POLICY_PATH, json=new))
     assert {key: stored[key] for key in _DUE_SOON_KEYS} == new
     assert {key: _ok(client.get(_POLICY_PATH))[key] for key in _DUE_SOON_KEYS} == new
 
@@ -255,7 +256,7 @@ def test_an_effective_put_is_stored_and_audited_once(client: TestClient, db_engi
     assert tuple(rows[-1]) == ("UPDATED", _SECTION, _DUE_SOON_DEFAULTS, new, None)
 
     # The same PUT again: 200 with the stored policy, nothing written.
-    again = _ok(client.put(_POLICY_PATH, json=new))
+    again = _ok(admin_of(client).put(_POLICY_PATH, json=new))
     assert again == stored
     assert len(_policy_audits(db_engine, _SECTION)) == before + 1
 
@@ -281,7 +282,7 @@ def test_out_of_range_policies_are_refused_with_nothing_written(
 ) -> None:
     stored = _stored_policy(db_engine)
     count = _audit_count(db_engine)
-    _refused(client.put(_POLICY_PATH, json=_due_soon(values)), detail)
+    _refused(admin_of(client).put(_POLICY_PATH, json=_due_soon(values)), detail)
     assert _stored_policy(db_engine) == stored
     assert _audit_count(db_engine) == count
 
@@ -304,7 +305,7 @@ def test_malformed_policy_bodies_are_refused_by_the_schema(
 ) -> None:
     stored = _stored_policy(db_engine)
     count = _audit_count(db_engine)
-    assert client.put(_POLICY_PATH, json=body).status_code == 422
+    assert admin_of(client).put(_POLICY_PATH, json=body).status_code == 422
     assert _stored_policy(db_engine) == stored
     assert _audit_count(db_engine) == count
 
@@ -313,28 +314,28 @@ def test_malformed_policy_bodies_are_refused_by_the_schema(
 def test_the_policy_boundaries_are_admitted(
     client: TestClient, values: tuple[int, int, int]
 ) -> None:
-    stored = _ok(client.put(_POLICY_PATH, json=_due_soon(values)))
+    stored = _ok(admin_of(client).put(_POLICY_PATH, json=_due_soon(values)))
     assert tuple(stored[key] for key in _DUE_SOON_KEYS) == values
 
 
 def test_policy_sections_never_touch_each_other(client: TestClient, db_engine: Engine) -> None:
-    sessions = _ok(client.get(_SESSIONS_POLICY_PATH))
-    correction = _ok(client.get(_CORRECTION_POLICY_PATH))
-    _ok(client.put(_POLICY_PATH, json=_due_soon((1, 20, 5))))
-    after_sessions = _ok(client.get(_SESSIONS_POLICY_PATH))
-    after_correction = _ok(client.get(_CORRECTION_POLICY_PATH))
+    sessions = _ok(admin_of(client).get(_SESSIONS_POLICY_PATH))
+    correction = _ok(admin_of(client).get(_CORRECTION_POLICY_PATH))
+    _ok(admin_of(client).put(_POLICY_PATH, json=_due_soon((1, 20, 5))))
+    after_sessions = _ok(admin_of(client).get(_SESSIONS_POLICY_PATH))
+    after_correction = _ok(admin_of(client).get(_CORRECTION_POLICY_PATH))
     assert {key: after_sessions[key] for key in _SESSION_DEFAULTS} == {
         key: sessions[key] for key in _SESSION_DEFAULTS
     }
     assert after_correction["undo_reason_required"] == correction["undo_reason_required"]
 
     _ok(
-        client.put(
+        admin_of(client).put(
             _SESSIONS_POLICY_PATH,
             json={"worker_session_timeout_minutes": 30, "badge_confirm_queue": False},
         )
     )
-    _ok(client.put(_CORRECTION_POLICY_PATH, json={"undo_reason_required": True}))
+    _ok(admin_of(client).put(_CORRECTION_POLICY_PATH, json={"undo_reason_required": True}))
     due_soon = _ok(client.get(_POLICY_PATH))
     assert tuple(due_soon[key] for key in _DUE_SOON_KEYS) == (1, 20, 5)
 
@@ -384,7 +385,11 @@ def test_settings_patches_merge_and_are_audited(client: TestClient, db_engine: E
     path = f"/api/departments/{department_id}"
     name = department["name"]
 
-    both = _ok(client.patch(path, json={"board_seconds_per_row": 2, "board_min_page_seconds": 10}))
+    both = _ok(
+        admin_of(client).patch(
+            path, json={"board_seconds_per_row": 2, "board_min_page_seconds": 10}
+        )
+    )
     assert _settings(both) == (2, 10)
     assert both["name"] == name and both["is_active"] is True
     rows = _department_audits(db_engine, department_id)
@@ -401,20 +406,24 @@ def test_settings_patches_merge_and_are_audited(client: TestClient, db_engine: E
 
     # A name-only PATCH keeps the settings; a settings-only PATCH keeps the name.
     new_name = _unique("DEPT")
-    renamed = _ok(client.patch(path, json={"name": new_name}))
+    renamed = _ok(admin_of(client).patch(path, json={"name": new_name}))
     assert _settings(renamed) == (2, 10)
-    kept_name = _ok(client.patch(path, json={"board_seconds_per_row": 5}))
+    kept_name = _ok(admin_of(client).patch(path, json={"board_seconds_per_row": 5}))
     assert kept_name["name"] == new_name and _settings(kept_name) == (5, 10)
 
     # An identical PATCH writes nothing.
     count = len(_department_audits(db_engine, department_id))
-    same = _ok(client.patch(path, json={"board_seconds_per_row": 5, "board_min_page_seconds": 10}))
+    same = _ok(
+        admin_of(client).patch(
+            path, json={"board_seconds_per_row": 5, "board_min_page_seconds": 10}
+        )
+    )
     assert same == kept_name
     assert len(_department_audits(db_engine, department_id)) == count
 
     # Partial merge: each field keeps the other's stored value.
-    _ok(client.patch(path, json={"board_seconds_per_row": 4}))
-    merged = _ok(client.patch(path, json={"board_min_page_seconds": 20}))
+    _ok(admin_of(client).patch(path, json={"board_seconds_per_row": 4}))
+    merged = _ok(admin_of(client).patch(path, json={"board_min_page_seconds": 20}))
     assert _settings(merged) == (4, 20)
     assert _settings(_listed(client, department)) == (4, 20)
     rows = _department_audits(db_engine, department_id)
@@ -451,7 +460,7 @@ def test_out_of_range_settings_are_refused_with_nothing_written(
     department = _create_department(client)
     stored = _stored_department(db_engine, int(department["id"]))
     count = _audit_count(db_engine)
-    _refused(client.patch(f"/api/departments/{department['id']}", json=body), detail)
+    _refused(admin_of(client).patch(f"/api/departments/{department['id']}", json=body), detail)
     assert _stored_department(db_engine, int(department["id"])) == stored
     assert _audit_count(db_engine) == count
 
@@ -473,7 +482,9 @@ def test_non_integer_settings_are_refused_by_the_schema(
     department = _create_department(client)
     stored = _stored_department(db_engine, int(department["id"]))
     count = _audit_count(db_engine)
-    assert client.patch(f"/api/departments/{department['id']}", json=body).status_code == 422
+    assert (
+        admin_of(client).patch(f"/api/departments/{department['id']}", json=body).status_code == 422
+    )
     assert _stored_department(db_engine, int(department["id"])) == stored
     assert _audit_count(db_engine) == count
 
@@ -482,13 +493,13 @@ def test_an_unknown_department_and_a_combined_refusal_write_nothing(
     client: TestClient, db_engine: Engine
 ) -> None:
     count = _audit_count(db_engine)
-    missing = client.patch("/api/departments/999999", json={"board_seconds_per_row": 2})
+    missing = admin_of(client).patch("/api/departments/999999", json={"board_seconds_per_row": 2})
     assert missing.status_code == 404
     assert missing.json() == {"detail": "Department 999999 does not exist."}
 
     department = _create_department(client)
     stored = _stored_department(db_engine, int(department["id"]))
-    combined = client.patch(
+    combined = admin_of(client).patch(
         f"/api/departments/{department['id']}",
         json={"name": "  ", "board_seconds_per_row": 2},
     )
@@ -500,8 +511,8 @@ def test_an_unknown_department_and_a_combined_refusal_write_nothing(
 def test_an_inactive_department_accepts_settings(client: TestClient, db_engine: Engine) -> None:
     department = _create_department(client)
     path = f"/api/departments/{department['id']}"
-    _ok(client.patch(path, json={"is_active": False}))
-    updated = _ok(client.patch(path, json={"board_seconds_per_row": 7}))
+    _ok(admin_of(client).patch(path, json={"is_active": False}))
+    updated = _ok(admin_of(client).patch(path, json={"board_seconds_per_row": 7}))
     assert updated["is_active"] is False
     assert _settings(updated) == (7, 6)
     last = _department_audits(db_engine, int(department["id"]))[-1]
@@ -518,7 +529,9 @@ def test_an_inactive_department_accepts_settings(client: TestClient, db_engine: 
 def test_the_create_body_refuses_the_settings(client: TestClient, db_engine: Engine) -> None:
     name = _unique("DEPT")
     count = _audit_count(db_engine)
-    response = client.post("/api/departments", json={"name": name, "board_seconds_per_row": 2})
+    response = admin_of(client).post(
+        "/api/departments", json={"name": name, "board_seconds_per_row": 2}
+    )
     assert response.status_code == 422
     assert name not in {row["name"] for row in client.get("/api/departments").json()}
     assert _audit_count(db_engine) == count
@@ -537,7 +550,11 @@ def _board_department(client: TestClient, department_id: int) -> dict[str, Any]:
 def test_the_board_feed_carries_its_departments_own_settings(client: TestClient) -> None:
     first = _create_department(client)
     second = _create_department(client)
-    _ok(client.patch(f"/api/departments/{second['id']}", json={"board_seconds_per_row": 2}))
+    _ok(
+        admin_of(client).patch(
+            f"/api/departments/{second['id']}", json={"board_seconds_per_row": 2}
+        )
+    )
 
     assert _board_department(client, int(first["id"])) == {
         "id": first["id"],
@@ -547,7 +564,7 @@ def test_the_board_feed_carries_its_departments_own_settings(client: TestClient)
     assert _settings(_board_department(client, int(second["id"]))) == (2, 6)
 
     _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/departments/{first['id']}",
             json={"board_seconds_per_row": 1, "board_min_page_seconds": 4},
         )
@@ -566,7 +583,7 @@ def test_policy_writers_serialize_and_merge(client: TestClient, db_engine: Engin
     with db_engine.connect() as holder:
         holder.execute(sa.text("SELECT 1 FROM application_policy WHERE id = 1 FOR NO KEY UPDATE"))
         holder.execute(sa.text("UPDATE application_policy SET worker_session_timeout_minutes = 30"))
-        thread, results = _start(lambda: client.put(_POLICY_PATH, json=new))
+        thread, results = _start(lambda: admin_of(client).put(_POLICY_PATH, json=new))
         try:
             _assert_blocked(thread)
             holder.commit()
@@ -591,7 +608,7 @@ def test_the_due_soon_write_locks_before_it_reads(client: TestClient, db_engine:
     with db_engine.connect() as holder:
         holder.execute(sa.text("SELECT 1 FROM application_policy WHERE id = 1 FOR NO KEY UPDATE"))
         holder.execute(sa.text("UPDATE application_policy SET due_soon_max_days = 9"))
-        thread, results = _start(lambda: client.put(_POLICY_PATH, json=new))
+        thread, results = _start(lambda: admin_of(client).put(_POLICY_PATH, json=new))
         try:
             _assert_blocked(thread)
             holder.commit()
@@ -615,7 +632,7 @@ def test_the_no_op_is_judged_on_the_locked_row(client: TestClient, db_engine: En
                 " due_soon_lead_time_percent = 20, due_soon_max_days = 5"
             )
         )
-        thread, results = _start(lambda: client.put(_POLICY_PATH, json=new))
+        thread, results = _start(lambda: admin_of(client).put(_POLICY_PATH, json=new))
         try:
             _assert_blocked(thread)
             holder.commit()
@@ -642,7 +659,7 @@ def test_a_settings_patch_waits_for_a_concurrent_rename(
             {"name": held_name, "id": department_id},
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/departments/{department_id}",
                 json={"board_seconds_per_row": 2, "board_min_page_seconds": 10},
             )

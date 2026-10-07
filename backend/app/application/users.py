@@ -8,8 +8,18 @@ here reads the Worker registry, and no Scan Station service reads Users.
 
 Users sign in with a password held in `user_credentials` (Phase 14
 slice 1, `app.application.authentication`); deactivating a User ends
-every open sign-in. Permissions are checked only where a route requires
-them.
+every open sign-in.
+
+Who may change Users (Phase 14 slice 2; owner decision OD-P19): every
+write takes the ``partflow:user-administration`` advisory lock first,
+re-reads the acting User (``app.application.user_access``) and needs
+``MANAGE_USERS_AND_ROLES`` on those fresh keys. Creating a User in a
+role that holds a protected key (``app.domain.permissions``), moving a
+User into or out of such a role, or changing whether such a User is
+active also needs ``MANAGE_CORRECTION_PERMISSIONS`` (renames and avatars
+do not). A role change or deactivation that would leave no active User
+with a password holding ``MANAGE_USERS_AND_ROLES`` or
+``MANAGE_CORRECTION_PERMISSIONS`` is refused (409).
 
 Rules owned here (owner decision OD-8; slice 12 decisions):
 
@@ -21,16 +31,15 @@ Rules owned here (owner decision OD-8; slice 12 decisions):
   identifier, not a credential.
 - The display name is required, not unique.
 - Each User holds exactly one existing role.
-- Users are deactivated, never deleted: no delete service exists, and
-  no last-Administrator guard exists yet (Phase 14 slice 2).
+- Users are deactivated, never deleted: no delete service exists.
 - The optional avatar is stored on the row (CD1/OD-10) after the shared
   image validation (``app.application.images``) — the Worker protocol.
 - ``users.theme_preference`` (OD-19) is stored only: no service here
   writes or reads it (Phase 14 adds both with the signed-in User).
 - Every effective write appends exactly one ``audit_events`` row in the
-  SAME transaction (entity ``User``, ``actor_reference`` and
-  ``actor_user_id`` NULL until Phase 14 slice 2 converts these
-  writers). Profile rows snapshot ``{login_name, display_name, role_id,
+  SAME transaction (entity ``User``; ``actor_user_id`` is the signed-in
+  User since Phase 14 slice 2; ``actor_reference`` is legacy and stays
+  NULL). Profile rows snapshot ``{login_name, display_name, role_id,
   is_active}``; avatar rows snapshot ``{"avatar": digest-or-null}`` —
   never bytes. Rejected writes and no-ops append nothing.
 
@@ -50,7 +59,7 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, undefer
 
-from app.application import audit, images, user_access
+from app.application import audit, authorization, images, user_access
 from app.application.common import (
     UNSET,
     UnsetType,
@@ -61,7 +70,8 @@ from app.application.common import (
     required_text,
 )
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.domain.enums import AuditEntityType, AuditEventType, UserSessionEndReason
+from app.application.user_access import Principal
+from app.domain.enums import AuditEntityType, AuditEventType, Permission, UserSessionEndReason
 from app.domain.user_login import (
     EMPTY_LOGIN_NAME_MESSAGE,
     InvalidLoginNameError,
@@ -181,6 +191,20 @@ def _avatar_digest(user: User) -> dict[str, str | int] | None:
     return images.image_digest(user.avatar_image, user.avatar_image_type)
 
 
+def _act(session: Session, actor: Principal) -> authorization.Actor:
+    """Lock, re-read the actor and require ``MANAGE_USERS_AND_ROLES`` on its fresh keys."""
+    acting = user_access.acting_user(session, actor)
+    user_access.judge(
+        session,
+        lambda: authorization.require(acting, (Permission.MANAGE_USERS_AND_ROLES,)),
+    )
+    return acting
+
+
+def _guard(session: Session, acting: authorization.Actor, detail: str) -> None:
+    user_access.judge(session, lambda: authorization.require_guard(acting, detail))
+
+
 def user_view(session: Session, user: User) -> UserView:
     """The answer, read from this transaction (role name included)."""
     role = session.get(Role, user.role_id)
@@ -222,11 +246,19 @@ def list_users(session: Session) -> list[UserView]:
 
 
 def create_user(
-    session: Session, *, login_name: object, display_name: object, role_id: object
+    session: Session,
+    *,
+    login_name: object,
+    display_name: object,
+    role_id: object,
+    actor: Principal,
 ) -> UserView:
+    acting = _act(session, actor)
     clean_name = required_text(display_name, "Name")
     login = canonical_login_name(login_name)
     role = require_role(session, role_id)
+    if user_access.role_holds_protected(session, role.id):
+        _guard(session, acting, authorization.PROTECTED_ROLE_MESSAGE)
     reject_duplicate_login(session, login)
     user = User(login_name=login, display_name=clean_name, role_id=role.id, is_active=True)
     session.add(user)
@@ -240,6 +272,7 @@ def create_user(
         entity_id=str(user.id),
         before_data=None,
         after_data=profile_snapshot(user),
+        actor_user_id=actor.user_id,
     )
     view = user_view(session, user)
     commit(session, USER_CONFLICTS)
@@ -254,10 +287,16 @@ def update_user(
     display_name: object = UNSET,
     role_id: object = UNSET,
     is_active: object = UNSET,
+    actor: Principal,
 ) -> UserView:
     """Apply the provided profile fields; a no-op writes and audits nothing.
 
-    Deactivation and reactivation have no guard. Deactivation ends every
+    A role change touching a protected role, or an activity change of a
+    User in one, also needs ``MANAGE_CORRECTION_PERMISSIONS`` (checked
+    after every read the change needs, before any write). A role change
+    or deactivation counts the management keys' holders before the first
+    assignment and again after the flush; losing the last holder of one
+    refuses everything (409). Deactivation ends every
     open sign-in of the User (Phase 14 slice 1): the credential row is
     locked after the User row and before any assignment — before a login
     rename upgrades the User lock at its UPDATE — so a concurrent sign-in
@@ -265,6 +304,7 @@ def update_user(
     here) or waits and then reads the User inactive. Reactivation never
     revives an ended session.
     """
+    acting = _act(session, actor)
     user = lock_user(session, user_id)
     before = profile_snapshot(user)
 
@@ -290,17 +330,39 @@ def update_user(
         return user_view(session, user)
     if "role_id" in changes:
         require_role(session, changes["role_id"])
+    if ("role_id" in changes or "is_active" in changes) and (
+        user_access.role_holds_protected(session, user.role_id)
+        or ("role_id" in changes and user_access.role_holds_protected(session, changes["role_id"]))
+    ):
+        _guard(
+            session,
+            acting,
+            authorization.PROTECTED_ROLE_MESSAGE
+            if "role_id" in changes
+            else authorization.PROTECTED_USER_MESSAGE,
+        )
     if "login_name" in changes:
         reject_duplicate_login(session, changes["login_name"], exclude_id=user.id)
     deactivating = changes.get("is_active") is False
     if deactivating:
         user_access.lock_credential(session, user.id)
+    # Last-holder rule: only a role change or a deactivation can remove a holder.
+    holders_before = (
+        user_access.management_holder_counts(session)
+        if deactivating or "role_id" in changes
+        else None
+    )
 
     # Read-before-assign: no query runs from here to the explicit flush.
     for field, value in changes.items():
         setattr(user, field, value)
     user.updated_at = func.now()
     flush(session, USER_CONFLICTS)
+    if holders_before is not None:
+        holders_after = user_access.management_holder_counts(session)
+        user_access.judge(
+            session, lambda: authorization.reject_holder_loss(holders_before, holders_after)
+        )
     if deactivating:
         user_access.end_user_sessions(session, user.id, UserSessionEndReason.USER_DEACTIVATED)
     audit.append_audit_event(
@@ -310,6 +372,7 @@ def update_user(
         entity_id=str(user.id),
         before_data=before,
         after_data=profile_snapshot(user),
+        actor_user_id=actor.user_id,
     )
     view = user_view(session, user)
     commit(session, USER_CONFLICTS)
@@ -317,7 +380,7 @@ def update_user(
 
 
 def set_user_avatar(
-    session: Session, user_id: int, *, data: bytes, declared_type: str | None
+    session: Session, user_id: int, *, data: bytes, declared_type: str | None, actor: Principal
 ) -> UserView:
     """Store or replace the avatar; identical bytes and type are a no-op.
 
@@ -326,6 +389,7 @@ def set_user_avatar(
     unknown outcome.
     """
     content_type = images.validate_image(data, declared_type)
+    _act(session, actor)
     user = lock_user(session, user_id, with_avatar=True)
     before = _avatar_digest(user)
     after = images.image_digest(data, content_type)
@@ -344,14 +408,16 @@ def set_user_avatar(
         entity_id=str(user.id),
         before_data={"avatar": before},
         after_data={"avatar": after},
+        actor_user_id=actor.user_id,
     )
     view = user_view(session, user)
     commit(session, USER_CONFLICTS)
     return view
 
 
-def remove_user_avatar(session: Session, user_id: int) -> UserView:
+def remove_user_avatar(session: Session, user_id: int, *, actor: Principal) -> UserView:
     """Remove the avatar; a User without one is a no-op."""
+    _act(session, actor)
     user = lock_user(session, user_id, with_avatar=True)
     before = _avatar_digest(user)
     if before is None:
@@ -369,6 +435,7 @@ def remove_user_avatar(session: Session, user_id: int) -> UserView:
         entity_id=str(user.id),
         before_data={"avatar": before},
         after_data={"avatar": None},
+        actor_user_id=actor.user_id,
     )
     view = user_view(session, user)
     commit(session, USER_CONFLICTS)

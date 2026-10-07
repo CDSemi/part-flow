@@ -1,6 +1,9 @@
 // Administration sidebar registry (GUI_DESIGN §9): the grouped section
-// list with each section's implementation phase. Production-safe —
-// static navigation configuration, no sample data.
+// list with each section's implementation phase and the permission its
+// changes need. Production-safe — static navigation configuration, no
+// sample data.
+
+import type { Permission } from '../../api/roles';
 
 export const ADMIN_GROUPS = [
   'Organization',
@@ -23,11 +26,18 @@ export interface AdminSection {
    * `Deferred`); presented as not available, with no promised phase.
    */
   phase: 'minimum' | 'full' | 'deferred';
+  /**
+   * The permission that changing this section's configuration needs
+   * (the server checks it). Without it the section is view-only. Absent
+   * for a section with nothing to change (a statement, or no content).
+   */
+  writePermission?: Permission;
 }
 
 export const ADMIN_SECTIONS: AdminSection[] = [
   {
     id: 'departments',
+    writePermission: 'MANAGE_DEPARTMENTS',
     phase: 'minimum',
     group: 'Organization',
     label: 'Departments',
@@ -35,6 +45,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'areas',
+    writePermission: 'MANAGE_AREAS',
     phase: 'minimum',
     group: 'Organization',
     label: 'Areas',
@@ -42,6 +53,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'operations',
+    writePermission: 'MANAGE_OPERATIONS',
     phase: 'minimum',
     group: 'Organization',
     label: 'Operations',
@@ -55,6 +67,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   // Stations, policies).
   {
     id: 'workers',
+    writePermission: 'MANAGE_WORKERS',
     phase: 'full',
     group: 'Organization',
     label: 'Workers',
@@ -63,6 +76,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'scan-stations',
+    writePermission: 'MANAGE_SCAN_STATIONS',
     phase: 'minimum',
     group: 'Production setup',
     label: 'Scan Stations',
@@ -70,6 +84,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'barcode-configuration',
+    writePermission: 'MANAGE_BARCODE_CONFIGURATION',
     phase: 'minimum',
     group: 'Production setup',
     label: 'Barcode configuration',
@@ -84,6 +99,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'users',
+    writePermission: 'MANAGE_USERS_AND_ROLES',
     phase: 'full',
     group: 'Access',
     label: 'Users',
@@ -92,6 +108,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'roles',
+    writePermission: 'MANAGE_USERS_AND_ROLES',
     phase: 'full',
     group: 'Access',
     label: 'Roles & permissions',
@@ -99,6 +116,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'worker-sessions',
+    writePermission: 'MANAGE_WORKER_SESSION_POLICIES',
     phase: 'full',
     group: 'Policies',
     label: 'Worker sessions',
@@ -115,6 +133,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'correction-permissions',
+    writePermission: 'MANAGE_CORRECTION_PERMISSIONS',
     phase: 'full',
     group: 'Policies',
     label: 'Correction permissions',
@@ -122,6 +141,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'data-retention',
+    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
     phase: 'full',
     group: 'Policies',
     label: 'History archival & purge',
@@ -130,6 +150,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'department-display',
+    writePermission: 'MANAGE_DEPARTMENTS',
     phase: 'full',
     group: 'Policies',
     label: 'Department display settings',
@@ -138,6 +159,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'settings',
+    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
     phase: 'full',
     group: 'Policies',
     label: 'Settings',

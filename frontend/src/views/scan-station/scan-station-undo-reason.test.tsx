@@ -331,19 +331,6 @@ function handle(url: string, method: string, body: unknown): Response {
       : json({ status: 'ok' });
   }
   if (url === '/api/machines') return json([]);
-  if (url === '/api/workers') {
-    return json(
-      WORKERS.map((worker) => ({
-        id: worker.id,
-        name: worker.name,
-        badge_barcode: worker.badge,
-        is_active: worker.active,
-        avatar_updated_at: null,
-        created_at: '2026-08-01T00:00:00Z',
-        updated_at: '2026-08-01T00:00:00Z',
-      })),
-    );
-  }
   if (/\/context$/.test(url)) {
     return json({
       station_id: LATHE,

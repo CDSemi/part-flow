@@ -3,11 +3,13 @@
 // key (the PROJECT_PROFILE §20 capabilities in GUI vocabulary — the
 // Worker barcode is the badge, Route Templates are Planned Routes, the
 // PartNumber master is Part Numbers), the four groups the Roles editor
-// shows, and the correction subset edited only in Correction
-// permissions. Presentation only: the server treats every key alike,
-// and nothing here allows or refuses anything.
+// shows, the correction subset edited only in Correction permissions,
+// the protected keys whose holders only a user who may manage correction
+// permissions changes, and the keys that grant nothing yet. Presentation
+// only: the server checks every permission itself, and nothing here
+// allows or refuses anything.
 
-import type { Permission } from '../../api/roles';
+import type { Permission, Role } from '../../api/roles';
 
 export interface PermissionGroup {
   label: string;
@@ -119,3 +121,38 @@ export const CORRECTION_PERMISSIONS: readonly Permission[] = [
   'EDIT_WORK_ORDER_ALLOCATION',
   'PERFORM_HISTORICAL_CORRECTIONS',
 ];
+
+/**
+ * The correction permissions and the permission to manage them: changing
+ * who holds one (a role's grants, or a user's role, activity or password)
+ * needs Manage correction permissions (the server's permission-management
+ * guard).
+ */
+export const PROTECTED_PERMISSIONS: readonly Permission[] = [
+  ...CORRECTION_PERMISSIONS,
+  'MANAGE_CORRECTION_PERMISSIONS',
+];
+
+/** Permissions no PartFlow action requires yet; marked as granting
+ * nothing yet wherever they are chosen. */
+export const INERT_PERMISSIONS: readonly Permission[] = [
+  'MANAGE_SCAN_BEHAVIOR',
+  'RESOLVE_EXCEPTIONAL_SITUATIONS',
+  'EXPORT_REPORTS',
+  'PERFORM_QUANTITY_CORRECTIONS',
+  'PERFORM_HISTORICAL_CORRECTIONS',
+];
+
+/** Whether the role holds a correction permission or the permission to
+ * manage them. */
+export function roleHoldsProtected(role: Role): boolean {
+  return role.permissions.some((key) => PROTECTED_PERMISSIONS.includes(key));
+}
+
+/** The operator-facing label of a permission where it is chosen: the
+ * label, marked when the permission grants nothing yet. */
+export function permissionChoiceLabel(key: Permission): string {
+  return INERT_PERMISSIONS.includes(key)
+    ? `${PERMISSION_LABELS[key]} — grants nothing yet`
+    : PERMISSION_LABELS[key];
+}

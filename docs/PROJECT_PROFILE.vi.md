@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và đoạn §20 mới của Phase 14 slice 2, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
@@ -1060,6 +1060,8 @@ luôn visible ở Scan Station.
 # 20. Role và permission
 
 RBAC áp dụng. Role là **named và editable**. Mỗi capability dưới đây là một **permission key**; role cấp một tập permission key và một User giữ một role. **Permission key là authority duy nhất**: quyết định authorization dựa trên các key mà role của User cấp — không bao giờ dựa trên tên role — và không role nào là implicit superuser. Các danh sách Administrator, Manager và Operator dưới đây là **role ban đầu với grant ban đầu**, được seed đúng như liệt kê; administrator được ủy quyền có thể đổi tên role hoặc đổi những gì một role cấp, và mọi thay đổi như vậy đều được audit.
+
+**Câu nêu tên role và permission-management guard (quyết định 2026-10-06).** Bất cứ chỗ nào profile này nêu một role là bên thực hiện hoặc cấu hình điều gì đó trong ứng dụng (ví dụ "Admin or Manager", "Admin-configured"), đó là nêu initial grant của role: permission mà action cần mới quyết định. Việc đổi ai giữ một correction permission hoặc permission quản lý correction permission — bằng cách đổi permission của role, hoặc role, trạng thái hoạt động hay mật khẩu của một User — tự nó cần permission quản lý correction permission, và PartFlow không bao giờ cho một thay đổi khiến không còn User active có mật khẩu nào giữ permission quản lý user và role, hoặc permission quản lý correction permission.
 
 Machine, Planned Route và PartNumber metadata là production master
 data trong Management, do authorized specialist quản lý; không bắt buộc Admin. Role Administrator ban đầu giữ các capability này, nhưng chúng không độc quyền của Administrator.

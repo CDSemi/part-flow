@@ -1127,8 +1127,8 @@ class Role(Base):
     row is ordinary editable configuration — no behavior is keyed to a
     role name. Names are unique (case-sensitive, trimmed). Roles are
     renamed, never deleted or deactivated. Its permissions are read for
-    the signed-in User and checked only where a route requires them
-    (Phase 14 slice 1: setting passwords and the user sign-in settings).
+    the signed-in User and checked where a route requires them (Phase 14
+    slice 2: every Administration read and write).
     """
 
     __tablename__ = "roles"
@@ -2111,10 +2111,11 @@ class AuditEvent(Base):
     the same transaction as the audited change (an Application-layer
     transaction protocol, Phase 4 workflows). `actor_user_id` is the
     signed-in User, derived by the server from the session, never from
-    a request body (Phase 14; written only by the slice 1 password and
-    sign-in-policy commands so far). The legacy text column
-    (`actor_reference`) is kept for history and never backfilled;
-    existing writers keep writing it until their slice converts them.
+    a request body (Phase 14; written by the Administration writers —
+    environment, Workers, policies, roles, Users and passwords — since
+    slice 2). The legacy text column (`actor_reference`) is kept for
+    history and never backfilled; the remaining writers keep writing it
+    until their slice converts them.
     Append-only enforcement is the raise-on-write trigger owned by the
     Phase 4 migration.
     """

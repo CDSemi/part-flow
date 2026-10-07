@@ -50,6 +50,7 @@ from sqlalchemy.engine import URL, make_url
 from alembic import command
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -120,7 +121,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "BC-", "digits": 4},
     )
@@ -131,7 +132,7 @@ def asset_tag_format(client: TestClient) -> None:
 def approved_policy(client: TestClient) -> Iterator[None]:
     """Every test leaves the approved defaults: 15 minutes, every option on."""
     yield
-    _ok(client.put(_POLICY_PATH, json={"worker_session_timeout_minutes": 15, **_ALL_ON}))
+    _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 15, **_ALL_ON}))
 
 
 # ---------------------------------------------------------------------------
@@ -152,21 +153,25 @@ class _Cell:
     """An Area with one Operation, one Scan Station and optional Machines."""
 
     def __init__(self, client: TestClient, *, machine_count: int = 0) -> None:
-        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        department = _ok(
+            admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201
+        )
         self.area = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
             ),
             201,
         )
         self.area_id = int(self.area["id"])
         operation = _ok(
-            client.post("/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}),
+            admin_of(client).post(
+                "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
+            ),
             201,
         )
         self.operation_id = int(operation["id"])
         station = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/scan-stations",
                 json={"station_id": _unique("ST"), "area_id": self.area_id},
             ),
@@ -192,7 +197,7 @@ class _Cell:
 
 def _worker(client: TestClient) -> dict[str, Any]:
     return _ok(
-        client.post(
+        admin_of(client).post(
             "/api/workers", json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE")}
         ),
         201,
@@ -205,11 +210,11 @@ def _set_mode(
     body: dict[str, Any] = {"worker_identification_mode": mode}
     if worker_id is not None:
         body["fixed_worker_id"] = worker_id
-    return _ok(client.patch(f"/api/areas/{area_id}", json=body))
+    return _ok(admin_of(client).patch(f"/api/areas/{area_id}", json=body))
 
 
 def _set_policy(client: TestClient, **fields: Any) -> dict[str, Any]:
-    return _ok(client.put(_POLICY_PATH, json=fields))
+    return _ok(admin_of(client).put(_POLICY_PATH, json=fields))
 
 
 def _release(
@@ -520,7 +525,7 @@ _OPTION = {
 def test_policy_carries_the_options_as_an_audited_partial_merge(
     client: TestClient, db_engine: Engine
 ) -> None:
-    initial = _ok(client.get(_POLICY_PATH))
+    initial = _ok(admin_of(client).get(_POLICY_PATH))
     assert {key: initial[key] for key in ("worker_session_timeout_minutes", *_ALL_ON)} == {
         "worker_session_timeout_minutes": 15,
         **_ALL_ON,
@@ -569,7 +574,7 @@ def test_policy_carries_the_options_as_an_audited_partial_merge(
     assert {key: stored[key] for key in third} == third
 
     counts = len(_policy_audits(db_engine))
-    empty = client.put(_POLICY_PATH, json={})
+    empty = admin_of(client).put(_POLICY_PATH, json={})
     assert (empty.status_code, empty.json()["detail"]) == (422, _E_G5)
     for body in (
         {"badge_confirm_done": "true"},
@@ -578,8 +583,8 @@ def test_policy_carries_the_options_as_an_audited_partial_merge(
         {"worker_session_timeout_minutes": None},
         {"badge_confirm_undo": False, "extra": 1},
     ):
-        assert client.put(_POLICY_PATH, json=body).status_code == 422, body
-    final = _ok(client.get(_POLICY_PATH))
+        assert admin_of(client).put(_POLICY_PATH, json=body).status_code == 422, body
+    final = _ok(admin_of(client).get(_POLICY_PATH))
     assert {key: final[key] for key in third} == third
     assert len(_policy_audits(db_engine)) == counts
 
@@ -591,7 +596,7 @@ def test_concurrent_partial_policy_writers_both_keep_their_change(
         holder.execute(sa.text("SELECT 1 FROM application_policy WHERE id = 1 FOR NO KEY UPDATE"))
         holder.execute(sa.text("UPDATE application_policy SET badge_confirm_done = false"))
         thread, results = _start(
-            lambda: client.put(_POLICY_PATH, json={"badge_confirm_queue": False})
+            lambda: admin_of(client).put(_POLICY_PATH, json={"badge_confirm_queue": False})
         )
         try:
             _assert_blocked(thread)
@@ -657,9 +662,9 @@ def _area_audits(engine: Engine, area_id: int) -> list[Any]:
 def test_the_area_editor_accepts_scanned_session_mode(
     client: TestClient, db_engine: Engine
 ) -> None:
-    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    department = _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
     created = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department["id"],
@@ -691,7 +696,7 @@ def test_the_area_editor_accepts_scanned_session_mode(
             "fixed_worker_id": None,
         }
 
-    refused = client.patch(
+    refused = admin_of(client).patch(
         f"/api/areas/{disabled.area_id}",
         json={"worker_identification_mode": "SCANNED", "fixed_worker_id": worker["id"]},
     )
@@ -822,7 +827,7 @@ def test_an_unrecognized_badge_is_refused_with_zero_writes(
     client: TestClient, db_engine: Engine, gated: str
 ) -> None:
     signed_in, inactive = _worker(client), _worker(client)
-    _ok(client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/workers/{inactive['id']}", json={"is_active": False}))
     command_ = _GATED[gated](client)
     _scanned(client, command_.cell, signed_in)
     rows = _sessions(db_engine, command_.cell.station_id)
@@ -1244,7 +1249,7 @@ def test_a_gate_first_is_closed_by_the_following_mode_change(
             _assert_blocked(gate)
             # The mode change waits on the gate's Area lock.
             patch, patch_results = _start(
-                lambda: client.patch(
+                lambda: admin_of(client).patch(
                     f"/api/areas/{command_.cell.area_id}",
                     json={"worker_identification_mode": "DISABLED"},
                 )

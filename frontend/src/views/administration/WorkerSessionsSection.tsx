@@ -12,14 +12,17 @@ import type { WorkerSessionPolicy } from '../../api/policies';
 import type { SensitiveAction } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   AdminField,
   PolicySwitch,
+  ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  ViewOnlyNote,
 } from './section-widgets';
 import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 
@@ -34,7 +37,8 @@ import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 // On): each switch saves on click and sends ONLY its own option (the
 // policy PUT is a partial merge), so a stale read never overwrites
 // another administrator's change; the timeout Save sends only the
-// timeout.
+// timeout. Without the Manage Worker session policies permission the
+// timeout, the overrides and the three options read as text.
 
 const TIMEOUT_MIN = 1;
 const TIMEOUT_MAX = 720;
@@ -82,6 +86,7 @@ function parseTimeout(text: string): number | null {
 export function WorkerSessionsSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_WORKER_SESSION_POLICIES');
   const policyData = useApiData(getWorkerSessionPolicy);
   const areasData = useApiData(listAreas);
   const [editing, setEditing] = useState<Area | null>(null);
@@ -92,10 +97,15 @@ export function WorkerSessionsSection() {
   const [switchError, setSwitchError] = useState<string | null>(null);
 
   const header = (
-    <SectionHeader
-      title="Worker sessions"
-      subtitle="Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)"
-    />
+    <>
+      <SectionHeader
+        title="Worker sessions"
+        subtitle="Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)"
+      />
+      {canWrite ? null : (
+        <ViewOnlyNote permission="MANAGE_WORKER_SESSION_POLICIES" />
+      )}
+    </>
   );
 
   if (
@@ -163,12 +173,23 @@ export function WorkerSessionsSection() {
           production interaction — never at a shift boundary. One default value
           with optional per-Area overrides.
         </p>
-        <DefaultTimeoutForm
-          savedMinutes={defaultMinutes}
-          writeBlocked={writeBlocked || switchBusy}
-          onBusyChange={setTimeoutBusy}
-          onSaved={policyData.reload}
-        />
+        {canWrite ? (
+          <DefaultTimeoutForm
+            savedMinutes={defaultMinutes}
+            writeBlocked={writeBlocked || switchBusy}
+            onBusyChange={setTimeoutBusy}
+            onSaved={policyData.reload}
+          />
+        ) : (
+          <ReadOnlyValues
+            rows={[
+              {
+                label: 'Default timeout',
+                value: `${defaultMinutes} minutes`,
+              },
+            ]}
+          />
+        )}
         <h2>Per-Area overrides</h2>
         <table className="ad-table">
           <thead>
@@ -176,7 +197,7 @@ export function WorkerSessionsSection() {
               <th>Area</th>
               <th>Worker ID mode</th>
               <th>Session timeout</th>
-              <th aria-label="Actions" />
+              {canWrite ? <th aria-label="Actions" /> : null}
             </tr>
           </thead>
           <tbody>
@@ -195,15 +216,17 @@ export function WorkerSessionsSection() {
                     ? `${area.workerSessionTimeoutMinutes} min`
                     : `Default · ${defaultMinutes} min`}
                 </td>
-                <td>
-                  <button
-                    className="btn"
-                    aria-label={`Edit session timeout — ${area.name}`}
-                    onClick={() => setEditing(area)}
-                  >
-                    Edit
-                  </button>
-                </td>
+                {canWrite ? (
+                  <td>
+                    <button
+                      className="btn"
+                      aria-label={`Edit session timeout — ${area.name}`}
+                      onClick={() => setEditing(area)}
+                    >
+                      Edit
+                    </button>
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>
@@ -222,24 +245,33 @@ export function WorkerSessionsSection() {
           Areas with a fixed or disabled Worker always keep the question; no
           badge exists there.
         </p>
-        <div className="ad-switchlist">
-          {BADGE_CONFIRMATION_OPTIONS.map(
-            ({ action, key, label, description }) => {
-              const on = policy.badgeConfirmation[key];
-              return (
-                <PolicySwitch
-                  key={action}
-                  label={label}
-                  description={description}
-                  ariaLabel={`Require badge scan — ${label}`}
-                  on={on}
-                  disabled={writeBlocked || switchBusy || timeoutBusy}
-                  onToggle={() => void toggle(action, key)}
-                />
-              );
-            },
-          )}
-        </div>
+        {canWrite ? (
+          <div className="ad-switchlist">
+            {BADGE_CONFIRMATION_OPTIONS.map(
+              ({ action, key, label, description }) => {
+                const on = policy.badgeConfirmation[key];
+                return (
+                  <PolicySwitch
+                    key={action}
+                    label={label}
+                    description={description}
+                    ariaLabel={`Require badge scan — ${label}`}
+                    on={on}
+                    disabled={writeBlocked || switchBusy || timeoutBusy}
+                    onToggle={() => void toggle(action, key)}
+                  />
+                );
+              },
+            )}
+          </div>
+        ) : (
+          <ReadOnlyValues
+            rows={BADGE_CONFIRMATION_OPTIONS.map(({ key, label }) => ({
+              label,
+              value: policy.badgeConfirmation[key] ? 'On' : 'Off',
+            }))}
+          />
+        )}
         <ServerErrorNote message={switchError} />
       </div>
       {editing ? (

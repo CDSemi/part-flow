@@ -10,12 +10,19 @@ import type { Permission, Role } from '../../api/roles';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { CORRECTION_PERMISSIONS, PERMISSION_LABELS } from './permissions';
+import {
+  CORRECTION_PERMISSIONS,
+  PERMISSION_LABELS,
+  permissionChoiceLabel,
+} from './permissions';
 import {
   PolicySwitch,
+  ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
@@ -29,8 +36,10 @@ import { ADMIN_SECTIONS } from './sections';
 // four correction permissions of each role (`/api/roles`). Both save on
 // click and re-read the stored value. The two panels load
 // independently, so either keeps working when the other cannot load.
-// The role permissions are configuration only: they are recorded for
-// each role and not enforced yet, and the section says so.
+// Changing either needs the Manage correction permissions permission
+// (the server checks it; a change of only correction permissions needs
+// no other permission); without it both read as text. The correction
+// permissions themselves are not checked yet, and the section says so.
 
 // No answer, a timeout or a 5xx: the write may or may not have
 // committed, so the copy never claims that nothing was changed.
@@ -46,10 +55,14 @@ const SUBTITLE =
 export function CorrectionPermissionsSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_CORRECTION_PERMISSIONS');
 
   return (
     <>
       <SectionHeader title="Correction permissions" subtitle={SUBTITLE} />
+      {canWrite ? null : (
+        <ViewOnlyNote permission="MANAGE_CORRECTION_PERMISSIONS" />
+      )}
       <div className="ad-config">
         <h2>Undo reason</h2>
         <p className="ad-confighelp">
@@ -58,13 +71,15 @@ export function CorrectionPermissionsSection() {
           The reason is recorded with the reversal and shown in Tracking. When
           Off, Undo asks for no reason.
         </p>
-        <UndoReasonPanel writeBlocked={writeBlocked} />
+        <UndoReasonPanel canWrite={canWrite} writeBlocked={writeBlocked} />
         <h2>Who may undo or correct</h2>
         <p className="ad-confighelp">
-          Choose which roles hold each correction permission. These permissions
-          are recorded for each role and are not enforced yet.
+          Choose which roles hold each correction permission. The correction
+          permissions are not checked yet; Perform quantity corrections and
+          Perform authorized historical corrections grant nothing yet because
+          PartFlow has no such correction.
         </p>
-        <CorrectionRoleTable writeBlocked={writeBlocked} />
+        <CorrectionRoleTable canWrite={canWrite} writeBlocked={writeBlocked} />
         <p className="ad-confighelp">
           Undo recent eligible scans covers exactly the actions the Scan
           Station&apos;s Undo offers — there is no extra time limit.
@@ -74,8 +89,15 @@ export function CorrectionPermissionsSection() {
   );
 }
 
-/** The Undo reason switch, toggled from the last read. */
-function UndoReasonPanel({ writeBlocked }: { writeBlocked: boolean }) {
+/** The Undo reason switch, toggled from the last read (as text for a
+ * user who may not change it). */
+function UndoReasonPanel({
+  canWrite,
+  writeBlocked,
+}: {
+  canWrite: boolean;
+  writeBlocked: boolean;
+}) {
   const policyData = useApiData(getCorrectionPermissionsPolicy);
   const [busy, setBusy] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -94,6 +116,19 @@ function UndoReasonPanel({ writeBlocked }: { writeBlocked: boolean }) {
   }
 
   const required = policyData.state.data.undoReasonRequired;
+
+  if (!canWrite) {
+    return (
+      <ReadOnlyValues
+        rows={[
+          {
+            label: 'Require a reason for every Undo',
+            value: required ? 'On' : 'Off',
+          },
+        ]}
+      />
+    );
+  }
 
   // Toggled from the last read; the server's answer is re-read so the
   // switch shows the stored value.
@@ -141,9 +176,16 @@ function UndoReasonPanel({ writeBlocked }: { writeBlocked: boolean }) {
  * revokes that one permission of that one role (a delta, so a
  * concurrent change to another permission is never reverted), toggled
  * from the last read; the roles are then re-read so every checkbox
- * shows the stored value.
+ * shows the stored value. A user who may not change it reads each cell
+ * as text.
  */
-function CorrectionRoleTable({ writeBlocked }: { writeBlocked: boolean }) {
+function CorrectionRoleTable({
+  canWrite,
+  writeBlocked,
+}: {
+  canWrite: boolean;
+  writeBlocked: boolean;
+}) {
   const rolesData = useApiData(listRoles);
   const [busy, setBusy] = useState(false);
   const [writeError, setWriteError] = useState<string | null>(null);
@@ -195,7 +237,7 @@ function CorrectionRoleTable({ writeBlocked }: { writeBlocked: boolean }) {
           <tr>
             <th>Role</th>
             {CORRECTION_PERMISSIONS.map((key) => (
-              <th key={key}>{PERMISSION_LABELS[key]}</th>
+              <th key={key}>{permissionChoiceLabel(key)}</th>
             ))}
           </tr>
         </thead>
@@ -211,13 +253,19 @@ function CorrectionRoleTable({ writeBlocked }: { writeBlocked: boolean }) {
                   className="ad-matrixcell"
                   data-label={PERMISSION_LABELS[key]}
                 >
-                  <input
-                    type="checkbox"
-                    aria-label={`${PERMISSION_LABELS[key]} — ${role.name}`}
-                    checked={role.permissions.includes(key)}
-                    disabled={writeBlocked || busy}
-                    onChange={() => void toggle(role, key)}
-                  />
+                  {canWrite ? (
+                    <input
+                      type="checkbox"
+                      aria-label={`${PERMISSION_LABELS[key]} — ${role.name}`}
+                      checked={role.permissions.includes(key)}
+                      disabled={writeBlocked || busy}
+                      onChange={() => void toggle(role, key)}
+                    />
+                  ) : role.permissions.includes(key) ? (
+                    'Yes'
+                  ) : (
+                    '—'
+                  )}
                 </td>
               ))}
             </tr>

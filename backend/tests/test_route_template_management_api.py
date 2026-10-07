@@ -53,6 +53,7 @@ from app.application.route_templates import RouteStepInput
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_route_template_management_api"
@@ -108,7 +109,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "RT-", "digits": 4},
     )
@@ -125,9 +126,9 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
-    response = client.post(
+    response = admin_of(client).post(
         "/api/areas",
         json={"department_id": department.json()["id"], "name": _unique("AREA"), **overrides},
     )
@@ -136,7 +137,9 @@ def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
 
 
 def _create_operation(client: TestClient, area_id: int) -> dict[str, Any]:
-    response = client.post("/api/operations", json={"area_id": area_id, "code": _unique("OP")})
+    response = admin_of(client).post(
+        "/api/operations", json={"area_id": area_id, "code": _unique("OP")}
+    )
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -165,7 +168,7 @@ class _Cell:
         self.operation_id = int(self.operation["id"])
         self.station_id: str | None = None
         if station:
-            response = client.post(
+            response = admin_of(client).post(
                 "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
             )
             assert response.status_code == 201, response.text
@@ -340,7 +343,7 @@ def _retire(client: TestClient, machine_id: int) -> None:
 
 
 def _deactivate(client: TestClient, path: str) -> None:
-    response = client.patch(path, json={"is_active": False})
+    response = admin_of(client).patch(path, json={"is_active": False})
     assert response.status_code == 200, response.text
 
 

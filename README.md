@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6), plus Part Numbers management (the real Management → Part Numbers view and the shared `Edit Part Number` dialog on `/api/part-numbers`: create-only creation, a partial edit, the image, the bounded `/page` search and the hard delete of the master record; the pencil `Edit Part Number` control on Work Order demand lines; the saved name on Add Part results, the Production Board rows and PN Tracking) (slice 7), plus Planned Routes management (the real Management → Planned Routes view on `/api/route-templates`: the management list with usage, create, full-replacement edit with an optional advisory preferred Machine per step, archive of an ever-used route, delete of a never-used route, the usage list; the preferred Machine is copied into the Assigned Route snapshot) (slice 8), plus the Department display settings and the Due Soon policy (the Production Board rotation timing per Department through the Department `PATCH`, `GET`/`PUT /api/policies/due-soon`, the real Administration → Department display settings and Administration → Settings sections; every due countdown uses the server policy) (slice 9), plus the Scan Station theme persistence of the station tier (`PUT /api/scan-stations/{id}/theme-preference`, not audited; `GET /api/scan-stations/{id}/context` reports the saved theme; the theme toggle on a Scan Station route saves it for that station while connected) (slice 10), plus the Movement-history retention period (`GET`/`PUT /api/policies/data-retention`, audited; the real Administration → History archival & purge section stores a period of 12–1200 whole months or none and states that archival and purge runs are not available yet — nothing reads the period, and nothing is archived or purged; Administration → Machine assignment is a read-only statement of the two Area modes, and Scan behavior states that it is not available yet) (slice 11), plus Users, roles and permissions configuration (`/api/roles` and `/api/users`, audited; the real Administration → Users and Roles & permissions sections, and the role × correction-permission table in Administration → Correction permissions; the stored User theme preference has no writer yet — users could not sign in until Phase 14 slice 1, and nothing reads a user, a role or a permission to allow or refuse an action before Phase 14) (slice 12) — and, in the open **Phase 14**, **sign-in for application Users** (slice 1): local login name and password accounts, server sessions and the CSRF header rule (`/api/session`, `/api/session/password`), the first-run setup of the first Administrator with a one-time setup token printed to the server log (`/api/setup`), `PUT /api/users/{id}/password`, the sign-in settings (`GET`/`PUT /api/policies/sign-in`), the recovery command `python -m app.cli reset-password`, and the account chip, sign-in dialogs, Users `Set password…` and Settings → User sign-in in the frontend; permission checks cover only setting passwords and changing the user sign-in settings, so every other screen and write stays open to anyone who can reach the service until Phase 14 slices 2–3:
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6), plus Part Numbers management (the real Management → Part Numbers view and the shared `Edit Part Number` dialog on `/api/part-numbers`: create-only creation, a partial edit, the image, the bounded `/page` search and the hard delete of the master record; the pencil `Edit Part Number` control on Work Order demand lines; the saved name on Add Part results, the Production Board rows and PN Tracking) (slice 7), plus Planned Routes management (the real Management → Planned Routes view on `/api/route-templates`: the management list with usage, create, full-replacement edit with an optional advisory preferred Machine per step, archive of an ever-used route, delete of a never-used route, the usage list; the preferred Machine is copied into the Assigned Route snapshot) (slice 8), plus the Department display settings and the Due Soon policy (the Production Board rotation timing per Department through the Department `PATCH`, `GET`/`PUT /api/policies/due-soon`, the real Administration → Department display settings and Administration → Settings sections; every due countdown uses the server policy) (slice 9), plus the Scan Station theme persistence of the station tier (`PUT /api/scan-stations/{id}/theme-preference`, not audited; `GET /api/scan-stations/{id}/context` reports the saved theme; the theme toggle on a Scan Station route saves it for that station while connected) (slice 10), plus the Movement-history retention period (`GET`/`PUT /api/policies/data-retention`, audited; the real Administration → History archival & purge section stores a period of 12–1200 whole months or none and states that archival and purge runs are not available yet — nothing reads the period, and nothing is archived or purged; Administration → Machine assignment is a read-only statement of the two Area modes, and Scan behavior states that it is not available yet) (slice 11), plus Users, roles and permissions configuration (`/api/roles` and `/api/users`, audited; the real Administration → Users and Roles & permissions sections, and the role × correction-permission table in Administration → Correction permissions; the stored User theme preference has no writer yet — users could not sign in until Phase 14 slice 1, and nothing reads a user, a role or a permission to allow or refuse an action before Phase 14) (slice 12) — and, in the open **Phase 14**, **sign-in for application Users** (slice 1): local login name and password accounts, server sessions and the CSRF header rule (`/api/session`, `/api/session/password`), the first-run setup of the first Administrator with a one-time setup token printed to the server log (`/api/setup`), `PUT /api/users/{id}/password`, the sign-in settings (`GET`/`PUT /api/policies/sign-in`), the recovery command `python -m app.cli reset-password`, and the account chip, sign-in dialogs, Users `Set password…` and Settings → User sign-in in the frontend; since **slice 2**, **Administration enforcement**: every Administration read needs a signed-in User and every Administration write its permission (the Administration sections are view-only without it), the permission-management guard and last-holder rule, the route registry `app/api/route_access.py`, the recovery command `python -m app.cli restore-correction-permission-management`, and `actor_user_id` on the audit rows these writes append; Management, master-data and monitoring routes stay open until Phase 14 slice 3 and Scan Station writes are callable by any client on the network until slice 4:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -697,6 +697,38 @@ Administrator exists. The token is the only protection of first-run setup, so
 complete it before the service is reachable by anyone else and restrict access
 to the log until then. Each backend process announces its own token.
 
+**Upgrading to Phase 14 slice 2.** Before and after deploying it, run this in
+the database shell (`docker compose exec db psql -U <POSTGRES_USER> -d partflow`)
+to count the active users with a password whose role holds each
+permission-management key:
+
+```sql
+SELECT rp.permission, count(*) AS holders
+FROM users u
+JOIN user_credentials c ON c.user_id = u.id
+JOIN role_permissions rp ON rp.role_id = u.role_id
+WHERE u.is_active
+  AND rp.permission IN ('MANAGE_USERS_AND_ROLES', 'MANAGE_CORRECTION_PERMISSIONS')
+GROUP BY rp.permission;
+```
+
+A missing row means no holder. Both counts should be at least 1, or
+`MANAGE_USERS_AND_ROLES` should be absent (first-run setup is then open). If
+`MANAGE_CORRECTION_PERMISSIONS` has no holder while `MANAGE_USERS_AND_ROLES`
+has, nobody may grant it any more once slice 2 runs: before deploying, grant it
+in Administration; after deploying, the backend logs a startup warning and you
+restore it from the host:
+
+```bash
+docker compose exec backend uv run python -m app.cli restore-correction-permission-management --role-name <role>
+```
+
+The command works only while no active user with a password may manage
+correction permissions, and the named role must have such a member. It grants
+the permission to that role, appends an audit row and changes nothing else.
+Each refusal (a holder already exists, no such role, no active user with a
+password in the role) writes nothing and exits 1.
+
 If the only Administrator forgets the password, reset it from the host:
 
 ```bash
@@ -771,7 +803,11 @@ docker compose exec backend uv run alembic upgrade head    # migrations
 ```
 
 The pytest suite contains three kinds of tests (behavior, unit, and
-integration):
+integration). `tests/test_route_access.py` is a unit test of the route
+registry in `app/api/route_access.py`: it fails on any route the registry does
+not classify, so a new route must be added there. Tests call signed-in or
+permission routes through `client_as` / `admin_of` from `tests/auth_harness.py`,
+not through an anonymous client:
 
 - `tests/test_health.py` — health-endpoint **behavior** tests that mock
   `ping_database` (success and safe 503 responses; no database needed).
@@ -804,7 +840,9 @@ integration):
   `tests/test_retention_policy_api.py`,
   `tests/test_users_roles_api.py`,
   `tests/test_authentication_api.py`,
-  `tests/test_first_run_setup_api.py`, and
+  `tests/test_first_run_setup_api.py`,
+  `tests/test_route_authorization_api.py`,
+  `tests/test_permission_management_api.py`, and
   `tests/test_cli.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls

@@ -32,6 +32,7 @@ from app.application.work_orders import site_today
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_tracking_api"
@@ -83,7 +84,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "TK-", "digits": 4},
     )
@@ -111,7 +112,7 @@ class _Cell:
         machine_count: int = 0,
         is_terminal: bool = False,
     ) -> None:
-        area = client.post(
+        area = admin_of(client).post(
             "/api/areas",
             json={
                 "department_id": department_id,
@@ -123,12 +124,12 @@ class _Cell:
         assert area.status_code == 201, area.text
         self.area_id = int(area.json()["id"])
         self.name = name
-        created = client.post(
+        created = admin_of(client).post(
             "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
         )
         assert created.status_code == 201, created.text
         self.operation_id = int(created.json()["id"])
-        station = client.post(
+        station = admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
         )
         assert station.status_code == 201, station.text
@@ -148,7 +149,7 @@ class _Cell:
 
 class _Shop:
     def __init__(self, client: TestClient) -> None:
-        response = client.post("/api/departments", json={"name": _unique("DEPT")})
+        response = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
         assert response.status_code == 201, response.text
         self.department_id = int(response.json()["id"])
         suffix = uuid.uuid4().hex[:6].upper()
@@ -1454,7 +1455,7 @@ def test_a_position_carries_the_effective_expected_duration_as_a_fixed_instant(
         [shop.material, shop.cut, shop.stockroom],
         expected_durations={0: datetime.timedelta(minutes=45)},
     )
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/operations/{shop.cut.operation_id}", json={"default_expected_duration": "PT3H"}
     )
     assert updated.status_code == 200, updated.text

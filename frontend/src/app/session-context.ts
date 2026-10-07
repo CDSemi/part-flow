@@ -9,12 +9,21 @@ import type { SessionUser } from '../api/session';
  */
 export type SessionStatus = 'unknown' | 'signed-out' | 'signed-in';
 
+/** How the last sign-in of this browser ended: an explicit sign-out, or
+ * the server refusing it as ended or expired; null while signed in or
+ * before any sign-in ended. */
+export type SessionEnd = 'sign-out' | 'expired' | null;
+
 export interface SessionValue {
   status: SessionStatus;
   /** The signed-in user; null unless `status` is `signed-in`. */
   user: SessionUser | null;
   /** PartFlow has no administrator yet (first-run setup is available). */
   setupOpen: boolean;
+  /** A read of the sign-in from the server is in flight. */
+  checking: boolean;
+  /** How the last sign-in ended (see `SessionEnd`). */
+  endedBy: SessionEnd;
   /** The signed-in user's role holds the permission. Presentation only:
    * the server checks every permission itself. */
   can(permission: Permission): boolean;

@@ -52,6 +52,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_machines_api"
@@ -106,7 +107,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
     """Machine creation requires the configured Asset Tag format."""
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -118,10 +119,10 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
     payload = {"department_id": department.json()["id"], "name": _unique("AREA"), **overrides}
-    response = client.post("/api/areas", json=payload)
+    response = admin_of(client).post("/api/areas", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -197,7 +198,7 @@ def test_format_change_applies_forward_and_never_resets_the_counter(
     before = _create_machine(client)
     before_sequence = _next_sequence(db_engine)
 
-    reformatted = client.put(
+    reformatted = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "MS-", "digits": 6},
     )
@@ -210,7 +211,7 @@ def test_format_change_applies_forward_and_never_resets_the_counter(
     assert after["asset_tag"] == f"MS-{before_sequence:06d}"
     assert client.get(f"/api/machines/{before['id']}").json()["asset_tag"] == before["asset_tag"]
 
-    restored = client.put(
+    restored = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -239,7 +240,7 @@ def test_create_requires_configured_asset_tag_format(client: TestClient, db_engi
         assert response.status_code == 409
         assert "not configured" in response.json()["detail"]
     finally:
-        restored = client.put(
+        restored = admin_of(client).put(
             "/api/barcode-configuration/machine-asset-tag-format",
             json={"prefix": "CD-", "digits": 4},
         )
@@ -347,7 +348,10 @@ def test_create_requires_existing_active_area_and_name(client: TestClient) -> No
     assert missing.status_code == 422
 
     area = _create_area(client)
-    assert client.patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code == 200
+    assert (
+        admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code
+        == 200
+    )
     inactive = client.post(
         "/api/machines", json={"area_id": area["id"], "name": _unique("MACHINE")}
     )
@@ -776,7 +780,9 @@ def test_reactivate_blockers_area_name_and_serial(client: TestClient) -> None:
     # Target Area must be active.
     inactive_area = _create_area(client)
     assert (
-        client.patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False}).status_code
+        admin_of(client)
+        .patch(f"/api/areas/{inactive_area['id']}", json={"is_active": False})
+        .status_code
         == 200
     )
     to_inactive = client.post(

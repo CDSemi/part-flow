@@ -58,6 +58,7 @@ from app.application.errors import InvalidInputError
 from app.application.machine_processing import FINGERPRINT_KEY
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _UNDO_MODULE = _BACKEND_DIR / "app" / "application" / "undo.py"
@@ -132,7 +133,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "BC-", "digits": 4},
     )
@@ -143,8 +144,8 @@ def asset_tag_format(client: TestClient) -> None:
 def approved_policy(client: TestClient) -> Iterator[None]:
     """Every test leaves the approved defaults: no reason required, slice 4 / 5 defaults."""
     yield
-    _ok(client.put(_POLICY_PATH, json={"undo_reason_required": False}))
-    _ok(client.put(_SESSIONS_POLICY_PATH, json=_SESSION_DEFAULTS))
+    _ok(admin_of(client).put(_POLICY_PATH, json={"undo_reason_required": False}))
+    _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json=_SESSION_DEFAULTS))
 
 
 # ---------------------------------------------------------------------------
@@ -165,21 +166,25 @@ class _Cell:
     """An Area with one Operation, one Scan Station and optional Machines."""
 
     def __init__(self, client: TestClient, *, machine_count: int = 0) -> None:
-        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        department = _ok(
+            admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201
+        )
         self.area = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
             ),
             201,
         )
         self.area_id = int(self.area["id"])
         operation = _ok(
-            client.post("/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}),
+            admin_of(client).post(
+                "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
+            ),
             201,
         )
         self.operation_id = int(operation["id"])
         station = _ok(
-            client.post(
+            admin_of(client).post(
                 "/api/scan-stations",
                 json={"station_id": _unique("ST"), "area_id": self.area_id},
             ),
@@ -205,7 +210,7 @@ class _Cell:
 
 def _worker(client: TestClient) -> dict[str, Any]:
     return _ok(
-        client.post(
+        admin_of(client).post(
             "/api/workers", json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE")}
         ),
         201,
@@ -350,7 +355,7 @@ def _preview(client: TestClient, command_: _Command) -> dict[str, Any]:
 
 
 def _set_required(client: TestClient, required: bool) -> dict[str, Any]:
-    return _ok(client.put(_POLICY_PATH, json={"undo_reason_required": required}))
+    return _ok(admin_of(client).put(_POLICY_PATH, json={"undo_reason_required": required}))
 
 
 # ---------------------------------------------------------------------------
@@ -474,8 +479,8 @@ def _pre_slice6_fingerprint(station_id: str, part_number: str, reverses: str) ->
 
 
 def test_policy_section_is_a_strict_audited_switch(client: TestClient, db_engine: Engine) -> None:
-    sessions_before = _ok(client.get(_SESSIONS_POLICY_PATH))
-    initial = _ok(client.get(_POLICY_PATH))
+    sessions_before = _ok(admin_of(client).get(_SESSIONS_POLICY_PATH))
+    initial = _ok(admin_of(client).get(_POLICY_PATH))
     assert set(initial) == {"undo_reason_required", "updated_at"}
     assert initial["undo_reason_required"] is False
     before = len(_policy_audits(db_engine, "correction-permissions"))
@@ -510,11 +515,11 @@ def test_policy_section_is_a_strict_audited_switch(client: TestClient, db_engine
         {"undo_reason_required": None},
         {"undo_reason_required": True, "extra": 1},
     ):
-        assert client.put(_POLICY_PATH, json=body).status_code == 422, body
-    assert _ok(client.get(_POLICY_PATH))["undo_reason_required"] is False
+        assert admin_of(client).put(_POLICY_PATH, json=body).status_code == 422, body
+    assert _ok(admin_of(client).get(_POLICY_PATH))["undo_reason_required"] is False
     assert _row_counts(db_engine) == counts
     # The Worker sessions section is untouched by every correction-permissions PUT.
-    sessions_after = _ok(client.get(_SESSIONS_POLICY_PATH))
+    sessions_after = _ok(admin_of(client).get(_SESSIONS_POLICY_PATH))
     assert {key: sessions_after[key] for key in _SESSION_DEFAULTS} == {
         key: sessions_before[key] for key in _SESSION_DEFAULTS
     }
@@ -710,7 +715,7 @@ def test_state_refusals_precede_the_reason(client: TestClient, db_engine: Engine
     source, target = _Cell(client), _Cell(client)
     flow_id, pn = _release(client, source)
     transfer = _transfer(client, source, target, flow_id, pn)
-    _ok(client.patch(f"/api/areas/{source.area_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/areas/{source.area_id}", json={"is_active": False}))
     deactivated = _Command(target, pn, str(transfer["device_event_id"]), 1, [flow_id], [])
     before = _row_counts(db_engine)
     _assert_plain_conflict(_post_undo(client, deactivated, _undo_body(deactivated)), "deactivated")
@@ -721,7 +726,7 @@ def _scanned_undo(client: TestClient) -> tuple[_Command, dict[str, Any]]:
     """An Undo of a prior transfer at a Scanned-session station with a valid session."""
     command_ = _plain_transfer(client)
     _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/areas/{command_.cell.area_id}", json={"worker_identification_mode": "SCANNED"}
         )
     )
@@ -778,7 +783,7 @@ def test_a_reason_at_a_question_gate_records_the_session_worker(
     client: TestClient, db_engine: Engine
 ) -> None:
     command_, signed_in = _scanned_undo(client)
-    _ok(client.put(_SESSIONS_POLICY_PATH, json={"badge_confirm_undo": False}))
+    _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json={"badge_confirm_undo": False}))
     _set_required(client, True)
     body = _undo_body(command_, reason="wrong PN")
     _ok(_post_undo(client, command_, body), 201)
@@ -918,7 +923,7 @@ def test_resolver_policy_reads_still_see_a_change_committed_while_they_waited(
     client: TestClient, db_engine: Engine
 ) -> None:
     command_, _ = _scanned_undo(client)
-    _ok(client.put(_SESSIONS_POLICY_PATH, json={"badge_confirm_undo": False}))
+    _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json={"badge_confirm_undo": False}))
     sessions = _open_sessions(db_engine, command_.cell.station_id)
     with db_engine.connect() as holder:
         # Conflicts with the resolver's FOR KEY SHARE re-read of the station Area.
@@ -930,7 +935,7 @@ def test_resolver_policy_reads_still_see_a_change_committed_while_they_waited(
         try:
             # The slice 6 read already ran (no reason: no short-circuit) and said off.
             _assert_blocked(thread)
-            _ok(client.put(_SESSIONS_POLICY_PATH, json={"badge_confirm_undo": True}))
+            _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json={"badge_confirm_undo": True}))
         finally:
             holder.rollback()
         response = _finish(thread, results)
@@ -946,7 +951,7 @@ def test_the_two_policy_sections_never_overwrite_each_other(
         holder.execute(sa.text("SELECT 1 FROM application_policy WHERE id = 1 FOR NO KEY UPDATE"))
         holder.execute(sa.text("UPDATE application_policy SET badge_confirm_done = false"))
         thread, results = _start(
-            lambda: client.put(_POLICY_PATH, json={"undo_reason_required": True})
+            lambda: admin_of(client).put(_POLICY_PATH, json={"undo_reason_required": True})
         )
         try:
             _assert_blocked(thread)

@@ -10,6 +10,7 @@ import {
 import type { Permission, Role } from '../../api/roles';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
   EmptyState,
@@ -20,17 +21,27 @@ import {
   CORRECTION_PERMISSIONS,
   PERMISSION_LABELS,
   ROLE_PERMISSION_GROUPS,
+  permissionChoiceLabel,
 } from './permissions';
-import { AdminField, SectionHeader, ServerErrorNote } from './section-widgets';
+import {
+  AdminField,
+  RowOpener,
+  SectionHeader,
+  ServerErrorNote,
+  ViewOnlyNote,
+} from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Roles & permissions: named, editable roles and the
 // permissions each one grants (initially Administrator, Manager and
 // Operator with exactly the PROJECT_PROFILE §20 capabilities). The
 // standard table + editor pattern: roles are created and renamed here,
-// never deleted. Permissions are checked only where a route requires
-// them (so far setting passwords and the user sign-in settings), and
-// the section says so.
+// never deleted. The server checks the Administration permissions (the
+// Management and Scan Station ones are recorded and not checked yet),
+// and the section says so. Without the Manage users and roles
+// permission the section is view-only; without the Manage correction
+// permissions permission the editor neither shows nor sends that
+// permission (the server refuses changing it).
 //
 // The editor edits the four permission groups only and sends grant /
 // revoke deltas computed over those groups: the correction permissions
@@ -52,6 +63,9 @@ type PendingDialog = { kind: 'new' } | { kind: 'edit'; role: Role };
 export function RolesSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const session = useSession();
+  const canWrite = session.can('MANAGE_USERS_AND_ROLES');
+  const managesCorrections = session.can('MANAGE_CORRECTION_PERMISSIONS');
   const rolesData = useApiData(listRoles);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
   const ready = rolesData.state.status === 'ready';
@@ -91,13 +105,17 @@ export function RolesSection() {
               {roles.map((role) => (
                 <tr
                   key={role.id}
-                  className="selrow"
-                  onClick={() => setDialog({ kind: 'edit', role })}
+                  className={canWrite ? 'selrow' : undefined}
+                  onClick={
+                    canWrite
+                      ? () => setDialog({ kind: 'edit', role })
+                      : undefined
+                  }
                 >
                   <td>
-                    <button className="rowbtn" aria-label={`Edit ${role.name}`}>
+                    <RowOpener editable={canWrite} label={`Edit ${role.name}`}>
                       <b>{role.name}</b>
-                    </button>
+                    </RowOpener>
                   </td>
                   <td data-label="Permissions">
                     {role.permissions.length} of {PERMISSIONS.length}
@@ -109,11 +127,10 @@ export function RolesSection() {
           </table>
         )}
         <div className="ad-notice">
-          Each user holds one role. PartFlow checks permissions only for setting
-          passwords and changing user sign-in settings so far; the other
-          permissions are recorded here and are not checked yet. Correction
-          permissions are set in Policies → Correction permissions. Roles are
-          renamed, never deleted.
+          Each user holds one role. PartFlow checks the Administration
+          permissions; the Management and Scan Station permissions are recorded
+          here and are not checked yet. Correction permissions are set in
+          Policies → Correction permissions. Roles are renamed, never deleted.
         </div>
       </>
     );
@@ -125,19 +142,23 @@ export function RolesSection() {
         title="Roles & permissions"
         subtitle={SUBTITLE}
         action={
-          <button
-            className="btn primary"
-            disabled={!ready || writeBlocked}
-            onClick={() => setDialog({ kind: 'new' })}
-          >
-            + New role
-          </button>
+          canWrite ? (
+            <button
+              className="btn primary"
+              disabled={!ready || writeBlocked}
+              onClick={() => setDialog({ kind: 'new' })}
+            >
+              + New role
+            </button>
+          ) : undefined
         }
       />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_USERS_AND_ROLES" />}
       {body}
       {dialog ? (
         <RoleDialog
           role={dialog.kind === 'edit' ? dialog.role : undefined}
+          managesCorrections={managesCorrections}
           writeBlocked={writeBlocked}
           onClose={closeDialog}
         />
@@ -148,14 +169,26 @@ export function RolesSection() {
 
 function RoleDialog({
   role,
+  managesCorrections,
   writeBlocked,
   onClose,
 }: {
   role?: Role;
+  /** The user may manage correction permissions: only then is Manage
+   * correction permissions shown and sent. */
+  managesCorrections: boolean;
   writeBlocked: boolean;
   /** Close request; `wroteAny` = a write was sent. */
   onClose: (wroteAny: boolean) => void;
 }) {
+  // The permissions this editor shows and sends: the four groups,
+  // without Manage correction permissions for a user who may not change
+  // who holds it.
+  const editable = managesCorrections
+    ? EDITABLE_PERMISSIONS
+    : EDITABLE_PERMISSIONS.filter(
+        (key) => key !== 'MANAGE_CORRECTION_PERMISSIONS',
+      );
   const [name, setName] = useState(role?.name ?? '');
   // Checked permissions of the four editable groups.
   const [checked, setChecked] = useState<ReadonlySet<Permission>>(
@@ -187,6 +220,12 @@ function RoleDialog({
   const heldCorrections = role
     ? CORRECTION_PERMISSIONS.filter((key) => role.permissions.includes(key))
     : [];
+  const heldCorrectionLabels = heldCorrections.length
+    ? heldCorrections.map((key) => PERMISSION_LABELS[key]).join(', ')
+    : 'none';
+  const showsManagementHeld =
+    !managesCorrections &&
+    role?.permissions.includes('MANAGE_CORRECTION_PERMISSIONS') === true;
 
   const toggle = (key: Permission, on: boolean) => {
     setChecked((current) => {
@@ -202,13 +241,13 @@ function RoleDialog({
       setAttempted(true);
       return;
     }
-    const checkedList = EDITABLE_PERMISSIONS.filter((key) => checked.has(key));
+    const checkedList = editable.filter((key) => checked.has(key));
     let patch: Parameters<typeof updateRole>[1] | null = null;
     if (role) {
       // Deltas over the four editable groups only.
       const held = new Set(role.permissions);
       const grant = checkedList.filter((key) => !held.has(key));
-      const revoke = EDITABLE_PERMISSIONS.filter(
+      const revoke = editable.filter(
         (key) => held.has(key) && !checked.has(key),
       );
       patch = {
@@ -260,26 +299,29 @@ function RoleDialog({
         {ROLE_PERMISSION_GROUPS.map((group) => (
           <fieldset key={group.label} className="ad-permgroup">
             <legend>{group.label}</legend>
-            {group.permissions.map((key) => (
-              <label key={key} className="ad-check">
-                <input
-                  type="checkbox"
-                  checked={checked.has(key)}
-                  disabled={busy}
-                  onChange={(event) => toggle(key, event.target.checked)}
-                />
-                <span>{PERMISSION_LABELS[key]}</span>
-              </label>
-            ))}
+            {group.permissions
+              .filter((key) => editable.includes(key))
+              .map((key) => (
+                <label key={key} className="ad-check">
+                  <input
+                    type="checkbox"
+                    checked={checked.has(key)}
+                    disabled={busy}
+                    onChange={(event) => toggle(key, event.target.checked)}
+                  />
+                  <span>{permissionChoiceLabel(key)}</span>
+                </label>
+              ))}
           </fieldset>
         ))}
-        {role ? (
+        {role && showsManagementHeld ? (
           <p className="ad-fieldhelp">
-            Correction permissions:{' '}
-            {heldCorrections.length
-              ? heldCorrections.map((key) => PERMISSION_LABELS[key]).join(', ')
-              : 'none'}{' '}
-            — set in Policies → Correction permissions.
+            {`Correction permissions: ${heldCorrectionLabels}; Manage correction permissions: held — set by a user who may manage correction permissions.`}
+          </p>
+        ) : role ? (
+          <p className="ad-fieldhelp">
+            Correction permissions: {heldCorrectionLabels} — set in Policies →
+            Correction permissions.
           </p>
         ) : null}
         <ServerErrorNote message={serverError} />

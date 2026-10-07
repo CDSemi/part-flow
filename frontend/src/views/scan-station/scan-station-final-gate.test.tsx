@@ -121,6 +121,20 @@ let commandLog: string[];
 let requests: { url: string; method: string; body: any }[];
 let nextMovementId: number;
 let healthDown: boolean;
+
+/** The application User signed in in this browser (the DEV demo badges
+ * are listed only for a user who may manage Workers); null = signed out. */
+const SIGNED_IN_USER_WIRE = {
+  id: 9,
+  login_name: 'admin',
+  display_name: 'Ada Admin',
+  role_id: 1,
+  role_name: 'Administrator',
+  avatar_updated_at: null,
+  must_change_password: false,
+  session_expires_at: null,
+};
+let userPermissions: string[] | null;
 /** Failure injected into the NEXT gated command. */
 let writeFailure: null | 'network' | { status: number; body: unknown };
 /** While set, the station context reads stay pending until it resolves. */
@@ -356,6 +370,14 @@ function handle(url: string, method: string, body: unknown): Response {
     return healthDown
       ? json({ status: 'unavailable' }, 503)
       : json({ status: 'ok' });
+  }
+  if (url === '/api/session') {
+    return json({
+      user: userPermissions
+        ? { ...SIGNED_IN_USER_WIRE, permissions: userPermissions }
+        : null,
+      setup_open: false,
+    });
   }
   if (url === '/api/machines') return json([]);
   if (url === '/api/workers') {
@@ -674,6 +696,7 @@ beforeEach(() => {
   recorded = new Map();
   commandLog = [];
   requests = [];
+  userPermissions = ['MANAGE_WORKERS'];
   nextMovementId = 500;
   healthDown = false;
   writeFailure = null;

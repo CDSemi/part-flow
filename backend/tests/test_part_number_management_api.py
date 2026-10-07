@@ -53,6 +53,7 @@ from app.application import common, images, part_numbers
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_part_number_management_api"
@@ -223,20 +224,20 @@ class _Cell:
     """A Department with one Area, an Operation and a Scan Station."""
 
     def __init__(self, client: TestClient) -> None:
-        department = client.post("/api/departments", json={"name": _unique("DEPT")})
+        department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
         assert department.status_code == 201, department.text
         self.department_id = int(department.json()["id"])
-        area = client.post(
+        area = admin_of(client).post(
             "/api/areas", json={"department_id": self.department_id, "name": _unique("AREA")}
         )
         assert area.status_code == 201, area.text
         self.area_id = int(area.json()["id"])
-        operation = client.post(
+        operation = admin_of(client).post(
             "/api/operations", json={"area_id": self.area_id, "code": _unique("OP")}
         )
         assert operation.status_code == 201, operation.text
         self.operation_id = int(operation.json()["id"])
-        station = client.post(
+        station = admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": self.area_id}
         )
         assert station.status_code == 201, station.text

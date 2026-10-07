@@ -6,7 +6,16 @@ was rejected and why, and never carries driver errors, SQL, or any
 other internal detail.
 """
 
-from typing import Any
+from typing import Any, Final
+
+#: The sign-in refusals' copy (Phase 14 slice 1: A1, A2, A3). Kept with the
+#: error vocabulary so every layer that refuses — the route dependencies,
+#: the authorization rules and the under-lock actor re-check — says the same.
+AUTHENTICATION_REQUIRED_MESSAGE: Final = (
+    "You are not signed in, or your sign-in has ended. Sign in to continue."
+)
+PERMISSION_DENIED_MESSAGE: Final = "Your account does not have permission to do this."
+PASSWORD_CHANGE_REQUIRED_MESSAGE: Final = "Choose a new password before you continue."
 
 
 class ApplicationError(Exception):
@@ -132,6 +141,11 @@ class PermissionDeniedError(ApplicationError):
     def __init__(self, message: str, required: tuple[str, ...]) -> None:
         super().__init__(message)
         self.required = required
+
+
+class LastPermissionHolderError(ConflictError):
+    """The change would leave no active User with a password holding a
+    permission-management key (Phase 14 slice 2, 409). Nothing was written."""
 
 
 class PasswordChangeRequiredError(ApplicationError):

@@ -47,11 +47,34 @@ artifacts. Observed constraints include:
 - no production reverse proxy, TLS policy, secret store, log rotation, release
   image tags, scheduled backup job, restore drill, or deployment rollback
   command is provided;
-- Phase 14 sign-in for application Users exists, but server-side permission checks cover only setting passwords and changing user sign-in settings; every other screen and write stays open to anyone who can reach the service;
+- Phase 14 sign-in for application Users exists and server-side permission checks cover every Administration read and write; Management, master-data and monitoring routes stay open until Phase 14 slice 3, and Scan Station writes are callable by any client on the network until station devices are enrolled (slice 4);
 - several approved views are still development-only previews or pending real
   backend/frontend integration.
 
 Never hide these limitations behind a NAS reverse proxy or a public DNS name.
+
+**Upgrade step for Phase 14 slice 2 (Administration enforcement).** Before and
+after deploying it, count the active users with a password whose role holds
+each permission-management key (run it in the database shell, for example
+`docker compose exec db psql -U <POSTGRES_USER> -d partflow -c "..."`):
+
+```sql
+SELECT rp.permission, count(*) AS holders
+FROM users u
+JOIN user_credentials c ON c.user_id = u.id
+JOIN role_permissions rp ON rp.role_id = u.role_id
+WHERE u.is_active
+  AND rp.permission IN ('MANAGE_USERS_AND_ROLES', 'MANAGE_CORRECTION_PERMISSIONS')
+GROUP BY rp.permission;
+```
+
+A missing row means no holder. Expect both counts to be at least 1, or no
+`MANAGE_USERS_AND_ROLES` row at all (first-run setup is then open). A missing
+`MANAGE_CORRECTION_PERMISSIONS` row while `MANAGE_USERS_AND_ROLES` has holders
+means nobody may manage correction permissions: before deploying, grant it in
+Administration; after deploying, run
+`docker compose exec backend uv run python -m app.cli restore-correction-permission-management --role-name <role>`
+(see `README.md`). The backend also logs a startup warning in that state.
 
 ## 3. Target portable topology
 

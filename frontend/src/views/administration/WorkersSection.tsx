@@ -11,6 +11,7 @@ import {
 import type { Worker } from '../../api/workers';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import { WorkerAvatar } from '../../components/WorkerAvatar';
 import {
@@ -25,9 +26,11 @@ import {
 import {
   ActiveField,
   AdminField,
+  RowOpener,
   SectionHeader,
   ServerErrorNote,
   StatusPill,
+  ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
@@ -44,6 +47,9 @@ import { ADMIN_SECTIONS } from './sections';
 // the operator changed, so an editor opened before another
 // administrator's change never reverts it. The list reloads only when
 // the editor closes, so a failing refresh never unmounts an open editor.
+//
+// Without the Manage Workers permission the section is view-only, and
+// the server withholds the badge barcodes, so no Badge column renders.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'workers')?.subtitle ?? '';
@@ -75,6 +81,7 @@ type PendingDialog = { kind: 'new' } | { kind: 'edit'; worker: Worker };
 export function WorkersSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_WORKERS');
   const workersData = useApiData(listWorkers);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
   const ready = workersData.state.status === 'ready';
@@ -97,6 +104,8 @@ export function WorkersSection() {
     );
   } else {
     const workers = workersData.state.data;
+    // The server sends the badges only to users who may manage Workers.
+    const showBadges = workers.every((worker) => worker.badgeBarcode !== null);
     body = (
       <>
         {workers.length === 0 ? (
@@ -106,7 +115,7 @@ export function WorkersSection() {
             <thead>
               <tr>
                 <th>Worker</th>
-                <th>Badge barcode</th>
+                {showBadges ? <th>Badge barcode</th> : null}
                 <th>Status</th>
               </tr>
             </thead>
@@ -114,23 +123,29 @@ export function WorkersSection() {
               {workers.map((worker) => (
                 <tr
                   key={worker.id}
-                  className="selrow"
-                  onClick={() => setDialog({ kind: 'edit', worker })}
+                  className={canWrite ? 'selrow' : undefined}
+                  onClick={
+                    canWrite
+                      ? () => setDialog({ kind: 'edit', worker })
+                      : undefined
+                  }
                 >
                   <td>
-                    <button
-                      className="rowbtn"
-                      aria-label={`Edit ${worker.name}`}
+                    <RowOpener
+                      editable={canWrite}
+                      label={`Edit ${worker.name}`}
                     >
                       <span className="ad-worker">
                         <WorkerAvatar worker={worker} size="sm" />
                         <b>{worker.name}</b>
                       </span>
-                    </button>
+                    </RowOpener>
                   </td>
-                  <td className="mono" data-label="Badge barcode">
-                    {worker.badgeBarcode}
-                  </td>
+                  {showBadges ? (
+                    <td className="mono" data-label="Badge barcode">
+                      {worker.badgeBarcode}
+                    </td>
+                  ) : null}
                   <td>
                     <StatusPill active={worker.isActive} />
                   </td>
@@ -157,15 +172,18 @@ export function WorkersSection() {
         title="Workers"
         subtitle={SUBTITLE}
         action={
-          <button
-            className="btn primary"
-            disabled={!ready || writeBlocked}
-            onClick={() => setDialog({ kind: 'new' })}
-          >
-            + New Worker
-          </button>
+          canWrite ? (
+            <button
+              className="btn primary"
+              disabled={!ready || writeBlocked}
+              onClick={() => setDialog({ kind: 'new' })}
+            >
+              + New Worker
+            </button>
+          ) : undefined
         }
       />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_WORKERS" />}
       {body}
       {dialog ? (
         <WorkerDialog

@@ -76,6 +76,7 @@ from app.core.config import get_settings
 from app.domain.enums import MovementType, ProcessingState
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_machine_processing_api"
@@ -127,7 +128,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
     """Machine creation requires the configured Asset Tag format."""
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -144,22 +145,24 @@ def _unique(prefix: str) -> str:
 
 
 def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    department = admin_of(client).post("/api/departments", json={"name": _unique("DEPT")})
     assert department.status_code == 201, department.text
     payload = {"department_id": department.json()["id"], "name": _unique("AREA"), **overrides}
-    response = client.post("/api/areas", json=payload)
+    response = admin_of(client).post("/api/areas", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _create_operation(client: TestClient, area_id: int) -> dict[str, Any]:
-    response = client.post("/api/operations", json={"area_id": area_id, "code": _unique("OP")})
+    response = admin_of(client).post(
+        "/api/operations", json={"area_id": area_id, "code": _unique("OP")}
+    )
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _create_station(client: TestClient, area_id: int) -> str:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area_id}
     )
     assert response.status_code == 201, response.text
@@ -542,9 +545,9 @@ def test_assign_refuses_wrong_station_state_quantity_and_pn(
     # Inactive station.
     inactive_station = _create_station(client, lathe.area_id)
     assert (
-        client.patch(
-            f"/api/scan-stations/{inactive_station}", json={"is_active": False}
-        ).status_code
+        admin_of(client)
+        .patch(f"/api/scan-stations/{inactive_station}", json={"is_active": False})
+        .status_code
         == 200
     )
     inactive = _act(
@@ -1734,7 +1737,7 @@ def test_machine_scan_refusals_resolve_nothing(client: TestClient, db_engine: En
     assert pn_scan.status_code == 422 and "Machine barcode" in pn_scan.json()["detail"]
     # Station context is judged first.
     inactive_station = _create_station(client, lathe.area_id)
-    client.patch(f"/api/scan-stations/{inactive_station}", json={"is_active": False})
+    admin_of(client).patch(f"/api/scan-stations/{inactive_station}", json={"is_active": False})
     assert _resolve_machine(client, inactive_station, asset_tag=other_tag).status_code == 409
     assert _resolve_machine(client, "NO-SUCH", asset_tag=other_tag).status_code == 404
     assert _movement_count(db_engine) == count

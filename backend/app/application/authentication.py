@@ -33,11 +33,12 @@ its database connection (``session.rollback()``), hashes or verifies
 outside any transaction and lock, then starts its locked phase, which
 re-reads what it relies on (a concurrent password set, deactivation or
 lock; for an administrator's password set, the actor's own sign-in and
-grant). Deactivation and grant changes do not take the advisory lock
-yet, so that actor re-read narrows the stale-authority window to the
-locked phase rather than closing it. Lock order: the ``partflow:user-administration``
-advisory lock → the ``users`` row → the ``user_credentials`` row →
-INSERT ``user_sessions`` → UPDATE ``user_sessions`` → audit.
+keys). Every role and user write takes the same advisory lock first
+(Phase 14 slice 2), so no concurrent administration write can change
+the grants, role assignment or activity that re-read saw before
+COMMIT. Lock order: the ``partflow:user-administration`` advisory lock
+→ the ``users`` row → the ``user_credentials`` row → INSERT
+``user_sessions`` → UPDATE ``user_sessions`` → audit.
 
 Sign-in, sign-out and failures are logged, never audited, and the log
 never carries the typed login name, a password, a hash, a token or its
@@ -52,24 +53,24 @@ import math
 import secrets
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import ColumnElement, Interval, case, func, or_, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import audit, password_hashing, user_access, users
+from app.application import audit, authorization, password_hashing, roles, user_access, users
 from app.application.common import commit
 from app.application.errors import (
+    AUTHENTICATION_REQUIRED_MESSAGE,
     AccountLockedError,
     AuthenticationRequiredError,
     ConflictError,
     InvalidInputError,
-    PasswordChangeRequiredError,
-    PermissionDeniedError,
     RecoveryOutcomeUnknownError,
     RecoveryUnavailableError,
     SignInFailedError,
     UnknownLoginError,
 )
+from app.application.user_access import Principal as Principal
 from app.domain.enums import AuditEntityType, AuditEventType, Permission, UserSessionEndReason
 from app.domain.password_policy import (
     InvalidPasswordError,
@@ -98,11 +99,6 @@ MAX_TOKEN_LENGTH: Final = 64
 NEVER_EXPIRES_COOKIE_SECONDS: Final = 34_560_000
 _POLICY_ID: Final = 1
 
-AUTHENTICATION_REQUIRED_MESSAGE: Final = (
-    "You are not signed in, or your sign-in has ended. Sign in to continue."
-)
-PERMISSION_DENIED_MESSAGE: Final = "Your account does not have permission to do this."
-PASSWORD_CHANGE_REQUIRED_MESSAGE: Final = "Choose a new password before you continue."
 SIGN_IN_FAILED_MESSAGE: Final = (
     "Sign-in failed. Check your login name and password. If it keeps failing, ask an"
     " administrator — the account may be locked or inactive."
@@ -132,20 +128,13 @@ _RECOVERY_OUTCOME_UNKNOWN: Final = (
 )
 
 
-class Principal(NamedTuple):
-    """The signed-in User of one request — plain values; no ORM object crosses COMMIT."""
+class RoleRestoreOutcome(NamedTuple):
+    """What ``restore-correction-permission-management`` reports."""
 
-    session_id: int
-    user_id: int
-    login_name: str
-    display_name: str
     role_id: int
     role_name: str
-    avatar_updated_at: datetime.datetime | None
-    permissions: frozenset[Permission]
-    must_change_password: bool
-    # None = the session never expires.
-    session_expires_at: datetime.datetime | None
+    # Active Users with a password holding the key after the grant.
+    holders: int
 
 
 class SessionGrant(NamedTuple):
@@ -161,6 +150,17 @@ class RecoveryOutcome(NamedTuple):
     user_id: int
     display_name: str
     is_active: bool
+
+
+_CORRECTION_MANAGER_EXISTS: Final = (
+    "A user who may manage correction permissions already exists. Grant it in"
+    " Administration instead."
+)
+_RESTORE_OUTCOME_UNKNOWN: Final = (
+    "The connection to the database failed while the grant was being saved, so it is"
+    " unknown whether the role may now manage correction permissions. Run the same command"
+    " again: it refuses once a user may manage correction permissions."
+)
 
 
 def _digest(token: str) -> bytes:
@@ -189,76 +189,7 @@ def resolve_principal(session: Session, token: str | None) -> Principal | None:
     usable = _usable_token(token)
     if usable is None:
         return None
-    return _principal_where(session, UserSession.token_digest == _digest(usable))
-
-
-def _principal_where(session: Session, which: ColumnElement[bool]) -> Principal | None:
-    """The principal of the one usable session ``which`` selects, or None."""
-    expires_at = case(
-        (
-            ApplicationPolicy.user_session_expires,
-            UserSession.created_at
-            + func.make_interval(0, 0, 0, ApplicationPolicy.user_session_days, type_=Interval),
-        ),
-        else_=None,
-    )
-    row = session.execute(
-        select(
-            UserSession.id,
-            User.id,
-            User.login_name,
-            User.display_name,
-            User.role_id,
-            Role.name,
-            User.avatar_image_updated_at,
-            UserCredential.password_is_temporary,
-            ApplicationPolicy.require_password_change,
-            expires_at,
-        )
-        .select_from(UserSession)
-        .join(User, User.id == UserSession.user_id)
-        .join(Role, Role.id == User.role_id)
-        .join(UserCredential, UserCredential.user_id == User.id)
-        .join(ApplicationPolicy, ApplicationPolicy.id == _POLICY_ID)
-        .where(
-            which,
-            UserSession.ended_at.is_(None),
-            User.is_active,
-            or_(expires_at.is_(None), func.now() < expires_at),
-        )
-    ).one_or_none()
-    if row is None:
-        return None
-    (
-        session_id,
-        user_id,
-        login_name,
-        display_name,
-        role_id,
-        role_name,
-        avatar_updated_at,
-        temporary,
-        require_change,
-        session_expires_at,
-    ) = row
-    permissions = frozenset(
-        Permission(permission)
-        for permission in session.scalars(
-            select(RolePermission.permission).where(RolePermission.role_id == role_id)
-        )
-    )
-    return Principal(
-        session_id=session_id,
-        user_id=user_id,
-        login_name=login_name,
-        display_name=display_name,
-        role_id=role_id,
-        role_name=role_name,
-        avatar_updated_at=avatar_updated_at,
-        permissions=permissions,
-        must_change_password=bool(temporary and require_change),
-        session_expires_at=session_expires_at,
-    )
+    return user_access.principal_where(session, UserSession.token_digest == _digest(usable))
 
 
 def cookie_max_age(principal: Principal) -> int:
@@ -386,26 +317,6 @@ def open_first_session(session: Session, user_id: int) -> SessionGrant:
     """Create the first session of a User created in this transaction (first-run setup)."""
     token, _session_id = _open_session(session, user_id)
     return _grant(session, token)
-
-
-def _recheck_actor(session: Session, actor: Principal, key: Permission) -> None:
-    """Under the advisory lock: the actor's sign-in is still usable and grants ``key``.
-
-    A fresh read (READ COMMITTED) of what the route checked before the
-    hashing wait: the session is not ended or expired, the User is still
-    active, no forced change is pending and the role still holds ``key``.
-    A refusal rolls back; nothing was written.
-    """
-    current = _principal_where(session, UserSession.id == actor.session_id)
-    if current is None or current.user_id != actor.user_id:
-        session.rollback()
-        raise AuthenticationRequiredError(AUTHENTICATION_REQUIRED_MESSAGE)
-    if current.must_change_password:
-        session.rollback()
-        raise PasswordChangeRequiredError(PASSWORD_CHANGE_REQUIRED_MESSAGE)
-    if key not in current.permissions:
-        session.rollback()
-        raise PermissionDeniedError(PERMISSION_DENIED_MESSAGE, required=(str(key),))
 
 
 def _apply_password_set(
@@ -590,8 +501,10 @@ def set_user_password(
     Gives a first password to a User without one, ends every sign-in of
     the User and clears a lock. Setting an inactive User's password is
     allowed (it cannot sign in until reactivated). The actor's sign-in
-    and ``MANAGE_USERS_AND_ROLES`` are re-read after the advisory lock,
-    so a revocation committed during the hashing wait refuses the set.
+    and keys are re-read after the advisory lock, so a revocation
+    committed during the hashing wait refuses the set; a User whose role
+    holds a protected key also needs ``MANAGE_CORRECTION_PERMISSIONS``
+    (the escalation guard, Phase 14 slice 2).
     """
     if actor.user_id == user_id:
         raise ConflictError(_OWN_PASSWORD)
@@ -600,10 +513,18 @@ def set_user_password(
     session.rollback()
     new_hash = password_hashing.hash_password(new_password)
 
-    user_access.acquire_user_administration_lock(session)
     # The route checked the actor before the hashing wait; check again.
-    _recheck_actor(session, actor, Permission.MANAGE_USERS_AND_ROLES)
+    acting = user_access.acting_user(session, actor)
+    user_access.judge(
+        session,
+        lambda: authorization.require(acting, (Permission.MANAGE_USERS_AND_ROLES,)),
+    )
     user = users.lock_user(session, user_id)
+    if user_access.role_holds_protected(session, user.role_id):
+        user_access.judge(
+            session,
+            lambda: authorization.require_guard(acting, authorization.PROTECTED_USER_MESSAGE),
+        )
     credential = user_access.lock_credential(session, user.id)
     _apply_password_set(
         session,
@@ -673,4 +594,77 @@ def reset_password_for_login(
         # COMMIT was sent; its answer was lost (the server may have
         # stored the reset). Never reported as "nothing was changed".
         raise RecoveryOutcomeUnknownError(_RECOVERY_OUTCOME_UNKNOWN) from exc
+    return outcome
+
+
+def restore_correction_permission_management(
+    session: Session, role_name: str
+) -> RoleRestoreOutcome:
+    """Recovery command: grant ``MANAGE_CORRECTION_PERMISSIONS`` back to a role.
+
+    Only while no active User with a password holds it (a database that
+    lost every holder before Phase 14 slice 2's last-holder rule existed)
+    and only to a role an active User with a password holds, so the grant
+    restores a holder. It grants that one key, never creates a User or a
+    password, and is outside the escalation guard by construction: access
+    to the backend container is the authority. Audited like a role edit
+    (``source: cli``, no actor).
+    """
+    user_access.acquire_user_administration_lock(session)
+    if user_access.permission_holder_count(session, Permission.MANAGE_CORRECTION_PERMISSIONS):
+        session.rollback()
+        raise RecoveryUnavailableError(_CORRECTION_MANAGER_EXISTS)
+    role = session.scalars(
+        select(Role)
+        .where(Role.name == role_name)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    ).one_or_none()
+    if role is None:
+        session.rollback()
+        raise RecoveryUnavailableError(f"No role is named {role_name}.")
+    members = session.scalar(
+        select(func.count())
+        .select_from(User)
+        .join(UserCredential, UserCredential.user_id == User.id)
+        .where(User.role_id == role.id, User.is_active)
+    )
+    if not members:
+        session.rollback()
+        raise RecoveryUnavailableError(
+            f"No active user with a password holds the role {role_name}. Name a role that"
+            " one holds."
+        )
+    held = user_access.role_permissions(session, role.id)
+    session.add(
+        RolePermission(role_id=role.id, permission=Permission.MANAGE_CORRECTION_PERMISSIONS.value)
+    )
+    role.updated_at = func.now()
+    session.flush()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.ROLE,
+        entity_id=str(role.id),
+        before_data=roles.role_snapshot(role.name, held),
+        after_data=roles.role_snapshot(
+            role.name, held | {Permission.MANAGE_CORRECTION_PERMISSIONS}
+        ),
+        metadata={"source": "cli"},
+    )
+    outcome = RoleRestoreOutcome(
+        role_id=role.id,
+        role_name=role.name,
+        holders=user_access.permission_holder_count(
+            session, Permission.MANAGE_CORRECTION_PERMISSIONS
+        ),
+    )
+    try:
+        commit(session, {})
+    except IntegrityError:
+        raise  # rolled back by ``commit``: a definite failure
+    except DBAPIError as exc:
+        # COMMIT was sent; its answer was lost (the server may have
+        # stored the grant). Never reported as "nothing was changed".
+        raise RecoveryOutcomeUnknownError(_RESTORE_OUTCOME_UNKNOWN) from exc
     return outcome

@@ -3,9 +3,19 @@
 HTTP surface of the application accounts: list, create and edit Users
 (login name, display name, role, active flag) and set, remove or read a
 User's avatar image. Users sign in through ``/api/session`` (Phase 14
-slice 1); only ``PUT /api/users/{id}/password`` checks a permission so
-far; credentials are never part of a user response. Users are never
+slice 1); credentials are never part of a user response. Users are never
 Workers: the Workers registry is ``/api/workers``.
+
+Access (Phase 14 slice 2): the list needs a signed-in User; every write
+needs ``MANAGE_USERS_AND_ROLES``, checked by the route and again by the
+service on the acting User re-read under the User-administration lock.
+Creating a User in a role holding a correction permission or
+``MANAGE_CORRECTION_PERMISSIONS``, moving a User into or out of such a
+role, changing whether such a User is active or setting their password
+also needs ``MANAGE_CORRECTION_PERMISSIONS``; a role change or
+deactivation that would leave no active User with a password holding a
+management key is 409 ``last_permission_holder``. The avatar image
+stays public.
 
 Routes stay thin orchestration: request schemas validate shape only
 (``extra="forbid"`` — a client that submits a server-owned field such
@@ -52,7 +62,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StrictInt
 from sqlalchemy.orm import Session
 
-from app.api.authorization import OptionalPrincipalDep, RequirePermission, holds
+from app.api.authorization import RequirePermission, SignedInDep, holds
 from app.api.dependencies import SessionDep
 from app.api.session import Secret
 from app.api.uploads import UploadedImage, read_image_body, stored_image_response
@@ -61,6 +71,8 @@ from app.application.authentication import Principal
 from app.domain.enums import Permission, SignInState
 
 router = APIRouter(prefix="/api")
+
+UserManagerDep = Annotated[Principal, Depends(RequirePermission(Permission.MANAGE_USERS_AND_ROLES))]
 
 
 class UserResponse(BaseModel):
@@ -85,8 +97,9 @@ class UserAdministrationResponse(UserResponse):
 
 class UserCreateRequest(BaseModel):
     """Login name, display name and role only — every other field is
-    server-owned; the audit actor stays NULL from this HTTP surface until
-    Phase 14 slice 2."""
+    server-owned; the audit actor (``actor_user_id``) is the signed-in
+    User (Phase 14 slice 2); ``actor_reference`` is legacy and stays
+    NULL."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -152,55 +165,61 @@ def _render(content: UserResponse | list[UserResponse], status_code: int = 200) 
 
 
 @router.get("/users", response_model=list[_EitherUser])
-def list_users(session: SessionDep, principal: OptionalPrincipalDep) -> JSONResponse:
+def list_users(principal: SignedInDep, session: SessionDep) -> JSONResponse:
     return _render(_answers(session, principal, users.list_users(session)))
 
 
 @router.post("/users", status_code=201, response_model=_EitherUser)
 def create_user(
-    body: UserCreateRequest, session: SessionDep, principal: OptionalPrincipalDep
+    principal: UserManagerDep, body: UserCreateRequest, session: SessionDep
 ) -> JSONResponse:
     view = users.create_user(
-        session, login_name=body.login_name, display_name=body.display_name, role_id=body.role_id
+        session,
+        login_name=body.login_name,
+        display_name=body.display_name,
+        role_id=body.role_id,
+        actor=principal,
     )
     return _render(_answers(session, principal, [view])[0], 201)
 
 
 @router.patch("/users/{user_id}", response_model=_EitherUser)
 def update_user(
-    user_id: int, body: UserUpdateRequest, session: SessionDep, principal: OptionalPrincipalDep
+    principal: UserManagerDep, user_id: int, body: UserUpdateRequest, session: SessionDep
 ) -> JSONResponse:
-    view = users.update_user(session, user_id, **body.model_dump(exclude_unset=True))
+    view = users.update_user(
+        session, user_id, actor=principal, **body.model_dump(exclude_unset=True)
+    )
     return _render(_answers(session, principal, [view])[0])
 
 
 @router.put("/users/{user_id}/avatar", response_model=_EitherUser)
 def set_user_avatar(
+    principal: UserManagerDep,
     user_id: int,
     image: Annotated[UploadedImage, Depends(read_image_body)],
     session: SessionDep,
-    principal: OptionalPrincipalDep,
 ) -> JSONResponse:
     view = users.set_user_avatar(
-        session, user_id, data=image.data, declared_type=image.content_type
+        session, user_id, data=image.data, declared_type=image.content_type, actor=principal
     )
     return _render(_answers(session, principal, [view])[0])
 
 
 @router.delete("/users/{user_id}/avatar", response_model=_EitherUser)
 def remove_user_avatar(
-    user_id: int, session: SessionDep, principal: OptionalPrincipalDep
+    principal: UserManagerDep, user_id: int, session: SessionDep
 ) -> JSONResponse:
-    view = users.remove_user_avatar(session, user_id)
+    view = users.remove_user_avatar(session, user_id, actor=principal)
     return _render(_answers(session, principal, [view])[0])
 
 
 @router.put("/users/{user_id}/password")
 def set_user_password(
+    principal: UserManagerDep,
     user_id: int,
     body: UserPasswordSetRequest,
     session: SessionDep,
-    principal: Annotated[Principal, Depends(RequirePermission(Permission.MANAGE_USERS_AND_ROLES))],
 ) -> UserAdministrationResponse:
     view = authentication.set_user_password(
         session, user_id, new_password=body.new_password.get_secret_value(), actor=principal

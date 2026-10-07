@@ -55,6 +55,7 @@ from app.application import users as users_service
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APP_DIR = _BACKEND_DIR / "app"
@@ -72,6 +73,9 @@ _USER_KEYS = {
     "created_at",
     "updated_at",
 }
+# What a caller who may manage users and roles (the harness administrator)
+# sees: slice 12's shape plus the slice 1 sign-in state.
+_ADMIN_USER_KEYS = _USER_KEYS | {"sign_in_state"}
 
 _E_R1 = "Role name must not be empty."
 _E_R2 = "A role with this name already exists."
@@ -166,13 +170,13 @@ def _refused(response: Any, status: int, detail: str | None = None) -> None:
 
 
 def _roles(client: TestClient) -> dict[str, dict[str, Any]]:
-    response = client.get("/api/roles")
+    response = admin_of(client).get("/api/roles")
     assert response.status_code == 200, response.text
     return {role["name"]: role for role in response.json()}
 
 
 def _users(client: TestClient) -> list[dict[str, Any]]:
-    response = client.get("/api/users")
+    response = admin_of(client).get("/api/users")
     assert response.status_code == 200, response.text
     return cast(list[dict[str, Any]], response.json())
 
@@ -185,7 +189,7 @@ def _create_role(
     client: TestClient, name: str | None = None, permissions: list[str] | None = None
 ) -> dict[str, Any]:
     payload = {"name": name or f"Role {_suffix()}", "permissions": permissions or []}
-    return _ok(client.post("/api/roles", json=payload), 201)
+    return _ok(admin_of(client).post("/api/roles", json=payload), 201)
 
 
 def _create_user(
@@ -199,7 +203,7 @@ def _create_user(
         "display_name": display_name or f"User {_suffix()}",
         "role_id": role_id,
     }
-    return _ok(client.post("/api/users", json=payload), 201)
+    return _ok(admin_of(client).post("/api/users", json=payload), 201)
 
 
 def _audit_rows(engine: Engine, entity_type: str, entity_id: int) -> list[sa.Row[Any]]:
@@ -284,7 +288,7 @@ def _finish(thread: threading.Thread, results: list[Any]) -> Any:
 
 
 def _put_avatar(client: TestClient, user_id: int, data: bytes, content_type: str) -> Any:
-    return client.put(
+    return admin_of(client).put(
         f"/api/users/{user_id}/avatar", content=data, headers={"Content-Type": content_type}
     )
 
@@ -324,7 +328,7 @@ def test_create_role_trims_the_name_and_collapses_duplicate_grants(
     """R-2."""
     name = f"Process Engineer {_suffix()}"
     created = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/roles",
             json={
                 "name": f"  {name} ",
@@ -366,7 +370,7 @@ def test_create_role_refusals_write_nothing(
 ) -> None:
     """R-3."""
     counts = _write_counts(db_engine)
-    _refused(client.post("/api/roles", json=payload), status, detail)
+    _refused(admin_of(client).post("/api/roles", json=payload), status, detail)
     assert _write_counts(db_engine) == counts
 
 
@@ -374,7 +378,7 @@ def test_role_names_are_unique_case_sensitively(client: TestClient) -> None:
     """R-3 / S12-OD10: a case variant of a role name is another name."""
     name = f"Case Role {_suffix()}"
     _create_role(client, name)
-    _refused(client.post("/api/roles", json={"name": name}), 409, _E_R2)
+    _refused(admin_of(client).post("/api/roles", json={"name": name}), 409, _E_R2)
     assert _create_role(client, name.lower())["name"] == name.lower()
 
 
@@ -383,7 +387,7 @@ def test_grant_and_revoke_are_audited_deltas(client: TestClient, db_engine: Engi
     role = _create_role(client, permissions=["MANAGE_MACHINES"])
     path = f"/api/roles/{role['id']}"
     changed = _ok(
-        client.patch(
+        admin_of(client).patch(
             path,
             json={
                 "grant_permissions": ["VIEW_PRODUCTION_DATA"],
@@ -406,13 +410,15 @@ def test_grant_and_revoke_are_audited_deltas(client: TestClient, db_engine: Engi
         {"name": role["name"]},
         {},
     ):
-        assert _ok(client.patch(path, json=no_op))["permissions"] == ["VIEW_PRODUCTION_DATA"]
+        assert _ok(admin_of(client).patch(path, json=no_op))["permissions"] == [
+            "VIEW_PRODUCTION_DATA"
+        ]
     assert len(_audit_rows(db_engine, "Role", role["id"])) == 2
     assert _xmin(db_engine, "roles", role["id"]) == xmin
 
     counts = _write_counts(db_engine)
     _refused(
-        client.patch(
+        admin_of(client).patch(
             path,
             json={
                 "grant_permissions": ["EXPORT_REPORTS"],
@@ -422,8 +428,8 @@ def test_grant_and_revoke_are_audited_deltas(client: TestClient, db_engine: Engi
         422,
         _E_R4,
     )
-    _refused(client.patch(path, json={"grant_permissions": ["NOPE"]}), 422)
-    _refused(client.patch(path, json={"permissions": []}), 422)
+    _refused(admin_of(client).patch(path, json={"grant_permissions": ["NOPE"]}), 422)
+    _refused(admin_of(client).patch(path, json={"permissions": []}), 422)
     assert _write_counts(db_engine) == counts
 
 
@@ -432,22 +438,24 @@ def test_role_rename(client: TestClient, db_engine: Engine) -> None:
     role = _create_role(client, permissions=["EXPORT_REPORTS"])
     path = f"/api/roles/{role['id']}"
     counts = _write_counts(db_engine)
-    _refused(client.patch(path, json={"name": "Administrator"}), 409, _E_R2)
-    _refused(client.patch(path, json={"name": ""}), 422, _E_R1)
-    _refused(client.patch(path, json={"name": None}), 422, _E_R1)
-    _refused(client.patch(path, json={"name": "A\x00B"}), 422, _E_R1_NUL)
+    _refused(admin_of(client).patch(path, json={"name": "Administrator"}), 409, _E_R2)
+    _refused(admin_of(client).patch(path, json={"name": ""}), 422, _E_R1)
+    _refused(admin_of(client).patch(path, json={"name": None}), 422, _E_R1)
+    _refused(admin_of(client).patch(path, json={"name": "A\x00B"}), 422, _E_R1_NUL)
     _refused(
-        client.patch("/api/roles/999999", json={"name": "X"}), 404, "Role 999999 does not exist."
+        admin_of(client).patch("/api/roles/999999", json={"name": "X"}),
+        404,
+        "Role 999999 does not exist.",
     )
     _refused(
-        client.patch(f"/api/roles/{_UNBINDABLE_ID}", json={"name": "X"}),
+        admin_of(client).patch(f"/api/roles/{_UNBINDABLE_ID}", json={"name": "X"}),
         404,
         f"Role {_UNBINDABLE_ID} does not exist.",
     )
     assert _write_counts(db_engine) == counts
 
     new_name = f"Renamed {_suffix()}"
-    renamed = _ok(client.patch(path, json={"name": f" {new_name} "}))
+    renamed = _ok(admin_of(client).patch(path, json={"name": f" {new_name} "}))
     assert renamed["name"] == new_name
     assert renamed["permissions"] == ["EXPORT_REPORTS"]
     rows = _audit_rows(db_engine, "Role", role["id"])
@@ -470,7 +478,7 @@ def test_concurrent_role_edit_waits_and_audits_the_committed_predecessor(
             {"id": role["id"]},
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/roles/{role['id']}", json={"grant_permissions": ["MANAGE_AREAS"]}
             )
         )
@@ -491,7 +499,7 @@ def test_create_role_race_lost_at_flush_is_a_conflict(
     name = f"Race {_suffix()}"
     with db_engine.connect() as holder:
         holder.execute(sa.text("INSERT INTO roles (name) VALUES (:name)"), {"name": name})
-        thread, results = _start(lambda: client.post("/api/roles", json={"name": name}))
+        thread, results = _start(lambda: admin_of(client).post("/api/roles", json={"name": name}))
         _assert_blocked(thread)
         holder.commit()
     _refused(_finish(thread, results), 409, _E_R2)
@@ -509,7 +517,7 @@ def test_rename_race_lost_at_flush_is_a_conflict_never_500(
     with db_engine.connect() as holder:
         holder.execute(sa.text("INSERT INTO roles (name) VALUES (:name)"), {"name": race_name})
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/roles/{role['id']}",
                 json={
                     "name": race_name,
@@ -537,7 +545,7 @@ def test_create_user_canonicalizes_and_audits(client: TestClient, db_engine: Eng
     manager = _roles(client)["Manager"]
     suffix = _suffix()
     created = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/users",
             json={
                 "login_name": f"  JDoe-{suffix} ",
@@ -547,7 +555,7 @@ def test_create_user_canonicalizes_and_audits(client: TestClient, db_engine: Eng
         ),
         201,
     )
-    assert set(created) == _USER_KEYS
+    assert set(created) == _ADMIN_USER_KEYS
     assert created["login_name"] == f"jdoe-{suffix}"
     assert created["display_name"] == f"Jane Doe {suffix}"
     assert created["role_id"] == manager["id"]
@@ -602,7 +610,7 @@ def test_login_name_rule_refusals_write_nothing(
     role_id = _seeded_role_id(client, "Operator")
     counts = _write_counts(db_engine)
     _refused(
-        client.post(
+        admin_of(client).post(
             "/api/users",
             json={"login_name": login_name, "display_name": "Jane", "role_id": role_id},
         ),
@@ -634,27 +642,27 @@ def test_duplicate_login_names_name_the_holder(client: TestClient, db_engine: En
     payload = {"login_name": f"JDOE-{suffix}", "display_name": "Other", "role_id": role_id}
     counts = _write_counts(db_engine)
     _refused(
-        client.post("/api/users", json=payload),
+        admin_of(client).post("/api/users", json=payload),
         409,
         f"This login name is already used by Jane Doe {suffix}.",
     )
     assert _write_counts(db_engine) == counts
-    _ok(client.patch(f"/api/users/{holder['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/users/{holder['id']}", json={"is_active": False}))
     _refused(
-        client.post("/api/users", json=payload),
+        admin_of(client).post("/api/users", json=payload),
         409,
         f"This login name is already used by Jane Doe {suffix} (inactive).",
     )
     other = _create_user(client, role_id)
     _refused(
-        client.patch(f"/api/users/{other['id']}", json={"login_name": f"jdoe-{suffix}"}),
+        admin_of(client).patch(f"/api/users/{other['id']}", json={"login_name": f"jdoe-{suffix}"}),
         409,
         f"This login name is already used by Jane Doe {suffix} (inactive).",
     )
     # A retried identical POST after an unknown outcome never duplicates.
     retried = {"login_name": f"retry-{suffix}", "display_name": "Retry", "role_id": role_id}
-    _ok(client.post("/api/users", json=retried), 201)
-    _refused(client.post("/api/users", json=retried), 409)
+    _ok(admin_of(client).post("/api/users", json=retried), 201)
+    _refused(admin_of(client).post("/api/users", json=retried), 409)
     assert (
         _count(db_engine, "SELECT count(*) FROM users WHERE login_name = :l", l=f"retry-{suffix}")
         == 1
@@ -675,7 +683,7 @@ def test_create_user_race_lost_at_flush_is_a_conflict(
             {"l": login, "r": role_id},
         )
         thread, results = _start(
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/users", json={"login_name": login, "display_name": "Late", "role_id": role_id}
             )
         )
@@ -701,7 +709,9 @@ def test_login_change_race_lost_at_flush_is_a_conflict_never_500(
             {"l": login, "r": role_id},
         )
         thread, results = _start(
-            lambda: client.patch(f"/api/users/{user['id']}", json={"login_name": login.upper()})
+            lambda: admin_of(client).patch(
+                f"/api/users/{user['id']}", json={"login_name": login.upper()}
+            )
         )
         _assert_blocked(thread)
         holder.commit()
@@ -739,7 +749,7 @@ def test_create_user_refusals_write_nothing(
         **payload,
     }
     counts = _write_counts(db_engine)
-    _refused(client.post("/api/users", json=body), 422, detail)
+    _refused(admin_of(client).post("/api/users", json=body), 422, detail)
     assert _write_counts(db_engine) == counts
 
 
@@ -749,7 +759,7 @@ def test_create_user_requires_every_field(client: TestClient, db_engine: Engine)
     for missing in ("login_name", "display_name", "role_id"):
         body = {"login_name": f"m-{_suffix()}", "display_name": "M", "role_id": role_id}
         del body[missing]
-        _refused(client.post("/api/users", json=body), 422)
+        _refused(admin_of(client).post("/api/users", json=body), 422)
     assert _write_counts(db_engine) == counts
 
 
@@ -776,7 +786,7 @@ def test_user_edits_are_audited_with_exact_snapshots(client: TestClient, db_engi
     for body, change in steps:
         before = dict(profile)
         profile.update(change)
-        answered = _ok(client.patch(path, json=body))
+        answered = _ok(admin_of(client).patch(path, json=body))
         assert {key: answered[key] for key in profile} == profile
         assert answered["role_name"] == (
             "Operator" if profile["role_id"] == operator else "Manager"
@@ -804,7 +814,7 @@ def test_user_no_ops_and_explicit_nulls_write_nothing(
         {"role_id": role_id, "is_active": True},
         {},
     ):
-        assert _ok(client.patch(path, json=no_op))["login_name"] == f"jdoe-{suffix}"
+        assert _ok(admin_of(client).patch(path, json=no_op))["login_name"] == f"jdoe-{suffix}"
     for body, detail in (
         ({"is_active": None}, _E_U9),
         ({"role_id": None}, _E_U8),
@@ -815,12 +825,12 @@ def test_user_no_ops_and_explicit_nulls_write_nothing(
         ({"display_name": "A\x00B"}, _E_U1_NUL),
         ({"role_id": _UNBINDABLE_ID}, f"Role {_UNBINDABLE_ID} does not exist."),
     ):
-        _refused(client.patch(path, json=body), 422, detail)
-    _refused(client.patch(path, json={"role_id": "1"}), 422)
-    _refused(client.patch(path, json={"id": 5}), 422)
+        _refused(admin_of(client).patch(path, json=body), 422, detail)
+    _refused(admin_of(client).patch(path, json={"role_id": "1"}), 422)
+    _refused(admin_of(client).patch(path, json={"id": 5}), 422)
     for missing_id in (999999, _UNBINDABLE_ID):
         _refused(
-            client.patch(f"/api/users/{missing_id}", json={"display_name": "X"}),
+            admin_of(client).patch(f"/api/users/{missing_id}", json={"display_name": "X"}),
             404,
             f"User {missing_id} does not exist.",
         )
@@ -843,7 +853,7 @@ def test_concurrent_user_edit_waits_and_audits_the_committed_predecessor(
             {"id": user["id"]},
         )
         thread, results = _start(
-            lambda: client.patch(
+            lambda: admin_of(client).patch(
                 f"/api/users/{user['id']}", json={"role_id": roles["Operator"]["id"]}
             )
         )
@@ -886,16 +896,16 @@ def test_user_avatar_round_trip(client: TestClient, db_engine: Engine) -> None:
 
     # The list carries no bytes: only the cache version.
     listed = {item["id"]: item for item in _users(client)}
-    assert set(listed[user["id"]]) == _USER_KEYS
+    assert set(listed[user["id"]]) == _ADMIN_USER_KEYS
     assert listed[user["id"]]["avatar_updated_at"] == uploaded["avatar_updated_at"]
 
-    removed = _ok(client.delete(path))
+    removed = _ok(admin_of(client).delete(path))
     assert removed["avatar_updated_at"] is None
     rows = _audit_rows(db_engine, "User", user["id"])
     assert len(rows) == 3
     assert rows[2].before_data == {"avatar": _digest(_PNG, "image/png")}
     assert rows[2].after_data == {"avatar": None}
-    assert _ok(client.delete(path))["avatar_updated_at"] is None
+    assert _ok(admin_of(client).delete(path))["avatar_updated_at"] is None
     assert len(_audit_rows(db_engine, "User", user["id"])) == 3
     _refused(client.get(path), 404, "This user has no avatar.")
 
@@ -929,7 +939,7 @@ def test_user_avatar_refusals_store_nothing(
 def test_avatar_routes_of_an_unknown_user_are_404(client: TestClient, missing_id: int) -> None:
     for response in (
         _put_avatar(client, missing_id, _JPEG, "image/jpeg"),
-        client.delete(f"/api/users/{missing_id}/avatar"),
+        admin_of(client).delete(f"/api/users/{missing_id}/avatar"),
         client.get(f"/api/users/{missing_id}/avatar"),
     ):
         _refused(response, 404, f"User {missing_id} does not exist.")
@@ -948,7 +958,9 @@ def test_the_user_theme_preference_has_no_surface(client: TestClient, db_engine:
             method, f"/api/users/{user['id']}/theme-preference", json={"theme_preference": "DARK"}
         )
         assert response.status_code in (404, 405), response.text
-    _refused(client.patch(f"/api/users/{user['id']}", json={"theme_preference": "DARK"}), 422)
+    _refused(
+        admin_of(client).patch(f"/api/users/{user['id']}", json={"theme_preference": "DARK"}), 422
+    )
     assert "theme_preference" not in user
     assert all("theme_preference" not in item for item in _users(client))
     assert _stored_user(db_engine, user["id"])["theme_preference"] is None
@@ -997,20 +1009,26 @@ def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
         str(column["name"]) for column in sa.inspect(db_engine).get_columns("users")
     }
 
-    department = _ok(client.post("/api/departments", json={"name": f"DEPT-{_suffix()}"}), 201)
+    department = _ok(
+        admin_of(client).post("/api/departments", json={"name": f"DEPT-{_suffix()}"}), 201
+    )
     area = _ok(
-        client.post("/api/areas", json={"department_id": department["id"], "name": _suffix()}),
+        admin_of(client).post(
+            "/api/areas", json={"department_id": department["id"], "name": _suffix()}
+        ),
         201,
     )
     station = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/scan-stations", json={"station_id": f"ST-{_suffix()}", "area_id": area["id"]}
         ),
         201,
     )
     scan_path = f"/api/scan-stations/{station['station_id']}/badge-scans"
     worker = _ok(
-        client.post("/api/workers", json={"name": "Badge Holder", "badge_barcode": _suffix()}),
+        admin_of(client).post(
+            "/api/workers", json={"name": "Badge Holder", "badge_barcode": _suffix()}
+        ),
         201,
     )
     assert _ok(client.post(scan_path, json={"badge": worker["badge_barcode"]}))["outcome"] == (
@@ -1034,16 +1052,16 @@ def _user_cases(client: TestClient) -> list[tuple[str, Callable[[], Any], int]]:
     login = f"cov-{_suffix()}"
     body = {"login_name": login, "display_name": "Coverage", "role_id": role_id}
     return [
-        ("create", lambda: client.post("/api/users", json=body), 1),
-        ("create-duplicate", lambda: client.post("/api/users", json=body), 0),
-        ("update", lambda: client.patch(path, json={"display_name": "Covered"}), 1),
-        ("update-no-op", lambda: client.patch(path, json={"display_name": "Covered"}), 0),
-        ("update-refused", lambda: client.patch(path, json={"display_name": ""}), 0),
+        ("create", lambda: admin_of(client).post("/api/users", json=body), 1),
+        ("create-duplicate", lambda: admin_of(client).post("/api/users", json=body), 0),
+        ("update", lambda: admin_of(client).patch(path, json={"display_name": "Covered"}), 1),
+        ("update-no-op", lambda: admin_of(client).patch(path, json={"display_name": "Covered"}), 0),
+        ("update-refused", lambda: admin_of(client).patch(path, json={"display_name": ""}), 0),
         ("avatar-set", lambda: _put_avatar(client, user["id"], _PNG, "image/png"), 1),
         ("avatar-set-no-op", lambda: _put_avatar(client, user["id"], _PNG, "image/png"), 0),
         ("avatar-refused", lambda: _put_avatar(client, user["id"], b"x", "image/png"), 0),
-        ("avatar-remove", lambda: client.delete(f"{path}/avatar"), 1),
-        ("avatar-remove-no-op", lambda: client.delete(f"{path}/avatar"), 0),
+        ("avatar-remove", lambda: admin_of(client).delete(f"{path}/avatar"), 1),
+        ("avatar-remove-no-op", lambda: admin_of(client).delete(f"{path}/avatar"), 0),
     ]
 
 
@@ -1053,16 +1071,24 @@ def _role_cases(client: TestClient) -> list[tuple[str, Callable[[], Any], int]]:
     path = f"/api/roles/{role['id']}"
     name = f"Coverage {_suffix()}"
     return [
-        ("create", lambda: client.post("/api/roles", json={"name": name}), 1),
-        ("create-duplicate", lambda: client.post("/api/roles", json={"name": name}), 0),
-        ("grant", lambda: client.patch(path, json={"grant_permissions": ["EXPORT_REPORTS"]}), 1),
+        ("create", lambda: admin_of(client).post("/api/roles", json={"name": name}), 1),
+        ("create-duplicate", lambda: admin_of(client).post("/api/roles", json={"name": name}), 0),
+        (
+            "grant",
+            lambda: admin_of(client).patch(path, json={"grant_permissions": ["EXPORT_REPORTS"]}),
+            1,
+        ),
         (
             "grant-no-op",
-            lambda: client.patch(path, json={"grant_permissions": ["EXPORT_REPORTS"]}),
+            lambda: admin_of(client).patch(path, json={"grant_permissions": ["EXPORT_REPORTS"]}),
             0,
         ),
-        ("revoke", lambda: client.patch(path, json={"revoke_permissions": ["EXPORT_REPORTS"]}), 1),
-        ("rename-refused", lambda: client.patch(path, json={"name": ""}), 0),
+        (
+            "revoke",
+            lambda: admin_of(client).patch(path, json={"revoke_permissions": ["EXPORT_REPORTS"]}),
+            1,
+        ),
+        ("rename-refused", lambda: admin_of(client).patch(path, json={"name": ""}), 0),
     ]
 
 
@@ -1147,6 +1173,13 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/api/policies.py",
     "app/api/session.py",
     "app/api/setup.py",
+    # Phase 14 slice 2: the permission sets, the rules over them, the
+    # route registry and the routes that require a key.
+    "app/domain/permissions.py",
+    "app/application/authorization.py",
+    "app/api/route_access.py",
+    "app/api/environment.py",
+    "app/api/workers.py",
 }
 
 
@@ -1216,6 +1249,8 @@ def test_only_the_sign_in_and_configuration_modules_read_users_roles_or_permissi
         "app/application/roles.py",
         "app/api/roles.py",
         "app/api/authorization.py",
+        "app/domain/permissions.py",
+        "app/application/authorization.py",
     } <= permissions
     for owner in _PERMISSION_READERS | _DEFINERS:
         assert (_BACKEND_DIR / owner).is_file(), owner
@@ -1229,4 +1264,31 @@ def test_password_hashing_and_the_sign_in_import_graph() -> None:
     assert "app/application/authentication.py" in hashing
     assert not {"users", "authentication"} & imports["app/application/user_access.py"]
     assert not {"authentication", "first_run"} & imports["app/application/users.py"]
+    assert not {"users", "authentication", "first_run"} & imports["app/application/roles.py"]
     assert "first_run" not in imports["app/application/authentication.py"]
+
+
+def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services() -> None:
+    """B-STATIC (Phase 14 slice 2): ``application/authorization.py`` reads no
+    model, no framework and no application module but ``errors``; the
+    environment, Worker and policy services know nothing about permissions
+    (their routes check them)."""
+    trees = _trees()
+    rules = trees["app/application/authorization.py"]
+    imported = {
+        node.module
+        for node in ast.walk(rules)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    } | {
+        alias.name
+        for node in ast.walk(rules)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert not {module for module in imported if module.startswith(("fastapi", "sqlalchemy"))}
+    assert "app.infrastructure.models" not in imported
+    assert _imported_application_modules(rules) == {"errors"}
+    for service in ("environment", "workers", "policies"):
+        tree = trees[f"app/application/{service}.py"]
+        assert not _reads(tree, "app.domain.enums", {"Permission"}), service
+        assert "authorization" not in _imported_application_modules(tree), service

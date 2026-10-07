@@ -176,19 +176,6 @@ function handle(
       : json({ status: 'ok' });
   }
   if (url === '/api/machines') return json([]);
-  if (url === '/api/workers') {
-    return json(
-      WORKERS.map((worker) => ({
-        id: worker.id,
-        name: worker.name,
-        badge_barcode: worker.badge,
-        is_active: true,
-        avatar_updated_at: null,
-        created_at: '2026-08-01T00:00:00Z',
-        updated_at: '2026-08-01T00:00:00Z',
-      })),
-    );
-  }
   if (url === `/api/scan-stations/${STATION}/context`) {
     if (contextFailure !== null) {
       return json(

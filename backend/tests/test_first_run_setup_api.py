@@ -15,6 +15,12 @@ cannot see the lifespan of a module-scoped client). ``_current_token``
 re-opens setup (every credentialed administrator deactivated), observes
 it and parses the last announced token, so cases are order-independent.
 Production code has no test-only accessor.
+
+Since Phase 14 slice 2 the role and user routes need a signed-in User
+who may manage them, and any such User closes setup: a case that
+prepares roles or users does it through ``_as_administrator`` — a fresh
+harness identity deactivated (by SQL) right after its one request, so
+setup stays open — and reads role ids by SQL.
 """
 
 import http.cookiejar
@@ -39,6 +45,7 @@ from alembic import command
 from app.application import first_run
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import ALL_PERMISSIONS, client_as
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_first_run_setup_api"
@@ -208,11 +215,25 @@ def _current_token(client: TestClient, engine: Engine, messages: list[str]) -> s
     return _last_token(messages)
 
 
-def _role_id(client: TestClient, name: str) -> int:
-    roles = _ok(client.get("/api/roles"))
-    return int(
-        next(role["id"] for role in cast(list[dict[str, Any]], roles) if role["name"] == name)
-    )
+def _role_id(engine: Engine, name: str) -> int:
+    with engine.connect() as connection:
+        return int(
+            connection.execute(
+                sa.text("SELECT id FROM roles WHERE name = :name"), {"name": name}
+            ).scalar_one()
+        )
+
+
+def _as_administrator(
+    client: TestClient, engine: Engine, method: str, url: str, **kwargs: Any
+) -> Any:
+    """One request as a fresh all-permission User, deactivated right after
+    so first-run setup stays (or becomes again) open."""
+    acting = client_as(client, *ALL_PERMISSIONS)
+    try:
+        return acting.request(method, url, **kwargs)
+    finally:
+        _execute(engine, "UPDATE users SET is_active = false WHERE id = :id", id=acting.user_id)
 
 
 def _body(token: str, role_id: object, **overrides: object) -> dict[str, object]:
@@ -275,7 +296,7 @@ def test_setup_creates_the_first_administrator_and_closes(
 ) -> None:
     """F-2."""
     token = _current_token(client, db_engine, announcements)
-    role_id = _role_id(client, "Administrator")
+    role_id = _role_id(db_engine, "Administrator")
     before = _counts(db_engine)
     _refused(_create(client, _body("AAAA-" + token[5:], role_id)), 403, _S2)
     assert _create(client, _body("AAAA-" + token[5:], role_id)).json()["setup_token_invalid"]
@@ -326,7 +347,7 @@ def test_two_concurrent_setups_create_one_administrator(
 ) -> None:
     """F-3."""
     token = _current_token(client, db_engine, announcements)
-    role_id = _role_id(client, "Administrator")
+    role_id = _role_id(db_engine, "Administrator")
     barrier = threading.Barrier(2)
     responses: list[Any] = []
 
@@ -352,7 +373,10 @@ def test_role_eligibility_is_rechecked_under_the_role_lock(
     """F-3b."""
     token = _current_token(client, db_engine, announcements)
     role = _ok(
-        client.post(
+        _as_administrator(
+            client,
+            db_engine,
+            "POST",
             "/api/roles",
             json={
                 "name": f"Setup {_suffix()}",
@@ -393,7 +417,10 @@ def test_role_eligibility_is_rechecked_under_the_role_lock(
     assert _counts(db_engine) == before
     assert _ok(client.get("/api/setup"))["open"] is True
     _ok(
-        client.patch(
+        _as_administrator(
+            client,
+            db_engine,
+            "PATCH",
             f"/api/roles/{role['id']}",
             json={"grant_permissions": ["MANAGE_CORRECTION_PERMISSIONS"]},
         )
@@ -406,16 +433,22 @@ def test_setup_refusals_write_nothing_and_keep_the_token(
 ) -> None:
     """F-4."""
     token = _current_token(client, db_engine, announcements)
-    role_id = _role_id(client, "Administrator")
+    role_id = _role_id(db_engine, "Administrator")
     lacking = _ok(
-        client.post(
+        _as_administrator(
+            client,
+            db_engine,
+            "POST",
             "/api/roles",
             json={"name": f"Lacking {_suffix()}", "permissions": ["MANAGE_USERS_AND_ROLES"]},
         ),
         201,
     )
     holder = _ok(
-        client.post(
+        _as_administrator(
+            client,
+            db_engine,
+            "POST",
             "/api/users",
             json={
                 "login_name": f"taken-{_suffix()}",
@@ -478,16 +511,20 @@ def test_setup_reopens_when_no_administrator_remains(
 ) -> None:
     """F-5."""
     token = _current_token(client, db_engine, announcements)
-    created = _ok(_create(client, _body(token, _role_id(client, "Administrator"))), 201)
+    created = _ok(_create(client, _body(token, _role_id(db_engine, "Administrator"))), 201)
     assert _ok(client.get("/api/setup"))["open"] is False
     mark = len(announcements)
-    _ok(client.patch(f"/api/users/{created['user']['id']}", json={"is_active": False}))
+    # The only administrator leaves (by SQL: the last-holder rule refuses it
+    # through Administration since Phase 14 slice 2).
+    _execute(
+        db_engine, "UPDATE users SET is_active = false WHERE id = :id", id=created["user"]["id"]
+    )
     assert _ok(client.get("/api/setup"))["open"] is True
     assert _ok(client.get("/api/session"))["setup_open"] is True
     assert len(announcements) == mark + 1
     rotated = _last_token(announcements)
     assert rotated != token
-    _ok(_create(client, _body(rotated, _role_id(client, "Administrator"))), 201)
+    _ok(_create(client, _body(rotated, _role_id(db_engine, "Administrator"))), 201)
 
 
 def test_startup_never_fails_over_the_setup_check(caplog: pytest.LogCaptureFixture) -> None:

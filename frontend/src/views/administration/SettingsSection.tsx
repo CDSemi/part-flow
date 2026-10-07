@@ -5,6 +5,7 @@ import { getDueSoonPolicy, updateDueSoonPolicy } from '../../api/policies';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   DUE_SOON_DAYS_RANGE,
@@ -14,7 +15,12 @@ import {
   isDueSoonPercent,
 } from '../dates';
 import type { DueSoonPolicy } from '../dates';
-import { SectionHeader, ServerErrorNote } from './section-widgets';
+import {
+  ReadOnlyValues,
+  SectionHeader,
+  ServerErrorNote,
+  ViewOnlyNote,
+} from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 import { SignInSettingsPanel } from './SignInSettingsPanel';
 
@@ -27,7 +33,9 @@ import { SignInSettingsPanel } from './SignInSettingsPanel';
 // (minimum ≤ maximum), so Save replaces them together. The User sign-in
 // panel (SignInSettingsPanel) follows it and loads its own data. The
 // rest of Settings is not available yet and says so — no control
-// pretends otherwise.
+// pretends otherwise. Without the Configure system settings permission
+// the whole section reads as text, with one view-only line under its
+// header.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'settings')?.subtitle ?? '';
@@ -59,9 +67,17 @@ function parseSetting(
 export function SettingsSection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('CONFIGURE_SYSTEM_SETTINGS');
   const policyData = useApiData(getDueSoonPolicy);
 
-  const header = <SectionHeader title="Settings" subtitle={SUBTITLE} />;
+  const header = (
+    <>
+      <SectionHeader title="Settings" subtitle={SUBTITLE} />
+      {canWrite ? null : (
+        <ViewOnlyNote permission="CONFIGURE_SYSTEM_SETTINGS" />
+      )}
+    </>
+  );
 
   if (policyData.state.status === 'loading') {
     return (
@@ -97,12 +113,31 @@ export function SettingsSection() {
           Used by every due countdown — Production Board, Area Board, Scan
           Station, Priority and Work Orders.
         </p>
-        <DueSoonForm
-          saved={policyData.state.data}
-          writeBlocked={writeBlocked}
-          onSaved={policyData.reload}
-          onOutcomeUnknown={policyData.revalidate}
-        />
+        {canWrite ? (
+          <DueSoonForm
+            saved={policyData.state.data}
+            writeBlocked={writeBlocked}
+            onSaved={policyData.reload}
+            onOutcomeUnknown={policyData.revalidate}
+          />
+        ) : (
+          <ReadOnlyValues
+            rows={[
+              {
+                label: 'Minimum warning days',
+                value: policyData.state.data.minDays,
+              },
+              {
+                label: 'Lead-time warning percentage (%)',
+                value: policyData.state.data.leadTimePercent,
+              },
+              {
+                label: 'Maximum warning days',
+                value: policyData.state.data.maxDays,
+              },
+            ]}
+          />
+        )}
         <SignInSettingsPanel />
         <h2>Other settings</h2>
         <p className="ad-confighelp">

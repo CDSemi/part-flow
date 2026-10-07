@@ -10,8 +10,20 @@ as an Area ``barcode_value`` or the ``next_sequence`` counter is
 rejected instead of silently ignored), the Application layer owns
 every business rule and the transaction, and the central handlers in
 ``app.api.errors`` translate typed failures into HTTP responses.
-Every effective write is audited in ``audit_events`` (Phase 13);
-nothing about the HTTP surface changes.
+Every effective write is audited in ``audit_events`` (Phase 13) with
+the signed-in User as ``actor_user_id`` (Phase 14 slice 2).
+
+Access (Phase 14 slice 2, ``app.api.route_access``): the list reads and
+``GET /api/scan-stations/{station_id}`` stay public (the Station Selector
+and the Scan Station read them without signing in); every write needs
+its section's permission — Departments ``MANAGE_DEPARTMENTS``, Areas
+``MANAGE_AREAS``, Operations ``MANAGE_OPERATIONS``, Scan Stations
+``MANAGE_SCAN_STATIONS``, the Asset Tag format
+``MANAGE_BARCODE_CONFIGURATION``. An Area's Worker Session timeout
+override is a Worker session policy edit: sending it needs
+``MANAGE_WORKER_SESSION_POLICIES`` (and an Area edit sending only the
+override needs nothing else). The Asset Tag format read is classified
+with the Management routes (Machines host it).
 
 Deliberate surface decisions:
 
@@ -30,15 +42,30 @@ Deliberate surface decisions:
 """
 
 import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, StrictInt
 
+from app.api.authorization import RequirePermission, SignedInDep, actor_of
 from app.api.dependencies import SessionDep
-from app.application import environment
+from app.application import authorization, environment
+from app.application.authentication import Principal
+from app.domain.enums import Permission
 
 router = APIRouter(prefix="/api")
+
+DepartmentManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_DEPARTMENTS))
+]
+AreaManagerDep = Annotated[Principal, Depends(RequirePermission(Permission.MANAGE_AREAS))]
+OperationManagerDep = Annotated[Principal, Depends(RequirePermission(Permission.MANAGE_OPERATIONS))]
+ScanStationManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_SCAN_STATIONS))
+]
+BarcodeConfigurationManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_BARCODE_CONFIGURATION))
+]
 
 # The canonical Worker ID mode vocabulary (PROJECT_PROFILE §8.13); Scanned
 # session (badge sign-in, Worker Sessions and the badge-confirmation gates)
@@ -90,17 +117,27 @@ def list_departments(session: SessionDep) -> list[DepartmentResponse]:
 
 
 @router.post("/departments", status_code=201)
-def create_department(body: DepartmentCreateRequest, session: SessionDep) -> DepartmentResponse:
-    department = environment.create_department(session, name=body.name)
+def create_department(
+    principal: DepartmentManagerDep, body: DepartmentCreateRequest, session: SessionDep
+) -> DepartmentResponse:
+    department = environment.create_department(
+        session, name=body.name, actor_user_id=principal.user_id
+    )
     return DepartmentResponse.model_validate(department)
 
 
 @router.patch("/departments/{department_id}")
 def update_department(
-    department_id: int, body: DepartmentUpdateRequest, session: SessionDep
+    principal: DepartmentManagerDep,
+    department_id: int,
+    body: DepartmentUpdateRequest,
+    session: SessionDep,
 ) -> DepartmentResponse:
     department = environment.update_department(
-        session, department_id, **body.model_dump(exclude_unset=True)
+        session,
+        department_id,
+        actor_user_id=principal.user_id,
+        **body.model_dump(exclude_unset=True),
     )
     return DepartmentResponse.model_validate(department)
 
@@ -170,7 +207,13 @@ def list_areas(session: SessionDep) -> list[AreaResponse]:
 
 
 @router.post("/areas", status_code=201)
-def create_area(body: AreaCreateRequest, session: SessionDep) -> AreaResponse:
+def create_area(
+    principal: AreaManagerDep, body: AreaCreateRequest, session: SessionDep
+) -> AreaResponse:
+    authorization.require(
+        actor_of(principal),
+        authorization.area_create_permissions(body.worker_session_timeout_minutes),
+    )
     area = environment.create_area(
         session,
         department_id=body.department_id,
@@ -182,13 +225,18 @@ def create_area(body: AreaCreateRequest, session: SessionDep) -> AreaResponse:
         worker_identification_mode=body.worker_identification_mode,
         fixed_worker_id=body.fixed_worker_id,
         worker_session_timeout_minutes=body.worker_session_timeout_minutes,
+        actor_user_id=principal.user_id,
     )
     return AreaResponse.model_validate(area)
 
 
 @router.patch("/areas/{area_id}")
-def update_area(area_id: int, body: AreaUpdateRequest, session: SessionDep) -> AreaResponse:
-    area = environment.update_area(session, area_id, **body.model_dump(exclude_unset=True))
+def update_area(
+    principal: SignedInDep, area_id: int, body: AreaUpdateRequest, session: SessionDep
+) -> AreaResponse:
+    fields = body.model_dump(exclude_unset=True)
+    authorization.require(actor_of(principal), authorization.area_update_permissions(fields))
+    area = environment.update_area(session, area_id, actor_user_id=principal.user_id, **fields)
     return AreaResponse.model_validate(area)
 
 
@@ -245,7 +293,9 @@ def list_operations(session: SessionDep) -> list[OperationResponse]:
 
 
 @router.post("/operations", status_code=201)
-def create_operation(body: OperationCreateRequest, session: SessionDep) -> OperationResponse:
+def create_operation(
+    principal: OperationManagerDep, body: OperationCreateRequest, session: SessionDep
+) -> OperationResponse:
     operation = environment.create_operation(
         session,
         area_id=body.area_id,
@@ -254,16 +304,23 @@ def create_operation(body: OperationCreateRequest, session: SessionDep) -> Opera
         description=body.description,
         default_expected_duration=body.default_expected_duration,
         is_external=body.is_external,
+        actor_user_id=principal.user_id,
     )
     return OperationResponse.model_validate(operation)
 
 
 @router.patch("/operations/{operation_id}")
 def update_operation(
-    operation_id: int, body: OperationUpdateRequest, session: SessionDep
+    principal: OperationManagerDep,
+    operation_id: int,
+    body: OperationUpdateRequest,
+    session: SessionDep,
 ) -> OperationResponse:
     operation = environment.update_operation(
-        session, operation_id, **body.model_dump(exclude_unset=True)
+        session,
+        operation_id,
+        actor_user_id=principal.user_id,
+        **body.model_dump(exclude_unset=True),
     )
     return OperationResponse.model_validate(operation)
 
@@ -314,22 +371,31 @@ def get_scan_station(station_id: str, session: SessionDep) -> ScanStationRespons
 
 
 @router.post("/scan-stations", status_code=201)
-def create_scan_station(body: ScanStationCreateRequest, session: SessionDep) -> ScanStationResponse:
+def create_scan_station(
+    principal: ScanStationManagerDep, body: ScanStationCreateRequest, session: SessionDep
+) -> ScanStationResponse:
     station = environment.create_scan_station(
         session,
         station_id=body.station_id,
         area_id=body.area_id,
         is_active=body.is_active,
+        actor_user_id=principal.user_id,
     )
     return ScanStationResponse.model_validate(station)
 
 
 @router.patch("/scan-stations/{station_id}")
 def update_scan_station(
-    station_id: str, body: ScanStationUpdateRequest, session: SessionDep
+    principal: ScanStationManagerDep,
+    station_id: str,
+    body: ScanStationUpdateRequest,
+    session: SessionDep,
 ) -> ScanStationResponse:
     station = environment.update_scan_station(
-        session, station_id, **body.model_dump(exclude_unset=True)
+        session,
+        station_id,
+        actor_user_id=principal.user_id,
+        **body.model_dump(exclude_unset=True),
     )
     return ScanStationResponse.model_validate(station)
 
@@ -367,9 +433,11 @@ def get_machine_asset_tag_format(session: SessionDep) -> MachineAssetTagFormatRe
 
 @router.put("/barcode-configuration/machine-asset-tag-format")
 def put_machine_asset_tag_format(
-    body: MachineAssetTagFormatPutRequest, session: SessionDep
+    principal: BarcodeConfigurationManagerDep,
+    body: MachineAssetTagFormatPutRequest,
+    session: SessionDep,
 ) -> MachineAssetTagFormatResponse:
     config = environment.upsert_machine_asset_tag_format(
-        session, prefix=body.prefix, digits=body.digits
+        session, prefix=body.prefix, digits=body.digits, actor_user_id=principal.user_id
     )
     return MachineAssetTagFormatResponse.model_validate(config)

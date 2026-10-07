@@ -8,9 +8,15 @@ initial grants; afterwards they are ordinary rows. Permission keys are
 the only authority: no rule here is keyed to a role name, and any role
 may be granted or revoked any key.
 
-Configuration only — nothing reads a role or a permission to allow or
-refuse an action until Phase 14, and no endpoint checks or simulates an
-identity before then.
+Who may change roles (Phase 14 slice 2; owner decision OD-P19): every
+write takes the ``partflow:user-administration`` advisory lock first and
+re-reads the acting User (``app.application.user_access``), then judges
+the change on those fresh keys (``app.application.authorization``): a
+change naming a correction permission or ``MANAGE_CORRECTION_PERMISSIONS``
+needs ``MANAGE_CORRECTION_PERMISSIONS``; a rename, any other key or an
+empty change needs ``MANAGE_USERS_AND_ROLES``. A revocation that would
+leave no active User with a password holding ``MANAGE_USERS_AND_ROLES``
+or ``MANAGE_CORRECTION_PERMISSIONS`` is refused (409).
 
 Rules owned here:
 
@@ -25,9 +31,10 @@ Rules owned here:
 - Roles are renamed, never deleted or deactivated: no such service
   exists.
 - Every effective write appends exactly one ``audit_events`` row in the
-  SAME transaction (entity ``Role``, ``actor_reference`` NULL until
-  Phase 14) snapshotting ``{name, permissions}`` (sorted). Rejected
-  writes and no-ops append nothing.
+  SAME transaction (entity ``Role``; ``actor_user_id`` is the signed-in
+  User since Phase 14 slice 2; ``actor_reference`` is legacy and stays
+  NULL) snapshotting ``{name, permissions}`` (sorted). Rejected writes
+  and no-ops append nothing.
 
 Each mutating service commits its own transaction and returns a
 plain-value :class:`RoleView` built before COMMIT, so no ORM object is
@@ -46,7 +53,7 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.application import audit
+from app.application import audit, authorization, user_access
 from app.application.common import (
     UNSET,
     UnsetType,
@@ -56,7 +63,9 @@ from app.application.common import (
     required_text,
 )
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
+from app.application.user_access import Principal
 from app.domain.enums import AuditEntityType, AuditEventType, Permission
+from app.domain.permissions import PERMISSION_MANAGEMENT
 from app.infrastructure.models import Role, RolePermission, User
 
 _ROLE_CONFLICTS: Final = {"uq_roles_name": "A role with this name already exists."}
@@ -158,9 +167,22 @@ def list_roles(session: Session) -> list[RoleView]:
     ]
 
 
-def create_role(session: Session, *, name: object, permissions: object) -> RoleView:
-    clean_name = required_text(name, "Role name")
+def create_role(
+    session: Session, *, name: object, permissions: object, actor: Principal
+) -> RoleView:
+    acting = user_access.acting_user(session, actor)
+    user_access.judge(
+        session,
+        lambda: authorization.require(acting, (Permission.MANAGE_USERS_AND_ROLES,)),
+    )
     granted = _permission_set(permissions)
+    user_access.judge(
+        session,
+        lambda: authorization.require_role_change(
+            acting, authorization.role_create_permissions(granted)
+        ),
+    )
+    clean_name = required_text(name, "Role name")
     _reject_duplicate_name(session, clean_name)
     role = Role(name=clean_name)
     session.add(role)
@@ -177,6 +199,7 @@ def create_role(session: Session, *, name: object, permissions: object) -> RoleV
         entity_id=str(role.id),
         before_data=None,
         after_data=role_snapshot(clean_name, granted),
+        actor_user_id=actor.user_id,
     )
     view = _view(session, role, granted)
     commit(session, _ROLE_CONFLICTS)
@@ -190,8 +213,26 @@ def update_role(
     name: object = UNSET,
     grant_permissions: object = (),
     revoke_permissions: object = (),
+    actor: Principal,
 ) -> RoleView:
-    """Rename and grant/revoke as deltas; a no-op writes and audits nothing."""
+    """Rename and grant/revoke as deltas; a no-op writes and audits nothing.
+
+    The keys the change needs are judged on the request as sent, before
+    the role is even looked up. Removing a management key counts its
+    holders before the first write and again after the flush.
+    """
+    acting = user_access.acting_user(session, actor)
+    grant = _permission_set(grant_permissions)
+    revoke = _permission_set(revoke_permissions)
+    user_access.judge(
+        session,
+        lambda: authorization.require_role_change(
+            acting,
+            authorization.role_update_permissions(
+                name_given=not isinstance(name, UnsetType), grant=grant, revoke=revoke
+            ),
+        ),
+    )
     if not is_bindable_id(role_id):
         raise NotFoundError(f"Role {role_id} does not exist.")
     role = session.get(Role, role_id, with_for_update=_EDIT_LOCK, populate_existing=True)
@@ -204,8 +245,6 @@ def update_role(
         clean_name = required_text(name, "Role name")
         if clean_name != role.name:
             new_name = clean_name
-    grant = _permission_set(grant_permissions)
-    revoke = _permission_set(revoke_permissions)
     if grant & revoke:
         raise InvalidInputError("A permission cannot be granted and revoked in the same change.")
     to_add = grant - held
@@ -217,6 +256,13 @@ def update_role(
 
     before = role_snapshot(role.name, held)
     after_permissions = (held | to_add) - to_remove
+    # Last-holder rule: counted before the DELETE (the first write) and
+    # again after the flush that makes the change visible.
+    holders_before = (
+        user_access.management_holder_counts(session)
+        if to_remove & frozenset(PERMISSION_MANAGEMENT)
+        else None
+    )
     # The DELETE runs before any assignment or add, so its autoflush has
     # nothing pending; it touches only this locked role's rows.
     if to_remove:
@@ -233,6 +279,11 @@ def update_role(
     for permission in to_add:
         session.add(RolePermission(role_id=role.id, permission=permission.value))
     flush(session, _ROLE_CONFLICTS)
+    if holders_before is not None:
+        holders_after = user_access.management_holder_counts(session)
+        user_access.judge(
+            session, lambda: authorization.reject_holder_loss(holders_before, holders_after)
+        )
     audit.append_audit_event(
         session,
         event_type=AuditEventType.UPDATED,
@@ -240,6 +291,7 @@ def update_role(
         entity_id=str(role.id),
         before_data=before,
         after_data=role_snapshot(role.name, after_permissions),
+        actor_user_id=actor.user_id,
     )
     view = _view(session, role, after_permissions)
     commit(session, _ROLE_CONFLICTS)

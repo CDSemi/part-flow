@@ -54,6 +54,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APP_DIR = _BACKEND_DIR / "app"
@@ -129,7 +130,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
     """Machine creation requires the configured Asset Tag format."""
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": "CD-", "digits": 4},
     )
@@ -146,9 +147,9 @@ def _ok(response: Response, status: int = 200) -> dict[str, Any]:
 
 
 def _create_area(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    department = _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
     payload = {"department_id": department["id"], "name": _unique("AREA"), **overrides}
-    return _ok(client.post("/api/areas", json=payload), 201)
+    return _ok(admin_of(client).post("/api/areas", json=payload), 201)
 
 
 def _create_machine(
@@ -360,7 +361,7 @@ def test_machine_refusals_audit_nothing(client: TestClient, db_engine: Engine) -
     retired = _create_machine(client, int(area["id"]))
     _retire(client, int(retired["id"]))
     inactive = _create_area(client)
-    _ok(client.patch(f"/api/areas/{inactive['id']}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/areas/{inactive['id']}", json={"is_active": False}))
     path = f"/api/machines/{machine['id']}"
     stored = _stored(db_engine, models.Machine, machine["id"])
     stored_retired = _stored(db_engine, models.Machine, retired["id"])
@@ -545,10 +546,13 @@ def test_production_assignment_moves_state_age_but_appends_no_machine_row(
 ) -> None:
     area = _create_area(client)
     operation = _ok(
-        client.post("/api/operations", json={"area_id": area["id"], "code": _unique("OP")}), 201
+        admin_of(client).post(
+            "/api/operations", json={"area_id": area["id"], "code": _unique("OP")}
+        ),
+        201,
     )
     station = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area["id"]}
         ),
         201,

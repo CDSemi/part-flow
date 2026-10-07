@@ -1,4 +1,4 @@
-"""Who is signed in, and what they may do (Phase 14 slice 1).
+"""Who is signed in, and what they may do (Phase 14 slices 1–2).
 
 FastAPI dependencies over ``app.application.authentication``:
 
@@ -14,10 +14,12 @@ FastAPI dependencies over ``app.application.authentication``:
   403 ``permission_denied`` with ``required_permissions``);
   ``SignedInDep`` is the key-less form.
 
-Checks run before the route body, so before any lock or write. In slice
-1 they gate only the new sign-in routes; no existing route changes its
-gate. The principal is always derived on the server from the session —
-never from a request body.
+Checks run before the route body, so before any lock or write. Since
+slice 2 every Administration read and write declares one (the class of
+every route is listed in ``app.api.route_access``); a route whose keys
+depend on its request also checks ``authorization.require`` on
+``actor_of(principal)`` first thing in its body. The principal is always
+derived on the server from the session — never from a request body.
 
 Also the cookie helpers: the raw token goes only into ``Set-Cookie``
 (``HttpOnly``, ``SameSite=Strict``, ``Path=/api``, ``Secure`` when
@@ -32,7 +34,11 @@ from fastapi import Depends, Request, Response
 from app.api.dependencies import SessionDep
 from app.application import authentication
 from app.application.authentication import SESSION_COOKIE, Principal
+from app.application.authorization import Actor
 from app.application.errors import (
+    AUTHENTICATION_REQUIRED_MESSAGE,
+    PASSWORD_CHANGE_REQUIRED_MESSAGE,
+    PERMISSION_DENIED_MESSAGE,
     AuthenticationRequiredError,
     PasswordChangeRequiredError,
     PermissionDeniedError,
@@ -52,7 +58,7 @@ OptionalPrincipalDep = Annotated[Principal | None, Depends(optional_principal)]
 
 def current_user(principal: OptionalPrincipalDep) -> Principal:
     if principal is None:
-        raise AuthenticationRequiredError(authentication.AUTHENTICATION_REQUIRED_MESSAGE)
+        raise AuthenticationRequiredError(AUTHENTICATION_REQUIRED_MESSAGE)
     return principal
 
 
@@ -67,11 +73,11 @@ class RequirePermission:
 
     def __call__(self, principal: CurrentUserDep) -> Principal:
         if principal.must_change_password:
-            raise PasswordChangeRequiredError(authentication.PASSWORD_CHANGE_REQUIRED_MESSAGE)
+            raise PasswordChangeRequiredError(PASSWORD_CHANGE_REQUIRED_MESSAGE)
         if any(key not in principal.permissions for key in self.keys):
             raise PermissionDeniedError(
-                authentication.PERMISSION_DENIED_MESSAGE,
-                required=tuple(str(key) for key in self.keys),
+                PERMISSION_DENIED_MESSAGE,
+                required=tuple(sorted(key.value for key in self.keys)),
             )
         return principal
 
@@ -86,6 +92,11 @@ def holds(principal: Principal | None, key: Permission) -> bool:
         and not principal.must_change_password
         and key in principal.permissions
     )
+
+
+def actor_of(principal: Principal) -> Actor:
+    """The request's principal as an ``authorization.Actor`` (id and keys)."""
+    return Actor(principal.user_id, principal.permissions)
 
 
 def set_session_cookie(response: Response, token: str, max_age: int) -> None:

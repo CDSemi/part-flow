@@ -8,8 +8,10 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { PERMISSIONS } from '../../api/roles';
 import type { SessionUser } from '../../api/session';
 import { ConnectivityContext } from '../../app/connectivity-context';
+import type { ConnectivityStatus } from '../../app/connectivity-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { prepareImageUpload } from '../../components/image-upload';
@@ -816,7 +818,15 @@ function handleWorkers(
     const ordered = [...state.workers].sort(
       (a, b) => a.name.localeCompare(b.name) || a.id - b.id,
     );
-    return workerFailure('GET list') ?? json(ordered.map(stamp));
+    // The badge key is sent only to a caller who may manage Workers.
+    const listed = hasPermission(session.user, 'MANAGE_WORKERS')
+      ? ordered
+      : ordered.map((worker) => {
+          const profile: Partial<WorkerRow> = { ...worker };
+          delete profile.badge_barcode;
+          return profile;
+        });
+    return workerFailure('GET list') ?? json(listed.map(stamp));
   }
   if (url === '/api/workers' && method === 'POST') {
     const failure = workerFailure('POST');
@@ -1113,21 +1123,28 @@ afterEach(() => {
 });
 
 /**
- * An explicit user sign-in for the sections that read it (Users, the
- * Settings → User sign-in panel): signed out unless a test signs a user
- * in. The session provider has its own suite.
+ * An explicit user sign-in: Administration shows its sections only to a
+ * signed-in user, so a test is signed in holding every permission unless
+ * it passes another user (or null: signed out). The session provider has
+ * its own suite.
  */
-function sessionValue(user: SessionUser | null = null): SessionValue {
+function sessionValue(
+  user: SessionUser | null = signedInUser([...PERMISSIONS]),
+  overrides: Partial<SessionValue> = {},
+): SessionValue {
   return {
     status: user ? 'signed-in' : 'signed-out',
     user,
     setupOpen: false,
+    checking: false,
+    endedBy: null,
     can: (permission) => hasPermission(user, permission),
     openSignIn: vi.fn(),
     openSetup: vi.fn(),
     openChangePassword: vi.fn(),
     signOut: vi.fn(async () => {}),
     refresh: vi.fn(async () => {}),
+    ...overrides,
   };
 }
 
@@ -1152,19 +1169,32 @@ function signedInUser(
 
 let session: SessionValue;
 
-function renderWithSession(
-  ui: React.ReactElement,
-  status: 'connected' | 'unavailable' = 'connected',
-) {
-  return render(
+/** Administration under the current `session` and a connectivity. */
+function adminTree(status: ConnectivityStatus = 'connected') {
+  return (
     <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
-      <SessionContext.Provider value={session}>{ui}</SessionContext.Provider>
-    </ConnectivityContext.Provider>,
+      <SessionContext.Provider value={session}>
+        <AdministrationView />
+      </SessionContext.Provider>
+    </ConnectivityContext.Provider>
   );
 }
 
-function renderAdmin(status: 'connected' | 'unavailable' = 'connected') {
-  return renderWithSession(<AdministrationView />, status);
+function renderAdmin(status: ConnectivityStatus = 'connected') {
+  return render(adminTree(status));
+}
+
+/** The label → value rows of one read-only value list (or of every
+ * list of the page). */
+function readOnlyRows(
+  container: ParentNode = document,
+): Record<string, string> {
+  return Object.fromEntries(
+    Array.from(container.querySelectorAll('.prow'), (row) => [
+      row.querySelector('.k')?.textContent ?? '',
+      row.querySelector('.v')?.textContent ?? '',
+    ]),
+  );
 }
 
 function openSection(label: string) {
@@ -2774,9 +2804,9 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     [
       'Role',
       'Undo recent eligible scans',
-      'Perform quantity corrections',
+      'Perform quantity corrections — grants nothing yet',
       'Edit Work Order Allocation',
-      'Perform authorized historical corrections',
+      'Perform authorized historical corrections — grants nothing yet',
     ],
     ['Administrator', '-', '-', '✓', '✓'],
     ['Manager', '-', '✓', '✓', '-'],
@@ -2790,7 +2820,7 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     'Undo recent eligible scans',
   );
   expect(document.body.textContent).toContain(
-    'Choose which roles hold each correction permission. These permissions are recorded for each role and are not enforced yet.',
+    'Choose which roles hold each correction permission. The correction permissions are not checked yet; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.',
   );
   expect(document.body.textContent).toContain(
     "Undo recent eligible scans covers exactly the actions the Scan Station's Undo offers — there is no extra time limit.",
@@ -3462,7 +3492,7 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
 /* ============ Users (Phase 13 — application accounts) ============ */
 
 const USERS_NOTE =
-  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions only for setting passwords and changing user sign-in settings so far; every other screen stays open to anyone who can reach PartFlow. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
+  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions in Administration; Management and Scan Station screens stay open to anyone who can reach PartFlow for now. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
 const USER_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the user before trying again.';
 const E_U2B =
@@ -3484,7 +3514,7 @@ function seedJane(overrides: Partial<UserRow> = {}): UserRow {
 
 async function openUsers(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);
-  await screen.findByRole('button', { name: 'Edit Lathe' });
+  await screen.findByText('Lathe');
   openSection('Users');
   await screen.findByRole('heading', { name: 'Users' });
   await waitFor(() =>
@@ -3845,11 +3875,11 @@ test('FA-U5: an unanswered save is an unknown outcome; offline blocks writes; a 
 /* ============ Roles & permissions (Phase 13 — named roles) ============ */
 
 const ROLES_NOTE =
-  'Each user holds one role. PartFlow checks permissions only for setting passwords and changing user sign-in settings so far; the other permissions are recorded here and are not checked yet. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
+  'Each user holds one role. PartFlow checks the Administration permissions; the Management and Scan Station permissions are recorded here and are not checked yet. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
 
 async function openRoles(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);
-  await screen.findByRole('button', { name: 'Edit Lathe' });
+  await screen.findByText('Lathe');
   openSection('Roles & permissions');
   await screen.findByRole('button', { name: 'Edit Manager' });
 }
@@ -3919,7 +3949,9 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
     'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Policies → Correction permissions.',
   );
   expect(
-    within(dialog).getByRole('checkbox', { name: 'Export and print reports' }),
+    within(dialog).getByRole('checkbox', {
+      name: 'Export and print reports — grants nothing yet',
+    }),
   ).toBeChecked();
   expect(
     within(dialog).getByRole('checkbox', { name: 'Manage Machines' }),
@@ -3933,7 +3965,9 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
   fireEvent.click(screen.getByRole('button', { name: 'Edit Manager' }));
   const edit = screen.getByRole('dialog', { name: 'Edit role' });
   fireEvent.click(
-    within(edit).getByRole('checkbox', { name: 'Export and print reports' }),
+    within(edit).getByRole('checkbox', {
+      name: 'Export and print reports — grants nothing yet',
+    }),
   );
   fireEvent.click(
     within(edit).getByRole('checkbox', { name: 'Manage Machines' }),
@@ -4245,9 +4279,13 @@ const SET_PASSWORD_TEXT =
 const SET_PASSWORD_UNKNOWN =
   'The server did not answer — the password may or may not have been set. Set it again to be sure.';
 
-/** Signed in as user 90 holding `MANAGE_USERS_AND_ROLES`, listed too. */
+/** Signed in as user 90 holding `MANAGE_USERS_AND_ROLES` and
+ * `MANAGE_CORRECTION_PERMISSIONS` (every seeded role holds a correction
+ * permission), listed too. */
 function signInUserAdministrator() {
-  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  session = sessionValue(
+    signedInUser(['MANAGE_USERS_AND_ROLES', 'MANAGE_CORRECTION_PERMISSIONS']),
+  );
   seedJane({
     id: 90,
     login_name: 'admin',
@@ -4301,27 +4339,22 @@ test('FA-U6: user administrators see every sign-in state and Set password… on 
   ).toBeNull();
 });
 
-test('FA-U6: without the permission, or signed out, neither the Sign-in column nor Set password… exists', async () => {
+test('FA-U6: without the permission neither the Sign-in column nor Set password… exists', async () => {
   seedJane({ sign_in_state: 'LOCKED' });
-  // Signed out: the server omits the state; the table is the S12 table.
-  await openUsers();
-  expect(
-    screen.getAllByRole('columnheader').map((th) => th.textContent),
-  ).toEqual(['User', 'Login name', 'Role', 'Status']);
-  expect(screen.queryByRole('button', { name: /^Set password/ })).toBeNull();
-  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
-  expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(USERS_NOTE);
-  expect(document.body.textContent).not.toContain('Users cannot sign in yet');
-  cleanup();
-
-  // Signed in without the permission: the same table.
+  // Signed in without the permission: the server omits the state; the
+  // table is the S12 table, read-only.
   session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
-  await openUsers();
+  renderAdmin();
+  openSection('Users');
+  await screen.findByText('Jane Doe');
   expect(
     screen.getAllByRole('columnheader').map((th) => th.textContent),
   ).toEqual(['User', 'Login name', 'Role', 'Status']);
   expect(screen.queryByText('Locked')).toBeNull();
   expect(screen.queryByRole('button', { name: /^Set password/ })).toBeNull();
+  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(USERS_NOTE);
+  expect(document.body.textContent).not.toContain('Users cannot sign in yet');
 });
 
 test('FA-U7: Set password… sends exactly the new password; a mismatch or a short password sends nothing', async () => {
@@ -4469,13 +4502,11 @@ test('FA-U7: Set password… closes without a request, ignores closing in flight
 
 /* ============ Settings → User sign-in (Phase 14) ============ */
 
+/** The User sign-in panel's values: the last read-only value list of
+ * Settings (a view-only Due Soon panel lists its values first). */
 function signInPolicyRows(): Record<string, string> {
-  return Object.fromEntries(
-    Array.from(document.querySelectorAll('.ad-configpreview .prow'), (row) => [
-      row.querySelector('.k')?.textContent ?? '',
-      row.querySelector('.v')?.textContent ?? '',
-    ]),
-  );
+  const lists = document.querySelectorAll('.ad-configpreview');
+  return readOnlyRows(lists[lists.length - 1]);
 }
 
 function signInPolicyReads(): number {
@@ -4488,29 +4519,11 @@ function signInPolicyReads(): number {
 async function openSignInSettings(
   status: 'connected' | 'unavailable' = 'connected',
 ) {
-  await openSettings(status);
+  renderAdmin(status);
+  openSection('Settings');
+  await screen.findByRole('heading', { name: 'Due Soon warning' });
   await screen.findByRole('heading', { name: 'User sign-in' });
 }
-
-test('FA-S1: signed out, the User sign-in panel asks to sign in and reads nothing', async () => {
-  await openSignInSettings();
-
-  expect(
-    screen.getByText(
-      "How long a user's sign-in lasts, when repeated failed sign-ins lock a user's account, and whether users must replace a password an administrator set.",
-    ),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText('Sign in to see the user sign-in settings.'),
-  ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-  expect(session.openSignIn).toHaveBeenCalledTimes(1);
-  expect(signInPolicyReads()).toBe(0);
-  // The Due Soon panel comes first, Other settings stays last.
-  expect(
-    screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
-  ).toEqual(['Due Soon warning', 'User sign-in', 'Other settings']);
-});
 
 test('FA-S2: signed in without the permission, the settings read without an edit control', async () => {
   session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
@@ -4524,14 +4537,25 @@ test('FA-S2: signed in without the permission, the settings read without an edit
       'New password at first sign-in': 'Required',
     }),
   );
+  // One view-only line for the whole section, under its header; the
+  // panel's own S1 note is gone.
   expect(
-    screen.getByText(
+    screen.getAllByText(/^View only — /).map((note) => note.textContent),
+  ).toEqual([
+    'View only — changing this needs the Configure system settings permission.',
+  ]);
+  expect(
+    screen.queryByText(
       'Only users whose role may configure system settings can change these.',
     ),
-  ).toBeInTheDocument();
+  ).toBeNull();
   expect(
     screen.queryByRole('button', { name: 'Edit user sign-in settings…' }),
   ).toBeNull();
+  // The panels come in order, Other settings stays last.
+  expect(
+    screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
+  ).toEqual(['Due Soon warning', 'User sign-in', 'Other settings']);
   // User sign-in never says "sessions" (those are Worker Sessions).
   expect(document.querySelector('.ad-config')?.textContent).not.toMatch(
     /session/i,
@@ -4698,4 +4722,513 @@ test('FA-S4: invalid values are refused in place, offline blocks editing and a f
   await waitFor(() =>
     expect(signInPolicyRows()['Lock duration']).toBe('15 minutes'),
   );
+});
+
+/* ============ Access — sign-in gate and permissions (Phase 14 slice 2) ============ */
+
+const G3 =
+  'Giving a user a role that holds correction permissions or the permission to manage them, or moving them out of such a role, needs the Manage correction permissions permission.';
+const L1 =
+  'This change would leave no active user with a password who may manage users and roles. Give that permission to another active user first.';
+const PROTECTED_ROLE_HINT =
+  'Roles that hold correction permissions or the permission to manage them can be given only by a user who may manage correction permissions.';
+const PROTECTED_USERS_LINE =
+  'Users whose role holds correction permissions or the permission to manage them can be renamed here; their role, whether they are active and their password can be changed only by a user who may manage correction permissions.';
+
+function adminRequests(): string[] {
+  return vi
+    .mocked(fetch)
+    .mock.calls.map(([input]) => String(input))
+    .filter((url) => url.startsWith('/api/'));
+}
+
+/** Open a section and wait until every one of its reads answered. */
+async function openLoadedSection(label: string) {
+  openSection(label);
+  const main = document.querySelector('.ad-main') as HTMLElement;
+  await waitFor(() =>
+    expect(within(main).queryAllByRole('status')).toEqual([]),
+  );
+  return main;
+}
+
+test('FA-1: signed out, a sign-in panel replaces the sections and Sign in opens once per entry', async () => {
+  session = sessionValue(null);
+  const view = renderAdmin();
+
+  expect(
+    screen.getByRole('heading', { name: 'Administration', level: 1 }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("Sign in to view and change PartFlow's configuration."),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('navigation', { name: 'Administration sections' }),
+  ).toBeNull();
+  // Opened once on entry; focus waits on the panel's Sign in button for
+  // when the dialog closes.
+  expect(session.openSignIn).toHaveBeenCalledTimes(1);
+  const signIn = screen.getByRole('button', { name: 'Sign in' });
+  expect(signIn).toHaveFocus();
+  expect(adminRequests()).toEqual([]);
+
+  // Closing the dialog (nothing changes in the session) never re-opens it.
+  view.rerender(adminTree());
+  expect(session.openSignIn).toHaveBeenCalledTimes(1);
+  fireEvent.click(signIn);
+  expect(session.openSignIn).toHaveBeenCalledTimes(2);
+  cleanup();
+
+  // A new entry into Administration opens it again.
+  renderAdmin();
+  expect(session.openSignIn).toHaveBeenCalledTimes(3);
+  expect(adminRequests()).toEqual([]);
+});
+
+test('FA-1: while PartFlow has no administrator, the panel offers setup first and opens nothing', () => {
+  session = sessionValue(null, { setupOpen: true });
+  renderAdmin();
+
+  expect(
+    screen.getByText(
+      'PartFlow has no administrator yet. Set up PartFlow with the setup token from the server log, or sign in if you already have an account.',
+    ),
+  ).toBeInTheDocument();
+  const setup = screen.getByRole('button', { name: 'Set up PartFlow' });
+  expect(setup).toHaveClass('primary');
+  expect(session.openSignIn).not.toHaveBeenCalled();
+  expect(session.openSetup).not.toHaveBeenCalled();
+  fireEvent.click(setup);
+  expect(session.openSetup).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(session.openSignIn).toHaveBeenCalledTimes(1);
+  expect(adminRequests()).toEqual([]);
+});
+
+test('FA-1: an unknown sign-in shows checking, offline and unreadable states — never the panel', () => {
+  session = sessionValue(null, { status: 'unknown', checking: true });
+  renderAdmin();
+  expect(
+    screen.getByRole('status', { name: 'Checking your sign-in' }),
+  ).toBeInTheDocument();
+  cleanup();
+
+  session = sessionValue(null, { status: 'unknown' });
+  renderAdmin('connecting');
+  expect(
+    screen.getByRole('status', { name: 'Checking your sign-in' }),
+  ).toBeInTheDocument();
+  cleanup();
+
+  renderAdmin('unavailable');
+  expect(
+    screen.getByText(
+      'Administration needs the connection to the PartFlow server.',
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  cleanup();
+
+  renderAdmin();
+  expect(
+    screen.getByText('Your sign-in could not be checked.'),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(session.refresh).toHaveBeenCalledTimes(1);
+
+  expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+  expect(session.openSignIn).not.toHaveBeenCalled();
+  expect(adminRequests()).toEqual([]);
+});
+
+test('FA-1: signing in from the panel shows the sections and focuses the active section', async () => {
+  session = sessionValue(null);
+  const view = renderAdmin();
+  expect(session.openSignIn).toHaveBeenCalledTimes(1);
+
+  session = sessionValue();
+  view.rerender(adminTree());
+  const nav = screen.getByRole('navigation', {
+    name: 'Administration sections',
+  });
+  expect(within(nav).getByRole('button', { name: 'Areas' })).toHaveFocus();
+  expect(
+    await screen.findByRole('button', { name: 'Edit Lathe' }),
+  ).toBeVisible();
+  expect(session.openSignIn).not.toHaveBeenCalled();
+});
+
+test('FA-2: an ended sign-in keeps open work for the same user only; signing out shows the panel', async () => {
+  const ada = signedInUser([...PERMISSIONS], { id: 1 });
+  session = sessionValue(ada);
+  const view = renderAdmin();
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  await openLoadedSection('Departments');
+  fireEvent.click(screen.getByRole('button', { name: '+ New Department' }));
+  const draft = () =>
+    within(
+      screen.getByRole('dialog', { name: 'New Department' }),
+    ).getByLabelText('Name');
+  fireEvent.change(draft(), { target: { value: 'Paint shop' } });
+
+  // The server ended the sign-in: the editor and its draft stay.
+  session = sessionValue(null, { endedBy: 'expired' });
+  view.rerender(adminTree());
+  expect(draft()).toHaveValue('Paint shop');
+  expect(
+    screen.queryByRole('heading', { name: 'Administration', level: 1 }),
+  ).toBeNull();
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+  // Opening the dialog is the provider's job, not the view's.
+  expect(session.openSignIn).not.toHaveBeenCalled();
+
+  // The same user signs in again: the draft is still there.
+  session = sessionValue({ ...ada });
+  view.rerender(adminTree());
+  expect(draft()).toHaveValue('Paint shop');
+
+  // Another user signs in: the sections remount without the draft.
+  session = sessionValue(signedInUser([...PERMISSIONS], { id: 2 }));
+  view.rerender(adminTree());
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(
+    await screen.findByRole('button', { name: 'Edit Machine Shop' }),
+  ).toBeInTheDocument();
+
+  // An explicit sign-out shows the panel and opens nothing.
+  session = sessionValue(null, { endedBy: 'sign-out' });
+  view.rerender(adminTree());
+  expect(
+    screen.getByRole('heading', { name: 'Administration', level: 1 }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(session.openSignIn).not.toHaveBeenCalled();
+});
+
+test('FA-3: without its permission every section is view-only — values as text, no control, one note', async () => {
+  session = sessionValue(signedInUser([]));
+  seedJane();
+  renderAdmin();
+  await screen.findByText('Lathe');
+
+  const sections: [string, string][] = [
+    ['Departments', 'Manage Departments'],
+    ['Areas', 'Manage Areas'],
+    ['Operations', 'Manage Operations'],
+    ['Workers', 'Manage Workers'],
+    ['Scan Stations', 'Manage Scan Stations'],
+    ['Barcode configuration', 'Manage barcode configuration'],
+    ['Users', 'Manage users and roles'],
+    ['Roles & permissions', 'Manage users and roles'],
+    ['Worker sessions', 'Manage Worker session policies'],
+    ['Correction permissions', 'Manage correction permissions'],
+    ['History archival & purge', 'Configure system settings'],
+    ['Department display settings', 'Manage Departments'],
+    ['Settings', 'Configure system settings'],
+  ];
+  for (const [label, permission] of sections) {
+    const main = await openLoadedSection(label);
+    expect(
+      within(main)
+        .getAllByText(/^View only — /)
+        .map((note) => note.textContent),
+    ).toEqual([
+      `View only — changing this needs the ${permission} permission.`,
+    ]);
+    for (const role of [
+      'button',
+      'checkbox',
+      'switch',
+      'radio',
+      'textbox',
+      'spinbutton',
+      'combobox',
+    ] as const) {
+      expect(within(main).queryAllByRole(role)).toEqual([]);
+    }
+    expect(main.querySelector('.selrow')).toBeNull();
+  }
+
+  // The values stay readable as text.
+  await openLoadedSection('Workers');
+  expect(
+    screen.getAllByRole('columnheader').map((th) => th.textContent),
+  ).toEqual(['Worker', 'Status']);
+  expect(screen.getByText('Alex Tran')).toBeInTheDocument();
+  expect(screen.queryByText('100482')).toBeNull();
+
+  await openLoadedSection('Barcode configuration');
+  expect(readOnlyRows()).toMatchObject({
+    Prefix: 'CD-',
+    'Number length (digits)': '4',
+    'Next Asset Tag': 'CD-0513',
+  });
+
+  await openLoadedSection('Worker sessions');
+  expect(readOnlyRows()).toEqual({
+    'Default timeout': '15 minutes',
+    'DONE — Complete Area processing': 'On',
+    'QUEUE — Return unfinished quantity to queue': 'On',
+    'UNDO — Reverse the last action': 'On',
+  });
+  expect(screen.getAllByText('Default · 15 min')).toHaveLength(2);
+
+  await openLoadedSection('Correction permissions');
+  expect(readOnlyRows()).toEqual({ 'Require a reason for every Undo': 'Off' });
+  expect(correctionMatrix()[1]).toEqual([
+    'Administrator',
+    '—',
+    '—',
+    'Yes',
+    'Yes',
+  ]);
+
+  await openLoadedSection('History archival & purge');
+  expect(readOnlyRows()).toEqual({ 'Retention period': 'No retention period' });
+
+  await openLoadedSection('Department display settings');
+  expect(screen.getByText('3 s')).toBeInTheDocument();
+
+  await openLoadedSection('Settings');
+  expect(readOnlyRows(document.querySelector('.ad-configpreview')!)).toEqual({
+    'Minimum warning days': '2',
+    'Lead-time warning percentage (%)': '15',
+    'Maximum warning days': '7',
+  });
+  expect(writes).toEqual([]);
+});
+
+test('FA-3: with its permission a section keeps its controls and shows no note', async () => {
+  session = sessionValue(signedInUser(['MANAGE_DEPARTMENTS']));
+  renderAdmin();
+  await screen.findByText('Lathe');
+  expect(screen.getByText(/^View only — /)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '+ New Area' })).toBeNull();
+
+  const main = await openLoadedSection('Departments');
+  expect(within(main).queryByText(/^View only — /)).toBeNull();
+  expect(
+    screen.getByRole('button', { name: '+ New Department' }),
+  ).toBeEnabled();
+  expect(
+    screen.getByRole('button', { name: 'Edit Machine Shop' }),
+  ).toBeInTheDocument();
+});
+
+test('FA-6: Areas name a Fixed Worker without a badge for a user who may not manage Workers', async () => {
+  session = sessionValue(signedInUser(['MANAGE_AREAS']));
+  renderAdmin();
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  fireEvent.change(within(dialog).getByLabelText('Worker ID mode'), {
+    target: { value: 'FIXED' },
+  });
+  expect(
+    within(within(dialog).getByLabelText('Fixed Worker'))
+      .getAllByRole('option')
+      .map((option) => option.textContent),
+  ).toEqual(['Choose a Worker', 'Alex Tran']);
+  expect(dialog.textContent).not.toContain('100482');
+});
+
+/** A role without any protected permission, and a user holding it. */
+function seedClerk() {
+  state.roles.push({
+    id: 10,
+    name: 'Clerk',
+    permissions: ['MANAGE_DEPARTMENTS'],
+  });
+  seedJane({ id: 51, login_name: 'bkim', display_name: 'Bo Kim', role_id: 10 });
+}
+
+test('FA-4: a user administrator without Manage correction permissions renames protected users only', async () => {
+  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  seedJane({ sign_in_state: 'PASSWORD_SET' });
+  seedClerk();
+  await openUsers();
+
+  // Protected rows keep Edit but not Set password…; the line says why.
+  expect(screen.getByRole('button', { name: 'Edit Jane Doe' })).toBeVisible();
+  expect(
+    screen.queryByRole('button', { name: 'Set password for Jane Doe' }),
+  ).toBeNull();
+  expect(
+    screen.getByRole('button', { name: 'Set password for Bo Kim' }),
+  ).toBeInTheDocument();
+  expect(screen.getByText(PROTECTED_USERS_LINE)).toBeInTheDocument();
+
+  // The protected user's role and activity read as text; a rename sends
+  // only the name.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  let dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  expect(within(dialog).queryByRole('combobox')).toBeNull();
+  expect(within(dialog).queryByRole('checkbox', { name: 'Active' })).toBeNull();
+  expect(
+    Array.from(dialog.querySelectorAll('.idrow'), (row) => row.textContent),
+  ).toEqual(['RoleManager', 'StatusActive']);
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Jane D' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    { method: 'PATCH', url: '/api/users/50', body: { display_name: 'Jane D' } },
+  ]);
+
+  // An unprotected user and a new user are offered unprotected roles only.
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Bo Kim' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  expect(
+    within(within(dialog).getByLabelText('Role'))
+      .getAllByRole('option')
+      .map((option) => option.textContent),
+  ).toEqual(['Clerk']);
+  expect(within(dialog).getByText(PROTECTED_ROLE_HINT)).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('checkbox', { name: 'Active' }),
+  ).toBeChecked();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New user' }));
+  dialog = screen.getByRole('dialog', { name: 'New user' });
+  expect(
+    within(within(dialog).getByLabelText('Role'))
+      .getAllByRole('option')
+      .map((option) => option.textContent),
+  ).toEqual(['Choose a role…', 'Clerk']);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  cleanup();
+
+  // No unprotected role at all: a new user cannot be added.
+  state.roles = state.roles.filter((role) => role.id !== 10);
+  state.users = state.users.filter((user) => user.id !== 51);
+  await openUsers();
+  fireEvent.click(screen.getByRole('button', { name: '+ New user' }));
+  dialog = screen.getByRole('dialog', { name: 'New user' });
+  expect(
+    within(dialog).getByRole('button', { name: 'Add user' }),
+  ).toBeDisabled();
+});
+
+test('FA-4: with Manage correction permissions every user control is back', async () => {
+  session = sessionValue(
+    signedInUser(['MANAGE_USERS_AND_ROLES', 'MANAGE_CORRECTION_PERMISSIONS']),
+  );
+  seedJane();
+  seedClerk();
+  await openUsers();
+  expect(
+    screen.getByRole('button', { name: 'Set password for Jane Doe' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(PROTECTED_USERS_LINE)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  expect(
+    within(within(dialog).getByLabelText('Role'))
+      .getAllByRole('option')
+      .map((option) => option.textContent),
+  ).toEqual(['Administrator', 'Clerk', 'Manager', 'Operator']);
+  expect(within(dialog).queryByText(PROTECTED_ROLE_HINT)).toBeNull();
+  expect(
+    within(dialog).getByRole('checkbox', { name: 'Active' }),
+  ).toBeChecked();
+});
+
+test('FA-4: the Roles editor hides Manage correction permissions from a user who may not change it', async () => {
+  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  await openRoles();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Administrator' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit role' });
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(30);
+  expect(
+    within(dialog).queryByRole('checkbox', {
+      name: 'Manage correction permissions',
+    }),
+  ).toBeNull();
+  expect(dialog.textContent).toContain(
+    'Correction permissions: Edit Work Order Allocation, Perform authorized historical corrections; Manage correction permissions: held — set by a user who may manage correction permissions.',
+  );
+  // A rename never revokes the hidden permission.
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Admin' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PATCH',
+      url: `/api/roles/${ADMINISTRATOR_ID}`,
+      body: { name: 'Admin' },
+    },
+  ]);
+  expect(state.roles[0].permissions).toContain('MANAGE_CORRECTION_PERMISSIONS');
+
+  // A role without it shows the S12 line.
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Manager' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Edit role' }).textContent,
+  ).toContain(
+    'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Policies → Correction permissions.',
+  );
+});
+
+test('FA-4: the correction matrix works for a user who may manage correction permissions only', async () => {
+  session = sessionValue(signedInUser(['MANAGE_CORRECTION_PERMISSIONS']));
+  renderAdmin();
+  await screen.findByText('Lathe');
+  await openLoadedSection('Correction permissions');
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+  fireEvent.click(
+    screen.getByRole('checkbox', {
+      name: 'Undo recent eligible scans — Manager',
+    }),
+  );
+  await waitFor(() =>
+    expect(writes).toEqual([
+      {
+        method: 'PATCH',
+        url: `/api/roles/${MANAGER_ID}`,
+        body: { grant_permissions: ['UNDO_RECENT_SCANS'] },
+      },
+    ]),
+  );
+});
+
+test('FA-5: only the inert permissions are marked in the Roles editor', async () => {
+  await openRoles();
+  fireEvent.click(screen.getByRole('button', { name: '+ New role' }));
+  const dialog = screen.getByRole('dialog', { name: 'New role' });
+  expect(
+    within(dialog)
+      .getAllByRole('checkbox')
+      .map((box) => box.closest('label')?.textContent ?? '')
+      .filter((label) => label.endsWith(' — grants nothing yet')),
+  ).toEqual([
+    'Manage scan behavior — grants nothing yet',
+    'Resolve exceptional production situations — grants nothing yet',
+    'Export and print reports — grants nothing yet',
+  ]);
+});
+
+test('FA-7: a refused user save shows the server detail and keeps the editor open', async () => {
+  seedJane();
+  await openUsers();
+  for (const [status, detail] of [
+    [403, G3],
+    [409, L1],
+  ] as const) {
+    userFailures.PATCH = { status, detail };
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Jane Doe' }));
+    const dialog = screen.getByRole('dialog', { name: 'Edit user' });
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Active' }));
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Save changes' }),
+    );
+    expect((await within(dialog).findByRole('alert')).textContent).toBe(detail);
+    expect(screen.getByRole('dialog', { name: 'Edit user' })).toBe(dialog);
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Cancel (Esc)' }),
+    );
+  }
+  expect(state.users[0].is_active).toBe(true);
 });

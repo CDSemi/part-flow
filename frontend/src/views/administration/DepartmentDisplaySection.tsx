@@ -6,6 +6,7 @@ import type { Department } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
@@ -15,7 +16,12 @@ import {
   isBoardSecondsPerRow,
   rotationDurationMs,
 } from '../production-board/board-logic';
-import { AdminField, SectionHeader, ServerErrorNote } from './section-widgets';
+import {
+  AdminField,
+  SectionHeader,
+  ServerErrorNote,
+  ViewOnlyNote,
+} from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Department display settings (Phase 13; GUI_DESIGN §9
@@ -26,7 +32,8 @@ import { ADMIN_SECTIONS } from './sections';
 // by the server; a running board applies a change at its next refresh.
 // The editor sends only the fields it changed (the PATCH is partial), so
 // a stale read never overwrites another administrator's change to the
-// other field.
+// other field. Without the Manage Departments permission the timings
+// read as text.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'department-display')
@@ -53,11 +60,15 @@ function parseSetting(
 export function DepartmentDisplaySection() {
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  const canWrite = useSession().can('MANAGE_DEPARTMENTS');
   const departmentsData = useApiData(listDepartments);
   const [editing, setEditing] = useState<Department | null>(null);
 
   const header = (
-    <SectionHeader title="Department display settings" subtitle={SUBTITLE} />
+    <>
+      <SectionHeader title="Department display settings" subtitle={SUBTITLE} />
+      {canWrite ? null : <ViewOnlyNote permission="MANAGE_DEPARTMENTS" />}
+    </>
   );
 
   if (departmentsData.state.status === 'loading') {
@@ -105,7 +116,7 @@ export function DepartmentDisplaySection() {
                 <th>Department</th>
                 <th>Seconds per displayed row</th>
                 <th>Minimum page dwell</th>
-                <th aria-label="Actions" />
+                {canWrite ? <th aria-label="Actions" /> : null}
               </tr>
             </thead>
             <tbody>
@@ -121,15 +132,17 @@ export function DepartmentDisplaySection() {
                   <td className="mono" data-label="Minimum page dwell">
                     {department.boardMinPageSeconds} s
                   </td>
-                  <td>
-                    <button
-                      className="btn"
-                      aria-label={`Edit rotation timing — ${department.name}`}
-                      onClick={() => setEditing(department)}
-                    >
-                      Edit
-                    </button>
-                  </td>
+                  {canWrite ? (
+                    <td>
+                      <button
+                        className="btn"
+                        aria-label={`Edit rotation timing — ${department.name}`}
+                        onClick={() => setEditing(department)}
+                      >
+                        Edit
+                      </button>
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>

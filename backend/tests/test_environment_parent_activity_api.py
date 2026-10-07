@@ -49,6 +49,7 @@ from alembic import command
 from app.application import audit
 from app.core.config import get_settings
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_env_parent_activity"
@@ -125,7 +126,7 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
 @pytest.fixture(scope="module", autouse=True)
 def asset_tag_format(client: TestClient) -> None:
     """Machine creation requires the configured Asset Tag format."""
-    response = client.put(
+    response = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
         json={"prefix": _ASSET_TAG_PREFIX, "digits": _ASSET_TAG_DIGITS},
     )
@@ -173,18 +174,18 @@ def _join(threads: list[threading.Thread]) -> None:
 
 
 def _create_department(client: TestClient) -> dict[str, Any]:
-    return _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    return _ok(admin_of(client).post("/api/departments", json={"name": _unique("DEPT")}), 201)
 
 
 def _create_area(client: TestClient, department_id: int | None = None) -> dict[str, Any]:
     if department_id is None:
         department_id = int(_create_department(client)["id"])
     payload = {"department_id": department_id, "name": _unique("AREA")}
-    return _ok(client.post("/api/areas", json=payload), 201)
+    return _ok(admin_of(client).post("/api/areas", json=payload), 201)
 
 
 def _deactivate_area(client: TestClient, area_id: int) -> None:
-    _ok(client.patch(f"/api/areas/{area_id}", json={"is_active": False}))
+    _ok(admin_of(client).patch(f"/api/areas/{area_id}", json={"is_active": False}))
 
 
 def _create_retired_machine(client: TestClient, area_id: int) -> dict[str, Any]:
@@ -326,7 +327,11 @@ class _Child(NamedTuple):
 
 
 def _send(client: TestClient, child: _Child) -> Response:
-    response: Response = client.request(child.method, child.path, json=child.body)
+    # Environment writes need their permission (Phase 14 slice 2); the
+    # Machine writes stay open until slice 3.
+    environment = not child.path.startswith("/api/machines")
+    sender = admin_of(client) if environment else client
+    response: Response = sender.request(child.method, child.path, json=child.body)
     return response
 
 
@@ -427,7 +432,7 @@ def _station_rebind(client: TestClient, engine: Engine) -> _Child:
     area_a = _create_area(client)
     area_b = _create_area(client)
     station = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/scan-stations", json={"station_id": _unique("ST"), "area_id": area_a["id"]}
         ),
         201,
@@ -639,7 +644,7 @@ def test_department_deactivation_waits_for_an_in_flight_area_create_and_refuses(
     entered, release = _gate(monkeypatch, "Area", "CREATED")
     threads: list[threading.Thread] = []
     create, created = _start(
-        lambda: client.post(
+        lambda: admin_of(client).post(
             "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}
         )
     )
@@ -647,7 +652,9 @@ def test_department_deactivation_waits_for_an_in_flight_area_create_and_refuses(
     try:
         assert entered.wait(timeout=20)
         deactivate, deactivated = _start(
-            lambda: client.patch(f"/api/departments/{department['id']}", json={"is_active": False})
+            lambda: admin_of(client).patch(
+                f"/api/departments/{department['id']}", json={"is_active": False}
+            )
         )
         threads.append(deactivate)
         # Waits on the in-flight Area create's Department FOR SHARE.
@@ -674,13 +681,15 @@ def test_department_deactivation_waits_for_an_in_flight_area_activation_and_refu
     entered, release = _gate(monkeypatch, "Area", "UPDATED")
     threads: list[threading.Thread] = []
     activate, activated = _start(
-        lambda: client.patch(f"/api/areas/{area['id']}", json={"is_active": True})
+        lambda: admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": True})
     )
     threads.append(activate)
     try:
         assert entered.wait(timeout=20)
         deactivate, deactivated = _start(
-            lambda: client.patch(f"/api/departments/{department['id']}", json={"is_active": False})
+            lambda: admin_of(client).patch(
+                f"/api/departments/{department['id']}", json={"is_active": False}
+            )
         )
         threads.append(deactivate)
         # Waits on the in-flight activation's Department FOR SHARE.
@@ -717,7 +726,7 @@ def test_area_deactivation_waits_for_an_in_flight_machine_reactivation(
     try:
         assert entered.wait(timeout=20)
         deactivate, deactivated = _start(
-            lambda: client.patch(f"/api/areas/{area['id']}", json={"is_active": False})
+            lambda: admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False})
         )
         threads.append(deactivate)
         # Waits on the in-flight reactivation's Area FOR SHARE.
