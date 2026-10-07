@@ -29,6 +29,7 @@ import {
   editableStep,
   estimateText,
   findById,
+  stepDuration,
   stepInput,
   stepsKey,
   validateSteps,
@@ -47,6 +48,8 @@ const RETRY_REFUSED =
   'The adjustment may already be applied; reload the route to check.';
 const RECORDED_STEP_TITLE =
   'An undone arrival recorded this step, so it stays.';
+const NO_STEP_EXPECTED =
+  "No step is expected next — the quantity's next arrival anywhere needs a route-deviation confirmation.";
 
 interface EditorData {
   catalog: Catalog;
@@ -97,7 +100,23 @@ function lockedStateLabel(step: EditorStep): string {
       : 'Recorded';
 }
 
-/** Area names as review chips, or the explicit empty statement. */
+/** One step as the review shows it: the locked-row content
+ * (`{Area} · {Operation} · Est. {time}`) plus the preferred Machine. */
+function reviewLabel(
+  area: string,
+  operation: string | null,
+  estimate: string,
+  machine: string | null,
+): string {
+  return [
+    area,
+    operation ?? '—',
+    `Est. ${estimate || '—'}`,
+    ...(machine !== null ? [machine] : []),
+  ].join(' · ');
+}
+
+/** Review chips, or the explicit empty statement. */
 function Chips({ names }: { names: string[] }) {
   if (names.length === 0) return <>no further steps</>;
   return (
@@ -365,10 +384,38 @@ export function EditAssignedRouteDialog({
     const lastLocked = lockedSteps[lockedSteps.length - 1];
     const areaName = (areaId: number) =>
       findById(catalog.areas, areaId)?.name ?? `Area ${areaId}`;
-    const nowNames = target.steps
-      .filter((step) => !step.locked)
-      .map((step) => step.area.name);
-    const newNames = steps.map((step) => areaName(step.areaId));
+    const nowTail = target.steps.filter((step) => !step.locked);
+    const nowNames = nowTail.map((step) =>
+      reviewLabel(
+        step.area.name,
+        step.operation ? operationLabel(step.operation) : null,
+        estimateText(step.expectedDuration),
+        step.preferredMachine?.name ?? null,
+      ),
+    );
+    const newNames = steps.map((step) => {
+      const operation = findById(catalog.operations, step.operationId);
+      const duration = stepDuration(step);
+      return reviewLabel(
+        areaName(step.areaId),
+        operation ? operationLabel(operation) : null,
+        duration === false ? step.durationText.trim() : estimateText(duration),
+        step.preferredMachineId === null
+          ? null
+          : (findById(catalog.machines, step.preferredMachineId)?.name ??
+              `Machine ${step.preferredMachineId}`),
+      );
+    });
+    // Instructions are not in the chips: name the steps whose chip reads
+    // the same but whose instructions change, so no change is invisible.
+    const instructionSteps = steps.flatMap((step, index) => {
+      const before = nowTail[index];
+      return before !== undefined &&
+        nowNames[index] === newNames[index] &&
+        (before.instructions ?? '').trim() !== step.instructions.trim()
+        ? [kept + 1 + index]
+        : [];
+    });
     return (
       <>
         <div className="ear-sec">
@@ -408,7 +455,9 @@ export function EditAssignedRouteDialog({
           <p className="ear-note">
             {recorded
               ? `The quantity's next on-route arrival is checked against step ${recorded.sequence} (recorded above), then the steps that follow.`
-              : "The quantity's next on-route arrival is checked against the first step below."}
+              : steps.length > 0
+                ? "The quantity's next on-route arrival is checked against the first step below."
+                : NO_STEP_EXPECTED}
           </p>
           <RouteStepList
             catalog={catalog}
@@ -477,6 +526,12 @@ export function EditAssignedRouteDialog({
               <div>
                 New: <Chips names={newNames} />
               </div>
+              {instructionSteps.length > 0 ? (
+                <div>
+                  Instructions change for{' '}
+                  {instructionSteps.map((n) => `step ${n}`).join(', ')}.
+                </div>
+              ) : null}
               <div>Reason: {reason.trim()}</div>
             </div>
           </ConfirmDialog>

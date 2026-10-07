@@ -32,6 +32,7 @@ const OPERATION = {
   11: { id: 11, code: 'RCV', name: 'Receiving', is_external: false },
   21: { id: 21, code: 'TURN', name: 'Turning', is_external: false },
   31: { id: 31, code: 'MILL', name: 'Milling', is_external: false },
+  32: { id: 32, code: 'FACE', name: 'Facing', is_external: false },
   41: { id: 41, code: 'STOCK', name: 'Stocking', is_external: false },
   51: { id: 51, code: 'DEB', name: 'Deburring', is_external: false },
 } as const;
@@ -40,6 +41,7 @@ const AREA_OF_OPERATION: Record<number, keyof typeof AREA> = {
   11: 1,
   21: 2,
   31: 3,
+  32: 3,
   41: 4,
   51: 5,
 };
@@ -215,7 +217,7 @@ beforeEach(() => {
         return json(([1, 2, 3, 4, 5] as const).map(areaWire));
       }
       if (url === '/api/operations') {
-        return json(([11, 21, 31, 41, 51] as const).map(operationWire));
+        return json(([11, 21, 31, 32, 41, 51] as const).map(operationWire));
       }
       if (url === '/api/machines') return json([MACHINE_WIRE]);
       if (url.startsWith('/api/tracking/assigned-routes')) {
@@ -413,6 +415,11 @@ test('FE-3: locked steps are read-only rows; the future steps continue the numbe
   expect(dialog().textContent).toContain(
     'No further steps — the route ends after step 2.',
   );
+  // With nothing below, no step is named as the next one expected.
+  expect(dialog().textContent).not.toContain('checked against the first step');
+  expect(dialog().textContent).toContain(
+    "No step is expected next — the quantity's next arrival anywhere needs a route-deviation confirmation.",
+  );
   // `+ Add step` starts in the last locked step's Area.
   fireEvent.click(screen.getByRole('button', { name: '+ Add step' }));
   expect(screen.getByLabelText('Step 3 Area')).toHaveValue('2');
@@ -518,8 +525,8 @@ test('FE-5: the review shows the route before and after; Adjust route posts exac
   );
   expect(lines).toEqual([
     'QF-140 · steps after step 2',
-    'Now: Mill → Stockroom',
-    'New: Deburr → Stockroom',
+    'Now: Mill · Milling · Est. — → Stockroom · Stocking · Est. —',
+    'New: Deburr · Deburring · Est. — → Stockroom · Stocking · Est. —',
     'Reason: Mill is down for the week',
   ]);
   // Keep editing returns to the editor, focus on Review adjustment.
@@ -568,6 +575,68 @@ test('FE-5: the review shows the route before and after; Adjust route posts exac
     changed: true,
     notice: '✓ Route adjusted for QF-140.',
   });
+});
+
+test('FE-5: the review shows an Operation, time or Machine change, not only Area changes', async () => {
+  flows = [
+    {
+      ...flowAtStep2(),
+      future_step_ids: [3, 4],
+      steps: [
+        ...flowAtStep2().steps.slice(0, 2),
+        step(3, 3, 31, 'FUTURE', false, { expected_duration: 'PT4H' }),
+        step(4, 4, 21, 'FUTURE', false),
+      ],
+    },
+  ];
+  await renderDialog();
+  fireEvent.change(screen.getByLabelText('Step 3 Operation'), {
+    target: { value: '32' },
+  });
+  fireEvent.change(screen.getByLabelText('Step 3 expected duration'), {
+    target: { value: '45m' },
+  });
+  fireEvent.change(screen.getByLabelText('Step 4 preferred Machine'), {
+    target: { value: '201' },
+  });
+  setReason('Face instead of mill');
+  fireEvent.click(reviewButton());
+  const confirm = screen.getByRole('dialog', {
+    name: 'Adjust the assigned route?',
+  });
+  const lines = Array.from(
+    confirm.querySelectorAll('.ear-review > div'),
+    (line) => line.textContent,
+  );
+  expect(lines).toEqual([
+    'QF-140 · steps after step 2',
+    'Now: Mill · Milling · Est. 4h 00m → Lathe · Turning · Est. —',
+    'New: Mill · Facing · Est. 45m → Lathe · Turning · Est. — · Lathe 1',
+    'Reason: Face instead of mill',
+  ]);
+});
+
+test('FE-5: an instructions-only change is named in the review', async () => {
+  await renderDialog();
+  fireEvent.change(screen.getAllByLabelText('Instructions')[1], {
+    target: { value: 'Count twice' },
+  });
+  setReason('Recount at stocking');
+  fireEvent.click(reviewButton());
+  const confirm = screen.getByRole('dialog', {
+    name: 'Adjust the assigned route?',
+  });
+  const lines = Array.from(
+    confirm.querySelectorAll('.ear-review > div'),
+    (line) => line.textContent,
+  );
+  expect(lines).toEqual([
+    'QF-140 · steps after step 2',
+    'Now: Mill · Milling · Est. — → Stockroom · Stocking · Est. —',
+    'New: Mill · Milling · Est. — → Stockroom · Stocking · Est. —',
+    'Instructions change for step 4.',
+    'Reason: Recount at stocking',
+  ]);
 });
 
 test('FE-5: removing every future step reads `no further steps` in the review and posts an empty tail', async () => {

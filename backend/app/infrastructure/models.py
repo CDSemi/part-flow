@@ -1732,7 +1732,9 @@ class AssignedRouteStep(Base):
     """Snapshot copy of a route step, independent of the mutable template.
 
     Copies every template step field, including `preferred_machine_id`
-    (a plain integer, no FK — lock order, S8-OD20).
+    (a plain integer, no FK — lock order, S8-OD20). An AssignedRoute
+    adjustment (ROUTE_ADJUSTED) replaces the future, unreferenced steps
+    with validated request content.
     """
 
     __tablename__ = "assigned_route_steps"
@@ -1760,9 +1762,12 @@ class AssignedRouteStep(Base):
     # Deliberately NO foreign key (S8-OD20): the snapshot INSERT runs
     # after the release/receipt starting Area or a split/merge Machine is
     # locked FOR UPDATE, and an FK check would take FOR KEY SHARE on
-    # Machine rows in an order production commands never use. The value
-    # is copied from the FK-checked `route_steps` column (or another
-    # snapshot) and Machines are never deleted, so it cannot dangle.
+    # Machine rows in an order production commands never use. Every
+    # writer validates the value: it is either copied from the FK-checked
+    # `route_steps` column (or another snapshot), or written by the
+    # ROUTE_ADJUSTED command (`route_adjustments.adjust_assigned_route`)
+    # after `route_templates.lock_step_references` checks it under
+    # FOR KEY SHARE. Machines are never deleted, so it cannot dangle.
     preferred_machine_id: Mapped[int | None] = mapped_column(Integer)
     instructions: Mapped[str | None] = mapped_column(Text)
 
