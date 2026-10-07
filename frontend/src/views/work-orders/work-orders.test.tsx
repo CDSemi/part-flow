@@ -2382,11 +2382,12 @@ test('saving an OPEN Work Order with an incomplete row is blocked, not filtered'
 async function openRelease(pn: string, woNumber = '007201') {
   const dialog = await openWorkOrderDetail(woNumber, pn);
   const row = within(dialog).getByText(pn).closest('tr')!;
-  fireEvent.click(
-    within(row as HTMLElement).getByRole('button', {
-      name: 'Release to production…',
-    }),
-  );
+  const opener = within(row as HTMLElement).getByRole('button', {
+    name: 'Release to production…',
+  });
+  // Activated from the keyboard: the opener holds focus.
+  opener.focus();
+  fireEvent.click(opener);
   const release = await screen.findByRole('dialog', {
     name: 'Release to production — explicit action',
   });
@@ -2458,6 +2459,8 @@ test('release FLOATING confirms quantity, Area and Operation, and reports the co
   expect(
     within(row).getByRole('button', { name: 'Release to production…' }),
   ).toBeDisabled();
+  // The now-disabled opener cannot hold focus: it stays in the dialog.
+  expect(document.activeElement).toBe(detailDialog);
   expect(
     within(row).getByRole('button', { name: 'Remove line E-500' }),
   ).toBeDisabled();
@@ -4364,11 +4367,11 @@ test('FC-7: a beyond-demand correction from Work Order Details reloads the detai
   expect(lineRow(details, 'B-200')).toHaveTextContent('Allocated 10/10');
   expect(lineRow(details, 'B-200')).not.toHaveTextContent('beyond demand');
 
-  fireEvent.click(
-    within(details).getByRole('button', {
-      name: 'Allocate stocked B-200 to this line',
-    }),
-  );
+  const opener = within(details).getByRole('button', {
+    name: 'Allocate stocked B-200 to this line',
+  });
+  opener.focus();
+  fireEvent.click(opener);
   const allocation = await screen.findByRole('dialog', {
     name: 'Allocate from stock',
   });
@@ -4405,8 +4408,14 @@ test('FC-7: a beyond-demand correction from Work Order Details reloads the detai
   ).toBeNull();
   await waitFor(() =>
     expect(lineRow(details, 'B-200')).toHaveTextContent(
-      'Allocated 12/10 · 2 beyond demand',
+      'Allocated 12/10 · +2 beyond demand',
     ),
+  );
+  // The reloaded row keeps its identity: focus returns to the opener.
+  expect(document.activeElement).toBe(
+    within(details).getByRole('button', {
+      name: 'Allocate stocked B-200 to this line',
+    }),
   );
   expect(detailReads()).toBe(detailBefore + 1);
   expect(listReads()).toBe(listBefore + 1);
@@ -4425,7 +4434,7 @@ test('FC-8: an over-allocated line saves its other fields — its unchanged Qty 
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
   expect(lineRow(dialog, 'A-100')).toHaveTextContent(
-    'Allocated 27/25 · 2 beyond demand',
+    'Allocated 27/25 · +2 beyond demand',
   );
   fireEvent.change(within(dialog).getByLabelText('Job Numbers for A-100'), {
     target: { value: '18112, 18113' },

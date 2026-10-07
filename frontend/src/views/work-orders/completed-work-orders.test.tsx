@@ -1117,7 +1117,7 @@ test('FC-7: the details of a completed Work Order keep the allocation actions fo
     ),
   ).toBeInTheDocument();
   await waitFor(() =>
-    expect(dialog).toHaveTextContent('Allocated 7/6 · 1 beyond demand'),
+    expect(dialog).toHaveTextContent('Allocated 7/6 · +1 beyond demand'),
   );
   expect(completedRequests().length).toBeGreaterThan(historyReads);
   expect(corrections).toHaveLength(1);

@@ -241,13 +241,23 @@ export function WorkOrderDetailPanel({
 
   /** Adopt fresh server state and rebuild the editable draft. The
    * Released state of every line — and with it the restricted edit —
-   * comes from the server's release evidence inside the response. */
+   * comes from the server's release evidence inside the response. A
+   * saved line keeps its row identity, so a focused row action survives
+   * the reload. */
   const adoptDetail = useCallback((fresh: WorkOrderDetail) => {
     setDetail(fresh);
     setDue(fresh.dueDate ?? '');
-    setLines(
-      fresh.demands.map((demand) => draftFromDemand(demand, fresh.dueDate)),
-    );
+    setLines((current) => {
+      const rowIds = new Map(
+        current.flatMap((line) =>
+          line.demandId === null ? [] : [[line.demandId, line.id] as const],
+        ),
+      );
+      return fresh.demands.map((demand) => {
+        const line = draftFromDemand(demand, fresh.dueDate);
+        return { ...line, id: rowIds.get(demand.id) ?? line.id };
+      });
+    });
     setNumberDraft('');
     setLineErrors([]);
   }, []);
@@ -270,6 +280,30 @@ export function WorkOrderDetailPanel({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  // A committed release or allocation reloads the details. The closed
+  // dialog returned focus to its opener, which the reloaded row may no
+  // longer offer (a `Reverse…` after the last allocation was reversed,
+  // a release action now disabled): focus then stays in this dialog,
+  // never on the page behind it.
+  const recoverFocus = useRef(false);
+  const reloadAfterCommit = useCallback(() => {
+    recoverFocus.current = true;
+    retryLoad();
+  }, [retryLoad]);
+  useEffect(() => {
+    if (!recoverFocus.current || detail === null) return;
+    recoverFocus.current = false;
+    const root = document
+      .getElementById(headingId)
+      ?.closest<HTMLElement>('[role="dialog"]');
+    const active = document.activeElement;
+    const lost =
+      active === null ||
+      active === document.body ||
+      (root?.contains(active) === true && active.matches(':disabled'));
+    if (lost) root?.focus();
+  }, [detail, headingId]);
 
   useEffect(() => {
     if (focusField) {
@@ -984,7 +1018,7 @@ export function WorkOrderDetailPanel({
                             {parseInt(line.qty || '0', 10) || 0}
                             {line.savedQty !== null &&
                             line.allocatedQuantity > line.savedQty
-                              ? ` · ${line.allocatedQuantity - line.savedQty} beyond demand`
+                              ? ` · +${line.allocatedQuantity - line.savedQty} beyond demand`
                               : ''}
                           </div>
                         ) : null}
@@ -1267,7 +1301,7 @@ export function WorkOrderDetailPanel({
             // The Released/read-only state comes back from the server
             // (release evidence in the reloaded demand lines) — never
             // from a session-local flag.
-            retryLoad();
+            reloadAfterCommit();
             onChanged();
             showNotice(
               `✓ ${result.partNumber} released to production × ${result.quantity} · Quantity Flow #${result.quantityFlowId}.`,
@@ -1289,7 +1323,7 @@ export function WorkOrderDetailPanel({
             if (!outcomeUnknown) return;
             // The last submission may have been recorded: show the
             // server's state, never a guess.
-            retryLoad();
+            reloadAfterCommit();
             onChanged();
             showNotice(OUTCOME_UNKNOWN_AFTER_CLOSE);
           }}
@@ -1298,7 +1332,7 @@ export function WorkOrderDetailPanel({
             // Allocation and completion come back from the server —
             // completion may move the Work Order between the active
             // list and the Completed Work Orders page.
-            retryLoad();
+            reloadAfterCommit();
             onChanged();
             showNotice(notice);
           }}

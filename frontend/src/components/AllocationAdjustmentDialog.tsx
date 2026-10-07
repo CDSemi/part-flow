@@ -108,12 +108,15 @@ function Actor({ actor }: { actor: AllocationUserRef }) {
  *
  * ONE intent keeps ONE `device_event_id` through every resubmit; a
  * changed step, target, quantity, note or reason is a new intent with a
- * new key. When the server did not answer, the outcome is unknown: the
- * inputs and the step navigation lock, so the next submit can only
- * repeat the same intent (PartFlow records it once); an explicit
- * refusal of that resubmit proves nothing was recorded and unlocks.
- * Closing while the outcome is unknown tells the host
- * (`onClose(true)`), which then reloads and says so. Presentation only:
+ * new key. The inputs and the step navigation lock while a submission
+ * is in flight (an edit then would drop the key the request carries).
+ * When the server did not answer, the outcome is unknown: they stay
+ * locked, so the next submit can only repeat the same intent (PartFlow
+ * records it once); an explicit refusal of that resubmit proves nothing
+ * was recorded and unlocks. Closing while the outcome is unknown (or
+ * a request is still running) tells the host (`onClose(true)`), which
+ * then reloads and says so; that request's late answer never reaches
+ * the host. Presentation only:
  * the server judges every write again under its locks.
  */
 export function AllocationAdjustmentDialog({
@@ -179,8 +182,18 @@ export function AllocationAdjustmentDialog({
   const errorRef = useRef<HTMLDivElement>(null);
   const [returnFocusKey, setReturnFocusKey] = useState<string | null>(null);
   const [errorFocus, setErrorFocus] = useState(0);
+  // False once this dialog instance unmounted: a late answer must never
+  // act on (close) a dialog the host opened since.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
-  const locked = outcomeUnknown;
+  // An in-flight request carries the intent's key: no edit until it ends.
+  const locked = outcomeUnknown || busy;
   const available = context?.availableStockedQuantity ?? 0;
 
   // The line / allocation the step works on; a step whose target left
@@ -250,7 +263,7 @@ export function AllocationAdjustmentDialog({
   /** A changed intent is a NEW submission: the next submit gets a fresh
    * key (never refused as reusing another intent's key). */
   function intentChanged() {
-    if (!submitted.current) return;
+    if (locked || !submitted.current) return;
     submitted.current = false;
     deviceEventId.current = null;
     setServerError(null);
@@ -351,9 +364,11 @@ export function AllocationAdjustmentDialog({
     const key = deviceEventId.current;
     try {
       const result = await call(key);
+      if (!alive.current) return;
       setBusy(false);
       onCommitted(result, committedNotice(result, line, workOrderNumberOf));
     } catch (error) {
+      if (!alive.current) return;
       setBusy(false);
       handleFailure(error, afterUnknown);
     }
@@ -576,6 +591,7 @@ export function AllocationAdjustmentDialog({
             readOnly={locked}
             aria-invalid={qtyError !== null ? true : undefined}
             onChange={(e) => {
+              if (locked) return;
               setQty(e.target.value);
               intentChanged();
             }}
@@ -591,6 +607,7 @@ export function AllocationAdjustmentDialog({
             value={note}
             readOnly={locked}
             onChange={(e) => {
+              if (locked) return;
               setNote(e.target.value);
               intentChanged();
             }}
@@ -656,6 +673,7 @@ export function AllocationAdjustmentDialog({
             readOnly={locked}
             aria-invalid={qtyError !== null ? true : undefined}
             onChange={(e) => {
+              if (locked) return;
               setQty(e.target.value);
               intentChanged();
             }}
@@ -678,6 +696,7 @@ export function AllocationAdjustmentDialog({
             readOnly={locked}
             aria-invalid={reasonMessage !== null ? true : undefined}
             onChange={(e) => {
+              if (locked) return;
               setReason(e.target.value);
               intentChanged();
             }}
@@ -745,6 +764,7 @@ export function AllocationAdjustmentDialog({
             readOnly={locked}
             aria-invalid={reasonMessage !== null ? true : undefined}
             onChange={(e) => {
+              if (locked) return;
               setReason(e.target.value);
               intentChanged();
             }}

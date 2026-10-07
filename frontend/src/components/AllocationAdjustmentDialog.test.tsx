@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -6,6 +7,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import type { AllocationScope } from '../api/management-allocations';
@@ -96,7 +98,7 @@ function completedContext(
 let contextWire: unknown;
 let contextGets: number;
 let posts: { url: string; body: Record<string, unknown> }[];
-let answers: (() => Response)[];
+let answers: (() => Response | Promise<Response>)[];
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -505,6 +507,113 @@ test('FC-6: an explicit refusal shows the detail, re-reads the figures and a cha
   fireEvent.click(screen.getByRole('button', { name: 'Allocate' }));
   await waitFor(() => expect(posts).toHaveLength(2));
   expect(posts[1].body.device_event_id).not.toBe(posts[0].body.device_event_id);
+});
+
+/** An answer the test settles later (a slow server). */
+function pendingAnswer(): {
+  resolve: (response: Response) => void;
+  reject: (error: unknown) => void;
+} {
+  const handle: {
+    resolve: (response: Response) => void;
+    reject: (error: unknown) => void;
+  } = { resolve: () => {}, reject: () => {} };
+  answers.push(
+    () =>
+      new Promise<Response>((resolve, reject) => {
+        handle.resolve = resolve;
+        handle.reject = reject;
+      }),
+  );
+  return handle;
+}
+
+test('FC-6: an in-flight correction locks the inputs and the steps, so its resubmit after an unknown outcome keeps its key', async () => {
+  contextWire = completedContext();
+  renderDialog();
+  await screen.findByLabelText('Quantity to allocate (pcs)');
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Allocate beyond demand…' }),
+  );
+  const reason = screen.getByLabelText('Reason (required)');
+  fireEvent.change(reason, { target: { value: 'customer accepted overage' } });
+  const slow = pendingAnswer();
+  fireEvent.click(screen.getByRole('button', { name: 'Record correction' }));
+  await waitFor(() => expect(posts).toHaveLength(1));
+
+  // While the request is in flight nothing may change the intent.
+  expect(qtyField()).toHaveAttribute('readonly');
+  expect(reason).toHaveAttribute('readonly');
+  expect(screen.getByRole('button', { name: 'Back' })).toBeDisabled();
+  fireEvent.change(reason, { target: { value: 'edited while sending' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+  expect(
+    screen.getByRole('heading', { name: 'Allocate beyond demand' }),
+  ).toBeInTheDocument();
+  expect(reason).toHaveValue('customer accepted overage');
+
+  await act(async () => {
+    slow.reject(new TypeError('Failed to fetch'));
+  });
+  await screen.findByText(/did not answer/);
+  answers.push(() => json(resultWire('ALLOCATE_BEYOND_DEMAND'), 201));
+  fireEvent.click(screen.getByRole('button', { name: 'Record correction' }));
+  await waitFor(() => expect(posts).toHaveLength(2));
+  expect(posts[1].body.device_event_id).toBe(posts[0].body.device_event_id);
+  expect(posts[1].body.reason).toBe('customer accepted overage');
+});
+
+test('FC-6: a request still running when its dialog closed never closes a dialog opened since', async () => {
+  const committed = vi.fn();
+  const closed = vi.fn();
+  function Host() {
+    const [opening, setOpening] = useState<number | null>(1);
+    return (
+      <>
+        <button onClick={() => setOpening((n) => (n ?? 0) + 1)}>Reopen</button>
+        {opening !== null ? (
+          <AllocationAdjustmentDialog
+            key={opening}
+            scope={{ workOrderDemandId: 7 }}
+            start={{ step: 'allocate', workOrderDemandId: 7 }}
+            writeBlocked={false}
+            onClose={(outcomeUnknown) => {
+              closed(outcomeUnknown);
+              setOpening(null);
+            }}
+            onCommitted={(_result, notice) => {
+              committed(notice);
+              setOpening(null);
+            }}
+          />
+        ) : null}
+      </>
+    );
+  }
+  render(<Host />);
+  await screen.findByLabelText('Quantity to allocate (pcs)');
+  const slow = pendingAnswer();
+  fireEvent.click(screen.getByRole('button', { name: 'Allocate' }));
+  await waitFor(() => expect(posts).toHaveLength(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(closed).toHaveBeenCalledWith(true);
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // A second intent in a new dialog ends with an unknown outcome.
+  fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
+  await screen.findByLabelText('Quantity to allocate (pcs)');
+  answers.push(NETWORK_FAILURE);
+  fireEvent.click(screen.getByRole('button', { name: 'Allocate' }));
+  await screen.findByText(/did not answer/);
+
+  // The first request answers late: the second dialog stays open.
+  await act(async () => {
+    slow.resolve(json(resultWire('ALLOCATE'), 201));
+  });
+  expect(committed).not.toHaveBeenCalled();
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+  expect(screen.getByText(/did not answer/)).toBeInTheDocument();
+  expect(qtyField()).toHaveAttribute('readonly');
 });
 
 test('FC-6: closing while the outcome is unknown tells the host', async () => {
