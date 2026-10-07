@@ -50,9 +50,12 @@ class RecordingController(pf.Controller):
         raise pf.Failure("transport disabled by test: " + str(argv[0]))
 
 
-def run_main(arguments, layout, **kwargs):
+def run_main(arguments, layout, *, interactive=False, **kwargs):
+    """In-process CLI. ``interactive=True`` simulates an operator terminal (PF-A1.4 unattended gate);
+    the default keeps the real ``unattended()``."""
     stdout, stderr = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    terminal = mock.patch.object(pf, "unattended", return_value=False) if interactive else contextlib.nullcontext()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), terminal:
         code = pf.main(arguments, installation_root=layout.root, running_release=layout.release_dir,
                        trusted_launch=True, **kwargs)
     return code, stdout.getvalue(), stderr.getvalue()
@@ -127,7 +130,7 @@ class HostileBootstrapValues(Base):
 
         hostile = {"PF_HOME": str(self.base / "alpha"), "PF_CONFIG_DIR": str(alpha_paths["configuration"])}
         with mock.patch.dict(os.environ, hostile), mock.patch.object(pf, "Controller", Capture):
-            code, out, err = run_main(["--instance", "beta", "update", "--latest"], self.layout)
+            code, out, err = run_main(["--instance", "beta", "update", "--latest"], self.layout, interactive=True)
         self.assertEqual(code, 1)
         self.assertIn("previous operation is incomplete", err)
         self.assertEqual(holder["controller"].calls, [])
@@ -753,11 +756,14 @@ class ProtectedPathChecks(Base):
         self.assertIn("control-file-unlisted", self.codes(self.validation()))
 
 
-def launcher_run(layout, arguments, env=None, cwd=None):
+def launcher_run(layout, arguments, env=None, cwd=None, *, interactive=False):
+    """The installed launcher; stdin is /dev/null (a scheduler) unless ``interactive`` gives it a pty."""
     environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
     environment.update(env or {})
-    return subprocess.run([str(layout.launcher), *arguments], env=environment, cwd=str(cwd or layout.root.parent),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=120)
+    with (pfx.interactive_stdin() if interactive else contextlib.nullcontext(subprocess.DEVNULL)) as stdin:
+        return subprocess.run([str(layout.launcher), *arguments], env=environment,
+                              cwd=str(cwd or layout.root.parent), stdin=stdin, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, check=False, timeout=120)
 
 
 def append_marker(path, marker):
@@ -1101,7 +1107,7 @@ class ManagedPathInventory(Base):
                               env={"PF_HOME": str(self.base / "alpha"), "PF_CONFIG_DIR": str(self.alpha_paths["configuration"])})
         self.assertIn("Instance: beta", status.stdout)
         self.assertIn(str(beta.paths.workspace), status.stdout)
-        permissions = launcher_run(self.layout, ["--instance", "beta", "permissions"])
+        permissions = launcher_run(self.layout, ["--instance", "beta", "permissions"], interactive=True)
         self.assertEqual(permissions.returncode, 0, permissions.stdout + permissions.stderr)
         self.assertEqual(stat.S_IMODE((beta.paths.configuration / ".env").stat().st_mode), 0o660)
         self.assertEqual(pfx.snapshot_tree(self.base / "alpha"), before)

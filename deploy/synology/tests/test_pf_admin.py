@@ -363,13 +363,20 @@ class AdminTests(unittest.TestCase):
         return self.error_output.getvalue()
 
     def invoke(self, arguments):
+        # Interactive harness: an operator at a terminal answers every prompt (PF-A1.4 unattended gate).
         with (
             mock.patch.object(pf, "Controller", return_value=self.c),
             mock.patch.object(pf, "confirm"),
             mock.patch.object(pf, "prompt_yes_no", return_value=True),
+            mock.patch.object(pf, "unattended", return_value=False),
         ):
-            return pf.main(arguments, installation_root=self.layout.root,
+            before = len(self.errors_text())
+            code = pf.main(arguments, installation_root=self.layout.root,
                            running_release=self.layout.release_dir, trusted_launch=True)
+        # No test passes vacuously on an unattended-gate refusal (PF-A1.4 SPEC section 6.2).
+        for gate in ("terminal-required", "instance-required-unattended", "policy-grant-required"):
+            self.assertNotIn(gate, self.errors_text()[before:])
+        return code
 
     def test_deploy_latest_creates_new_database_migrates_and_opens_app(self):
         write_deploy_env(self.root)
@@ -890,30 +897,51 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.invoke(["release-check"]), 0)
         self.assertEqual(self.c.revision(), OLD)
 
+    # PF-A1.4: `release-check --apply` is refused by the auto-apply gate (no protected grant in A1), so
+    # the guards of update(automatic=True) are exercised directly; the path stays for the PF-A4.3 grant.
+
+    def automatic_update(self):
+        with self.c.lock("release-check"):
+            self.c.update(self.c.target, automatic=True)
+
     def test_auto_update_is_opt_in(self):
-        self.assertEqual(self.invoke(["release-check", "--apply"]), 1)
+        with self.assertRaisesRegex(pf.Failure, "Unattended update is disabled"):
+            self.automatic_update()
         self.assertTrue(self.c.running["frontend"])
 
     def test_auto_update_same_schema_succeeds_without_prompt(self):
         self.c.config["auto_update"] = True
-        with mock.patch.object(pf, "Controller", return_value=self.c), mock.patch.object(pf, "confirm") as confirmation:
-            self.assertEqual(pf.main(["release-check", "--apply"], installation_root=self.layout.root,
-                                     running_release=self.layout.release_dir, trusted_launch=True), 0)
+        with mock.patch.object(pf, "confirm") as confirmation:
+            self.automatic_update()
             confirmation.assert_not_called()
         self.assertEqual(self.c.revision(), NEW)
 
     def test_auto_update_never_migrates(self):
         self.c.config["auto_update"] = True
         self.c.new_migration = True
-        self.assertEqual(self.invoke(["release-check", "--apply"]), 20)
+        with self.assertRaisesRegex(pf.Deferred, "migration change"):
+            self.automatic_update()
         self.assertTrue(self.c.running["frontend"])
         self.assertFalse(self.c.pending.exists())
 
     def test_auto_update_refuses_divergent_history(self):
         self.c.config["auto_update"] = True
         self.c.fail = "divergence"
-        self.assertEqual(self.invoke(["release-check", "--apply"]), 20)
+        with self.assertRaisesRegex(pf.Deferred, "not a descendant"):
+            self.automatic_update()
         self.assertEqual(self.c.revision(), OLD)
+
+    def test_release_check_apply_is_refused_by_policy(self):
+        self.c.config["auto_update"] = True
+        with mock.patch.object(self.c, "resolve", wraps=self.c.resolve) as resolve, \
+             mock.patch.object(self.c, "lock", wraps=self.c.lock) as lock:
+            self.assertEqual(self.invoke(["--instance", "staging", "release-check", "--apply"]), 20)
+        self.assertIn("auto-apply-not-permitted: release apply needs a protected policy that permits it; approved "
+                      "policy revision 1 of instance staging does not", self.errors_text())
+        self.assertEqual(self.c.revision(), OLD)
+        resolve.assert_not_called()
+        lock.assert_not_called()
+        self.assertTrue(self.c.running["frontend"])
 
     def mark_config_production(self):
         # v2.5 tests flipped the in-memory config; the approved environment is now
@@ -991,7 +1019,8 @@ class AdminTests(unittest.TestCase):
     def test_auto_update_refuses_dirty_workspace(self):
         self.c.config["auto_update"] = True
         self.c.workspace_dirty = True
-        self.assertEqual(self.invoke(["release-check", "--apply"]), 20)
+        with self.assertRaisesRegex(pf.Deferred, "Automatic update refuses a workspace"):
+            self.automatic_update()
         self.assertEqual(self.c.revision(), OLD)
         self.assertEqual(self.c.snapshots(), [])
 
@@ -1077,9 +1106,14 @@ class AdminTests(unittest.TestCase):
                 pf.Controller.resolve(self.c, release="v0.1.0")
 
     def test_destructive_compose_flags_are_rejected(self):
+        # PF-A1.4: the catch-all Compose route is gone; these words are named refusals before any read.
         for args in (["down", "-v"], ["down", "--volumes"], ["rm", "-svf"]):
-            with self.assertRaises(pf.Failure):
-                self.c.passthrough(args)
+            with self.subTest(args=args):
+                before = len(self.errors_text())
+                self.assertEqual(self.invoke(["--instance", "staging", *args]), 1)
+                self.assertIn(f"ERROR: compose-route-removed: 'pf {args[0]}' no longer forwards to Docker Compose.",
+                              self.errors_text()[before:])
+        self.assertEqual(self.c.calls, [])
 
 
     def test_compose_runs_receive_managed_job_label(self):
@@ -1352,7 +1386,8 @@ class PurgeRecoveryTests(unittest.TestCase):
                                          running_release=self.layout.release_dir, trusted_launch=True), 1)
             self.assertIn("pass --instance", errors.getvalue())
             with mock.patch.object(pf, "Controller", return_value=self.c) as constructed, \
-                 mock.patch.object(self.c, "purge") as purge:
+                 mock.patch.object(self.c, "purge") as purge, \
+                 mock.patch.object(pf, "unattended", return_value=False):  # an operator at a terminal
                 self.assertEqual(pf.main(["--instance", "beta", "purge", "--keep-backups"],
                                          installation_root=self.layout.root,
                                          running_release=self.layout.release_dir, trusted_launch=True), 0)

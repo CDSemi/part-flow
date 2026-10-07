@@ -1,5 +1,18 @@
 # PartFlow — Hướng dẫn triển khai trên Synology NAS (DSM 7)
 
+> **Bộ kit cũ, không được quản lý (2026-09-08), chỉ giữ để tham khảo.** Bộ kit này có trước
+> Deployment Admin (`pf-admin.py`, PF-A1) và không được bảo trì cùng nó:
+>
+> - `pf.sh` của kit chuyển tiếp mọi lệnh Compose, nằm ngoài các ranh giới của PF-A1;
+> - không dùng kit trên Docker daemon đang chạy một instance do pf quản lý: các tài nguyên
+>   `partflow-staging` không có label của kit sẽ bị từ chối ở đó với mã
+>   `resource-legacy-unlabeled` hoặc `resource-name-collision`;
+> - `compose.nas.yaml` của kit **không đồng bộ với topology của control plane được quản lý**
+>   (label instance, database URL được sinh, instance ID); các bản sửa ở mức ứng dụng
+>   như `da5d990` vẫn có thể được chép sang.
+>
+> Hãy dùng [`docs/deployment/SYNOLOGY_ADMIN.vi.md`](../SYNOLOGY_ADMIN.vi.md).
+
 > **Mục đích:** Hướng dẫn từng bước triển khai PartFlow lên Synology NAS chạy DSM 7 để dùng làm **internal staging/test**.
 >
 > **Repository:** `CDSemi/part-flow`  

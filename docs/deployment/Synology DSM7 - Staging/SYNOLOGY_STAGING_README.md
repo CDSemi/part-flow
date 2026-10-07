@@ -1,5 +1,18 @@
 # PartFlow - Synology restricted staging kit
 
+> **Superseded, unmanaged kit (2026-09-08), kept for reference only.** It predates
+> the Deployment Admin (`pf-admin.py`, PF-A1) and is not maintained with it:
+>
+> - its `pf.sh` forwards any Compose command, outside the PF-A1 boundaries;
+> - do not use it on a Docker daemon that hosts a pf-managed instance: its
+>   unlabelled `partflow-staging` resources are refused there as
+>   `resource-legacy-unlabeled` or `resource-name-collision`;
+> - its `compose.nas.yaml` is **not synchronized with the managed control-plane
+>   topology** (instance labels, generated database URL, instance ID);
+>   application-level fixes such as `da5d990` may still be mirrored into it.
+>
+> Use [`docs/deployment/SYNOLOGY_ADMIN.md`](../SYNOLOGY_ADMIN.md) instead.
+
 Prepared 2026-09-08 against CDSemi/part-flow source commit:
 `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`.
 

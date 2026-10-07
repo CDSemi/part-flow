@@ -148,6 +148,58 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > copied to `/tmp/r`): **332 tests OK, 0 skipped** on both (`test_docker_scope.py` 84); `sh -n` and
 > the Python 3.9 `ast` parse of the 13 Python files under `deploy/synology` passed. The Docker-daemon
 > and NAS host gates remain `not_run`.
+>
+> **PF-A1.4 checkpoint addendum (2026-10-06) — entry routes, no catch-all Compose; PF-A1 offline
+> closure.** The Compose passthrough and every route to it are removed: each former word is a named
+> refusal (`compose-route-removed` with the managed alternative), a leading Compose/Docker global
+> option is `compose-override-refused`, any other leading option (abbreviations included; every
+> parser sets `allow_abbrev=False`) is `unknown-option`, an unknown word is `unknown-command`, all
+> before the registry is read, a lock is taken or a process starts. Explicit dispatch: `DISPATCH`
+> (18 CLI routes: mutability, lock, trusted launch/context, pending route, preflight, fail-closed
+> rule, unattended rule, policy class, handler) drives `main()`; `ENTRY_ROUTES` E1…E11 names every
+> non-CLI route and its test. Read-only `pf ps` and `pf logs` rebuild the Compose argv from parsed
+> options only (services `db`/`backend`/`frontend`; `--tail` 1–10000, default 200; `--since`/`--until`
+> duration or RFC 3339; `logs -f` bounded by 3600 s and the runner's 64 MiB stream cap, ending with
+> `logs-bound-reached`) and run through the validated context, runner and daemon binding without a
+> lock or operation. Unattended gate (before the lock, stdin absent/closed/not a TTY):
+> confirmation routes → `terminal-required`; `backup`, `permissions`, `release-check` →
+> `instance-required-unattended` without `--instance`, then `policy-grant-required` (exit 20; the A1
+> policy schema grants no class). `release-check --apply` → `auto-apply-not-permitted` (exit 20) with
+> or without a terminal; `update(automatic=True)` keeps its guards (now unit-tested directly).
+> Scheduler wrappers require `--instance`, use a fixed `PATH` and exec only the sibling
+> `bootstrap/pf` or legacy `control/pf.sh` (whose report now names the command word after
+> `--instance <id>`). `fail_closed()` stops every owned Compose one-off from the exact inventory
+> (`pf_docker.owned_oneoffs`, sorted, a vanished one skipped with a warning, a cached daemon refusal
+> ends it), then `compose stop frontend backend`; the legacy `partflow.admin.project` filter is gone
+> and the copy names `pf --instance <slug> status`. `recoveries`/`restore-instance` list and verify
+> only `<recovery>/<project>/` of the selected instance (`recovery-outside-instance`), `--project` is
+> a validated name that must match `--instance` (`selection-conflict`), and a bundle may restore only
+> `deployed.json`, `last-reset.json`, `observed-tags.json` (`recovery-state-file-refused`).
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12`
+> (CPython 3.12.15, git 2.47.3) and `python:3.9` (CPython 3.9.25, git 2.47.3) containers, uid 0,
+> source mounted read-only and copied to `/tmp/r`: **395 tests OK, 0 skipped** on both. Baseline
+> (the 332 PF-A1.3 tests, reported separately): all pass; the classified conversions are
+> `test_pf_admin` auto-update tests (direct `update(..., automatic=True)` calls),
+> `test_destructive_compose_flags_are_rejected`, CE-6 (now `…former_passthrough_verbs_are_refused…`),
+> RW-6, the retargeted signal test (`backup` at its first effect, `docker tag`, pty stdin), the raw
+> `config`/`version` assertions, and the interactive harness (patched confirmation ⇒ simulated
+> terminal) for the in-process and installed-launcher callers. New: 63 tests (`test_entry_routes.py`
+> 62: DT 9 + E8, RC 5, RA 8, US 8, SW 6, EH 6, CI 6, SS 7, CLI 6; `test_pf_admin` 1). No test was
+> skipped (the `pty unavailable` skip did not trigger). `sh -n` passed for `pf.sh`,
+> `install-control.sh`, `backup.sh`, `release-check.sh`, and the 14 Python files under
+> `deploy/synology` parse with `ast.parse(..., feature_version=(3, 9))`. Docker is a registered fake or
+> a fixture script; no daemon, NAS or running stack was contacted.
+> Gates (PF-A1 closure run): A1-T01…T10 **passed**; A1-T15 **passed** (cli_gate: CLI-1…CLI-3,
+> CLI-7, RC, RA, SW-6); A1-T16 **passed** (cli_gate: CLI-4); A1-T18 **passed** (offline and CLI-5);
+> A1-T11…T14 **blocked** (docker gate `not_run`; T11/T14 also need the real Compose `run` one-off
+> label set that `fail_closed` relies on); A1-T17 **blocked** (host gate `not_run`). PF-A1 closure
+> statement: every entry route uses the A1 primitives and no catch-all Compose route remains; the
+> safety scope is proven offline only; no finding is closed overall and nothing is production-ready.
+> Limits: PF-A1.3's (except the passthrough-flag line) plus terminal-based unattended detection; no
+> unattended operation (scheduled backup and release check included) on a pf-managed instance until
+> a PF-A4.3 policy grant (OD-A14-13); the wrappers are not installed by A1; `install-control.sh` is
+> still the legacy installer; the real Compose one-off labels are unproven offline; no managed
+> application-CLI route.
 
 ## Executed checks
 

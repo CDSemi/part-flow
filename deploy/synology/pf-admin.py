@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import datetime as dt
 import grp
 import hashlib
@@ -59,7 +60,7 @@ pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A1.3"
+CHECKPOINT = "PF-A1.4"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -68,7 +69,10 @@ TIMEOUT_COMPOSE = 900.0
 TIMEOUT_BUILD = 3600.0
 TIMEOUT_DATA = 3600.0
 TIMEOUT_GIT_FETCH = 1800.0
-TIMEOUT_PASSTHROUGH = 3600.0
+# PF-A1.4: `pf logs` bounds. `-f` ends after this deadline or the runner's 64 MiB stream cap.
+TIMEOUT_LOGS_FOLLOW = 3600.0
+LOGS_DEFAULT_TAIL = 200
+LOGS_MAX_TAIL = 10000
 # PF-A1.3: the daemon identity probe (`docker info`), run once per process before any other Docker child.
 TIMEOUT_DAEMON_PROBE = 30.0
 # Container listings taken when a container vanishes between `ps -a` and inspect (inventory churn).
@@ -76,8 +80,6 @@ INVENTORY_ATTEMPTS = 3
 # Per-call Compose value overrides: only the temporary databases of the update rehearsal and of
 # reset-db (fullmatch). Any other key or value is refused before rendering (OD-A13-13).
 COMPOSE_VALUE_OVERRIDES = {"POSTGRES_DB": r"pf_(migrate|clean)_[0-9a-f]{20}"}
-# Commands whose first step inside the lock is the topology ownership preflight (OD-A13-03).
-TOPOLOGY_GUARDED_COMMANDS = frozenset({"backup", "update", "rollback", "reset-db", "resume"})
 GITHUB_HTTPS = "https://github.com/"
 DEFAULTS = {
     "repository": "CDSemi/part-flow", "branch": "main",
@@ -102,6 +104,14 @@ AUTO_REVIEW_PATHS = (
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 BACKUP_RE = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{6}\Z")
 RECOVERY_RE = re.compile(r"purge-\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{6}\Z")
+# The protected state files create_purge_recovery() copies into a bundle; the only names a bundle's
+# state_files may list for a restore into protected state (PF-A1.4).
+RESTORABLE_STATE_FILES = ("deployed.json", "last-reset.json", "observed-tags.json")
+# Compose project names (pf-config.json grammar); --project is validated by it before any selection.
+PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}\Z")
+# `pf logs --since/--until`: a relative duration or an RFC 3339 date/time; nothing else reaches Compose.
+SINCE_RE = re.compile(r"(?:\d{1,6}[smh]|\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?)?)\Z")
+PS_STATUSES = ("paused", "restarting", "removing", "running", "dead", "created", "exited")
 OPERATION_ID_RE = re.compile(r"\d{8}T\d{6}Z-[a-z0-9-]+-[0-9a-f]{8}\Z")
 IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+\Z")
 REQUIRED_NAS_ENV_KEYS = (
@@ -432,7 +442,7 @@ def render_env_template(template_path, values):
 
 
 def prompt_value(label, default=None, validator=None):
-    if not sys.stdin.isatty():
+    if unattended():
         raise Failure("Initial deployment configuration requires an interactive terminal.")
     suffix = f" [{default}]" if default not in (None, "") else ""
     while True:
@@ -449,7 +459,7 @@ def prompt_value(label, default=None, validator=None):
 
 
 def prompt_yes_no(label, default=True):
-    if not sys.stdin.isatty():
+    if unattended():
         raise Failure("Initial deployment configuration requires an interactive terminal.")
     suffix = " [Y/n]" if default else " [y/N]"
     while True:
@@ -543,9 +553,24 @@ def page_items(items, page):
     return items[start:start + PAGE_SIZE], pages, start
 
 
+def unattended():
+    """True when no operator terminal is attached: stdin absent, closed, detached or not a TTY (PF-A1.4).
+
+    A scheduled task, a script and ``ssh`` without ``-t`` are unattended. The predicate fails closed and
+    is shared by the pre-lock unattended gate and every prompt.
+    """
+    stream = sys.stdin
+    if stream is None:
+        return True
+    try:
+        return not stream.isatty()
+    except (ValueError, OSError, AttributeError):  # closed or detached stream
+        return True
+
+
 def confirm(phrase, warning):
     log(warning)
-    if not sys.stdin.isatty():
+    if unattended():
         raise Failure("This operation requires an interactive terminal; no --yes bypass exists.")
     answer = input(f"Type exactly '{phrase}': ").strip()
     if answer != phrase:
@@ -1699,6 +1724,19 @@ class Controller:
         # A rejected editable configuration blocks the mutation here, not after effects started.
         self.ensure_config()
 
+    def policy_permits(self, operation_class):
+        """Whether the approved protected policy permits ``operation_class`` without an operator (PF-A1.4).
+
+        The policy bytes, hash, schema, revision and environment are re-verified on every call. The A1
+        policy schema (``schema_version``, ``revision``, ``environment``) grants no unattended operation
+        class, so the answer is always False here; the PF-A4.3 policy mechanism replaces this method.
+        """
+        try:
+            pf_instance.load_policy(self.context)
+        except (pf_instance.ContextError, OSError) as exc:
+            raise Failure(str(exc)) from exc
+        return False
+
     def publish_backup_permissions(self, root):
         """Make backup artifacts read-only to the configured trusted DSM group.
 
@@ -2489,7 +2527,7 @@ class Controller:
             if len(matches) != 1:
                 raise Failure("Specify an exact backup ID, or a full SHA with exactly one matching backup.")
             return self.verify_snapshot(matches[0]["id"])
-        if not sys.stdin.isatty():
+        if unattended():
             raise Failure("Interactive selection requires a terminal; pass a backup ID instead.")
         page = 1
         while True:
@@ -2538,16 +2576,43 @@ class Controller:
         write_json(self.pending, data)
 
     def fail_closed(self):
-        if self.pending.exists():
+        """After a failed operation with a pending journal: stop this instance's own one-off Compose
+        containers (exact PF-A1.3 inventory), then the application services (PF-A1.4).
+
+        Runs under the failing operation's lock, through the same context and runner. A cached daemon
+        refusal ends it before any further process; a one-off that vanished after the inventory (an
+        exited ``--rm`` job) is reported and skipped. Nothing is selected by the legacy run label.
+        """
+        if not self.pending.exists():
+            return
+        daemon_refused = False
+        try:
+            inventory = self.docker_inventory()
+        except DaemonFailure as exc:
+            log("WARNING: Could not confirm application shutdown: " + str(exc).splitlines()[0])
+            inventory, daemon_refused = None, True
+        except Failure as exc:
+            log("WARNING: Could not list this instance's one-off containers: " + str(exc).splitlines()[0])
+            inventory = None
+        if inventory is not None:
+            for container_id in pf_docker.owned_oneoffs(inventory):
+                try:
+                    self.docker("stop", "--time", "30", container_id)
+                except DaemonFailure as exc:
+                    log("WARNING: Could not confirm application shutdown: " + str(exc).splitlines()[0])
+                    daemon_refused = True
+                    break
+                except Failure as exc:
+                    # The first line of the daemon's answer ("No such container" for a vanished --rm job).
+                    lines = [line.strip() for line in str(exc).splitlines() if line.strip()] or [type(exc).__name__]
+                    log(f"WARNING: Could not stop one-off container {container_id[:12]}: {lines[min(1, len(lines) - 1)]}")
+        if not daemon_refused:
             try:
-                jobs = self.docker("ps", "-q", "--filter", "label=partflow.admin.project=" + self.config["project"]).splitlines()
-                for job in jobs:
-                    self.docker("stop", "--time", "30", job)
                 self.compose("stop", "frontend", "backend")
             except Failure as exc:
-                log("WARNING: Could not confirm application shutdown: " + str(exc))
-            log("Operation incomplete. Application services are intentionally stopped.")
-            log("Inspect 'pf.sh status'. Automation and Compose writes remain blocked.")
+                log("WARNING: Could not confirm application shutdown: " + str(exc).splitlines()[0])
+        log(f"Operation incomplete. Application services are intentionally stopped. Inspect 'pf --instance "
+            f"{self.context.slug} status'. Automation and Compose writes remain blocked.")
 
     def wait_health(self, service):
         end = time.monotonic() + self.config["health_timeout_seconds"]
@@ -3216,29 +3281,39 @@ class Controller:
             log("WARNING: Some old rollback image tags were already missing before purge. Their checkpoint files are preserved, but those old image layers cannot be reconstructed automatically.")
         return manifest, binding
 
-    def recoveries(self, project=None):
-        base = self.recovery_root.parent
+    def recoveries(self):
+        """Bundle candidates of the selected instance only: ``<recovery>/<compose_project>/purge-*``.
+
+        Neither ``--project`` nor any sibling project directory is ever listed (PF-A1.4).
+        """
+        base = self.recovery_root
         result = []
         if not base.is_dir():
             return result
-        project_dirs = [base / project] if project else [item for item in base.iterdir() if item.is_dir()]
-        for project_dir in project_dirs:
-            if not project_dir.is_dir():
+        for folder in base.iterdir():
+            if not folder.is_dir() or not RECOVERY_RE.fullmatch(folder.name):
                 continue
-            for folder in project_dir.iterdir():
-                if not folder.is_dir() or not RECOVERY_RE.fullmatch(folder.name):
-                    continue
-                try:
-                    metadata = load_json(folder / "manifest.json")
-                    metadata["_folder"] = str(folder)
-                    result.append(metadata)
-                except (OSError, ValueError):
-                    result.append({"id": folder.name, "project": project_dir.name, "status": "invalid", "_folder": str(folder)})
+            try:
+                metadata = load_json(folder / "manifest.json")
+                metadata["_folder"] = str(folder)
+                result.append(metadata)
+            except (OSError, ValueError):
+                result.append({"id": folder.name, "project": base.name, "status": "invalid", "_folder": str(folder)})
         return sorted(result, key=lambda item: item["id"], reverse=True)
 
     def verify_recovery(self, item):
         folder = Path(item.get("_folder") or self.recovery_root / item["id"])
-        if not folder.is_dir() or not RECOVERY_RE.fullmatch(folder.name):
+        # PF-A1.4: restore authority is the selected instance's own recovery directory, exactly.
+        try:
+            info = os.lstat(folder)
+        except OSError:
+            info = None
+        if folder.parent != self.recovery_root or info is None or not stat.S_ISDIR(info.st_mode):
+            raise Failure(
+                f"recovery-outside-instance: {folder} is not a bundle directory of instance {self.context.slug} "
+                f"({self.recovery_root}); only the selected instance's own recovery bundles can be listed or "
+                "restored. Nothing was changed.")
+        if not RECOVERY_RE.fullmatch(folder.name):
             raise Failure("Invalid recovery bundle path.")
         manifest_path = folder / "manifest.json"
         if digest(manifest_path) != (folder / "manifest.sha256").read_text(encoding="utf-8").strip():
@@ -3246,6 +3321,15 @@ class Controller:
         metadata = load_json(manifest_path)
         if metadata.get("kind") != "partflow-purge-recovery" or metadata.get("status") != "complete":
             raise Failure("Recovery bundle is incomplete or unsupported.")
+        state_files = metadata.get("state_files", [])
+        if not isinstance(state_files, list):
+            state_files = [state_files]
+        for name in state_files:
+            if name not in RESTORABLE_STATE_FILES:
+                raise Failure(
+                    f"recovery-state-file-refused: bundle {metadata.get('id', folder.name)} lists state file "
+                    f"{name!r}; only {', '.join(RESTORABLE_STATE_FILES)} can be restored into protected state. "
+                    "Nothing was changed.")
         for name, checksum in metadata.get("checksums", {}).items():
             path = folder / name
             if not path.is_file() or digest(path) != checksum:
@@ -3264,8 +3348,8 @@ class Controller:
             )
         return pages
 
-    def choose_recovery(self, requested=None, project=None):
-        items = self.recoveries(project=project)
+    def choose_recovery(self, requested=None):
+        items = self.recoveries()
         if not items:
             raise Failure("No purge recovery bundles were found.")
         if requested:
@@ -3273,7 +3357,7 @@ class Controller:
             if len(matches) != 1:
                 raise Failure("Specify one exact purge recovery ID.")
             return self.verify_recovery(matches[0])
-        if not sys.stdin.isatty():
+        if unattended():
             raise Failure("Interactive recovery selection requires a terminal; pass a recovery ID.")
         page = 1
         while True:
@@ -3327,7 +3411,7 @@ class Controller:
                 if "deletion_plan" not in pending:
                     raise self.plan_missing("purge")
                 recovery_id = pending["recovery"]
-                matches = [item for item in self.recoveries(project=self.config["project"]) if item.get("id") == recovery_id]
+                matches = [item for item in self.recoveries() if item.get("id") == recovery_id]
                 if len(matches) != 1:
                     raise Failure("Interrupted purge recovery bundle is missing or ambiguous; manual recovery is required.")
                 self.verify_recovery(matches[0])
@@ -3868,7 +3952,9 @@ class Controller:
             ("Docker daemon", self.describe_daemon),
             ("Runtime configuration", lambda: (
                 f"ok | project: {self.config['project']} | environment: {self.config['environment']}"
-                f" | auto-update: {self.config['auto_update']} | channel: {self.config['release_channel']}"
+                f" | auto-update: proposal {str(self.config['auto_update']).lower()} (unattended apply not permitted"
+                f" by protected policy revision {self.context.approved_policy.revision})"
+                f" | channel: {self.config['release_channel']}"
                 f" | workspace group: {self.config['workspace_write_group']}"
                 f" | backup group: {self.config['backup_read_group']}"
             )),
@@ -3923,56 +4009,109 @@ class Controller:
             text += " | changes: " + ", ".join(workspace["changes"][:10])
         return text
 
-    def passthrough(self, args):
-        if not args:
-            args = ["ps"]
-        if args[0].startswith("-"):
-            raise Failure("Compose global overrides are not accepted; the project/file are fixed.")
-        if args[0] in ("down", "rm") and any(v == "--volumes" or v.startswith("--volumes=")
-                                                   or v.startswith("-") and not v.startswith("--") and "v" in v
-                                                   for v in args[1:]):
-            raise Failure("Volume deletion is blocked. Use reset-db or purge for backed-up destructive workflows.")
-        if args[0] == "config":
-            # The resolved configuration contains secrets; it stays private (doctor validates it).
-            raise Failure("Raw `compose config` output is not available through this route; use `pf doctor`.")
-        read_only = args[0] in COMPOSE_READ_ONLY_VERBS
-        if not read_only and args[0] not in COMPOSE_MUTATING_VERBS:
-            # An unknown word is not a Compose command either; refuse it before any lock,
-            # operation record or child process (A1-T03). Full explicit dispatch is PF-A1.4.
-            raise Failure(
-                f"Unknown command {args[0]!r}. Managed commands: {', '.join(sorted(KNOWN_COMMANDS))}. "
-                f"Compose passthrough verbs: {', '.join(sorted(COMPOSE_READ_ONLY_VERBS | COMPOSE_MUTATING_VERBS))}."
-            )
-        # Catch-all forwarding is removed in PF-A1.4; until then it runs only through the
-        # validated context, the same runner (registered CLI, allowlisted environment, frozen
-        # inputs, bounded redacted streaming output, deadline, process-group cancellation) and,
-        # for mutating verbs, the stable lock with a frozen configuration.
-        with contextlib.nullcontext() if read_only else self.lock(pending_route="compose:" + args[0]):
-            if not read_only:
-                # PF-A1.3: ownership preflight right after the lock, before any Compose child.
-                self.require_topology_owned("compose " + args[0])
-            values, env_file = self.compose_inputs()
-            cli = self.compose_cli()
-            override = self.override if self.override.exists() else None
-            command = self.compose_prefix(cli, self.root, env_file, override)
-            child = pf_config.child_values(values, workspace=self.root, instance_id=self.context.instance_id)
-            if args[0] in pf_docker.ENVELOPE_VERBS:
-                # The resolved model must pass the envelope; passthrough CLI flags are PF-A1.4.
-                self.require_envelope(self.root, override, child)
-            effect = None if read_only else {"kind": "compose-passthrough", "verb": args[0]}
-            self.command(command + list(args), env=child, timeout=TIMEOUT_PASSTHROUGH, stream=True, effect=effect)
+    def compose_ps(self, args):
+        """``pf ps``: one ``compose ps`` rebuilt from the parsed options only (PF-A1.4).
+
+        Read-only: no lock, operation directory, envelope or inventory. The Compose argv carries the
+        fixed project, files, env-file and directory; no operator token is forwarded as typed.
+        """
+        services = checked_services(args.services)
+        argv = ["ps"]
+        if args.all:
+            argv.append("--all")
+        if args.quiet:
+            argv.append("--quiet")
+        if args.services_only:
+            argv.append("--services")
+        if args.status:
+            argv += ["--status", args.status]
+        if args.format:
+            argv += ["--format", args.format]
+        self.compose(*argv, *services, stream=True, timeout=TIMEOUT_DIAGNOSTIC)
+
+    def compose_logs(self, args):
+        """``pf logs``: bounded, redacted ``compose logs`` rebuilt from the parsed options only (PF-A1.4).
+
+        ``--follow`` ends at TIMEOUT_LOGS_FOLLOW or at the runner's stream cap; either bound ends with
+        ``logs-bound-reached`` (decided from the runner's result for this child, never from its text).
+        """
+        services = checked_services(args.services)
+        argv = ["logs", "--tail", str(args.tail)]
+        if args.follow:
+            argv.append("--follow")
+        if args.timestamps:
+            argv.append("--timestamps")
+        if args.no_color:
+            argv.append("--no-color")
+        if args.no_log_prefix:
+            argv.append("--no-log-prefix")
+        if args.since:
+            argv += ["--since", args.since]
+        if args.until:
+            argv += ["--until", args.until]
+        timeout = TIMEOUT_LOGS_FOLLOW if args.follow else TIMEOUT_DIAGNOSTIC
+        # The daemon probe and the Compose version run first, so the next child is `logs` itself.
+        self.compose_cli()
+        started = len(self.runner.history)
+        try:
+            self.compose(*argv, *services, stream=True, timeout=timeout)
+        except DaemonFailure:
+            raise
+        except Failure as exc:
+            results = self.runner.history[started:]
+            if results and results[-1].timed_out and "logs" in results[-1].argv:
+                raise Failure(
+                    f"logs-bound-reached: 'pf logs' stopped at its bound ({timeout:.0f} s or 64 MiB of output); the "
+                    "output above is complete up to that point. Nothing was changed.") from exc
+            raise
+
+
+def checked_services(names):
+    """Service names for ``pf ps``/``pf logs``: only the managed topology's services (pf_docker.SERVICES)."""
+    for name in names:
+        if name not in pf_docker.SERVICES:
+            raise Failure(f"unknown service '{name}'; services: {', '.join(pf_docker.SERVICES)}")
+    return list(names)
+
+
+def project_name(value):
+    """argparse type of ``--project``: a Compose project name (PROJECT_RE); never a path component."""
+    if not PROJECT_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"invalid Compose project name {value!r} (lowercase letters, digits, "
+                                         "'_' and '-', at most 40 characters)")
+    return value
+
+
+def tail_count(value):
+    """argparse type of ``pf logs --tail``."""
+    if not re.fullmatch(r"\d{1,5}", value) or not 1 <= int(value) <= LOGS_MAX_TAIL:
+        raise argparse.ArgumentTypeError(f"--tail must be an integer from 1 to {LOGS_MAX_TAIL}")
+    return int(value)
+
+
+def since_value(value):
+    """argparse type of ``pf logs --since/--until`` (SINCE_RE)."""
+    if not SINCE_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError("must be a duration such as 30m or 2h, or an RFC 3339 date/time")
+    return value
 
 
 def parser():
-    result = argparse.ArgumentParser(description="PartFlow NAS staging administration; use --help on a command.")
+    # PF-A1.4: abbreviations are refused everywhere (OD-A14-10); `pf --inst x` is unknown-option.
+    result = argparse.ArgumentParser(description="PartFlow NAS staging administration; use --help on a command.",
+                                     allow_abbrev=False)
     result.add_argument("--instance", help="Registered instance slug or UUID; required when several instances exist and no protected default is set")
     subs = result.add_subparsers(dest="command", required=True)
+
+    def add(name, **kwargs):
+        return subs.add_parser(name, allow_abbrev=False, **kwargs)
+
     for name in ("doctor", "status", "permissions", "backup", "reset-db", "resume", "abort-deploy"):
-        subs.add_parser(name)
+        add(name)
 
-    subs.add_parser("instances", help="List registered instances from the protected registry (no Docker access)")
+    add("instances", help="List registered instances from the protected registry (no Docker access)")
 
-    deploy = subs.add_parser("deploy", help="Create a brand-new managed staging deployment")
+    deploy = add("deploy", help="Create a brand-new managed staging deployment")
     deploy_selection = deploy.add_mutually_exclusive_group()
     deploy_selection.add_argument("--current", action="store_true", help="Deploy the current clean Git checkout (default when no selector is given)")
     deploy_selection.add_argument("--latest", action="store_true", help="Resolve the configured branch tip to a fixed SHA and deploy it")
@@ -3981,28 +4120,28 @@ def parser():
     deploy.add_argument("--channel", choices=("stable", "prerelease"))
     deploy.add_argument("--skip-ci", action="store_true", help="Explicit manual staging exception; CI is checked by default")
 
-    purge = subs.add_parser("purge", help="Create a full recovery bundle, then remove one managed staging instance")
-    purge.add_argument("--project", help="Legacy alias: select the registered instance whose Compose project is unique; prefer --instance")
+    purge = add("purge", help="Create a full recovery bundle, then remove one managed staging instance")
+    purge.add_argument("--project", type=project_name, help="Legacy alias: select the registered instance whose Compose project is unique; prefer --instance")
     backup_policy = purge.add_mutually_exclusive_group()
     backup_policy.add_argument("--delete-backups", action="store_true", help="Delete normal revision checkpoints after archiving them into the recovery bundle")
     backup_policy.add_argument("--keep-backups", action="store_true", help="Keep normal revision checkpoints after purge")
     purge.add_argument("--reset-admin-config", action="store_true", help="Also delete config/pf-config.json after a separate confirmation")
 
-    recoveries = subs.add_parser("recoveries", help="List verified purge-recovery bundle candidates")
+    recoveries = add("recoveries", help="List verified purge-recovery bundle candidates of the selected instance")
     recoveries.add_argument("--page", type=int, default=1)
-    recoveries.add_argument("--project")
+    recoveries.add_argument("--project", type=project_name, help="Legacy alias for selection; with --instance it must name that instance's project")
 
-    restore = subs.add_parser("restore-instance", help="Restore a purged instance or recover its old database side-by-side")
+    restore = add("restore-instance", help="Restore a purged instance or recover its old database side-by-side")
     restore.add_argument("recovery_id", nargs="?")
-    restore.add_argument("--project", help="Filter recovery selection by project; the restore target is always the selected registered instance")
+    restore.add_argument("--project", type=project_name, help="Legacy alias for selection; the restore target and the bundles listed are always the selected registered instance's own")
     restore.add_argument("--side-by-side", action="store_true", help="Restore only the old active database under a separate recovery DB name; do not replace the current instance")
 
-    backups = subs.add_parser("backups", help="List revision checkpoints, newest first, 10 per page")
+    backups = add("backups", help="List revision checkpoints, newest first, 10 per page")
     backups.add_argument("--page", type=int, default=1)
-    rollback = subs.add_parser("rollback")
+    rollback = add("rollback")
     rollback.add_argument("backup_id", nargs="?")
     rollback.add_argument("--restore-db", action="store_true")
-    update = subs.add_parser("update")
+    update = add("update")
     selection = update.add_mutually_exclusive_group()
     selection.add_argument("--latest", action="store_true", help="Resolve the current configured branch tip to a fixed SHA")
     selection.add_argument("--commit")
@@ -4010,23 +4149,246 @@ def parser():
     update.add_argument("--channel", choices=("stable", "prerelease"))
     update.add_argument("--allow-migrations", action="store_true")
     update.add_argument("--skip-ci", action="store_true", help="Explicit manual staging exception; never used by the scheduler")
-    check = subs.add_parser("release-check")
+    check = add("release-check")
     check.add_argument("--channel", choices=("stable", "prerelease"))
-    check.add_argument("--apply", action="store_true")
+    check.add_argument("--apply", action="store_true",
+                       help="refused in this checkpoint: needs a protected policy grant (PF-A4.3)")
+
+    ps = add("ps", help="Show the instance's Compose containers (read-only)")
+    ps.add_argument("-a", "--all", action="store_true")
+    ps.add_argument("-q", "--quiet", action="store_true")
+    ps.add_argument("--services", dest="services_only", action="store_true", help="List service names only")
+    ps.add_argument("--status", choices=PS_STATUSES)
+    ps.add_argument("--format", choices=("table", "json"))
+    ps.add_argument("services", nargs="*", metavar="service", help="db, backend or frontend")
+
+    logs = add("logs", help="Show bounded, redacted service logs (read-only)")
+    logs.add_argument("--tail", type=tail_count, default=LOGS_DEFAULT_TAIL,
+                      help=f"Lines per service, 1-{LOGS_MAX_TAIL} (default {LOGS_DEFAULT_TAIL})")
+    logs.add_argument("-f", "--follow", action="store_true",
+                      help=f"Follow; ends after {TIMEOUT_LOGS_FOLLOW:.0f} s or 64 MiB of output")
+    logs.add_argument("-t", "--timestamps", action="store_true")
+    logs.add_argument("--no-color", action="store_true")
+    logs.add_argument("--no-log-prefix", action="store_true")
+    logs.add_argument("--since", type=since_value, help="Duration such as 30m or 2h, or an RFC 3339 date/time")
+    logs.add_argument("--until", type=since_value, help="Duration such as 30m or 2h, or an RFC 3339 date/time")
+    logs.add_argument("services", nargs="*", metavar="service", help="db, backend or frontend")
     return result
 
 
-KNOWN_COMMANDS = {
-    "doctor", "status", "permissions", "backup", "reset-db", "resume", "deploy", "abort-deploy",
-    "instances", "purge", "recoveries", "restore-instance",
-    "backups", "rollback", "update", "release-check",
-}
+# ------------------------------------------------------------ explicit dispatch (PF-A1.4)
+# Every CLI word is one row here; main() derives its gates from the row and runs the handler in
+# exactly one branch. There is no catch-all route: a word outside DISPATCH is a named refusal.
+
+
+@dataclasses.dataclass(frozen=True)
+class Route:
+    name: str
+    mutability: str      # "read-only" | "registry-read" | "mutating" | "conditional" (mutating only with --apply)
+    lock: bool
+    trusted_launch: bool
+    trusted_context: bool
+    pending: str         # "any" | "refuse" | the route's own name (it has a PENDING_ROUTES entry)
+    preflight: str       # "none" | "owned" | "empty-target" | "plan" | "restore" | "apply" (where the topology check runs)
+    fail_closed: str     # "never" | "always" | "unless-side-by-side" | "if-apply"
+    unattended: str      # "allowed" | "terminal" | "policy"
+    policy_class: str    # "" | "backup" | "permissions" | "release-check"
+    handler: str         # dotted name; DT-4 proves it resolves
+
+
+def _read_only(name, handler, *, mutability="read-only", trusted=False):
+    return Route(name, mutability, False, trusted, trusted, "any", "none", "never", "allowed", "", handler)
+
+
+def _locked(name, mutability, pending, preflight, fail_closed, unattended_rule, policy_class, handler):
+    return Route(name, mutability, True, True, True, pending, preflight, fail_closed, unattended_rule, policy_class,
+                 handler)
+
+
+DISPATCH = {route.name: route for route in (
+    _read_only("instances", "display_registry", mutability="registry-read"),
+    _read_only("status", "Controller.status"),
+    _read_only("doctor", "Controller.doctor"),
+    _read_only("backups", "Controller.display_page"),
+    _read_only("recoveries", "Controller.display_recoveries"),
+    _read_only("ps", "Controller.compose_ps", trusted=True),
+    _read_only("logs", "Controller.compose_logs", trusted=True),
+    _locked("permissions", "mutating", "refuse", "none", "never", "policy", "permissions", "Controller.permissions"),
+    _locked("deploy", "mutating", "refuse", "empty-target", "always", "terminal", "", "Controller.deploy"),
+    _locked("abort-deploy", "mutating", "abort-deploy", "plan", "always", "terminal", "", "Controller.abort_deploy"),
+    _locked("purge", "mutating", "purge", "plan", "never", "terminal", "", "Controller.purge"),
+    _locked("restore-instance", "mutating", "refuse", "restore", "unless-side-by-side", "terminal", "",
+            "Controller.restore_instance"),
+    _locked("backup", "mutating", "refuse", "owned", "never", "policy", "backup", "Controller.snapshot"),
+    _locked("reset-db", "mutating", "refuse", "owned", "always", "terminal", "", "Controller.reset_database"),
+    _locked("rollback", "mutating", "rollback", "owned", "always", "terminal", "", "Controller.rollback"),
+    _locked("resume", "mutating", "resume", "owned", "always", "terminal", "", "Controller.resume"),
+    _locked("update", "mutating", "refuse", "owned", "always", "terminal", "", "Controller.update"),
+    _locked("release-check", "conditional", "refuse", "apply", "if-apply", "policy", "release-check",
+            "Controller.resolve"),
+)}
+KNOWN_COMMANDS = frozenset(DISPATCH)
 # Commands that never take the instance lock and never mutate managed state.
-READ_ONLY_COMMANDS = {"status", "doctor", "instances", "backups", "recoveries"}
-# Compose words the compatibility passthrough still forwards (bounded; removed in PF-A1.4).
+READ_ONLY_COMMANDS = frozenset(name for name, route in DISPATCH.items() if not route.lock)
+# Effect classifier only (compose_effect): Compose verbs that change nothing. No route forwards these
+# words; `ps` and `logs` are rebuilt from parsed options by Controller.compose_ps/compose_logs.
 COMPOSE_READ_ONLY_VERBS = {"ps", "logs", "version", "top", "images", "port", "ls", "events", "stats"}
-COMPOSE_MUTATING_VERBS = {"up", "down", "start", "stop", "restart", "pull", "build", "create", "rm", "exec", "run",
-                          "kill", "pause", "unpause", "cp", "push", "scale", "wait", "attach", "watch"}
+
+# Former catch-all Compose words (word -> guidance group). Each is a named refusal before anything is read.
+REMOVED_COMPOSE_ROUTES = {
+    **{word: "start" for word in ("up", "start", "restart", "create", "scale", "watch", "unpause")},
+    **{word: "stop" for word in ("down", "stop", "kill", "pause", "rm")},
+    **{word: "oneoff" for word in ("run", "exec", "cp", "attach")},
+    **{word: "image" for word in ("build", "pull", "push")},
+    **{word: "view" for word in ("version", "top", "images", "port", "ls", "events", "stats", "wait")},
+    "config": "config",
+}
+REMOVED_ROUTE_GUIDANCE = {
+    "start": "Containers are started only by managed commands: pf resume (reopen after a pre-change failure), "
+             "pf update, pf rollback, pf deploy (first deployment) or pf restore-instance.",
+    "stop": "Containers are stopped or removed only by managed commands: pf purge (with a verified recovery "
+            "bundle) or pf abort-deploy (incomplete first deployment); a managed stop/start arrives with PF-A4. "
+            "Volumes are never removed outside those flows.",
+    "oneoff": "One-off containers, shells and file copies are not available. Inspect with pf status, pf ps or "
+              "pf logs; change data with pf backup, pf reset-db or pf rollback --restore-db.",
+    "image": "Images are built only by pf deploy and pf update from the protected source store.",
+    "view": "Only ps and logs are available as read-only Compose views; pf doctor reports the Compose version.",
+    "config": "Raw compose config output is not available through this route; use pf doctor, which validates the "
+              "resolved model privately.",
+}
+# Leading Compose/Docker global options: the project, files, env-file, directory and daemon are fixed.
+COMPOSE_GLOBAL_OPTIONS = frozenset({
+    "-f", "--file", "-p", "--project-name", "--project-directory", "--env-file", "--profile",
+    "--parallel", "--progress", "--ansi", "--compatibility", "--dry-run", "--all-resources",
+    "-c", "--context", "-H", "--host", "--config", "-D", "--debug", "-l", "--log-level",
+    "--tls", "--tlscacert", "--tlscert", "--tlskey", "--tlsverify",
+})
+
+
+@dataclasses.dataclass(frozen=True)
+class EntryRoute:
+    id: str              # "E1".."E11"
+    entry: str
+    target_route: str    # a DISPATCH name | "*" (every DISPATCH route) | "refuse" | "fail_closed"
+    mutability: str      # target's mutability | "per-route" for "*" | "none" for "refuse" | "mutating"
+    lock: str            # "per-route" | "none" | "held" (the failing operation's own lock, until finally)
+    pending: str         # "per-route" | "n/a" | "existing-journal" (fail_closed acts only when one exists)
+    test: str            # "module.Class.test_name" in tests/
+    owner: str           # "PF-A1.4" or the later owner of a static-only row
+
+
+# Non-CLI entry routes (audit data; DT-8 proves every row against DISPATCH and its named test).
+ENTRY_ROUTES = (
+    EntryRoute("E1", "repository pf.sh", "refuse", "none", "none", "n/a",
+               "test_pf_admin.PureTests.test_repository_launcher_refuses_operational_execution", "PF-A1.4"),
+    EntryRoute("E2", "<root>/bootstrap/pf", "*", "per-route", "per-route", "per-route",
+               "test_entry_routes.InstalledLauncherRoutes.test_cli1_removed_routes_through_the_installed_launcher",
+               "PF-A1.4"),
+    EntryRoute("E3", "legacy <home>/control/pf.sh", "refuse", "none", "none", "n/a",
+               "test_entry_routes.SchedulerWrappers.test_sw4_legacy_control_wrapper_reports_the_command_word",
+               "PF-A1.4"),
+    EntryRoute("E4", "/usr/local/bin/pf (legacy installer)", "refuse", "none", "none", "n/a",
+               "test_entry_routes.StaticScan.test_ss7_shell_entry_points", "PF-A2"),
+    EntryRoute("E5", "backup.sh", "backup", "mutating", "yes", "refuse",
+               "test_entry_routes.SchedulerWrappers.test_sw6_installed_wrappers_reach_the_policy_gates", "PF-A1.4"),
+    EntryRoute("E6", "release-check.sh", "release-check", "conditional", "yes", "refuse",
+               "test_entry_routes.SchedulerWrappers.test_sw6_installed_wrappers_reach_the_policy_gates", "PF-A1.4"),
+    EntryRoute("E7", "python pf-admin.py without the handshake", "refuse", "none", "none", "n/a",
+               "test_instance_context.PendingJournalVisibility."
+               "test_legacy_control_directory_is_diagnostics_only_and_executes_no_payload", "PF-A1.4"),
+    EntryRoute("E8", "pf_bootstrap.py run from elsewhere", "refuse", "none", "none", "n/a",
+               "test_entry_routes.DispatchTables.test_e8_verifier_refuses_outside_bootstrap", "PF-A1.4"),
+    EntryRoute("E9", "main() except -> fail_closed()", "fail_closed", "mutating", "held", "existing-journal",
+               "test_entry_routes.ErrorHandler.test_eh1_only_owned_oneoffs_are_stopped_then_the_application",
+               "PF-A1.4"),
+    EntryRoute("E10", "SIGINT/SIGTERM/SIGHUP/SIGQUIT", "fail_closed", "mutating", "held", "existing-journal",
+               "test_runner_config_source.TimeoutAndCancellation."
+               "test_real_termination_signals_through_the_installed_cli_record_the_effect_before_the_lock_is_free",
+               "PF-A1.4"),
+    EntryRoute("E11", "install-control.sh", "refuse", "none", "none", "n/a",
+               "test_entry_routes.StaticScan.test_ss7_shell_entry_points", "PF-A2"),
+)
+
+
+def classify_command(rest):
+    """Classify the words after the global options before any registry read (PF-A1.4); pure.
+
+    Returns ("route", name) or ("help", None); every other word raises a named Failure. No refusal
+    here reads the registry, builds a Controller, takes a lock or starts a process.
+    """
+    if not rest:
+        return "route", "ps"  # v2.5 compatibility: `pf` alone is the read-only `pf ps`
+    word = rest[0]
+    if word in ("-h", "--help"):
+        return "help", None
+    if word in DISPATCH:
+        return "route", word
+    if word in REMOVED_COMPOSE_ROUTES:
+        raise Failure(f"compose-route-removed: 'pf {word}' no longer forwards to Docker Compose. "
+                      f"{REMOVED_ROUTE_GUIDANCE[REMOVED_COMPOSE_ROUTES[word]]} Nothing was read or changed.")
+    if word.startswith("-"):
+        option = word.split("=", 1)[0] if word.startswith("--") else word[:2]
+        if option in COMPOSE_GLOBAL_OPTIONS:
+            raise Failure(f"compose-override-refused: '{option}' is a Compose or Docker global option; the project, "
+                          "files, env-file, project directory and daemon are fixed by the controller. Nothing was "
+                          "read or changed.")
+        raise Failure(f"unknown-option: '{option}' is not a pf option; only --instance may precede the command, and "
+                      "abbreviations are refused. Nothing was read or changed.")
+    raise Failure(f"unknown-command: Unknown command '{word}'. Managed commands: {', '.join(sorted(KNOWN_COMMANDS))}. "
+                  "Read-only Compose views: ps, logs. Nothing was read or changed.")
+
+
+def route_preflight(route, args):
+    """The topology preflight main() runs right after the lock: "owned" or "none" (PF-A1.3 OD-A13-03).
+
+    deploy, purge, abort-deploy and exact restore-instance run their stronger empty-target or frozen-plan
+    checks inside the handler instead.
+    """
+    if route.preflight == "owned":
+        return "owned"
+    if route.preflight == "restore" and args.side_by_side:
+        return "owned"
+    if route.preflight == "apply" and args.apply:
+        return "owned"
+    return "none"
+
+
+def route_fail_closed(route, args):
+    """Whether an exception inside this route's locked body runs fail_closed()."""
+    if route.fail_closed == "always":
+        return True
+    if route.fail_closed == "unless-side-by-side":
+        return not args.side_by_side
+    if route.fail_closed == "if-apply":
+        return bool(args.apply)
+    return False
+
+
+def require_attended(route, args, controller, *, explicit_instance, selected_by):
+    """The unattended gate (PF-A1.4, ARCH section 5): applied to every locked route before the lock.
+
+    Without a terminal a confirmation route is refused, every other route must name its instance and
+    then needs a protected policy grant for its operation class. ``release-check --apply`` is left to
+    the auto-apply gate, which gives the specific code.
+    """
+    if not unattended():
+        return
+    slug = controller.context.slug
+    if route.unattended == "terminal":
+        raise Failure(f"terminal-required: '{route.name}' asks for a typed confirmation and cannot run without a "
+                      "terminal (scheduled task, script, or ssh without -t). Run it interactively: sudo pf --instance "
+                      f"{slug} {route.name}. Nothing was changed.")
+    if not explicit_instance:
+        raise Failure(f"instance-required-unattended: '{route.name}' is running without a terminal and selected "
+                      f"instance {slug} by {selected_by}. Unattended commands must name the instance: pf --instance "
+                      f"<slug|uuid> {route.name}. Nothing was changed.")
+    automatic_apply = route.mutability == "conditional" and bool(getattr(args, "apply", False))
+    if route.unattended == "policy" and not automatic_apply and not controller.policy_permits(route.policy_class):
+        raise Deferred(f"policy-grant-required: unattended '{route.name}' needs a protected policy that permits this "
+                       f"class of operation; approved policy revision {controller.context.approved_policy.revision} "
+                       f"of instance {slug} permits no unattended operation in this checkpoint (grants arrive with "
+                       f"PF-A4.3). Run it from an interactive terminal: sudo pf --instance {slug} {route.name}. "
+                       "Nothing was changed.")
 
 
 def display_registry(registry):
@@ -4127,7 +4489,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 "root-override: " + " ".join(injected) + ": the installation root is chosen by the installed "
                 "bootstrap; --installation-root is not an operator option. Nothing was read and nothing was changed."
             )
-        globals_parser = argparse.ArgumentParser(add_help=False)
+        globals_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
         globals_parser.add_argument("--instance")
         options, rest = globals_parser.parse_known_args(argv)
         if root is None:
@@ -4142,9 +4504,13 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             )
 
         root = bind_installation_root(root, running_release)
-        passthrough = not rest or (rest[0] not in KNOWN_COMMANDS and rest[0] not in ("-h", "--help"))
-        # Help is answered before any registry or instance state is read.
-        args = None if passthrough else parser().parse_args(rest)
+        # PF-A1.4: every word is classified before the registry is read. A removed Compose word, a
+        # Compose/Docker global option, any other leading option and an unknown word are refused here
+        # without a registry read, a Controller, a lock or a child process. Help and usage errors
+        # are answered by argparse (exit 0/2), also before any state is read.
+        _, name = classify_command(rest)
+        args = parser().parse_args(rest if rest else [name])
+        route = DISPATCH[args.command]
         try:
             registry = pf_instance.load_registry(root)
         except pf_instance.ContextError as exc:
@@ -4158,19 +4524,24 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             validation = pf_instance.validate_context(context, running_release=running_release, interpreter=sys.executable)
             return Controller(context, validation=validation, running_release=running_release)
 
-        if passthrough:
-            controller = select()
-            controller.require_trusted_context()
-            if not trusted_launch:
-                raise Failure("Compose passthrough requires the installed bootstrap launcher (Python isolated mode).")
-            controller.passthrough(rest)
-            return 0
         if args.command == "instances":
             display_registry(registry)
             return 0
-        controller = select(project=getattr(args, "project", None))
+        project = getattr(args, "project", None)
+        controller = select(project=project)
+        context = controller.context
+        if options.instance is not None and project is not None and project != context.compose_project:
+            raise Failure(f"selection-conflict: --project {project} does not match the selected instance {context.slug} "
+                          f"(project {context.compose_project}). Use --instance alone. Nothing was changed.")
+        if route.trusted_context:
+            controller.require_trusted_context()
+        if route.trusted_launch and not trusted_launch:
+            raise Failure(
+                ("Mutating commands" if route.lock else "Compose views (ps, logs)")
+                + " must start through the installed bootstrap launcher (Python isolated mode, sanitized environment)."
+            )
 
-        if args.command in READ_ONLY_COMMANDS:
+        if not route.lock:
             if args.command == "doctor":
                 controller.doctor()
             elif args.command == "status":
@@ -4178,24 +4549,30 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             elif args.command == "backups":
                 controller.display_page(controller.snapshots(), args.page)
             elif args.command == "recoveries":
-                controller.display_recoveries(controller.recoveries(project=args.project), args.page)
+                controller.display_recoveries(controller.recoveries(), args.page)
+            elif args.command == "ps":
+                controller.compose_ps(args)
+            elif args.command == "logs":
+                controller.compose_logs(args)
             return 0
 
-        # Every mutation: validated context, sanitized launch, stable lock, explicit journal route.
-        controller.require_trusted_context()
-        if not trusted_launch:
-            raise Failure(
-                "Mutating commands must start through the installed bootstrap launcher "
-                "(Python isolated mode, sanitized environment)."
-            )
-        held_lock.enter_context(controller.lock(pending_route=args.command))
-        # PF-A1.3: ownership preflight right after the lock, before any confirmation, journal
-        # write, pause, tag or Compose child (deploy, purge, abort-deploy and exact restore run
-        # their stronger empty-target or plan checks instead).
-        if args.command in TOPOLOGY_GUARDED_COMMANDS \
-                or (args.command == "restore-instance" and args.side_by_side) \
-                or (args.command == "release-check" and args.apply):
-            controller.require_topology_owned(args.command)
+        # Every locked route: validated context and sanitized launch (above), then the unattended and
+        # auto-apply gates before the lock, the stable lock with its explicit journal route, and the
+        # ownership preflight before any confirmation, journal write, pause, tag or Compose child.
+        require_attended(route, args, controller, explicit_instance=options.instance is not None,
+                         selected_by="protected default" if registry.default_instance_id is not None
+                         else "single registration")
+        if route.mutability == "conditional" and args.apply and not controller.policy_permits("auto-apply"):
+            slug, revision = context.slug, context.approved_policy.revision
+            raise Deferred(
+                f"auto-apply-not-permitted: release apply needs a protected policy that permits it; approved policy "
+                f"revision {revision} of instance {slug} does not (automatic apply is off in this checkpoint). The "
+                f"editable auto_update setting is a proposal only. Nothing was changed. Check with 'pf --instance "
+                f"{slug} release-check' and apply manually with 'pf --instance {slug} update --release <tag>'.")
+        held_lock.enter_context(controller.lock(pending_route=route.name))
+        if route_preflight(route, args) == "owned":
+            controller.require_topology_owned(route.name)
+        managed_started = route_fail_closed(route, args)
 
         if args.command == "permissions":
             controller.permissions()
@@ -4206,7 +4583,6 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             )
             if not use_current and target is None:
                 raise Failure("No published release exists for this channel. Select prerelease, --latest, or an explicit commit.")
-            managed_started = True
             controller.deploy(target, use_current=use_current, skip_ci=args.skip_ci)
         elif args.command == "purge":
             delete_backups = True if args.delete_backups else False if args.keep_backups else None
@@ -4214,8 +4590,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         elif args.command == "restore-instance":
             # The mutation target is the selected registered instance, never a
             # path embedded in the (untrusted) recovery bundle.
-            recovery = controller.choose_recovery(args.recovery_id, project=args.project)
-            managed_started = not args.side_by_side
+            recovery = controller.choose_recovery(args.recovery_id)
             controller.restore_instance(recovery, side_by_side=args.side_by_side)
             managed_started = False
         elif args.command == "backup":
@@ -4224,22 +4599,17 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             controller.snapshot("scheduled-or-manual-backup")
             log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though runtime .env is stored separately.")
         elif args.command == "reset-db":
-            managed_started = True
             controller.reset_database()
         elif args.command == "abort-deploy":
-            managed_started = True
             controller.abort_deploy()
         elif args.command == "rollback":
-            managed_started = True
             controller.rollback(args.backup_id, args.restore_db)
         elif args.command == "resume":
-            managed_started = True
             controller.resume()
         elif args.command == "update":
             target = controller.resolve(latest=args.latest, commit=args.commit, release=args.release, channel=args.channel)
             if target is None:
                 raise Failure("No published release exists for this channel. Select prerelease or use --latest manually.")
-            managed_started = True
             controller.update(target, allow_migrations=args.allow_migrations, skip_ci=args.skip_ci)
         elif args.command == "release-check":
             target = controller.resolve(channel=args.channel)
@@ -4251,7 +4621,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             if not args.apply:
                 log("Check-only. No code or database changes were made.")
                 return 0
-            managed_started = True
+            # Unreachable in A1 (the auto-apply gate refuses first); kept for the PF-A4.3 grant.
             controller.update(target, automatic=True)
         return 0
     except (Failure, pf_instance.ContextError, OSError, ValueError, KeyError, KeyboardInterrupt) as exc:

@@ -47,19 +47,25 @@ SECRET = "Fixture-Secret-p@ss:w/rd#1"
 REAL_GIT = "/usr/bin/git" if os.path.isfile("/usr/bin/git") else None
 
 
-def run_main(arguments, layout, **kwargs):
+def run_main(arguments, layout, *, interactive=False, **kwargs):
+    """In-process CLI. ``interactive=True`` simulates an operator terminal (PF-A1.4 unattended gate);
+    the default keeps the real ``unattended()``."""
     stdout, stderr = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    terminal = mock.patch.object(pf, "unattended", return_value=False) if interactive else contextlib.nullcontext()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), terminal:
         code = pf.main(arguments, installation_root=layout.root, running_release=layout.release_dir,
                        trusted_launch=True, **kwargs)
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def launcher_run(layout, arguments, env=None, cwd=None):
+def launcher_run(layout, arguments, env=None, cwd=None, *, interactive=False):
+    """The installed launcher; stdin is /dev/null (a scheduler) unless ``interactive`` gives it a pty."""
     environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
     environment.update(env or {})
-    return subprocess.run([str(layout.launcher), *arguments], env=environment, cwd=str(cwd or layout.root.parent),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=180)
+    with (pfx.interactive_stdin() if interactive else contextlib.nullcontext(subprocess.DEVNULL)) as stdin:
+        return subprocess.run([str(layout.launcher), *arguments], env=environment,
+                              cwd=str(cwd or layout.root.parent), stdin=stdin, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, check=False, timeout=180)
 
 
 def recording_tool(directory, name, *, exit_code=1, extra=""):
@@ -564,7 +570,7 @@ class WritableGitMetadata(Base):
             return original(controller, argv, **kwargs)
 
         with mock.patch.object(pf.Controller, "command", recorded):
-            code, out, err = run_main(["--instance", "staging", "permissions"], self.layout)
+            code, out, err = run_main(["--instance", "staging", "permissions"], self.layout, interactive=True)
         self.assertEqual(code, 0, err)
         self.assertEqual(calls, [])
         self.assertFalse(self.marker.exists())
@@ -670,7 +676,7 @@ class ImportAndPluginInjection(Base):
         self.assertFalse(self.marker.exists(), "refused helper was executed")
         self.assertEqual(pfx.snapshot_tree(self.base / "staging"), before)
         # Mutation through the launcher stops at the same boundary.
-        result = launcher_run(self.layout, ["--instance", "staging", "backup"])
+        result = launcher_run(self.layout, ["--instance", "staging", "backup"], interactive=True)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("tool-ancestor-replaceable", result.stderr)
         self.assertFalse(self.marker.exists())
@@ -1126,27 +1132,58 @@ class TimeoutAndCancellation(Base):
                                                 "targets": ["frontend", "backend"]})
         self.assertNotIn(self.password, json.dumps(records))
 
+    def backup_signal_tool(self):
+        """PF-A1.4: the registered tool answers at once every read-only argv `backup` issues before its first
+        effect-carrying child (daemon gates, the empty inventory, `compose ps -a -q <service>`, `inspect`, the
+        psql readiness queries); the first argv the classifier marks mutating blocks (pidfile, sleep 300)."""
+        answers = self.base / "backup-answers"
+        answers.mkdir(exist_ok=True)
+        (answers / "inspect.json").write_text(json.dumps([{
+            "Image": "sha256:" + "a" * 64, "State": {"Running": True, "Health": {"Status": "healthy"}},
+            "Config": {"Env": ["POSTGRES_DB=partflow_staging", "POSTGRES_USER=partflow_staging"]}}]) + "\n")
+        body = (
+            "#!/bin/sh\n"
+            "if [ \"$1\" = compose ] && [ \"$2\" = version ]; then echo 'Docker Compose version v2-fixture'; exit 0; fi\n"
+            + pfx.daemon_shell_lines(self.base / "daemon") +
+            "case \"$*\" in\n"
+            "  *' ps -a -q '*) echo " + "c" * 64 + "; exit 0;;\n"
+            "  *' -c SELECT 1;') echo 1; exit 0;;\n"
+            "  *' -c SHOW server_version_num;') echo 160000; exit 0;;\n"
+            "esac\n"
+            f"if [ \"$1\" = inspect ]; then cat {answers}/inspect.json; exit 0; fi\n"
+            f"sleep 300 &\necho $! > {self.pidfile}\n"
+            "echo \"starting with secret ${POSTGRES_PASSWORD:-" + SECRET + "}\"\n"
+            "echo \"stderr sees ${POSTGRES_PASSWORD:-" + SECRET + "} too\" >&2\n"
+            "exec sleep 300\n"
+        )
+        return pfx.tool_script(self.base / "tools", "docker", body)
+
     def test_real_termination_signals_through_the_installed_cli_record_the_effect_before_the_lock_is_free(self):
         """A12r2-F01: a hangup (SSH drop) or quit is an interruption like SIGTERM/SIGINT. Sent for real
-        to the installed launcher during a mutating Compose child, each must terminate the child group
-        and journal the effect before the controller exits and its instance lock is released."""
+        to the installed launcher during a mutating child, each must terminate the child group and
+        journal the effect before the controller exits and its instance lock is released.
+
+        PF-A1.4: the catch-all `up` route is gone; the managed `backup` is interrupted at its first
+        effect-carrying child (`docker tag` of the running image), run by an operator at a terminal."""
+        self.backup_signal_tool()
         operations = self.context.operations_dir
         for signum in (signal.SIGHUP, signal.SIGQUIT, signal.SIGTERM, signal.SIGINT):
             with self.subTest(signal=signum.name):
                 if self.pidfile.exists():
                     self.pidfile.unlink()
                 before = set(os.listdir(str(operations))) if operations.exists() else set()
-                with open(str(self.base / "cli-out.txt"), "wb") as out, open(str(self.base / "cli-err.txt"), "wb") as err:
+                with open(str(self.base / "cli-out.txt"), "wb") as out, \
+                        open(str(self.base / "cli-err.txt"), "wb") as err, pfx.interactive_stdin() as terminal:
                     process = subprocess.Popen(
-                        [str(self.layout.launcher), "--instance", "staging", "up", "-d", "--no-deps", "db"],
+                        [str(self.layout.launcher), "--instance", "staging", "backup"],
                         env={"PATH": "/usr/bin:/bin", "TERM": "dumb"}, cwd=str(self.layout.root.parent),
-                        stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+                        stdin=terminal, stdout=out, stderr=err)
                     try:
                         deadline = time.monotonic() + 60
                         while not self.pidfile.exists() and process.poll() is None and time.monotonic() < deadline:
                             time.sleep(0.05)
                         self.assertTrue(self.pidfile.exists(), (self.base / "cli-err.txt").read_text())
-                        time.sleep(0.3)  # the child is running and streaming; the controller is in the runner
+                        time.sleep(0.3)  # the child is running; the controller is in the runner
                         process.send_signal(signum)
                         returncode = process.wait(timeout=60)
                     finally:
@@ -1164,7 +1201,11 @@ class TimeoutAndCancellation(Base):
                 records = [record for name in new
                            for record in pf_runner.load_unresolved_effects(operations / name / "unresolved-effects.json")]
                 self.assertEqual([record["outcome"] for record in records], ["interrupted"])
-                self.assertEqual(records[0]["effect"], {"kind": "compose-passthrough", "verb": "up"})
+                # The observed first effect of `backup`: tagging the running backend image for retention.
+                effect = records[0]["effect"]
+                self.assertEqual((effect["kind"], effect["verb"]), ("docker", "tag"))
+                self.assertEqual(effect["targets"][0], "sha256:" + "a" * 64)
+                self.assertTrue(effect["targets"][1].startswith("partflow-staging-backend:backup-"), effect)
                 self.assertEqual(pf_runner.group_members(records[0]["process_group"]), [])
                 self.assertNotIn(self.password, json.dumps(records) + stderr
                                  + (self.base / "cli-out.txt").read_text())
@@ -1572,7 +1613,7 @@ class FrozenAuthority(Base):
             self.assertEqual(values["POSTGRES_DB"], "partflow_staging")
             self.assertEqual(values, dict(controller.frozen.values))
 
-    def test_raw_compose_config_is_not_available_through_the_passthrough(self):
+    def test_raw_compose_config_is_not_available_through_any_route(self):
         code, out, err = run_main(["config"], self.layout)
         self.assertEqual(code, 1)
         self.assertIn("not available through this route", err)
@@ -1590,7 +1631,7 @@ class FrozenAuthority(Base):
 
     def test_installed_cli_mutation_freezes_the_proposal_and_stops_on_unsupported_values(self):
         original = self.env_path.read_bytes()
-        result = launcher_run(self.layout, ["--instance", "staging", "permissions"])
+        result = launcher_run(self.layout, ["--instance", "staging", "permissions"], interactive=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         operations = sorted(os.listdir(self.context.operations_dir))
         self.assertEqual(len(operations), 1)
@@ -1604,7 +1645,7 @@ class FrozenAuthority(Base):
         # A value that cannot round-trip: explicit migration issue, nothing regenerated or written.
         self.env_path.write_bytes(original.replace(b"abc123", b"\"it's-not-quotable\""))
         edited = self.env_path.read_bytes()
-        result = launcher_run(self.layout, ["--instance", "staging", "permissions"])
+        result = launcher_run(self.layout, ["--instance", "staging", "permissions"], interactive=True)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("migration-issue", result.stderr)
         self.assertNotIn("it's-not-quotable", result.stderr + result.stdout)
@@ -1616,7 +1657,7 @@ class FrozenAuthority(Base):
         self.env_path.write_bytes(original)
         policy = self.layout.policy_path
         policy.write_bytes(pfx.policy_document(revision=2))
-        result = launcher_run(self.layout, ["--instance", "staging", "permissions"])
+        result = launcher_run(self.layout, ["--instance", "staging", "permissions"], interactive=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("policy-invalid", result.stderr)
         self.assertEqual(len(os.listdir(self.context.operations_dir)), 2)
@@ -1642,7 +1683,10 @@ class ReadOnlyAfterExtraction(Base):
                     code, err = exc.code, ""
                 if arguments[0] == "frobnicate":
                     self.assertEqual(code, 1)
-                    self.assertIn("Unknown command 'frobnicate'", err)
+                    self.assertIn("unknown-command: Unknown command 'frobnicate'", err)
+                if arguments[0] == "version":
+                    self.assertEqual(code, 1)
+                    self.assertIn("compose-route-removed: 'pf version' no longer forwards to Docker Compose.", err)
         self.assertEqual(pfx.snapshot_tree(self.base / "staging", context.paths.private_state, self.layout.sources), before)
         self.assertEqual(os.listdir(context.operations_dir), [])
         self.assertEqual(os.listdir(self.layout.sources), [])

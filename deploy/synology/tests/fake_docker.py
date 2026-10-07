@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import sys
 import tarfile
+import time
 
 STATE_DIR = None  # replaced when the tool is installed
 
@@ -128,8 +129,8 @@ def labels_text(labels):
 
 
 class Result:
-    def __init__(self, code=0, out="", err=""):
-        self.code, self.out, self.err = code, out, err
+    def __init__(self, code=0, out="", err="", sleep=0):
+        self.code, self.out, self.err, self.sleep = code, out, err, sleep
 
 
 def violation(state, text):
@@ -292,7 +293,10 @@ def dispatch(state, argv, env):
             containers.remove(found[0])
         return Result(0)
     if verb == "stop":
+        failures = state.get("compose", {}).get("stop_fail", {})  # PF-A1.4 EH-5: a vanished --rm one-off
         for wanted in positional_after(argv, 1):
+            if wanted in failures:
+                return Result(1, "", failures[wanted] + "\n")
             for container in state.get("containers", []):
                 if container["id"] == wanted:
                     container["status"] = "exited"
@@ -338,6 +342,9 @@ def compose(state, argv, env):
         return Result(0, settings.get("run_output", ""))
     if verb == "ps":
         return Result(0, settings.get("ps", "NAME  STATUS\n"))
+    if verb == "logs":
+        # PF-A1.4: `logs_sleep` keeps a followed child running after its output (bound tests).
+        return Result(0, settings.get("logs", ""), sleep=settings.get("logs_sleep", 0))
     if verb == "exec":
         if "psql" in rest and "-c" in rest:
             statement = rest[rest.index("-c") + 1]
@@ -372,14 +379,21 @@ def main(argv):
     save_state(state)
     sys.stdout.write(result.out)
     sys.stderr.write(result.err)
+    if result.sleep:
+        sys.stdout.flush()
+        time.sleep(result.sleep)
     return result.code
 
 
 def apply_state_patch(state, patch):
     """{"op": "append"|"remove"|"update", "list": name, "match": {...}, "value"/"set": {...}}, or
-    {"op": "set", "key": name, "value": ...} for a top-level state field (e.g. a new ``info``)."""
+    {"op": "set", "key": name, "value": ...} for a top-level state field (e.g. a new ``info``), or
+    {"op": "write_file", "path": ..., "text": ...}: an editor changes a fixture file (PF-A1.4 CLI-5)."""
     if patch["op"] == "set":
         state[patch["key"]] = patch["value"]
+        return
+    if patch["op"] == "write_file":
+        Path(patch["path"]).write_text(patch["text"], encoding="utf-8")
         return
     items = state.setdefault(patch["list"], [])
     if patch["op"] == "append":

@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A1.3 (trên commit `13807ca`).
+> Baseline đồng bộ: package revision PF-A1.4 (trên commit `53246a1`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -126,6 +126,44 @@
 > bundle bao phủ image ID của nó. Không prune, không dùng `compose down -v`, không ép xóa image,
 > và không bao giờ xóa đường dẫn bind mount. `abort-deploy` không còn chạy
 > `compose down --volumes`; nó xóa container, network và volume trong plan và giữ lại image.
+
+> **Checkpoint Deployment Admin PF-A1.4 (2026-10-06) — mọi entry route đi qua các primitive A1,
+> không còn Compose catch-all; PF-A1 đóng offline, vẫn là trạng thái phát triển, chưa phải bản
+> phát hành NAS.**
+> *Không còn Compose catch-all.* `pf` chỉ nhận đúng các lệnh managed ở mục 17 và hai Compose view
+> read-only. Mọi từ mà Compose passthrough trước đây chuyển tiếp (`up`, `start`, `restart`,
+> `create`, `scale`, `watch`, `unpause`, `down`, `stop`, `kill`, `pause`, `rm`, `run`, `exec`, `cp`,
+> `attach`, `build`, `pull`, `push`, `version`, `top`, `images`, `port`, `ls`, `events`, `stats`,
+> `wait`, `config`) bị từ chối với `compose-route-removed` kèm tên lệnh managed thay thế; global
+> option của Compose hoặc Docker đứng đầu (`-f`, `-p`, `--env-file`, `--project-directory`,
+> `--profile`, `-H`, `--context`, …) bị từ chối với `compose-override-refused`; mọi option đứng đầu
+> khác, kể cả dạng viết tắt như `--inst`, bị từ chối với `unknown-option`; từ không biết bị từ chối
+> với `unknown-command` (tất cả exit 1). Các lần từ chối này xảy ra trước khi đọc registry, lấy lock
+> hay khởi động bất kỳ process nào. Mọi lệnh đều từ chối option viết tắt.
+> *View read-only.* `pf ps` và `pf logs` (mục 14) dựng lại lệnh Compose chỉ từ các option đã parse
+> (service `db`, `backend`, `frontend`) và chạy qua context đã validate, runner và daemon binding,
+> output được redact và giới hạn; không lấy lock, không tạo operation. `pf` không kèm lệnh chính là
+> `pf ps`.
+> *Lệnh chạy không có terminal.* Lệnh khởi động không có terminal (scheduled task, script, `ssh`
+> không có `-t`) bị từ chối trước lock: lệnh có hỏi xác nhận gõ tay bị từ chối với
+> `terminal-required`; `backup`, `permissions` và `release-check` phải nêu rõ instance
+> (`--instance <slug|uuid>`, nếu không thì `instance-required-unattended`) và sau đó cần một grant
+> trong protected policy cho loại thao tác đó, mà ở checkpoint này không policy nào cấp
+> (`policy-grant-required`, exit 20; grant có từ PF-A4.3). `release-check --apply` bị từ chối với
+> `auto-apply-not-permitted` (exit 20) dù có hay không có terminal; `auto_update` trong
+> `pf-config.json` chỉ là đề xuất. Wrapper `backup.sh` và `release-check.sh` của scheduler bắt
+> buộc `--instance` và chỉ thực thi launcher nằm cạnh nó (mục 13).
+> *Fail-closed stop.* Sau một operation thất bại có pending journal, controller chỉ dừng các
+> one-off job Compose của chính instance này theo exact inventory (job đã biến mất được báo và bỏ
+> qua), rồi dừng các application service; label cũ `partflow.admin.project` không chọn gì cả. Thông
+> báo nêu `pf --instance <slug> status`.
+> *Thẩm quyền restore.* `recoveries` và `restore-instance` chỉ liệt kê và kiểm tra bundle trong
+> thư mục `recovery/<project>/` của chính instance đã chọn. `--project` là tên Compose project,
+> không bao giờ là đường dẫn, và khi đi cùng `--instance` thì phải đúng project của instance đó
+> (`selection-conflict`). Bundle nằm ngoài thư mục đó bị từ chối (`recovery-outside-instance`), và
+> bundle chỉ được restore `deployed.json`, `last-reset.json` và `observed-tags.json` vào protected
+> state (`recovery-state-file-refused`).
+> Khối này **thay thế** các câu về passthrough trong khối PF-A1.2 và PF-A1.3 ở trên.
 
 ## 1. Mục đích
 
@@ -301,6 +339,11 @@ Chạy:
 sudo sh ./deploy/synology/install-control.sh
 ```
 
+> **Cảnh báo (PF-A1.4).** `install-control.sh` cài layout v2.5 cũ, mà launcher của nó ở checkpoint
+> này chỉ read-only (mục 15). Trên một NAS v2.5 đang chạy, nó thay thư mục `control/` v2.5 đang
+> hoạt động (được archive vào `recovery/control-upgrades/`) bằng một thư mục read-only cho tới khi có
+> installer PF-A2. Không chạy nó trên NAS bạn vẫn đang quản trị bằng v2.5.
+
 Installer hiển thị target path và yêu cầu nhập chính xác:
 
 ```text
@@ -316,7 +359,10 @@ Installer migrate an toàn như sau:
 5. Nếu đã có `control/`, archive nó vào `recovery/control-upgrades/` trước khi thay.
 6. Cài bản `control/` root-owned mới.
 7. Cài `/usr/local/bin/pf` nếu path đó chưa bị phần mềm khác sử dụng.
-8. Chạy `pf permissions` để chuẩn hóa quyền repo/config/backup/recovery.
+8. Chạy `pf permissions` để chuẩn hóa quyền repo/config/backup/recovery. Ở checkpoint này lệnh
+   đó tới launcher read-only cũ, vốn từ chối `permissions` trên installation chưa đăng ký; do
+   `set -eu`, installer dừng tại đó và không in thông báo "installation complete". Thư mục control
+   vẫn là thư mục read-only cũ cho tới PF-A2.
 
 Installer không xóa container, volume, database, revision backup hay application source.
 Đây không phải redeploy và cũng không reset database.
@@ -361,6 +407,9 @@ Default:
 
 Trusted users có thể sửa file này qua SMB. Controller validate key được hỗ trợ, project name,
 boolean, numeric value và DSM group trước khi sử dụng.
+
+`auto_update` chỉ là đề xuất: apply không người trực cần một grant trong protected policy, mà
+checkpoint này không cung cấp (mục 13).
 
 ### `config/.env`
 
@@ -777,47 +826,67 @@ import/reconciliation cho đúng loại data thật sự cần mang qua.
 
 ## 13. Release check và scheduled task
 
-Chỉ check:
+Chỉ check, chạy tương tác:
 
 ```sh
-sudo pf release-check
+sudo pf --instance <slug> release-check
 ```
 
-Muốn cho phép unattended staging update, sửa:
+Apply một release đã chọn bằng tay với `sudo pf --instance <slug> update --release <tag>`.
 
-```text
-/volume1/docker/partflow/config/pf-config.json
-```
-
-và đặt:
-
-```text
-"auto_update": true
-```
-
-Scheduled update chặt hơn manual update: phải có eligible published release, CI success đúng
-exact SHA, không có migration/config/dependency condition cần human review, và workspace vẫn
-khớp deployed revision.
-
-DSM Task Scheduler nên gọi root-owned wrapper:
+**Ở checkpoint này không có scheduled task trên instance do pf quản lý.** Khi không có terminal,
+`backup` và `release-check` bị từ chối với `policy-grant-required` (exit 20) và
+`release-check --apply` với `auto-apply-not-permitted` (exit 20): thao tác không người trực cần một
+grant trong protected policy cho đúng loại thao tác đó, và grant có từ PF-A4.3. Đặt
+`"auto_update": true` trong `config/pf-config.json` không bật được gì; nó chỉ là đề xuất. Trong lúc
+chờ, hãy chạy checkpoint tương tác rồi copy ra ngoài NAS:
 
 ```sh
-/volume1/docker/partflow/control/backup.sh
+sudo pf --instance <slug> backup
 ```
 
-và:
+Khi đã có grant, một DSM task root-owned phải nêu instance và chạy wrapper mà installer PF-A2 đặt
+cạnh launcher đã cài, hoặc chạy chính launcher:
 
 ```sh
-/volume1/docker/partflow/control/release-check.sh --apply
+<root>/bootstrap/backup.sh --instance <slug>
+<root>/bootstrap/release-check.sh --instance <slug> [--channel stable|prerelease] [--apply]
+<root>/bootstrap/pf --instance <slug> backup
 ```
 
-Không schedule `reset-db`, `purge`, `restore-instance` hay destructive interactive command.
+Wrapper chỉ nhận đúng các tham số này (tham số khác in usage và exit 2), chạy với `PATH` cố định
+và chỉ thực thi launcher nằm cạnh nó. Bản sao nằm trong thư mục `control/` cũ sẽ tới launcher
+read-only cũ, vốn từ chối `backup` và `release-check` trên installation chưa đăng ký.
+
+Khi đã được cấp grant, scheduled update vẫn chặt hơn manual update: phải có eligible published
+release, CI success đúng exact SHA, không có migration/config/dependency condition cần human
+review, và workspace vẫn khớp deployed revision.
+
+Không schedule `reset-db`, `purge`, `restore-instance` hay destructive interactive command; không
+có terminal thì chúng vẫn bị từ chối (`terminal-required`).
 
 ## 14. Raw Compose nâng cao
 
 Ưu tiên `sudo pf ...` vì controller pin path và serialize state-changing operation.
 
-Nếu thật sự cần raw Compose, dạng tương đương là:
+Từ PF-A1.4 `pf` không còn chuyển tiếp lệnh Compose. Chỉ còn hai view read-only:
+
+```sh
+sudo pf --instance <slug> ps [-a] [-q] [--services] [--status STATUS] [--format table|json] [SERVICE...]
+sudo pf --instance <slug> logs [--tail N] [-f] [-t] [--no-color] [--no-log-prefix] [--since V] [--until V] [SERVICE...]
+```
+
+`SERVICE` là `db`, `backend` hoặc `frontend`; `STATUS` là một trong `paused`, `restarting`,
+`removing`, `running`, `dead`, `created`, `exited`; `V` là khoảng thời gian như `30m`, `2h`, hoặc
+ngày/giờ RFC 3339. `--tail` mặc định 200, cho phép 1–10000. `logs -f` kết thúc sau 1 giờ hoặc
+64 MiB output với `logs-bound-reached` (exit 1); phần output đã hiện tới lúc đó là đầy đủ. Cả hai
+view chạy qua context đã validate, các tool đã đăng ký và daemon binding, redact mật khẩu database,
+không lấy lock và không tạo operation. Mọi từ hoặc option Compose khác bị từ chối (mục 16).
+
+Không có route managed để chạy CLI của ứng dụng trong container backend (`exec` và `run` bị từ
+chối; route managed thuộc PF-A4).
+
+Nếu thật sự cần raw Compose bên ngoài controller, dạng tương đương là:
 
 ```sh
 sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
@@ -840,11 +909,6 @@ Từ PF-A1.3 `compose.nas.yaml` còn bắt buộc `DEPLOY_ADMIN_INSTANCE_ID`. **
 cho mọi resource mà Compose tạo sau đó**: các resource này bị phân loại `resource-foreign-claim`
 hoặc `resource-label-conflict` và chặn `purge`, `abort-deploy` cùng mọi guarded command cho tới
 khi được review.
-
-Qua controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart`/`scale`/`watch` phải qua Compose
-envelope (**model** đã resolve), và mọi passthrough verb có mutation chạy ownership preflight
-trước. **CLI flag** của passthrough (ví dụ `run -v`, `--cap-add`, `exec --privileged`) không được
-model envelope bao phủ cho tới khi PF-A1.4 bỏ route này.
 
 Raw Docker/Compose bỏ qua controller lock, recovery check và destructive guard. Không chạy
 song song với `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
@@ -880,6 +944,12 @@ recovery/control-upgrades/
 Explicit install step chính là security boundary cho phép `repo/` writable bởi users.
 Không chạy `install-control.sh` chưa review/không rõ nguồn bằng `sudo`.
 
+> **Cảnh báo (PF-A1.4).** Ở checkpoint này `install-control.sh` cài layout cũ có launcher chỉ
+> read-only: nó từ chối mọi lệnh trừ báo cáo chẩn đoán, kể cả lệnh `pf permissions` cuối cùng của
+> chính installer. Chạy nó trên NAS v2.5 đang hoạt động sẽ thay thư mục control v2.5 đang chạy (được
+> archive vào `recovery/control-upgrades/`) bằng một thư mục read-only cho tới khi installer PF-A2
+> thay thế.
+
 ## 16. Troubleshooting
 
 ### SMB thấy `repo/` nhưng không sửa được
@@ -910,6 +980,54 @@ hoặc cài/update control trước:
 ```sh
 sudo sh ./deploy/synology/install-control.sh
 ```
+
+Ở checkpoint này installer đó cài layout read-only cũ (xem cảnh báo ở mục 15); không chạy nó trên
+NAS v2.5 đang hoạt động.
+
+### `compose-route-removed`, `compose-override-refused`, `unknown-option` hoặc `unknown-command`
+
+`pf` không còn chuyển tiếp lệnh Compose (PF-A1.4). `compose-route-removed` nêu lệnh managed thay
+thế từ đó (ví dụ `pf resume`, `pf update` hoặc `pf rollback` thay cho `up`; `pf purge` hoặc
+`pf abort-deploy` thay cho `down`); `compose-override-refused` nghĩa là global option của Compose
+hoặc Docker như `-f`, `-p` hay `--env-file` (project, file, env-file, thư mục và daemon là cố
+định); `unknown-option` là mọi thứ khác đứng trước lệnh, kể cả dạng viết tắt của `--instance`;
+`unknown-command` là từ không biết. Không có gì được đọc hay thay đổi. Dùng `pf ps` và `pf logs`
+cho view Compose read-only (mục 14).
+
+### `terminal-required`
+
+Lệnh này hỏi xác nhận gõ tay nhưng được khởi động không có terminal (scheduled task, script,
+`ssh` không có `-t`). Chạy tương tác: `sudo pf --instance <slug> <command>`. Không có gì bị thay
+đổi.
+
+### `instance-required-unattended`
+
+`backup`, `permissions` hoặc `release-check` chạy không có terminal và instance được chọn qua
+default được bảo vệ hoặc vì là registration duy nhất. Lệnh không người trực phải nêu instance:
+`pf --instance <slug|uuid> <command>`. Không có gì bị thay đổi.
+
+### `policy-grant-required` hoặc `auto-apply-not-permitted` (exit 20)
+
+`backup`, `permissions` hoặc `release-check` chạy không người trực, hoặc mọi `release-check --apply`,
+cần một protected policy cho phép đúng loại thao tác đó. Ở checkpoint này không policy nào cấp
+(grant có từ PF-A4.3); `auto_update` trong `pf-config.json` không cấp được. Hãy chạy lệnh tương tác,
+và apply release bằng tay với `pf --instance <slug> update --release <tag>`. Không có gì bị thay
+đổi.
+
+### `selection-conflict`, `recovery-outside-instance` hoặc `recovery-state-file-refused`
+
+`selection-conflict`: `--project` nêu project khác với instance đã chọn bằng `--instance`; chỉ dùng
+`--instance`. `recovery-outside-instance`: bundle không phải thư mục nằm trong
+`recovery/<project>/` của chính instance đã chọn; bundle của instance khác hoặc bản sao ở nơi khác
+không bao giờ được liệt kê hay restore. `recovery-state-file-refused`: manifest của bundle liệt kê
+state file khác `deployed.json`, `last-reset.json` hoặc `observed-tags.json`. Không có gì bị thay
+đổi.
+
+### `logs-bound-reached`
+
+`pf logs` dừng ở giới hạn của nó (1 giờ với `-f`, nếu không thì deadline chẩn đoán, hoặc 64 MiB
+output). Output đã hiện là đầy đủ tới thời điểm đó; thu hẹp bằng `--since`, `--tail` hoặc tên
+service.
 
 ### Có `.env` nhưng Compose báo thiếu biến
 
@@ -1014,8 +1132,14 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | `sudo pf restore-instance RECOVERY_ID` | Dựng lại functional instance đã purge |
 | `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB bên cạnh current instance |
 | `sudo pf release-check` | Check eligible release, không apply |
-| `sudo pf release-check --apply` | Unattended update chỉ khi mọi gate pass |
+| `sudo pf release-check --apply` | Bị từ chối ở checkpoint này (exit 20): cần grant trong protected policy (PF-A4.3) |
 | `sudo pf resume` | Resume chỉ khi early-failure state chưa thay đổi |
+| `sudo pf ps [options] [SERVICE...]` | View container Compose read-only của instance (mục 14) |
+| `sudo pf logs [options] [SERVICE...]` | Log service có giới hạn và được redact (mục 14) |
+
+Lệnh khởi động không có terminal phải truyền `--instance <slug|uuid>`; cho tới khi có grant
+PF-A4.3, mọi lệnh có lock đều bị từ chối khi không có terminal (`terminal-required`,
+`policy-grant-required`).
 
 ## 18. Giới hạn validation
 
@@ -1034,12 +1158,31 @@ Giới hạn của PF-A1.3 (chỉ có bằng chứng offline; Docker-daemon gate
 - JSON đã render được kiểm tra, không được dùng lại làm input `-f` khi thực thi;
 - các label marker container của Compose dùng cho ownership chưa được hiệu chỉnh trên daemon thật;
 - việc bao phủ image theo image ID giả định daemon không có hoạt động song song giữa `image save`
-  và binding inventory;
-- CLI flag của passthrough (`run -v`, `--cap-add`, `exec --privileged`) không được model envelope
-  bao phủ cho tới PF-A1.4.
+  và binding inventory.
+
+PF-A1.4 bổ sung các giới hạn sau:
+
+- việc phát hiện chạy không người trực dựa trên terminal (stdin không có, đã đóng hoặc không phải
+  TTY); `ssh` không có `-t` được tính là không người trực;
+- không thao tác không người trực nào, kể cả scheduled backup và release check, chạy trên instance
+  do pf quản lý cho tới khi có grant trong protected policy của PF-A4.3;
+- checkpoint này không cài wrapper của scheduler (installer PF-A2 sẽ đặt chúng);
+- `install-control.sh` vẫn là installer cũ (mục 5 và 15);
+- các label one-off của Compose `run` mà `fail_closed` dựa vào mới chỉ được chứng minh offline;
+- không có route managed để chạy CLI của ứng dụng trong container backend.
+
+**Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
+một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;
+phạm vi an toàn của PF-A1 mới chỉ được chứng minh offline. A1-T11…T14 vẫn bị chặn vì cần Docker
+daemon thật (owner PF-A3.4/PF-A5.1, kể cả label one-off thật của Compose `run`) và A1-T17 cần bằng
+chứng DSM ACL/SMB (owner PF-A2.3/PF-A5.1). Không finding nào được đóng toàn bộ và không có gì ở đây
+là production-ready.
 
 Trước khi dựa vào v2.5 recovery cho data quan trọng, nên chạy ít nhất một vòng disposable
-staging trên NAS thật:
+staging trên NAS thật. Vòng dưới đây bắt đầu bằng `install-control` nên **cần installer PF-A2**;
+trước khi có nó, hãy bắt đầu từ một protected layout và chạy tương tác
+`<root>/bootstrap/pf --instance <slug> doctor → backup → update → purge → restore-instance →
+verify UI/data`.
 
 ```text
 install-control

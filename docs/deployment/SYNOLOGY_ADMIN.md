@@ -133,6 +133,44 @@
 > longer runs `compose down --volumes`; it removes the planned containers, network and volume
 > and keeps the images.
 
+> **Deployment Admin checkpoint PF-A1.4 (2026-10-06) — every entry route on the A1 primitives, no
+> catch-all Compose; PF-A1 closed offline, still a development state, not a NAS release.**
+> *No catch-all Compose.* `pf` accepts exactly the managed commands of section 17 and two
+> read-only Compose views. Every word the former Compose passthrough forwarded (`up`, `start`,
+> `restart`, `create`, `scale`, `watch`, `unpause`, `down`, `stop`, `kill`, `pause`, `rm`, `run`,
+> `exec`, `cp`, `attach`, `build`, `pull`, `push`, `version`, `top`, `images`, `port`, `ls`,
+> `events`, `stats`, `wait`, `config`) is refused with `compose-route-removed` and names the managed
+> alternative; a leading Compose or Docker global option (`-f`, `-p`, `--env-file`,
+> `--project-directory`, `--profile`, `-H`, `--context`, …) is refused with
+> `compose-override-refused`; any other leading option, an abbreviation such as `--inst` included,
+> with `unknown-option`; an unknown word with `unknown-command` (all exit 1). These refusals happen
+> before the registry is read, a lock is taken or any process starts. Abbreviated options are
+> refused by every command.
+> *Read-only views.* `pf ps` and `pf logs` (section 14) rebuild the Compose command from their
+> parsed options only (services `db`, `backend`, `frontend`) and run it through the validated
+> context, the runner and the daemon binding with redacted, bounded output; they take no lock and
+> create no operation. `pf` without a command is `pf ps`.
+> *Commands without a terminal.* A command started without a terminal (a scheduled task, a script,
+> `ssh` without `-t`) is refused before the lock: a command that asks for a typed confirmation with
+> `terminal-required`; `backup`, `permissions` and `release-check` must name the instance
+> (`--instance <slug|uuid>`, else `instance-required-unattended`) and then need a protected policy
+> grant for their class of operation, which no policy grants in this checkpoint
+> (`policy-grant-required`, exit 20; grants arrive with PF-A4.3). `release-check --apply` is refused
+> with `auto-apply-not-permitted` (exit 20) with or without a terminal; `auto_update` in
+> `pf-config.json` is a proposal only. The scheduler wrappers `backup.sh` and `release-check.sh`
+> require `--instance` and execute only their sibling launcher (section 13).
+> *Fail-closed stop.* After a failed operation with a pending journal the controller stops only
+> this instance's own Compose one-off jobs from the exact inventory (one that already vanished is
+> reported and skipped), then the application services; the legacy `partflow.admin.project` label
+> selects nothing. The message names `pf --instance <slug> status`.
+> *Restore authority.* `recoveries` and `restore-instance` list and verify bundles only in the
+> selected instance's own `recovery/<project>/` directory. `--project` is a Compose project name,
+> never a path, and with `--instance` it must name that instance's project (`selection-conflict`).
+> A bundle outside that directory is refused (`recovery-outside-instance`), and a bundle restores
+> only `deployed.json`, `last-reset.json` and `observed-tags.json` into protected state
+> (`recovery-state-file-refused`).
+> This block **supersedes** the passthrough sentences of the PF-A1.2 and PF-A1.3 blocks above.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -313,6 +351,11 @@ Then run:
 sudo sh ./deploy/synology/install-control.sh
 ```
 
+> **Warning (PF-A1.4).** `install-control.sh` installs the legacy v2.5 layout, whose launcher is
+> read-only in this checkpoint (section 15). On a live v2.5 NAS it replaces the working v2.5
+> `control/` directory (archived under `recovery/control-upgrades/`) with a read-only one until the
+> PF-A2 installer exists. Do not run it on a NAS you still administer with v2.5.
+
 It shows the target paths and requires this exact confirmation:
 
 ```text
@@ -328,7 +371,11 @@ The installer performs these migrations safely:
 5. Archives an existing `control/` under `recovery/control-upgrades/` before replacement.
 6. Installs a new root-owned `control/` copy.
 7. Installs `/usr/local/bin/pf` when that path is free or already PartFlow-managed.
-8. Runs `pf permissions` to normalize repository/config/backup/recovery modes.
+8. Runs `pf permissions` to normalize repository/config/backup/recovery modes. In this
+   checkpoint that call reaches the legacy read-only launcher, which refuses `permissions` on an
+   unregistered installation; under `set -eu` the installer stops there and its "installation
+   complete" message is not printed. The control directory stays the legacy read-only one until
+   PF-A2.
 
 The installer preserves Docker containers, volumes, databases, revision backups, and
 application source. It is not a redeploy or database reset.
@@ -374,6 +421,9 @@ Default template:
 
 Trusted users may edit this file over SMB. The controller validates supported keys,
 project naming, booleans, positive numeric values, and configured DSM groups before using it.
+
+`auto_update` is a proposal only: unattended apply needs a protected policy grant, which this
+checkpoint does not provide (section 13).
 
 ### `config/.env`
 
@@ -801,49 +851,71 @@ procedure for any data that truly must be carried forward.
 
 ## 13. Release checks and scheduled tasks
 
-Check without applying:
+Check without applying, interactively:
 
 ```sh
-sudo pf release-check
+sudo pf --instance <slug> release-check
 ```
 
-To allow unattended release updates, edit:
+Apply a selected release manually with `sudo pf --instance <slug> update --release <tag>`.
 
-```text
-/volume1/docker/partflow/config/pf-config.json
-```
-
-and set:
-
-```text
-"auto_update": true
-```
-
-Scheduled updates are stricter than manual updates: they require an eligible published
-release, matching successful CI for the exact SHA, no migration/config/dependency condition
-requiring human review, and a workspace that still exactly matches the deployed revision.
-
-DSM Task Scheduler should call the root-owned wrappers, for example:
+**Scheduled tasks are not available on a pf-managed instance in this checkpoint.** Without a
+terminal, `backup` and `release-check` are refused with `policy-grant-required` (exit 20) and
+`release-check --apply` with `auto-apply-not-permitted` (exit 20): unattended operation needs a
+protected policy grant for that class of operation, and the grants arrive with PF-A4.3. The
+editable `"auto_update": true` in `config/pf-config.json` does not enable anything; it is a
+proposal only. Until then run the checkpoint interactively and copy it off-NAS:
 
 ```sh
-/volume1/docker/partflow/control/backup.sh
+sudo pf --instance <slug> backup
 ```
 
-and:
+Once grants exist, a root-owned DSM task names its instance and runs the wrapper the PF-A2
+installer places next to the installed launcher, or the launcher itself:
 
 ```sh
-/volume1/docker/partflow/control/release-check.sh --apply
+<root>/bootstrap/backup.sh --instance <slug>
+<root>/bootstrap/release-check.sh --instance <slug> [--channel stable|prerelease] [--apply]
+<root>/bootstrap/pf --instance <slug> backup
 ```
+
+The wrappers accept exactly these arguments (anything else prints usage and exits 2), run with
+a fixed `PATH` and execute only their sibling launcher. Copies under a legacy `control/`
+directory reach the read-only legacy launcher, which refuses `backup` and `release-check` on an
+unregistered installation.
+
+Scheduled updates, once granted, stay stricter than manual updates: they require an eligible
+published release, matching successful CI for the exact SHA, no migration/config/dependency
+condition requiring human review, and a workspace that still exactly matches the deployed
+revision.
 
 Do not schedule `reset-db`, `purge`, `restore-instance`, or other interactive destructive
-commands.
+commands; without a terminal they are refused anyway (`terminal-required`).
 
 ## 14. Advanced raw Compose access
 
 Prefer `sudo pf ...`. The controller pins all important paths and serializes state-changing
 operations.
 
-If raw Compose access is absolutely necessary, the equivalent shape is:
+Since PF-A1.4 `pf` no longer forwards Compose commands. Two read-only views remain:
+
+```sh
+sudo pf --instance <slug> ps [-a] [-q] [--services] [--status STATUS] [--format table|json] [SERVICE...]
+sudo pf --instance <slug> logs [--tail N] [-f] [-t] [--no-color] [--no-log-prefix] [--since V] [--until V] [SERVICE...]
+```
+
+`SERVICE` is `db`, `backend` or `frontend`; `STATUS` is one of `paused`, `restarting`,
+`removing`, `running`, `dead`, `created`, `exited`; `V` is a duration such as `30m` or `2h`, or
+an RFC 3339 date/time. `--tail` defaults to 200 and allows 1–10000. `logs -f` ends after 1 hour
+or 64 MiB of output with `logs-bound-reached` (exit 1); the output shown until then is complete.
+Both views run through the validated context, the registered tools and the daemon binding, redact
+the database password, take no lock and create no operation. Any other Compose word or option is
+refused (section 16).
+
+There is no managed route for an application CLI inside the backend container (`exec` and `run`
+are refused; a managed route is PF-A4).
+
+If raw Compose access outside the controller is absolutely necessary, the equivalent shape is:
 
 ```sh
 sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
@@ -867,11 +939,6 @@ Since PF-A1.3 `compose.nas.yaml` also requires `DEPLOY_ADMIN_INSTANCE_ID`. **A w
 mislabels every resource Compose then creates**: those resources are classified
 `resource-foreign-claim` or `resource-label-conflict` and block `purge`, `abort-deploy` and every
 guarded command until they are reviewed.
-
-Through the controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart`/`scale`/`watch` must pass the
-Compose envelope (the resolved **model**), and every mutating passthrough verb runs the
-ownership preflight first. Passthrough **CLI flags** (for example `run -v`, `--cap-add`,
-`exec --privileged`) are not covered by the model envelope until PF-A1.4 removes the route.
 
 Using raw Docker/Compose bypasses controller locks, recovery checks, and destructive guards.
 Do not run it concurrently with `pf update`, `pf backup`, `pf reset-db`, `pf purge`, or
@@ -908,6 +975,12 @@ recovery/control-upgrades/
 This explicit step is the security boundary that permits `repo/` to remain users-writable.
 Do not run an unreviewed or unknown `install-control.sh` with `sudo`.
 
+> **Warning (PF-A1.4).** In this checkpoint `install-control.sh` installs the legacy layout, whose
+> launcher is read-only: it refuses every command except the diagnostics report, including the
+> installer's own final `pf permissions`. Running it on a live v2.5 NAS replaces the working v2.5
+> control directory (archived under `recovery/control-upgrades/`) with a read-only one until the
+> PF-A2 installer replaces it.
+
 ## 16. Troubleshooting
 
 ### SMB can see `repo/` but cannot edit
@@ -938,6 +1011,54 @@ or install/update control first:
 ```sh
 sudo sh ./deploy/synology/install-control.sh
 ```
+
+In this checkpoint that installer installs the legacy read-only layout (see the warning in
+section 15); do not run it on a live v2.5 NAS.
+
+### `compose-route-removed`, `compose-override-refused`, `unknown-option` or `unknown-command`
+
+`pf` no longer forwards Compose commands (PF-A1.4). `compose-route-removed` names the managed
+command that replaces the word (for example `pf resume`, `pf update` or `pf rollback` instead of
+`up`; `pf purge` or `pf abort-deploy` instead of `down`); `compose-override-refused` means a
+Compose or Docker global option such as `-f`, `-p` or `--env-file` (the project, files, env-file,
+directory and daemon are fixed); `unknown-option` means anything else before the command,
+including an abbreviation of `--instance`; `unknown-command` means an unknown word. Nothing was
+read or changed. Use `pf ps` and `pf logs` for read-only Compose views (section 14).
+
+### `terminal-required`
+
+The command asks for a typed confirmation and was started without a terminal (a scheduled task,
+a script, `ssh` without `-t`). Run it interactively: `sudo pf --instance <slug> <command>`.
+Nothing was changed.
+
+### `instance-required-unattended`
+
+`backup`, `permissions` or `release-check` ran without a terminal and the instance was selected
+by the protected default or as the only registration. An unattended command must name its
+instance: `pf --instance <slug|uuid> <command>`. Nothing was changed.
+
+### `policy-grant-required` or `auto-apply-not-permitted` (exit 20)
+
+An unattended `backup`, `permissions` or `release-check`, or any `release-check --apply`, needs a
+protected policy that permits that class of operation. No policy grants one in this checkpoint
+(grants arrive with PF-A4.3); `auto_update` in `pf-config.json` does not. Run the command
+interactively, and apply a release manually with `pf --instance <slug> update --release <tag>`.
+Nothing was changed.
+
+### `selection-conflict`, `recovery-outside-instance` or `recovery-state-file-refused`
+
+`selection-conflict`: `--project` names a different project than the instance selected with
+`--instance`; use `--instance` alone. `recovery-outside-instance`: the bundle is not a directory
+of the selected instance's own `recovery/<project>/`; bundles of other instances or copies
+elsewhere are never listed or restored. `recovery-state-file-refused`: the bundle manifest lists
+a state file other than `deployed.json`, `last-reset.json` or `observed-tags.json`. Nothing was
+changed.
+
+### `logs-bound-reached`
+
+`pf logs` stopped at its bound (1 hour for `-f`, otherwise the diagnostic deadline, or 64 MiB of
+output). The output shown is complete up to that point; narrow it with `--since`, `--tail` or a
+service name.
 
 ### `.env` exists but Compose says variables are missing
 
@@ -1038,8 +1159,14 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 | `sudo pf restore-instance RECOVERY_ID` | Recreate a purged functional instance |
 | `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB alongside current instance |
 | `sudo pf release-check` | Check eligible release without applying |
-| `sudo pf release-check --apply` | Apply unattended update only when every gate passes |
+| `sudo pf release-check --apply` | Refused in this checkpoint (exit 20): needs a protected policy grant (PF-A4.3) |
 | `sudo pf resume` | Resume only an unchanged early-failure state |
+| `sudo pf ps [options] [SERVICE...]` | Read-only Compose container view of the instance (section 14) |
+| `sudo pf logs [options] [SERVICE...]` | Bounded, redacted service logs (section 14) |
+
+Commands started without a terminal must pass `--instance <slug|uuid>`; until PF-A4.3 policy
+grants exist every locked command is refused without a terminal (`terminal-required`,
+`policy-grant-required`).
 
 ## 18. Validation boundary
 
@@ -1058,12 +1185,31 @@ PF-A1.3 limits (offline evidence only; the Docker-daemon and NAS host gates are 
 - the rendered JSON is validated, not reused as the executed `-f` input;
 - the Compose container-marker labels used for ownership are not calibrated on a real daemon;
 - image coverage by image ID assumes a quiescent daemon between `image save` and the binding
-  inventory;
-- passthrough CLI flags (`run -v`, `--cap-add`, `exec --privileged`) are not covered by the
-  model envelope until PF-A1.4.
+  inventory.
+
+PF-A1.4 adds these limits:
+
+- unattended detection is terminal-based (stdin absent, closed or not a TTY); `ssh` without `-t`
+  counts as unattended;
+- no unattended operation, scheduled backup or release check included, runs on a pf-managed
+  instance until a PF-A4.3 protected policy grant exists;
+- the scheduler wrappers are not installed by this checkpoint (the PF-A2 installer places them);
+- `install-control.sh` is still the legacy installer (sections 5 and 15);
+- the Compose `run` one-off labels that `fail_closed` relies on are proven offline only;
+- there is no managed route for an application CLI in the backend container.
+
+**PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
+instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose
+route remains; the PF-A1 safety scope is proven offline only. A1-T11…T14 stay blocked on a real
+Docker daemon (owners PF-A3.4/PF-A5.1, including the real Compose `run` one-off labels) and A1-T17
+on DSM ACL/SMB evidence (owners PF-A2.3/PF-A5.1). No finding is closed overall and nothing here
+is production-ready.
 
 Before relying on v2.5 recovery on important data, perform at least one disposable staging
-cycle on the actual NAS:
+cycle on the actual NAS. The cycle below starts with `install-control` and therefore **requires the
+PF-A2 installer**; until it exists, start from a protected layout and run
+`<root>/bootstrap/pf --instance <slug> doctor → backup → update → purge → restore-instance →
+verify UI/data` interactively.
 
 ```text
 install-control

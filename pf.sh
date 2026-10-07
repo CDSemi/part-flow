@@ -119,6 +119,10 @@ fi
 # migration is the PF-A2 installer's job.
 HOME_DIR=${SELF_DIR%/control}
 COMMAND=${1:-}
+# A scheduler wrapper calls `pf.sh --instance <id> <command>`; report the command word itself.
+if [ "$COMMAND" = --instance ]; then
+    COMMAND=${3:-}
+fi
 echo "PartFlow NAS Admin (PF-A1.1 checkpoint) - legacy launcher"
 echo "UNREGISTERED legacy installation (v2.5 layout) at $HOME_DIR"
 echo "  control: $SELF_DIR (not executed: unverified legacy payload)"

@@ -655,6 +655,16 @@ class Inventory:
         return ()
 
 
+def owned_oneoffs(inventory):
+    """IDs of this instance's owned Compose one-off containers (``run``), whatever their state, sorted.
+
+    The fail-closed selection (PF-A1.4): stopping an exited container is harmless, so no status is
+    needed and the frozen identity shape stays unchanged.
+    """
+    return tuple(sorted(item.key for item in inventory.owned
+                        if item.kind == "container" and item.identity.get("oneoff") == "True"))
+
+
 def _container_identity(container):
     labels = container["labels"]
     return {"id": container["id"], "name": container["name"], "service": labels.get(COMPOSE_SERVICE_LABEL, ""),

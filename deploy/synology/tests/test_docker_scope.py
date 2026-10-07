@@ -520,9 +520,12 @@ class PlanRules(unittest.TestCase):
 # ============================================================================ integration base
 
 
-def run_main(arguments, layout, *, env=None):
+def run_main(arguments, layout, *, env=None, interactive=False):
+    """In-process CLI. ``interactive=True`` simulates an operator terminal (PF-A1.4 unattended gate);
+    the default keeps the real ``unattended()``."""
     stdout, stderr = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    terminal = mock.patch.object(pf, "unattended", return_value=False) if interactive else contextlib.nullcontext()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), terminal:
         if env is None:
             code = pf.main(arguments, installation_root=layout.root, running_release=layout.release_dir,
                            trusted_launch=True)
@@ -533,11 +536,13 @@ def run_main(arguments, layout, *, env=None):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def launcher_run(layout, arguments, env=None):
+def launcher_run(layout, arguments, env=None, *, interactive=False):
     environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
     environment.update(env or {})
-    return subprocess.run([str(layout.launcher), *arguments], env=environment, cwd=str(layout.root.parent),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=300)
+    with (pfx.interactive_stdin() if interactive else contextlib.nullcontext(subprocess.DEVNULL)) as stdin:
+        return subprocess.run([str(layout.launcher), *arguments], env=environment, cwd=str(layout.root.parent),
+                              stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+                              timeout=300)
 
 
 class ScopeBase(unittest.TestCase):
@@ -596,7 +601,10 @@ class ScopeBase(unittest.TestCase):
 
         with mock.patch.object(pf, "confirm", side_effect=record), \
                 mock.patch.object(pf, "prompt_yes_no", return_value=False):
-            code, out, err = run_main(["--instance", slug, *arguments], self.layout)
+            # The patched confirmation is an operator at a terminal (interactive harness, PF-A1.4).
+            code, out, err = run_main(["--instance", slug, *arguments], self.layout, interactive=True)
+        for gate in ("terminal-required", "instance-required-unattended", "policy-grant-required"):
+            self.assertNotIn(gate, err)  # no test passes vacuously on an unattended-gate refusal
         return code, out, err, confirmations
 
     def mutations(self):
@@ -987,23 +995,21 @@ class ComposeEnvelope(ScopeBase):
                 self.assertNotIn(password, out + err)
                 self.assertNotIn("Compose config", out)
 
-    def test_ce6_passthrough_mutating_verbs_require_the_envelope(self):
-        self.state(topology(self.context))
-        code, out, err = run_main(["--instance", "staging", "up", "-d"], self.layout)
-        self.assertEqual(code, 0, err)
-        self.assertEqual([verb[0] for verb in self.verbs() if verb[0] in ("config", "up")], ["config", "up"])
-        # Audit F2: scale and watch create, build or start containers from the model as well.
+    def test_ce6_former_passthrough_verbs_are_refused_before_any_render(self):
+        # PF-A1.4: the catch-all Compose route is removed. Audit F2's words (scale and watch create, build or
+        # start containers from the model as well) are named refusals before any render or verb.
         for verb, arguments in (("up", ["-d", "db"]), ("run", ["-d", "db"]), ("scale", ["backend=2"]), ("watch", [])):
             with self.subTest(verb):
                 state = self.state(topology(self.context))
                 state["compose"]["render_patch"] = [{"op": "set", "path": ["services", "db", "privileged"], "value": True}]
                 self.fake.write_state(state)
-                code, out, err = run_main(["--instance", "staging", verb, *arguments], self.layout)
+                code, out, err = run_main(["--instance", "staging", verb, *arguments], self.layout, interactive=True)
                 self.assertEqual(code, 1)
-                self.assertIn("envelope-forbidden", err)
-                self.assertIn(["config", "--format", "json"], self.verbs())
+                self.assertIn(f"ERROR: compose-route-removed: 'pf {verb}' no longer forwards to Docker Compose.", err)
+                self.assertNotIn(["config", "--format", "json"], self.verbs())
                 self.assertFalse([item for item in self.verbs() if item[:1] == [verb]])
-        self.assertTrue(pf_docker.ENVELOPE_VERBS <= pf.COMPOSE_MUTATING_VERBS)
+                self.assertEqual(self.fake.calls(), [])
+        self.assertTrue(pf_docker.ENVELOPE_VERBS <= set(pf.REMOVED_COMPOSE_ROUTES))
 
     def test_ce7_instance_label_positions_and_generated_variable(self):
         text = (pfx.REPO_PACKAGE / "compose.nas.yaml").read_text()
@@ -2108,7 +2114,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A1.3")
+        self.assertEqual(pf.CHECKPOINT, "PF-A1.4")
 
 
 if __name__ == "__main__":

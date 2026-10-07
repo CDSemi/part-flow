@@ -6,12 +6,15 @@ installation root, installs the real control files as a release, and registers
 instances through the explicit registration transaction. Nothing here touches
 Docker, the network or any existing installation.
 """
+import contextlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import pty
 import socket
 import sys
+import unittest
 
 PACKAGE = Path(__file__).resolve().parents[1]
 REPO_PACKAGE = PACKAGE.parents[1]
@@ -389,6 +392,51 @@ def owned_topology(context, *, prefix="a", with_images=True):
                                 [f"{project}-{service}:candidate-{prefix}00000000000-abcdef"],
                                 {pf.pf_docker.INSTANCE_LABEL: context.instance_id}))
     return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}
+
+
+def compose_run_labels(context, service):
+    """The label set Docker Compose v2 gives a ``compose run`` one-off container of ``service``.
+
+    Compose v2 (docker/compose v2.40.2, ``pkg/compose/run.go`` ``prepareRun`` adds
+    ``com.docker.compose.oneoff=True`` and ``com.docker.compose.slug``; ``pkg/compose/create.go``
+    ``prepareLabels`` sets the project, service and ``config-hash`` labels and writes
+    ``container-number`` only for numbered service containers, never for a one-off). The instance
+    label comes from the service definition in compose.nas.yaml. Real-daemon confirmation is a
+    docker-gate item (PF-A3.4/PF-A5.1).
+    """
+    pf_docker = pf.pf_docker
+    return {pf_docker.INSTANCE_LABEL: context.instance_id,
+            pf_docker.COMPOSE_PROJECT_LABEL: context.compose_project,
+            pf_docker.COMPOSE_SERVICE_LABEL: service,
+            pf_docker.COMPOSE_ONEOFF_LABEL: "True",
+            pf_docker.COMPOSE_CONFIG_HASH_LABEL: "f" * 64,
+            "com.docker.compose.slug": "0123456789ab" * 4 + "0123456789abcdef"}
+
+
+@contextlib.contextmanager
+def interactive_stdin():
+    """The slave side of a fresh pty, for a launcher subprocess's stdin: the controller sees a terminal.
+
+    The master stays open for the duration; both ends are closed on exit. Tests that need it skip
+    with the reason ``pty unavailable`` when the host cannot allocate one.
+    """
+    try:
+        master, slave = pty.openpty()
+    except OSError as exc:
+        raise unittest.SkipTest("pty unavailable: " + str(exc))
+    try:
+        yield slave
+    finally:
+        os.close(slave)
+        os.close(master)
+
+
+def install_wrapper(layout, name):
+    """Fixture-only stand-in for the PF-A2 installer: the repository scheduler wrapper ``name``
+    (backup.sh, release-check.sh) as <root>/bootstrap/<name>, root-owned 0700."""
+    path = Path(layout.root) / pf_instance.BOOTSTRAP_DIR / name
+    pf_instance._write_private_file(path, (PACKAGE / name).read_bytes(), 0o700)
+    return path
 
 
 def load_fake_docker_module():
