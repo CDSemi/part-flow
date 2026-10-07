@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   confirmAllocation,
   getAllocationSuggestion,
+  suggestionChanged,
 } from '../../api/allocations';
 import type {
   AllocationResult,
@@ -242,9 +243,11 @@ export function AllocationDialog({
         // An explicit refusal — nothing recorded. The suggestion is
         // re-read from the server so the operator adjusts against the
         // current figures, under a fresh idempotency key. A refusal by
-        // the role applied at Scan Stations is judged after the
-        // idempotency re-check: it also ends an unknown outcome.
-        if (stationPermissionDenied(error)) setOutcomeUnknown(false);
+        // the role applied at Scan Stations, or a stale suggestion it
+        // may not adjust, is judged after the idempotency re-check: it
+        // also ends an unknown outcome.
+        if (stationPermissionDenied(error) || suggestionChanged(error))
+          setOutcomeUnknown(false);
         setServerError(
           `${errorMessage(error)} The suggestion was refreshed from the server — review the lines and confirm again.`,
         );

@@ -244,6 +244,14 @@ class StationContextChangedError(ConflictError):
     14 slice 4, C-1): the device is valid, the station's context is stale."""
 
 
+class SuggestionChangedError(ConflictError):
+    """A station allocation sent the suggestion it was shown, unchanged,
+    but the suggestion went stale and the role applied at Scan Stations
+    may not adjust it (409; Phase 14 slice 4, C-2). Judged after the
+    post-lock idempotency re-check: nothing was recorded under the
+    request's ``device_event_id``."""
+
+
 class EnrollmentCodeInvalidError(ApplicationError):
     """An enrollment code that is unknown, used, expired, revoked or issued
     for another Scan Station (403; Phase 14 slice 4, E-1) — one answer for

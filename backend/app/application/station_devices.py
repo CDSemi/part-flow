@@ -88,9 +88,10 @@ _LAST_SEEN_INTERVAL: Final = datetime.timedelta(seconds=60)
 _CODE_ATTEMPTS: Final = 3
 _CODE_DIGEST_UNIQUE: Final = "uq_scan_station_devices_enrollment_code_digest"
 _TOKEN_MAX_LENGTH: Final = 128
-# FOR KEY SHARE: the station must stay as judged; a station edit's own
-# FOR KEY SHARE and UPDATE (FOR NO KEY UPDATE) never conflict with it.
-_STATION_LOCK: Final = {"read": True, "key_share": True}
+# FOR SHARE: the station must stay as judged (active) until COMMIT, so it
+# conflicts with a station edit's FOR NO KEY UPDATE (``_EDIT_LOCK``) and a
+# command's FOR UPDATE, never with the station allocation's FOR KEY SHARE.
+_STATION_LOCK: Final = {"read": True}
 
 #: G-4: issuing a code while the station role holds a protected key.
 ENROLLMENT_GUARD_MESSAGE: Final = (
@@ -365,10 +366,11 @@ def issue_enrollment(
 
     Order: the name rule (422) → the User-administration lock and the
     actor re-read → the enrollment guard on the station role's CURRENT
-    grants (403) → the station FOR KEY SHARE (404 unknown, 409 inactive)
+    grants (403) → the station FOR SHARE (404 unknown, 409 inactive)
     → the replaced device FOR UPDATE (409 unless an active device of
-    this station) → INSERT → audit → COMMIT. Under the lock no role
-    write can change the guard's inputs before COMMIT.
+    this station) → INSERT → audit → COMMIT. Under the advisory lock no
+    role write can change the guard's inputs, and under the station lock
+    no edit can deactivate the station, before COMMIT.
     """
     try:
         clean_label = normalize_device_label(label)

@@ -56,6 +56,7 @@ from app.api.route_access import ROUTE_ACCESS, Access
 from app.application import (
     allocations,
     direct_processing,
+    environment,
     intake,
     machine_processing,
     merges,
@@ -65,6 +66,7 @@ from app.application import (
     station_identity,
     transfers,
     undo,
+    worker_sessions,
 )
 from app.application.errors import (
     ConflictError,
@@ -1620,7 +1622,7 @@ def test_the_allocation_adjustment_check(
                 json=_allocation_body(stock, proposed, suggestion_unchanged=True),
             )
             assert stale.status_code == 409, stale.text
-            assert stale.json() == {"detail": _C2}
+            assert stale.json() == {"detail": _C2, "suggestion_changed": True}
             assert _counts(db_engine) == before
         finally:
             _set_rank(db_engine, stock.supply_demand_id, None)
@@ -1843,6 +1845,66 @@ def test_two_activations_of_one_code(client: TestClient, db_engine: Engine) -> N
     assert row.token_digest is not None and row.enrollment_code_digest is None
 
 
+def test_an_issue_waits_for_a_concurrent_deactivation(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SD-21 (concurrent): a deactivation holding its station lock blocks the
+    issue, which then judges the committed inactive station — never a code
+    for an inactive station."""
+    cell = _Cell(client)
+    enroller = _enroller(client)
+    inside, release = threading.Event(), threading.Event()
+    real_close = worker_sessions.close_open_sessions
+
+    def paused_close(*args: Any, **kwargs: Any) -> Any:
+        inside.set()
+        assert release.wait(timeout=20), "test deadlock: the deactivation never released"
+        return real_close(*args, **kwargs)
+
+    monkeypatch.setattr(worker_sessions, "close_open_sessions", paused_close)
+
+    def deactivate() -> Any:
+        with Session(db_engine) as session:
+            return environment.update_scan_station(
+                session, cell.station_id, is_active=False, actor_user_id=None
+            )
+
+    results: dict[str, Any] = {}
+
+    def run(name: str, call: Callable[[], Any]) -> None:
+        try:
+            results[name] = call()
+        except Exception as exc:  # noqa: BLE001 — collected for assertions
+            results[name] = exc
+
+    before = _counts(db_engine)
+    edit = threading.Thread(target=run, args=("edit", deactivate), daemon=True)
+    issue = threading.Thread(
+        target=run, args=("issue", lambda: _issue(enroller, cell.station_id)), daemon=True
+    )
+    try:
+        edit.start()
+        assert inside.wait(timeout=20), "the deactivation never took its station lock"
+        issue.start()
+        deadline = time.monotonic() + 10
+        while not _waiting_on_a_lock(db_engine) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        waited = _waiting_on_a_lock(db_engine)
+        release.set()
+        edit.join(timeout=30)
+        issue.join(timeout=30)
+    finally:
+        release.set()
+    assert not edit.is_alive() and not issue.is_alive()
+    assert waited, "the issue never waited on the deactivation's station lock"
+    assert not isinstance(results["edit"], Exception), repr(results["edit"])
+    response = results["issue"]
+    assert response.status_code == 409, response.text
+    assert "is inactive" in response.json()["detail"]
+    after = _counts(db_engine)
+    assert after["scan_station_devices"] == before["scan_station_devices"]
+
+
 class _Inflight(NamedTuple):
     key: Permission
     call: Callable[[Session, str], Any]
@@ -2054,6 +2116,22 @@ _BODIES = (
 )
 
 
+#: The rows one command of each body records under its device_event_id
+#: (measured on a single uncontended call of each body).
+_RECORDS = {
+    "receipt": 1,
+    "assignment": 1,
+    "leave machine": 1,
+    "direct DONE": 1,
+    "arrival": 2,
+    "merge": 3,
+    "scrap": 4,
+    "addition": 1,
+    "undo": 2,
+    "allocation": 1,
+}
+
+
 def _waiting_on_a_lock(engine: Engine) -> bool:
     return bool(
         _scalar(
@@ -2131,8 +2209,7 @@ def test_an_inflight_retry_replays_and_is_never_refused_for_a_key(
     else:
         assert not isinstance(b, Exception), repr(b)
         assert b.created is False
-    assert case.records(event) >= 1
-    assert case.records(event) == case.records(event)  # stable, one command
+    assert case.records(event) == _RECORDS[body], "the retry recorded more than one command"
 
 
 def test_an_inflight_command_records_once(

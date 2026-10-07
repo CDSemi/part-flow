@@ -703,11 +703,15 @@ test('FS-6: a revoked device raises the enrollment dialog over the wizard; the s
   expect(box.textContent).not.toContain(D1);
   // The revoked token is forgotten.
   expect(readStationDeviceToken(STATION)).toBeNull();
-  // Escape never dismisses the enrollment dialog.
+  // Escape never dismisses the enrollment dialog, and it offers no way
+  // out of the station (the panel's Station Selector is not rendered).
   fireEvent.keyDown(enrollDialog, { key: 'Escape' });
   expect(
     screen.getByRole('dialog', { name: 'Enroll this device' }),
   ).toBeInTheDocument();
+  expect(
+    within(enrollDialog).queryByRole('button', { name: 'Station Selector' }),
+  ).toBeNull();
 
   enter(enrollDialog, 'K7M2Q-X9RTA');
   await waitFor(() =>

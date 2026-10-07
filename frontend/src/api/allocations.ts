@@ -12,7 +12,7 @@
 //
 // Production-safe: no mock data, no framework imports.
 
-import { apiRequest, apiRequestWithStatus } from './client';
+import { apiRequest, apiRequestWithStatus, refusalFlag } from './client';
 import { stationDeviceHeaders } from './station-devices';
 
 // ---------------------------------------------------------------------------
@@ -234,4 +234,12 @@ export async function confirmAllocation(
     deviceEventId: data.device_event_id,
     created: status === 201,
   };
+}
+
+/** True for the 409 `suggestion_changed` (C-2): the suggestion sent
+ * unchanged went stale and the role applied at Scan Stations may not
+ * adjust it. Judged after the idempotency re-check — nothing was
+ * recorded. */
+export function suggestionChanged(error: unknown): boolean {
+  return refusalFlag(error, 'suggestion_changed');
 }

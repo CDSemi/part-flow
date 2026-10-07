@@ -1317,6 +1317,52 @@ test('FS-13: without the adjust permission no stepper renders and the suggestion
   expect(allocationRequests()[0].body.suggestion_unchanged).toBe(true);
 });
 
+test('FS-13: a stale suggestion (C-2) answering the identical retry ends an unknown outcome', async () => {
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'ADJUST_SUGGESTED_ALLOCATION',
+  );
+  await renderStation();
+  const allocation = await stockPnA(12);
+  // A 5xx: the outcome is unknown, nothing was committed.
+  allocationFailure = { status: 503, body: { detail: 'Service unavailable.' } };
+  fireEvent.click(
+    within(allocation).getByRole('button', { name: 'Confirm allocation' }),
+  );
+  const box = await screen.findByRole('dialog', {
+    name: 'Allocate stocked quantity',
+  });
+  await within(box).findByText(/may or may not have been recorded/);
+  const C2 =
+    'The suggested allocation changed since it was shown, and Scan Stations are not allowed to adjust suggested allocations. Nothing was allocated.';
+  allocationFailure = {
+    status: 409,
+    body: { detail: C2, suggestion_changed: true },
+  };
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Retry the same allocation' }),
+  );
+  await waitFor(() => expect(allocationRequests()).toHaveLength(2));
+  expect(allocationRequests()[1].body).toEqual(allocationRequests()[0].body);
+  // Judged after the idempotency re-check: nothing was recorded under
+  // that device_event_id, so the outcome is no longer unknown.
+  await within(box).findByText(new RegExp(C2.slice(0, 40)));
+  expect(
+    within(box).queryByText(/may or may not have been recorded/),
+  ).toBeNull();
+  expect(
+    within(box).queryByRole('button', { name: 'Retry the same allocation' }),
+  ).toBeNull();
+  await within(box).findByRole('table', { name: 'Allocation suggestion' });
+  allocationFailure = null;
+  fireEvent.click(
+    within(box).getByRole('button', {
+      name: 'Leave in stock — allocate later',
+    }),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(await notice()).toHaveTextContent('left in stock — not allocated');
+});
+
 test('with the adjust permission an adjusted line is sent as a changed suggestion', async () => {
   await renderStation();
   const adjusted = await stockPnA(12);

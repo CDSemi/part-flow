@@ -155,12 +155,16 @@ export function StationEnrollment({
         </Guidance>
       ) : null}
       <div className="row">
-        <button
-          className="bigbtn ghost"
-          onClick={() => navigate('/scan-station')}
-        >
-          Station Selector
-        </button>
+        {variant === 'panel' ? (
+          // The dialog has no way out: its drafts and an unknown outcome
+          // stay until the same intent is confirmed again after enrolling.
+          <button
+            className="bigbtn ghost"
+            onClick={() => navigate('/scan-station')}
+          >
+            Station Selector
+          </button>
+        ) : null}
         <button
           className="bigbtn primary"
           disabled={writeBlocked || busy}

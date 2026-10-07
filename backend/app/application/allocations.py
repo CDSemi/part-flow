@@ -131,6 +131,7 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
     RecordedByAnotherUserError,
+    SuggestionChangedError,
 )
 from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import stocked_quantity_of
@@ -1043,7 +1044,7 @@ def _confirm_allocation(
         if suggestion_unchanged and not station_access.station_may(
             session, StationCommand.ALLOCATION_ADJUSTMENT
         ):
-            raise ConflictError(_STALE_SUGGESTION_MESSAGE)
+            raise SuggestionChangedError(_STALE_SUGGESTION_MESSAGE)
         station_access.require_station_capability(
             session, StationCommand.ALLOCATION, StationCommand.ALLOCATION_ADJUSTMENT
         )

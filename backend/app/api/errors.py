@@ -46,8 +46,10 @@ without a valid enrolled device carries ``station_device_required``
 device ``station_device_mismatch`` (403), a station command the role
 applied at Scan Stations does not grant ``station_permission_denied``
 with ``required_permissions`` (403), an inventory read of an Area the
-station was rebound away from ``station_context_changed`` (409), and a
-refused enrollment code ``enrollment_code_invalid`` (403).
+station was rebound away from ``station_context_changed`` (409), a
+refused enrollment code ``enrollment_code_invalid`` (403), and a station
+allocation whose unchanged suggestion went stale ``suggestion_changed``
+(409), so the station ends an unknown outcome without parsing the message.
 
 Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
@@ -88,6 +90,7 @@ from app.application.errors import (
     StationDeviceMismatchError,
     StationDeviceRequiredError,
     StationPermissionDeniedError,
+    SuggestionChangedError,
     UnsupportedMediaTypeError,
 )
 from app.application.intake import WorkOrderSelectionRequiredError
@@ -279,6 +282,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         (StationDeviceMismatchError, 403, "station_device_mismatch"),
         (StationContextChangedError, 409, "station_context_changed"),
         (EnrollmentCodeInvalidError, 403, "enrollment_code_invalid"),
+        (SuggestionChangedError, 409, "suggestion_changed"),
     )
     for error_type, status_code, flag in _station_refusals:
         _register_gate_refusal(error_type, status_code, flag)
