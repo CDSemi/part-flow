@@ -311,6 +311,20 @@ def test_empty_name_is_refused(client: TestClient, db_engine: Engine, name: str)
     assert _write_counts(db_engine) == counts
 
 
+def test_a_nul_character_in_the_name_is_refused_never_500(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """PostgreSQL text cannot hold NUL: the name is refused before any query."""
+    worker = _create_worker(client)
+    counts = _write_counts(db_engine)
+    detail = {"detail": "Worker name must not contain a NUL character."}
+    created = client.post("/api/workers", json={"name": "A\x00B", "badge_barcode": _badge()})
+    edited = client.patch(f"/api/workers/{worker['id']}", json={"name": "A\x00B"})
+    for response in (created, edited):
+        assert (response.status_code, response.json()) == (422, detail)
+    assert _write_counts(db_engine) == counts
+
+
 @pytest.mark.parametrize("badge", ["", "\r\n"])
 def test_empty_badge_is_refused(client: TestClient, db_engine: Engine, badge: str) -> None:
     counts = _write_counts(db_engine)

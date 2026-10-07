@@ -84,6 +84,11 @@ _E_U2B = (
 _E_U4 = "This login name is already used by another user."
 _E_U8 = "Choose a role for this user."
 _E_U9 = "User active status must be true or false."
+_E_R1_NUL = "Role name must not contain a NUL character."
+_E_U1_NUL = "Name must not contain a NUL character."
+# One past the largest id PostgreSQL can bind to an ``integer`` key: it
+# names no row and must be answered as missing, never fail in the driver.
+_UNBINDABLE_ID = 2**31
 _UNSUPPORTED = "The file is not a PNG, JPEG or WebP image."
 _TOO_LARGE = "The image is larger than 2 MB. Choose a smaller image."
 
@@ -352,6 +357,7 @@ def test_create_role_trims_the_name_and_collapses_duplicate_grants(
         pytest.param({"name": "X", "permissions": ["NOPE"]}, 422, None, id="unknown-permission"),
         pytest.param({"name": "X", "id": 1}, 422, None, id="extra-field"),
         pytest.param({"name": 5}, 422, None, id="non-string-name"),
+        pytest.param({"name": "A\x00B"}, 422, _E_R1_NUL, id="nul-name"),
     ],
 )
 def test_create_role_refusals_write_nothing(
@@ -428,8 +434,14 @@ def test_role_rename(client: TestClient, db_engine: Engine) -> None:
     _refused(client.patch(path, json={"name": "Administrator"}), 409, _E_R2)
     _refused(client.patch(path, json={"name": ""}), 422, _E_R1)
     _refused(client.patch(path, json={"name": None}), 422, _E_R1)
+    _refused(client.patch(path, json={"name": "A\x00B"}), 422, _E_R1_NUL)
     _refused(
         client.patch("/api/roles/999999", json={"name": "X"}), 404, "Role 999999 does not exist."
+    )
+    _refused(
+        client.patch(f"/api/roles/{_UNBINDABLE_ID}", json={"name": "X"}),
+        404,
+        f"Role {_UNBINDABLE_ID} does not exist.",
     )
     assert _write_counts(db_engine) == counts
 
@@ -705,6 +717,12 @@ def test_login_change_race_lost_at_flush_is_a_conflict_never_500(
         pytest.param({"role_id": True}, None, id="bool-role"),
         pytest.param({"role_id": 1.5}, None, id="float-role"),
         pytest.param({"display_name": "  "}, _E_U1, id="blank-name"),
+        pytest.param({"display_name": "A\x00B"}, _E_U1_NUL, id="nul-name"),
+        pytest.param(
+            {"role_id": _UNBINDABLE_ID},
+            f"Role {_UNBINDABLE_ID} does not exist.",
+            id="unbindable-role",
+        ),
         pytest.param({"password": "secret"}, None, id="password-field"),
         pytest.param({"theme_preference": "DARK"}, None, id="theme-field"),
     ],
@@ -793,15 +811,18 @@ def test_user_no_ops_and_explicit_nulls_write_nothing(
         ({"display_name": None}, _E_U1),
         ({"login_name": "j doe"}, _E_U2B),
         ({"role_id": 999999}, "Role 999999 does not exist."),
+        ({"display_name": "A\x00B"}, _E_U1_NUL),
+        ({"role_id": _UNBINDABLE_ID}, f"Role {_UNBINDABLE_ID} does not exist."),
     ):
         _refused(client.patch(path, json=body), 422, detail)
     _refused(client.patch(path, json={"role_id": "1"}), 422)
     _refused(client.patch(path, json={"id": 5}), 422)
-    _refused(
-        client.patch("/api/users/999999", json={"display_name": "X"}),
-        404,
-        "User 999999 does not exist.",
-    )
+    for missing_id in (999999, _UNBINDABLE_ID):
+        _refused(
+            client.patch(f"/api/users/{missing_id}", json={"display_name": "X"}),
+            404,
+            f"User {missing_id} does not exist.",
+        )
     assert _stored_user(db_engine, user["id"]) == stored
     assert _write_counts(db_engine) == counts
 
@@ -903,13 +924,14 @@ def test_user_avatar_refusals_store_nothing(
     assert _write_counts(db_engine) == counts
 
 
-def test_avatar_routes_of_an_unknown_user_are_404(client: TestClient) -> None:
+@pytest.mark.parametrize("missing_id", [999999, _UNBINDABLE_ID])
+def test_avatar_routes_of_an_unknown_user_are_404(client: TestClient, missing_id: int) -> None:
     for response in (
-        _put_avatar(client, 999999, _JPEG, "image/jpeg"),
-        client.delete("/api/users/999999/avatar"),
-        client.get("/api/users/999999/avatar"),
+        _put_avatar(client, missing_id, _JPEG, "image/jpeg"),
+        client.delete(f"/api/users/{missing_id}/avatar"),
+        client.get(f"/api/users/{missing_id}/avatar"),
     ):
-        _refused(response, 404, "User 999999 does not exist.")
+        _refused(response, 404, f"User {missing_id} does not exist.")
 
 
 def test_user_avatar_bytes_are_never_loaded_by_default() -> None:

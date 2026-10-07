@@ -1742,6 +1742,15 @@ production identity giả trong module graph production. Slice 8 đã nối view
 - enforce permission key là authority duy nhất, như PROJECT_PROFILE §16 và §20 nay
   nêu (quyết định owner OD-P8/P9, 2026-10-06): không implicit superuser và không
   hành vi nào gắn với tên role;
+- trước khi enforce, owner chỉnh lại các câu canonical mà slice 12 còn để nêu tên
+  role thay vì key: PROJECT_PROFILE §8.3 (Work Order Demand được sửa và Allocation
+  được điều chỉnh "by Admin or Manager"), §8.12 và §18 (Admin và Manager điều chỉnh
+  Allocation), §29 (điều chỉnh Allocation thủ công bởi Admin và Manager) — các role
+  ban đầu giữ `EDIT_WORK_ORDER_DEMAND` / `EDIT_WORK_ORDER_ALLOCATION` theo §20 — và
+  §28 (thẩm quyền maintenance archival/purge rõ ràng của Admin) cùng GUI_DESIGN §9
+  (history archival & purge chỉ dành cho Admin); chưa có permission key nào của
+  Phase 13 bao trùm archival/purge, nên key cấp quyền cho nó (một key sẵn có hoặc
+  mở rộng vocabulary) được quyết định ở đây hoặc cùng Phase 16;
 - resolve User tier của theme (GUI_DESIGN §2.1 ①) cho User đã xác thực từ preference
   được lưu ở Phase 13 (`users.theme_preference`, chưa có writer), ưu tiên hơn tier
   Scan Station, và quyết định toggle lưu tier nào khi có User đăng nhập; hình dạng API

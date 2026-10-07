@@ -1,12 +1,13 @@
 import { useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { ApiError } from '../../api/client';
 import {
   getCorrectionPermissionsPolicy,
   updateUndoReasonRequired,
 } from '../../api/policies';
 import { listRoles, updateRole } from '../../api/roles';
 import type { Permission, Role } from '../../api/roles';
+import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
@@ -30,6 +31,13 @@ import { ADMIN_SECTIONS } from './sections';
 // independently, so either keeps working when the other cannot load.
 // The role permissions are configuration only: they are recorded for
 // each role and not enforced yet, and the section says so.
+
+// No answer, a timeout or a 5xx: the write may or may not have
+// committed, so the copy never claims that nothing was changed.
+const SWITCH_OUTCOME_UNKNOWN =
+  'The server did not answer — this change may or may not have been saved. The switch shows the stored setting once it can be read again; check it before trying again.';
+const TABLE_OUTCOME_UNKNOWN =
+  'The server did not answer — this change may or may not have been saved. The table shows the stored permissions once they can be read again; check them before trying again.';
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'correction-permissions')
@@ -97,7 +105,15 @@ function UndoReasonPanel({ writeBlocked }: { writeBlocked: boolean }) {
       await updateUndoReasonRequired(!required);
       policyData.reload();
     } catch (error) {
-      setSwitchError(errorMessage(error));
+      if (error instanceof ApiError && !writeOutcomeUnknown(error)) {
+        setSwitchError(error.message);
+      } else {
+        // Re-read in the background: the stored value replaces the
+        // switch when it can be read, and a failed re-read keeps the
+        // switch and this note on screen.
+        setSwitchError(SWITCH_OUTCOME_UNKNOWN);
+        policyData.revalidate();
+      }
     } finally {
       setBusy(false);
     }
@@ -157,12 +173,17 @@ function CorrectionRoleTable({ writeBlocked }: { writeBlocked: boolean }) {
         role.id,
         held ? { revokePermissions: [key] } : { grantPermissions: [key] },
       );
-    } catch (error) {
-      setWriteError(errorMessage(error));
-    } finally {
-      // Success or failure: re-read so each checkbox shows the stored
-      // value.
       rolesData.reload();
+    } catch (error) {
+      setWriteError(
+        error instanceof ApiError && !writeOutcomeUnknown(error)
+          ? error.message
+          : TABLE_OUTCOME_UNKNOWN,
+      );
+      // Re-read in the background so each checkbox shows the stored
+      // value; a failed re-read keeps the table and this note on screen.
+      rolesData.revalidate();
+    } finally {
       setBusy(false);
     }
   };

@@ -47,7 +47,14 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.application import audit
-from app.application.common import UNSET, UnsetType, commit, flush, required_text
+from app.application.common import (
+    UNSET,
+    UnsetType,
+    commit,
+    flush,
+    is_bindable_id,
+    required_text,
+)
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType, Permission
 from app.infrastructure.models import Role, RolePermission, User
@@ -185,6 +192,8 @@ def update_role(
     revoke_permissions: object = (),
 ) -> RoleView:
     """Rename and grant/revoke as deltas; a no-op writes and audits nothing."""
+    if not is_bindable_id(role_id):
+        raise NotFoundError(f"Role {role_id} does not exist.")
     role = session.get(Role, role_id, with_for_update=_EDIT_LOCK, populate_existing=True)
     if role is None:
         raise NotFoundError(f"Role {role_id} does not exist.")

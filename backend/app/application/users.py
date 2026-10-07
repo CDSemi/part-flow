@@ -48,7 +48,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, undefer
 
 from app.application import audit, images
-from app.application.common import UNSET, UnsetType, commit, flush, required_flag, required_text
+from app.application.common import (
+    UNSET,
+    UnsetType,
+    commit,
+    flush,
+    is_bindable_id,
+    required_flag,
+    required_text,
+)
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType
 from app.domain.user_login import (
@@ -126,7 +134,7 @@ def _role_id(value: object) -> int:
 
 
 def _require_role(session: Session, role_id: int) -> Role:
-    role = session.get(Role, role_id)
+    role = session.get(Role, role_id) if is_bindable_id(role_id) else None
     if role is None:
         raise InvalidInputError(f"Role {role_id} does not exist.")
     return role
@@ -145,6 +153,8 @@ def _reject_duplicate_login(session: Session, login: str, exclude_id: int | None
 
 def _lock_user(session: Session, user_id: int, *, with_avatar: bool = False) -> User:
     """Load one User under its row lock; avatar bytes only when compared."""
+    if not is_bindable_id(user_id):
+        raise NotFoundError(f"User {user_id} does not exist.")
     user = session.get(
         User,
         user_id,
@@ -347,6 +357,8 @@ def remove_user_avatar(session: Session, user_id: int) -> UserView:
 
 
 def get_user_avatar(session: Session, user_id: int) -> UserAvatar:
+    if not is_bindable_id(user_id):
+        raise NotFoundError(f"User {user_id} does not exist.")
     user = session.get(User, user_id, options=[undefer(User.avatar_image)])
     if user is None:
         raise NotFoundError(f"User {user_id} does not exist.")

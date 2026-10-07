@@ -4017,6 +4017,58 @@ test('FA-C6: a refused grant shows the reason and the stored value; offline disa
   expect(writes).toEqual([]);
 });
 
+test('FA-C6: an unanswered grant is an unknown outcome; a failed re-read keeps the table and the note', async () => {
+  const unknown =
+    'The server did not answer — this change may or may not have been saved. The table shows the stored permissions once they can be read again; check them before trying again.';
+  await openCorrectionPermissions();
+  const name = 'Undo recent eligible scans — Manager';
+  expect(await screen.findByRole('checkbox', { name })).not.toBeChecked();
+
+  // The server stores the grant, then the answer is lost.
+  state.roles
+    .find((role) => role.id === MANAGER_ID)!
+    .permissions.push('UNDO_RECENT_SCANS');
+  roleFailures.PATCH = 'network';
+  fireEvent.click(screen.getByRole('checkbox', { name }));
+  expect((await screen.findByRole('alert')).textContent).toBe(unknown);
+  await waitFor(() =>
+    expect(screen.getByRole('checkbox', { name })).toBeChecked(),
+  );
+  expect(document.body.textContent).not.toContain('Nothing was changed');
+
+  // The re-read fails too: the last table and the note stay on screen.
+  roleFailures = {
+    PATCH: 'network',
+    'GET list': { status: 500, detail: 'Database unavailable.' },
+  };
+  const other = 'Perform quantity corrections — Operator';
+  fireEvent.click(screen.getByRole('checkbox', { name: other }));
+  await waitFor(() =>
+    expect(screen.getByRole('checkbox', { name: other })).toBeEnabled(),
+  );
+  expect(screen.getByRole('alert').textContent).toBe(unknown);
+  expect(screen.getByRole('checkbox', { name })).toBeChecked();
+  expect(
+    screen.queryByText('Role permissions could not be loaded.'),
+  ).toBeNull();
+});
+
+test('an unanswered Undo reason switch is an unknown outcome and keeps the switch', async () => {
+  const toggle = await openCorrectionPermissions();
+  correctionFailure = { status: 503, detail: 'Service unavailable.' };
+  fireEvent.click(toggle);
+  expect((await screen.findByRole('alert')).textContent).toBe(
+    'The server did not answer — this change may or may not have been saved. The switch shows the stored setting once it can be read again; check it before trying again.',
+  );
+  await waitFor(() => expect(toggle).toBeEnabled());
+  expect(
+    screen.getByRole('switch', { name: UNDO_REASON_SWITCH }),
+  ).toHaveAttribute('aria-checked', 'false');
+  expect(
+    screen.queryByText('Correction permission settings could not be loaded.'),
+  ).toBeNull();
+});
+
 test('FA-C6: a failed roles load offers Retry while the Undo reason switch keeps working', async () => {
   roleFailures['GET list'] = { status: 500, detail: 'Database unavailable.' };
   const toggle = await openCorrectionPermissions();

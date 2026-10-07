@@ -24,11 +24,27 @@ class UnsetType:
 
 UNSET: Final = UnsetType()
 
+# The largest id PostgreSQL can bind to an ``integer`` key. An id
+# outside 1..MAX_ROW_ID names no row: answer it as missing before any
+# query instead of failing in the driver.
+MAX_ROW_ID: Final = 2_147_483_647
+
+
+def is_bindable_id(value: int) -> bool:
+    """Whether ``value`` can name a row of an ``integer``-keyed table."""
+    return 0 < value <= MAX_ROW_ID
+
 
 def required_text(value: object, label: str) -> str:
-    """Normalize a required text field: strip and reject empty/None."""
+    """Normalize a required text field: strip and reject empty/None.
+
+    PostgreSQL text cannot hold NUL (U+0000), so a value containing it
+    is refused as input before it reaches any query.
+    """
     if not isinstance(value, str) or not value.strip():
         raise InvalidInputError(f"{label} must not be empty.")
+    if "\x00" in value:
+        raise InvalidInputError(f"{label} must not contain a NUL character.")
     return value.strip()
 
 
