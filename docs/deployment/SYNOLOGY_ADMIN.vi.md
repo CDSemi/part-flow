@@ -1,6 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
+> Baseline đồng bộ: package revision PF-A1.3 (trên commit `13807ca`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -77,6 +78,49 @@
 > biến allowlist, nên Compose không đọc file nào có thể sửa được. Compose passthrough bị giới
 > hạn trong các từ đã biết và từ chối dump `config` thô cho tới khi PF-A1.4 bỏ hẳn route này;
 > `install-control.sh` vẫn là installer legacy.
+
+> **Checkpoint Deployment Admin PF-A1.3 (2026-10-06) — Compose envelope, daemon binding, exact
+> resource inventory; vẫn là trạng thái phát triển, chưa phải bản phát hành NAS.**
+> *Daemon binding.* Registration resolve đường dẫn Docker socket (link hệ thống như `/var/run` →
+> `/run`) và lưu endpoint `unix://` đã resolve; validation kiểm tra offline (không có thành phần
+> symbolic link, ancestor được bảo vệ, socket do root sở hữu và không world-writable). Socket
+> không tồn tại chỉ là một note (daemon đang dừng), không phải lỗi trust. Trước Docker/Compose
+> child đầu tiên của mỗi process, controller chạy `docker info` một lần và bắt buộc đúng engine
+> ID đã đăng ký và daemon rootful; drift (`daemon-drift`), rootless (`daemon-rootless`), câu trả
+> lời không dùng được (`daemon-info-invalid`) hoặc không trả lời (`daemon-unreachable`) chặn mọi
+> mutation trước bất kỳ confirmation, ghi journal, pause hay Docker effect nào. `status`/`doctor`
+> in dòng daemon, đánh dấu mọi mục Docker sau đó là `unavailable: <code>` mà không liên lạc lại
+> daemon, và vẫn in mọi mục không liên quan Docker.
+> *Compose envelope.* Trước mọi `up`, `run`, `build`, `create`, `start` hoặc `restart` (managed
+> hay passthrough), controller render `docker compose … config --format json` với đúng input của
+> lời gọi đó (installed `compose.nas.yaml`, image override được bảo vệ, frozen env-file và các
+> child value hiệu lực, kể cả tên database tạm theo từng lời gọi) vào file riêng 0600
+> `compose-<n>.json`, kiểm tra theo allowlist topology PartFlow (ba service, chỉ `postgres_data`
+> và `default`, không có option đặc quyền host, không bind mount hay Docker socket, một port
+> frontend trên địa chỉ đã duyệt, instance label ở mọi nơi), so sánh literal từng application
+> value, và ghi hash input vào `compose-envelope.json`. Chỉ `POSTGRES_DB=pf_migrate_*`/`pf_clean_*`
+> (database rehearsal của update và của reset-db) được override theo lời gọi. Compose v1 không
+> được hỗ trợ (không render được `config --format json`).
+> *Instance label.* `compose.nas.yaml` gắn `io.deploy-admin.instance-id` lên ba service, hai image
+> build, volume `postgres_data` và network `default`, từ `DEPLOY_ADMIN_INSTANCE_ID` do controller
+> sinh từ registration được bảo vệ.
+> *Exact inventory.* Mọi container (kể cả container đã dừng, không bao giờ đọc `Config.Env`), các
+> tên volume/network của topology và volume, network, image tag có label được phân loại thành
+> owned, excluded (reference, bind path, resource owned ngoài topology, tag ngoại lai hoặc sai
+> ngữ pháp) hoặc blocker (`resource-legacy-unlabeled`, `resource-name-collision`,
+> `resource-foreign-claim`, `resource-label-conflict`, `resource-shared`,
+> `resource-unsupported-driver`). Tiền tố tên không bao giờ chọn resource nào. `deploy` và
+> `restore-instance` exact yêu cầu target trống (`resource-target-not-empty`); `backup`, `update`,
+> `rollback`, `reset-db`, `resume`, restore side-by-side, `release-check --apply` và passthrough có
+> mutation chạy ownership preflight ngay sau lock (`resource-not-owned`). Resource legacy hoặc
+> ngoại lai không bao giờ được tự động adopt (adoption thuộc PF-A2).
+> *Closed deletion plan.* `purge` và `abort-deploy` chỉ xóa đúng một plan đã đóng băng
+> (`deletion-plan.json`, hash nằm trong journal): mỗi item và mọi container đang dùng volume hoặc
+> network được kiểm tra lại ngay trước effect của nó, thay đổi thì dừng với `plan-drift`, resume
+> chạy đúng plan đó và không bao giờ thêm resource, và image tag chỉ bị xóa khi purge recovery
+> bundle bao phủ image ID của nó. Không prune, không dùng `compose down -v`, không ép xóa image,
+> và không bao giờ xóa đường dẫn bind mount. `abort-deploy` không còn chạy
+> `compose down --volumes`; nó xóa container, network và volume trong plan và giữ lại image.
 
 ## 1. Mục đích
 
@@ -162,6 +206,9 @@ file bên ngoài cho Docker Compose một cách explicit:
 PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo
 ```
 
+và, từ PF-A1.3, định danh instance dùng làm label cho mọi resource Compose tạo ra
+(`DEPLOY_ADMIN_INSTANCE_ID`, sinh từ registration được bảo vệ, không bao giờ đọc từ `.env`).
+
 Installed `control/compose.nas.yaml` sử dụng path đó:
 
 ```yaml
@@ -187,7 +234,8 @@ sudo pf ...
 ```
 
 Không giả định `docker compose` chạy trực tiếp trong `repo/` sẽ tự tìm được external `.env`
-hay installed Compose file. Xem §14 nếu thật sự cần raw Compose.
+hay installed Compose file. Xem §14 nếu thật sự cần raw Compose; dạng đó cũng phải khai báo
+`DEPLOY_ADMIN_INSTANCE_ID`.
 
 ## 4. Source files và installed control files
 
@@ -388,6 +436,12 @@ sudo pf abort-deploy
 Command có confirmation, chỉ xóa resource của incomplete first deployment và giữ repo cùng
 `config/.env` để có thể retry.
 
+Từ PF-A1.3, một resource topology Compose chưa có label hoặc thuộc instance khác (container,
+volume hoặc network) làm `deploy` bị từ chối với `resource-target-not-empty` trước mọi thay
+đổi, và `abort-deploy` in rồi đóng băng plan chính xác trước `ABORT DEPLOY <project>`; lệnh này
+không bao giờ chạy `compose down --volumes`, giữ lại image, và một lần abort bị gián đoạn sẽ
+tiếp tục đúng plan đó sau `RESUME ABORT DEPLOY <project>`.
+
 ## 8. Repository được sửa tự do và deployed revision
 
 Từ v2.5, `repo/` là working tree chứ không phải bằng chứng duy nhất về code đang chạy.
@@ -463,6 +517,9 @@ sudo pf update --latest --allow-migrations
 
 Historical migration đã tồn tại mà bị sửa/xóa vẫn bị refuse. Tool không tự chạy
 `alembic downgrade`.
+
+Từ PF-A1.3, một resource topology Compose chưa có label hoặc thuộc instance khác làm `update`
+bị từ chối với `resource-not-owned` ngay sau lock, trước mọi confirmation hay thay đổi.
 
 `--skip-ci` chỉ là manual staging exception, không được coi là CI pass.
 
@@ -554,25 +611,40 @@ sudo pf purge --project partflow-staging
 
 ### Chuỗi an toàn trước khi purge
 
-Tool in summary gồm project, repo, source revision, database, container, volume, network,
-image tag, checkpoint, state và environment. Sau đó yêu cầu nhiều confirmation.
+Từ PF-A1.3 trình tự là:
 
-Đầu tiên:
+1. **Preliminary plan.** Controller inventory chính xác daemon đã bind (xem ghi chú checkpoint
+   PF-A1.3 ở đầu tài liệu) và dựng một deletion plan tham khảo. Bất kỳ blocker nào (resource
+   legacy, trùng tên, thuộc instance khác, xung đột label, dùng chung hoặc không được hỗ trợ)
+   làm purge bị từ chối với `resource-blocked` ngay tại đây: không confirmation, không pause,
+   không bundle.
+2. **Summary.** Tool in project, repo, source revision, database, đúng các container, volume và
+   network, các image tag đang chờ recovery bundle bao phủ, mọi exclusion được giữ lại và mọi
+   bind path được giữ lại, checkpoint, state và environment.
+3. **Confirmation đầu tiên** `PURGE <project>`, sau đó dừng application write.
+4. **Bundle và binding plan.** Verified recovery bundle được tạo. Sau khi `images.tar` được kiểm
+   tra, controller inventory lại, dựng binding plan (image tag có image ID được lưu trong bundle
+   trở thành candidate; owned tag khác được giữ lại và báo cáo) và so với preliminary plan, chỉ
+   bỏ qua các tag do chính lần purge này tạo. Có khác biệt thì dừng với `plan-changed` và mở lại
+   application; khi đó thư mục bundle không có `manifest.json`. Nếu không, `resources_before_purge`
+   được niêm phong vào manifest từ binding plan.
+5. **Destructive confirmation**, sau khi in đầy đủ binding plan:
 
-```text
-PURGE <project>
-```
+   ```text
+   DELETE <database>
+   ERASE <project> <random-challenge>
+   ```
 
-Controller stop application write và tạo verified recovery bundle. Chỉ khi backup hoàn tất
-mới hỏi destructive confirmation tiếp theo, gồm:
+   Xóa normal revision backup hoặc reset `pf-config.json` có confirmation riêng. Không có
+   `--yes` bypass.
+6. **Thực thi khép kín.** Plan được ghi bền vững (`deletion-plan.json`, hash trong journal) trước
+   lần xóa đầu tiên. Container, rồi network, volume và các image tag được bao phủ bị xóa lần
+   lượt; mỗi item, và mọi container dùng volume hoặc network đó (kể cả container đã dừng), được
+   kiểm tra lại ngay trước effect của nó, thay đổi thì dừng với `plan-drift`. Không prune, không
+   bao giờ dùng `compose down -v`, không ép xóa image, và không bao giờ xóa bind-mounted path.
 
-```text
-DELETE <database>
-ERASE <project> <random-challenge>
-```
-
-Xóa normal revision backup hoặc reset `pf-config.json` có confirmation riêng. Không có
-`--yes` bypass.
+Bảo đảm này giả định daemon tin cậy và không có hoạt động song song: Docker không có
+compare-and-delete nguyên tử, nên một Docker administrator chạy song song nằm ngoài bảo đảm.
 
 ### Purge recovery bundle
 
@@ -630,7 +702,11 @@ Root-owned `control/` vẫn được giữ để có thể deploy sạch ngay sa
 ### Purge bị gián đoạn
 
 Nếu mất điện/SSH sau khi destructive deletion đã bắt đầu, chạy `purge` lại. Journal nhận diện
-incomplete purge và yêu cầu resume confirmation trước khi tiếp tục dựa trên verified bundle.
+incomplete purge và plan đã đóng băng của nó; sau `RESUME PURGE <project> <recovery-id>` chỉ các
+item còn lại trong plan được xử lý (item đã xóa được ghi là `already-absent`), resource mới xuất
+hiện không bao giờ được thêm vào, và plan bị thiếu, bị di chuyển, là symlink hoặc bị sửa sẽ bị
+từ chối với `plan-invalid`. Journal ghi trước PF-A1.3 (không có plan đóng băng) bị từ chối với
+`plan-missing`: hãy review thủ công các resource còn lại.
 
 ### Brand-new deploy sau purge
 
@@ -663,6 +739,10 @@ Restore vào target project đang trống:
 ```sh
 sudo pf restore-instance RECOVERY_ID
 ```
+
+Từ PF-A1.3, kiểm tra target trống chính là exact inventory: bất kỳ container, volume hoặc
+network owned hay blocker nào của project đều bị từ chối với `resource-target-not-empty` trước
+mọi confirmation.
 
 Restore sẽ đưa saved repository workspace trở lại, restore `config/.env`, load saved image,
 recreate/restore database set, restore checkpoint history/state rồi health-check backend/frontend.
@@ -732,6 +812,7 @@ Nếu thật sự cần raw Compose, dạng tương đương là:
 ```sh
 sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
   PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<password percent-encoded>@db:5432/<db>' \
+  DEPLOY_ADMIN_INSTANCE_ID=<instance UUID từ 'pf instances'> \
   docker compose \
   --project-directory /volume1/docker/partflow/repo \
   --env-file /volume1/docker/partflow/config/.env \
@@ -744,6 +825,16 @@ Từ PF-A1.2 `compose.nas.yaml` lấy URL kết nối backend từ `PARTFLOW_DAT
 controller sinh với credential percent-encoded; lệnh raw phải tự cung cấp biến này
 (controller không bao giờ đưa `.env` cho Compose như file có thể sửa: nó đưa snapshot đã đóng
 băng hoặc env-file rỗng do registration tạo, cộng các biến allowlist).
+
+Từ PF-A1.3 `compose.nas.yaml` còn bắt buộc `DEPLOY_ADMIN_INSTANCE_ID`. **UUID sai sẽ gắn nhầm label
+cho mọi resource mà Compose tạo sau đó**: các resource này bị phân loại `resource-foreign-claim`
+hoặc `resource-label-conflict` và chặn `purge`, `abort-deploy` cùng mọi guarded command cho tới
+khi được review.
+
+Qua controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart` phải qua Compose
+envelope (**model** đã resolve), và mọi passthrough verb có mutation chạy ownership preflight
+trước. **CLI flag** của passthrough (ví dụ `run -v`, `--cap-add`, `exec --privileged`) không được
+model envelope bao phủ cho tới khi PF-A1.4 bỏ route này.
 
 Raw Docker/Compose bỏ qua controller lock, recovery check và destructive guard. Không chạy
 song song với `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
@@ -827,7 +918,41 @@ Raw Compose không tự biết external config. Runtime file authoritative là:
 Nếu `doctor` báo `migration-issue` hoặc lỗi parse cho file này thì controller đã từ chối
 đề xuất (key lạ/trùng, quoting không hỗ trợ, secret không thể đóng băng literal); sửa file
 bằng tay — controller không bao giờ ghi lại nó. Lệnh raw Compose còn cần
-`PARTFLOW_DATABASE_URL` (mục 14).
+`PARTFLOW_DATABASE_URL` và `DEPLOY_ADMIN_INSTANCE_ID` (mục 14); `DEPLOY_ADMIN_INSTANCE_ID` không
+bao giờ được chấp nhận trong `config/.env`.
+
+### Docker daemon bị drift, không liên lạc được hoặc rootless
+
+`daemon-drift`: endpoint đã đăng ký trả lời với engine ID khác với engine mà instance đã bind.
+Mọi bước Docker/Compose bị từ chối; không có gì bị thay đổi trừ khi thông báo nêu tên một
+operation và phase. Bind lại daemon là một installation transaction tường minh (PF-A2); không
+sửa record.
+
+`daemon-unreachable`: socket không tồn tại (daemon đang dừng) hoặc daemon không trả lời. Khởi
+động Docker (Container Manager) rồi chạy lại; `status` vẫn in mọi mục không liên quan Docker.
+
+`daemon-rootless` / `daemon-info-invalid`: chỉ hỗ trợ daemon local rootful có định danh dùng được.
+
+`daemon-endpoint-*` trong trust summary: đường dẫn socket đã đăng ký không phải socket được bảo
+vệ (symbolic link, owner không tin cậy, world-writable, ancestor có thể bị thay). Không có gì bị
+liên lạc.
+
+### Compose envelope bị từ chối
+
+`envelope-*` liệt kê từng finding kèm JSON path (không bao giờ in value): option nguy hiểm hoặc
+không mong đợi trong model đã resolve, image override được bảo vệ bị sửa (`envelope-override`),
+hoặc render thất bại (`envelope-render-failed`: Compose exit, lớn hơn 4 MiB, JSON không hợp lệ
+hoặc key trùng; Compose v1 không render được `config --format json` và không được hỗ trợ). Không
+có gì được build, create hay start.
+
+### Resource bị chặn khỏi purge hoặc không thuộc instance
+
+`resource-blocked` (purge, abort-deploy), `resource-not-owned` (guarded command) và
+`resource-target-not-empty` (deploy, restore exact) liệt kê từng resource kèm class. Review bằng
+`sudo pf status`; resource legacy chưa có label (ví dụ từ bản cài v2.5), trùng tên và resource
+thuộc instance khác không bao giờ được tự động adopt hay xóa (adoption thuộc PF-A2). `plan-drift`
+trong purge hoặc abort nghĩa là một resource trong plan hoặc một user của nó đã thay đổi sau khi
+plan được đóng băng; journal giữ nguyên plan.
 
 ### Có local source edit trước update
 
@@ -861,7 +986,7 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | `sudo pf deploy --latest` | Brand-new staging từ latest configured branch SHA |
 | `sudo pf deploy --commit FULL_SHA` | Brand-new deploy từ exact commit |
 | `sudo pf deploy --release TAG` | Brand-new deploy từ published release |
-| `sudo pf abort-deploy` | Xóa incomplete first deploy trước khi frontend mở |
+| `sudo pf abort-deploy` | Xóa incomplete first deploy trước khi frontend mở (xác nhận `ABORT DEPLOY <project>`; abort bị gián đoạn tiếp tục bằng `RESUME ABORT DEPLOY <project>`) |
 | `sudo pf update --latest` | Managed staging update theo latest branch SHA |
 | `sudo pf update --commit FULL_SHA` | Update tới exact commit |
 | `sudo pf update --release TAG` | Update tới release |
@@ -885,6 +1010,20 @@ Offline tests đi kèm simulate Docker/PostgreSQL nhưng thực sự chạy cont
 filesystem/archive/checksum, permission policy, deployed-source/workspace separation,
 purge/recovery và path construction. Chúng không thay thế integration rehearsal trên DSM +
 Docker + PostgreSQL thật.
+
+Giới hạn của PF-A1.3 (chỉ có bằng chứng offline; Docker-daemon gate và NAS host gate chưa chạy):
+
+- một Docker hoặc root administrator chạy song song nằm ngoài bảo đảm (không có compare-and-delete
+  nguyên tử; item và user được kiểm tra lại với daemon tin cậy và không có hoạt động song song);
+- volume được tạo lại trong cùng một giây với metadata giống hệt thì không phân biệt được;
+- phiên bản Compose trên NAS chưa được kiểm chứng; luật envelope được hiệu chỉnh trên một lần
+  render Compose v2 thật (Docker Desktop CLI);
+- JSON đã render được kiểm tra, không được dùng lại làm input `-f` khi thực thi;
+- các label marker container của Compose dùng cho ownership chưa được hiệu chỉnh trên daemon thật;
+- việc bao phủ image theo image ID giả định daemon không có hoạt động song song giữa `image save`
+  và binding inventory;
+- CLI flag của passthrough (`run -v`, `--cap-add`, `exec --privileged`) không được model envelope
+  bao phủ cho tới PF-A1.4.
 
 Trước khi dựa vào v2.5 recovery cho data quan trọng, nên chạy ít nhất một vòng disposable
 staging trên NAS thật:

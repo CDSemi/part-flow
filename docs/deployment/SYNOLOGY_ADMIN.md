@@ -81,6 +81,52 @@
 > words and refuses the raw `config` dump until PF-A1.4 removes the route;
 > `install-control.sh` remains the legacy installer.
 
+> **Deployment Admin checkpoint PF-A1.3 (2026-10-06) — Compose envelope, daemon binding, exact
+> resource inventory; still a development state, not a NAS release.**
+> *Daemon binding.* Registration resolves the Docker socket path (system links such as
+> `/var/run` → `/run`) and stores the resolved `unix://` endpoint; validation checks it offline
+> (no symbolic-link component, protected ancestors, a root-owned socket that is not
+> world-writable). A missing socket is reported as a note (a stopped daemon), not as a trust
+> failure. Before the first Docker/Compose child of every process the controller runs
+> `docker info` once and requires the registered engine ID and a rootful daemon; drift
+> (`daemon-drift`), rootless mode (`daemon-rootless`), an unusable answer (`daemon-info-invalid`)
+> or no answer (`daemon-unreachable`) refuses every mutation before any confirmation, journal
+> write, pause or Docker effect. `status`/`doctor` print the daemon line, mark every later
+> Docker section `unavailable: <code>` without contacting the daemon again, and still print
+> every non-Docker section.
+> *Compose envelope.* Before any `up`, `run`, `build`, `create`, `start` or `restart` (managed or
+> passthrough) the controller renders `docker compose … config --format json` with exactly the
+> inputs of that call (installed `compose.nas.yaml`, protected image override, frozen env-file
+> and the effective child values, per-call temporary database names included) into a private
+> 0600 `compose-<n>.json`, validates it against the PartFlow topology allowlist (three
+> services, `postgres_data` and `default` only, no host-privilege options, no bind mounts or
+> Docker socket, one frontend port on the approved address, the instance label everywhere)
+> and compares every application value literally, and records the input hashes in
+> `compose-envelope.json`. Only `POSTGRES_DB=pf_migrate_*`/`pf_clean_*` (the update rehearsal and
+> reset-db databases) may be overridden per call. Compose v1 is unsupported (it cannot render
+> `config --format json`).
+> *Instance label.* `compose.nas.yaml` stamps `io.deploy-admin.instance-id` on the three services,
+> both image builds, the `postgres_data` volume and the `default` network, from
+> `DEPLOY_ADMIN_INSTANCE_ID`, which the controller generates from the protected registration.
+> *Exact inventory.* All containers (stopped ones included, `Config.Env` never read), the topology
+> volume/network names and the labelled volumes, networks and image tags are classified as
+> owned, excluded (references, bind paths, owned resources outside the topology, foreign or
+> ungrammatical tags) or blockers (`resource-legacy-unlabeled`, `resource-name-collision`,
+> `resource-foreign-claim`, `resource-label-conflict`, `resource-shared`,
+> `resource-unsupported-driver`). Name prefixes never select anything. `deploy` and exact
+> `restore-instance` require an empty target (`resource-target-not-empty`); `backup`, `update`,
+> `rollback`, `reset-db`, `resume`, side-by-side restore, `release-check --apply` and mutating
+> passthrough run an ownership preflight right after the lock (`resource-not-owned`). Legacy or
+> foreign resources are never adopted automatically (adoption is PF-A2).
+> *Closed deletion plan.* `purge` and `abort-deploy` delete exactly a frozen plan
+> (`deletion-plan.json`, hashed in the journal): every item and every container that uses a
+> volume or network is reinspected before its effect, a change stops with `plan-drift`, resume
+> runs the same plan and never adds a resource, and an image tag is deleted only when the
+> purge recovery bundle covers its image ID. Nothing prunes, nothing uses `compose down -v`,
+> image removal is never forced, and bind-mounted paths are never deleted. `abort-deploy` no
+> longer runs `compose down --volumes`; it removes the planned containers, network and volume
+> and keeps the images.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -166,6 +212,10 @@ It also explicitly provides the repository path used for image build contexts:
 PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo
 ```
 
+and, since PF-A1.3, the instance identity that labels every resource Compose creates
+(`DEPLOY_ADMIN_INSTANCE_ID`, generated from the protected registration, never read from
+`.env`).
+
 The installed `control/compose.nas.yaml` uses that value:
 
 ```yaml
@@ -192,7 +242,8 @@ sudo pf ...
 ```
 
 Do not assume a raw `docker compose` command run from `repo/` will automatically discover
-the external `.env` or the installed Compose file. See §14 for the explicit advanced form.
+the external `.env` or the installed Compose file. See §14 for the explicit advanced form,
+which must also name `DEPLOY_ADMIN_INSTANCE_ID`.
 
 ## 4. Source files versus installed control files
 
@@ -398,6 +449,12 @@ sudo pf abort-deploy
 The command requires confirmation and removes only resources from that incomplete first
 deployment. It keeps the repository and `config/.env` so deployment can be retried.
 
+Since PF-A1.3 an existing unlabeled or foreign Compose topology resource (container, volume or
+network) refuses `deploy` with `resource-target-not-empty` before any change, and
+`abort-deploy` prints and freezes the exact plan before `ABORT DEPLOY <project>`; it never
+runs `compose down --volumes`, keeps the images, and an interrupted abort resumes the same
+plan after `RESUME ABORT DEPLOY <project>`.
+
 ## 8. Editable repository and deployed revision
 
 `repo/` is now a working tree, not the authoritative record of what is currently running.
@@ -475,6 +532,9 @@ sudo pf update --latest --allow-migrations
 
 Existing historical migration files being modified or deleted remain refused. No lifecycle
 command automatically performs `alembic downgrade`.
+
+Since PF-A1.3 an existing unlabeled or foreign Compose topology resource refuses `update`
+with `resource-not-owned` right after the lock, before any confirmation or change.
 
 `--skip-ci` is a manual staging exception, not evidence that CI passed.
 
@@ -568,26 +628,41 @@ sudo pf purge --project partflow-staging
 
 ### Purge safety sequence
 
-Before deletion, the tool prints a summary of project, repo, source revision, database,
-containers, volumes, networks, image tags, checkpoints, state, and environment presence.
-It then requires multiple confirmations.
+Since PF-A1.3 the sequence is:
 
-The first confirmation is:
+1. **Preliminary plan.** The controller inventories the bound daemon exactly (see the PF-A1.3
+   checkpoint note at the top) and builds an advisory deletion plan. Any blocker (a legacy, name-collided,
+   foreign-claimed, label-conflicting, shared or unsupported resource) refuses the purge with
+   `resource-blocked` here: no confirmation, no pause, no bundle.
+2. **Summary.** It prints project, repo, source revision, database, the exact containers,
+   volumes and networks, the image tags pending recovery-bundle coverage, every retained
+   exclusion and every retained bind path, checkpoints, state and environment presence.
+3. **First confirmation** `PURGE <project>`, then application writes stop.
+4. **Bundle and binding plan.** The verified recovery bundle is created. After `images.tar` is
+   verified the controller inventories again, builds the binding plan (image tags covered by
+   an image ID saved in the bundle become candidates; other owned tags are retained and
+   reported) and compares it with the preliminary plan, ignoring only the tags this purge
+   created itself. A difference stops with `plan-changed` and reopens the application; the
+   bundle folder then has no `manifest.json`. Otherwise `resources_before_purge` is sealed
+   into the manifest from the binding plan.
+5. **Destructive confirmations**, after the full binding plan is printed:
 
-```text
-PURGE <project>
-```
+   ```text
+   DELETE <database>
+   ERASE <project> <random-challenge>
+   ```
 
-The controller stops application writes and creates a verified recovery bundle. Only after
-that succeeds does it request the destructive confirmations, including:
+   Deleting normal revision backups or resetting `pf-config.json` adds separate
+   confirmations. There is no `--yes` bypass.
+6. **Closed execution.** The plan is written durably (`deletion-plan.json`, its hash in the
+   journal) before the first deletion. Containers, then the network, the volume and the
+   covered image tags are removed one by one; each item, and every container that uses the
+   volume or network (stopped ones included), is reinspected immediately before its effect,
+   and a change stops with `plan-drift`. Nothing is pruned, `compose down -v` is never used,
+   image removal is never forced, and bind-mounted paths are never deleted.
 
-```text
-DELETE <database>
-ERASE <project> <random-challenge>
-```
-
-Deleting normal revision backups or resetting `pf-config.json` adds separate confirmations.
-There is no `--yes` bypass.
+The guarantee assumes a quiescent, trusted daemon: Docker has no atomic compare-and-delete,
+so a concurrent Docker administrator is outside it.
 
 ### Purge recovery bundle
 
@@ -646,8 +721,12 @@ immediately afterward.
 ### Interrupted purge
 
 If power/SSH fails after destructive deletion begins, run `purge` again. The operation
-journal identifies the incomplete purge and requires a resume confirmation before
-continuing from the verified recovery bundle.
+journal identifies the incomplete purge and its frozen plan; after
+`RESUME PURGE <project> <recovery-id>` only the remaining planned items are processed (already
+removed ones are recorded as `already-absent`), a newly appeared resource is never added, and
+a missing, moved, symlinked or tampered plan is refused with `plan-invalid`. A journal written
+before PF-A1.3 (no frozen plan) is refused with `plan-missing`: review the remaining resources
+manually.
 
 ### Brand-new redeploy after purge
 
@@ -680,6 +759,10 @@ Restore a purged instance into an empty target project:
 ```sh
 sudo pf restore-instance RECOVERY_ID
 ```
+
+Since PF-A1.3 the empty-target test is the exact inventory: any owned or blocking container,
+volume or network of the project refuses with `resource-target-not-empty` before any
+confirmation.
 
 The restore recreates the saved repository workspace, restores `config/.env`, loads saved
 application images, recreates/restores the database set, restores checkpoint history/state,
@@ -754,6 +837,7 @@ If raw Compose access is absolutely necessary, the equivalent shape is:
 ```sh
 sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
   PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<percent-encoded password>@db:5432/<db>' \
+  DEPLOY_ADMIN_INSTANCE_ID=<instance UUID from 'pf instances'> \
   docker compose \
   --project-directory /volume1/docker/partflow/repo \
   --env-file /volume1/docker/partflow/config/.env \
@@ -767,6 +851,16 @@ Since PF-A1.2 `compose.nas.yaml` takes the backend connection URL from
 a raw invocation must supply it explicitly (the controller itself never passes `.env` to
 Compose as an editable file: it hands over a frozen snapshot or a registration-created empty
 env-file plus the allowlisted variables).
+
+Since PF-A1.3 `compose.nas.yaml` also requires `DEPLOY_ADMIN_INSTANCE_ID`. **A wrong UUID
+mislabels every resource Compose then creates**: those resources are classified
+`resource-foreign-claim` or `resource-label-conflict` and block `purge`, `abort-deploy` and every
+guarded command until they are reviewed.
+
+Through the controller, passthrough `up`/`run`/`build`/`create`/`start`/`restart` must pass the
+Compose envelope (the resolved **model**), and every mutating passthrough verb runs the
+ownership preflight first. Passthrough **CLI flags** (for example `run -v`, `--cap-add`,
+`exec --privileged`) are not covered by the model envelope until PF-A1.4 removes the route.
 
 Using raw Docker/Compose bypasses controller locks, recovery checks, and destructive guards.
 Do not run it concurrently with `pf update`, `pf backup`, `pf reset-db`, `pf purge`, or
@@ -846,7 +940,42 @@ The authoritative runtime file is:
 If `doctor` reports `migration-issue` or a parse error for that file, the controller refused
 the proposal (unknown/duplicate key, unsupported quoting, a secret that cannot be frozen
 literally); fix the file by hand — the controller never rewrites it. A raw Compose command
-additionally needs `PARTFLOW_DATABASE_URL` (section 14).
+additionally needs `PARTFLOW_DATABASE_URL` and `DEPLOY_ADMIN_INSTANCE_ID` (section 14);
+`DEPLOY_ADMIN_INSTANCE_ID` is never accepted in `config/.env`.
+
+### Docker daemon drift, unreachable or rootless refusal
+
+`daemon-drift`: the registered endpoint answers as a different engine ID than the one the
+instance is bound to. Every Docker/Compose step is refused; nothing was changed unless the
+message names an operation and phase. Re-binding a daemon is an explicit installation
+transaction (PF-A2); do not edit the record.
+
+`daemon-unreachable`: the socket is absent (daemon stopped) or the daemon did not answer.
+Start Docker (Container Manager) and rerun; `status` still prints every non-Docker section.
+
+`daemon-rootless` / `daemon-info-invalid`: only a local rootful daemon with a usable identity is
+supported.
+
+`daemon-endpoint-*` in the trust summary: the registered socket path is not a protected
+socket (symbolic link, untrusted owner, world-writable, replaceable ancestor). Nothing was
+contacted.
+
+### Compose envelope refused
+
+`envelope-*` lists each finding with its JSON path (values are never printed): a hostile or
+unexpected option in the resolved model, a changed protected image override
+(`envelope-override`), or a render that failed (`envelope-render-failed`: Compose exit, more
+than 4 MiB, invalid JSON or a duplicate key; Compose v1 cannot render `config --format json`
+and is unsupported). Nothing was built, created or started.
+
+### Resources blocked from purge or not owned
+
+`resource-blocked` (purge, abort-deploy), `resource-not-owned` (guarded commands) and
+`resource-target-not-empty` (deploy, exact restore) list each resource with its class. Review
+them with `sudo pf status`; legacy unlabeled resources (for example from a v2.5 installation),
+name collisions and resources claimed by another instance are never adopted or deleted
+automatically (adoption is PF-A2). `plan-drift` during a purge or abort means a planned
+resource or one of its users changed after the plan was frozen; the journal keeps the plan.
 
 ### Local source edits exist before an update
 
@@ -880,7 +1009,7 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 | `sudo pf deploy --latest` | Brand-new staging deployment from latest configured branch SHA |
 | `sudo pf deploy --commit FULL_SHA` | Brand-new deployment from an explicit commit |
 | `sudo pf deploy --release TAG` | Brand-new deployment from a published release |
-| `sudo pf abort-deploy` | Remove an incomplete first deploy before frontend access opened |
+| `sudo pf abort-deploy` | Remove an incomplete first deploy before frontend access opened (confirm `ABORT DEPLOY <project>`; an interrupted abort resumes with `RESUME ABORT DEPLOY <project>`) |
 | `sudo pf update --latest` | Managed staging update from latest branch SHA |
 | `sudo pf update --commit FULL_SHA` | Managed staging update to exact commit |
 | `sudo pf update --release TAG` | Managed staging update to release |
@@ -904,6 +1033,20 @@ The included offline tests simulate Docker/PostgreSQL behavior while exercising 
 logic, filesystem/archive/checksum handling, permission policy, source/workspace separation,
 purge/recovery flow, and path construction. They do not replace a real DSM + Docker +
 PostgreSQL integration rehearsal.
+
+PF-A1.3 limits (offline evidence only; the Docker-daemon and NAS host gates are not run):
+
+- a concurrent Docker or root administrator is outside the guarantee (no atomic
+  compare-and-delete; items and users are reinspected under a quiescent trusted daemon);
+- a volume recreated within the same second with identical metadata is indistinguishable;
+- the NAS Compose version is unverified; the envelope rules were calibrated on one real
+  Compose v2 render (Docker Desktop CLI);
+- the rendered JSON is validated, not reused as the executed `-f` input;
+- the Compose container-marker labels used for ownership are not calibrated on a real daemon;
+- image coverage by image ID assumes a quiescent daemon between `image save` and the binding
+  inventory;
+- passthrough CLI flags (`run -v`, `--cap-add`, `exec --privileged`) are not covered by the
+  model envelope until PF-A1.4.
 
 Before relying on v2.5 recovery on important data, perform at least one disposable staging
 cycle on the actual NAS:

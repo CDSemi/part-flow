@@ -881,6 +881,9 @@ def validate_context(context, *, running_release=None, interpreter=None, checker
     private_state_trusted = not any(
         finding.severity == "refuse" for finding in checker.findings[private_findings_before:]
     )
+    # PF-A1.3: the registered daemon endpoint (offline path trust; a missing socket is a note).
+    for severity, code, message in daemon_endpoint_findings(checker, context.daemon.endpoint):
+        (checker.refuse if severity == "refuse" else checker.note)(code, context.daemon.endpoint, message)
     # Registered data paths: workspace/configuration are editor-writable leaves
     # in protected locations; backups/recovery are protected authoritative storage.
     for name in ("workspace", "configuration"):
@@ -905,6 +908,72 @@ def validate_context(context, *, running_release=None, interpreter=None, checker
         acl_state = "unknown"
     return ContextValidation(context=context, findings=tuple(checker.findings), acl_state=acl_state,
                              private_state_trusted=private_state_trusted)
+
+
+UNIX_SCHEME = "unix://"
+
+
+def daemon_endpoint_findings(checker, endpoint):
+    """Offline trust rules of a registered Docker endpoint (PF-A1.3). Returns [(severity, code, detail)].
+
+    The path must be canonical; every ancestor passes the protected-ancestor walk (no symbolic
+    link, trusted owner, replacement-resistant, no extra ACL authority). The leaf, examined
+    without following links, must be a root-owned socket that is not world-writable (group
+    read/write is the normal Docker access model). A missing leaf alone is a *note*: a
+    stopped daemon may remove its socket, which is an availability condition, not a trust
+    failure. Nothing is contacted.
+    """
+    if not isinstance(endpoint, str) or not endpoint.startswith(UNIX_SCHEME):
+        return [("refuse", "daemon-endpoint-scheme",
+                 f"Registered Docker endpoint {endpoint!r} is not a unix:// socket; nothing was contacted.")]
+    path = endpoint[len(UNIX_SCHEME):]
+    reason = canonical_path_error(path)
+    if reason is not None:
+        return [("refuse", "daemon-endpoint-noncanonical",
+                 f"Registered Docker endpoint {path} is not one canonical absolute path ({reason}); nothing was contacted.")]
+    walk = PathChecker(checker.root)
+    walk.ancestors(Path(path))
+    checker.acl_states |= walk.acl_states
+    findings = []
+    for finding in walk.findings:
+        if finding.code == "ancestor-symlink":
+            findings.append(("refuse", "daemon-endpoint-symlink",
+                             f"Registered Docker endpoint {path} contains a symbolic link at {finding.path}; registration "
+                             "stores the resolved socket path. The binding must be rebuilt by the PF-A2 installation "
+                             "transaction (disposable fixtures: re-register); nothing was contacted."))
+        else:
+            findings.append((finding.severity, "daemon-endpoint-" + finding.code,
+                             f"Registered Docker endpoint {path}: {finding.path}: {finding.message}; nothing was contacted."))
+    if any(severity == "refuse" for severity, _, _ in findings):
+        return findings
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return findings + [("note", "daemon-endpoint-missing",
+                            f"Docker endpoint {path} is absent (daemon stopped?); Docker sections will report "
+                            "daemon-unreachable.")]
+    except OSError as exc:
+        return findings + [("refuse", "daemon-endpoint-unreadable",
+                            f"Registered Docker endpoint {path} is not a usable protected socket "
+                            f"({exc.strerror or exc}); nothing was contacted.")]
+
+    def unusable(code, detail):
+        findings.append(("refuse", code, f"Registered Docker endpoint {path} is not a usable protected socket "
+                                         f"({detail}); nothing was contacted."))
+
+    if stat.S_ISLNK(info.st_mode):
+        findings.append(("refuse", "daemon-endpoint-symlink",
+                         f"Registered Docker endpoint {path} contains a symbolic link at {path}; registration stores "
+                         "the resolved socket path. The binding must be rebuilt by the PF-A2 installation transaction "
+                         "(disposable fixtures: re-register); nothing was contacted."))
+        return findings
+    if not stat.S_ISSOCK(info.st_mode):
+        unusable("daemon-endpoint-not-socket", "not a socket")
+    if info.st_uid != TRUSTED_UID:
+        unusable("daemon-endpoint-owner", f"owner uid {info.st_uid}; trusted owner is uid {TRUSTED_UID}")
+    if stat.S_IMODE(info.st_mode) & 0o002:
+        unusable("daemon-endpoint-writable", f"mode {oct(stat.S_IMODE(info.st_mode))} is world-writable")
+    return findings
 
 
 def _data_directory(checker, path, name, *, protected):
@@ -1434,6 +1503,18 @@ def register_instance(root, spec):
     daemon = dict(spec["daemon"])
     daemon.setdefault("scope", "local")
     daemon.setdefault("rootless", False)
+    # PF-A1.3: canonicalize the endpoint (system links such as /var/run resolved) and store the
+    # resolved socket path. Registration needs the live socket, so every finding refuses, the
+    # missing-socket note included. Registration stays transport-free: nothing is contacted.
+    endpoint = daemon.get("endpoint")
+    if not isinstance(endpoint, str) or not endpoint.startswith(UNIX_SCHEME):
+        raise ContextError("Registration refused: daemon.endpoint must be a unix:// socket path.")
+    resolved = UNIX_SCHEME + os.path.realpath(endpoint[len(UNIX_SCHEME):])
+    problems = daemon_endpoint_findings(PathChecker(root), resolved)
+    if problems:
+        raise ContextError("Docker endpoint is not acceptable; registration refused:\n"
+                           + "\n".join(f"[{severity}] {code}: {message}" for severity, code, message in problems))
+    daemon["endpoint"] = resolved
 
     def build_record(instance_id):
         return {

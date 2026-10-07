@@ -81,6 +81,51 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > (baseline suite 106, PF-A1.1 suite 91, PF-A1.2 suite 50). Host validations remain not
 > exercised; A1-T17's host gate stays *blocked*.
 
+> **PF-A1.3 checkpoint addendum (2026-10-06) — Compose envelope, daemon binding, exact resource
+> inventory.** New pure module `pf_docker.py` (release file; installed by both installer lists)
+> and controller wiring: registration stores the resolved `unix://` socket and validation applies
+> offline endpoint rules (a missing socket is a note); every process probes `docker info` once
+> before any other Docker/Compose child and refuses drift, rootless, unusable or absent answers;
+> `Controller.command()` takes `effect` as a required keyword, refuses `effect=None` on any argv
+> the classifiers do not prove read-only (`unclassified-mutation`) and gates every Docker child on
+> the daemon binding; every `up`/`run`/`build`/`create`/`start`/`restart` (managed and passthrough)
+> first renders `compose … config --format json` with exactly its inputs (effective values and the
+> `POSTGRES_DB=pf_migrate_*/pf_clean_*` overrides included) into a private `compose-<n>.json` and
+> validates it against the topology allowlist with literal value comparison; `compose.nas.yaml`
+> labels services, builds, the volume and the network with `DEPLOY_ADMIN_INSTANCE_ID`; an exact
+> inventory (no prefixes, `Config.Env` never requested) classifies owned/excluded/blocker
+> resources with their users; `deploy`/exact `restore-instance` require an empty target, guarded
+> commands run an ownership preflight right after the lock, and `purge`/`abort-deploy` execute a
+> frozen, hashed, closed plan with per-item and per-user reinspection (`compose down --volumes`
+> removed from `abort-deploy`; images deleted only when their image ID is in the purge bundle).
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12`
+> (CPython 3.12.15, git 2.47.3) and `python:3.9` (CPython 3.9.25, git 2.47.3) containers, uid 0,
+> source mounted read-only and copied to `/tmp/r`: **326 tests OK, 0 skipped** on both (baseline
+> suite `test_pf_admin.py` 107, PF-A1.1 suite 91, PF-A1.2 suite 50, PF-A1.3 suite
+> `test_docker_scope.py` 78); no test failed or was skipped. `sh -n` passed for
+> `pf.sh`, `install-control.sh`, `backup.sh` and `release-check.sh`, and every module and test
+> file under `deploy/synology` parses with `ast.parse(..., feature_version=(3, 9))`. Docker is a registered fake (`tests/fake_docker.py`) or a
+> fixture script; no daemon, NAS or running stack was contacted.
+> Real-Compose render evidence (required, spec section 6.4): Docker Compose `v2.40.2-desktop.1`,
+> harness host CLI (fallback source; no `docker:cli` image was cached and none was pulled),
+> throwaway project `pfa13-fixture`, `config --format json` only. Escape mode **doubled**: every
+> environment value equals `escape(sentinel)` for exactly one mode, including a password with `$`,
+> `$$`, `"`, `'`, `\`, `#`, `@`, `%`, `&`, `<`, space and non-ASCII (the single quote went through the child environment with an empty
+> env-file; the frozen env-file case used the same password without `'`, which the frozen format
+> refuses); a second render with a planted
+> `repo/compose.override.yaml` and a hostile `repo/.env` was byte-identical (modulo the project
+> directory). The Windows CLI normalized `build.context` to a host path, so the
+> `<repo_root>/<service>` rule is calibrated from the rule, not from this render (Linux render gap).
+> Tokenized fixture: `fixtures/compose/partflow-2.40.2-desktop.1.json` (repository only).
+> Gates: offline **passed** (A1-T18; A1-T16 with the stopped-daemon case); A1-T11…A1-T14 and
+> A1-T17 stay **blocked** (Docker-daemon and NAS host gates `not_run`); A1-T15 `not_run` (PF-A1.4).
+> Limits: a concurrent Docker or root administrator is outside the guarantee; a volume recreated
+> within the same second with identical metadata is indistinguishable; the NAS Compose version is
+> unverified; the rendered JSON is validated, not reused as the executed input; the Compose
+> container-marker labels are not calibrated on a real daemon; image coverage by image ID assumes
+> a quiescent daemon between `image save` and the binding inventory; passthrough CLI flags
+> (`run -v`, `--cap-add`, `exec --privileged`) are not covered by the model envelope until PF-A1.4.
+
 ## Executed checks
 
 | Check | Actual result |

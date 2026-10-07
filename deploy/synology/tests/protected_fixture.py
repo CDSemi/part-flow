@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -51,6 +52,7 @@ def release_files():
         "pf_runner.py": (PACKAGE / "pf_runner.py").read_bytes(),
         "pf_config.py": (PACKAGE / "pf_config.py").read_bytes(),
         "pf_source.py": (PACKAGE / "pf_source.py").read_bytes(),
+        "pf_docker.py": (PACKAGE / "pf_docker.py").read_bytes(),
         "compose.nas.yaml": (REPO_PACKAGE / "compose.nas.yaml").read_bytes(),
         "pf-config.example.json": (PACKAGE / "pf-config.example.json").read_bytes(),
         "nas.env.example": (PACKAGE / "nas.env.example").read_bytes(),
@@ -80,6 +82,9 @@ class Layout:
         self.bootstrap_module = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_MODULE_NAME
         self.tools_conf = self.root / pf_instance.BOOTSTRAP_DIR / pf_bootstrap.TOOLS_CONF_NAME
         self.sources = self.root / pf_instance.SOURCES_RELATIVE
+        # PF-A1.3: the registration endpoint (through the <base>/var/run link) and the socket it resolves to.
+        self.daemon_endpoint = values.get("daemon_endpoint")
+        self.daemon_socket = values.get("daemon_socket")
 
 
 # Host executables the fixture installer registers (PF-A1.2 runner): fixed system
@@ -102,8 +107,34 @@ def default_tools():
     return tools
 
 
+def install_daemon_socket(base):
+    """A root-owned fixture socket <base>/run/docker.sock (0660 in a 0755 parent) and <base>/var/run -> ../run.
+
+    Returns (registration endpoint through the link, resolved socket path). Nothing listens on it.
+    """
+    base = Path(base)
+    run = base / "run"
+    run.mkdir(exist_ok=True)
+    os.chmod(run, 0o755)
+    path = run / "docker.sock"
+    if not os.path.lexists(path):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(path))
+        finally:
+            listener.close()
+    os.chmod(path, 0o660)
+    var = base / "var"
+    var.mkdir(exist_ok=True)
+    os.chmod(var, 0o755)
+    if not os.path.lexists(var / "run"):
+        os.symlink("../run", var / "run")
+    return "unix://" + str(var / "run" / "docker.sock"), path
+
+
 def install_root(base, *, launcher=None, interpreter=None, tools=None):
-    """Initialize <base>/install as a trusted installation root."""
+    """Initialize <base>/install as a trusted installation root (plus the fixture daemon socket)."""
+    endpoint, socket_path = install_daemon_socket(base)
     values = pf_instance.initialize_installation_root(
         Path(base) / "install",
         launcher=launcher if launcher is not None else (REPO_PACKAGE / "pf.sh").read_bytes(),
@@ -117,6 +148,7 @@ def install_root(base, *, launcher=None, interpreter=None, tools=None):
         },
         tools=default_tools() if tools is None else tools,
     )
+    values = dict(values, daemon_endpoint=endpoint, daemon_socket=socket_path)
     return Layout(values)
 
 
@@ -178,7 +210,7 @@ def registration_spec(layout, slug, paths, *, project=None, engine_id=ENGINE_ID,
         "slug": slug,
         "compose_project": project or slug,
         "approved_environment": environment,
-        "daemon": {"endpoint": "unix:///var/run/docker.sock", "engine_id": engine_id},
+        "daemon": {"endpoint": layout.daemon_endpoint, "engine_id": engine_id},
         "paths": paths,
         "control_release_id": RELEASE_ID,
         "profile_path": layout.profile_path,
@@ -213,3 +245,182 @@ def snapshot_tree(*roots):
         info = os.lstat(root)
         result[str(root)] = (info.st_mode, info.st_uid, info.st_gid, info.st_ino, info.st_nlink, None)
     return result
+
+
+# ------------------------------------------------------------------ PF-A1.3 daemon fixtures
+
+
+def daemon_info(engine_id=ENGINE_ID, *, rootless=False, security_options=None):
+    options = ["name=seccomp,profile=builtin"] if security_options is None else security_options
+    if rootless:
+        options = list(options or []) + ["name=rootless"]
+    return {"ID": engine_id, "ServerVersion": "28.0.0", "OperatingSystem": "Fixture Linux",
+            "SecurityOptions": options, "ServerErrors": None}
+
+
+def trust_daemon(controller, engine_id=None):
+    """Test-only: mark the daemon binding verified for tests that exercise the runner, not the daemon."""
+    controller._daemon = pf.pf_docker.DaemonObservation(
+        endpoint=controller.context.daemon.endpoint, engine_id=engine_id or controller.context.daemon.engine_id,
+        server_version="28.0.0", operating_system="Fixture Linux", rootless=False)
+    return controller
+
+
+COMPOSE_FIXTURE = PACKAGE / "fixtures" / "compose" / "partflow-2.40.2-desktop.1.json"
+
+
+class FakeDocker:
+    """Handle on an installed fake Docker tool: its state file and recorded calls."""
+
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.path = self.directory / "docker"
+        self.state_path = self.directory / "docker-state.json"
+        self.calls_path = self.directory / "calls.jsonl"
+
+    def state(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def state_bytes(self):
+        return self.state_path.read_bytes()
+
+    def write_state(self, state):
+        self.state_path.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
+
+    def update(self, **fields):
+        state = self.state()
+        state.update(fields)
+        self.write_state(state)
+        return state
+
+    def calls(self):
+        if not self.calls_path.exists():
+            return []
+        return [json.loads(line) for line in self.calls_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def argvs(self):
+        return [call["argv"] for call in self.calls()]
+
+    def clear_calls(self):
+        if self.calls_path.exists():
+            self.calls_path.unlink()
+
+
+def default_docker_state(engine_id=ENGINE_ID):
+    return {"info": daemon_info(engine_id), "containers": [], "volumes": [], "networks": [], "images": [],
+            "compose": {"fixture": str(COMPOSE_FIXTURE)}, "hooks": []}
+
+
+def install_fake_docker(layout, state=None):
+    """Install tests/fake_docker.py as the registered ``docker`` tool of ``layout`` (root-owned 0755,
+    protected directory, absolute interpreter shebang) and rewrite bootstrap/tools.conf like the installer."""
+    directory = Path(layout.root).parent / "fake-docker"
+    directory.mkdir(exist_ok=True)
+    os.chmod(directory, 0o755)
+    source = (PACKAGE / "tests" / "fake_docker.py").read_text(encoding="utf-8")
+    source = source.replace("STATE_DIR = None  # replaced when the tool is installed",
+                            "STATE_DIR = " + repr(str(directory)), 1)
+    body = "#!" + os.path.realpath(sys.executable) + " -I" + chr(10) + source
+    tool = tool_script(directory, "docker", body)
+    handle = FakeDocker(directory)
+    handle.write_state(state if state is not None else default_docker_state())
+    tools = pf_bootstrap.parse_tools_conf(pf_instance.read_bytes_nofollow(layout.tools_conf), label="tools.conf")
+    tools["docker"] = str(tool)
+    pf_instance._write_private_file(layout.tools_conf, pf_bootstrap.render_tools_conf(tools), 0o600)
+    return handle
+
+
+def labels_for(context, service=None, *, project=None, oneoff="False", markers=True):
+    labels = {pf.pf_docker.INSTANCE_LABEL: context.instance_id,
+              pf.pf_docker.COMPOSE_PROJECT_LABEL: project or context.compose_project}
+    if service is not None:
+        labels[pf.pf_docker.COMPOSE_SERVICE_LABEL] = service
+        if markers:
+            labels[pf.pf_docker.COMPOSE_ONEOFF_LABEL] = oneoff
+            labels[pf.pf_docker.COMPOSE_CONTAINER_NUMBER_LABEL] = "1"
+    return labels
+
+
+def container(cid, name, labels, *, image="sha256:img", config_image="", volumes=(), binds=(), networks=(),
+              status="running", created="2026-10-06T00:00:00Z"):
+    mounts = [{"Type": "volume", "Name": volume_name, "Source": "/var/lib/docker/volumes/" + volume_name + "/_data",
+               "Destination": "/data", "RW": True, "Driver": "local", "Mode": "z", "Propagation": ""}
+              for volume_name in volumes]
+    mounts += [{"Type": "bind", "Source": path, "Destination": "/bind", "RW": True, "Mode": "", "Propagation": "rprivate"}
+               for path in binds]
+    return {"id": cid, "name": "/" + name, "labels": labels, "image": image, "config_image": config_image,
+            "created": created, "status": status, "mounts": mounts,
+            "networks": {name: {"NetworkID": nid, "IPAddress": "172.18.0.2"} for name, nid in networks}}
+
+
+def volume(name, labels, *, driver="local", scope="local", created_at="2026-10-06T00:00:00Z", options=None):
+    return {"name": name, "driver": driver, "scope": scope, "created_at": created_at,
+            "mountpoint": "/var/lib/docker/volumes/" + name + "/_data", "labels": labels, "options": options}
+
+
+def network(nid, name, labels, *, driver="bridge", scope="local", created="2026-10-06T00:00:00.000000000Z"):
+    return {"id": nid, "name": name, "driver": driver, "scope": scope, "created": created, "labels": labels}
+
+
+def image(iid, tags, labels):
+    return {"id": iid, "repo_tags": list(tags), "labels": labels}
+
+
+def owned_topology(context, *, prefix="a", with_images=True):
+    """State fragments for one fully owned Compose deployment of ``context`` (3 services, volume, network)."""
+    project = context.compose_project
+    net_id = (prefix * 64)[:64]
+    network_name = project + "_default"
+    volume_name = project + "_postgres_data"
+    containers = []
+    for index, service in enumerate(("db", "backend", "frontend")):
+        cid = ((prefix + str(index)) * 32)[:64]
+        containers.append(container(cid, f"{project}-{service}-1", labels_for(context, service),
+                                    image=f"sha256:{prefix}{service}", config_image=f"{project}-{service}:candidate-x",
+                                    volumes=(volume_name,) if service == "db" else (),
+                                    networks=((network_name, net_id),)))
+    volumes = [volume(volume_name, dict(labels_for(context), **{pf.pf_docker.COMPOSE_VOLUME_LABEL: "postgres_data"}))]
+    networks = [network(net_id, network_name,
+                        dict(labels_for(context), **{pf.pf_docker.COMPOSE_NETWORK_LABEL: "default"}))]
+    images = []
+    if with_images:
+        for service in ("backend", "frontend"):
+            images.append(image(f"sha256:{prefix}{service}",
+                                [f"{project}-{service}:candidate-{prefix}00000000000-abcdef"],
+                                {pf.pf_docker.INSTANCE_LABEL: context.instance_id}))
+    return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}
+
+
+def load_fake_docker_module():
+    """tests/fake_docker.py as a module (its render_model builds expected Compose models)."""
+    return load_module("fake_docker", PACKAGE / "tests" / "fake_docker.py")
+
+
+def expected_render(context, *, values=None, root=None, override_text=None, mode=None):
+    """The model the recorded Compose fixture renders for these effective inputs (JSON text)."""
+    if values is None:
+        values = pf.pf_config.parse_app_env((Path(context.paths.configuration) / ".env").read_bytes(), label=".env")
+    child = pf.pf_config.child_values(values, workspace=root or context.paths.workspace,
+                                      instance_id=context.instance_id)
+    model = load_fake_docker_module().render_model(COMPOSE_FIXTURE, child, context.compose_project, mode=mode,
+                                                   override_text=override_text)
+    return json.dumps(model, ensure_ascii=False)
+
+
+def daemon_shell_lines(directory):
+    """sh lines for a fixture tool that answers like the bound daemon for the PF-A1.3 gates only:
+    ``docker info``, the inventory listings (empty) and ``compose ... config --format json`` (the
+    recorded fixture model from ``<directory>/compose-render.json``). Everything else falls through."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "daemon-info.json").write_text(json.dumps(daemon_info()) + "\n")
+    return (
+        f'if [ "$1" = info ]; then cat {directory}/daemon-info.json; exit 0; fi\n'
+        'if [ "$*" = "ps -a --no-trunc --format {{.ID}}" ]; then exit 0; fi\n'
+        'case "$1 $2" in "volume ls"|"network ls"|"image ls") exit 0;; esac\n'
+        f'case "$*" in *" config --format json") cat {directory}/compose-render.json; exit 0;; esac\n'
+    )
+
+
+def write_daemon_answers(directory, context, **kwargs):
+    (Path(directory) / "compose-render.json").write_text(expected_render(context, **kwargs), encoding="utf-8")

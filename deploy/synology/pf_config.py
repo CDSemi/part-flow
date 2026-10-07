@@ -33,7 +33,9 @@ APP_KEYS = (
 )
 SECRET_KEYS = ("POSTGRES_PASSWORD",)
 # Core-generated keys: never read from the editable file, always derived by the adapter.
-GENERATED_KEYS = ("PARTFLOW_REPO_ROOT", "PARTFLOW_DATABASE_URL")
+# DEPLOY_ADMIN_INSTANCE_ID (PF-A1.3) is the protected instance UUID; Compose stamps it as the
+# ownership label of every resource it creates, so it never comes from the editable file.
+GENERATED_KEYS = ("PARTFLOW_REPO_ROOT", "PARTFLOW_DATABASE_URL", "DEPLOY_ADMIN_INSTANCE_ID")
 KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 UNQUOTED_VALUE_RE = re.compile(r"[^\s'\"#]+\Z")
 SNAPSHOT_FILE = "app.env"
@@ -203,12 +205,13 @@ def database_url(user, password, database, *, host="db", port=5432):
     )
 
 
-def child_values(values, *, workspace):
+def child_values(values, *, workspace, instance_id):
     """Allowlisted app values plus the core-generated keys for one Compose invocation."""
     result = {key: values[key] for key in APP_KEYS}
     result["PARTFLOW_REPO_ROOT"] = str(workspace)
     result["PARTFLOW_DATABASE_URL"] = database_url(values["POSTGRES_USER"], values["POSTGRES_PASSWORD"],
                                                    values["POSTGRES_DB"])
+    result["DEPLOY_ADMIN_INSTANCE_ID"] = str(instance_id)
     return result
 
 
@@ -229,8 +232,8 @@ class FrozenAppConfig:
     source_sha256: str
     values: types.MappingProxyType
 
-    def child_values(self, workspace):
-        return child_values(self.values, workspace=workspace)
+    def child_values(self, workspace, instance_id):
+        return child_values(self.values, workspace=workspace, instance_id=instance_id)
 
 
 def _utc():

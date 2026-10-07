@@ -50,6 +50,37 @@ def fixture(root, revision=OLD, new_migration=False):
 
 
 
+def fake_inventory(context, resources):
+    """PF-A1.3: an exact inventory (pf_docker.classify_inventory) built from fixture name lists.
+
+    Containers are owned Compose containers of this instance (service from the name, else db);
+    volumes and networks carry this instance's labels; image tags are owned instance tags.
+    """
+    pf_docker = pf.pf_docker
+    project = context.compose_project
+    containers = []
+    for index, name in enumerate(resources.get("containers", [])):
+        service = name if name in pf_docker.SERVICES else "db"
+        containers.append(pfx.container(f"{index:02d}{name}".ljust(64, "0")[:64], name,
+                                        pfx.labels_for(context, service)))
+    volumes = [pfx.volume(name, dict(pfx.labels_for(context), **{pf_docker.COMPOSE_VOLUME_LABEL: "postgres_data"}))
+               for name in resources.get("volumes", [])]
+    networks = [pfx.network(("n" + name).ljust(64, "0")[:64], name,
+                            dict(pfx.labels_for(context), **{pf_docker.COMPOSE_NETWORK_LABEL: "default"}))
+                for name in resources.get("networks", [])]
+    images = [{"reference": reference, "id": "sha256:" + reference.split(":", 1)[0],
+               "labels": {pf_docker.INSTANCE_LABEL: context.instance_id}}
+              for reference in resources.get("images", [])]
+    parsed = {
+        "container": pf_docker.parse_field_lines("\n".join(json.dumps(item) for item in containers), kind="container"),
+        "volume": pf_docker.parse_field_lines("\n".join(json.dumps(item) for item in volumes), kind="volume"),
+        "network": pf_docker.parse_field_lines("\n".join(json.dumps(item) for item in networks), kind="network"),
+    }
+    return pf_docker.classify_inventory(project=project, instance_id=context.instance_id,
+                                        containers=parsed["container"], volumes=parsed["volume"],
+                                        networks=parsed["network"], images=images)
+
+
 def write_deploy_env(root, bind_ip="127.0.0.1"):
     config = root.parent / "config"
     config.mkdir(exist_ok=True)
@@ -85,6 +116,14 @@ class FakeController(pf.Controller):
         self.resources = {"containers": [], "volumes": []}
         self.workspace_head = OLD
         self.workspace_dirty = False
+        pfx.trust_daemon(self)
+
+    def verify_daemon(self, *, refresh=False):
+        # The daemon binding is exercised by test_docker_scope.py; here it is a verified fixture.
+        return self._daemon
+
+    def docker_inventory(self):
+        return fake_inventory(self.context, self.resources)
 
     def workspace_status(self, root=None):
         # Simulated protected-manifest comparison (PF-A1.2): the fake tracks what was deployed.
@@ -119,7 +158,24 @@ class FakeController(pf.Controller):
     def docker(self, *args, **kwargs):
         self.calls.append(("docker", args))
         if args[:2] in (("image", "save"), ("image", "load")):
+            kwargs.setdefault("effect", pf.docker_effect(args))
             return self.command(["docker", *args], **kwargs)
+        # PF-A1.3: per-resource deletion of the frozen plan (never `compose down`).
+        if args[:2] == ("rm", "-f"):
+            name = next(name for index, name in enumerate(self.resources.get("containers", []))
+                        if f"{index:02d}{name}".ljust(64, "0")[:64] == args[2])
+            self.resources["containers"] = [item for item in self.resources["containers"] if item != name]
+            self.running[name if name in self.running else "db"] = False
+            return ""
+        if args[:2] == ("volume", "rm"):
+            self.resources["volumes"] = [item for item in self.resources["volumes"] if item != args[2]]
+            self.dbs.pop("partflow_staging", None)
+            self.running = {"db": False, "backend": False, "frontend": False}
+            return ""
+        if args[:2] == ("network", "rm"):
+            self.resources["networks"] = [item for item in self.resources.get("networks", [])
+                                          if ("n" + item).ljust(64, "0")[:64] != args[2]]
+            return ""
         if args[0] == "version":
             return "28.0.0"
         if args[0] == "tag":
@@ -276,9 +332,6 @@ class FakeController(pf.Controller):
             raise pf.Deferred("not a descendant")
         if self.new_migration:
             raise pf.Deferred("migration change")
-
-    def project_resources(self):
-        return self.resources
 
     def ensure_listener_available(self, values):
         self.calls.append(("listener", values["PARTFLOW_BIND_IP"], values["PARTFLOW_HTTP_PORT"]))
@@ -1032,8 +1085,10 @@ class AdminTests(unittest.TestCase):
     def test_compose_runs_receive_managed_job_label(self):
         c = pf.Controller(self.context)
         c.cli = ["docker", "compose"]
-        with mock.patch.object(c, "command", return_value="") as run:
+        with mock.patch.object(c, "command", return_value="") as run, \
+             mock.patch.object(c, "require_envelope") as envelope:
             c.compose("run", "--rm", "--no-deps", "backend", "uv", "run", "alembic", "heads")
+        envelope.assert_called_once()  # PF-A1.3: a mutating verb passes the Compose envelope first
         args = run.call_args[0][0]
         self.assertIn("--label", args)
         self.assertIn("partflow.admin.project=partflow-staging", args)
@@ -1048,13 +1103,15 @@ class AdminTests(unittest.TestCase):
         c._runner = pf.pf_runner.ProcessRunner({"docker": str(script)}, home=self.context.home_dir,
                                                docker_config=self.context.docker_config_dir,
                                                docker_host=self.context.daemon.endpoint, redactor=c.redactor)
+        pfx.trust_daemon(c)
         with mock.patch.dict(os.environ, {"POSTGRES_DB": "unexpected_database"}):
-            self.assertEqual(c.command(["docker"]), "absent")
-            self.assertEqual(c.command(["docker"], env={"POSTGRES_DB": "rehearsal"}), "rehearsal")
+            self.assertEqual(c.command(["docker", "version"], effect=None), "absent")
+            self.assertEqual(c.command(["docker", "version"], effect=None, env={"POSTGRES_DB": "rehearsal"}),
+                             "rehearsal")
             with self.assertRaises(pf.Failure):
-                c.command([os.sys.executable, "-c", "print(1)"])  # not a registered tool id
+                c.command([os.sys.executable, "-c", "print(1)"], effect=None)  # not a registered tool id
             with self.assertRaises(pf.Failure):
-                c.command(["docker"], env={"PATH": "/tmp"})  # reserved host variable
+                c.command(["docker", "version"], effect=None, env={"PATH": "/tmp"})  # reserved host variable
 
 
 class PureTests(unittest.TestCase):
@@ -1323,21 +1380,38 @@ class PurgeRecoveryTests(unittest.TestCase):
         def record_confirm(phrase, warning):
             confirmations.append(phrase)
 
-        with mock.patch.object(self.c, "instance_summary", return_value=summary), \
-             mock.patch.object(self.c, "log_instance_summary"), \
-             mock.patch.object(self.c, "database_ready", return_value=16), \
-             mock.patch.object(self.c, "ensure_local_contract", return_value={"heads": ["r1"]}), \
-             mock.patch.object(self.c, "create_purge_recovery", return_value=recovery), \
-             mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
-             mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
-             mock.patch.object(pf, "confirm", side_effect=record_confirm), \
-             mock.patch.object(pf, "prompt_yes_no", return_value=False):
-            self.c.purge()
+        self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
+        with self.c.lock():
+            plan = self.binding_plan(recovery["id"])
+            with mock.patch.object(self.c, "instance_summary", return_value=summary), \
+                 mock.patch.object(self.c, "log_instance_summary"), \
+                 mock.patch.object(self.c, "database_ready", return_value=16), \
+                 mock.patch.object(self.c, "ensure_local_contract", return_value={"heads": ["r1"]}), \
+                 mock.patch.object(self.c, "pause"), \
+                 mock.patch.object(self.c, "phase"), \
+                 mock.patch.object(self.c, "durable_phase") as durable, \
+                 mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)) as create, \
+                 mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
+                 mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
+                 mock.patch.object(pf, "confirm", side_effect=record_confirm), \
+                 mock.patch.object(pf, "prompt_yes_no", return_value=False):
+                self.c.purge()
 
         self.assertEqual(confirmations[0], "PURGE partflow-staging")
         self.assertEqual(confirmations[1], "DELETE partflow_staging")
         self.assertTrue(confirmations[2].startswith("ERASE partflow-staging "))
-        cleanup.assert_called_once_with(recovery["id"], delete_backups=False, reset_admin_config=False)
+        # The preliminary plan is handed to the bundle, and the binding plan is what deletion executes.
+        self.assertEqual(create.call_args.args[0]["image_coverage"], "pending")
+        self.assertEqual(durable.call_args.args[0], "deleting")
+        self.assertEqual(durable.call_args.kwargs["deletion_plan"]["sha256"], pf.pf_docker.plan_sha256(plan))
+        cleanup.assert_called_once_with(recovery["id"], plan, delete_backups=False, reset_admin_config=False)
+
+    def binding_plan(self, recovery_id):
+        plan = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge", operation_id=self.c.operation_id,
+                                          daemon=self.c.verify_daemon(), recovery_id=recovery_id,
+                                          covered_image_refs=set())
+        plan["slug"] = self.c.context.slug
+        return plan
 
     def test_purge_delete_backups_adds_separate_confirmation(self):
         summary = {
@@ -1354,22 +1428,31 @@ class PurgeRecoveryTests(unittest.TestCase):
         }
         checkpoint = {"id": recovery["active_checkpoint"], "images": {}, "database_heads": ["r1"]}
         confirmations = []
-        with mock.patch.object(self.c, "instance_summary", return_value=summary), \
-             mock.patch.object(self.c, "log_instance_summary"), \
-             mock.patch.object(self.c, "database_ready", return_value=16), \
-             mock.patch.object(self.c, "ensure_local_contract"), \
-             mock.patch.object(self.c, "create_purge_recovery", return_value=recovery), \
-             mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
-             mock.patch.object(self.c, "finish_purge_cleanup"), \
-             mock.patch.object(pf, "confirm", side_effect=lambda phrase, warning: confirmations.append(phrase)):
-            self.c.purge(delete_backups=True)
+        with self.c.lock():
+            plan = self.binding_plan(recovery["id"])
+            with mock.patch.object(self.c, "instance_summary", return_value=summary), \
+                 mock.patch.object(self.c, "log_instance_summary"), \
+                 mock.patch.object(self.c, "database_ready", return_value=16), \
+                 mock.patch.object(self.c, "ensure_local_contract"), \
+                 mock.patch.object(self.c, "pause"), \
+                 mock.patch.object(self.c, "phase"), \
+                 mock.patch.object(self.c, "durable_phase"), \
+                 mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)), \
+                 mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
+                 mock.patch.object(self.c, "finish_purge_cleanup"), \
+                 mock.patch.object(pf, "confirm", side_effect=lambda phrase, warning: confirmations.append(phrase)):
+                self.c.purge(delete_backups=True)
         self.assertIn("DELETE BACKUPS partflow-staging", confirmations)
 
     def test_interrupted_deleting_purge_can_resume_from_verified_bundle(self):
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
+        self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
+        with self.c.lock():
+            plan = self.binding_plan(recovery_id)
+            reference = self.c.write_deletion_plan(plan)
         pf.write_json(self.c.pending, {
-            "operation": "purge", "phase": "deleting", "recovery": recovery_id,
-            "delete_backups": True, "reset_admin_config": False,
+            "operation": "purge", "phase": "deleting", "recovery": recovery_id, "deletion_plan": reference,
+            "deleted": [], "delete_backups": True, "reset_admin_config": False,
         })
         item = {"id": recovery_id, "project": "partflow-staging", "status": "complete"}
         with mock.patch.object(self.c, "recoveries", return_value=[item]), \
@@ -1378,7 +1461,20 @@ class PurgeRecoveryTests(unittest.TestCase):
              mock.patch.object(pf, "confirm") as confirmation:
             self.c.purge()
         confirmation.assert_called_once()
-        cleanup.assert_called_once_with(recovery_id, delete_backups=True, reset_admin_config=False)
+        # Resume executes exactly the frozen plan the journal references (PF-A1.3).
+        cleanup.assert_called_once_with(recovery_id, plan, delete_backups=True, reset_admin_config=False)
+
+    def test_pre_plan_deleting_journal_is_refused_with_plan_missing(self):
+        recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
+        pf.write_json(self.c.pending, {
+            "operation": "purge", "phase": "deleting", "recovery": recovery_id,
+            "delete_backups": True, "reset_admin_config": False,
+        })
+        with mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
+             mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation")):
+            with self.assertRaisesRegex(pf.Failure, "plan-missing"):
+                self.c.purge()
+        cleanup.assert_not_called()
 
     def test_side_by_side_restore_never_replaces_active_database(self):
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
@@ -1408,11 +1504,11 @@ class PurgeRecoveryTests(unittest.TestCase):
             "root": str(self.root), "postgres_major": 16, "database": "partflow_staging",
             "database_user": "partflow_staging", "source_revision": OLD, "databases": [],
         }
+        self.c.resources = {"containers": ["c"], "volumes": []}
+        (self.c.state / "deployed.json").unlink()
         with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
-             mock.patch.object(self.c, "detailed_project_resources", return_value={
-                 "containers": ["c"], "volumes": [], "networks": [], "images": []
-             }):
-            with self.assertRaisesRegex(pf.Failure, "empty target project"):
+             mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation before the empty-target test")):
+            with self.assertRaisesRegex(pf.Failure, "resource-target-not-empty: restore-instance requires an empty target"):
                 self.c.restore_instance(recovery)
 
     def exact_restore_bundle(self, tree_extra=None):
@@ -1437,8 +1533,6 @@ class PurgeRecoveryTests(unittest.TestCase):
         env_path = self.c.config_dir / ".env"
         env_before = env_path.read_bytes() if env_path.exists() else None
         with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
-             mock.patch.object(self.c, "detailed_project_resources", return_value={
-                 "containers": [], "volumes": [], "networks": [], "images": []}), \
              mock.patch.object(pf, "confirm", side_effect=AssertionError("confirmation must not be asked")), \
              mock.patch.object(self.c, "restore_runtime_environment",
                                side_effect=AssertionError("configuration must not be touched")):
@@ -1550,13 +1644,13 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
              ]), \
              mock.patch.object(self.c, "db_heads", return_value=["r1"]), \
              mock.patch.object(self.c, "available_snapshot_image_refs", return_value=([], [])), \
-             mock.patch.object(self.c, "detailed_project_resources", return_value={
-                 "containers": ["c"], "volumes": ["v"], "networks": ["n"], "images": []
-             }), \
              mock.patch.object(self.c, "compose", side_effect=fake_compose), \
              mock.patch.object(self.c, "command", side_effect=fake_command), \
              self.c.lock():
-            recovery = self.c.create_purge_recovery()
+            self.c.resources = {"containers": ["c"], "volumes": ["partflow-staging_postgres_data"],
+                                "networks": ["partflow-staging_default"]}
+            preliminary = self.c.plan_for("purge", self.c.docker_inventory(), command="purge")
+            recovery, binding = self.c.create_purge_recovery(preliminary)
             frozen_values = dict(self.c.frozen.values)
 
         verified = self.c.verify_recovery({**recovery, "_folder": str(self.c.recovery_root / recovery["id"])})
@@ -1571,6 +1665,12 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
         self.assertEqual(pf.read_app_env(folder / "configuration/.env"), frozen_values)
         self.assertTrue((folder / "configuration/pf-config.json").is_file())
         self.assertEqual(verified["workspace_archive"], "workspace.tar.gz")
+        # PF-A1.3: resources_before_purge is sealed from the binding plan's candidates (v2 shape).
+        self.assertEqual(binding["image_coverage"], "bound")
+        self.assertEqual(verified["resources_before_purge"], {
+            kind + "s": [item["key"] for item in binding["candidates"] if item["kind"] == kind]
+            for kind in ("container", "volume", "network", "image")})
+        self.assertEqual(verified["resources_before_purge"]["volumes"], ["partflow-staging_postgres_data"])
 
 class RecoverySourceTests(unittest.TestCase):
     def setUp(self):

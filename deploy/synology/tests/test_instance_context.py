@@ -407,11 +407,11 @@ class StableLocks(Base):
         controller = RecordingController(self.alpha)
         before = os.stat(self.alpha.lock_path)
         with controller.lock() as held:
-            with mock.patch.object(controller, "detailed_project_resources", return_value={
-                "containers": [], "volumes": [], "networks": [], "images": [],
-            }):
+            with mock.patch.object(controller, "execute_deletion_plan") as deletion:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    controller.finish_purge_cleanup("purge-x", delete_backups=True, reset_admin_config=False)
+                    controller.finish_purge_cleanup("purge-x", {"candidates": []}, delete_backups=True,
+                                                    reset_admin_config=False)
+            deletion.assert_called_once_with({"candidates": []})
             self.assertFalse(controller.state.exists())
             self.assertFalse((self.alpha_paths["configuration"] / ".env").exists())
             after = os.stat(self.alpha.lock_path)

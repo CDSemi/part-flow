@@ -66,14 +66,19 @@ def recording_tool(directory, name, *, exit_code=1, extra=""):
     """A registered fixture tool that records its environment/argv/cwd and never contacts anything.
 
     ``docker compose version`` answers like an installed plugin so the Compose contract
-    itself is exercised; every other invocation fails like a host without a daemon.
+    itself is exercised and ``docker info`` answers as the registered engine (PF-A1.3);
+    every other invocation fails like a host without a daemon.
     """
     directory = Path(directory)
+    (directory / "daemon-info.json").write_text(json.dumps(pfx.daemon_info()) + "\n")
     body = (
         "#!/bin/sh\n"
         f"env | LC_ALL=C sort > {directory}/observed-{name}-env.txt\n"
         f"printf '%s\\n' \"$@\" > {directory}/observed-{name}-argv.txt\n"
         f"pwd > {directory}/observed-{name}-cwd.txt\n"
+        # PF-A1.3: it answers the daemon identity probe like the bound engine (the binding gate passes),
+        # then behaves like a host whose daemon refuses every other request.
+        f"if [ \"$1\" = info ]; then cat {directory}/daemon-info.json; exit 0; fi\n"
         "if [ \"$1\" = compose ] && [ \"$2\" = version ]; then echo 'Docker Compose version v2-fixture'; exit 0; fi\n"
         f"{extra}"
         f"echo 'fixture {name}: no daemon' >&2\n"
@@ -251,7 +256,8 @@ class SubprocessEnvironment(Base):
         self.assertEqual(self.context.diagnostic_env_path.read_bytes().strip().startswith(b"#"), True)
         self.assertIn("Registered tools (bootstrap/tools.conf; PATH is never searched): docker=" + self.tools["docker"], out)
         self.assertIn("Git: unavailable", out)
-        self.assertIn("Docker: unavailable", out)
+        self.assertIn("Docker daemon: verified | engine " + pfx.ENGINE_ID, out)
+        self.assertIn("Compose envelope: unavailable: envelope-render-failed", out)
         self.assertEqual(pfx.snapshot_tree(self.base / "staging"), before)
 
     def test_installed_launcher_status_uses_registered_tools_only(self):
@@ -275,11 +281,11 @@ class SubprocessEnvironment(Base):
         controller = self.controller(self.context)
         controller.cli = ["docker", "compose"]
         with self.assertRaises(pf.Failure):
-            controller.command(["docker", "version"], env={"DOCKER_HOST": "tcp://evil:2375"})
+            controller.command(["docker", "version"], effect=None, env={"DOCKER_HOST": "tcp://evil:2375"})
         with self.assertRaises(pf.Failure):
-            controller.command(["docker", "version"], env={"PATH": str(self.marker_dir)})
+            controller.command(["docker", "version"], effect=None, env={"PATH": str(self.marker_dir)})
         with self.assertRaises(pf.Failure):
-            controller.command(["docker", "version"], env={"COMPOSE_FILE": "/x"})
+            controller.command(["docker", "version"], effect=None, env={"COMPOSE_FILE": "/x"})
         self.assertFalse((self.base / "observed-docker-env.txt").exists())
         with self.assertRaises(pf.Failure):
             controller.compose("config", "-q")  # the fixture docker exits 1
@@ -289,9 +295,9 @@ class SubprocessEnvironment(Base):
         self.assertEqual(env["PARTFLOW_DATABASE_URL"], "postgresql+psycopg://partflow_staging:abc123@db:5432/partflow_staging")
         self.assertEqual(env["DOCKER_HOST"], self.context.daemon.endpoint)
         with self.assertRaises(pf.Failure):
-            controller.command(["python3", "-c", "print(1)"])  # not a typed executable id
+            controller.command(["python3", "-c", "print(1)"], effect=None)  # not a typed executable id
         with self.assertRaises(pf.Failure):
-            controller.command(["ip", "addr"])  # registered? no -> refused, never searched on PATH
+            controller.command(["ip", "addr"], effect=None)  # registered? no -> refused, never searched on PATH
         self.assertFalse(self.marker.exists())
 
 
@@ -658,7 +664,9 @@ class ImportAndPluginInjection(Base):
         code, out, err = run_main(["--instance", "staging", "doctor"], self.layout)
         self.assertEqual(code, 1)
         self.assertIn("docker=REFUSED (tool-ancestor-replaceable)", out)
-        self.assertIn("Docker: unavailable: tool-ancestor-replaceable", out)
+        # PF-A1.3: the refused executable is the daemon probe's transport; nothing else is attempted.
+        self.assertIn("Docker daemon: unavailable: daemon-unreachable", out)
+        self.assertIn("did not answer (tool-ancestor-replaceable", out)
         self.assertFalse(self.marker.exists(), "refused helper was executed")
         self.assertEqual(pfx.snapshot_tree(self.base / "staging"), before)
         # Mutation through the launcher stops at the same boundary.
@@ -897,6 +905,9 @@ class TimeoutAndCancellation(Base):
         body = (
             "#!/bin/sh\n"
             "if [ \"$1\" = compose ] && [ \"$2\" = version ]; then echo 'Docker Compose version v2-fixture'; exit 0; fi\n"
+            # PF-A1.3 gates (daemon identity, empty inventory, the recorded Compose model) answer at once;
+            # every other invocation is the slow, chatty child under test.
+            + pfx.daemon_shell_lines(self.base / "daemon") +
             f"sleep 300 &\necho $! > {self.pidfile}\n"
             # The application secret reaches the child only as an allowlisted variable; the
             # child echoes it back on both streams like a chatty tool would.
@@ -908,6 +919,7 @@ class TimeoutAndCancellation(Base):
         self.tool = pfx.tool_script(self.base / "tools", "docker", body)
         self.install({"docker": str(self.tool), "git": str(self.tool)})
         self.context, self.paths = self.instance()
+        pfx.write_daemon_answers(self.base / "daemon", self.context)
         self.password = dict(line.split("=", 1) for line in pfx.ENV_TEXT.splitlines())["POSTGRES_PASSWORD"]
 
     @staticmethod
@@ -1102,6 +1114,8 @@ class TimeoutAndCancellation(Base):
 
         controller.cli = ["docker", "compose"]  # the interrupted child is the stop itself, not the version probe
         with controller.lock():
+            # ...nor the PF-A1.3 daemon probe or ownership preflight, which run (unpatched) first.
+            controller.require_topology_owned("stop")
             with mock.patch.object(controller.runner, "_pump", side_effect=interrupted):
                 with self.assertRaises(KeyboardInterrupt):
                     controller.compose("stop", "frontend", "backend", timeout=30)
@@ -1212,20 +1226,21 @@ class RunnerInputOutput(Base):
         tool = pfx.tool_script(self.base / "tools", "docker", "#!/bin/sh\ncat\n")
         self.install({"docker": str(tool)})
         context, paths = self.instance()
-        controller = self.controller(context)
+        controller = pfx.trust_daemon(self.controller(context))  # the `cat` tool is not a daemon fake
         payload = b"dump-bytes\n" * 5000
         out_path = self.base / "out-1.bin"
         with out_path.open("wb") as out:
-            self.assertEqual(controller.command(["docker"], input_file=payload, output=out), "")
+            self.assertEqual(controller.command(["docker", "version"], effect=None, input_file=payload, output=out), "")
         self.assertEqual(out_path.read_bytes(), payload)
         in_path = self.base / "in.bin"
         in_path.write_bytes(payload)
         with in_path.open("rb") as stream, (self.base / "out-2.bin").open("wb") as out:
-            controller.command(["docker"], input_file=stream, output=out)
+            controller.command(["docker", "version"], effect=None, input_file=stream, output=out)
         self.assertEqual((self.base / "out-2.bin").read_bytes(), payload)
-        controller.command(["docker"], input_file=str(in_path), output=str(self.base / "out-3.bin"))
+        controller.command(["docker", "version"], effect=None, input_file=str(in_path),
+                           output=str(self.base / "out-3.bin"))
         self.assertEqual((self.base / "out-3.bin").read_bytes(), payload)
-        self.assertEqual(controller.command(["docker"], input_file=b"hello"), "hello")
+        self.assertEqual(controller.command(["docker", "version"], effect=None, input_file=b"hello"), "hello")
         for result in controller.runner.history[:3]:
             self.assertEqual(result.stdout, "")
         self.assertEqual(controller.runner.history[-1].stdout, "hello")
@@ -1235,17 +1250,17 @@ class RunnerInputOutput(Base):
                                "#!/bin/sh\nhead -c 300000 /dev/zero | tr '\\0' 'z'\ncat\n")
         self.install({"docker": str(tool)})
         context, paths = self.instance()
-        controller = self.controller(context)
+        controller = pfx.trust_daemon(self.controller(context))  # the flooding tool is not a daemon fake
         payload = b"q" * 300000
         started = time.monotonic()
-        output = controller.command(["docker"], input_file=payload, timeout=20)
+        output = controller.command(["docker", "version"], effect=None, input_file=payload, timeout=20)
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(len(output), 600000)
         self.assertTrue(output.endswith("q" * 10))
         # An early-exiting child does not turn the stdin write into an exception.
         tool.write_text("#!/bin/sh\nexit 3\n")
         with self.assertRaisesRegex(pf.Failure, "exit 3"):
-            controller.command(["docker"], input_file=payload, timeout=20)
+            controller.command(["docker", "version"], effect=None, input_file=payload, timeout=20)
 
 
 # =============================================================================== A1-T10

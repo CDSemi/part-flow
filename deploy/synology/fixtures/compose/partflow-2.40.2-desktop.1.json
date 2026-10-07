@@ -1,0 +1,180 @@
+{
+  "compose_version": "v2.40.2-desktop.1",
+  "escape_mode": "doubled",
+  "model": {
+    "name": "{{PROJECT}}",
+    "networks": {
+      "default": {
+        "ipam": {},
+        "labels": {
+          "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+        },
+        "name": "{{PROJECT}}_default"
+      }
+    },
+    "services": {
+      "backend": {
+        "build": {
+          "context": "{{ENV:PARTFLOW_REPO_ROOT}}/backend",
+          "dockerfile": "Dockerfile",
+          "labels": {
+            "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+          }
+        },
+        "command": null,
+        "depends_on": {
+          "db": {
+            "condition": "service_healthy",
+            "required": true
+          }
+        },
+        "entrypoint": null,
+        "environment": {
+          "DATABASE_URL": "{{ENV:PARTFLOW_DATABASE_URL}}",
+          "SITE_TIMEZONE": "{{ENV:SITE_TIMEZONE}}"
+        },
+        "healthcheck": {
+          "interval": "10s",
+          "retries": 12,
+          "start_period": "1m0s",
+          "test": [
+            "CMD",
+            "python",
+            "-c",
+            "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"
+          ],
+          "timeout": "5s"
+        },
+        "labels": {
+          "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+        },
+        "logging": {
+          "driver": "json-file",
+          "options": {
+            "max-file": "3",
+            "max-size": "10m"
+          }
+        },
+        "networks": {
+          "default": null
+        },
+        "restart": "unless-stopped"
+      },
+      "db": {
+        "command": null,
+        "entrypoint": null,
+        "environment": {
+          "POSTGRES_DB": "{{ENV:POSTGRES_DB}}",
+          "POSTGRES_PASSWORD": "{{ENV:POSTGRES_PASSWORD}}",
+          "POSTGRES_USER": "{{ENV:POSTGRES_USER}}"
+        },
+        "healthcheck": {
+          "interval": "5s",
+          "retries": 20,
+          "start_period": "20s",
+          "test": [
+            "CMD-SHELL",
+            "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+          ],
+          "timeout": "5s"
+        },
+        "image": "postgres:16",
+        "labels": {
+          "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+        },
+        "logging": {
+          "driver": "json-file",
+          "options": {
+            "max-file": "3",
+            "max-size": "10m"
+          }
+        },
+        "networks": {
+          "default": null
+        },
+        "restart": "unless-stopped",
+        "volumes": [
+          {
+            "source": "postgres_data",
+            "target": "/var/lib/postgresql/data",
+            "type": "volume",
+            "volume": {}
+          }
+        ]
+      },
+      "frontend": {
+        "build": {
+          "context": "{{ENV:PARTFLOW_REPO_ROOT}}/frontend",
+          "dockerfile": "Dockerfile",
+          "labels": {
+            "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+          }
+        },
+        "command": null,
+        "depends_on": {
+          "backend": {
+            "condition": "service_healthy",
+            "required": true
+          }
+        },
+        "entrypoint": null,
+        "environment": {
+          "BACKEND_PROXY_TARGET": "http://backend:8000",
+          "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS": "{{ENV:PARTFLOW_ALLOWED_HOST}}"
+        },
+        "healthcheck": {
+          "interval": "10s",
+          "retries": 12,
+          "start_period": "1m0s",
+          "test": [
+            "CMD",
+            "wget",
+            "-q",
+            "-O",
+            "/dev/null",
+            "http://127.0.0.1:5173/api/health"
+          ],
+          "timeout": "5s"
+        },
+        "labels": {
+          "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+        },
+        "logging": {
+          "driver": "json-file",
+          "options": {
+            "max-file": "3",
+            "max-size": "10m"
+          }
+        },
+        "networks": {
+          "default": null
+        },
+        "ports": [
+          {
+            "host_ip": "{{ENV:PARTFLOW_BIND_IP}}",
+            "mode": "ingress",
+            "protocol": "tcp",
+            "published": "{{ENV:PARTFLOW_HTTP_PORT}}",
+            "target": 5173
+          }
+        ],
+        "restart": "unless-stopped"
+      }
+    },
+    "volumes": {
+      "postgres_data": {
+        "labels": {
+          "io.deploy-admin.instance-id": "{{ENV:DEPLOY_ADMIN_INSTANCE_ID}}"
+        },
+        "name": "{{PROJECT}}_postgres_data"
+      }
+    }
+  },
+  "notes": [
+    "Sentinel values were replaced by {{ENV:NAME}} tokens (substituted through the escape mode) and the project name by {{PROJECT}}.",
+    "Every environment value equals escape(sentinel) for exactly one escape mode: doubled ($ -> $$); the db healthcheck test is the doubled form.",
+    "build.context was normalized by the Windows Compose to a host path below the project directory (...\\volume1\\partflow\\repo\\<service>); the {{ENV:PARTFLOW_REPO_ROOT}}/<service> form is calibrated from the envelope rule, not from this render (Linux render gap).",
+    "backend/frontend carry no image key when no override file is selected; networks.default carries ipam: {}."
+  ],
+  "source": "real `docker compose config --format json` render on the harness host CLI (Docker Desktop, Windows); throwaway project pfa13-fixture, config only, no daemon interaction (PF-A1.3 spec section 6.4 fallback)"
+}

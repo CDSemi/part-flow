@@ -38,7 +38,7 @@ BOOTSTRAP_MODULE_NAME = "pf_bootstrap.py"
 CONTROL_INVENTORY_NAME = "control-manifest.json"
 CONTROL_ENTRY_POINT = "pf-admin.py"
 REQUIRED_RELEASE_FILES = ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_runner.py", "pf_config.py",
-                          "pf_source.py", "compose.nas.yaml")
+                          "pf_source.py", "pf_docker.py", "compose.nas.yaml")
 BOOTSTRAP_CONF_KEYS = ("interpreter", "control_release", "control_release_sha256")
 # Host executables the control release may start (PF-A1.2 runner). Registered by the
 # trusted installer in ``bootstrap/tools.conf`` as absolute paths; every entry is optional

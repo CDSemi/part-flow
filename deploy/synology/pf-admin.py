@@ -26,6 +26,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,11 +54,12 @@ pf_instance = _load_sibling_module("pf_instance")
 pf_runner = _load_sibling_module("pf_runner")
 pf_config = _load_sibling_module("pf_config")
 pf_source = _load_sibling_module("pf_source")
+pf_docker = _load_sibling_module("pf_docker")
 pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A1.2"
+CHECKPOINT = "PF-A1.3"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -67,6 +69,13 @@ TIMEOUT_BUILD = 3600.0
 TIMEOUT_DATA = 3600.0
 TIMEOUT_GIT_FETCH = 1800.0
 TIMEOUT_PASSTHROUGH = 3600.0
+# PF-A1.3: the daemon identity probe (`docker info`), run once per process before any other Docker child.
+TIMEOUT_DAEMON_PROBE = 30.0
+# Per-call Compose value overrides: only the temporary databases of the update rehearsal and of
+# reset-db (fullmatch). Any other key or value is refused before rendering (OD-A13-13).
+COMPOSE_VALUE_OVERRIDES = {"POSTGRES_DB": r"pf_(migrate|clean)_[0-9a-f]{20}"}
+# Commands whose first step inside the lock is the topology ownership preflight (OD-A13-03).
+TOPOLOGY_GUARDED_COMMANDS = frozenset({"backup", "update", "rollback", "reset-db", "resume"})
 GITHUB_HTTPS = "https://github.com/"
 DEFAULTS = {
     "repository": "CDSemi/part-flow", "branch": "main",
@@ -91,6 +100,7 @@ AUTO_REVIEW_PATHS = (
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 BACKUP_RE = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{6}\Z")
 RECOVERY_RE = re.compile(r"purge-\d{8}T\d{6}Z-[0-9a-f]{12}-[0-9a-f]{6}\Z")
+OPERATION_ID_RE = re.compile(r"\d{8}T\d{6}Z-[a-z0-9-]+-[0-9a-f]{8}\Z")
 IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+\Z")
 REQUIRED_NAS_ENV_KEYS = (
     "POSTGRES_USER",
@@ -112,6 +122,28 @@ class Failure(RuntimeError):
 
 class Deferred(Failure):
     """A scheduled update needs human review; exit 20, never silently succeed."""
+
+
+class PlanChanged(Failure):
+    """The binding inventory differs from the preliminary plan (PF-A1.3). Raised inside the bundle
+    creation after the checkpoint exists, so purge reopens that exact application before re-raising."""
+
+    def __init__(self, message, checkpoint):
+        super().__init__(message)
+        self.checkpoint = checkpoint
+
+
+class DaemonFailure(Failure):
+    """The bound Docker daemon is unreachable, invalid, rootless or drifted (PF-A1.3).
+
+    Cached for the life of the process: every later Docker/Compose child raises it again
+    without starting a process.
+    """
+
+    def __init__(self, code, message, detail=""):
+        super().__init__(message)
+        self.code = code
+        self.detail = detail
 
 
 def log(message):
@@ -187,11 +219,12 @@ def database_swap_sql(current, prepared, retained):
 # tables below do not recognise as read-only is recorded as a mutation. Descriptors name the
 # tool, verb and targets needed to reconcile; they never carry application values.
 DOCKER_READ_ONLY = frozenset({
-    ("ps",), ("inspect",), ("version",), ("compose", "version"),
+    ("ps",), ("inspect",), ("version",), ("compose", "version"), ("info",),
     ("image", "inspect"), ("image", "ls"), ("volume", "ls"), ("network", "ls"),
+    ("container", "inspect"), ("volume", "inspect"), ("network", "inspect"),
     ("image", "save"),  # writes a host file inside the operation's own folder; the daemon is unchanged
 })
-DOCKER_GROUPS = frozenset({"image", "volume", "network", "compose"})
+DOCKER_GROUPS = frozenset({"image", "volume", "network", "compose", "container"})
 COMPOSE_EXEC_READ_ONLY_PROGRAMS = frozenset({"pg_dump", "pg_dumpall", "wget"})
 GIT_READ_ONLY = frozenset({"--version", "rev-parse", "ls-tree", "cat-file", "merge-base"})
 SQL_READ_ONLY_KEYWORDS = frozenset({"SELECT", "SHOW"})
@@ -246,6 +279,56 @@ def git_effect(arguments):
     if verb in GIT_READ_ONLY:
         return None
     return {"kind": "source-store", "verb": verb, "targets": effect_targets(rest)}
+
+
+# Global Compose options the effect cross-check consumes (as option/value pairs) before the verb.
+COMPOSE_GLOBAL_PAIRS = ("--project-directory", "--env-file", "-p", "-f")
+READ_ONLY_PROBE_TOOLS = ("ip", "hostname")
+
+
+def read_only_sql(words):
+    """``exec ... psql ... -c <statement>`` whose first keyword is a read-only one and with no ``-f``.
+
+    The first-keyword policy is ``sql()``'s: it classifies journaling, not database authority.
+    """
+    if not words or words[0] != "exec" or "-f" in words or "-c" not in words:
+        return False
+    positional = [word for word in words[1:] if not word.startswith("-")]
+    if positional[1:2] != ["psql"]:
+        return False
+    index = words.index("-c")
+    statement = words[index + 1] if index + 1 < len(words) else ""
+    return bool(statement.strip()) and statement.lstrip().split(None, 1)[0].upper() in SQL_READ_ONLY_KEYWORDS
+
+
+def unclassified_mutation(tool, arguments):
+    """``None`` when a direct Git/Docker/Compose argv is read-only by the classifiers, else its verb.
+
+    ``Controller.command`` refuses ``effect=None`` on anything this does not prove read-only
+    (PF-A1.3, VERDICT A12r2-F03): a mutating child must carry an explicit effect descriptor.
+    """
+    words = [str(word) for word in arguments]
+    if tool in READ_ONLY_PROBE_TOOLS:
+        return None
+    if tool == "git":
+        effect = git_effect(words)
+        return None if effect is None else "git " + effect["verb"]
+    if tool == "docker" and words[:1] != ["compose"]:
+        effect = docker_effect(words)
+        return None if effect is None else "docker " + effect["verb"]
+    if tool not in ("docker", "docker_compose"):
+        return tool
+    rest = words[1:] if tool == "docker" else words
+    project = "?"
+    while rest and rest[0].startswith("-"):
+        if rest[0] not in COMPOSE_GLOBAL_PAIRS or len(rest) < 2:
+            return "compose " + rest[0]
+        if rest[0] == "-p":
+            project = rest[1]
+        rest = rest[2:]
+    if compose_effect(project, rest) is None or read_only_sql(rest):
+        return None
+    return "compose " + (rest[0] if rest else "?")
 
 
 def read_app_env(path, *, require_all=True):
@@ -533,6 +616,19 @@ class Controller:
         self._snapshots = 0
         self.remote_override = None          # tests: local approved remote instead of GitHub
         self.source_protocols = ("https",)   # tests: ("file",) for a local remote
+        # PF-A1.3 Docker scope: process-wide daemon verification (an observation or the cached
+        # DaemonFailure), whether any effect-carrying child has started, and per-operation state
+        # (topology check, approved Compose input keys, render sequence, image tags created).
+        self._daemon = None
+        self._daemon_recorded_op = None
+        self.effects_started = False
+        self.compose_version = None
+        self._inventory_active = False
+        self._topology_checked = False
+        self._operation_command = None
+        self._approved_envelopes = {}
+        self._envelope_sequence = 0
+        self.created_image_refs = []
 
     def ensure_config(self):
         """Load the runtime configuration once (read-only); return the cached values."""
@@ -643,20 +739,30 @@ class Controller:
                 raise Failure(str(exc)) from exc
         return self._runner
 
-    def command(self, argv, *, cwd=None, output=None, input_file=None, env=None, timeout=None, effect=None,
+    def command(self, argv, *, effect, cwd=None, output=None, input_file=None, env=None, timeout=None,
                 stream=False):
         """Every child process of the control release. ``argv[0]`` is a typed executable id.
 
+        ``effect`` is required (PF-A1.3): a descriptor for a child that can change external
+        state, or ``None``, which is accepted only for an argv the classifiers prove read-only.
         ``env`` may only carry allowlisted application values (Compose interpolation);
         the host environment is built by the runner from scratch. Output is bounded and
         redacted; every call has a deadline; timeouts terminate the process group and,
-        when ``effect`` describes an external effect, record it as unresolved.
+        when ``effect`` describes an external effect, record it as unresolved. No process
+        starts before, in order: the argv/tool checks, the effect cross-check, the locked
+        operation check, the child environment allowlist, the daemon binding (every Docker
+        and Compose child) and the lazy topology ownership check (PF-A1.3).
         """
         if not argv:
             raise Failure("Empty command.")
         tool, arguments = str(argv[0]), [str(item) for item in argv[1:]]
         if tool not in pf_bootstrap.TOOL_IDS:
             raise Failure(f"{tool!r} is not a registered executable id; the control release never searches PATH.")
+        if effect is None:
+            verb = unclassified_mutation(tool, arguments)
+            if verb is not None:
+                raise Failure(f"unclassified-mutation: {verb}: a mutating child must carry an explicit effect "
+                              "descriptor; nothing was started.")
         if effect is not None and self.operation_dir is None:
             # A child that can change external state must have a journal to record an
             # unresolved effect in; only a locked operation provides one.
@@ -667,11 +773,22 @@ class Controller:
                 else TIMEOUT_DIAGNOSTIC
         try:
             child_env = self.runner.environment(env or None, allowed_keys=pf_config.CHILD_KEYS)
+        except pf_runner.RunnerError as exc:
+            raise Failure(str(exc)) from exc
+        if tool in ("docker", "docker_compose"):
+            if (tool, *arguments) != pf_docker.DAEMON_PROBE_ARGV:
+                self.verify_daemon()
+            if effect is not None and self.operation_dir is not None and not self._topology_checked \
+                    and not self._inventory_active:
+                self.require_topology_owned(self._operation_command)
+        try:
             spec = pf_runner.ProcessSpec(
                 tool=tool, argv=tuple(arguments), cwd=str(cwd or self.context.installation_root), env=child_env,
                 timeout=float(timeout), stdin=input_file,
                 stdout="stream" if stream else output, effect=effect, label=tool,
             )
+            if effect is not None:
+                self.effects_started = True
             result = self.runner.run(spec)
         except pf_runner.RunnerError as exc:
             raise Failure(str(exc)) from exc
@@ -689,14 +806,553 @@ class Controller:
         """The Compose entry point: the registered Docker CLI plugin, else a registered standalone binary."""
         if self.cli is None:
             try:
-                self.docker("compose", "version")
+                self.compose_version = self.docker("compose", "version").strip()
                 self.cli = ["docker", "compose"]
+            except DaemonFailure:
+                raise
             except Failure as exc:
                 if "docker_compose" not in self.registered_tools():
                     raise Failure("Docker Compose is unavailable: " + str(exc).splitlines()[0]) from exc
-                self.command(["docker_compose", "version"])
+                self.compose_version = self.command(["docker_compose", "version"], effect=None).strip()
                 self.cli = ["docker_compose"]
         return list(self.cli)
+
+    # ------------------------------------------------------------ Docker scope (PF-A1.3)
+
+    def write_private_json(self, name, value):
+        """A private (0600) audit/authority file in the current operation directory (no-op outside one)."""
+        if self.operation_dir is None:
+            return None
+        path = self.operation_dir / name
+        pf_config._write_private(path, pf_docker.normalize_json(value) + b"\n", 0o600)
+        return path
+
+    def daemon_failure(self, code, detail):
+        """Operator copy for a daemon refusal (no values; engine IDs are identities, not secrets)."""
+        context = self.context
+        endpoint = context.daemon.endpoint
+        if code == "daemon-unreachable":
+            text = (f"Docker daemon at {endpoint} did not answer ({detail}); no further Docker or Compose step "
+                    "was attempted.")
+        elif code == "daemon-info-invalid":
+            text = f"Docker daemon at {endpoint} returned an unusable identity ({detail}); every Docker step is refused."
+        elif code == "daemon-rootless":
+            text = (f"The daemon at {endpoint} runs in rootless mode; only a local rootful daemon is supported. "
+                    "Nothing was changed.")
+        else:
+            head = (f"Docker daemon drift: instance {context.slug} is bound to engine {context.daemon.engine_id} at "
+                    f"{endpoint}, but the endpoint answers as engine {detail}.")
+            if self.effects_started:
+                journal = self.read_journal() or {}
+                operation = journal.get("operation") or self._operation_command or "the operation"
+                text = (head + f" Every further Docker/Compose step is refused. {operation} stopped in phase "
+                        f"{journal.get('phase') or 'unknown'}; review it with 'pf status --instance {context.slug}'. "
+                        "Re-binding a daemon is an explicit installation transaction (PF-A2).")
+            else:
+                text = head + (" Every Docker/Compose step is refused and nothing was changed. Re-binding a daemon is "
+                               "an explicit installation transaction (PF-A2).")
+        return DaemonFailure(code, f"{code}: {text}", detail)
+
+    def verify_daemon(self, *, refresh=False):
+        """Observe the bound daemon (engine ID, rootless) once per process; refuse drift before any mutation.
+
+        The result, success or failure, is cached; a failure is raised again by every later
+        Docker/Compose child without starting a process. ``refresh`` re-observes (immediately
+        before a deletion plan executes, which also covers a resumed purge or abort).
+        """
+        if self._daemon is not None and not refresh:
+            if isinstance(self._daemon, Failure):
+                raise self._daemon
+            self._record_daemon(self._daemon)
+            return self._daemon
+        self._daemon = None
+        endpoint = self.context.daemon.endpoint
+        socket_path = endpoint[len(pf_instance.UNIX_SCHEME):] if endpoint.startswith(pf_instance.UNIX_SCHEME) \
+            else endpoint
+        try:
+            if not os.path.lexists(socket_path):
+                raise self.daemon_failure("daemon-unreachable", "socket absent")
+            try:
+                text = self.command(["docker", "info", "--format", "{{json .}}"], effect=None,
+                                    timeout=TIMEOUT_DAEMON_PROBE)
+            except DaemonFailure:
+                raise
+            except Failure as exc:
+                lines = [line.strip() for line in str(exc).splitlines()[1:] if line.strip()]
+                detail = lines[0] if lines else str(exc).splitlines()[0]
+                raise self.daemon_failure("daemon-unreachable", detail[:200]) from exc
+            try:
+                observation = pf_docker.parse_daemon_info(text, endpoint=endpoint)
+            except pf_docker.DockerScopeError as exc:
+                detail = "server error" if exc.code == "daemon-unreachable" else \
+                    (exc.findings[0].message if exc.findings else "info")
+                raise self.daemon_failure(exc.code, detail) from exc
+            try:
+                pf_docker.check_daemon(observation, self.context.daemon)
+            except pf_docker.DockerScopeError as exc:
+                raise self.daemon_failure(exc.code, observation.engine_id) from exc
+        except Failure as exc:
+            self._daemon = exc
+            raise
+        self._daemon = observation
+        self._record_daemon(observation)
+        return observation
+
+    def _record_daemon(self, observation):
+        if self.operation_dir is None or self._daemon_recorded_op == self.operation_id:
+            return
+        self.write_private_json("daemon.json", {
+            "schema_version": 1, "observed_at": utc(), "endpoint": observation.endpoint,
+            "registered_engine_id": self.context.daemon.engine_id, "engine_id": observation.engine_id,
+            "server_version": observation.server_version, "operating_system": observation.operating_system,
+            "rootless": observation.rootless, "result": "verified",
+        })
+        self._daemon_recorded_op = self.operation_id
+
+    def describe_daemon(self):
+        observation = self.verify_daemon()
+        return (f"verified | engine {observation.engine_id} | endpoint {observation.endpoint} | server "
+                f"{observation.server_version or 'unknown'} | local rootful")
+
+    def compose_env_file(self):
+        """The env-file Compose reads: the frozen snapshot inside an operation, else the diagnostics file."""
+        if self.frozen is not None:
+            return self.frozen.env_file
+        return self.context.diagnostic_env_path
+
+    def compose_prefix(self, cli, root, env_file, override):
+        command = list(cli) + [
+            "--project-directory", str(root),
+            "--env-file", str(env_file),
+            "-p", self.context.compose_project,
+            "-f", str(self.control_dir / "compose.nas.yaml"),
+        ]
+        if override is not None:
+            command += ["-f", str(override)]
+        return command
+
+    def envelope_failure(self, exc):
+        findings = exc.findings or (pf_docker.Finding(exc.code, "$", "refused"),)
+        lines = [f"  - {finding.code} at {finding.path}: {finding.message}" for finding in findings]
+        return Failure(f"{exc.code}: Compose envelope refused for {self.context.compose_project} "
+                       f"({len(findings)} finding(s)); nothing was built, created or started:\n" + "\n".join(lines))
+
+    def render_compose(self, root, override, child):
+        """``compose ... config --format json`` with exactly the inputs of the verb; literal bytes, never logged.
+
+        Inside an operation the runner writes ``compose-<n>.json`` (0600) directly; outside one
+        (doctor) an unlinked private temporary file is used. Returns (model, file name or None).
+        """
+        cli = self.compose_cli()
+        argv = self.compose_prefix(cli, root, self.compose_env_file(), override) + ["config", "--format", "json"]
+        name = None
+        if self.operation_dir is not None:
+            self._envelope_sequence += 1
+            name = f"compose-{self._envelope_sequence}.json"
+            fd = os.open(str(self.operation_dir / name),
+                         os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            handle = os.fdopen(fd, "w+b")
+        else:
+            handle = tempfile.TemporaryFile(dir=str(self.context.operations_dir))
+
+        def failed(reason):
+            return pf_docker.DockerScopeError("envelope-render-failed", [pf_docker.Finding(
+                "envelope-render-failed", "$", reason)])
+
+        with handle:
+            try:
+                # Classifier-computed (read-only `config`); the runtime cross-check re-verifies the argv.
+                self.command(argv, env=child, output=handle, timeout=TIMEOUT_DIAGNOSTIC,
+                             effect=compose_effect(self.context.compose_project, argv[-3:]))
+            except DaemonFailure:
+                raise
+            except Failure as exc:
+                raise failed(str(exc).splitlines()[0] + "; Compose v1 cannot render `config --format json` and "
+                             "is unsupported") from exc
+            handle.flush()
+            handle.seek(0)
+            data = handle.read(pf_docker.RENDER_LIMIT + 1)
+        if len(data) > pf_docker.RENDER_LIMIT:
+            raise failed("the resolved model exceeds 4 MiB")
+        if not data.strip():
+            raise failed("empty output")
+        try:
+            model = pf_instance.parse_strict_json(data, label="compose config")
+        except pf_instance.ContextError as exc:
+            raise failed("duplicate key" if "Duplicate" in str(exc) else "invalid JSON") from exc
+        return model, name
+
+    def require_envelope(self, root, override, child, *, value_overrides=()):
+        """Render, validate and record the Compose model of exactly these inputs before a mutating verb.
+
+        The input key covers the installed file, the protected override, the project directory,
+        the frozen env-file, the instance ID and every effective child value (overrides
+        included); a key approved earlier in this operation is not rendered again.
+        """
+        root = Path(root)
+        compose_file = self.control_dir / "compose.nas.yaml"
+        try:
+            compose_bytes = pf_instance.read_bytes_nofollow(compose_file)
+            override_bytes = pf_instance.read_bytes_nofollow(override) if override is not None else None
+        except OSError as exc:
+            raise Failure(f"envelope-render-failed: Compose inputs unreadable: {exc.strerror or exc}") from exc
+        key = (
+            pf_instance.sha256_bytes(compose_bytes),
+            pf_instance.sha256_bytes(override_bytes) if override_bytes is not None else None,
+            str(root), self.frozen.env_sha256 if self.frozen is not None else None, self.context.instance_id,
+            pf_instance.sha256_bytes(pf_instance.normalize_json(child)),
+        )
+        if key in self._approved_envelopes:
+            return self._approved_envelopes[key]
+        project = self.context.compose_project
+        record = {
+            "sequence": None, "compose_version": None,
+            "inputs": {"compose_file": str(compose_file), "compose_file_sha256": key[0],
+                       "override": str(override) if override is not None else None, "override_sha256": key[1],
+                       "project_directory": str(root), "repo_root": child.get("PARTFLOW_REPO_ROOT"),
+                       "frozen_env_sha256": key[3], "instance_id": key[4], "effective_values_sha256": key[5],
+                       "value_overrides": sorted(value_overrides)},
+            "resolved_file": None, "resolved_sha256": None, "escape_mode": None, "result": "refused",
+        }
+        try:
+            images = pf_docker.parse_image_override(override_bytes, project=project) \
+                if override_bytes is not None else None
+            expectation = pf_docker.ComposeExpectation(
+                project=project, instance_id=self.context.instance_id, repo_root=child["PARTFLOW_REPO_ROOT"],
+                values=types.MappingProxyType({name: child[name] for name in pf_config.APP_KEYS}),
+                database_url=child["PARTFLOW_DATABASE_URL"], images=images)
+            model, name = self.render_compose(root, override, child)
+            record.update(sequence=self._envelope_sequence if name else None, resolved_file=name,
+                          compose_version=self.compose_version,
+                          resolved_sha256=pf_instance.sha256_bytes(pf_instance.normalize_json(model)))
+            if pf_instance.read_bytes_nofollow(compose_file) != compose_bytes or (
+                    override is not None and pf_instance.read_bytes_nofollow(override) != override_bytes):
+                raise pf_docker.DockerScopeError("envelope-render-failed", [pf_docker.Finding(
+                    "envelope-render-failed", "$", "Compose inputs changed during the render")])
+            result = pf_docker.validate_envelope(model, expectation)
+        except pf_docker.DockerScopeError as exc:
+            record["code"] = exc.code
+            self._append_envelope_record(record)
+            raise self.envelope_failure(exc) from exc
+        record.update(escape_mode=result.escape_mode, result="approved")
+        self._append_envelope_record(record)
+        self._approved_envelopes[key] = result
+        return result
+
+    def _append_envelope_record(self, record):
+        if self.operation_dir is None:
+            return
+        path = self.operation_dir / "compose-envelope.json"
+        document = {"schema_version": 1, "renders": []}
+        if os.path.lexists(str(path)):
+            document = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(path), label=str(path))
+        document["renders"].append(record)
+        self.write_private_json("compose-envelope.json", document)
+
+    def describe_envelope(self):
+        """Doctor: render and validate the current inputs read-only (literal values; no file remains)."""
+        values, _ = self.compose_inputs()
+        override = self.override if self.override.exists() else None
+        child = pf_config.child_values(values, workspace=self.root, instance_id=self.context.instance_id)
+        result = self.require_envelope(self.root, override, child)
+        version = (self.compose_version or "unknown").split()[-1]  # "Docker Compose version v2.x" -> "v2.x"
+        return (f"ok | compose {version} | services {', '.join(pf_docker.SERVICES)} | "
+                f"dollar-escape {result.escape_mode} | values compared")
+
+    def docker_inventory(self):
+        """Exact, read-only inventory of this instance's resources on the bound daemon (ARCH section 8)."""
+        if self._inventory_active:
+            raise Failure("Internal error: nested Docker inventory.")
+        self._inventory_active = True
+        try:
+            return self._observe_inventory()
+        except pf_docker.DockerScopeError as exc:
+            raise Failure(f"{exc.code}: Docker inventory output is not understood: "
+                          + "; ".join(finding.render() for finding in exc.findings)) from exc
+        finally:
+            self._inventory_active = False
+
+    @staticmethod
+    def _ls_rows(text):
+        rows = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            row = pf_docker.strict_json(line, code="inventory-invalid", path="ls")
+            if not isinstance(row, dict):
+                raise pf_docker.DockerScopeError("inventory-invalid", [pf_docker.Finding(
+                    "inventory-invalid", "ls", "row is not an object")])
+            rows.append(row)
+        return rows
+
+    def _selected_names(self, kind, topology, label_filter):
+        """Exact topology names present on the daemon plus every name carrying this instance's label."""
+        extra = ["--no-trunc"] if kind == "network" else []
+        present = {row.get("Name") for row in self._ls_rows(self.docker(kind, "ls", *extra, "--format", "{{json .}}"))}
+        labelled = {row.get("Name") for row in self._ls_rows(
+            self.docker(kind, "ls", *extra, "--filter", label_filter, "--format", "{{json .}}"))}
+        names = (present & set(topology)) | labelled
+        if not all(isinstance(name, str) and name for name in names):
+            raise pf_docker.DockerScopeError("inventory-invalid", [pf_docker.Finding(
+                "inventory-invalid", kind, "ls row without a name")])
+        return sorted(names)
+
+    def _observe_inventory(self):
+        project, instance_id = self.context.compose_project, self.context.instance_id
+        label_filter = f"label={pf_docker.INSTANCE_LABEL}={instance_id}"
+        batch = 50
+        ids = [line.strip() for line in self.docker("ps", "-a", "--no-trunc", "--format", "{{.ID}}").splitlines()
+               if line.strip()]
+        containers = []
+        for start in range(0, len(ids), batch):
+            containers += pf_docker.parse_field_lines(self.docker(
+                "container", "inspect", "--format", pf_docker.CONTAINER_FIELDS, *ids[start:start + batch]),
+                kind="container")
+        names = pf_docker.topology_names(project)
+        observed = {}
+        for kind, fields in (("volume", pf_docker.VOLUME_FIELDS), ("network", pf_docker.NETWORK_FIELDS)):
+            selected = self._selected_names(kind, names[kind].values(), label_filter)
+            observed[kind] = []
+            for start in range(0, len(selected), batch):
+                observed[kind] += pf_docker.parse_field_lines(self.docker(
+                    kind, "inspect", "--format", fields, *selected[start:start + batch]), kind=kind)
+        references = set()
+        for row in self._ls_rows(self.docker("image", "ls", "--no-trunc", "--filter", label_filter,
+                                             "--format", "{{json .}}")):
+            repository, tag = row.get("Repository"), row.get("Tag")
+            if isinstance(repository, str) and isinstance(tag, str) and "<none>" not in (repository, tag):
+                references.add(repository + ":" + tag)
+        references = sorted(references)
+        images = []
+        for start in range(0, len(references), batch):
+            chunk = references[start:start + batch]
+            inspected = pf_docker.parse_field_lines(self.docker(
+                "image", "inspect", "--format", pf_docker.IMAGE_FIELDS, *chunk), kind="image")
+            if len(inspected) != len(chunk):
+                raise pf_docker.DockerScopeError("inventory-invalid", [pf_docker.Finding(
+                    "inventory-invalid", "image", "inspect returned a different number of images")])
+            for reference, record in zip(chunk, inspected):
+                images.append({"reference": reference, "id": record["id"], "labels": record["labels"]})
+        return pf_docker.classify_inventory(project=project, instance_id=instance_id, containers=containers,
+                                            volumes=observed["volume"], networks=observed["network"], images=images)
+
+    @staticmethod
+    def resource_name(item):
+        if item.kind == "container":
+            return item.identity.get("name") or item.key[:12]
+        return item.key
+
+    def retained_lines(self, items):
+        return [f"  retained: {item.reason if item.kind == 'image' else item.cls} {item.kind} {self.resource_name(item)}"
+                for item in items]
+
+    def describe_inventory(self):
+        inventory = self.docker_inventory()
+        summary = inventory.summary()
+        lines = [f"containers {summary['containers']}, networks {summary['networks']}, volumes {summary['volumes']}, "
+                 f"image tags {summary['image_tags']} | excluded {summary['excluded']} | blocked {summary['blocked']}"]
+        lines += [f"  blocked: {item.cls} {item.kind} {self.resource_name(item)}" for item in inventory.blockers]
+        lines += self.retained_lines(inventory.excluded)
+        return "\n".join(lines)
+
+    def require_topology_owned(self, command):
+        """Ownership preflight: refuse any blocker before Compose could adopt or recreate it (OD-A13-03)."""
+        inventory = self.docker_inventory()
+        self.write_private_json("inventory-preflight.json", dict(inventory.record(), command=str(command)))
+        if inventory.blockers:
+            lines = [f"  - {item.cls}: {item.kind} {self.resource_name(item)}" for item in inventory.blockers]
+            raise Failure(
+                f"resource-not-owned: {command} refused before any change: {len(inventory.blockers)} Compose "
+                f"topology resource(s) exist but are not owned by instance {self.context.slug}; Compose could adopt "
+                "or recreate them:\n" + "\n".join(lines)
+                + "\nLegacy or foreign resources are never adopted automatically (adoption is PF-A2).")
+        self._topology_checked = True
+        return inventory
+
+    def require_empty_target(self, command):
+        """deploy / exact restore-instance: no owned or blocking container, volume or network may exist."""
+        inventory = self.docker_inventory()
+        self.write_private_json("inventory-preflight.json", dict(inventory.record(), command=str(command)))
+        present = [item for item in inventory.blockers + inventory.owned
+                   if item.kind in ("container", "volume", "network")]
+        if present:
+            item = present[0]
+            raise Failure(f"resource-target-not-empty: {command} requires an empty target: {item.kind} "
+                          f"{self.resource_name(item)} ({item.cls}) already exists for project "
+                          f"{self.context.compose_project}. Nothing was changed.")
+        self._topology_checked = True
+        return inventory
+
+    def plan_for(self, kind, inventory, *, command, recovery_id=None, covered_image_refs=None):
+        """A deletion plan of ``kind`` for this operation; blockers refuse before any confirmation."""
+        observation = self.verify_daemon()
+        try:
+            plan = pf_docker.plan_deletion(inventory, kind=kind, operation_id=self.operation_id,
+                                           daemon=observation, recovery_id=recovery_id,
+                                           covered_image_refs=covered_image_refs)
+        except pf_docker.DockerScopeError as exc:
+            if exc.code != "resource-blocked":
+                raise Failure(str(exc)) from exc
+            lines = [f"  - {item.cls}: {item.kind} {self.resource_name(item)}: {item.reason}"
+                     for item in inventory.blockers]
+            raise Failure(
+                f"resource-blocked: {command} refused before any confirmation: {len(inventory.blockers)} resource(s) "
+                f"on daemon {observation.engine_id} cannot be proven to belong to instance {self.context.slug}:\n"
+                + "\n".join(lines) + f"\nNothing was stopped or deleted. Review them with 'pf status --instance "
+                f"{self.context.slug}'. Legacy or foreign resources are never adopted automatically (adoption is "
+                "PF-A2).") from exc
+        plan["slug"] = self.context.slug
+        self._topology_checked = True
+        return plan
+
+    def log_plan(self, plan, *, title):
+        log(title)
+        for item in plan["candidates"]:
+            name = (item["identity"].get("name") or item["key"]) if item["kind"] == "container" else item["key"]
+            users = f" (users: {len(item['users'])})" if "users" in item else ""
+            log(f"  delete {item['kind']} {name}{users}")
+        if plan.get("pending_images"):
+            log("  image tags pending recovery-bundle coverage: " + ", ".join(plan["pending_images"]))
+        for entry in plan["exclusions"]:
+            if entry["kind"] == "image" and entry["reason"] == "not-covered":
+                log(f"  not covered by the recovery bundle: retained image {entry['key']}")
+            else:
+                log(f"  retained: {entry['reason'] if entry['kind'] == 'image' else entry['class']} {entry['kind']} "
+                    f"{entry['key']}")
+        for path in plan["bind_paths"]:
+            log(f"  retained bind path (never deleted): {path}")
+
+    def write_deletion_plan(self, plan):
+        """Persist the binding plan durably (O_EXCL|O_NOFOLLOW temp, fsync, rename, directory fsync)."""
+        expected = {"purge": "bound", "abort-deploy": "none"}.get(plan.get("kind"))
+        if self.operation_dir is None or expected is None or plan.get("image_coverage") != expected \
+                or plan.get("operation_id") != self.operation_id:
+            raise Failure("plan-invalid: only a binding plan of this locked operation can be frozen; nothing was "
+                          "deleted.")
+        data = pf_docker.plan_bytes(plan)
+        path = self.operation_dir / "deletion-plan.json"
+        pf_config._write_private(path, data, 0o600)
+        return {"operation_id": self.operation_id, "path": str(path), "sha256": pf_instance.sha256_bytes(data)}
+
+    def durable_phase(self, phase, **fields):
+        """``phase()`` plus an fsync of the state directory (deletion-plan journal writes)."""
+        self.phase(phase, **fields)
+        directory = os.open(str(self.state), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def load_deletion_plan(self, journal, *, kind):
+        """The frozen plan the journal references: exact path, regular file, hash, instance, kind, operation."""
+        def invalid(detail):
+            return Failure("plan-invalid: The frozen deletion plan for this journal is missing, not the expected "
+                           "regular file, of the wrong kind or operation, or does not match its recorded hash; "
+                           "nothing was deleted.\n  detail: " + detail)
+
+        reference = journal.get("deletion_plan")
+        if not isinstance(reference, dict) or set(reference) != {"operation_id", "path", "sha256"} \
+                or not all(isinstance(value, str) for value in reference.values()):
+            raise invalid("journal reference is malformed")
+        operation_id = reference["operation_id"]
+        if not OPERATION_ID_RE.fullmatch(operation_id):
+            raise invalid("operation id is malformed")
+        expected = self.context.operations_dir / operation_id / "deletion-plan.json"
+        if reference["path"] != str(expected):
+            raise invalid("path is not the operation's deletion-plan.json")
+        try:
+            fd = os.open(str(expected), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise invalid(f"cannot open: {exc.strerror or exc}") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise invalid("not a regular file")
+            chunks = []
+            while True:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                chunks.append(block)
+        finally:
+            os.close(fd)
+        try:
+            return pf_docker.load_plan(b"".join(chunks), expected_sha256=reference["sha256"],
+                                       instance_id=self.context.instance_id, kind=kind, operation_id=operation_id)
+        except pf_docker.DockerScopeError as exc:
+            raise invalid("; ".join(finding.message for finding in exc.findings)) from exc
+
+    def plan_drift(self, kind, key, reason, deleted):
+        removed = sum(1 for entry in deleted if entry.get("outcome") == "removed")
+        return Failure(f"plan-drift: Planned {kind} {key} changed after the plan was frozen ({reason}); deletion "
+                       f"stopped. Already removed: {removed}. The journal keeps the frozen plan; inspect with "
+                       f"'pf status --instance {self.context.slug}'.")
+
+    def execute_deletion_plan(self, plan):
+        """Execute exactly the frozen plan: re-observe every item and its users before its effect.
+
+        Never prunes, never ``compose down``, never forces an image removal. The journal's
+        ``deleted`` list is persisted durably after each item, so a resume continues the same
+        closed plan and never adds a resource.
+        """
+        journal = load_json(self.pending)
+        deleted = list(journal.get("deleted") or [])
+        phase = journal.get("phase")
+        try:
+            observation = self.verify_daemon(refresh=True)
+        except DaemonFailure as exc:
+            if exc.code != "daemon-drift":
+                raise
+            raise self.plan_drift("daemon", plan["daemon"]["engine_id"],
+                                  "the endpoint now answers as engine " + exc.detail, deleted) from exc
+        if plan["daemon"]["engine_id"] != observation.engine_id:
+            raise self.plan_drift("daemon", plan["daemon"]["engine_id"],
+                                  "the endpoint answers as engine " + observation.engine_id, deleted)
+        done = {(entry.get("kind"), entry.get("key")) for entry in deleted}
+
+        def prove(inventory, items):
+            if inventory.blockers:
+                item = inventory.blockers[0]
+                raise self.plan_drift(item.kind, self.resource_name(item), item.cls, deleted)
+            for item in items:
+                by_id, by_name = inventory.index(item["kind"])
+                outcome = pf_docker.compare_identity(item, by_id, by_name)
+                if isinstance(outcome, tuple):
+                    raise self.plan_drift(item["kind"], item["key"], outcome[1], deleted)
+                if item["kind"] in ("volume", "network"):
+                    violations = pf_docker.users_violations(plan, item, inventory.users_of(item["kind"], item["key"]))
+                    if violations:
+                        raise self.plan_drift(item["kind"], item["key"], violations[0].message, deleted)
+            return inventory
+
+        # Pre-effect proof of this run (first execution and resume alike): no effect before it passes.
+        # Every later observation is taken immediately after the previous effect, so each item and
+        # its users are reinspected (fresh `ps -a` + inspect) right before its own effect.
+        inventory = prove(self.docker_inventory(), plan["candidates"])
+        for item in plan["candidates"]:
+            if (item["kind"], item["key"]) in done:
+                continue
+            prove(inventory, [item])
+            by_id, by_name = inventory.index(item["kind"])
+            if pf_docker.compare_identity(item, by_id, by_name) == "absent":
+                deleted.append({"kind": item["kind"], "key": item["key"], "outcome": "already-absent"})
+            else:
+                identity = item["identity"]
+                if item["kind"] == "container":
+                    self.docker("rm", "-f", identity["id"])
+                elif item["kind"] == "network":
+                    self.docker("network", "rm", identity["id"])
+                elif item["kind"] == "volume":
+                    self.docker("volume", "rm", identity["name"])
+                else:
+                    self.docker("image", "rm", identity["reference"])
+                inventory = self.docker_inventory()
+                by_id, by_name = inventory.index(item["kind"])
+                if pf_docker.compare_identity(item, by_id, by_name) != "absent":
+                    raise Failure(f"plan-effect-unconfirmed: {item['kind']} {item['key']} is still present after "
+                                  "removal; deletion stopped and the journal keeps the plan.")
+                deleted.append({"kind": item["kind"], "key": item["key"], "outcome": "removed"})
+            self.durable_phase(phase, deleted=deleted)
+        return deleted
 
     # --------------------------------------------- application configuration (PF-A1.2)
 
@@ -800,8 +1456,11 @@ class Controller:
             if not env_file.is_file():
                 raise Failure(f"Registered diagnostics env-file is missing: {env_file}; it is created only by registration.")
         for key, value in (overrides or {}).items():
-            if key not in pf_config.APP_KEYS:
-                raise Failure(f"Compose override {key!r} is not an application key.")
+            pattern = COMPOSE_VALUE_OVERRIDES.get(key)
+            if pattern is None or not isinstance(value, str) or not re.fullmatch(pattern, value):
+                raise Failure(f"compose-override-refused: Compose value override {key} is not an approved per-call "
+                              "override (or its value is not an approved temporary database name); nothing was "
+                              "started.")
             values[key] = value
         return values, env_file
 
@@ -815,6 +1474,7 @@ class Controller:
         os.mkdir(directory, 0o700)
         os.chmod(directory, 0o700)
         self.operation_id, self.operation_dir, self._snapshots, self.frozen = operation_id, directory, 0, None
+        self.reset_operation_scope(str(command))
         self.runner.effects_path = directory / "unresolved-effects.json"
         context = self.context
         write_json(directory / "operation.json", {
@@ -827,11 +1487,20 @@ class Controller:
         if (self.config_dir / ".env").is_file():
             self.freeze_app_config()
 
+    def reset_operation_scope(self, command=None):
+        """Per-operation Docker-scope state (PF-A1.3); the daemon verification is per process."""
+        self._operation_command = command
+        self._topology_checked = False
+        self._approved_envelopes = {}
+        self._envelope_sequence = 0
+        self.created_image_refs = []
+
     def end_operation(self):
         self.frozen = None
         self.operation_id = None
         self.operation_dir = None
         self._snapshots = 0
+        self.reset_operation_scope()
         if self._runner is not None:
             self._runner.effects_path = None
 
@@ -1098,7 +1767,7 @@ class Controller:
         commands = (["ip", "-4", "-o", "addr", "show", "scope", "global"], ["hostname", "-I"])
         for command in commands:
             try:
-                output = self.command(command)
+                output = self.command(command, effect=None)
             except Failure:
                 continue
             candidates = re.findall(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])", output)
@@ -1235,23 +1904,12 @@ class Controller:
                 f"Cannot bind {address}:{port}; choose another port/address or stop the conflicting service before deploy."
             ) from exc
 
-    def project_resources(self):
-        project = self.config["project"]
-        containers = self.docker("ps", "-a", "-q", "--filter", "label=com.docker.compose.project=" + project).splitlines()
-        volumes = self.docker("volume", "ls", "--format", "{{.Name}}").splitlines()
-        prefix = project + "_"
-        project_volumes = [name for name in volumes if name == prefix + "postgres_data" or name.startswith(prefix)]
-        return {"containers": [value for value in containers if value], "volumes": project_volumes}
-
     def assert_new_deployment(self):
         if (self.state / "deployed.json").exists():
             raise Failure("This project already has a managed deployment record. Use update, not deploy.")
-        resources = self.project_resources()
-        if resources["containers"] or resources["volumes"]:
-            raise Failure(
-                "Existing Docker resources were found for project " + self.config["project"]
-                + ". New deploy refuses to adopt or overwrite them; use status/update or inspect the leftover resources first."
-            )
+        # PF-A1.3: the exact inventory replaces the former project-prefix scan; any owned or
+        # blocking container, volume or network refuses (adoption is never automatic).
+        self.require_empty_target("deploy")
 
     # ------------------------------------------- source store and manifest (PF-A1.2)
 
@@ -1455,35 +2113,36 @@ class Controller:
             raise Failure("Source provenance check failed: " + str(exc)) from exc
 
     def compose(self, *args, root=None, override=None, timeout=None, env=None, **kwargs):
-        """One Compose invocation with frozen inputs: fixed project, files, env-file and directory."""
+        """One Compose invocation with frozen inputs: fixed project, files, env-file and directory.
+
+        ``env`` carries only approved per-call value overrides (COMPOSE_VALUE_OVERRIDES), refused
+        before any process starts. A mutating verb in ``pf_docker.ENVELOPE_VERBS`` first passes the
+        Compose envelope for exactly these effective inputs (PF-A1.3).
+        """
         root = Path(root or self.root)
+        values, env_file = self.compose_inputs(env)
         if "effect" not in kwargs:
             # Production wiring of the unresolved-effect journal: every mutating Compose verb
             # (and every exec that is not a known read-only program) carries a descriptor,
             # built from the caller's arguments before the managed run label is added.
             kwargs["effect"] = compose_effect(self.config["project"], args)
-        if args and args[0] == "run":
+        verb = str(args[0]) if args else ""
+        if verb == "run":
             args = ("run", "--label", "partflow.admin.project=" + self.config["project"], *args[1:])
         cli = self.compose_cli()
         compose_file = self.control_dir / "compose.nas.yaml"
         if not compose_file.is_file():
             raise Failure("Missing installed control/compose.nas.yaml.")
-        values, env_file = self.compose_inputs(env)
-        command = cli + [
-            "--project-directory", str(root),
-            "--env-file", str(env_file),
-            "-p", self.config["project"],
-            "-f", str(compose_file),
-        ]
         selected = Path(override) if override else self.override
-        if selected.exists():
-            command += ["-f", str(selected)]
+        selected = selected if selected.exists() else None
+        command = self.compose_prefix(cli, root, env_file, selected)
         # Application values reach Compose only as allowlisted child variables derived from
-        # the frozen snapshot (plus the core-generated repository root and encoded database
-        # URL); no editable file is read by Compose and no host variable is inherited.
-        child = pf_config.child_values(values, workspace=root)
+        # the frozen snapshot (plus the core-generated repository root, encoded database URL
+        # and instance ID); no editable file is read by Compose and no host variable is inherited.
+        child = pf_config.child_values(values, workspace=root, instance_id=self.context.instance_id)
+        if verb in pf_docker.ENVELOPE_VERBS:
+            self.require_envelope(root, selected, child, value_overrides=sorted(env or {}))
         if timeout is None:
-            verb = args[0] if args else ""
             data_programs = ("pg_dump", "pg_dumpall", "pg_restore", "createdb", "dropdb")
             if verb == "build":
                 timeout = TIMEOUT_BUILD
@@ -1591,14 +2250,13 @@ class Controller:
         return major
 
     def make_override(self, images, path):
-        lines = ["services:"]
-        for service in ("backend", "frontend"):
-            reference = images[service]["reference"] if isinstance(images[service], dict) else images[service]
-            if not IMAGE_RE.fullmatch(reference):
-                raise Failure("Invalid retained image reference.")
-            lines += [f"  {service}:", f"    image: {json.dumps(reference)}"]
+        # One exact grammar (pf_docker): the envelope parses its expected images from these bytes.
+        try:
+            data = pf_docker.render_image_override(images)
+        except pf_docker.DockerScopeError as exc:
+            raise Failure("Invalid retained image reference.") from exc
         temporary = Path(path).with_suffix(".tmp")
-        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temporary.write_bytes(data)
         os.replace(temporary, path)
 
     def retain_images(self, backup_id):
@@ -1607,6 +2265,7 @@ class Controller:
             image_id = self.inspect(service)["Image"]
             reference = f"{self.config['project']}-{service}:backup-{backup_id.lower()}"
             self.docker("tag", image_id, reference)
+            self.created_image_refs.append(reference)
             images[service] = {"id": image_id, "reference": reference}
         return images
 
@@ -2032,7 +2691,7 @@ class Controller:
     def deploy(self, target=None, *, use_current=False, skip_ci=False):
         self.staging()
         self.assert_new_deployment()
-        self.command(["git", "--version"])
+        self.command(["git", "--version"], effect=None)
         self.docker("version", "--format", "{{.Server.Version}}")
         self.free_space()
         values = self.prepare_new_env()
@@ -2115,6 +2774,10 @@ class Controller:
             log("Initial deployment complete.")
             log("Run the UI/workflow and firewall smoke tests, then create the first baseline checkpoint with: sudo pf backup")
 
+    def plan_missing(self, operation):
+        return Failure(f"plan-missing: This interrupted {operation} predates frozen deletion plans (PF-A1.3); "
+                       "automatic resume is refused. Review the remaining resources manually; nothing was deleted.")
+
     def abort_deploy(self):
         self.staging()
         if not self.pending.exists():
@@ -2126,62 +2789,45 @@ class Controller:
             raise Failure("A managed deployment record already exists; abort-deploy is only for an incomplete first deployment.")
         safe_phases = {
             "confirmed", "changing-source", "source-replaced", "source-ready",
-            "starting-database", "migrating-database", "activating",
+            "starting-database", "migrating-database", "activating", "aborting",
         }
         if pending.get("phase") not in safe_phases:
             raise Failure(
                 "Frontend access may already have opened. Automatic first-deploy cleanup is refused; preserve the database and review recovery manually."
             )
-        database = pending.get("database") or self.env()["POSTGRES_DB"]
-        confirm(
-            "ABORT DEPLOY " + self.config["project"],
-            f"Delete containers and Docker volumes created by the incomplete first deployment for database {database}. "
-            "The source checkout and .env are kept so deployment can be retried. This is allowed only before frontend access opened.",
-        )
-        self.compose("down", "--volumes", "--remove-orphans")
+        project = self.config["project"]
+        if pending.get("phase") == "aborting":
+            # Resume: the frozen plan only (closed); nothing newly discovered is ever added.
+            if "deletion_plan" not in pending:
+                raise self.plan_missing("abort-deploy")
+            plan = self.load_deletion_plan(pending, kind="abort-deploy")
+            self._topology_checked = True
+            self.log_plan(plan, title="Frozen abort-deploy plan (resume; only these items are removed):")
+            confirm(
+                "RESUME ABORT DEPLOY " + project,
+                "An earlier abort-deploy froze this plan and began removing resources. Resume only the remaining "
+                "planned items; the source checkout and .env are kept.",
+            )
+        else:
+            database = pending.get("database") or self.env()["POSTGRES_DB"]
+            plan = self.plan_for("abort-deploy", self.docker_inventory(), command="abort-deploy")
+            self.log_plan(plan, title="Abort-deploy plan (exact resources of this instance; images are retained):")
+            confirm(
+                "ABORT DEPLOY " + project,
+                f"Delete containers and Docker volumes created by the incomplete first deployment for database {database}. "
+                "The source checkout and .env are kept so deployment can be retried. This is allowed only before frontend access opened.",
+            )
+            reference = self.write_deletion_plan(plan)
+            self.durable_phase("aborting", deletion_plan=reference, deleted=[])
+        # LIFECYCLE section 8: per-resource proof, never `compose down -v` as a substitute.
+        self.execute_deletion_plan(plan)
         if self.override.exists():
             self.override.unlink()
         self.pending.unlink()
         log("Incomplete first deployment resources were removed. Source and .env were kept; rerun deploy when ready.")
 
-    def detailed_project_resources(self):
-        """Return only Docker resources owned by this Compose project."""
-        project = self.config["project"]
-        containers = [value for value in self.docker(
-            "ps", "-a", "-q", "--filter", "label=com.docker.compose.project=" + project
-        ).splitlines() if value]
-
-        volumes = set(value for value in self.docker(
-            "volume", "ls", "--format", "{{.Name}}", "--filter", "label=com.docker.compose.project=" + project
-        ).splitlines() if value)
-        # Older Compose releases did not consistently label every volume. The
-        # project-name prefix is safe here because the exact project is already
-        # selected and confirmed interactively.
-        for value in self.docker("volume", "ls", "--format", "{{.Name}}").splitlines():
-            if value.startswith(project + "_"):
-                volumes.add(value)
-
-        networks = set(value for value in self.docker(
-            "network", "ls", "--format", "{{.Name}}", "--filter", "label=com.docker.compose.project=" + project
-        ).splitlines() if value)
-        for value in self.docker("network", "ls", "--format", "{{.Name}}").splitlines():
-            if value.startswith(project + "_"):
-                networks.add(value)
-
-        image_refs = []
-        for value in self.docker("image", "ls", "--format", "{{.Repository}}:{{.Tag}}").splitlines():
-            if value.startswith(project + "-backend:") or value.startswith(project + "-frontend:"):
-                image_refs.append(value)
-
-        return {
-            "containers": containers,
-            "volumes": sorted(volumes),
-            "networks": sorted(networks),
-            "images": sorted(set(image_refs)),
-        }
-
-    def instance_summary(self):
-        resources = self.detailed_project_resources()
+    def instance_summary(self, plan):
+        """What a purge would delete and retain, from a deletion plan (never from name prefixes)."""
         try:
             values = self.env()
         except Failure:
@@ -2191,16 +2837,24 @@ class Controller:
             revision = self.revision()
         except Failure:
             pass
+        candidates = plan["candidates"]
+
+        def keys(kind):
+            return [(item["identity"].get("name") or item["key"]) if kind == "container" else item["key"]
+                    for item in candidates if item["kind"] == kind]
+
         return {
             "project": self.config["project"],
             "root": str(self.root),
             "database": values.get("POSTGRES_DB", "unknown"),
             "database_user": values.get("POSTGRES_USER", "unknown"),
             "revision": revision,
-            "containers": resources["containers"],
-            "volumes": resources["volumes"],
-            "networks": resources["networks"],
-            "images": resources["images"],
+            "containers": keys("container"),
+            "volumes": keys("volume"),
+            "networks": keys("network"),
+            "images": keys("image") + list(plan.get("pending_images") or []),
+            "exclusions": list(plan["exclusions"]),
+            "bind_paths": list(plan["bind_paths"]),
             "checkpoints": len(self.snapshots()),
             "state_present": self.state.is_dir() and any(
                 item.name != "operation.lock" for item in self.state.iterdir()
@@ -2217,7 +2871,13 @@ class Controller:
         log("  Containers: " + str(len(summary["containers"])))
         log("  Volumes: " + (", ".join(summary["volumes"]) or "none"))
         log("  Networks: " + (", ".join(summary["networks"]) or "none"))
-        log("  PartFlow image tags: " + str(len(summary["images"])))
+        log("  PartFlow image tags (deleted only when the recovery bundle covers their image ID): "
+            + str(len(summary["images"])))
+        for entry in summary.get("exclusions", []):
+            log(f"  Retained: {entry['reason'] if entry['kind'] == 'image' else entry['class']} {entry['kind']} "
+                f"{entry['key']}")
+        for path in summary.get("bind_paths", []):
+            log("  Retained bind path (never deleted): " + path)
         log("  Revision checkpoints: " + str(summary["checkpoints"]))
 
     def database_inventory(self):
@@ -2295,8 +2955,13 @@ class Controller:
                     missing.append(reference)
         return sorted(refs), sorted(set(missing))
 
-    def create_purge_recovery(self):
-        """Create a verified recovery bundle before destructive project purge.
+    def create_purge_recovery(self, preliminary):
+        """Create a verified recovery bundle before destructive project purge; return (manifest, binding plan).
+
+        PF-A1.3: after ``images.tar`` is verified the binding inventory and plan are built, the
+        plan must equal the preliminary one (owned tags modulo the tags this operation created),
+        and ``resources_before_purge`` is sealed from the binding candidates. The manifest is
+        written once and never rewritten.
 
         The active database/source and current images are mandatory. Historical
         rollback image tags are included when still present. All non-template
@@ -2404,7 +3069,28 @@ class Controller:
         with tarfile.open(images_path, "r:") as archive:
             archive.getmembers()
 
-        resources = self.detailed_project_resources()
+        binding_inventory = self.docker_inventory()
+        binding = self.plan_for("purge", binding_inventory, command="purge", recovery_id=recovery_id,
+                                covered_image_refs=set(image_refs))
+        created = sorted(set(self.created_image_refs))
+        try:
+            pf_docker.compare_plans(preliminary, binding, created_image_refs=set(created))
+            comparison = "equal"
+        except pf_docker.DockerScopeError as exc:
+            self.write_private_json("inventory-binding.json", dict(
+                binding_inventory.record(), created_image_refs=created, compare_plans="plan-changed",
+                findings=[finding.render() for finding in exc.findings]))
+            raise PlanChanged("plan-changed: The deletion candidates changed while the recovery bundle was created ("
+                              + "; ".join(f"{finding.path} {finding.message}" for finding in exc.findings[:10])
+                              + "); purge stops before deletion and the application is reopened.", checkpoint) from exc
+        self.write_private_json("inventory-binding.json", dict(
+            binding_inventory.record(), created_image_refs=created, compare_plans=comparison))
+
+        def candidates(kind):
+            return [item["key"] for item in binding["candidates"] if item["kind"] == kind]
+
+        resources = {"containers": candidates("container"), "volumes": candidates("volume"),
+                     "networks": candidates("network"), "images": candidates("image")}
         manifest = {
             "format": 2,
             "kind": "partflow-purge-recovery",
@@ -2459,7 +3145,7 @@ class Controller:
         log("Recovery bundle verified: " + str(folder))
         if missing_history_images:
             log("WARNING: Some old rollback image tags were already missing before purge. Their checkpoint files are preserved, but those old image layers cannot be reconstructed automatically.")
-        return manifest
+        return manifest, binding
 
     def recoveries(self, project=None):
         base = self.recovery_root.parent
@@ -2533,18 +3219,10 @@ class Controller:
             elif answer.isdigit() and 1 <= int(answer) <= len(items):
                 return self.verify_recovery(items[int(answer) - 1])
 
-    def finish_purge_cleanup(self, recovery_id, *, delete_backups, reset_admin_config):
-        resources = self.detailed_project_resources()
-        # Delete in dependency order. State/.env are removed last so an
-        # interrupted Docker cleanup remains diagnosable and resumable.
-        for container in resources["containers"]:
-            self.docker("rm", "-f", container)
-        for network in resources["networks"]:
-            self.docker("network", "rm", network)
-        for volume in resources["volumes"]:
-            self.docker("volume", "rm", volume)
-        for image in resources["images"]:
-            self.docker("image", "rm", image)
+    def finish_purge_cleanup(self, recovery_id, plan, *, delete_backups, reset_admin_config):
+        # Docker deletion runs exactly the frozen plan (PF-A1.3). State/.env are removed last so
+        # an interrupted Docker cleanup remains diagnosable and resumable; bind paths are never deleted.
+        self.execute_deletion_plan(plan)
 
         if delete_backups and self.backups_dir.exists():
             shutil.rmtree(self.backups_dir)
@@ -2577,24 +3255,33 @@ class Controller:
         if self.pending.exists():
             pending = load_json(self.pending)
             if pending.get("operation") == "purge" and pending.get("phase") == "deleting" and pending.get("recovery"):
+                if "deletion_plan" not in pending:
+                    raise self.plan_missing("purge")
                 recovery_id = pending["recovery"]
                 matches = [item for item in self.recoveries(project=self.config["project"]) if item.get("id") == recovery_id]
                 if len(matches) != 1:
                     raise Failure("Interrupted purge recovery bundle is missing or ambiguous; manual recovery is required.")
                 self.verify_recovery(matches[0])
+                plan = self.load_deletion_plan(pending, kind="purge")
+                self._topology_checked = True
+                self.log_plan(plan, title="Frozen purge plan (resume; only these items are removed):")
                 confirm(
                     "RESUME PURGE " + self.config["project"] + " " + recovery_id,
                     "An earlier purge passed all confirmations and began deleting resources. Resume only the remaining cleanup using the already verified recovery bundle.",
                 )
                 self.finish_purge_cleanup(
-                    recovery_id,
+                    recovery_id, plan,
                     delete_backups=bool(pending.get("delete_backups")),
                     reset_admin_config=bool(pending.get("reset_admin_config")),
                 )
                 return
             raise Failure("An incomplete managed operation exists. Resolve it before purge so recovery state is unambiguous.")
 
-        summary = self.instance_summary()
+        # Preliminary (advisory) plan: blockers refuse here, before any confirmation, pause or bundle.
+        inventory = self.docker_inventory()
+        preliminary = self.plan_for("purge", inventory, command="purge")
+        self.write_private_json("inventory-preliminary.json", inventory.record())
+        summary = self.instance_summary(preliminary)
         self.log_instance_summary(summary)
         if not summary["containers"] and not summary["volumes"] and not summary["state_present"] and not summary["env_present"]:
             raise Failure("No active or residual deployment state was found for this project.")
@@ -2605,7 +3292,7 @@ class Controller:
 
         confirm(
             "PURGE " + self.config["project"],
-            "This is a destructive staging teardown. The selected project's containers, volumes, networks, PartFlow image tags, runtime state, and config/.env are candidates for deletion. The writable repo and installed control plane are retained. A verified recovery bundle is created before any destructive Docker deletion.",
+            "This is a destructive staging teardown. The selected project's exact containers, volumes, networks and covered PartFlow image tags listed above, runtime state, and config/.env are candidates for deletion. The writable repo, bind-mounted paths and installed control plane are retained. A verified recovery bundle is created before any destructive Docker deletion.",
         )
 
         # Stop writes first so the recovery bundle is a stable point-in-time state.
@@ -2613,7 +3300,7 @@ class Controller:
         recovery = None
         checkpoint = None
         try:
-            recovery = self.create_purge_recovery()
+            recovery, binding = self.create_purge_recovery(preliminary)
             checkpoint = self.verify_snapshot(recovery["active_checkpoint"])
             self.phase("recovery-ready", recovery=recovery["id"], active_checkpoint=checkpoint["id"])
             log("Recovery summary:")
@@ -2623,6 +3310,7 @@ class Controller:
             log("  Preserved databases: " + ", ".join(item["name"] for item in recovery["databases"]))
             log("  Saved Docker image tags: " + str(len(recovery["saved_image_refs"])))
             log("  Revision checkpoints archived: yes")
+            self.log_plan(binding, title="Binding deletion plan (frozen before the final confirmation):")
 
             # Second gate proves the operator understands which database becomes inaccessible.
             confirm(
@@ -2653,15 +3341,20 @@ class Controller:
                 "FINAL CONFIRMATION. After this point the controller will start deleting Docker resources. Recovery bundle: "
                 + recovery["id"],
             )
-            self.phase(
+            reference = self.write_deletion_plan(binding)
+            self.durable_phase(
                 "deleting",
                 recovery=recovery["id"],
+                deletion_plan=reference,
+                deleted=[],
                 delete_backups=bool(delete_backups),
                 reset_admin_config=bool(reset_admin_config),
             )
-        except Exception:
+        except Exception as exc:
             # No destructive deletion has happened yet. Reopen the exact current
             # application if the recovery checkpoint was created successfully.
+            if checkpoint is None and isinstance(exc, PlanChanged):
+                checkpoint = exc.checkpoint
             if checkpoint is not None:
                 try:
                     self.activate(checkpoint["images"], checkpoint["database_heads"])
@@ -2673,7 +3366,7 @@ class Controller:
             raise
 
         self.finish_purge_cleanup(
-            recovery["id"],
+            recovery["id"], binding,
             delete_backups=bool(delete_backups),
             reset_admin_config=bool(reset_admin_config),
         )
@@ -2763,11 +3456,11 @@ class Controller:
             raise Failure("Exact restore must be run from the bootstrap root/config for the same project.")
         if Path(recovery["root"]).resolve() != self.root:
             raise Failure("Exact restore must run from the original repository root recorded in the recovery bundle.")
-        resources = self.detailed_project_resources()
-        if resources["containers"] or resources["volumes"]:
-            raise Failure("Exact restore requires an empty target project. Purge the current instance first, or use --side-by-side to recover data without replacing it.")
         if (self.state / "deployed.json").exists():
             raise Failure("A managed deployment record already exists. Exact restore refuses to overwrite it.")
+        # PF-A1.3: exact inventory; any owned or blocking topology resource refuses before any confirmation.
+        # Purge the current instance first, or use --side-by-side to recover data without replacing it.
+        self.require_empty_target("restore-instance")
 
         log("Restore target summary:")
         log("  Project: " + recovery["project"])
@@ -3039,9 +3732,17 @@ class Controller:
     def live_sections(self, sections):
         """Run read-only probes one by one; report each unavailable section instead of stopping."""
         unavailable = []
+        reported = False
         for label, probe in sections:
             try:
                 log(f"{label}: {probe()}")
+            except DaemonFailure as exc:
+                # PF-A1.3: the cached daemon refusal; no further transport was attempted.
+                unavailable.append(label)
+                log(f"{label}: unavailable: {exc.code}")
+                if not reported:
+                    log("  " + str(exc).split(": ", 1)[-1])
+                    reported = True
             except (Failure, OSError, ValueError, KeyError) as exc:
                 unavailable.append(label)
                 detail = str(exc).strip().splitlines()
@@ -3093,8 +3794,8 @@ class Controller:
             log("Runtime configuration: unavailable: " + str(exc).splitlines()[0])
             self.refuse_live_checks("runtime configuration rejected")
         unavailable = self.live_sections((
-            ("Git", lambda: self.command(["git", "--version"])),
-            ("Docker", lambda: self.docker("version", "--format", "{{.Server.Version}}")),
+            ("Git", lambda: self.command(["git", "--version"], effect=None)),
+            ("Docker daemon", self.describe_daemon),
             ("Runtime configuration", lambda: (
                 f"ok | project: {self.config['project']} | environment: {self.config['environment']}"
                 f" | auto-update: {self.config['auto_update']} | channel: {self.config['release_channel']}"
@@ -3102,7 +3803,7 @@ class Controller:
                 f" | backup group: {self.config['backup_read_group']}"
             )),
             ("Runtime .env", self.env_status),
-            ("Compose config", lambda: self.compose("config", "-q") or "ok"),
+            ("Compose envelope", self.describe_envelope),
             ("Free space", lambda: self.free_space() or "ok"),
         ))
         log("Database volume capacity, NAS recovery, and production readiness are not certified by doctor.")
@@ -3127,6 +3828,8 @@ class Controller:
             self.refuse_live_checks("runtime configuration rejected")
         log("Runtime configuration: ok | project: " + self.config["project"])
         unavailable = self.live_sections((
+            ("Docker daemon", self.describe_daemon),
+            ("Managed resources", self.describe_inventory),
             ("Runtime .env", self.env_presence),
             ("Deployed source", self.revision),
             ("Workspace", self.describe_workspace),
@@ -3175,19 +3878,19 @@ class Controller:
         # inputs, bounded redacted streaming output, deadline, process-group cancellation) and,
         # for mutating verbs, the stable lock with a frozen configuration.
         with contextlib.nullcontext() if read_only else self.lock(pending_route="compose:" + args[0]):
-            cli = self.compose_cli()
+            if not read_only:
+                # PF-A1.3: ownership preflight right after the lock, before any Compose child.
+                self.require_topology_owned("compose " + args[0])
             values, env_file = self.compose_inputs()
-            command = cli + [
-                "--project-directory", str(self.root),
-                "--env-file", str(env_file),
-                "-p", self.config["project"],
-                "-f", str(self.control_dir / "compose.nas.yaml"),
-            ]
-            if self.override.exists():
-                command += ["-f", str(self.override)]
+            cli = self.compose_cli()
+            override = self.override if self.override.exists() else None
+            command = self.compose_prefix(cli, self.root, env_file, override)
+            child = pf_config.child_values(values, workspace=self.root, instance_id=self.context.instance_id)
+            if args[0] in pf_docker.ENVELOPE_VERBS:
+                # The resolved model must pass the envelope; passthrough CLI flags are PF-A1.4.
+                self.require_envelope(self.root, override, child)
             effect = None if read_only else {"kind": "compose-passthrough", "verb": args[0]}
-            self.command(command + list(args), env=pf_config.child_values(values, workspace=self.root),
-                         timeout=TIMEOUT_PASSTHROUGH, stream=True, effect=effect)
+            self.command(command + list(args), env=child, timeout=TIMEOUT_PASSTHROUGH, stream=True, effect=effect)
 
 
 def parser():
@@ -3416,6 +4119,13 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 "(Python isolated mode, sanitized environment)."
             )
         held_lock.enter_context(controller.lock(pending_route=args.command))
+        # PF-A1.3: ownership preflight right after the lock, before any confirmation, journal
+        # write, pause, tag or Compose child (deploy, purge, abort-deploy and exact restore run
+        # their stronger empty-target or plan checks instead).
+        if args.command in TOPOLOGY_GUARDED_COMMANDS \
+                or (args.command == "restore-instance" and args.side_by_side) \
+                or (args.command == "release-check" and args.apply):
+            controller.require_topology_owned(args.command)
 
         if args.command == "permissions":
             controller.permissions()
