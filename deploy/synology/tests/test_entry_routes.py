@@ -252,6 +252,10 @@ WRITE_SITE_ALLOWLIST = {
         (".mkdir", "Controller._purge_bundle"), (".open", "Controller._purge_bundle"),
         ("_write_private_file", "Controller._purge_bundle"), ("write_private_json", "Controller._purge_bundle"),
         ("os.replace", "Controller.restore_instance"), ("_write_private_file", "Controller._read_bundle_at"),
+        # Audit AF-1: the runtime .env and the restored state files are written from their verified payload bytes
+        # (restore-instance, under its journal), never copied from an unlisted bundle path.
+        ("_write_private_file", "Controller.restore_runtime_environment"),
+        ("_write_private_file", "Controller.restore_instance"),
     },
     "pf_instance.py": {
         ("_write_private_file", "_stage_instance_dir"), ("_write_private_file", "_write_registry"),

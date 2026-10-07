@@ -2080,14 +2080,10 @@ class Flows(Instance):
 
     def test_fl5_restore_env_and_fl6_the_reuse_branch_touch_only_env(self):
         controller = self.fake()
-        bundle = self.base / "bundle"
-        (bundle / "configuration").mkdir(parents=True)
-        (bundle / "configuration/.env").write_text(pfx.ENV_TEXT)
-        os.chmod(bundle / "configuration/.env", 0o604)
         other = self.config_dir / "notes.txt"
         other.write_text("x")
         os.chmod(other, 0o600)
-        controller.restore_runtime_environment(bundle)
+        controller.restore_runtime_environment(pfx.ENV_TEXT.encode())  # audit AF-1: the verified payload bytes
         env = self.config_dir / ".env"
         self.assertEqual((mode(env), owner(env)), (0o660, (0, gid_of("users"))))
         self.assertEqual(mode(other), 0o600)

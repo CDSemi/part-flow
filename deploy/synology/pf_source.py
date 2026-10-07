@@ -84,6 +84,12 @@ class SourceError(RuntimeError):
     """A refused or failed source operation. Nothing was written to the workspace."""
 
 
+class ArchiveLimitExceeded(SourceError):
+    """A tree exceeds an entry, name or size limit (walk_tree's entry count, archive_tree's ``limits``: the importer
+    would refuse it). Unlike a link or special entry it says nothing about what a source replacement would destroy
+    (audit AF-6)."""
+
+
 def store_key(remote_url):
     """Filesystem-safe key for one approved remote."""
     stripped = re.sub(r"^[a-z]+://", "", remote_url.strip().lower())
@@ -450,7 +456,8 @@ def walk_tree(root, *, excludes=DEFAULT_EXCLUDES):
                     relative = entry.name if not prefix else prefix + "/" + entry.name
                     count += 1
                     if count > MANIFEST_ENTRY_LIMIT:
-                        raise SourceError("tree has more than %d entries; refusing to inventory it" % MANIFEST_ENTRY_LIMIT)
+                        raise ArchiveLimitExceeded("tree has more than %d entries; refusing to inventory it"
+                                                   % MANIFEST_ENTRY_LIMIT)
                     if entry.is_symlink():
                         yield relative, "unsupported", None, None
                         continue
@@ -728,9 +735,9 @@ def archive_tree(root, destination, *, excludes=DEFAULT_EXCLUDES, unsupported="r
                 try:
                     _, problem = member_name_problem(relative, limits)
                     if problem is not None:
-                        raise SourceError(f"the name {relative!r} cannot be archived ({problem})")
+                        raise ArchiveLimitExceeded(f"the name {relative!r} cannot be archived ({problem})")
                     if info.st_size > limits.file_bytes or total + info.st_size > limits.total_bytes:
-                        raise SourceError(f"{relative}: the tree exceeds the archive size limits")
+                        raise ArchiveLimitExceeded(f"{relative}: the tree exceeds the archive size limits")
                     executable = bool(info.st_mode & 0o111)
                     reader = _HashingReader(file_fd, info.st_size)
                     archive.addfile(_file_member(relative, info.st_size, executable, info), reader)
@@ -743,7 +750,7 @@ def archive_tree(root, destination, *, excludes=DEFAULT_EXCLUDES, unsupported="r
                 members.append((relative, "file", info.st_size, executable))
                 total += info.st_size
                 if len(members) > limits.members:
-                    raise SourceError("the tree has more members than the archive limit")
+                    raise ArchiveLimitExceeded("the tree has more members than the archive limit")
     except BaseException:
         try:
             os.unlink(str(destination))
@@ -754,6 +761,33 @@ def archive_tree(root, destination, *, excludes=DEFAULT_EXCLUDES, unsupported="r
     return {"manifest": {"schema_version": MANIFEST_SCHEMA, "source": {"kind": "unknown"}, "entries": entries},
             "unsupported": skipped, "expanded_bytes": total, "members": len(members),
             "members_sha256": members_digest(members)}
+
+
+def tree_limit_problem(root, *, excludes=DEFAULT_EXCLUDES, limits=SOURCE_LIMITS):
+    """The first entry, name or size of ``root`` that archive_tree would refuse under ``limits`` (a read-only walk; no
+    file byte is read), or None. Links and special entries are archive_tree's own refusal, not reported here."""
+    total = members = 0
+    walker = walk_tree(root, excludes=excludes)
+    try:
+        for relative, kind, file_fd, info in walker:
+            if file_fd is not None:
+                os.close(file_fd)
+            if kind != "file":
+                continue
+            _, problem = member_name_problem(relative, limits)
+            if problem is not None:
+                return f"the name {relative!r} cannot be archived ({problem})"
+            if info.st_size > limits.file_bytes or total + info.st_size > limits.total_bytes:
+                return f"{relative}: the tree exceeds the archive size limits"
+            total += info.st_size
+            members += 1
+            if members > limits.members:
+                return "the tree has more members than the archive limit"
+    except ArchiveLimitExceeded as exc:
+        return str(exc)
+    finally:
+        walker.close()
+    return None
 
 
 def _archive_stream(fd):
@@ -767,13 +801,35 @@ def _archive_stream(fd):
         raise
 
 
-_UNREADABLE = (tarfile.TarError, EOFError, zlib.error, OSError, UnicodeError)
+_UNREADABLE = (tarfile.TarError, EOFError, zlib.error, OSError, UnicodeError, RecursionError)
+# A GNU longname/longlink or PAX extended header is read whole into memory by tarfile while it parses the header, before
+# any member limit can apply; a larger declared payload is refused first (audit AF-8).
+EXTENDED_HEADER_LIMIT = 64 * 1024
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """tarfile's header parser with the extended-header payloads bounded before they are read (and GNU sparse maps,
+    a refused type, never parsed)."""
+
+    def _proc_gnulong(self, archive):
+        if self.size > EXTENDED_HEADER_LIMIT:
+            raise ArchiveRefused("archive-member-refused", self.name, "path-length")
+        return super()._proc_gnulong(archive)
+
+    def _proc_pax(self, archive):
+        if self.size > EXTENDED_HEADER_LIMIT:
+            raise ArchiveRefused("archive-member-refused", self.name, "pax-key")
+        return super()._proc_pax(archive)
+
+    def _proc_sparse(self, archive):
+        raise ArchiveRefused("archive-member-refused", self.name, "type")
 
 
 def _members(handle):
     """Yield every member of a streaming ``tar.gz`` (``next()``, never ``getmembers()``) with its archive."""
     try:
-        archive = tarfile.open(fileobj=handle, mode="r|gz", encoding="utf-8", errors="surrogateescape")
+        archive = tarfile.open(fileobj=handle, mode="r|gz", encoding="utf-8", errors="surrogateescape",
+                               tarinfo=_BoundedTarInfo)
     except _UNREADABLE as exc:
         raise ArchiveRefused("archive-unreadable", "", str(exc) or type(exc).__name__) from exc
     with archive:

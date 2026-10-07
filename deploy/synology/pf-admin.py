@@ -103,6 +103,8 @@ RESTORABLE_STATE_FILES = pf_config.RESTORABLE_STATE_FILES
 DEPLOYMENT_ID_RE = re.compile(r"dep-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
 VERIFICATION_ID_RE = re.compile(r"ver-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
 MANIFEST_READ_LIMIT = 8 * 1024 * 1024
+# The runtime .env and a state file are restored from their verified payload bytes, read whole (audit AF-1).
+SMALL_PAYLOAD_LIMIT = 16 * 1024 * 1024
 ARTIFACT_MARGIN = 64 * 1024 * 1024
 ARCHIVE_MARGIN = 256 * 1024 * 1024
 LIFECYCLE_DEFS = pf_config.LIFECYCLE_SCHEMA["$defs"]
@@ -1395,7 +1397,8 @@ PENDING_ROUTES = {
     ),
     "rollback": (
         lambda journal: journal.get("operation") in ("update", "rollback", "reset-db"),
-        "roll back to a verified checkpoint (use --restore-db when data/schema may have changed)",
+        "roll back to a healthy checkpoint (use --restore-db when data/schema may have changed; an emergency or "
+        "partial capture is evidence and data, never a rollback target)",
     ),
     "abort-deploy": (
         lambda journal: journal.get("operation") == "deploy",
@@ -4687,13 +4690,28 @@ class Controller:
 
     def deployed_commit(self):
         """The deployed source commit (section 3.3 Read): a valid record's ``source.commit`` (may be None), else the
-        legacy ``deployed.json`` ``sha`` when it is a full SHA, else None. Never a claim."""
+        legacy ``deployed.json`` ``sha`` when it is a full SHA, else None. Never a claim: a pre-A3.1 rollback or
+        restore wrote the checkpoint's unproven claim there, so such a pointer's ``sha`` counts only when the protected
+        source manifest records that same commit as ``git_commit`` (audit AF-3); an A3.1 pointer whose seal failed
+        carries a proven commit or null."""
         view = self.current_deployment()
         if view is not None and view.mismatch is None:
             return view.record["source"]["commit"]
         pointer = self.read_pointer() or {}
         sha = pointer.get("sha")
-        return sha if isinstance(sha, str) and SHA_RE.fullmatch(sha) else None
+        if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+            return None
+        ref = pointer.get("ref")
+        if "deployment_id" in pointer or "deployment_seal_failed" in pointer or not isinstance(ref, str) \
+                or not ref.startswith(("rollback:", "restore:")):
+            return sha
+        try:
+            manifest = self.load_source_manifest()
+        except Failure:
+            return None
+        proven = manifest is not None and manifest["source"]["kind"] == "git_commit" \
+            and manifest["source"].get("commit") == sha
+        return sha if proven else None
 
     def describe_deployed_source(self):
         commit = self.deployed_commit()
@@ -5179,10 +5197,34 @@ class Controller:
                            f"{self.context.slug} resume' reopens the unchanged deployment.")
         return Failure(head + ". A healthy checkpoint would bind the wrong images. Nothing was changed.")
 
+    def workspace_archive_limit(self, detail, *, changed):
+        slug = self.context.slug
+        return Failure(
+            f"workspace-archive-limit: the editable workspace differs from the deployed source and cannot be archived "
+            f"within the archive limits ({detail}). Move the oversized or deeply nested files out of the repository "
+            f"workspace and retry; 'pf --instance {slug} backup --emergency' preserves the database and records the "
+            "workspace as excluded." + ("" if changed else " Nothing was changed."))
+
+    def workspace_archive_preflight(self, view):
+        """Read-only (audit AF-6): a capture that a drifted workspace would make refuse on an archive limit is refused
+        before any confirmation or pause, so the application keeps running."""
+        valid = view is not None and view.mismatch is None
+        commit = view.record["source"]["commit"] if valid else self.deployed_commit()
+        workspace = self.workspace_status()
+        if not (workspace["dirty"] or (workspace["head"] is not None and workspace["head"] != commit)):
+            return
+        try:
+            problem = pf_source.tree_limit_problem(self.root, excludes=SOURCE_EXCLUDES)
+        except (pf_source.SourceError, OSError) as exc:
+            raise Failure("Source backup refuses this workspace: " + str(exc)) from exc
+        if problem is not None:
+            raise self.workspace_archive_limit(problem, changed=False)
+
     def capture_preflight(self, kind):
         """Read-only, before any confirmation, pause or effect of `pf backup`, update, reset-db, purge and rollback
         (section 3.4): the deployment image binding and the provable deployed source of a healthy capture."""
         view = self.current_deployment()
+        self.workspace_archive_preflight(view)
         if view is not None and view.mismatch is None:
             for service in pf_docker.BUILT_SERVICES:
                 try:
@@ -5437,12 +5479,25 @@ class Controller:
             try:
                 archived = pf_source.archive_tree(self.root, folder / "workspace.tar.gz", excludes=SOURCE_EXCLUDES,
                                                   unsupported=unsupported)
+            except pf_source.ArchiveLimitExceeded as exc:
+                if unsupported != "record":
+                    raise self.workspace_archive_limit(str(exc), changed=True) from exc
+                # Audit AF-6: `pf backup --emergency` (no source replacement follows) preserves the data anyway and
+                # records the workspace it could not archive.
+                archived = None
+                exclusions.append({"item": "workspace", "reason": ("the drifted workspace exceeds the archive "
+                                                                   "limits and was not archived: " + str(exc))[:500]})
+                log("WARNING: the writable repository differs from the deployed revision but exceeds the archive "
+                    "limits (" + str(exc) + "); it was not archived and is recorded as excluded.")
             except pf_source.SourceError as exc:
                 raise Failure("Source backup refuses this workspace: " + str(exc)) from exc
-            unsupported_entries += archived["unsupported"]
-            payloads.append(self._archive_payload(folder, "workspace.tar.gz", "workspace_archive", archive=archived))
-            workspace_payload = "workspace.tar.gz"
-            log("Writable repository differs from the deployed revision; current workspace was archived separately.")
+            if archived is not None:
+                unsupported_entries += archived["unsupported"]
+                payloads.append(self._archive_payload(folder, "workspace.tar.gz", "workspace_archive",
+                                                      archive=archived))
+                workspace_payload = "workspace.tar.gz"
+                log("Writable repository differs from the deployed revision; current workspace was archived "
+                    "separately.")
         database = self.env()["POSTGRES_DB"]
         dump = self.dump_store(database, folder, "database.dump")
         self.write_dump_list(dump, folder / "database.list")
@@ -6140,6 +6195,14 @@ class Controller:
                 os.close(fd)
         return found
 
+    def _bundle_entries(self, dir_fd, name):
+        """_folder_entries of one bundle folder; an oversized folder is a coded refusal of that bundle only, so a
+        listing shows it as ``[invalid: bundle-unlisted-file]`` instead of failing (audit AF-4)."""
+        try:
+            return self._folder_entries(dir_fd)
+        except ValueError as exc:
+            raise bundle_failure("bundle-unlisted-file", name, str(exc)) from exc
+
     @staticmethod
     def _unlisted(entries, payload_paths):
         allowed = {"manifest.json", "manifest.sha256"} | set(payload_paths)
@@ -6196,10 +6259,18 @@ class Controller:
             manifest = parsed
             if kind == "purge-bundle":
                 self._refuse_state_files(name, manifest["purge"]["state_files"])
+                for item in manifest["purge"]["state_files"]:
+                    payload = next((entry for entry in manifest["payloads"] if entry["path"] == "state/" + item), None)
+                    if payload is None or payload["type"] != "state_file":
+                        raise Failure(
+                            f"recovery-state-file-refused: bundle {name} lists state file {item!r} without a "
+                            f"state/{item} state_file payload; only verified payloads are restored. Nothing was "
+                            "changed.")
             self._bind_instance(kind, name, manifest)
             for payload in manifest["payloads"]:
                 self._verify_payload(dir_fd, name, payload["path"], payload["size"], payload["sha256"])
-            unlisted = self._unlisted(self._folder_entries(dir_fd), [item["path"] for item in manifest["payloads"]])
+            unlisted = self._unlisted(self._bundle_entries(dir_fd, name),
+                                      [item["path"] for item in manifest["payloads"]])
             if unlisted:
                 raise bundle_failure("bundle-unlisted-file", name, f"{unlisted[0]} is not listed in the manifest")
         elif isinstance(parsed, dict) and type(parsed.get("format")) is int and parsed["format"] in (1, 2):
@@ -6218,7 +6289,7 @@ class Controller:
                     raise bundle_failure("manifest-schema-unsupported", name,
                                          f"legacy payload {path!r} has no payload type ({supported})")
                 sizes[path] = self._verify_payload(dir_fd, name, path, None, digest_value)
-            unlisted = self._unlisted(self._folder_entries(dir_fd), list(checksums))
+            unlisted = self._unlisted(self._bundle_entries(dir_fd, name), list(checksums))
             try:
                 manifest, legacy_record = pf_config.migrate_legacy_manifest(
                     parsed, legacy_sha256=manifest_sha256, bundle_kind=kind, payload_sizes=sizes,
@@ -7312,25 +7383,32 @@ class Controller:
         except pf_source.SourceError as exc:
             raise Failure(str(exc)) from exc
 
-    def restore_runtime_environment(self, recovery, extracted_source=None):
-        """The runtime .env of a bundle (``configuration/.env``) or, for a format 1 bundle, the ``.env`` taken out of
-        its extracted source tree (``extracted_source``: that file). ``recovery``: a BundleView or a folder."""
-        folder = Path(recovery.folder if isinstance(recovery, BundleView) else recovery)
-        source = folder / "configuration" / ".env"
-        if not source.is_file() and extracted_source is not None:
+    def runtime_environment_bytes(self, recovery, extracted_source=None):
+        """The verified runtime .env of a strictly read bundle: its ``config_env`` payload or, for a format 1
+        bundle, the ``.env`` taken out of its verified, extracted source payload (``extracted_source``: that file).
+        A ``configuration/.env`` the manifest does not list is never opened (audit AF-1)."""
+        payloads = recovery.payloads_of("config_env")
+        if len(payloads) > 1:
+            raise Failure("Recovery bundle lists more than one runtime .env; exact restore is refused.")
+        if payloads:
+            return self.read_small_payload(recovery, payloads[0]["path"], "config_env")
+        if extracted_source is not None:
             legacy = Path(extracted_source)
-            if legacy.is_file():
-                source = legacy
-        if not source.is_file():
-            raise Failure("Recovery bundle does not contain a runtime .env; exact restore is refused.")
+            if legacy.is_file() and not legacy.is_symlink() and legacy.stat().st_size <= SMALL_PAYLOAD_LIMIT:
+                return legacy.read_bytes()
+        raise Failure("Recovery bundle does not contain a runtime .env; exact restore is refused.")
+
+    def restore_runtime_environment(self, data):
+        """Install ``data`` (the verified runtime .env bytes of runtime_environment_bytes) as the configuration
+        directory's .env."""
         existed = real_directory(self.config_dir)
         self.config_dir.mkdir(mode=0o2770, parents=True, exist_ok=True)
         if not existed:
             self.apply_single("configuration", self.config_dir, "dir")
-        # PF-A2.3: a content-only copy whose temporary gets the configuration file target before the rename; no other
+        # PF-A2.3: a new file whose temporary gets the configuration file target before the rename; no other
         # configuration file is touched.
         temporary = self.config_dir / (".env.restore-" + uuid.uuid4().hex[:8])
-        copy_fresh(source, temporary)
+        pf_instance._write_private_file(temporary, data, 0o600)
         self.apply_single("configuration", temporary, "file")
         os.replace(temporary, self.config_dir / ".env")
 
@@ -7426,6 +7504,11 @@ class Controller:
             if recovery.payload("revision-checkpoints.tar.gz") is not None:
                 # A hostile checkpoint history is refused here, before any confirmation or journal (PB-4).
                 self.inspect_payload(recovery, "revision-checkpoints.tar.gz", limits=pf_source.HISTORY_LIMITS)
+            # Audit AF-1: the runtime .env and the state files are their verified payload bytes, read before any
+            # confirmation or journal; an unlisted file in the bundle folder is never opened.
+            runtime_env = self.runtime_environment_bytes(recovery, extracted_source=legacy_env)
+            state_files = [(name, self.read_small_payload(recovery, "state/" + name, "state_file"))
+                           for name in recovery.purge["state_files"] if name != "deployed.json"]
             self.deployment_preflight(manifest)
             confirm(
                 "RESTORE INSTANCE " + recovery.compose_project,
@@ -7442,7 +7525,7 @@ class Controller:
                 "operation": "restore-instance", "phase": "confirmed", "started": utc(),
                 "recovery": recovery.bundle_id, "database": recovery.database,
             })
-            self.restore_runtime_environment(recovery, extracted_source=legacy_env)
+            self.restore_runtime_environment(runtime_env)
             # The restored .env is the configuration this operation consumes from here on.
             self.freeze_app_config(explicit=True)
             # The editable workspace receives the workspace archive when the bundle has one (unknown provenance),
@@ -7480,11 +7563,9 @@ class Controller:
 
         self.phase("restoring-checkpoints")
         self.restore_revision_checkpoints(recovery)
-        for name in recovery.purge["state_files"]:
-            source = folder / "state" / name
-            if source.is_file() and name != "deployed.json":
-                copy_fresh(source, self.state / name)
-                self.publish_fresh("private_state", self.state / name)
+        for name, data in state_files:
+            pf_instance._write_private_file(self.state / name, data, 0o600)
+            self.publish_fresh("private_state", self.state / name)
 
         self.phase("activating")
         self.activate(recovery.images, recovery.database_heads)
@@ -7641,6 +7722,34 @@ class Controller:
         finally:
             os.close(fd)
 
+    def read_small_payload(self, view, path, kind):
+        """The verified bytes of one small file payload (``kind``: config_env, state_file) of a strictly read bundle:
+        opened through one no-follow descriptor like extract_payload and hashed again as read, so the bytes consumed
+        are the bytes verified. A file the manifest does not list as ``kind`` is never opened (section 3.1 step 8,
+        section 3.7; audit AF-1)."""
+        payload = view.payload(path)
+        if payload is None or payload["type"] != kind:
+            raise bundle_failure("bundle-payload-mismatch", view.bundle_id, f"{path}: not a listed {kind} payload")
+        if payload["size"] > SMALL_PAYLOAD_LIMIT:
+            raise bundle_failure("bundle-payload-mismatch", view.bundle_id, f"{path}: size")
+        dir_fd = os.open(str(view.folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd, _ = self._check_payload(dir_fd, view.bundle_id, path, payload["size"], payload["sha256"])
+        finally:
+            os.close(dir_fd)
+        try:
+            data = b""
+            while len(data) <= payload["size"]:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                data += block
+        finally:
+            os.close(fd)
+        if len(data) != payload["size"] or pf_instance.sha256_bytes(data) != payload["sha256"]:
+            raise bundle_failure("bundle-payload-mismatch", view.bundle_id, f"{path}: hash")
+        return data
+
     @staticmethod
     def require_source_identity(view, tree, payload):
         """An extracted source tree equals the bundle's recorded tree identity when one is recorded."""
@@ -7771,7 +7880,13 @@ class Controller:
             raise Failure("No interrupted operation exists.")
         pending = load_json(self.pending)
         if pending["phase"] not in ("paused", "backup-ready"):
-            raise Failure("Source/database may have changed. Use the recorded checkpoint with rollback --restore-db instead.")
+            # Audit AF-5: a rollback journal's recorded checkpoint is its preservation capture, which may be an
+            # emergency or partial capture (never a rollback target); name the operation's healthy target instead.
+            hint = pending.get("selected") if pending.get("operation") == "rollback" else pending.get("checkpoint")
+            named = f" (this operation's: {hint})" if isinstance(hint, str) and BACKUP_RE.fullmatch(hint) else ""
+            raise Failure("Source/database may have changed. Roll back to a healthy checkpoint" + named + " with "
+                          "'rollback <backup-id> --restore-db' instead; an emergency or partial capture is evidence "
+                          "and data, never a rollback target.")
         self.database_ready()
         contract = self.ensure_local_contract()
         confirm("RESUME " + self.env()["POSTGRES_DB"], "Resume the unchanged deployment after a pre-change failure.")
@@ -8816,7 +8931,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 log("No published release for this channel. No update attempted.")
                 return 0
             log("Selected release: " + target["ref"] + " -> " + target["sha"])
-            log("Deployed source: " + controller.revision())
+            log("Deployed source: " + controller.describe_deployed_source())
             if not args.apply:
                 log("Check-only. No code or database changes were made.")
                 return 0

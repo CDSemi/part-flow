@@ -272,7 +272,9 @@
 > *Bundles.* New checkpoints and purge recovery bundles are written as `schema_version` 1 manifests
 > (`contracts/lifecycle-records.schema.json`) and read strictly: the exact manifest bytes, every payload's size and
 > hash, no link and no unlisted file, before anything is extracted, confirmed or journaled. Older format 1 and 2
-> bundles stay usable through an explicit, deterministic in-memory migration; nothing on disk is rewritten.
+> bundles stay usable through an explicit, deterministic in-memory migration; nothing on disk is rewritten. A file
+> such a bundle does not list is recorded and never opened: `restore-instance` takes the runtime `.env` and every state
+> file only from verified payloads (a format 1 `.env` from the verified source archive).
 > *Classes and levels.* A capture is a **healthy checkpoint**, an **emergency preservation** or **partial**; its
 > verification level (`captured`, `failed`, `data-restore`) comes from a separate verification record under
 > `artifacts/verifications/`. Only a healthy checkpoint is a rollback target.
@@ -878,7 +880,9 @@ Deployment: <deployment-id> (git_commit <sha12>|unknown), sealed <stamp>
 Since PF-A3.1 the deployed source comes from the **deployment record** (section 7), not from `repo/` or its
 `.git`. `Deployed source:` prints the commit only when the protected source store proved it; otherwise it prints
 `unknown provenance (…)` and never a claimed commit. `deployed.json` `sha` is likewise written only for a proven
-commit (`null` otherwise). The `Deployment:` line is one of:
+commit (`null` otherwise); a pre-A3.1 `sha` written by a `rollback:` or `restore:` counts as the deployed commit only
+when the protected source manifest records that same commit. `pf release-check` prints the same `Deployed source:`
+line. The `Deployment:` line is one of:
 
 ```text
 Deployment: <id> (git_commit <sha12>|unknown), sealed <stamp>
@@ -1039,7 +1043,9 @@ sudo pf --instance <slug> backup --emergency
 It prints the observed contract (live heads, image heads, running and expected image IDs), asks
 `EMERGENCY BACKUP <project>`, captures and restore-tests the current database and prints
 `Emergency preservation <id> captured (<level>). It is evidence and data for repair or export, not a rollback
-target.` It is refused without a terminal and is never run by `backup.sh`. While a deploy, update, rollback or
+target.` When the drifted workspace exceeds the archive limits (section 16, `workspace-archive-limit`) it still
+preserves the data and records the workspace as excluded. It is refused without a terminal and is never run by
+`backup.sh`. While a deploy, update, rollback or
 reset-db is interrupted, `status` lists it as a legal route; it does not change the interrupted operation. An
 emergency or partial capture is **never a rollback target** (`checkpoint-not-rollback-target`).
 
@@ -1749,7 +1755,8 @@ Nothing was changed.
 of the selected instance's own `recovery/<project>/`; bundles of other instances, copies
 elsewhere and links to them are never listed or restored. `recovery-state-file-refused`: the
 bundle manifest lists a state file other than `deployed.json`, `last-reset.json` or
-`observed-tags.json`, or its state files are not a list. Nothing was changed.
+`observed-tags.json`, its state files are not a list, or it lists a state file without its verified
+`state/<name>` payload (a legacy bundle then reports `manifest-schema-unsupported`). Nothing was changed.
 
 ### `logs-bound-reached`
 
@@ -1816,11 +1823,19 @@ A refusal before any effect ends with `Nothing was changed.`; a later one names 
 - `manifest-checksum-mismatch`, `manifest-invalid`, `manifest-schema-unsupported`, `bundle-payload-mismatch`,
   `bundle-unlisted-file`: the bundle folder was changed, damaged or written by an unsupported control. Do not edit
   or "repair" it; copy it off-NAS as evidence and use another checkpoint or recovery bundle. `pf backups` and
-  `pf recoveries` list such a folder as `[invalid: <code>]`. A bundle copied back from off-NAS must be byte-identical
-  (no added files such as `.DS_Store` or `Thumbs.db`).
+  `pf recoveries` list such a folder as `[invalid: <code>]` (a folder with more than 20000 entries is
+  `[invalid: bundle-unlisted-file]`). A bundle copied back from off-NAS must be byte-identical (no added files such as
+  `.DS_Store` or `Thumbs.db`).
 - `archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`: an archive payload contains a
-  link, special file, unsafe or duplicate path, exceeds the importer limits, changed while it was read, or does not
-  fit; nothing was extracted. For `archive-capacity` free space on the volume and retry.
+  link, special file, unsafe or duplicate path, exceeds the importer limits (a PAX or GNU long-name header above
+  64 KiB is refused before it is read), changed while it was read, or does not fit; nothing was extracted. For
+  `archive-capacity` free space on the volume and retry.
+- `workspace-archive-limit`: the editable workspace differs from the deployed source and holds a file over 128 MiB,
+  more than 512 MiB or 200000 files in total, or a path the archive cannot hold. `pf backup`, `update`, `reset-db`,
+  `purge` and `rollback` refuse in their preflight, before any confirmation or pause (the application keeps running):
+  their capture never proceeds without the drifted workspace, which a later source replacement would destroy. Move
+  the files out of the repository workspace and retry; `pf --instance <slug> backup --emergency` preserves the database meanwhile and records the
+  workspace as excluded.
 - `source-manifest-mismatch`: the extracted source differs from the recorded source manifest; use another
   checkpoint.
 - `checkpoint-not-rollback-target`: the selected checkpoint is an emergency or partial capture. Restore its data
@@ -1831,7 +1846,9 @@ A refusal before any effect ends with `Nothing was changed.`; a later one names 
   or switched and the services stay stopped. Preserve the database manually — a `pg_dump --format=custom` of the
   named database from the `db` service to a protected, root-only location — or fix the cause and run
   `pf --instance <slug> backup --emergency`; then retry, or run `pf --instance <slug> resume` to reopen the unchanged
-  deployment.
+  deployment. Once a rollback got past that point (`resume` is no longer a legal route), roll back again to a healthy
+  checkpoint with `--restore-db`: the preservation capture its journal records may be an emergency or partial
+  capture, which is evidence and data, never a rollback target.
 - `deployment-artifact-mismatch`: a file of the current deployment record differs from the record. **Do not delete
   the folder**; keep it as evidence. As a note the capture continued with the source from the protected source store
   or the proven workspace and the next `update` seals a fresh record. As a refusal the deployed source is

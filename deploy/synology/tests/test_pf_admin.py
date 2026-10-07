@@ -1899,15 +1899,12 @@ class RecoverySourceTests(unittest.TestCase):
         self.assertFalse((self.root / "DEPLOYED_SOURCE.txt").exists())
 
     def test_restore_runtime_environment_writes_external_config_env(self):
-        recovery_dir = Path(self.temp.name) / "recovery"
-        saved = recovery_dir / "configuration"
-        saved.mkdir(parents=True)
-        (saved / ".env").write_text(
-            "POSTGRES_DB=partflow_staging\nPOSTGRES_USER=partflow_staging\n"
-            "POSTGRES_PASSWORD=old-secret\nSITE_TIMEZONE=America/Los_Angeles\n"
-            "PARTFLOW_BIND_IP=127.0.0.1\nPARTFLOW_HTTP_PORT=5173\nPARTFLOW_ALLOWED_HOST=localhost\n"
+        # Audit AF-1: the caller passes the verified payload bytes (runtime_environment_bytes).
+        self.c.restore_runtime_environment(
+            b"POSTGRES_DB=partflow_staging\nPOSTGRES_USER=partflow_staging\n"
+            b"POSTGRES_PASSWORD=old-secret\nSITE_TIMEZONE=America/Los_Angeles\n"
+            b"PARTFLOW_BIND_IP=127.0.0.1\nPARTFLOW_HTTP_PORT=5173\nPARTFLOW_ALLOWED_HOST=localhost\n"
         )
-        self.c.restore_runtime_environment(recovery_dir)
         restored = self.c.config_dir / ".env"
         self.assertIn("POSTGRES_PASSWORD=old-secret", restored.read_text())
         self.assertEqual(stat.S_IMODE(restored.stat().st_mode), 0o660)

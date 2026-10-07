@@ -504,6 +504,28 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > not authorship. Recommended verdict: `PASS_WITH_DECLARED_LIMITS` (offline/filesystem). Not production-ready; F04,
 > F06, F07, F10, F15 and F16 are not closed overall.
 
+> **PF-A3.1 audit addendum (2026-10-07, uncommitted over `4d7fe76`).** The independent audit of `26b6ed4..4d7fe76`
+> (`_claude_outputs/ops/PF-A3.1/audit-findings.json`: 9 rows, 7 distinct findings, all confirmed) is closed in the OPS
+> paths with 11 new regressions in `test_artifacts.py`; every one fails on `4d7fe76` and passes now. (AF-1/AF-9)
+> `restore-instance` takes the runtime `.env` only from the verified `config_env` payload (format 1: the `.env` of the
+> verified source payload) and every state file only from its verified `state/<name>` payload, read through one
+> no-follow descriptor and re-hashed as read; a listed state file without that payload is refused by the legacy
+> migration (`manifest-schema-unsupported`) and the schema-1 reader (`recovery-state-file-refused`) — LG-11 (unlisted
+> `configuration/.env`, unlisted `configuration` link), LG-12, PB-11. (AF-2/AF-7) `release-check` prints
+> `describe_deployed_source()` and exits 0 after an unprovable rollback (DA-14 release-check case). (AF-3) a pre-A3.1
+> pointer written by `rollback:`/`restore:` counts as a commit only when the protected source manifest records it as
+> `git_commit` (DA-17). (AF-4) a bundle folder over 20000 entries is `[invalid: bundle-unlisted-file]` instead of
+> aborting the listing (LG-13). (AF-5) the pending-route copy and the controller's `resume` refusal name a healthy
+> checkpoint, never the recorded preservation capture (EP-15; the CLI gate refuses `resume` before the controller).
+> (AF-6) a drifted workspace over the archive limits is refused in the capture preflight before any confirmation or
+> pause (`workspace-archive-limit`, EP-14), and `pf backup --emergency` preserves the data with a `workspace` exclusion
+> (EP-13). (AF-8) GNU long-name/long-link and PAX headers declaring more than 64 KiB are refused before tarfile reads
+> them (AX-18). Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (3.12.15)
+> and `python:3.9` (3.9.25) containers, uid 0: **782 tests OK, 0 skipped** on both (858.581 s and 850.685 s; logs
+> `evidence/suite-python3*-audit.log`). Updated without weakening: the two `restore_runtime_environment` unit tests now
+> pass verified bytes, and the SS-3 allowlist gains the two verified-bytes write sites. Nothing was run against a NAS,
+> DSM, Docker daemon, the running stack or a development database. Verdict unchanged: `PASS_WITH_DECLARED_LIMITS`.
+
 ## Executed checks
 
 | Check | Actual result |

@@ -596,6 +596,64 @@ class Legacy(Base):
         with tarfile.open(self.c.deployments_dir / record["deployment_id"] / "source.tar.gz") as archive:
             self.assertNotIn(".env", archive.getnames())
 
+    def restore_with_planted_env(self, plant):
+        """Audit AF-1: a format 1 purge bundle whose folder also holds an unlisted runtime .env (``plant``)."""
+        bundle = PurgeBundle.legacy(self, fmt=1)
+        plant(bundle.folder)
+        view = self.c.verify_recovery(bundle.folder)
+        self.assertIn("configuration", view.legacy["unlisted_entries"])
+        self.assertEqual(PurgeBundle.restore(self, view), 0, self.last_error)
+        env = (self.c.config_dir / ".env").read_text()
+        self.assertIn("POSTGRES_PASSWORD=abc123", env)  # the verified .env of the source payload
+        self.assertNotIn("unlisted-secret", env)
+
+    def test_lg11_an_unlisted_configuration_env_is_never_the_runtime_env(self):
+        def plant(folder):
+            (folder / "configuration").mkdir()
+            (folder / "configuration" / ".env").write_text(pfx.ENV_TEXT.replace("abc123", "unlisted-secret"))
+
+        self.restore_with_planted_env(plant)
+
+    def test_lg11_an_unlisted_configuration_link_is_never_followed(self):
+        def plant(folder):
+            outside = Path(self.temp.name) / "outside-configuration"
+            outside.mkdir()
+            (outside / ".env").write_text(pfx.ENV_TEXT.replace("abc123", "unlisted-secret"))
+            os.symlink(str(outside), str(folder / "configuration"))
+
+        self.restore_with_planted_env(plant)
+
+    def test_lg12_a_legacy_state_file_is_restored_only_from_its_verified_payload(self):
+        # Audit AF-1: a state_files name without a state/<name> checksum is refused; a listed one is restored from
+        # its verified bytes.
+        recovery_id = "purge-20260904T120000Z-" + OLD[:12] + "-e5f6a7"
+        folder = pfx.legacy_purge_bundle(self.c.recovery_root / recovery_id, project=PROJECT, root=self.root,
+                                         tree=self.tree(), extra={"state_files": ["deployed.json", "last-reset.json"]})
+        (folder / "state" / "last-reset.json").write_text('{"unlisted": true}\n')
+        with self.assertRaisesRegex(pf.Failure, "^manifest-schema-unsupported: " + recovery_id + ": state file "
+                                    "last-reset.json has no state/last-reset.json payload"):
+            self.c.verify_recovery(folder)
+        listed = b'{"time": "20261005T000000Z"}\n'
+        bundle = PurgeBundle.legacy(self, files={"state/last-reset.json": listed},
+                                    extra={"state_files": ["deployed.json", "last-reset.json"]})
+        self.assertEqual(PurgeBundle.restore(self, bundle), 0, self.last_error)
+        self.assertEqual((self.c.state / "last-reset.json").read_bytes(), listed)
+
+    def test_lg13_a_bundle_folder_with_too_many_entries_is_listed_invalid(self):
+        # Audit AF-4: one oversized folder is `[invalid: bundle-unlisted-file]`; the other folders stay listed.
+        oversized = self.legacy()
+        healthy = self.legacy("20260902T120000Z-" + OLD[:12] + "-b2c3d4")
+        junk = oversized / "junk"
+        junk.mkdir()
+        for index in range(20001):
+            os.close(os.open(str(junk / str(index)), os.O_WRONLY | os.O_CREAT, 0o600))
+        listing = {item.bundle_id: item for item in self.c.snapshots()}
+        self.assertIsInstance(listing[oversized.name], pf.InvalidBundle)
+        self.assertEqual(listing[oversized.name].code, "bundle-unlisted-file")
+        self.assertIsInstance(listing[healthy.name], pf.BundleView)
+        self.assertEqual(self.invoke(["backups"]), 0, self.last_error)
+        self.assertIn(f"{oversized.name}  [invalid: bundle-unlisted-file]", self.output.getvalue())
+
 
 # ============================================================================ AX/AR: archive import (A3-T13)
 
@@ -776,6 +834,18 @@ class ArchiveImport(unittest.TestCase):
         result = self.run_import(self.archive(data))
         self.assertEqual(stat.S_IMODE(os.lstat(str(self.parent / "out" / "shared")).st_mode), 0o700)
         self.assertEqual([entry["path"] for entry in result["entries"]], ["shared/file"])
+
+    def test_ax18_an_oversized_extended_header_is_refused_before_tarfile_reads_it(self):
+        # Audit AF-8: tarfile reads a GNU longname/longlink or PAX header payload whole while parsing the header; a
+        # declared size above EXTENDED_HEADER_LIMIT is refused first (1 GiB declared, 1 MiB present).
+        for kind, reason in ((tarfile.GNUTYPE_LONGNAME, "path-length"), (tarfile.GNUTYPE_LONGLINK, "path-length"),
+                             (tarfile.XHDTYPE, "pax-key"), (tarfile.XGLTYPE, "pax-key")):
+            with self.subTest(kind=kind):
+                info = tarfile.TarInfo("././@LongLink")
+                info.type = kind
+                info.size = 1024 ** 3
+                self.refused(gzip.compress(info.tobuf(tarfile.USTAR_FORMAT) + b"a" * MIB), reason)
+        self.assertLess(pf_source.EXTENDED_HEADER_LIMIT, MIB)
 
 
 @ROOT_FS
@@ -1281,6 +1351,34 @@ class DeployedArtifact(Base):
                          ("deployment-artifact", "unknown"))
         self.assertTrue(checkpoint.bundle_id.split("-")[1] == "0" * 12)
 
+    def test_da14_release_check_reports_an_unknown_deployed_source(self):
+        # Audit AF-2: the check-only command reads the deployed commit like update does, never the strict revision().
+        self.legacy_rollback("9" * 40)
+        self.assertEqual(self.invoke(["release-check"]), 0, self.last_error)
+        self.assertIn("Deployed source: unknown provenance (no proven commit is recorded)", self.output.getvalue())
+        self.assertIn("Check-only. No code or database changes were made.", self.output.getvalue())
+
+    def test_da17_an_a23_unproven_rollback_pointer_is_not_a_proven_commit(self):
+        # Audit AF-3: an A2.3 rollback wrote the checkpoint's claim into deployed.json even when the store did not
+        # prove the tree (its protected source manifest stayed `unknown`); after the upgrade it is no commit.
+        backup_id = "20260901T120000Z-" + OLD[:12] + "-a1b2c3"
+        pf.write_json(self.c.state / "deployed.json", {"sha": OLD, "ref": "rollback:" + backup_id,
+                                                       "deployed_at": "20260901T130000Z",
+                                                       "checkpoint": "20260901T125900Z-" + OLD[:12] + "-b2c3d4"})
+        self.c.record_source_manifest(self.root, OLD, verified=False)
+        self.assertIsNone(self.c.deployed_commit())
+        self.assertEqual(self.c.describe_deployed_source(), "unknown provenance (no proven commit is recorded)")
+        self.assertEqual(self.invoke(["backup"]), 1)
+        self.assertIn(pf.Controller.CANNOT_RECONSTRUCT, self.last_error)
+        self.assertEqual([item for item in self.c.snapshots()], [])
+        # The same pointer whose tree the protected manifest records as that commit stays a proven commit, and an
+        # update pointer keeps its sha as before.
+        self.c.record_source_manifest(self.root, OLD, verified=True)
+        self.assertEqual(self.c.deployed_commit(), OLD)
+        self.c.record_source_manifest(self.root, OLD, verified=False)
+        pf.write_json(self.c.state / "deployed.json", {"sha": OLD, "ref": "v1.0.0"})
+        self.assertEqual(self.c.deployed_commit(), OLD)
+
     def test_da15_restore_instance_then_update(self):
         bundle = PurgeBundle.legacy(self)
         self.assertEqual(PurgeBundle.restore(self, bundle), 0, self.last_error)
@@ -1501,6 +1599,62 @@ class Emergency(Base):
         view = next(item for item in self.c.snapshots() if isinstance(item, pf.BundleView)
                     and item.reason == "emergency-manual")
         self.assertEqual(view.manifest["workspace"]["unsupported_entries"], ["passwd-link"])
+
+
+    def big_workspace_file(self):
+        """Audit AF-6: a drifted workspace holding one file over the 128 MiB archive limit (sparse: no disk use)."""
+        with open(str(self.root / "big-export.sql"), "wb") as handle:
+            handle.truncate(pf_source.SOURCE_LIMITS.file_bytes + 1)
+        self.c.workspace_dirty = True
+
+    def test_ep13_backup_emergency_preserves_the_data_when_the_workspace_exceeds_the_limits(self):
+        self.big_workspace_file()
+        self.assertEqual(self.invoke(["backup", "--emergency"]), 0, self.last_error)
+        view = self.c.snapshots()[0]
+        self.assertEqual((view.capture_class, view.level), ("emergency_preservation", "data_restore_verified"))
+        self.assertIsNone(view.workspace_payload)
+        self.assertTrue(view.manifest["workspace"]["differs_from_deployed"])
+        reason = next(item["reason"] for item in view.manifest["exclusions"] if item["item"] == "workspace")
+        self.assertIn("big-export.sql: the tree exceeds the archive size limits", reason)
+        self.assertIn("database.dump", {item["path"] for item in view.manifest["payloads"]})
+
+    def test_ep14_a_capture_the_workspace_limits_would_refuse_is_refused_before_any_pause(self):
+        target = self.checkpoint()
+        self.big_workspace_file()
+        for command in (["rollback", target.bundle_id], ["backup"]):
+            with self.subTest(command=command[0]):
+                confirm = mock.Mock()
+                self.assertEqual(self.invoke(command, confirm=confirm), 1)
+                self.assertIn("ERROR: workspace-archive-limit: the editable workspace differs from the deployed source "
+                              "and cannot be archived within the archive limits (big-export.sql: the tree exceeds the "
+                              "archive size limits).", self.last_error)
+                self.assertIn("Nothing was changed.", self.last_error)
+                confirm.assert_not_called()
+                self.assertFalse(self.c.pending.exists())
+                self.assertTrue(self.c.running["backend"] and self.c.running["frontend"])
+                self.assertEqual([item.bundle_id for item in self.c.snapshots()], [target.bundle_id])
+
+    def test_ep15_resume_names_a_healthy_target_after_an_emergency_preserved_rollback(self):
+        # Audit AF-5: the rollback journal records its preservation capture, here an emergency one (never a target).
+        target = self.checkpoint()
+        self.mismatch()
+        with mock.patch.object(self.c, "activate", side_effect=pf.Failure("frontend did not become healthy")):
+            self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 1)
+        journal = json.loads(self.c.pending.read_text())
+        preserved = self.c.verify_snapshot(journal["checkpoint"])
+        self.assertEqual(preserved.capture_class, "emergency_preservation")
+        # The route gate refuses `pf resume` for this phase and names the legal route ...
+        self.assertEqual(self.invoke(["resume"]), 1)
+        self.assertIn("roll back to a healthy checkpoint (use --restore-db when data/schema may have changed; an "
+                      "emergency or partial capture is evidence and data, never a rollback target)", self.last_error)
+        # ... and the controller's own refusal (defence in depth) names the operation's healthy target, not the
+        # recorded preservation capture.
+        with self.assertRaises(pf.Failure) as caught:
+            self.c.resume()
+        self.assertEqual(str(caught.exception),
+                         f"Source/database may have changed. Roll back to a healthy checkpoint (this operation's: "
+                         f"{target.bundle_id}) with 'rollback <backup-id> --restore-db' instead; an emergency or "
+                         "partial capture is evidence and data, never a rollback target.")
 
 
 # ============================================================================ VR: verification records
@@ -1758,12 +1912,13 @@ class PurgeBundle(Base):
         return test.c.verify_recovery(view.folder)
 
     @staticmethod
-    def legacy(test, fmt=2, files=None):
+    def legacy(test, fmt=2, files=None, extra=None):
         tree = Path(test.temp.name) / "legacy-bundle-tree"
         if not tree.exists():
             pfx.source_fixture(tree)
         folder = pfx.legacy_purge_bundle(test.c.recovery_root / ("purge-20261006T000000Z-" + OLD[:12] + "-abcdef"),
-                                         project=PROJECT, root=test.root, tree=tree, fmt=fmt, files=files)
+                                         project=PROJECT, root=test.root, tree=tree, fmt=fmt, files=files,
+                                         extra=extra)
         return test.c.verify_recovery(folder)
 
     @staticmethod
@@ -1949,6 +2104,16 @@ class PurgeBundle(Base):
         self.assertEqual((self.root / "frontend" / "app.txt").read_text(), "local edits\n")
         with tarfile.open(self.c.current_deployment().folder / "source.tar.gz") as archive:
             self.assertEqual(archive.extractfile("frontend/app.txt").read(), OLD.encode())
+
+
+    def test_pb11_a_listed_state_file_without_its_payload_is_refused(self):
+        # Audit AF-1 (schema 1): a state file is restored only from its verified state/<name> payload.
+        view = PurgeBundle.build(self)
+        missing = next(name for name in pf.RESTORABLE_STATE_FILES if view.payload("state/" + name) is None)
+        tpa.rewrite_manifest(view.folder, lambda m: m["purge"]["state_files"].append(missing))
+        with self.assertRaisesRegex(pf.Failure, "^recovery-state-file-refused: bundle " + view.bundle_id
+                                    + " lists state file '" + missing + "' without a state/" + missing):
+            self.c.verify_recovery(view.folder)
 
 
 # ============================================================================ RT: routes and listings

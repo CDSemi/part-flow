@@ -2442,6 +2442,10 @@ def migrate_legacy_manifest(legacy, *, legacy_sha256, bundle_kind, payload_sizes
         if not _match(_L_CHECKPOINT, derived_from):
             raise refuse("active_checkpoint is missing or malformed")
         purge_section = _legacy_purge_section(legacy, refuse)
+        # Audit AF-1: a listed state file is restored from its verified payload only; nothing else is opened.
+        for name in purge_section["state_files"]:
+            if types.get("state/" + name) != "state_file":
+                raise refuse(f"state file {name} has no state/{name} payload in the checksum map")
     # Class (section 3.7): a purge bundle is complete (rule 7, checked by the reader) or not restorable.
     claimed_reason = legacy.get("reason") if isinstance(legacy.get("reason"), str) else None
     verified_claim = legacy.get("source_verified")

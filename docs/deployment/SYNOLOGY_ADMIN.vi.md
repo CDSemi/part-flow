@@ -266,6 +266,8 @@
 > (`contracts/lifecycle-records.schema.json`) và được đọc chặt: đúng byte của manifest, size và hash của từng
 > payload, không link, không file ngoài danh sách, trước khi extract, xác nhận hay ghi journal bất cứ gì. Bundle cũ
 > format 1 và 2 vẫn dùng được qua một migration tường minh, tất định, chỉ trong bộ nhớ; không có gì trên đĩa bị ghi lại.
+> File mà bundle như vậy không liệt kê chỉ được ghi nhận và không bao giờ được mở: `restore-instance` chỉ lấy `.env`
+> runtime và mọi state file từ payload đã verify (`.env` của format 1 lấy từ source archive đã verify).
 > *Class và level.* Một capture là **healthy checkpoint**, **emergency preservation** hoặc **partial**; verification
 > level (`captured`, `failed`, `data-restore`) lấy từ verification record riêng trong `artifacts/verifications/`.
 > Chỉ healthy checkpoint mới là rollback target.
@@ -856,7 +858,9 @@ Deployment: <deployment-id> (git_commit <sha12>|unknown), sealed <stamp>
 Từ PF-A3.1, deployed source lấy từ **deployment record** (mục 7), không từ `repo/` hay `.git` của nó.
 `Deployed source:` chỉ in commit khi protected source store đã chứng minh được; nếu không nó in
 `unknown provenance (…)` và không bao giờ in commit chỉ được claim. `deployed.json` `sha` cũng chỉ được ghi cho commit
-đã chứng minh (ngược lại là `null`). Dòng `Deployment:` là một trong:
+đã chứng minh (ngược lại là `null`); một `sha` từ trước A3.1 do `rollback:` hay `restore:` ghi chỉ được tính là
+deployed commit khi protected source manifest ghi đúng commit đó. `pf release-check` in cùng dòng `Deployed source:`.
+Dòng `Deployment:` là một trong:
 
 ```text
 Deployment: <id> (git_commit <sha12>|unknown), sealed <stamp>
@@ -1012,8 +1016,9 @@ sudo pf --instance <slug> backup --emergency
 
 Lệnh in contract quan sát được (live head, image head, image ID đang chạy và kỳ vọng), hỏi
 `EMERGENCY BACKUP <project>`, capture và restore-test database hiện tại rồi in `Emergency preservation <id> captured
-(<level>). It is evidence and data for repair or export, not a rollback target.` Lệnh bị từ chối khi không có
-terminal và không bao giờ được `backup.sh` chạy. Khi một deploy, update, rollback hay reset-db bị ngắt, `status` liệt
+(<level>). It is evidence and data for repair or export, not a rollback target.` Khi workspace bị lệch vượt giới
+hạn archive (mục 16, `workspace-archive-limit`) lệnh vẫn giữ data và ghi workspace là excluded. Lệnh bị từ chối khi
+không có terminal và không bao giờ được `backup.sh` chạy. Khi một deploy, update, rollback hay reset-db bị ngắt, `status` liệt
 kê nó như một route hợp lệ; nó không thay đổi operation bị ngắt. Emergency hay partial capture **không bao giờ là
 rollback target** (`checkpoint-not-rollback-target`).
 
@@ -1701,7 +1706,8 @@ và apply release bằng tay với `pf --instance <slug> update --release <tag>`
 `recovery/<project>/` của chính instance đã chọn; bundle của instance khác, bản sao ở nơi khác và
 link trỏ tới chúng không bao giờ được liệt kê hay restore. `recovery-state-file-refused`: manifest
 của bundle liệt kê state file khác `deployed.json`, `last-reset.json` hoặc `observed-tags.json`,
-hoặc danh sách state file không phải là một list. Không có gì bị thay đổi.
+danh sách state file không phải là một list, hoặc liệt kê một state file không có payload `state/<name>` đã
+verify (bundle legacy khi đó báo `manifest-schema-unsupported`). Không có gì bị thay đổi.
 
 ### `logs-bound-reached`
 
@@ -1772,11 +1778,19 @@ Refusal trước mọi tác động kết thúc bằng `Nothing was changed.`; r
 - `manifest-checksum-mismatch`, `manifest-invalid`, `manifest-schema-unsupported`, `bundle-payload-mismatch`,
   `bundle-unlisted-file`: thư mục bundle đã bị sửa, hỏng hoặc được ghi bởi control không được hỗ trợ. Đừng sửa hay
   "vá" nó; copy ra ngoài NAS làm bằng chứng và dùng checkpoint hay recovery bundle khác. `pf backups` và
-  `pf recoveries` liệt kê thư mục như vậy là `[invalid: <code>]`. Bundle copy ngược từ ngoài NAS về phải giống từng
-  byte (không thêm file như `.DS_Store` hay `Thumbs.db`).
+  `pf recoveries` liệt kê thư mục như vậy là `[invalid: <code>]` (thư mục có hơn 20000 entry là
+  `[invalid: bundle-unlisted-file]`). Bundle copy ngược từ ngoài NAS về phải giống từng byte (không thêm file như
+  `.DS_Store` hay `Thumbs.db`).
 - `archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`: archive payload chứa link,
-  special file, path không an toàn hay trùng, vượt giới hạn của importer, thay đổi trong lúc đọc, hoặc không đủ chỗ;
-  không có gì được extract. Với `archive-capacity` hãy giải phóng dung lượng rồi chạy lại.
+  special file, path không an toàn hay trùng, vượt giới hạn của importer (header PAX hay GNU long-name lớn hơn 64 KiB
+  bị từ chối trước khi được đọc), thay đổi trong lúc đọc, hoặc không đủ chỗ; không có gì được extract. Với
+  `archive-capacity` hãy giải phóng dung lượng rồi chạy lại.
+- `workspace-archive-limit`: workspace có thể sửa khác deployed source và chứa file lớn hơn 128 MiB, tổng cộng hơn
+  512 MiB hay 200000 file, hoặc path mà archive không chứa được. `pf backup`, `update`, `reset-db`, `purge` và
+  `rollback` từ chối ngay ở preflight, trước mọi xác nhận hay pause (ứng dụng vẫn chạy): capture của chúng không bao
+  giờ tiếp tục khi thiếu workspace bị lệch, thứ mà một lần thay source sau đó sẽ xóa mất. Chuyển các file đó ra khỏi
+  repository workspace rồi chạy lại; trong lúc đó `pf --instance <slug> backup --emergency` giữ database và ghi
+  workspace là excluded.
 - `source-manifest-mismatch`: source đã extract khác source manifest đã ghi; dùng checkpoint khác.
 - `checkpoint-not-rollback-target`: checkpoint được chọn là emergency hay partial capture. Restore data của nó thủ
   công hoặc export từ nó; chọn healthy checkpoint cho `rollback`.
@@ -1786,7 +1800,9 @@ Refusal trước mọi tác động kết thúc bằng `Nothing was changed.`; r
   switch và service vẫn dừng. Preserve database thủ công — một `pg_dump --format=custom` của database được nêu tên từ
   service `db` vào chỗ được bảo vệ, chỉ root đọc được — hoặc sửa nguyên nhân rồi chạy
   `pf --instance <slug> backup --emergency`; sau đó chạy lại, hoặc chạy `pf --instance <slug> resume` để mở lại
-  deployment không đổi.
+  deployment không đổi. Khi rollback đã đi qua điểm đó (`resume` không còn là route hợp lệ), hãy rollback lại về một
+  healthy checkpoint với `--restore-db`: preservation capture mà journal ghi có thể là emergency hay partial capture,
+  vốn là bằng chứng và data, không bao giờ là rollback target.
 - `deployment-artifact-mismatch`: một file của deployment record hiện tại khác record. **Đừng xóa thư mục**; giữ làm
   bằng chứng. Ở dạng note, capture đã tiếp tục với source từ protected source store hoặc workspace đã chứng minh và
   lần `update` kế tiếp seal record mới. Ở dạng refusal, deployed source không chứng minh được: khôi phục protected
