@@ -248,8 +248,9 @@ class WorkOrderDetail(NamedTuple):
     allocation_history_ids: frozenset[int]
 
 
-def _derived_status(
-    work_order: WorkOrder,
+def derived_status(
+    completed_at: datetime.datetime | None,
+    stored_status: str,
     demands: Collection[tuple[int, int]],
     released: Mapping[int, int],
 ) -> str:
@@ -260,12 +261,14 @@ def _derived_status(
     allocation projection). Derived at read time — the stored column
     stays OPEN, so no migration and no drift are possible. A partially
     released line keeps the Work Order OPEN: its remaining quantity is
-    still releasable."""
-    if work_order.completed_at is not None:
+    still releasable. Takes the Work Order's two stored scalars rather
+    than the row, so the reconciliation checks can derive the status a
+    replayed ``completed_at`` implies with the same rule."""
+    if completed_at is not None:
         return WorkOrderStatus.COMPLETED
     if demands and all(released.get(demand_id, 0) >= requested for demand_id, requested in demands):
         return WorkOrderStatus.RELEASED
-    return work_order.status
+    return stored_status
 
 
 def _require_active(work_order: WorkOrder, action: str) -> None:
@@ -301,8 +304,9 @@ def _build_detail(
         work_order=work_order,
         demands=demands,
         released_quantities=released,
-        status=_derived_status(
-            work_order,
+        status=derived_status(
+            work_order.completed_at,
+            work_order.status,
             [(demand.id, demand.requested_quantity) for demand in demands],
             released,
         ),
@@ -381,7 +385,7 @@ def list_work_orders(
             work_order=work_order,
             demand_line_count=count,
             part_numbers=values,
-            status=_derived_status(work_order, lines, released),
+            status=derived_status(work_order.completed_at, work_order.status, lines, released),
         )
         for work_order, count, values, lines in rows
     ]

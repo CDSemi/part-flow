@@ -117,6 +117,8 @@ in a rehearsal command.
 - estimate lock/time/disk impact using staging data;
 - verify off-site backup health and make a fresh pre-release dump;
 - verify the previous release remains available;
+- run reconciliation (§7) on the current release, keep the report, and open
+  incidents for any findings;
 - decide whether writes must be stopped;
 - announce the window and rollback decision deadline.
 
@@ -133,7 +135,9 @@ in a rehearsal command.
 7. Check health internally and through HTTPS.
 8. Run authorization, SPA-route, `/api`, scan-focus/connectivity, and designated
    write/read-back smoke tests.
-9. Run reconciliation.
+9. Run reconciliation (§7) and keep the JSON report. Compare it with the
+   pre-release report: only findings absent from it block step 10;
+   pre-existing findings stay open incidents under the owner's decision.
 10. Reopen writes only when every required check passes.
 
 ### Observe
@@ -161,18 +165,71 @@ data.
 
 ## 7. Reconciliation
 
-Phase 16 must provide read-only commands that at minimum verify:
+Reconciliation is the read-only backend command `python -m app.cli reconcile`
+(Phase 16 slice 1). It runs the checks below in one read-only database snapshot
+and prints one JSON report on stdout; it never repairs anything.
 
-- current-position projections replay from non-reversed Movement history;
-- every active/closed flow has a valid conservation history;
-- per-PN introduced quantity reconciles with active, stocked, scrapped, and
-  reversed outcomes under the canonical rules;
-- Machine assigned quantities reconcile with flows currently on each Machine;
-- demand `released_quantity` derives from `RECEIVED` evidence;
-- demand `allocated_quantity` and Work Order `completed_at` reconcile with
-  active allocation rows;
-- no retained Movement references a purged row;
-- no append-only table was mutated outside an approved archival/purge path.
+```bash
+# development stack
+f=reconcile.json
+docker compose exec -T backend uv run python -m app.cli reconcile > "$f"; rc=$?
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code"]==int(sys.argv[2]); print(r["result"], r["exit_code"])' "$f" "$rc" \
+  || echo "could not run: no complete report (exit $rc)"
+docker compose exec -T backend uv run python -m app.cli reconcile --check j     # identity check only
+```
+
+- **pf-managed staging:** `pf` refuses `exec`/`run`, so run the raw Compose form
+  of `SYNOLOGY_ADMIN.md` §14 (`docker compose ... exec -T backend uv run python
+  -m app.cli reconcile`) outside the controller, never concurrently with
+  `pf update`, `pf backup`, `pf reset-db`, `pf purge` or `pf restore-instance`.
+  Write the report to the operator's home, never into a pf-managed directory.
+- **Production:** the invocation arrives with the Phase 16 production artifacts.
+- **Options:** `--check ID` (repeatable, `a` to `j`; the others are `skipped`),
+  `--statement-timeout SECONDS` (1-3600, default 300), `--max-findings N`
+  (1-10000, default 100 findings listed per check; `finding_count` stays full).
+- **Exit codes:** `0` clean, `1` mismatch (at least one finding), `2` could not
+  run or incomplete (an `error` check or a run-level error wins over findings).
+  The exit status counts **only** when the report holds one complete JSON
+  document whose `exit_code` equals it; an empty or unparseable report means
+  "could not run" whatever the status (Compose itself exits 1 before anything
+  runs when the service is stopped or the project is wrong).
+- Keep the report in the deployment record (§1, "Smoke/reconciliation
+  results").
+
+Checks, each keeping the original requirement as its definition:
+
+| Check | Requirement |
+| --- | --- |
+| (a) | current-position projections replay from non-reversed Movement history; |
+| (b) | every active/closed flow has a valid conservation history, plus the SLICE1 §17 cross-row invariants except the audit-row invariant (enforced by the transaction protocol and covered by the existing API tests); |
+| (c) | per-PN introduced quantity reconciles with active, stocked, scrapped, and reversed outcomes under the canonical rules; |
+| (d) | Machine assigned quantities reconcile with flows currently on each Machine; |
+| (e) | demand `released_quantity` derives from `RECEIVED` evidence; |
+| (f) | demand `allocated_quantity` and Work Order `completed_at` reconcile with active allocation rows; |
+| (g) | no retained Movement references a purged row; |
+| (h) | no append-only table was mutated outside an approved archival/purge path; |
+| (i) | Hot list entries are active demand (the `DEPLOYMENT.md` §5 query); |
+| (j) | canonical identity under the running interpreter and database: canonical PNs, case-insensitive Worker badges, the Asset Tag prefix rule, every canonical-form CHECK re-evaluated under the running database collation and ctype, the collation version, and index-independent duplicate probes of the identity keys (the platform-upgrade identity check). |
+
+(g) and (h) report `not_applicable` until Movement-history archival and
+database-role hardening exist; they are neutral for the exit code.
+
+Operating rules:
+
+- One read-only snapshot; the command takes only `ACCESS SHARE` table locks,
+  before the snapshot, and no row or advisory locks. It fails after 5 s waiting
+  for a table lock. Never run a migration concurrently, and run it off-peak.
+- Platform-upgrade rehearsal for (j): for a Python/UCD upgrade, run
+  `--check j` from the candidate backend image against the current database;
+  for a glibc or PostgreSQL-image change, run `--check j` on a restore onto the
+  candidate server (restore drill) or right after an in-place upgrade before
+  writes reopen. The glibc/PostgreSQL-image half is **pending until the restore
+  drill exists**. The owner decides on re-canonicalization before any upgrade.
+- For a Work Order reported `not_completed_but_fully_allocated`, `expected` is
+  the replay value, not a repair proposal; the owner picks the done date in the
+  incident.
+- A non-zero exit is an incident (§8). Never edit history or projections
+  directly; the owner decides each repair.
 
 Reconciliation is read-only by default. A mismatch creates an incident; it does
 not trigger an automatic repair.

@@ -120,6 +120,7 @@ diễn tập.
 - ước lượng lock/time/disk impact bằng staging data;
 - verify off-site backup và tạo pre-release dump mới;
 - xác nhận previous release còn dùng được;
+- chạy reconciliation (§7) trên release hiện tại, giữ report, và mở incident cho mọi finding;
 - quyết định có cần dừng write hay không;
 - thông báo window và deadline quyết định rollback.
 
@@ -136,7 +137,9 @@ diễn tập.
 7. Check health nội bộ và qua HTTPS.
 8. Chạy smoke test authorization, SPA route, `/api`, scan-focus/connectivity và
    designated write/read-back.
-9. Chạy reconciliation.
+9. Chạy reconciliation (§7) và giữ JSON report. So sánh với report trước release:
+   chỉ finding không có trong đó mới chặn bước 10; finding đã có từ trước vẫn là
+   incident mở theo quyết định của owner.
 10. Chỉ mở lại write khi mọi kiểm tra bắt buộc pass.
 
 ### Quan sát
@@ -162,18 +165,70 @@ history và downgrade có thể bị từ chối hoặc làm mất loại dữ l
 
 ## 7. Reconciliation
 
-Phase 16 phải cung cấp command read-only tối thiểu để verify:
+Reconciliation là command backend chỉ đọc `python -m app.cli reconcile` (Phase 16
+slice 1). Nó chạy các check dưới đây trong một database snapshot chỉ đọc và in
+một JSON report ra stdout; nó không bao giờ repair gì.
 
-- current-position projection replay được từ non-reversed Movement history;
-- mỗi active/closed flow có conservation history hợp lệ;
-- introduced quantity theo PN reconcile với active, stocked, scrapped và
-  reversed outcome theo canonical rule;
-- assigned quantity trên Machine reconcile với flow đang ở từng Machine;
-- `released_quantity` của demand được derive từ evidence `RECEIVED`;
-- `allocated_quantity` của demand và `completed_at` của Work Order reconcile với
-  active allocation row;
-- không retained Movement nào reference row đã purge;
-- không append-only table nào bị mutate ngoài archive/purge path đã duyệt.
+```bash
+# development stack
+f=reconcile.json
+docker compose exec -T backend uv run python -m app.cli reconcile > "$f"; rc=$?
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code"]==int(sys.argv[2]); print(r["result"], r["exit_code"])' "$f" "$rc" \
+  || echo "could not run: no complete report (exit $rc)"
+docker compose exec -T backend uv run python -m app.cli reconcile --check j     # identity check only
+```
+
+- **Staging do pf quản lý:** `pf` từ chối `exec`/`run`, nên chạy dạng raw Compose
+  trong `SYNOLOGY_ADMIN.md` §14 (`docker compose ... exec -T backend uv run python
+  -m app.cli reconcile`) bên ngoài controller, không bao giờ chạy đồng thời với
+  `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
+  Ghi report vào home của operator, không bao giờ vào thư mục do pf quản lý.
+- **Production:** cách gọi sẽ có cùng các production artifact của Phase 16.
+- **Option:** `--check ID` (lặp lại được, `a` đến `j`; các check còn lại là
+  `skipped`), `--statement-timeout SECONDS` (1-3600, mặc định 300),
+  `--max-findings N` (1-10000, mặc định liệt kê 100 finding mỗi check;
+  `finding_count` vẫn đầy đủ).
+- **Exit code:** `0` sạch, `1` mismatch (có ít nhất một finding), `2` không chạy
+  được hoặc report không đầy đủ (check `error` hoặc lỗi cấp run thắng finding).
+  Exit status chỉ có giá trị **khi** report là một JSON document hoàn chỉnh có
+  `exit_code` bằng nó; report rỗng hoặc không parse được nghĩa là "không chạy
+  được" bất kể status (chính Compose thoát với 1 trước khi chạy gì khi service
+  đã dừng hoặc project sai).
+- Lưu report trong deployment record (§1, "Smoke/reconciliation results").
+
+Các check, mỗi check giữ yêu cầu gốc làm định nghĩa:
+
+| Check | Yêu cầu |
+| --- | --- |
+| (a) | current-position projection replay được từ non-reversed Movement history; |
+| (b) | mỗi active/closed flow có conservation history hợp lệ, cùng các invariant cross-row của SLICE1 §17 trừ invariant audit-row (được bảo đảm bởi transaction protocol và đã có API test hiện có phủ); |
+| (c) | introduced quantity theo PN reconcile với active, stocked, scrapped và reversed outcome theo canonical rule; |
+| (d) | assigned quantity trên Machine reconcile với flow đang ở từng Machine; |
+| (e) | `released_quantity` của demand được derive từ evidence `RECEIVED`; |
+| (f) | `allocated_quantity` của demand và `completed_at` của Work Order reconcile với active allocation row; |
+| (g) | không retained Movement nào reference row đã purge; |
+| (h) | không append-only table nào bị mutate ngoài archive/purge path đã duyệt; |
+| (i) | Hot list entry là demand đang active (query của `DEPLOYMENT.md` §5); |
+| (j) | canonical identity dưới interpreter và database đang chạy: canonical PN, Worker badge không phân biệt hoa/thường, rule prefix Asset Tag, mọi canonical-form CHECK được đánh giá lại dưới collation và ctype hiện tại của database, collation version và duplicate probe không phụ thuộc index cho các identity key (platform-upgrade identity check). |
+
+(g) và (h) báo `not_applicable` cho đến khi có Movement-history archival và
+database-role hardening; chúng trung lập với exit code.
+
+Quy tắc vận hành:
+
+- Một snapshot chỉ đọc; command chỉ lấy table lock `ACCESS SHARE`, trước
+  snapshot, và không lấy row lock hay advisory lock. Nó fail sau 5 s chờ table
+  lock. Không bao giờ chạy migration đồng thời, và chạy ngoài giờ cao điểm.
+- Rehearsal platform-upgrade cho (j): với nâng cấp Python/UCD, chạy `--check j`
+  từ candidate backend image trên database hiện tại; với thay đổi glibc hoặc
+  PostgreSQL image, chạy `--check j` trên bản restore vào candidate server
+  (restore drill) hoặc ngay sau in-place upgrade trước khi mở lại write. Nửa
+  glibc/PostgreSQL-image **pending cho đến khi có restore drill**. Owner quyết
+  định re-canonicalization trước mọi nâng cấp.
+- Với Work Order báo `not_completed_but_fully_allocated`, `expected` là giá trị
+  replay, không phải đề xuất repair; owner chọn done date trong incident.
+- Exit khác 0 là incident (§8). Không bao giờ sửa trực tiếp history hoặc
+  projection; owner quyết định từng repair.
 
 Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự động repair.
 

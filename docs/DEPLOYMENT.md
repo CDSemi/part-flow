@@ -178,6 +178,8 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   Priority (the automatic removal of `IMPLEMENTATION_ROADMAP.md` Phase 12 only
   covers changes made after it):
   `SELECT d.id, d.priority_rank FROM work_order_demands d JOIN work_orders w ON w.id = d.work_order_id WHERE d.priority_rank IS NOT NULL AND (w.completed_at IS NOT NULL OR d.requested_quantity <= d.allocated_quantity);`
+  This query is check (i) of the read-only `reconcile` command
+  (`deployment/OPERATIONS_RUNBOOK.md` §7).
 - an incident owner, maintenance window, RPO, and RTO are explicitly approved;
 - pilot entry, pilot exit, and escalation criteria are documented.
 

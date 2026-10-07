@@ -988,6 +988,9 @@ _REGISTRY_OWNERS = {
     # naming the signed-in and the previous Worker.
     "app/application/worker_sessions.py",
     "app/application/scan_station.py",
+    # Phase 16 S1: the read-only reconciliation identity check (j)
+    # re-evaluates every stored badge; it never writes.
+    "app/application/reconciliation.py",
 }
 _RAW_SQL_ON_WORKERS = re.compile(r"(?i)\b(from|join|update|into)\s+workers\b")
 _MODELS_MODULE = "app.infrastructure.models"

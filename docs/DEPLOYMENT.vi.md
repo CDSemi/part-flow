@@ -166,6 +166,8 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   Priority (automatic removal trong Phase 12 của `IMPLEMENTATION_ROADMAP.md` chỉ
   phủ các thay đổi sau nó):
   `SELECT d.id, d.priority_rank FROM work_order_demands d JOIN work_orders w ON w.id = d.work_order_id WHERE d.priority_rank IS NOT NULL AND (w.completed_at IS NOT NULL OR d.requested_quantity <= d.allocated_quantity);`
+  Query này là check (i) của command read-only `reconcile`
+  (`deployment/OPERATIONS_RUNBOOK.md` §7).
 - incident owner, maintenance window, RPO và RTO được phê duyệt rõ;
 - điều kiện bắt đầu pilot, kết thúc pilot và escalation được ghi lại.
 

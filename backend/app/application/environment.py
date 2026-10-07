@@ -135,6 +135,13 @@ from app.infrastructure.models import (
 # the stable database id at creation and never entered or edited.
 AREA_BARCODE_PREFIX: Final = "PF:AREA:"
 
+# Asset Tag format prefix rule (GUI_DESIGN §9 Barcode configuration):
+# whitespace and ':' are refused; an empty prefix stays valid. The
+# Python-side twin of the stored CHECK `ASSET_TAG_PREFIX_SQL`, also
+# re-evaluated over the stored prefix by the reconciliation identity
+# check under the running interpreter.
+ASSET_TAG_PREFIX_FORBIDDEN: Final = re.compile(r"[\s:]")
+
 _MACHINE_ASSET_TAG_CONFIG_ID: Final = 1
 _ASSET_TAG_DIGITS_MIN: Final = 1
 _ASSET_TAG_DIGITS_MAX: Final = 8
@@ -1074,7 +1081,7 @@ def get_machine_asset_tag_format(session: Session) -> MachineAssetTagConfig:
 def upsert_machine_asset_tag_format(
     session: Session, *, prefix: str, digits: int, actor_user_id: int | None
 ) -> MachineAssetTagConfig:
-    if re.search(r"[\s:]", prefix):
+    if ASSET_TAG_PREFIX_FORBIDDEN.search(prefix):
         raise InvalidInputError("The Asset Tag prefix must not contain whitespace or ':'.")
     if not _ASSET_TAG_DIGITS_MIN <= digits <= _ASSET_TAG_DIGITS_MAX:
         raise InvalidInputError(

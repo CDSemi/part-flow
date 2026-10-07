@@ -26,23 +26,34 @@ Commands:
   a user exists and for a role no active user with a password holds; it
   grants that one key only. Audited like a role edit (``source: cli``, no
   actor).
+- ``reconcile [--check ID]... [--statement-timeout S] [--max-findings N]``
+  (Phase 16 slice 1, read-only): run the reconciliation checks in one
+  read-only snapshot and print one JSON report on stdout (also when it
+  could not run); 0 clean, 1 mismatch, 2 could not run. Never repairs.
 
 The CLI configures no logging on stdout: stdout carries only the
-command's outcome lines; refusals and errors go to stderr.
+command's outcome lines (``reconcile``: its JSON report); refusals and
+errors go to stderr.
 """
 
 import argparse
+import datetime
 import getpass
+import json
 import sys
-from collections.abc import Sequence
+import traceback
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from pydantic import ValidationError
 from sqlalchemy import Engine
 from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.application import authentication
+from app.application import authentication, reconciliation
 from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
 from app.core.config import get_settings
 from app.infrastructure.database import build_engine
@@ -170,11 +181,127 @@ def _run_restore_correction_permission_management(args: argparse.Namespace) -> i
     return 0
 
 
+_RECONCILE_HELP = (
+    "Run the read-only reconciliation checks and print a JSON report. Never changes data."
+)
+
+
+def _bounded_int(low: int, high: int) -> Callable[[str], int]:
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"must be a whole number, got {value!r}") from None
+        if not low <= number <= high:
+            raise argparse.ArgumentTypeError(f"must be between {low} and {high}, got {number}")
+        return number
+
+    return parse
+
+
+def _add_reconcile_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("reconcile", help=_RECONCILE_HELP, description=_RECONCILE_HELP)
+    parser.add_argument(
+        "--check",
+        action="append",
+        choices=reconciliation.CHECK_IDS,
+        help="Run only this check (repeatable); the others are reported as skipped.",
+    )
+    parser.add_argument(
+        "--statement-timeout",
+        type=_bounded_int(1, 3600),
+        default=reconciliation.DEFAULT_STATEMENT_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help="Per-statement timeout in seconds (1-3600, default %(default)s).",
+    )
+    parser.add_argument(
+        "--max-findings",
+        type=_bounded_int(1, 10000),
+        default=reconciliation.DEFAULT_MAX_FINDINGS,
+        metavar="N",
+        help="Findings listed per check (1-10000, default %(default)s); the count stays full.",
+    )
+    parser.set_defaults(handler=_run_reconcile)
+
+
+def _code_alembic_head() -> str | None:
+    """The Alembic head this code ships (None when it cannot be read)."""
+    try:
+        return ScriptDirectory(
+            str(Path(__file__).resolve().parents[1] / "alembic")
+        ).get_current_head()
+    except (CommandError, OSError):
+        return None
+
+
+def _reconcile_summary(report: reconciliation.ReconciliationReport) -> str:
+    if report.error is not None:
+        return f"reconcile: {report.error.message}"
+    document = reconciliation.report_document(report)
+    findings = sum(check.finding_count for check in report.checks)
+    milliseconds = document["duration_ms"]
+    errors = [check.id for check in report.checks if check.status == "error"]
+    if errors:
+        return (
+            f"reconcile: ERROR in check(s) {', '.join(errors)}; the report is incomplete."
+            f" ({findings} findings) in {milliseconds} ms"
+        )
+    failed = [check.id for check in report.checks if check.status == "fail"]
+    if failed:
+        return (
+            f"reconcile: MISMATCH in check(s) {', '.join(failed)} ({findings} findings)"
+            f" in {milliseconds} ms"
+        )
+    run = sum(1 for check in report.checks if check.status != "skipped")
+    return (
+        f"reconcile: clean ({run} of {len(reconciliation.CHECK_IDS)} checks run, 0 findings)"
+        f" in {milliseconds} ms"
+    )
+
+
+def _run_reconcile(args: argparse.Namespace) -> int:
+    started_at = datetime.datetime.now(datetime.UTC)
+    options: dict[str, Any] = {
+        "checks": args.check or reconciliation.CHECK_IDS,
+        "statement_timeout_seconds": args.statement_timeout,
+        "max_findings": args.max_findings,
+        "expected_alembic_revision": _code_alembic_head(),
+    }
+    try:
+        engine = _engine()
+    except ValidationError:
+        report = reconciliation.error_report(
+            "configuration_invalid", started_at=started_at, **options
+        )
+    else:
+        try:
+            report = reconciliation.run_reconciliation(engine, **options)
+        except Exception as exc:
+            # Any escaping error still yields a complete report (exit 2).
+            report = reconciliation.error_report(
+                "internal_error", started_at=started_at, exception=exc, **options
+            )
+        finally:
+            engine.dispose()
+    sys.stdout.write(
+        json.dumps(reconciliation.report_document(report), indent=2, ensure_ascii=True) + "\n"
+    )
+    if (
+        report.error is not None
+        and report.error.code == "internal_error"
+        and report.error.exception is not None
+    ):
+        traceback.print_exception(report.error.exception, file=sys.stderr)
+    print(_reconcile_summary(report), file=sys.stderr)
+    return reconciliation.result_of(report)[1]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_reset_password_parser(subparsers)
     _add_restore_correction_permission_management_parser(subparsers)
+    _add_reconcile_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result
