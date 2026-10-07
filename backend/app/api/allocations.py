@@ -37,6 +37,19 @@ Surface:
   mandatory reason (a smaller allocation is a reversal plus a new
   allocation); needs Edit Work Order Allocation. 201 / 200 / 409 as
   above; 409 when already reversed (also under a race).
+- ``POST /allocations/corrections`` — the authorized beyond-demand
+  correction (Phase 14 slice 5, PROJECT_PROFILE §8.12): one demand line,
+  MORE than its remaining demand, never above the available stocked
+  quantity, mandatory reason, recorded ``exceeds_demand`` with the
+  signed-in User; needs Edit Work Order Allocation. 201 / 200 replay;
+  409 within the remaining demand, beyond the available stock, on a
+  mismatched reuse or ``recorded_by_another_user``.
+- ``GET  /allocations/management/context?part_number=…`` or
+  ``?work_order_demand_id=…`` — the stock figures, demand lines and
+  active allocations (with who recorded them) a Management allocation,
+  reversal or correction is prepared from: the PN's open Work Order
+  Demand, or one line whatever its Work Order's state; needs Edit Work
+  Order Allocation (it serves only that write workflow).
 - ``GET  /allocations?part_number=…&work_order_demand_id=…&work_order_id=…``
   — the allocation rows (allocations and reversals) for audit display;
   needs View production data or Edit Work Order Allocation.
@@ -63,6 +76,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.authorization import RequireAnyPermission, RequirePermission, StationDeviceDep
 from app.api.dependencies import SessionDep
+from app.api.user_refs import UserRefResponse, user_ref_response
 from app.application import allocations, station_devices
 from app.application.authentication import Principal
 from app.domain.enums import Permission
@@ -191,19 +205,32 @@ class AllocationRowResponse(BaseModel):
     quantity: int
     source: Literal["STOCKROOM", "MANAGEMENT"]
     is_manual_override: bool
+    # Recorded by the authorized beyond-demand correction (Phase 14 slice 5).
+    exceeds_demand: bool
     allocation_reason: str | None
     # Set on a reversal row: the allocation it takes back.
     reverses_allocation_id: int | None
     station_id: str | None
     actor_reference: str | None
-    # The signed-in User of a Management allocation or reversal.
+    # The signed-in User of a Management allocation, reversal or correction.
     actor_user_id: int | None
     allocated_at: datetime.datetime
     command_sequence: int
 
 
+AllocationKind = Literal["ALLOCATE", "REVERSE_ALLOCATION", "ALLOCATE_BEYOND_DEMAND"]
+
+# Explicit: an unknown kind is a programming error (500), never silently
+# reported as another kind.
+_KINDS: dict[str, AllocationKind] = {
+    "ALLOCATE": "ALLOCATE",
+    "REVERSE_ALLOCATION": "REVERSE_ALLOCATION",
+    allocations.ALLOCATE_BEYOND_DEMAND: "ALLOCATE_BEYOND_DEMAND",
+}
+
+
 class AllocationResponse(BaseModel):
-    kind: Literal["ALLOCATE", "REVERSE_ALLOCATION"]
+    kind: AllocationKind
     part_number: str
     # The quantity allocated (or, on a reversal, taken back).
     allocation_quantity: int
@@ -224,6 +251,7 @@ def _row(row: allocations.AllocationRow) -> AllocationRowResponse:
         quantity=row.quantity,
         source="STOCKROOM" if row.source == "STOCKROOM" else "MANAGEMENT",
         is_manual_override=row.is_manual_override,
+        exceeds_demand=row.exceeds_demand,
         allocation_reason=row.allocation_reason,
         reverses_allocation_id=row.reverses_allocation_id,
         station_id=row.station_id,
@@ -236,7 +264,7 @@ def _row(row: allocations.AllocationRow) -> AllocationRowResponse:
 
 def _response(result: allocations.AllocationResult) -> AllocationResponse:
     return AllocationResponse(
-        kind="ALLOCATE" if result.kind == "ALLOCATE" else "REVERSE_ALLOCATION",
+        kind=_KINDS[result.kind],
         part_number=result.part_number,
         allocation_quantity=result.allocation_quantity,
         rows=[_row(row) for row in result.rows],
@@ -311,6 +339,127 @@ def reverse_allocation(
     return _response(result)
 
 
+class AllocationCorrectionRequest(BaseModel):
+    """The authorized beyond-demand correction (no station, no actor, no flag)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    work_order_demand_id: StrictInt
+    quantity: StrictInt
+    reason: str
+    device_event_id: str
+
+
+@router.post("/allocations/corrections")
+def allocate_beyond_demand(
+    principal: AllocationEditorDep,
+    body: AllocationCorrectionRequest,
+    session: SessionDep,
+    response: Response,
+) -> AllocationResponse:
+    result = allocations.allocate_beyond_demand(
+        session,
+        actor_user_id=principal.user_id,
+        part_number=body.part_number,
+        work_order_demand_id=body.work_order_demand_id,
+        quantity=body.quantity,
+        reason=body.reason,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return _response(result)
+
+
+class ContextAllocationResponse(BaseModel):
+    allocation_id: int
+    quantity: int
+    source: Literal["STOCKROOM", "MANAGEMENT"]
+    is_manual_override: bool
+    exceeds_demand: bool
+    allocation_reason: str | None
+    station_id: str | None
+    allocated_at: datetime.datetime
+    actor_user: UserRefResponse | None
+
+
+class ContextLineResponse(BaseModel):
+    work_order_id: int
+    work_order_number: str | None
+    work_order_completed: bool
+    received_date: datetime.date
+    work_order_demand_id: int
+    request_type: Literal["NEW", "MODIFY"]
+    due_date: datetime.date | None
+    priority_rank: int | None
+    requested_quantity: int
+    # The derived active allocation (never the projection).
+    allocated_quantity: int
+    remaining_shortage: int
+    beyond_demand_quantity: int
+    # Oldest first.
+    active_allocations: list[ContextAllocationResponse]
+
+
+class AllocationContextResponse(BaseModel):
+    part_number: str
+    stocked_quantity: int
+    active_allocated_quantity: int
+    available_stocked_quantity: int
+    # Canonical demand order.
+    lines: list[ContextLineResponse]
+
+
+def _context_line(line: allocations.ContextLine) -> ContextLineResponse:
+    return ContextLineResponse(
+        work_order_id=line.work_order.id,
+        work_order_number=line.work_order.work_order_number,
+        work_order_completed=line.work_order.completed_at is not None,
+        received_date=line.work_order.received_date,
+        work_order_demand_id=line.demand.id,
+        request_type="NEW" if line.demand.request_type == "NEW" else "MODIFY",
+        due_date=line.demand.due_date,
+        priority_rank=line.demand.priority_rank,
+        requested_quantity=line.demand.requested_quantity,
+        allocated_quantity=line.allocated_quantity,
+        remaining_shortage=line.remaining_shortage,
+        beyond_demand_quantity=line.beyond_demand_quantity,
+        active_allocations=[
+            ContextAllocationResponse(
+                allocation_id=entry.allocation.id,
+                quantity=entry.allocation.quantity,
+                source="STOCKROOM" if entry.allocation.source == "STOCKROOM" else "MANAGEMENT",
+                is_manual_override=entry.allocation.is_manual_override,
+                exceeds_demand=entry.allocation.exceeds_demand,
+                allocation_reason=entry.allocation.allocation_reason,
+                station_id=entry.allocation.station_id,
+                allocated_at=entry.allocation.allocated_at,
+                actor_user=user_ref_response(entry.actor_user),
+            )
+            for entry in line.active_allocations
+        ],
+    )
+
+
+@router.get("/allocations/management/context")
+def get_management_allocation_context(
+    principal: AllocationEditorDep,
+    session: SessionDep,
+    part_number: str | None = None,
+    work_order_demand_id: int | None = None,
+) -> AllocationContextResponse:
+    context = allocations.management_allocation_context(
+        session, part_number=part_number, work_order_demand_id=work_order_demand_id
+    )
+    return AllocationContextResponse(
+        part_number=context.part_number,
+        stocked_quantity=context.position.stocked_quantity,
+        active_allocated_quantity=context.position.active_allocated_quantity,
+        available_stocked_quantity=context.position.available_stocked_quantity,
+        lines=[_context_line(line) for line in context.lines],
+    )
+
+
 class AllocationRecordResponse(BaseModel):
     id: int
     part_number: str
@@ -318,6 +467,7 @@ class AllocationRecordResponse(BaseModel):
     quantity: int
     source: str
     is_manual_override: bool
+    exceeds_demand: bool
     allocation_reason: str | None
     reverses_allocation_id: int | None
     station_id: str | None
@@ -344,6 +494,7 @@ def list_allocations(
             quantity=row.quantity,
             source=row.source,
             is_manual_override=row.is_manual_override,
+            exceeds_demand=row.exceeds_demand,
             allocation_reason=row.allocation_reason,
             reverses_allocation_id=row.reverses_allocation_id,
             station_id=row.station_id,

@@ -218,7 +218,7 @@ Các check, mỗi check giữ yêu cầu gốc làm định nghĩa:
 | (c) | introduced quantity theo PN reconcile với active, stocked, scrapped và reversed outcome theo canonical rule; |
 | (d) | assigned quantity trên Machine reconcile với flow đang ở từng Machine; |
 | (e) | `released_quantity` của demand được derive từ evidence `RECEIVED`; |
-| (f) | `allocated_quantity` của demand và `completed_at` của Work Order reconcile với active allocation row; |
+| (f) | `allocated_quantity` của demand và `completed_at` của Work Order reconcile với active allocation row; correction beyond-demand được cấp quyền (các allocation row ghi `exceeds_demand`, Phase 14 slice 5) không bị báo là allocation vượt requested quantity; |
 | (g) | không retained Movement nào reference row đã purge; |
 | (h) | không append-only table nào bị mutate ngoài archive/purge path đã duyệt; |
 | (i) | Hot list entry là demand đang active (query của `DEPLOYMENT.md` §5); |

@@ -436,6 +436,21 @@ let nextReleaseRefusal: {
   body: Record<string, unknown>;
 } | null = null;
 
+/**
+ * Management allocation (Phase 14 slice 5): the stocked quantity of a
+ * PN not allocated yet, the active allocation rows of each demand line,
+ * and every allocation command the client posted.
+ */
+let availableStock: Record<string, number> = {};
+let allocationRows: {
+  id: number;
+  demandId: number;
+  quantity: number;
+  exceedsDemand: boolean;
+  reason: string | null;
+}[] = [];
+let allocationPosts: { url: string; body: Record<string, unknown> }[] = [];
+
 function sessionResponse(): Response {
   return new Response(
     JSON.stringify({
@@ -657,6 +672,97 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     return new Response(null, { status: 204 });
   }
 
+  // ---- Management allocation (Phase 14 slice 5) -----------------------
+  if (url.startsWith('/api/allocations/management/context?')) {
+    const id = Number(
+      new URLSearchParams(url.split('?')[1]).get('work_order_demand_id'),
+    );
+    const wo = state.workOrders.find((w) => w.demands.some((d) => d.id === id));
+    const target = wo?.demands.find((d) => d.id === id);
+    if (!wo || !target) {
+      return detailResponse(`Demand line ${id} does not exist.`, 404);
+    }
+    const available = availableStock[target.part_number] ?? 0;
+    return json({
+      part_number: target.part_number,
+      stocked_quantity: available + target.allocated_quantity,
+      active_allocated_quantity: target.allocated_quantity,
+      available_stocked_quantity: available,
+      lines: [
+        {
+          work_order_id: wo.id,
+          work_order_number: wo.work_order_number,
+          work_order_completed: false,
+          received_date: wo.received_date,
+          work_order_demand_id: id,
+          request_type: target.request_type,
+          due_date: target.due_date,
+          priority_rank: target.priority_rank,
+          requested_quantity: target.requested_quantity,
+          allocated_quantity: target.allocated_quantity,
+          remaining_shortage: Math.max(
+            target.requested_quantity - target.allocated_quantity,
+            0,
+          ),
+          beyond_demand_quantity: Math.max(
+            target.allocated_quantity - target.requested_quantity,
+            0,
+          ),
+          active_allocations: allocationRows
+            .filter((row) => row.demandId === id)
+            .map((row) => ({
+              allocation_id: row.id,
+              quantity: row.quantity,
+              source: 'MANAGEMENT',
+              is_manual_override: row.exceedsDemand,
+              exceeds_demand: row.exceedsDemand,
+              allocation_reason: row.reason,
+              station_id: null,
+              allocated_at: T0,
+              actor_user: {
+                id: 90,
+                display_name: 'Mia Manager',
+                avatar_updated_at: null,
+              },
+            })),
+        },
+      ],
+    });
+  }
+  if (url === '/api/allocations/corrections' && method === 'POST') {
+    allocationPosts.push({ url, body });
+    const id = Number(body.work_order_demand_id);
+    const target = state.workOrders
+      .flatMap((w) => w.demands)
+      .find((d) => d.id === id);
+    if (!target) {
+      return detailResponse(`Demand line ${id} does not exist.`, 422);
+    }
+    const quantity = Number(body.quantity);
+    target.allocated_quantity += quantity;
+    availableStock[target.part_number] =
+      (availableStock[target.part_number] ?? 0) - quantity;
+    allocationRows.push({
+      id: 500 + allocationRows.length,
+      demandId: id,
+      quantity,
+      exceedsDemand: true,
+      reason: String(body.reason),
+    });
+    return json(
+      {
+        kind: 'ALLOCATE_BEYOND_DEMAND',
+        part_number: target.part_number,
+        allocation_quantity: quantity,
+        rows: [],
+        completed_work_order_ids: [],
+        reopened_work_order_ids: [],
+        device_event_id: body.device_event_id,
+      },
+      201,
+    );
+  }
+
   // ---- Work Orders ----------------------------------------------------
   if (url.startsWith('/api/work-orders?')) {
     const params = new URLSearchParams(url.split('?')[1]);
@@ -839,6 +945,9 @@ beforeEach(() => {
   state = seedState();
   sessionPermissions = PERMISSIONS;
   nextReleaseRefusal = null;
+  availableStock = {};
+  allocationRows = [];
+  allocationPosts = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -3993,13 +4102,13 @@ test('FM-4: with Create and edit Work Orders only, the lines read as text — no
   ]);
 });
 
-test('FM-4: a user who may change no Work Order only reads — no Save demand, the view-only note names both permissions', async () => {
+test('FM-4: a user who may change no Work Order only reads — no Save demand, the view-only note names the three permissions', async () => {
   sessionPermissions = ['VIEW_PRODUCTION_DATA'];
   await renderWorkOrders();
 
   expect(
     screen.getByText(
-      'View only — changing this needs one of these permissions: Create and edit Work Orders, Edit Work Order Demand.',
+      'View only — changing this needs one of these permissions: Create and edit Work Orders, Edit Work Order Demand, Edit Work Order Allocation.',
     ),
   ).toBeInTheDocument();
   expect(
@@ -4125,4 +4234,215 @@ test('FM-6: a release recorded by another user shows the server detail and keeps
     state.releaseAttempts[0].device_event_id,
   );
   expect(state.committedReleases.size).toBe(0);
+});
+
+/* ============ Phase 14 slice 5 — allocation in Work Order Details ============ */
+
+const WITHOUT_ALLOCATION = PERMISSIONS.filter(
+  (key) => key !== 'EDIT_WORK_ORDER_ALLOCATION',
+);
+
+function lineRow(dialog: HTMLElement, pn: string): HTMLElement {
+  return within(dialog).getByText(pn).closest('tr') as HTMLElement;
+}
+
+test('FC-7: the allocation actions are offered only to Edit Work Order Allocation holders', async () => {
+  state.workOrders[0].demands[0].allocated_quantity = 4;
+  sessionPermissions = WITHOUT_ALLOCATION;
+  await renderWorkOrders();
+  let dialog = await openWorkOrderDetail('007201', 'A-100');
+  expect(
+    within(dialog).queryByRole('button', { name: /^Allocate stocked/ }),
+  ).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: /^Reverse an allocation/ }),
+  ).toBeNull();
+  cleanup();
+
+  sessionPermissions = PERMISSIONS;
+  await renderWorkOrders();
+  dialog = await openWorkOrderDetail('007201', 'A-100');
+  const a100 = lineRow(dialog, 'A-100');
+  expect(
+    within(a100).getByRole('button', {
+      name: 'Allocate stocked A-100 to this line',
+    }),
+  ).toHaveTextContent('Allocate from stock…');
+  expect(
+    within(a100).getByRole('button', {
+      name: 'Reverse an allocation of A-100 on this line',
+    }),
+  ).toHaveTextContent('Reverse…');
+  // Reverse… only where something is allocated.
+  const e500 = lineRow(dialog, 'E-500');
+  expect(
+    within(e500).getByRole('button', {
+      name: 'Allocate stocked E-500 to this line',
+    }),
+  ).toBeInTheDocument();
+  expect(
+    within(e500).queryByRole('button', { name: /^Reverse an allocation/ }),
+  ).toBeNull();
+});
+
+test('FC-7: a Released Work Order shows the actions column only to allocation holders; an allocation-only user reads no View only note', async () => {
+  sessionPermissions = ['VIEW_PRODUCTION_DATA', 'EDIT_WORK_ORDER_ALLOCATION'];
+  await renderWorkOrders();
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+  let dialog = await openWorkOrderDetail('007300', 'D-400');
+  expect(dialog.querySelectorAll('.wo-table thead th')).toHaveLength(7);
+  const d400 = lineRow(dialog, 'D-400');
+  expect(
+    within(d400).getByRole('button', {
+      name: 'Allocate stocked D-400 to this line',
+    }),
+  ).toBeEnabled();
+  expect(
+    within(d400).queryByRole('button', { name: 'Release to production…' }),
+  ).toBeNull();
+  expect(
+    within(d400).queryByRole('button', { name: 'Remove line D-400' }),
+  ).toBeNull();
+  cleanup();
+
+  sessionPermissions = ['VIEW_PRODUCTION_DATA'];
+  await renderWorkOrders();
+  dialog = await openWorkOrderDetail('007300', 'D-400');
+  expect(dialog.querySelectorAll('.wo-table thead th')).toHaveLength(6);
+  expect(
+    within(dialog).queryByRole('button', { name: /^Allocate stocked/ }),
+  ).toBeNull();
+});
+
+test('FC-7: allocation waits for the saved demand and for the connection', async () => {
+  state.workOrders[0].demands[0].allocated_quantity = 4;
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  const allocate = within(dialog).getByRole('button', {
+    name: 'Allocate stocked A-100 to this line',
+  });
+  const reverse = within(dialog).getByRole('button', {
+    name: 'Reverse an allocation of A-100 on this line',
+  });
+  await waitFor(() => expect(allocate).toBeEnabled());
+
+  const qty = within(dialog).getByLabelText('Quantity for A-100');
+  fireEvent.change(qty, { target: { value: '30' } });
+  for (const button of [allocate, reverse]) {
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      'title',
+      'Save or discard the demand changes first — allocation works on the saved demand.',
+    );
+  }
+  fireEvent.change(qty, { target: { value: '25' } });
+  expect(allocate).toBeEnabled();
+
+  state.healthDown = true;
+  act(() => {
+    window.dispatchEvent(new Event('offline'));
+  });
+  await waitFor(() => expect(allocate).toBeDisabled());
+  expect(reverse).toBeDisabled();
+});
+
+test('FC-7: a beyond-demand correction from Work Order Details reloads the details once and the list, and names the result', async () => {
+  // B-200 is fully allocated (10 of 10) and 2 pcs wait in stock.
+  state.workOrders[0].demands[1].allocated_quantity = 10;
+  allocationRows = [
+    {
+      id: 400,
+      demandId: 102,
+      quantity: 10,
+      exceedsDemand: false,
+      reason: null,
+    },
+  ];
+  availableStock = { 'B-200': 2 };
+  await renderWorkOrders();
+  const details = await openWorkOrderDetail('007201', 'B-200');
+  expect(lineRow(details, 'B-200')).toHaveTextContent('Allocated 10/10');
+  expect(lineRow(details, 'B-200')).not.toHaveTextContent('beyond demand');
+
+  fireEvent.click(
+    within(details).getByRole('button', {
+      name: 'Allocate stocked B-200 to this line',
+    }),
+  );
+  const allocation = await screen.findByRole('dialog', {
+    name: 'Allocate from stock',
+  });
+  await within(allocation).findByText(
+    'This demand line is fully allocated. Allocating more is a correction — use Allocate beyond demand….',
+  );
+  fireEvent.click(
+    within(allocation).getByRole('button', {
+      name: 'Allocate beyond demand…',
+    }),
+  );
+  fireEvent.change(within(allocation).getByLabelText(/^Quantity to allocate/), {
+    target: { value: '2' },
+  });
+  fireEvent.change(within(allocation).getByLabelText(/^Reason/), {
+    target: { value: 'customer accepted overage' },
+  });
+  const detailReads = () =>
+    state.calls.filter((call) => call === 'GET /api/work-orders/1').length;
+  const listReads = () =>
+    state.calls.filter((call) => call === 'GET /api/work-orders').length;
+  const [detailBefore, listBefore] = [detailReads(), listReads()];
+  fireEvent.click(
+    within(allocation).getByRole('button', { name: 'Record correction' }),
+  );
+
+  expect(
+    await screen.findByText(
+      '✓ 2 pcs of B-200 allocated beyond demand to Work Order 007201 — correction recorded.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('dialog', { name: /Allocate beyond demand/ }),
+  ).toBeNull();
+  await waitFor(() =>
+    expect(lineRow(details, 'B-200')).toHaveTextContent(
+      'Allocated 12/10 · 2 beyond demand',
+    ),
+  );
+  expect(detailReads()).toBe(detailBefore + 1);
+  expect(listReads()).toBe(listBefore + 1);
+  expect(allocationPosts).toHaveLength(1);
+  expect(allocationPosts[0].body).toMatchObject({
+    part_number: 'B-200',
+    work_order_demand_id: 102,
+    quantity: 2,
+    reason: 'customer accepted overage',
+  });
+});
+
+test('FC-8: an over-allocated line saves its other fields — its unchanged Qty is never judged', async () => {
+  // A-100: 25 requested, 27 allocated by an authorized correction.
+  state.workOrders[0].demands[0].allocated_quantity = 27;
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  expect(lineRow(dialog, 'A-100')).toHaveTextContent(
+    'Allocated 27/25 · 2 beyond demand',
+  );
+  fireEvent.change(within(dialog).getByLabelText('Job Numbers for A-100'), {
+    target: { value: '18112, 18113' },
+  });
+  // A changed Qty below the allocated quantity still errors as typed.
+  const qty = within(dialog).getByLabelText('Quantity for A-100');
+  fireEvent.change(qty, { target: { value: '26' } });
+  expect(within(dialog).getByText('≥ 27 pcs allocated')).toBeInTheDocument();
+  fireEvent.change(qty, { target: { value: '25' } });
+  expect(within(dialog).queryByText('≥ 27 pcs allocated')).toBeNull();
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007201 demand updated — business demand only/);
+  expect(patchBodies()).toEqual([
+    {
+      line_edits: [{ id: 101, job_numbers: ['18112', '18113'] }],
+      new_lines: [],
+    },
+  ]);
 });

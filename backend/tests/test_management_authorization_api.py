@@ -428,7 +428,8 @@ class _Write:
     # Builds (path, request kwargs, target row) against fresh set-up data.
     prepare: Callable[[TestClient, _Shop], _Prepared]
     status: int = 200
-    # False only for the demand line delete: no audit row of its own (F13).
+    # False for the demand line delete (no audit row of its own, F13) and
+    # for the allocation context read (Phase 14 slice 5: a static-key GET).
     records: bool = True
 
 
@@ -681,6 +682,29 @@ def _p_reverse(client: TestClient, shop: _Shop) -> _Prepared:
     )
 
 
+def _p_correct(client: TestClient, shop: _Shop) -> _Prepared:
+    pn, _, _ = _stocked(client, shop, 10, 10)
+    _, demands = _work_order(admin_of(client), (pn, 2))
+    return (
+        "/api/allocations/corrections",
+        {
+            "json": {
+                "part_number": pn,
+                "work_order_demand_id": demands[0],
+                "quantity": 3,
+                "reason": "customer accepted overage",
+                "device_event_id": _event(),
+            }
+        },
+        ("work_order_demands", "id", demands[0]),
+    )
+
+
+def _p_context(client: TestClient, shop: _Shop) -> _Prepared:
+    pn, _, _ = _stocked(client, shop, 10, 6)
+    return f"/api/allocations/management/context?part_number={pn}", {}, None
+
+
 def _keys(*keys: Permission) -> frozenset[Permission]:
     return frozenset(keys)
 
@@ -768,6 +792,15 @@ _WRITES: list[_Write] = [
         _keys(EWOA),
         _p_reverse,
         201,
+    ),
+    _Write("correct", "POST", "/api/allocations/corrections", _keys(EWOA), _p_correct, 201),
+    _Write(
+        "context",
+        "GET",
+        "/api/allocations/management/context",
+        _keys(EWOA),
+        _p_context,
+        records=False,
     ),
 ]
 

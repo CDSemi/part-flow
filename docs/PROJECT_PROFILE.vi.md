@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), làm rõ §8.2 và §21 của Phase 14 slice 5 (allocation action trên Completed Work Orders), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
@@ -359,7 +359,7 @@ Thuộc tính minh họa: `id`, `work_order_number`, `received_date`, `due_date`
   nhập tay.
 - Reversal allocation có thể reopen Work Order và clear `completed_at`; history
   không bị xóa.
-- Completed Work Order rời active view nhưng ở read-only unbounded history;
+- Completed Work Order rời active view nhưng ở unbounded history, read-only với demand, entry và release (user giữ Edit Work Order Allocation giữ việc allocation adjustment của §8.12 / §18, có thể reopen Work Order);
   uniqueness của WO Number bao trùm cả history.
 
 ## 8.3 WorkOrderDemand
@@ -1197,7 +1197,7 @@ WO/due, default NEW, quantity/Job/requester/reason/notes; Save chỉ business de
 và kết quả Flow/Movement.
 
 Completed Work Orders nằm ở read-only history riêng, `completed_at` newest-first,
-bounded default range, server-side search/filter/paging; không create/edit/release.
+bounded default range, server-side search/filter/paging; không create/demand edit/release; user giữ Edit Work Order Allocation giữ các allocation action của §8.12 / §18.
 Active search miss dẫn tới history; nhập number đã completed mở details thay vì
 duplicate. Existing active PN phải show distribution và ask intent. Không mở rộng
 sang customer/pricing/invoice/shipping/purchasing/accounting.

@@ -1,0 +1,214 @@
+/* Shared `Adjust WO Allocation` dialog (GUI_DESIGN §11.6): the dialog
+   carries its own stylesheet so every surface that opens it — Work
+   Order Details and PN Tracking — renders it identically. */
+
+.aad .aad-stock {
+  font-size: 13.5px;
+  color: var(--muted);
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+
+.aad .aad-stock .mono {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.aad .aad-lines,
+.aad .aad-allocs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.aad .aad-line {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel2);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.aad .aad-linehead {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.aad .aad-linefig {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 4px 0 8px;
+}
+
+/* Beyond demand: warning-tone TEXT, never color only. */
+.aad .aad-beyond {
+  color: var(--warn-t);
+  font-weight: 700;
+}
+
+.aad .aad-allocs li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  border-top: 1px solid var(--border);
+  padding: 8px 0 0;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.aad .aad-allocdesc {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.aad .aad-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  vertical-align: middle;
+}
+
+.aad .aad-actor .worker-avatar.sm {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+
+.aad .aad-open {
+  min-height: 40px;
+}
+
+.aad .aad-note {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 6px 0;
+}
+
+.aad .aad-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  font-size: 13.5px;
+  margin: 0 0 12px;
+}
+
+.aad .aad-facts dt {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.aad .aad-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.aad .aad-facts-line {
+  font-size: 14px;
+  margin: 0 0 10px;
+  overflow-wrap: anywhere;
+}
+
+.aad .aad-consequence {
+  font-size: 13.5px;
+  margin-bottom: 12px;
+}
+
+.aad .aad-warning {
+  background: var(--warning-surface-weak);
+  border: 1px solid var(--warning-border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  color: var(--warn-t);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.aad .aad-warning h4 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  margin: 0 0 4px;
+}
+
+.aad .aad-warning p {
+  margin: 0;
+}
+
+.aad .aad-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aad .aad-form label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  margin-top: 6px;
+}
+
+.aad .aad-form input,
+.aad .aad-form textarea {
+  width: 100%;
+  background-color: var(--field-bg);
+  border: 1.5px solid var(--border2);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 15px;
+  padding: 9px 12px;
+  min-height: 44px;
+  outline: none;
+  font-family: inherit;
+}
+
+.aad .aad-form input.mono {
+  font-family: var(--mono), monospace;
+}
+
+.aad .aad-form input:focus,
+.aad .aad-form textarea:focus {
+  border-color: var(--info-t);
+}
+
+.aad .aad-form input[readonly],
+.aad .aad-form textarea[readonly] {
+  opacity: 0.7;
+}
+
+.aad .aad-fielderr,
+.aad .aad-error {
+  font-size: 12.5px;
+  color: var(--err-t);
+  font-weight: 700;
+}
+
+.aad .aad-error {
+  margin-top: 12px;
+  outline: none;
+}
+
+.aad .aad-after {
+  font-size: 13px;
+  color: var(--warn-t);
+  font-weight: 650;
+}
+
+.bigbtn.aad-warnbtn {
+  background: var(--warn);
+  color: var(--on-warn);
+}
+
+.bigbtn.aad-warnbtn:disabled {
+  opacity: 0.35;
+}
+
+/* Phone widths: the action rows stack so every button keeps its full
+   label and touch size. */
+@media (max-width: 480px) {
+  .aad .row {
+    flex-direction: column;
+  }
+}

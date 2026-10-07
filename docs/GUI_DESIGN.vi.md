@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
 > Baseline upstream: commit `f96bf09` (Production Board — merged quantity theo mọi nhánh lineage).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) và slice 5 (Management allocation và correction beyond-demand) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
@@ -697,7 +697,7 @@ monitoring chung.
 ## 7.2 Detail panel
 
 1. PN master/current metadata + derived barcode; absent master không ảnh hưởng history.
-2. Active Demand table với allocation progress, labeled separate from Movement.
+2. Active Demand table với allocation progress, labeled separate from Movement. Line được allocate vượt demand bằng một correction được cấp quyền hiển thị `(+n beyond demand)`; summary và progress bar chỉ tính mỗi line đến requested quantity của nó và nêu riêng phần beyond-demand (`Allocated 18 / 20 requested · +2 beyond demand`), để một line còn thiếu không bao giờ bị hiển thị là đã đủ nhờ phần dư của line khác.
 3. Current Area/Machine bars, derive Movement.
 4. Flow & Routes: shared compact `RouteModeChip`; Planned snapshot state/deviation;
    Floating actual trace, repeated Area/split/Repair; arrows separate siblings;
@@ -705,9 +705,9 @@ monitoring chung.
 5. Immutable reverse-chronological Movement history, canonical types, Repair badge,
    DONE vs Stocked distinction; no edit.
 6. Scrap history + cumulative/reconciliation.
-7. Stocked & Allocation history.
+7. Stocked & Allocation history. Entry Management nêu tên user đã ghi nó; correction beyond-demand được đánh dấu `beyond demand`.
 8. Authorized corrections: adjustment, route, allocation, priority, audit; reason
-   bắt buộc và tạo new history.
+   bắt buộc và tạo new history — mọi correction (allocation beyond demand, reversal) cần reason và tạo new history; allocation thường của stocked quantity để lại cho sau, được cung cấp từ cùng dialog `Adjust WO Allocation` (§11.6), nhận ghi chú tùy chọn.
 
 ## 7.3 States
 
@@ -733,8 +733,7 @@ khi refresh dời ranh giới của nó hoặc đổi nội dung các row nó hi
 đóng hoặc mở lại, scrap bị undo), không bao giờ khi refresh không đổi gì liên
 quan, name / revision / image / ERP
 id từ master lấy từ chi tiết Part Number đã lưu từ Phase 13 và render `—` (ảnh mặc định) khi vắng,
-và section Corrections (§7.2 mục 8) ẩn hoàn toàn cho đến khi có authorized
-corrections (Phase 14) — không bao giờ render nút vô hiệu. Dòng position của một
+và section Corrections (§7.2 mục 8) ẩn hoàn toàn với user không giữ permission của nút đã triển khai nào của nó — không bao giờ render nút vô hiệu. **Ranh giới triển khai (Phase 14 slice 5):** section Corrections chỉ render cho user giữ permission của ít nhất một nút đã triển khai của nó và chỉ hiện các nút đó — `Adjust WO Allocation…` (Edit Work Order Allocation, §11.6) — dưới tag `authorized actions — recorded with your name`, với kết quả của lần adjustment gần nhất là dòng trạng thái dưới nút; nút chưa triển khai thì vắng mặt, không bao giờ vô hiệu. Dòng position của một
 Quantity Flow thêm ghi chú advisory tường minh `· exceeds expected duration`
 (warning tone, viết ra chữ — không bao giờ chỉ màu) khi position đã vượt expected
 duration hiệu lực (PROJECT_PROFILE §17 — thời điểm `expected_by` cố định của
@@ -822,7 +821,7 @@ dialog giữ mở với lý do và suggestion refresh; lost response → freeze 
 same-intent retry; success chỉ sau server trả lời (nêu Work Order completed), rồi
 inventory refresh và barcode input refocus. `Leave in stock — allocate later` zero
 write. Manager adjustment sau này chỉ là API capability đến khi Phase 14
-authorization.
+authorization (màn hình Management do Phase 14 slice 5 giao, §11.6). Admin và Manager có thể adjust allocation về sau, mọi thay đổi đều có audit (§11.6).
 
 ---
 
@@ -857,11 +856,12 @@ manually, barcode optional. Duplicate PN focus existing line.
 
 Released line: qty/due/Jobs editable, PN/Request Type read-only; qty below committed
 inline error. Raising qty reopens remaining/release. Released WO không add/remove/
-edit header scope. Removal: draft immediate, saved-unreleased confirm, released
+edit header scope, ngoại trừ các allocation action của user được adjust allocation (§11.6). Removal: draft immediate, saved-unreleased confirm, released
 disabled với lý do. Due default chỉ propagate tới line còn giữ inherited default;
 explicit no-date không inherit lại. User được đổi header Work Order nhưng không được đổi demand line (Create and edit Work Orders mà không có Edit Work Order Demand, Phase 14) đổi WO due date thì chỉ đổi WO due date: mọi line giữ nguyên due date, và dialog nói rõ điều đó cạnh field (`Line due dates stay unchanged — you may not edit demand lines.`). Saved line đang trên Hot list (không có released quantity và không có allocation, hiện tại hay đã reverse — line có allocation history không bao giờ remove được, nên nó nhận plain confirmation và lời từ chối của server) hiện cảnh báo nêu Hot rank (`🔥#n`) và chỉ remove sau khi gõ PN để xác nhận (dialog typed-confirmation dùng chung); removal cũng đưa nó khỏi Hot list và các Hot rank còn lại đóng khoảng trống (quyết định 2026-10-04).
 
 PN lookup chỉ nói “new” sau exact server response; in-flight shows Searching.
+Allocation của line đã lưu (Phase 14): mỗi line đã lưu hiện `Allocated a/b` (kèm `+n beyond demand` khi một correction được cấp quyền allocate vượt demand) và, với user được adjust allocation (Edit Work Order Allocation), `Allocate from stock…` và `Reverse…` trên Work Order Open, Released và Completed như nhau; cả hai mở dialog dùng chung của §11.6 và bị vô hiệu khi demand draft còn thay đổi chưa lưu. Qty edit bị giới hạn không đổi ngoài điều đó: Qty không đổi không bao giờ là lỗi (line được allocate vượt demand vẫn sửa được các field khác), và Qty bị đổi không bao giờ thấp hơn released hoặc allocated quantity.
 Validation missing PN/non-positive/duplicate, due null valid; first invalid focused,
 input preserved. Dirty state là actual diff và guard navigation/back/reload.
 
@@ -913,7 +913,7 @@ phát cursor khi thực sự còn row tiếp theo (history kết thúc đúng ra
 không hiện `Show more` thừa), và continuation của một preset Done range giữ
 nguyên range đã resolve ở page đầu — site midnight đi qua giữa hai page không
 neo lại query đã load; đổi search/filter/sort reset paging. Row opens read-only
-details với done date và allocated quantity. No New/edit/release; independent
+details với done date và allocated quantity (demand vẫn read-only; user được adjust allocation giữ các allocation action của §11.2 — một reversal có thể reopen Work Order, §11.6). No New/demand edit/release — chỉ các allocation action của user được adjust allocation (§11.6); independent
 toolbar. Active search/New exact number check can route here.
 
 **Implementation boundary (Phase 10):** production UI thật trên
@@ -926,6 +926,20 @@ quantity từng demand line. Work Order chỉ complete khi server derive (mọi 
 line fully allocated từ stocked quantity), rời active list và không bao giờ bị
 duplicate bởi New Work Order lookup (lookup mở completed details). Mock preview
 dev-only cũ của trang này đã bỏ.
+
+## 11.6 Dialog adjust allocation (post-v18, Phase 14)
+
+Dialog dùng chung **`Adjust WO Allocation`** là bề mặt Management duy nhất để allocate stocked quantity để lại cho sau, để thực hiện correction beyond-demand được cấp quyền và để reverse một allocation (PROJECT_PROFILE §8.12 / §18). Chỉ user giữ Edit Work Order Allocation thấy nó; với mọi người khác nó ẩn — không bao giờ render vô hiệu hay vô tác dụng.
+
+- **Điểm vào.** Tracking → Corrections → `Adjust WO Allocation…` (§7.2 mục 8; các Work Order open của PN đang chọn) và Work Order Details (§11.2; một line đã lưu, trên Work Order Open, Released và Completed — kể cả trên trang Completed Work Orders, §11.5, nơi một reversal có thể reopen Work Order). Tracking chỉ liệt kê open demand; Work Order đã hoàn tất được adjust từ Work Order Details của nó.
+- **Các bước.** `Overview` (các demand line trong phạm vi với con số allocated / requested, `+n pcs beyond demand` khi áp dụng, và các active allocation, mỗi cái đánh dấu `beyond demand` nếu là correction), `Allocate from stock` (một demand line, không bao giờ vượt remaining demand hoặc available stocked quantity; ghi chú tùy chọn), `Allocate beyond demand` và `Reverse allocation`.
+- **Correction beyond-demand.** Bước thứ hai tường minh, có cảnh báo rằng quantity vượt demand, quantity và reason bắt buộc; được ghi như một correction riêng với tên user đã sign-in và đảo ngược được như mọi allocation. Allocation thường ngày không bao giờ vượt remaining demand.
+- **Reversal.** Reason bắt buộc; nó append history mới, không bao giờ sửa hay xóa allocation, và có thể làm Work Order đã hoàn tất thành chưa hoàn tất (Work Order reopen; một adjustment không bao giờ ghi lại done date gốc của nó).
+- **Actor.** Mỗi entry hiện user đã ghi nó bằng avatar và tên.
+- **Kết quả chưa rõ và sign-in.** Một intent giữ một request identity qua mọi lần resubmit. Khi server chưa trả lời, input và điều hướng bước bị khóa để lần submit kế tiếp chỉ có thể lặp lại đúng intent đó; việc server từ chối tường minh lần resubmit chứng minh chưa có gì được ghi và mở khóa input. Gián đoạn sign-in theo cùng quy tắc. Đóng dialog khi kết quả chưa rõ sẽ reload host và nói rõ điều đó.
+- **Offline.** Khi mất kết nối, các action submit bị chặn; không có gì được xếp hàng.
+
+Được tham chiếu từ §7.2 mục 8, §7.3, §10, §11.2 và §11.5.
 
 ---
 
@@ -1186,6 +1200,8 @@ session không còn shift end.
 29. **Sign-in cho application User** (§1.2, §9, §2.1; quyết định owner OD-P1–OD-P5, 2026-10-06 — không tăng version): §1.2 mới mô tả account chip ở top navigation (`Sign in` / `Set up PartFlow`, hoặc avatar và tên cùng `Change password…` và `Sign out`; không có ở nơi navigation bị ẩn), sign-in modal phủ lên view hiện tại, dialog `Choose a new password` không đóng được, dialog first-run `Set up PartFlow` với setup token, và các quy tắc Scan Station và Production Board không bao giờ hỏi sign-in còn control không khả dụng thì ẩn, không disable; Administration → Settings có thêm panel **User sign-in** (thời hạn theo ngày hoặc không bao giờ, số lần sign-in sai trước khi khóa, thời gian khóa, ép thay mật khẩu do administrator đặt) bên cạnh Due Soon warning; Users có thêm `Set password…` và cột `Sign-in` cho user administrator, và các ghi chú Users và Roles nay nêu rằng users sign in và permission nào đã được kiểm tra, còn ghi chú Correction permissions vẫn nêu rằng các permission của nó chưa được enforce; User theme tier vẫn được lên kế hoạch ở Phase 14 slice 8. Phase 14 slice 2 mở rộng mục này (không bump version): truy cập Administration và các section nhận biết permission (§1.2, §9; quyết định owner OD-P7, OD-P19). Phase 14 slice 3 lại mở rộng mục này (không bump version): truy cập Management và các Management view nhận biết permission (§1.1, §1.2, §8, §9, §11.2, §12.3, §13.1, §14.2; quyết định owner OD-P7, OD-P10, OD-P17).
 
 30. **Enroll thiết bị Scan Station** (§4.1, §4.5, §4.13, §9; quyết định owner OD-P6, OD-S4-1, OD-S4-9, 2026-10-06 — không bump version): cả hai mode của Scan Station yêu cầu thiết bị đã enroll (§4.1); `⟲ UNDO` không hiển thị khi role áp dụng tại Scan Stations không cấp nó (§4.5); §4.13 mới mô tả màn hình và dialog enroll cùng các action mà station ẩn; Administration → Scan Stations có thêm dialog `Devices…` và Roles & permissions đánh dấu role áp dụng tại Scan Stations (§9).
+
+31. **Management allocation adjustment và correction beyond-demand** (§4.11, §7.2, §7.3, §10, §11.2, §11.5, §11.6; quyết định owner OD-P10, OD-P12/P13, OD-S5-3, 2026-10-06 — không tăng version): Work Order Details cung cấp `Allocate from stock…` và `Reverse…` trên mọi line đã lưu (Work Order Open, Released và Completed) và section Corrections của Tracking cung cấp `Adjust WO Allocation…`, cả hai mở dialog dùng chung của §11.6 với bước thứ hai beyond-demand tường minh; line được allocate vượt demand hiện `(+n beyond demand)` và allocation progress tính riêng phần đó; Qty edit bị giới hạn không bao giờ xét Qty không đổi.
 
 ## 15.2 Từ GUI Design v16
 

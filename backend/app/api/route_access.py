@@ -1,4 +1,4 @@
-"""Who may call each route (Phase 14 slices 2–4; owner decisions OD-P6, OD-P7, OD-P10, OD-P19).
+"""Who may call each route (Phase 14 slices 2–5; owner decisions OD-P6, OD-P7, OD-P10, OD-P19).
 
 One registry classifies every API route by ``(METHOD, path)``; a test
 (``tests/test_route_access.py``) fails on any route that is missing,
@@ -204,6 +204,10 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("DELETE", "/api/work-orders/{work_order_id}/demands/{demand_id}"): _permission(_EWOD),
     ("POST", "/api/allocations/management"): _permission(_EWOA),
     ("POST", "/api/allocations/{allocation_id}/reversals"): _permission(_EWOA),
+    # Slice 5: the beyond-demand correction and the context read only its
+    # write workflow uses (OD-P7, OD-P10).
+    ("POST", "/api/allocations/corrections"): _permission(_EWOA),
+    ("GET", "/api/allocations/management/context"): _permission(_EWOA),
     # --- PERMISSION (static + conditional) ----------------------------------
     ("POST", "/api/areas"): _permission(Permission.MANAGE_AREAS, conditional=_keys(_MWSP)),
     ("POST", "/api/roles"): _permission(_MUAR, conditional=_keys(_MCP)),

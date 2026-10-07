@@ -76,6 +76,7 @@ from typing import Any, Final, Literal, NamedTuple
 from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.orm import Session, aliased
 
+from app.application import user_access
 from app.application.allocations import (
     DemandContext,
     active_allocated_quantities,
@@ -293,6 +294,9 @@ class AllocationEntry(NamedTuple):
     demand: WorkOrderDemand
     work_order: WorkOrder
     reversed_by_allocation_id: int | None
+    # The signed-in User who recorded a Management row (Phase 14); None
+    # for station rows and rows recorded before sign-in existed.
+    actor_user: user_access.UserRef | None
 
 
 class AllocationPage(NamedTuple):
@@ -1206,6 +1210,10 @@ def allocation_history(
             )
         ):
             reversed_by[int(original_id)] = int(reversal_id)
+    # One display-reference read over the page's recorded Users.
+    actors = user_access.user_refs(
+        session, [row.actor_user_id for row in rows if row.actor_user_id is not None]
+    )
     return AllocationPage(
         entries=[
             AllocationEntry(
@@ -1213,6 +1221,9 @@ def allocation_history(
                 demand=demands[row.work_order_demand_id].demand,
                 work_order=demands[row.work_order_demand_id].work_order,
                 reversed_by_allocation_id=reversed_by.get(row.id),
+                actor_user=(
+                    actors.get(row.actor_user_id) if row.actor_user_id is not None else None
+                ),
             )
             for row in rows
         ],

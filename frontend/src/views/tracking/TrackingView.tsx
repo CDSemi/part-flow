@@ -19,7 +19,10 @@ import {
   trackingListQuery,
 } from '../../api/tracking';
 import { useConnectivity } from '../../app/connectivity-context';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { AllocationAdjustmentDialog } from '../../components/AllocationAdjustmentDialog';
+import { OUTCOME_UNKNOWN_AFTER_CLOSE } from '../../components/allocation-adjustment';
 import {
   AreaDot,
   HotPn,
@@ -109,6 +112,11 @@ function timestamp(iso: string): string {
 // a click anywhere outside every row and the panel itself all close it
 // (the row and panel cases restore focus to the originating row; a
 // plain outside click does not).
+//
+// Corrections (GUI_DESIGN §7.2 item 8, Phase 14 slice 5): the detail
+// ends with the authorized correction actions the signed-in user may
+// use — `Adjust WO Allocation…` for Edit Work Order Allocation — and
+// renders no section at all for a user who may use none of them.
 export function TrackingView() {
   const preview = getViewStatePreview();
   const { status: connectivity } = useConnectivity();
@@ -155,8 +163,8 @@ export function TrackingView() {
   const toggleSelected = (pn: string) =>
     setSelectedPn((current) => (current === pn ? null : pn));
 
-  // Escape closes the modeless panel (a dialog on top of it — none in
-  // Tracking today — would own Escape through its own focus scope).
+  // Escape closes the modeless panel (a dialog on top of it — the
+  // allocation dialog — owns Escape through its own focus scope).
   useEffect(() => {
     if (selectedPn === null) return;
     function onKeyDown(event: KeyboardEvent) {
@@ -179,9 +187,12 @@ export function TrackingView() {
     function onDocumentMouseDown(event: MouseEvent) {
       const target = event.target as HTMLElement | null;
       if (!target) return;
+      // A dialog opened from the panel (an `.overlay` above it) is part
+      // of the panel's work, never an outside click.
       if (
         target.closest('.tk-table tr.selrow') ||
-        target.closest('.tk-right')
+        target.closest('.tk-right') ||
+        target.closest('.overlay')
       ) {
         return;
       }
@@ -514,6 +525,7 @@ export function TrackingView() {
             pn={selectedPn}
             enabled={preview === null}
             onClose={() => close(true)}
+            onListChanged={feed.reload}
           />
         ) : null}
       </div>
@@ -606,13 +618,29 @@ function TrackingDetailPanel({
   pn,
   enabled,
   onClose,
+  onListChanged,
 }: {
   pn: string;
   enabled: boolean;
   onClose: () => void;
+  /** An allocation change was recorded (or may have been) — the list
+   * re-reads its figures. */
+  onListChanged: () => void;
 }) {
   const { status: connectivity } = useConnectivity();
+  const { can } = useSession();
   const feed = useTrackingDetailFeed(pn, connectivity, enabled);
+  // The `Adjust WO Allocation` dialog, and the outcome of the last
+  // adjustment shown under its button (cleared by the next open; a
+  // different PN is a fresh panel).
+  const [adjusting, setAdjusting] = useState(false);
+  const [correctionNotice, setCorrectionNotice] = useState<string | null>(null);
+  const afterAdjustment = (notice: string) => {
+    setAdjusting(false);
+    feed.reload();
+    onListChanged();
+    setCorrectionNotice(notice);
+  };
   const detail = feed.state.status === 'ready' ? feed.state.data : null;
   const stale =
     connectivity !== 'connected' ||
@@ -674,75 +702,111 @@ function TrackingDetailPanel({
   );
 
   return (
-    <aside className="tk-right" aria-label="PN detail">
-      {detail === null ? (
-        <>
-          <div className="tk-pnrow">
-            <div>
-              <h2>{pn}</h2>
+    <>
+      <aside className="tk-right" aria-label="PN detail">
+        {detail === null ? (
+          <>
+            <div className="tk-pnrow">
+              <div>
+                <h2>{pn}</h2>
+              </div>
+              <span className="spacer" />
+              <CloseDetailButton onClose={onClose} />
             </div>
-            <span className="spacer" />
-            <CloseDetailButton onClose={onClose} />
-          </div>
-          {!enabled ? (
-            <EmptyState message="PN details are not part of this state preview." />
-          ) : feed.state.status === 'error' ? (
-            <ErrorState
-              message="PN details could not be loaded."
-              detail={feed.state.message}
-              onRetry={feed.reload}
-            />
-          ) : (
-            <LoadingState label={`Loading details of ${pn}`} />
-          )}
-        </>
-      ) : (
-        <TrackingDetailContent
-          detail={detail}
-          stale={stale}
-          paging={{
-            movements: pagedSection(
-              {
-                items: detail.movements.movements,
-                total: detail.movements.total,
-                hasMore: detail.movements.hasMore,
-              },
-              movements.older,
-              movements.showOlder,
-            ),
-            scrap: pagedSection(
-              {
-                items: detail.scrapHistory.movements,
-                total: detail.scrapHistory.total,
-                hasMore: detail.scrapHistory.hasMore,
-              },
-              scrap.older,
-              scrap.showOlder,
-            ),
-            flows: pagedSection(
-              {
-                items: detail.flows.flows,
-                total: detail.flows.total,
-                hasMore: detail.flows.hasMore,
-              },
-              flows.older,
-              flows.showOlder,
-            ),
-            allocations: pagedSection(
-              {
-                items: detail.allocations.allocations,
-                total: detail.allocations.total,
-                hasMore: detail.allocations.hasMore,
-              },
-              allocations.older,
-              allocations.showOlder,
-            ),
+            {!enabled ? (
+              <EmptyState message="PN details are not part of this state preview." />
+            ) : feed.state.status === 'error' ? (
+              <ErrorState
+                message="PN details could not be loaded."
+                detail={feed.state.message}
+                onRetry={feed.reload}
+              />
+            ) : (
+              <LoadingState label={`Loading details of ${pn}`} />
+            )}
+          </>
+        ) : (
+          <TrackingDetailContent
+            detail={detail}
+            stale={stale}
+            paging={{
+              movements: pagedSection(
+                {
+                  items: detail.movements.movements,
+                  total: detail.movements.total,
+                  hasMore: detail.movements.hasMore,
+                },
+                movements.older,
+                movements.showOlder,
+              ),
+              scrap: pagedSection(
+                {
+                  items: detail.scrapHistory.movements,
+                  total: detail.scrapHistory.total,
+                  hasMore: detail.scrapHistory.hasMore,
+                },
+                scrap.older,
+                scrap.showOlder,
+              ),
+              flows: pagedSection(
+                {
+                  items: detail.flows.flows,
+                  total: detail.flows.total,
+                  hasMore: detail.flows.hasMore,
+                },
+                flows.older,
+                flows.showOlder,
+              ),
+              allocations: pagedSection(
+                {
+                  items: detail.allocations.allocations,
+                  total: detail.allocations.total,
+                  hasMore: detail.allocations.hasMore,
+                },
+                allocations.older,
+                allocations.showOlder,
+              ),
+            }}
+            corrections={
+              can('EDIT_WORK_ORDER_ALLOCATION')
+                ? {
+                    writeBlocked: connectivity !== 'connected',
+                    notice: correctionNotice,
+                    onAdjust: () => {
+                      setCorrectionNotice(null);
+                      setAdjusting(true);
+                    },
+                  }
+                : null
+            }
+            onClose={onClose}
+          />
+        )}
+      </aside>
+      {/* The dialog renders beside the panel (its own overlay above the
+        navigation), never inside the panel's stacking context. */}
+      {adjusting ? (
+        <AllocationAdjustmentDialog
+          scope={{ partNumber: pn }}
+          start={{ step: 'overview' }}
+          writeBlocked={connectivity !== 'connected'}
+          onClose={(outcomeUnknown) => {
+            if (outcomeUnknown) afterAdjustment(OUTCOME_UNKNOWN_AFTER_CLOSE);
+            else setAdjusting(false);
           }}
-          onClose={onClose}
+          onCommitted={(_result, notice) => afterAdjustment(notice)}
         />
-      )}
-    </aside>
+      ) : null}
+    </>
   );
+}
+
+/** The correction actions of the detail (null: none permitted). */
+interface CorrectionActions {
+  writeBlocked: boolean;
+  /** The outcome of the last adjustment, under its button. */
+  notice: string | null;
+  onAdjust: () => void;
 }
 
 /** `Showing n of m <noun>` with the explicit continuation control. */
@@ -806,16 +870,28 @@ function TrackingDetailContent({
   detail: d,
   stale,
   paging,
+  corrections,
   onClose,
 }: {
   detail: TrackingDetail;
   stale: boolean;
   paging: DetailPaging;
+  corrections: CorrectionActions | null;
   onClose: () => void;
 }) {
   const now = useUiClock('minute');
   const requestedTotal = d.demands.reduce((s, x) => s + x.requestedQuantity, 0);
-  const allocatedTotal = d.demands.reduce((s, x) => s + x.allocatedQuantity, 0);
+  // Each line counts only up to its requested quantity — one line's
+  // excess (an authorized beyond-demand correction) never covers
+  // another line's shortage; the excess is named separately.
+  const coveredTotal = d.demands.reduce(
+    (s, x) => s + Math.min(x.allocatedQuantity, x.requestedQuantity),
+    0,
+  );
+  const beyondTotal = d.demands.reduce(
+    (s, x) => s + Math.max(x.allocatedQuantity - x.requestedQuantity, 0),
+    0,
+  );
   const shareTotal = d.activeQuantity + d.stockedQuantity;
   const ready = readyNote(d.locations);
 
@@ -924,6 +1000,9 @@ function TrackingDetailContent({
                       data-label="Alloc."
                     >
                       {row.allocatedQuantity}
+                      {row.allocatedQuantity > row.requestedQuantity
+                        ? ` (+${row.allocatedQuantity - row.requestedQuantity} beyond demand)`
+                        : ''}
                     </td>
                     <td className="mono short" data-label="Shortage">
                       {row.shortage}
@@ -941,12 +1020,13 @@ function TrackingDetailContent({
             <div className="prog">
               <i
                 style={{
-                  width: `${requestedTotal > 0 ? Math.round((allocatedTotal / requestedTotal) * 100) : 0}%`,
+                  width: `${requestedTotal > 0 ? Math.round((coveredTotal / requestedTotal) * 100) : 0}%`,
                 }}
               />
             </div>
             <div className="prognote">
-              Allocated {allocatedTotal} / {requestedTotal} requested
+              Allocated {coveredTotal} / {requestedTotal} requested
+              {beyondTotal > 0 ? ` · +${beyondTotal} beyond demand` : ''}
               {d.stockedQuantity === 0 ? ' — nothing stocked yet' : ''}
             </div>
           </>
@@ -1130,6 +1210,8 @@ function TrackingDetailContent({
                       ? ` · reason: ${a.allocationReason}`
                       : ''}
                     {a.stationId ? ` · ${a.stationId}` : ''}
+                    {a.exceedsDemand ? ' · beyond demand' : ''}
+                    {a.actorUser ? ` · ${a.actorUser.displayName}` : ''}
                   </span>
                 </li>
               ))}
@@ -1142,6 +1224,31 @@ function TrackingDetailContent({
           </>
         )}
       </div>
+
+      {corrections !== null ? (
+        <div className="tk-sec tk-corr">
+          <h4>
+            Corrections{' '}
+            <span className="tag">
+              authorized actions — recorded with your name
+            </span>
+          </h4>
+          <div className="tk-corr-actions">
+            <button
+              className="btn ghost"
+              disabled={corrections.writeBlocked}
+              onClick={corrections.onAdjust}
+            >
+              Adjust WO Allocation…
+            </button>
+          </div>
+          {corrections.notice !== null ? (
+            <p className="tk-corr-notice" role="status">
+              {corrections.notice}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </>
   );
 }

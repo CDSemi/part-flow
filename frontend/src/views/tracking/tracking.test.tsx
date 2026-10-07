@@ -8,7 +8,11 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
 import { ConnectivityContext } from '../../app/connectivity-context';
+import { SessionContext, hasPermission } from '../../app/session-context';
+import type { SessionValue } from '../../app/session-context';
 import { TrackingView } from './TrackingView';
 import {
   SEARCH_DEBOUNCE_MS,
@@ -486,14 +490,52 @@ function trackingCalls(fetchMock: ReturnType<typeof stubFetch>): string[] {
     .filter((url) => url.startsWith('/api/tracking'));
 }
 
+/**
+ * The signed-in user of a test (Phase 14): the Corrections section
+ * offers only the actions the user's permissions allow, so a test holds
+ * every permission unless it signs in another user.
+ */
+function signedInSession(
+  permissions: readonly Permission[] = PERMISSIONS,
+): SessionValue {
+  const user = {
+    id: 90,
+    loginName: 'mia',
+    displayName: 'Mia Manager',
+    roleId: 2,
+    roleName: 'Manager',
+    avatarUpdatedAt: null,
+    permissions: [...permissions],
+    mustChangePassword: false,
+    sessionExpiresAt: null,
+  };
+  return {
+    status: 'signed-in',
+    user,
+    setupOpen: false,
+    checking: false,
+    endedBy: null,
+    can: (permission) => hasPermission(user, permission),
+    openSignIn: vi.fn(),
+    openSetup: vi.fn(),
+    openChangePassword: vi.fn(),
+    signOut: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+}
+
+let session: SessionValue = signedInSession();
+
 /** Render the view with a healthy shared connectivity state. */
 async function renderTracking(
   status: 'connected' | 'unavailable' = 'connected',
 ) {
   const result = render(
-    <ConnectivityContext.Provider value={{ status, retry: () => {} }}>
-      <TrackingView />
-    </ConnectivityContext.Provider>,
+    <SessionContext.Provider value={session}>
+      <ConnectivityContext.Provider value={{ status, retry: () => {} }}>
+        <TrackingView />
+      </ConnectivityContext.Provider>
+    </SessionContext.Provider>,
   );
   // The first feed answer resolves in a microtask.
   await act(async () => {});
@@ -518,6 +560,7 @@ function flowBlock(id: string): Element {
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/tracking');
+  session = signedInSession();
   stubFetch();
 });
 
@@ -2117,4 +2160,328 @@ test('the Tracking flow-header RouteModeChip keeps its compact variant', async (
   );
   const compact = /\.qflow \.routechip \{[^}]*}/s.exec(css)![0];
   expect(compact).toContain('font-size: 10.5px');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 14 slice 5 — Corrections and the allocation beyond demand
+// ---------------------------------------------------------------------------
+
+const PN = '2027-60-8114-00';
+
+/** The detail with one over-allocated line (12 of 10) and one short
+ * line (8 of 10), and the correction in the allocation history. */
+function overAllocatedDetail(lines = 2) {
+  const base = detailPayload();
+  const workOrder = {
+    work_order_id: 1,
+    work_order_number: '007001',
+    work_order_demand_id: 10,
+    request_type: 'NEW',
+  };
+  return {
+    ...base,
+    stocked_quantity: 22,
+    demands: [
+      {
+        ...demand({ allocated_quantity: 12 }),
+        released_quantity: 10,
+        shortage: 0,
+      },
+      {
+        ...demand({
+          work_order_id: 2,
+          work_order_number: '007008',
+          work_order_demand_id: 11,
+          requested_quantity: 10,
+          allocated_quantity: 8,
+          priority_rank: null,
+          job_numbers: [],
+        }),
+        released_quantity: 0,
+        shortage: 2,
+      },
+    ].slice(0, lines),
+    allocations: {
+      allocations: [
+        {
+          id: 32,
+          quantity: 2,
+          work_order: workOrder,
+          source: 'MANAGEMENT',
+          is_manual_override: true,
+          allocation_reason: 'customer accepted overage',
+          reverses_allocation_id: null,
+          reversed_by_allocation_id: null,
+          station_id: null,
+          allocated_at: '2030-07-23T09:00:00Z',
+          exceeds_demand: true,
+          actor_user: {
+            id: 90,
+            display_name: 'Mia Manager',
+            avatar_updated_at: null,
+          },
+        },
+        {
+          id: 31,
+          quantity: 10,
+          work_order: workOrder,
+          source: 'STOCKROOM',
+          is_manual_override: false,
+          allocation_reason: null,
+          reverses_allocation_id: null,
+          reversed_by_allocation_id: null,
+          station_id: 'STOCK-ST-1',
+          allocated_at: '2030-07-23T08:00:00Z',
+          exceeds_demand: false,
+          actor_user: null,
+        },
+      ],
+      total: 2,
+      has_more: false,
+      next_before_allocation_id: null,
+    },
+  };
+}
+
+function section(title: string): HTMLElement {
+  return Array.from(document.querySelectorAll<HTMLElement>('.tk-sec')).find(
+    (el) => el.querySelector('h4')?.textContent?.startsWith(title),
+  )!;
+}
+
+test('FC-9: no Corrections section without Edit Work Order Allocation', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA', 'ASSIGN_ROUTES']);
+  await renderTracking();
+  await openFirstRow();
+  expect(document.querySelector('.tk-right h2')?.textContent).toBe(PN);
+  expect(section('Corrections')).toBeUndefined();
+  expect(
+    screen.queryByRole('button', { name: /Adjust WO Allocation/ }),
+  ).toBeNull();
+});
+
+test('FC-9: Corrections offers exactly Adjust WO Allocation… — disabled while offline', async () => {
+  await renderTracking();
+  await openFirstRow();
+  const corrections = section('Corrections');
+  expect(corrections.querySelector('h4 .tag')?.textContent).toBe(
+    'authorized actions — recorded with your name',
+  );
+  const buttons = within(corrections).getAllByRole('button');
+  expect(buttons.map((button) => button.textContent)).toEqual([
+    'Adjust WO Allocation…',
+  ]);
+  expect(buttons[0]).toBeEnabled();
+  // The Corrections section is the last detail section.
+  const sections = document.querySelectorAll('.tk-right .tk-sec');
+  expect(sections[sections.length - 1]).toBe(corrections);
+  cleanup();
+
+  await renderTracking('unavailable');
+  await openFirstRow();
+  expect(
+    screen.getByRole('button', { name: 'Adjust WO Allocation…' }),
+  ).toBeDisabled();
+});
+
+test('FC-9: Adjust WO Allocation… opens the PN dialog; a correction reloads both feeds and reports under the button', async () => {
+  const context = {
+    part_number: PN,
+    stocked_quantity: 22,
+    active_allocated_quantity: 20,
+    available_stocked_quantity: 2,
+    lines: [
+      {
+        work_order_id: 1,
+        work_order_number: '007001',
+        work_order_completed: false,
+        received_date: '2030-07-01',
+        work_order_demand_id: 10,
+        request_type: 'NEW',
+        due_date: '2030-07-24',
+        priority_rank: 1,
+        requested_quantity: 10,
+        allocated_quantity: 10,
+        remaining_shortage: 0,
+        beyond_demand_quantity: 0,
+        active_allocations: [],
+      },
+    ],
+  };
+  const posted: { url: string; body: Record<string, unknown> }[] = [];
+  const fetchMock = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/api/allocations/management/context')) {
+        return jsonResponse(context);
+      }
+      if (url === '/api/allocations/corrections') {
+        posted.push({
+          url,
+          body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        });
+        return jsonResponse(
+          {
+            kind: 'ALLOCATE_BEYOND_DEMAND',
+            part_number: PN,
+            allocation_quantity: 2,
+            rows: [],
+            completed_work_order_ids: [],
+            reopened_work_order_ids: [],
+            device_event_id: 'evt',
+          },
+          201,
+        );
+      }
+      return defaultAnswer(url);
+    },
+  );
+  vi.stubGlobal('fetch', fetchMock);
+  await renderTracking();
+  await openFirstRow();
+  const adjust = screen.getByRole('button', { name: 'Adjust WO Allocation…' });
+  adjust.focus();
+  fireEvent.click(adjust);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Adjust WO Allocation',
+  });
+  const calls = () => fetchMock.mock.calls.map((call) => String(call[0]));
+  expect(calls()).toContain(
+    `/api/allocations/management/context?part_number=${PN}`,
+  );
+  // A click inside the dialog is never an outside click of the panel.
+  fireEvent.mouseDown(dialog);
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+
+  fireEvent.click(
+    await within(dialog).findByRole('button', { name: 'Allocate from stock…' }),
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Allocate beyond demand…' }),
+  );
+  fireEvent.change(within(dialog).getByLabelText(/^Quantity to allocate/), {
+    target: { value: '2' },
+  });
+  fireEvent.change(within(dialog).getByLabelText(/^Reason/), {
+    target: { value: 'customer accepted overage' },
+  });
+  const detailReads = () =>
+    calls().filter((url) => url.startsWith('/api/tracking/detail')).length;
+  const listReads = () =>
+    calls().filter((url) => url.startsWith('/api/tracking?')).length;
+  const [detailBefore, listBefore] = [detailReads(), listReads()];
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Record correction' }),
+  );
+  await act(async () => {});
+  await act(async () => {});
+
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(posted).toHaveLength(1);
+  expect(posted[0].body).toMatchObject({
+    part_number: PN,
+    work_order_demand_id: 10,
+    quantity: 2,
+  });
+  const notice = document.querySelector('.tk-corr-notice');
+  expect(notice?.getAttribute('role')).toBe('status');
+  expect(notice?.textContent).toBe(
+    `✓ 2 pcs of ${PN} allocated beyond demand to Work Order 007001 — correction recorded.`,
+  );
+  expect(detailReads()).toBeGreaterThan(detailBefore);
+  expect(listReads()).toBeGreaterThan(listBefore);
+
+  // The next open clears it; closing returns focus to the button.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Adjust WO Allocation…' }),
+  );
+  expect(document.querySelector('.tk-corr-notice')).toBeNull();
+  const reopened = await screen.findByRole('dialog', {
+    name: 'Adjust WO Allocation',
+  });
+  fireEvent.click(
+    await within(reopened).findByRole('button', { name: 'Close (Esc)' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.activeElement).toBe(
+    screen.getByRole('button', { name: 'Adjust WO Allocation…' }),
+  );
+  // Escape inside the dialog never closed the panel either.
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+});
+
+test('FC-9: a notice belongs to its PN — selecting another PN clears it', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/allocations/management/context')) {
+        return jsonResponse({
+          part_number: PN,
+          stocked_quantity: 0,
+          active_allocated_quantity: 0,
+          available_stocked_quantity: 0,
+          lines: [],
+        });
+      }
+      return defaultAnswer(url);
+    }),
+  );
+  await renderTracking();
+  await openFirstRow();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Adjust WO Allocation…' }),
+  );
+  await screen.findByText(/No open Work Order Demand for this PN/);
+  expect(document.querySelector('.tk-corr-notice')).toBeNull();
+  const rows = document.querySelectorAll<HTMLElement>('.tk-table .rowbtn');
+  fireEvent.click(screen.getByRole('button', { name: 'Close (Esc)' }));
+  fireEvent.click(rows[1]);
+  await act(async () => {});
+  expect(document.querySelector('.tk-corr-notice')).toBeNull();
+});
+
+test('FC-9: the demand counts each line only up to its demand and names the excess; the history names the correction and its User', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/detail')
+      ? jsonResponse(overAllocatedDetail())
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+  const demandSection = section('Active WO Demand');
+  const cells = demandSection.querySelectorAll('[data-label="Alloc."]');
+  expect(cells[0].textContent).toBe('12 (+2 beyond demand)');
+  expect(cells[1].textContent).toBe('8');
+  expect(demandSection.querySelector('.prognote')?.textContent).toBe(
+    'Allocated 18 / 20 requested · +2 beyond demand',
+  );
+  expect(
+    (demandSection.querySelector('.prog i') as HTMLElement).style.width,
+  ).toBe('90%');
+
+  const history = section('Stocked & Allocation history');
+  const entries = history.querySelectorAll('.mv li');
+  expect(entries[0].textContent).toContain(
+    '2 pcs · WO 007001 · management · manual override · reason: customer accepted overage · beyond demand · Mia Manager',
+  );
+  expect(entries[1].textContent).not.toContain('beyond demand');
+  expect(entries[1].textContent).toContain('· STOCK-ST-1');
+});
+
+test('FC-9: a single line allocated beyond its demand reads fully covered plus its excess', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/detail')
+      ? jsonResponse(overAllocatedDetail(1))
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+  const demandSection = section('Active WO Demand');
+  expect(demandSection.querySelector('.prognote')?.textContent).toBe(
+    'Allocated 10 / 10 requested · +2 beyond demand',
+  );
+  expect(
+    (demandSection.querySelector('.prog i') as HTMLElement).style.width,
+  ).toBe('100%');
 });

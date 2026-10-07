@@ -260,9 +260,12 @@ function completedPage(url: URL) {
 
 /**
  * Management needs a signed-in user (Phase 14 slice 3): the fake signs
- * in a user holding every permission.
+ * in a user holding every permission unless a test grants fewer.
  */
-const sessionPermissions: readonly Permission[] = PERMISSIONS;
+let sessionPermissions: readonly Permission[] = PERMISSIONS;
+
+/** Every allocation correction the client posted (Phase 14 slice 5). */
+let corrections: Record<string, unknown>[];
 
 function sessionResponse(): Response {
   return new Response(
@@ -284,10 +287,76 @@ function sessionResponse(): Response {
   );
 }
 
-function handle(rawUrl: string, method: string): Response {
+function handle(rawUrl: string, method: string, body?: string): Response {
   const url = new URL(rawUrl, 'http://localhost');
   if (url.pathname === '/api/session') return sessionResponse();
   requests.push(`${method} ${url.pathname}${url.search}`);
+  // Management allocation on a completed Work Order (Phase 14 slice 5,
+  // OD-S5-3 option A): one line's context, and the correction.
+  if (url.pathname === '/api/allocations/management/context') {
+    const id = Number(url.searchParams.get('work_order_demand_id'));
+    const w = workOrders.find((o) => o.lines.some((l) => l.id === id));
+    const target = w?.lines.find((l) => l.id === id);
+    if (!w || !target) return json({ detail: 'nope' }, 404);
+    return json({
+      part_number: target.pn,
+      stocked_quantity: target.allocated + 2,
+      active_allocated_quantity: target.allocated,
+      available_stocked_quantity: 2,
+      lines: [
+        {
+          work_order_id: w.id,
+          work_order_number: w.number,
+          work_order_completed: w.completedAt !== null,
+          received_date: w.received,
+          work_order_demand_id: id,
+          request_type: 'NEW',
+          due_date: w.due,
+          priority_rank: null,
+          requested_quantity: target.requested,
+          allocated_quantity: target.allocated,
+          remaining_shortage: Math.max(target.requested - target.allocated, 0),
+          beyond_demand_quantity: Math.max(
+            target.allocated - target.requested,
+            0,
+          ),
+          active_allocations: [
+            {
+              allocation_id: 900 + id,
+              quantity: target.allocated,
+              source: 'STOCKROOM',
+              is_manual_override: false,
+              exceeds_demand: false,
+              allocation_reason: null,
+              station_id: 'STOCK-1',
+              allocated_at: '2026-08-02T08:00:00Z',
+              actor_user: null,
+            },
+          ],
+        },
+      ],
+    });
+  }
+  if (url.pathname === '/api/allocations/corrections' && method === 'POST') {
+    const sent = JSON.parse(body ?? '{}') as Record<string, unknown>;
+    corrections.push(sent);
+    const target = workOrders
+      .flatMap((w) => w.lines)
+      .find((l) => l.id === Number(sent.work_order_demand_id));
+    if (target) target.allocated += Number(sent.quantity);
+    return json(
+      {
+        kind: 'ALLOCATE_BEYOND_DEMAND',
+        part_number: sent.part_number,
+        allocation_quantity: sent.quantity,
+        rows: [],
+        completed_work_order_ids: [],
+        reopened_work_order_ids: [],
+        device_event_id: sent.device_event_id,
+      },
+      201,
+    );
+  }
   if (url.pathname === '/api/health') return json({ status: 'ok' });
   if (url.pathname === '/api/policies/due-soon') {
     return json({
@@ -352,6 +421,8 @@ function line(
 
 beforeEach(() => {
   requests = [];
+  sessionPermissions = PERMISSIONS;
+  corrections = [];
   // One active Work Order, three recently completed ones (on time /
   // late / undated internal), one completed long ago, and 55 generated
   // completions in between so the 50-row page has a second page.
@@ -415,7 +486,11 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const response = handle(String(input), init?.method ?? 'GET');
+      const response = handle(
+        String(input),
+        init?.method ?? 'GET',
+        typeof init?.body === 'string' ? init.body : undefined,
+      );
       if (holdContinuations && String(input).includes('cursor=')) {
         return new Promise<Response>((resolve) => {
           heldContinuations.push(() => resolve(response));
@@ -992,6 +1067,79 @@ test('a row opens the read-only Work Order Details with the Done date and the al
 
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('FC-7: the details of a completed Work Order keep the allocation actions for allocation holders — a correction reloads the history', async () => {
+  await renderCompleted();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open Work Order 006996' }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('81-1042');
+  // Demand, entry and release stay read-only (OD-S5-3 option A).
+  expect(screen.queryByRole('button', { name: 'Save demand' })).toBeNull();
+  expect(
+    screen.queryByRole('button', { name: /Release to production/ }),
+  ).toBeNull();
+  expect(dialog).toHaveTextContent(
+    'Users who may adjust allocation can still allocate beyond demand or reverse an allocation here.',
+  );
+  expect(
+    within(dialog).getByRole('button', {
+      name: 'Reverse an allocation of 81-1042 on this line',
+    }),
+  ).toBeEnabled();
+  fireEvent.click(
+    within(dialog).getByRole('button', {
+      name: 'Allocate stocked 81-1042 to this line',
+    }),
+  );
+  const allocation = await screen.findByRole('dialog', {
+    name: 'Allocate from stock',
+  });
+  fireEvent.click(
+    await within(allocation).findByRole('button', {
+      name: 'Allocate beyond demand…',
+    }),
+  );
+  fireEvent.change(within(allocation).getByLabelText(/^Reason/), {
+    target: { value: 'customer accepted overage' },
+  });
+  const historyReads = completedRequests().length;
+  fireEvent.click(
+    within(allocation).getByRole('button', { name: 'Record correction' }),
+  );
+  expect(
+    await screen.findByText(
+      '✓ 1 pcs of 81-1042 allocated beyond demand to Work Order 006996 — correction recorded.',
+    ),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(dialog).toHaveTextContent('Allocated 7/6 · 1 beyond demand'),
+  );
+  expect(completedRequests().length).toBeGreaterThan(historyReads);
+  expect(corrections).toHaveLength(1);
+});
+
+test('FC-7: without Edit Work Order Allocation the completed details offer no allocation action', async () => {
+  sessionPermissions = PERMISSIONS.filter(
+    (key) => key !== 'EDIT_WORK_ORDER_ALLOCATION',
+  );
+  await renderCompleted();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open Work Order 006996' }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('81-1042');
+  expect(
+    within(dialog).queryByRole('button', { name: /^Allocate stocked/ }),
+  ).toBeNull();
+  expect(dialog.querySelectorAll('.wo-table thead th')).toHaveLength(6);
+  expect(dialog).not.toHaveTextContent('Users who may adjust allocation');
 });
 
 /* ============ Entry points on the active list ============ */

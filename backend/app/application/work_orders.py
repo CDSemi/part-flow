@@ -598,7 +598,11 @@ def _guard_released_line_edit(
       binds a line that only carries allocated quantity (Phase 10 —
       ``allocated_quantity`` is the projection the allocation command
       maintains under this same demand row lock, and the caller
-      re-reads the row under the lock before judging it).
+      re-reads the row under the lock before judging it). An edit
+      carrying the UNCHANGED quantity changes nothing and is never
+      judged (Phase 14 slice 5): a line allocated beyond its demand by
+      an authorized correction keeps its other fields editable, and its
+      Qty may only be raised to at least its allocated quantity.
 
     Qty, due date and Job Numbers are otherwise the normal audited
     edit; nothing here touches QuantityFlows, PartMovements, or release
@@ -614,6 +618,8 @@ def _guard_released_line_edit(
     if "requested_quantity" not in edit:
         return
     quantity = _validated_quantity(edit["requested_quantity"])
+    if quantity == demand.requested_quantity:
+        return
     committed = max(released_quantity, demand.allocated_quantity)
     if quantity < committed:
         reason = (
@@ -621,8 +627,9 @@ def _guard_released_line_edit(
             if released_quantity >= demand.allocated_quantity
             else f"{demand.allocated_quantity} pcs are already allocated"
         )
+        verb = "lower" if quantity < demand.requested_quantity else "set"
         raise ConflictError(
-            f"Cannot lower Qty to {quantity} pcs for Part Number"
+            f"Cannot {verb} Qty to {quantity} pcs for Part Number"
             f" '{demand.part_number}': {reason}. Enter {committed} pcs or more."
         )
 

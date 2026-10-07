@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) và slice 5 (Management allocation và correction beyond-demand) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth.
 >
@@ -135,7 +135,9 @@ không sở hữu Movement; Allocation slice sau vẫn tách cả hai.
 - Admin/Manager edit có audit và không chạm Flow/Movement. Sau release chỉ
   `requested_quantity`, `due_date`, `job_numbers` sửa được; quantity không thấp hơn
   `max(released, allocated)`. `request_type`, `requester`, `reason`, `notes` bị
-  từ chối; saved PN không sửa; released line không remove.
+  từ chối; saved PN không sửa; released line không remove. Một edit mang quantity không đổi
+  không bị xét (line được allocate vượt demand bằng correction được cấp quyền vẫn sửa được
+  các field khác).
 
 ---
 
@@ -194,7 +196,7 @@ từ part thứ hai phải confirm active quantity; không merge.
 - `remaining = requested − released` là hard server cap. Demand row lock
   `FOR UPDATE` serialize concurrent release, không thể jointly over-release.
 - Released line edit chỉ quantity/due/Jobs; quantity floor là max(released,
-  allocated). Một invalid `line_edits` làm cả save transaction zero write. Edit và
+  allocated), chỉ xét khi quantity bị đổi. Một invalid `line_edits` làm cả save transaction zero write. Edit và
   release dùng cùng row lock và recompute released quantity, nên bất kể arrival
   order vẫn không thể `released > requested`. Removal vẫn refused, và line đang trên Hot list chỉ được remove với confirmation của §5.
 - Read model expose released/remaining. Work Order chỉ `RELEASED` khi mọi line
@@ -287,6 +289,7 @@ side effect trong transaction. Demand save là transaction trước, riêng bi�
 - Cùng id + khác fingerprint → explicit conflict, không write; đây là client defect.
 - New intent dùng id mới và vẫn chịu active-quantity confirmation.
 - **User khác (Phase 14 slice 3).** Một Management command (release, Management allocation và reversal của nó, Hot list change) bị replay bởi User khác với User đã ghi nó bị từ chối bằng 409 `recorded_by_another_user` và không ghi gì; record tạo trước khi có sign-in, không có User được ghi, được tính là do User khác ghi. Cùng User replay từ session hay browser khác thì replay bình thường. Fingerprint được kiểm tra trước, và identity không bao giờ là một phần của fingerprint.
+- **Correction beyond-demand (Phase 14 slice 5).** Correction là command có kiểu dùng chung namespace `device_event_id` của allocation; fingerprint của nó mang giá trị `command` riêng và không bao giờ mang identity người thực hiện, và việc User khác replay cùng identity bị từ chối như quy tắc trên.
 - Idempotency ở slice chỉ cho release vì đây là command introduce quantity. Demand
   save không cần key; file import tương lai có contract riêng.
 - Online synchronous: server có thể đặt `occurred_at = server_received_at`; không
@@ -344,6 +347,8 @@ trigger; creation có before NULL, update append row mới, không rewrite row c
 **Users và roles (Phase 13, `0028_phase13_users_roles`).** Cấu hình Users và roles được audit với các giá trị `entity_type` bổ sung `User` và `Role`; `entity_id` là id nội bộ dạng text và `actor_reference` vẫn NULL còn `actor_user_id` mang User đã sign-in (Phase 14 slice 2). Mỗi write hiệu lực append đúng một row trong cùng transaction: tạo role là `CREATED` với `before_data` NULL và `after_data` `{name, permissions}` (các permission key sắp theo giá trị); đổi tên role hoặc một delta grant / revoke là một row `UPDATED` với cùng snapshot trước và sau; tạo user là `CREATED` với profile snapshot `{login_name, display_name, role_id, is_active}`; sửa profile user là một row `UPDATED` với snapshot đó trước và sau; đổi avatar của user là row `UPDATED` với `{"avatar": null | digest}` — một digest, không bao giờ là byte ảnh, như với Worker. Mọi write role và user trước hết lấy advisory lock `partflow:user-administration` rồi đọc lại permission của user thực hiện; permission-management guard và số holder là lượt đọc thường dưới lock đó (Phase 14 slice 2). Row role hoặc user được lock tiếp theo, nên các row liên tiếp của một entity tạo thành chuỗi. Write cấu hình có audit lấy `FOR KEY SHARE` trên row `users` của user thực hiện qua foreign key `actor_user_id`: nó chỉ chờ sau việc đổi login name của user đó và không tạo chu trình với các lock ở trên. Command production không bao giờ đọc hay lock `users`, `roles` hoặc `role_permissions`. Ba role được seed không có row `CREATED` (`before_data` của lần sửa đầu là seed). Preference theme được lưu của User (`users.theme_preference`) không có writer ở Phase 13 nên không có row audit nào cho nó. No-op hay write bị từ chối không append gì.
 
 **Thiết bị Scan Station (Phase 14 slice 4, `0030_phase14_station_devices`).** Enroll thiết bị station được audit với giá trị `entity_type` bổ sung `ScanStationDevice`; `entity_id` là id nội bộ của thiết bị dạng text. Phát hành enrollment code append row `CREATED` mang `actor_user_id` của User phát hành; việc kích hoạt của chính station append row `UPDATED` không có User (`actor_user_id` NULL, `metadata.source = "station-activation"`), và kích hoạt một thiết bị thay thế thiết bị khác append thêm một row `UPDATED` cho thiết bị bị thay (`metadata.replaced_by_device_id`); revoke append row `UPDATED` mang User revoke. Code, token hay digest không bao giờ được audit, và `last_seen_at` là metadata liên hệ của thiết bị, không audit. Command của Scan Station đọc các grant của role áp dụng tại Scan Station bằng plain read và không bao giờ lock `users`, `roles` hay `role_permissions`.
+
+**Allocation row là audit record của chính nó (Phase 14 slice 5).** Correction beyond-demand ghi một row `work_order_allocations` append-only (`exceeds_demand`, reason bắt buộc, `actor_user_id`, và các con số trước / requested trong command metadata) và không ghi row `audit_events`; các lần gỡ khỏi Hot list mà nó kích hoạt vẫn được audit như trước.
 
 ---
 
@@ -435,6 +440,8 @@ actor/time/before/after/metadata, `(entity_type,entity_id,id)` index, append-onl
 
 **Thiết bị Scan Station (Phase 14 slice 4, `0030_phase14_station_devices`).** **`scan_station_devices`** — PK `pk_scan_station_devices` `id` (identity); `station_id text NOT NULL` FK `fk_scan_station_devices_station_id_scan_stations` → `scan_stations (station_id)`; `label text NOT NULL` (đã trim, 1–80 ký tự, một rule của Application); `enrollment_code_digest bytea` nullable với UNIQUE `uq_scan_station_devices_enrollment_code_digest` và `ck_scan_station_devices_enrollment_code_digest_length` (`octet_length = 32`); `enrollment_expires_at timestamptz NOT NULL`; `token_digest bytea` nullable với UNIQUE `uq_scan_station_devices_token_digest` và `ck_scan_station_devices_token_digest_length` (`octet_length = 32`); `replaces_device_id integer` nullable FK `fk_scan_station_devices_replaces_device_id_scan_station_devices` → `scan_station_devices (id)`; `issued_at timestamptz NOT NULL DEFAULT now()`; `activated_at`, `last_seen_at`, `revoked_at` timestamptz nullable; `revoked_reason text` nullable. Chỉ lưu digest SHA-256. Row đang chờ giữ digest của code và kích hoạt xóa nó đồng thời đặt digest của token, nên hai thứ không bao giờ cùng tồn tại (`ck_scan_station_devices_code_or_token`) và code đã dùng không thể khớp lại; `ck_scan_station_devices_activation_shape` (có token digest khi và chỉ khi có `activated_at`), `ck_scan_station_devices_revocation_shape` (`revoked_at` khi và chỉ khi có `revoked_reason`), `ck_scan_station_devices_revoked_reason` (`REVOKED`, `REPLACED`), `ck_scan_station_devices_replaced_shape` (`REPLACED` chỉ cho thiết bị đã kích hoạt), `ck_scan_station_devices_last_seen_shape` và `ck_scan_station_devices_no_self_replace`. Application không bao giờ xóa row và không có index phụ. `application_policy` có thêm `scan_station_role_id integer NOT NULL` với `fk_application_policy_scan_station_role_id_roles` → `roles (id)`: role áp dụng tại Scan Station, migration đặt một lần thành role Operator seed (nơi duy nhất resolve một role theo tên; upgrade bị từ chối khi không role nào tên Operator) và không API nào ghi. `ck_audit_events_entity_type` được mở rộng với `ScanStationDevice`. Downgrade của `0030_phase14_station_devices` từ chối khi còn bất kỳ row `scan_station_devices` hay row audit `ScanStationDevice` nào; nếu không thì nó khôi phục CHECK entity-type trước đó và bỏ pointer cùng bảng.
 
+**Correction beyond-demand (Phase 14 slice 5, `0031_phase14_beyond_demand`).** `work_order_allocations` thêm `exceeds_demand boolean NOT NULL DEFAULT false` (mọi row lịch sử giữ `false`) và `ck_work_order_allocations_exceeds_demand_shape` (`NOT exceeds_demand OR (source = 'MANAGEMENT' AND allocation_reason IS NOT NULL AND reverses_allocation_id IS NULL AND station_id IS NULL AND allocated_by_worker_id IS NULL AND actor_user_id IS NOT NULL)`: correction là row Management có reason, không bao giờ là reversal, không bao giờ gán cho Scan Station hay Worker, và luôn được ghi kèm User đã sign-in). Downgrade từ chối khi còn bất kỳ row correction nào; nếu không thì nó bỏ CHECK và cột.
+
 Slice migration không FK tới table không tạo; deferred Station/Machine columns đến
 phase sau. Cross-row invariant (projection/latest Movement, first RECEIVED,
 route-step ownership/mode, audit same transaction, one PN per WO) do transaction
@@ -453,7 +460,7 @@ protocol, reconciliation và concurrency test enforce.
 | Direct Area processing | Phase 7 — implemented, `0008` | derived PROCESSING, không stored mode/column |
 | SPLIT/MERGED partial | Phase 8 — implemented, `0009` | types, flow lifecycle, append-only lineage edge table |
 | Undo/Repair/Scrap/Adjustment | Phase 9 — implemented, `0010` | reason/reversal columns, types/status; complete-command reversal; addition tạo Flow mới; Undo reason policy (`application_policy.undo_reason_required`, Phase 13 `0022_phase13_undo_reason_policy`) bắt buộc `reason` trên row `REVERSED` khi đang bật — do Undo command enforce, không bao giờ bằng CHECK (phụ thuộc cấu hình) |
-| Stockroom/Allocation | Phase 10 — implemented, `0011` | STOCKED/closed flow, completed projection, append-only allocation/reversal; không FK Movement/Flow |
+| Stockroom/Allocation | Phase 10 — implemented, `0011` | STOCKED/closed flow, completed projection, append-only allocation/reversal; không FK Movement/Flow; Phase 14 slice 5 thêm `exceeds_demand` (`0031_phase14_beyond_demand`) |
 | Monitoring read models | Phase 11 | Movement-derived query |
 | Priority/Hot UI | Phase 12 — implemented, `0013_phase12_priority` | không thêm column: `priority_rank` hiện có nhận CHECK dương và UNIQUE (dense `1..N`, §5/§17) sau pre-check từ chối, cùng audit expression index (§17); writer là Hot command và automatic / line-deletion removal (`hot_ranks`), cả hai audit qua `audit_events` (§16) |
 | Full Administration | Phase 13 | master tables đã có từ Phase 3.5; Department display settings và Due Soon policy đã triển khai (`0025_phase13_display_settings`); setting retention period của Movement history đã triển khai (`0027_phase13_retention_period`) — việc thực thi vẫn ở Phase 16 |

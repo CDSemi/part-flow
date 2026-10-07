@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from alembic import command
 from app import cli
-from app.application import production_release, projections, reconciliation
+from app.application import allocations, production_release, projections, reconciliation
 from app.core.config import get_settings
 from app.domain.enums import MovementType, QuantityFlowStatus
 from app.infrastructure import models
@@ -1609,6 +1609,94 @@ def test_allocated_beyond_requested(case: Case, run: Callable[..., Run]) -> None
     quantity = requested - allocated + 1
     assert quantity <= _available_stock(case, _PN_B)
     _insert_allocation(case, part_number=_PN_B, line="L2", quantity=quantity)
+    result = run(case.url)
+    _assert_failing(result, {"f": {"ALLOCATED_EXCEEDS_REQUESTED", "ALLOCATED_QUANTITY_MISMATCH"}})
+    assert _entity(_one(result.report, "ALLOCATED_EXCEEDS_REQUESTED")) == (
+        "WorkOrderDemand",
+        s.demands["L2"],
+    )
+
+
+def _correct(case: Case, part_number: str, line: str, quantity: int) -> int:
+    """An authorized beyond-demand correction recorded through the
+    Application command itself (Phase 14 slice 5) — never by SQL."""
+    actor = int(case.scalar("SELECT min(id) FROM users"))
+    with Session(case.engine) as session:
+        result = allocations.allocate_beyond_demand(
+            session,
+            actor_user_id=actor,
+            part_number=part_number,
+            work_order_demand_id=case.scenario.demands[line],
+            quantity=quantity,
+            reason="customer accepted overage",
+            device_event_id=_event(),
+        )
+    assert result.created
+    return result.rows[0].allocation_id
+
+
+def test_authorized_beyond_demand_corrections_are_clean(
+    case: Case, run: Callable[..., Run]
+) -> None:
+    """RC-1: a correction on an open Work Order (WO1 line L2) and on a
+    completed one (WO2) leaves checks (e) and (f) clean — no
+    ALLOCATED_EXCEEDS_REQUESTED, no COMPLETED_AT_MISMATCH."""
+    s = case.scenario
+    requested, allocated = _demand(case, "L2")
+    shortage = requested - allocated
+    assert shortage + 1 <= _available_stock(case, _PN_B)
+    _correct(case, _PN_B, "L2", shortage + 1)
+    done = case.scalar(
+        "SELECT completed_at FROM work_orders WHERE id = :id", id=s.work_orders["WO2"]
+    )
+    assert done is not None and _available_stock(case, _PN_E) >= 1
+    _correct(case, _PN_E, "WO2", 1)
+    assert (
+        case.scalar("SELECT completed_at FROM work_orders WHERE id = :id", id=s.work_orders["WO2"])
+        == done
+    )
+    result = run(case.url)
+    _assert_failing(result, {}, exit_code=0)
+
+
+def test_only_the_authorized_excess_is_excused(case: Case, run: Callable[..., Run]) -> None:
+    """RC-1: beside a correction, an unflagged excess row is still
+    ALLOCATED_EXCEEDS_REQUESTED (C-f6 unchanged)."""
+    s = case.scenario
+    requested, allocated = _demand(case, "L2")
+    # The correction excuses its own quantity; unflagged rows beyond the
+    # requested quantity by themselves are still reported.
+    correction = requested - allocated + 1
+    _correct(case, _PN_B, "L2", correction)
+    excess = requested - allocated + 1
+    assert allocated + excess > requested
+    assert excess <= _available_stock(case, _PN_B)
+    _insert_allocation(case, part_number=_PN_B, line="L2", quantity=excess)
+    result = run(case.url)
+    _assert_failing(result, {"f": {"ALLOCATED_EXCEEDS_REQUESTED", "ALLOCATED_QUANTITY_MISMATCH"}})
+    assert _entity(_one(result.report, "ALLOCATED_EXCEEDS_REQUESTED")) == (
+        "WorkOrderDemand",
+        s.demands["L2"],
+    )
+
+
+def test_a_reversed_correction_excuses_nothing(case: Case, run: Callable[..., Run]) -> None:
+    """RC-1: once the correction is reversed, an excess is a finding again."""
+    s = case.scenario
+    requested, allocated = _demand(case, "L2")
+    correction = _correct(case, _PN_B, "L2", requested - allocated + 1)
+    actor = int(case.scalar("SELECT min(id) FROM users"))
+    with Session(case.engine) as session:
+        allocations.reverse_allocation(
+            session,
+            allocation_id=correction,
+            reason="recorded in error",
+            device_event_id=_event(),
+            actor_user_id=actor,
+        )
+    assert _demand(case, "L2") == (requested, allocated)
+    excess = requested - allocated + 1
+    _insert_allocation(case, part_number=_PN_B, line="L2", quantity=excess)
     result = run(case.url)
     _assert_failing(result, {"f": {"ALLOCATED_EXCEEDS_REQUESTED", "ALLOCATED_QUANTITY_MISMATCH"}})
     assert _entity(_one(result.report, "ALLOCATED_EXCEEDS_REQUESTED")) == (

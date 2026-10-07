@@ -71,6 +71,11 @@ export interface DemandLineDraft {
    * takes it off the Hot list (the server re-checks the current rank). */
   hotRank: number | null;
   statusLabel: string;
+  /** The saved requested quantity, or null for an unsaved draft line.
+   * An unchanged Qty is never judged against the floor: a line
+   * allocated beyond its demand by an authorized correction keeps its
+   * other fields editable (Phase 14 slice 5). */
+  savedQty: number | null;
 }
 
 export type LineField = 'pn' | 'qty' | 'due';
@@ -113,6 +118,16 @@ function belowCommittedMessage(line: DemandLineDraft): string {
   return `≥ ${committedQuantity(line)} pcs ${reason}`;
 }
 
+/** A changed Qty below the committed quantity — the saved Qty itself
+ * is never an error, even when an authorized correction allocated
+ * beyond it. */
+function belowCommitted(line: DemandLineDraft, quantity: number): boolean {
+  return (
+    (line.savedQty === null || quantity !== line.savedQty) &&
+    quantity < committedQuantity(line)
+  );
+}
+
 /**
  * The Qty error of one line as it is being typed: a line may never be
  * taken below what production has already committed to it
@@ -127,7 +142,7 @@ export function qtyEntryError(
   raw: string,
 ): string | null {
   if (!isPositiveInteger(raw)) return null;
-  return Number.parseInt(raw, 10) < committedQuantity(line)
+  return belowCommitted(line, Number.parseInt(raw, 10))
     ? belowCommittedMessage(line)
     : null;
 }
@@ -155,6 +170,7 @@ export function createDraftLine(
     hasAllocationHistory: false,
     hotRank: null,
     statusLabel: 'Draft (unsaved)',
+    savedQty: null,
     ...init,
   };
 }
@@ -190,6 +206,7 @@ export function draftFromDemand(
     isNewPn: false,
     type: demand.requestType,
     qty: String(demand.requestedQuantity),
+    savedQty: demand.requestedQuantity,
     due: demand.dueDate ?? '',
     // A line still holding the WO due date follows later WO-due edits;
     // a line with its own date (or explicit No due date) keeps it.
@@ -303,7 +320,7 @@ export function validateDemandLines(
         field: 'qty',
         message: 'quantity must be a positive whole number',
       });
-    } else if (Number.parseInt(line.qty, 10) < committedQuantity(line)) {
+    } else if (belowCommitted(line, Number.parseInt(line.qty, 10))) {
       errors.push({
         lineId: line.id,
         field: 'qty',

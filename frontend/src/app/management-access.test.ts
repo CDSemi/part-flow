@@ -52,8 +52,12 @@ test('FM-3: each sub view opens for View production data or a key its actions us
 test('FM-3: each sub view names the keys of the changes it hosts', () => {
   expect(MANAGEMENT_WRITE_ACCESS).toEqual({
     'area-board': [],
-    'work-orders': ['MANAGE_WORK_ORDERS', 'EDIT_WORK_ORDER_DEMAND'],
-    tracking: [],
+    'work-orders': [
+      'MANAGE_WORK_ORDERS',
+      'EDIT_WORK_ORDER_DEMAND',
+      'EDIT_WORK_ORDER_ALLOCATION',
+    ],
+    tracking: ['EDIT_WORK_ORDER_ALLOCATION'],
     priority: ['SET_DEMAND_PRIORITY', 'REORDER_HOT_ITEMS'],
     'planned-routes': ['MANAGE_ROUTE_TEMPLATES'],
     'part-numbers': ['MANAGE_PART_NUMBER_MASTER'],

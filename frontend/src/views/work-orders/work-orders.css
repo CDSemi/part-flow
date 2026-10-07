@@ -793,6 +793,15 @@
   align-items: center;
 }
 
+/* Allocation actions of a saved line (GUI_DESIGN §11.6): below the
+   release / removal actions, on every Work Order state. */
+.wo-alloc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .pr-x:disabled {
   opacity: 0.35;
   cursor: not-allowed;

@@ -2,9 +2,13 @@ import { expect, test } from 'vitest';
 
 import type { WorkOrderDemand } from '../../api/work-orders';
 import {
+  buildLineEdits,
   createDraftLine,
+  draftFromDemand,
   hotListExitNotices,
   lineRemoveRule,
+  qtyEntryError,
+  validateDemandLines,
 } from './demand-lines';
 
 // The demand-line removal rule is the presentation mirror of the
@@ -139,4 +143,40 @@ test('a save notice names only the lines that left the Hot list fully allocated'
   expect(hotListExitNotices(previous, fresh)).toEqual([
     '🔥 A-100 left the Hot list (was #2) — the line is now fully allocated.',
   ]);
+});
+
+// Phase 14 slice 5: a line allocated beyond its demand by an authorized
+// correction (10 requested, 12 allocated) keeps its other fields
+// editable — only a CHANGED Qty is judged against the floor.
+
+test('FC-8: an over-allocated line with its saved Qty passes the entry check and the save check', () => {
+  const demand = savedDemand(1, 'A-100', {
+    allocatedQuantity: 12,
+    hasAllocationHistory: true,
+  });
+  const line = draftFromDemand(demand, null);
+  expect(line.savedQty).toBe(10);
+  expect(qtyEntryError(line, '10')).toBeNull();
+  expect(validateDemandLines([line])).toEqual([]);
+
+  // A changed Qty below the allocated quantity still errors.
+  expect(qtyEntryError(line, '11')).toBe('≥ 12 pcs allocated');
+  expect(validateDemandLines([{ ...line, qty: '11' }])).toEqual([
+    { lineId: line.id, field: 'qty', message: '≥ 12 pcs allocated' },
+  ]);
+  expect(qtyEntryError(line, '12')).toBeNull();
+
+  // Saving another field sends no requested_quantity.
+  expect(
+    buildLineEdits(
+      [{ ...line, due: '2026-10-01', dueTouched: true }],
+      [demand],
+    ),
+  ).toEqual([{ id: 1, dueDate: '2026-10-01' }]);
+});
+
+test('FC-8: an unsaved draft line is always judged — it has no saved Qty', () => {
+  const draft = createDraftLine({ due: '', allocatedQuantity: 5 });
+  expect(draft.savedQty).toBeNull();
+  expect(qtyEntryError(draft, '4')).toBe('≥ 5 pcs allocated');
 });

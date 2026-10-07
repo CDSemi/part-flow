@@ -309,6 +309,17 @@ AREA_FIXED_WORKER_SQL = "(worker_identification_mode = 'FIXED') = (fixed_worker_
 MOVEMENT_WORKER_STATION_SQL = "worker_id IS NULL OR station_id IS NOT NULL"
 ALLOCATION_WORKER_STATION_SQL = "allocated_by_worker_id IS NULL OR station_id IS NOT NULL"
 
+# The authorized beyond-demand correction (Phase 14 slice 5; PROJECT_PROFILE
+# §8.12): a row recorded `exceeds_demand` is a Management row with a
+# reason and a signed-in User, never a reversal and never attributed to a
+# Scan Station or a Worker. Repeated verbatim by migration
+# `0031_phase14_beyond_demand`.
+ALLOCATION_EXCEEDS_DEMAND_SQL = (
+    "NOT exceeds_demand OR (source = 'MANAGEMENT' AND allocation_reason IS NOT NULL"
+    " AND reverses_allocation_id IS NULL AND station_id IS NULL"
+    " AND allocated_by_worker_id IS NULL AND actor_user_id IS NOT NULL)"
+)
+
 # Worker Session timeout policy (Phase 13 slice 4; owner decision OD-2):
 # whole minutes, 1-720 for the global default and for every per-Area
 # override (NULL = use the default), default 15. Repeated verbatim by
@@ -2112,13 +2123,17 @@ class WorkOrderAllocation(Base):
     rows under one id, replayed as a whole on a transport retry.
     `station_id` names the Stockroom Scan Station of a receiving
     confirmation (NULL for a Management allocation or adjustment);
-    `actor_user_id` is the signed-in User of a Management allocation or
-    reversal, derived by the server from the session, never from a
-    request body (Phase 14 slice 3; NULL on station rows). The legacy
+    `actor_user_id` is the signed-in User of a Management allocation,
+    reversal or beyond-demand correction, derived by the server from the
+    session, never from a request body (Phase 14 slice 3; NULL on station
+    rows). The legacy
     text column (`actor_reference`) is kept for history, written no more
     and never backfilled; `allocated_by_worker_id` (Phase 13)
     is the Worker identified at the Stockroom station; NULL for
-    Management rows.
+    Management rows. `exceeds_demand` (Phase 14 slice 5) marks the one
+    row kind allowed beyond a demand's remaining shortage — the
+    authorized beyond-demand correction (CHECK: Management, reasoned,
+    a signed-in User, never a reversal).
     """
 
     __tablename__ = "work_order_allocations"
@@ -2139,6 +2154,11 @@ class WorkOrderAllocation(Base):
     # suggestion the server computed at confirmation time (an Operator
     # adjustment, PROJECT_PROFILE §18) — audit context only.
     is_manual_override: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    # True only on a row recorded by the authorized beyond-demand
+    # correction (Phase 14 slice 5, PROJECT_PROFILE §8.12): the intent when
+    # recorded, never recomputed — a later reversal of other rows may
+    # leave it within demand.
+    exceeds_demand: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     allocation_reason: Mapped[str | None] = mapped_column(Text)
     reverses_allocation_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -2189,6 +2209,10 @@ class WorkOrderAllocation(Base):
         CheckConstraint(
             ALLOCATION_WORKER_STATION_SQL,
             name=conv("ck_work_order_allocations_worker_requires_station"),
+        ),
+        CheckConstraint(
+            ALLOCATION_EXCEEDS_DEMAND_SQL,
+            name=conv("ck_work_order_allocations_exceeds_demand_shape"),
         ),
         UniqueConstraint(
             "reverses_allocation_id", name="uq_work_order_allocations_reverses_allocation_id"

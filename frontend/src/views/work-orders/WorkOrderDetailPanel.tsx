@@ -10,6 +10,11 @@ import {
 } from '../../api/work-orders';
 import type { WorkOrderDetail } from '../../api/work-orders';
 import { useSession } from '../../app/session-context';
+import { AllocationAdjustmentDialog } from '../../components/AllocationAdjustmentDialog';
+import {
+  OUTCOME_UNKNOWN_AFTER_CLOSE,
+  SAVE_DEMAND_FIRST,
+} from '../../components/allocation-adjustment';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { TypeChip } from '../../components/indicators';
@@ -109,6 +114,13 @@ const LINE_DUE_DATES_KEPT =
  * adding and removing lines) need Edit Work Order Demand. What the user
  * may not change renders as text, its controls are absent, and a save
  * sends only what the user could change.
+ *
+ * Allocation (Phase 14 slice 5): a user holding Edit Work Order
+ * Allocation finds `Allocate from stock…` and `Reverse…` on every saved
+ * line of an Open, Released or Completed Work Order (the shared
+ * `Adjust WO Allocation` dialog, GUI_DESIGN §11.6) — never while the
+ * demand draft has unsaved changes: allocation works on the saved
+ * demand.
  */
 export function WorkOrderDetailPanel({
   workOrderId,
@@ -131,11 +143,13 @@ export function WorkOrderDetailPanel({
   // What the user may change, fixed when the dialog opens: an open
   // editor never changes under a later change of the sign-in.
   const { can } = useSession();
-  const [{ canEditHeader, canEditDemand, pnReadOnly }] = useState(() => ({
-    canEditHeader: can('MANAGE_WORK_ORDERS'),
-    canEditDemand: can('EDIT_WORK_ORDER_DEMAND'),
-    pnReadOnly: !can('MANAGE_PART_NUMBER_MASTER'),
-  }));
+  const [{ canEditHeader, canEditDemand, canAdjustAllocation, pnReadOnly }] =
+    useState(() => ({
+      canEditHeader: can('MANAGE_WORK_ORDERS'),
+      canEditDemand: can('EDIT_WORK_ORDER_DEMAND'),
+      canAdjustAllocation: can('EDIT_WORK_ORDER_ALLOCATION'),
+      pnReadOnly: !can('MANAGE_PART_NUMBER_MASTER'),
+    }));
   // The dialog owns its detail load so a committed save can adopt the
   // PATCH response as the fresh server state (never a simulated local
   // success).
@@ -182,6 +196,11 @@ export function WorkOrderDetailPanel({
   // released state (never a session-local flag).
   const [releaseDialog, setReleaseDialog] =
     useState<ReleaseRequestContext | null>(null);
+  // The allocation dialog of one saved demand line (§11.6).
+  const [allocationDialog, setAllocationDialog] = useState<{
+    demandId: number;
+    step: 'allocate' | 'reverse';
+  } | null>(null);
   // The audited external-number entry of an internal Work Order
   // (PROJECT_PROFILE §7): blank = no change; a non-blank entry travels
   // VERBATIM with Save demand.
@@ -313,6 +332,10 @@ export function WorkOrderDetailPanel({
   // releases (header), its lines (demand).
   const headerEditable = editable && canEditHeader;
   const linesEditable = editable && canEditDemand;
+  // The row actions column: release and removal (Open only), and the
+  // allocation actions on every Work Order state.
+  const rowActionsVisible =
+    headerEditable || linesEditable || canAdjustAllocation;
   const woDisplay = detail.workOrderNumber ?? '—';
   const internal = detail.workOrderNumber === null;
 
@@ -705,7 +728,7 @@ export function WorkOrderDetailPanel({
                   <th>Due date</th>
                   <th>Job Numbers</th>
                   <th>Status</th>
-                  {headerEditable || linesEditable ? <th></th> : null}
+                  {rowActionsVisible ? <th></th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -954,14 +977,19 @@ export function WorkOrderDetailPanel({
                         </span>
                         {line.allocatedQuantity > 0 ? (
                           // Allocation from stocked quantity (Phase 10):
-                          // server-owned, shown as it is.
+                          // server-owned, shown as it is; an authorized
+                          // correction beyond the SAVED demand says so.
                           <div className="sub mono-sm">
                             Allocated {line.allocatedQuantity}/
                             {parseInt(line.qty || '0', 10) || 0}
+                            {line.savedQty !== null &&
+                            line.allocatedQuantity > line.savedQty
+                              ? ` · ${line.allocatedQuantity - line.savedQty} beyond demand`
+                              : ''}
                           </div>
                         ) : null}
                       </td>
-                      {headerEditable || linesEditable ? (
+                      {rowActionsVisible ? (
                         <td data-label="" className="wo-cell-actions">
                           <div className="wo-rowactions">
                             {headerEditable && line.demandId !== null ? (
@@ -1038,6 +1066,42 @@ export function WorkOrderDetailPanel({
                           {linesEditable && removeRule === 'blocked' ? (
                             <div className="bc">
                               {RELEASED_REMOVE_EXPLANATION}
+                            </div>
+                          ) : null}
+                          {canAdjustAllocation && line.demandId !== null ? (
+                            <div className="wo-alloc-actions">
+                              <button
+                                className="rel-btn"
+                                disabled={writeBlocked || busy || dirty}
+                                title={dirty ? SAVE_DEMAND_FIRST : undefined}
+                                aria-label={`Allocate stocked ${line.pn ?? ''} to this line`}
+                                onClick={() => {
+                                  if (line.demandId === null || dirty) return;
+                                  setAllocationDialog({
+                                    demandId: line.demandId,
+                                    step: 'allocate',
+                                  });
+                                }}
+                              >
+                                Allocate from stock…
+                              </button>
+                              {line.allocatedQuantity > 0 ? (
+                                <button
+                                  className="rel-btn"
+                                  disabled={writeBlocked || busy || dirty}
+                                  title={dirty ? SAVE_DEMAND_FIRST : undefined}
+                                  aria-label={`Reverse an allocation of ${line.pn ?? ''} on this line`}
+                                  onClick={() => {
+                                    if (line.demandId === null || dirty) return;
+                                    setAllocationDialog({
+                                      demandId: line.demandId,
+                                      step: 'reverse',
+                                    });
+                                  }}
+                                >
+                                  Reverse…
+                                </button>
+                              ) : null}
                             </div>
                           ) : null}
                         </td>
@@ -1126,6 +1190,9 @@ export function WorkOrderDetailPanel({
                 allocated from stocked quantity. It is read-only history: no
                 edit, removal or release. Later work is a new Work Order Demand;
                 an audited allocation adjustment reopens it.
+                {canAdjustAllocation
+                  ? ' Users who may adjust allocation can still allocate beyond demand or reverse an allocation here.'
+                  : null}
               </>
             ) : !linesRestricted ? null : (
               <>
@@ -1205,6 +1272,35 @@ export function WorkOrderDetailPanel({
             showNotice(
               `✓ ${result.partNumber} released to production × ${result.quantity} · Quantity Flow #${result.quantityFlowId}.`,
             );
+          }}
+        />
+      ) : null}
+
+      {allocationDialog ? (
+        <AllocationAdjustmentDialog
+          scope={{ workOrderDemandId: allocationDialog.demandId }}
+          start={{
+            step: allocationDialog.step,
+            workOrderDemandId: allocationDialog.demandId,
+          }}
+          writeBlocked={writeBlocked}
+          onClose={(outcomeUnknown) => {
+            setAllocationDialog(null);
+            if (!outcomeUnknown) return;
+            // The last submission may have been recorded: show the
+            // server's state, never a guess.
+            retryLoad();
+            onChanged();
+            showNotice(OUTCOME_UNKNOWN_AFTER_CLOSE);
+          }}
+          onCommitted={(_result, notice) => {
+            setAllocationDialog(null);
+            // Allocation and completion come back from the server —
+            // completion may move the Work Order between the active
+            // list and the Completed Work Orders page.
+            retryLoad();
+            onChanged();
+            showNotice(notice);
           }}
         />
       ) : null}

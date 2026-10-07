@@ -102,11 +102,14 @@ function ActiveWorkOrdersView() {
   const writeBlocked = status !== 'connected';
   const { showNotice, noticeElement } = useToastNotice();
   // Creating a Work Order needs Create and edit Work Orders; a user who
-  // may neither create/edit Work Orders nor edit demand only reads
-  // (Phase 14 slice 3). The server checks every write itself.
+  // may neither create/edit Work Orders, edit demand nor adjust allocation
+  // only reads (Phase 14 slices 3 and 5). The server checks every write.
   const { can } = useSession();
   const canCreate = can('MANAGE_WORK_ORDERS');
-  const viewOnly = !canCreate && !can('EDIT_WORK_ORDER_DEMAND');
+  const viewOnly =
+    !canCreate &&
+    !can('EDIT_WORK_ORDER_DEMAND') &&
+    !can('EDIT_WORK_ORDER_ALLOCATION');
 
   // Selected Work Order — its details open as a modal dialog over the
   // list (GUI_DESIGN §11.2); the list stays mounted and the URL never

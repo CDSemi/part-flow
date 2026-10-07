@@ -1793,10 +1793,11 @@ def test_identity_stays_out_of_every_business_rule() -> None:
         ), path.name
     allocations = (_APPLICATION_DIR / "allocations.py").read_text(encoding="utf-8")
     # Only the confirmation's row constructor names the allocation identity
-    # column; the Management-only reversal writes none (Phase 14 slice 3).
+    # column; the Management-only reversal (Phase 14 slice 3) and
+    # beyond-demand correction (slice 5) write none.
     assert allocations.count("allocated_by_worker_id=identity.worker_id") == 1
-    assert allocations.count("allocated_by_worker_id=None") == 1
-    assert len(re.findall(r"\ballocated_by_worker_id\b", allocations)) == 3  # + docstring
+    assert allocations.count("allocated_by_worker_id=None") == 2
+    assert len(re.findall(r"\ballocated_by_worker_id\b", allocations)) == 4  # + docstring
     undo = (_APPLICATION_DIR / "undo.py").read_text(encoding="utf-8")
     # The Undo command never reads the original's Worker: only the preview does.
     assert len(re.findall(r"\.worker_id\b", undo)) == 1

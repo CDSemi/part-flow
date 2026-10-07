@@ -6,10 +6,11 @@ verifies what `0029_phase14_sign_in` adds (IMPLEMENTATION_ROADMAP
 Phase 14; PROJECT_PROFILE §7 User; owner decisions OD-P1–OD-P5,
 OD-P17) — pinned to `0029` since slice 4 added the next revision — and
 what `0030_phase14_station_devices` adds (owner decisions OD-P6,
-OD-S4-1):
+OD-S4-1) — pinned to `0030` since slice 5 added the next revision — and
+what `0031_phase14_beyond_demand` adds (owner decisions OD-P12/P13):
 
-- exact head boundary: `0030_phase14_station_devices` is the single
-  head (the 0029 cases run against `0029` explicitly);
+- exact head boundary: `0031_phase14_beyond_demand` is the single
+  head (the 0029 and 0030 cases run against their own revision);
 - the sign-in policy columns on `application_policy` (types, server
   defaults, the seeded row's values) with their exact range CHECKs;
 - the `user_credentials` and `user_sessions` shapes with their exact
@@ -33,7 +34,14 @@ OD-S4-1):
   parity with the model constants, models↔migration metadata parity at
   head; up/down/up on a clean head; the downgrade refuses with a device
   row and, separately, with a `ScanStationDevice` audit row; the upgrade
-  refuses (exact message) when no role is named Operator.
+  refuses (exact message) when no role is named Operator;
+- 0031: `work_order_allocations.exceeds_demand` (boolean, NOT NULL,
+  default false) and `ck_work_order_allocations_exceeds_demand_shape`
+  with literal parity and each of its refusals, models↔migration
+  metadata parity at head; pre-0031 rows (a station allocation with a
+  Worker, Management allocations with and without a User, a reversal)
+  read false across the upgrade and survive a clean downgrade; the
+  downgrade refuses (exact message) while a correction row exists.
 """
 
 import functools
@@ -60,10 +68,12 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0028_phase13_users_roles"
 _SIGN_IN_REVISION = "0029_phase14_sign_in"
 _DEVICES_REVISION = "0030_phase14_station_devices"
-_HEAD_REVISION = _DEVICES_REVISION
+_CORRECTION_REVISION = "0031_phase14_beyond_demand"
+_HEAD_REVISION = _CORRECTION_REVISION
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261006_0029_phase14_sign_in.py"
 _DEVICES_MIGRATION_FILE = _VERSIONS_DIR / "20261007_0030_phase14_station_devices.py"
+_CORRECTION_MIGRATION_FILE = _VERSIONS_DIR / "20261007_0031_phase14_beyond_demand.py"
 _TEMPLATE_DATABASE = "partflow_test_phase14_template"
 _DEVICES_TEMPLATE_DATABASE = "partflow_test_phase14_devices_template"
 _ACTOR_TABLES = ("audit_events", "machine_lifecycle_events", "work_order_allocations")
@@ -611,13 +621,14 @@ def _load_devices_migration() -> ModuleType:
 
 @pytest.fixture(scope="module")
 def devices_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → 0029 → head through real Alembic runs."""
+    """Temporary database migrated 0030 → 0029 → 0030 through real Alembic runs
+    (the 0030 cases are pinned to their own boundary)."""
     name = "partflow_test_phase14_devices_schema"
     _create_temp_database(admin_engine, name)
     config = _alembic_config(_url(name))
-    command.upgrade(config, "head")
+    command.upgrade(config, _DEVICES_REVISION)
     command.downgrade(config, _SIGN_IN_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, _DEVICES_REVISION)
     engine = create_engine(_url(name))
     yield engine
     engine.dispose()
@@ -626,7 +637,7 @@ def devices_engine(admin_engine: Engine) -> Iterator[Engine]:
 
 @pytest.fixture
 def devices_connection(devices_engine: Engine) -> Iterator[Connection]:
-    """Per-test connection at head whose transaction is always rolled back."""
+    """Per-test connection at 0030 whose transaction is always rolled back."""
     with devices_engine.connect() as conn:
         transaction = conn.begin()
         yield conn
@@ -636,7 +647,7 @@ def devices_connection(devices_engine: Engine) -> Iterator[Connection]:
 @pytest.fixture(scope="module")
 def devices_template(admin_engine: Engine) -> Iterator[str]:
     _create_temp_database(admin_engine, _DEVICES_TEMPLATE_DATABASE)
-    command.upgrade(_alembic_config(_url(_DEVICES_TEMPLATE_DATABASE)), "head")
+    command.upgrade(_alembic_config(_url(_DEVICES_TEMPLATE_DATABASE)), _DEVICES_REVISION)
     yield _DEVICES_TEMPLATE_DATABASE
     _drop_temp_database(admin_engine, _DEVICES_TEMPLATE_DATABASE)
 
@@ -786,16 +797,6 @@ def test_device_migration_literals_repeat_the_model_constants() -> None:
     assert models.SCAN_STATION_DEVICE_LABEL_MAX == 80
 
 
-def test_models_metadata_matches_the_migrated_schema(devices_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with devices_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 def test_device_rows_are_refused_when_malformed(devices_connection: Connection) -> None:
     connection = devices_connection
     station = _insert_station(connection)
@@ -890,7 +891,7 @@ def test_clean_device_downgrade_restores_the_sign_in_boundary(
                 )
             ).scalar_one()
         assert "ScanStationDevice" not in str(check)
-        command.upgrade(config, "head")
+        command.upgrade(config, _DEVICES_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _DEVICES_REVISION
     finally:
@@ -953,3 +954,281 @@ def test_the_upgrade_refuses_without_an_operator_role(admin_engine: Engine) -> N
     finally:
         engine.dispose()
         _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# 0031 — the authorized beyond-demand correction (Phase 14 slice 5)
+# ---------------------------------------------------------------------------
+
+_EXCEEDS_DEMAND_CHECK = "ck_work_order_allocations_exceeds_demand_shape"
+_CORRECTION_TEMPLATE_DATABASE = "partflow_test_phase14_correction_template"
+
+
+def _load_correction_migration() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "phase14_beyond_demand_migration", _CORRECTION_MIGRATION_FILE
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def correction_engine(admin_engine: Engine) -> Iterator[Engine]:
+    """Temporary database migrated head → 0030 → head through real Alembic runs."""
+    name = "partflow_test_phase14_correction_schema"
+    _create_temp_database(admin_engine, name)
+    config = _alembic_config(_url(name))
+    command.upgrade(config, "head")
+    command.downgrade(config, _DEVICES_REVISION)
+    command.upgrade(config, "head")
+    engine = create_engine(_url(name))
+    yield engine
+    engine.dispose()
+    _drop_temp_database(admin_engine, name)
+
+
+@pytest.fixture
+def correction_connection(correction_engine: Engine) -> Iterator[Connection]:
+    """Per-test connection at head whose transaction is always rolled back."""
+    with correction_engine.connect() as conn:
+        transaction = conn.begin()
+        yield conn
+        transaction.rollback()
+
+
+@pytest.fixture(scope="module")
+def correction_template(admin_engine: Engine) -> Iterator[str]:
+    _create_temp_database(admin_engine, _CORRECTION_TEMPLATE_DATABASE)
+    command.upgrade(_alembic_config(_url(_CORRECTION_TEMPLATE_DATABASE)), "head")
+    yield _CORRECTION_TEMPLATE_DATABASE
+    _drop_temp_database(admin_engine, _CORRECTION_TEMPLATE_DATABASE)
+
+
+@pytest.fixture
+def correction_head_database(admin_engine: Engine, correction_template: str) -> Iterator[URL]:
+    name = "partflow_test_phase14_correction_downgrade"
+    _create_temp_database(admin_engine, name, template=correction_template)
+    yield _url(name)
+    _drop_temp_database(admin_engine, name)
+
+
+def _insert_demand(connection: Connection, part_number: str = "PN-BD") -> int:
+    work_order = _scalar_id(
+        connection, "INSERT INTO work_orders (received_date) VALUES (current_date) RETURNING id"
+    )
+    return _scalar_id(
+        connection,
+        "INSERT INTO work_order_demands (work_order_id, part_number, request_type,"
+        " requested_quantity) VALUES (:work_order, :pn, 'NEW', 10) RETURNING id",
+        work_order=work_order,
+        pn=part_number,
+    )
+
+
+def _insert_allocation(connection: Connection, demand: int, event: str, **columns: object) -> int:
+    """One allocation row through SQL; ``exceeds_demand`` only when given
+    (so the same helper writes pre-0031 rows)."""
+    values: dict[str, object] = {
+        "part_number": "PN-BD",
+        "work_order_demand_id": demand,
+        "quantity": 2,
+        "source": "MANAGEMENT",
+        "device_event_id": event,
+        **columns,
+    }
+    names = ", ".join([*values, "allocated_at"])
+    placeholders = ", ".join([*(f":{name}" for name in values), "now()"])
+    return _scalar_id(
+        connection,
+        f"INSERT INTO work_order_allocations ({names}) VALUES ({placeholders}) RETURNING id",
+        **values,
+    )
+
+
+def test_head_is_the_beyond_demand_revision(correction_engine: Engine) -> None:
+    with correction_engine.connect() as connection:
+        assert _version(connection) == _CORRECTION_REVISION
+    migration = _load_correction_migration()
+    assert migration.revision == _CORRECTION_REVISION
+    assert migration.down_revision == _DEVICES_REVISION
+    assert len(_CORRECTION_REVISION) <= 32
+
+
+def test_exceeds_demand_column_and_check(correction_engine: Engine) -> None:
+    inspector = inspect(correction_engine)
+    columns = {str(c["name"]): c for c in inspector.get_columns("work_order_allocations")}
+    column = columns["exceeds_demand"]
+    assert isinstance(column["type"], sa.Boolean)
+    assert column["nullable"] is False
+    assert str(column["default"]) == "false"
+    checks = {
+        str(check["name"]) for check in inspector.get_check_constraints("work_order_allocations")
+    }
+    assert _EXCEEDS_DEMAND_CHECK in checks
+    indexed = {
+        column_name
+        for index in inspector.get_indexes("work_order_allocations")
+        for column_name in index["column_names"]
+    }
+    assert "exceeds_demand" not in indexed
+
+
+def test_correction_migration_literals_repeat_the_model_constants() -> None:
+    migration = _load_correction_migration()
+    assert migration._EXCEEDS_DEMAND_SQL == models.ALLOCATION_EXCEEDS_DEMAND_SQL
+    assert migration._CHECK == _EXCEEDS_DEMAND_CHECK
+    assert models.WorkOrderAllocation.__tablename__ == migration._TABLE
+    assert migration._COLUMN == "exceeds_demand"
+
+
+def test_models_metadata_matches_the_migrated_schema(correction_engine: Engine) -> None:
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    with correction_engine.connect() as conn:
+        context = MigrationContext.configure(conn)
+        diffs = compare_metadata(context, models.Base.metadata)
+    assert diffs == []
+
+
+def test_correction_rows_are_refused_when_malformed(correction_connection: Connection) -> None:
+    """BC-14: a row recorded ``exceeds_demand`` is Management, reasoned,
+    User-recorded, never a reversal, never a station or Worker row."""
+    connection = correction_connection
+    user = _insert_user(connection, "correction")
+    station = _insert_station(connection, "BD-ST")
+    worker = _scalar_id(
+        connection,
+        "INSERT INTO workers (name, badge_barcode) VALUES ('Worker', 'BD-W1') RETURNING id",
+    )
+    demand = _insert_demand(connection)
+    valid: dict[str, object] = {
+        "exceeds_demand": True,
+        "allocation_reason": "customer accepted overage",
+        "actor_user_id": user,
+        "is_manual_override": True,
+    }
+    original = _insert_allocation(connection, demand, "BD-OK", **valid)
+    malformed: dict[str, dict[str, object]] = {
+        "stockroom source": {"source": "STOCKROOM"},
+        "no reason": {"allocation_reason": None},
+        "a reversal": {"reverses_allocation_id": original},
+        "a station": {"station_id": station},
+        "a worker": {"station_id": station, "allocated_by_worker_id": worker},
+        "no user": {"actor_user_id": None},
+    }
+    for label, change in malformed.items():
+        _refused_by(
+            connection,
+            _EXCEEDS_DEMAND_CHECK,
+            functools.partial(
+                _insert_allocation, connection, demand, f"BD-{label}", **{**valid, **change}
+            ),
+        )
+    # The same shapes without the flag are not this CHECK's concern.
+    _insert_allocation(connection, demand, "BD-PLAIN", allocation_reason=None)
+
+
+def _pre_correction_rows(connection: Connection) -> list[int]:
+    """Representative rows written at 0030: a station allocation with a
+    Worker, Management allocations with and without a User, a reversal."""
+    user = _insert_user(connection, "precorrection")
+    station = _insert_station(connection, "PRE-ST")
+    worker = _scalar_id(
+        connection,
+        "INSERT INTO workers (name, badge_barcode) VALUES ('Worker', 'PRE-W1') RETURNING id",
+    )
+    demand = _insert_demand(connection)
+    station_row = _insert_allocation(
+        connection,
+        demand,
+        "PRE-1",
+        source="STOCKROOM",
+        station_id=station,
+        allocated_by_worker_id=worker,
+    )
+    legacy_row = _insert_allocation(connection, demand, "PRE-2")
+    actor_row = _insert_allocation(connection, demand, "PRE-3", actor_user_id=user)
+    reversal_row = _insert_allocation(
+        connection,
+        demand,
+        "PRE-4",
+        reverses_allocation_id=legacy_row,
+        allocation_reason="wrong line",
+        actor_user_id=user,
+        is_manual_override=True,
+    )
+    return [station_row, legacy_row, actor_row, reversal_row]
+
+
+def test_existing_rows_cross_the_revision_unflagged(correction_head_database: URL) -> None:
+    config = _alembic_config(correction_head_database)
+    engine = create_engine(correction_head_database)
+    try:
+        command.downgrade(config, _DEVICES_REVISION)
+        with engine.begin() as connection:
+            ids = _pre_correction_rows(connection)
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert _version(connection) == _CORRECTION_REVISION
+            flags: dict[int, bool] = {
+                int(row.id): bool(row.exceeds_demand)
+                for row in connection.execute(
+                    sa.text(
+                        "SELECT id, exceeds_demand FROM work_order_allocations WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": ids},
+                )
+            }
+            assert flags == dict.fromkeys(ids, False)
+            validated = connection.execute(
+                sa.text("SELECT convalidated FROM pg_constraint WHERE conname = :name"),
+                {"name": _EXCEEDS_DEMAND_CHECK},
+            ).scalar_one()
+            assert validated is True
+        # A clean downgrade (no correction row) keeps every row intact.
+        command.downgrade(config, _DEVICES_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _DEVICES_REVISION
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM work_order_allocations WHERE id = ANY(:ids)"),
+                {"ids": ids},
+            ).scalar_one()
+            assert kept == len(ids)
+        columns = {str(c["name"]) for c in inspect(engine).get_columns("work_order_allocations")}
+        assert "exceeds_demand" not in columns
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert _version(connection) == _CORRECTION_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_correction_downgrade_refuses_while_a_correction_exists(
+    correction_head_database: URL,
+) -> None:
+    engine = create_engine(correction_head_database)
+    try:
+        with engine.begin() as connection:
+            _insert_allocation(
+                connection,
+                _insert_demand(connection),
+                "BD-REFUSE",
+                exceeds_demand=True,
+                allocation_reason="customer accepted overage",
+                actor_user_id=_insert_user(connection, "refuse"),
+                is_manual_override=True,
+            )
+        with pytest.raises(ProgrammingError) as raised:
+            command.downgrade(_alembic_config(correction_head_database), _DEVICES_REVISION)
+        assert "Beyond-demand allocation corrections exist; refusing downgrade" in str(
+            raised.value.orig
+        )
+        with engine.connect() as connection:
+            assert _version(connection) == _CORRECTION_REVISION
+        columns = {str(c["name"]) for c in inspect(engine).get_columns("work_order_allocations")}
+        assert "exceeds_demand" in columns
+    finally:
+        engine.dispose()

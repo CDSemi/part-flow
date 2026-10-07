@@ -813,6 +813,9 @@ _MANAGEMENT_WRITES = {
     ("POST", "/api/hot-list/changes"),
     ("POST", "/api/allocations/management"),
     ("POST", "/api/allocations/{allocation_id}/reversals"),
+    # Phase 14 slice 5: the correction and its workflow's static-key read.
+    ("POST", "/api/allocations/corrections"),
+    ("GET", "/api/allocations/management/context"),
 }
 
 

@@ -828,3 +828,23 @@
     min-width: 0;
   }
 }
+
+/* Corrections (GUI_DESIGN §7.2 item 8 / §7.3): only the authorized
+   actions the user may use, and the outcome of the last adjustment as
+   a status line under its button. */
+.tk-corr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tk-corr-actions .btn {
+  min-height: 44px;
+}
+
+.tk-corr-notice {
+  font-size: 12.5px;
+  color: var(--text);
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}

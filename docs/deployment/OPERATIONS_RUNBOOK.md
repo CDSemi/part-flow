@@ -217,7 +217,7 @@ Checks, each keeping the original requirement as its definition:
 | (c) | per-PN introduced quantity reconciles with active, stocked, scrapped, and reversed outcomes under the canonical rules; |
 | (d) | Machine assigned quantities reconcile with flows currently on each Machine; |
 | (e) | demand `released_quantity` derives from `RECEIVED` evidence; |
-| (f) | demand `allocated_quantity` and Work Order `completed_at` reconcile with active allocation rows; |
+| (f) | demand `allocated_quantity` and Work Order `completed_at` reconcile with active allocation rows; an authorized beyond-demand correction (allocation rows recorded `exceeds_demand`, Phase 14 slice 5) is not reported as allocation beyond the requested quantity; |
 | (g) | no retained Movement references a purged row; |
 | (h) | no append-only table was mutated outside an approved archival/purge path; |
 | (i) | Hot list entries are active demand (the `DEPLOYMENT.md` §5 query); |

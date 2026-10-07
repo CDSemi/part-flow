@@ -65,6 +65,7 @@ from sqlalchemy.orm import Session
 
 from app.api.authorization import MACHINES_READ, RequireAnyPermission, RequirePermission
 from app.api.dependencies import SessionDep
+from app.api.user_refs import UserRefResponse, user_ref_response
 from app.application import machines
 from app.application.authentication import Principal
 from app.application.common import UNSET
@@ -114,12 +115,6 @@ class MachineResponse(BaseModel):
 class AssignedLineResponse(BaseModel):
     part_number: str
     quantity: int
-
-
-class UserRefResponse(BaseModel):
-    id: int
-    display_name: str
-    avatar_updated_at: datetime.datetime | None
 
 
 class MachineLifecycleEventResponse(BaseModel):
@@ -382,15 +377,7 @@ def list_lifecycle_events(
             event_type=entry.event.event_type,
             occurred_at=entry.event.occurred_at,
             actor=entry.event.actor,
-            actor_user=(
-                UserRefResponse(
-                    id=entry.actor_user.id,
-                    display_name=entry.actor_user.display_name,
-                    avatar_updated_at=entry.actor_user.avatar_updated_at,
-                )
-                if entry.actor_user is not None
-                else None
-            ),
+            actor_user=user_ref_response(entry.actor_user),
             reason=entry.event.reason,
             before_state=entry.event.before_state,
             after_state=entry.event.after_state,

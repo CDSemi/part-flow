@@ -41,9 +41,12 @@ Rules owned here:
 - **Two invariants, enforced under locks** (§8.12): the total active
   allocation of a PN never exceeds its available stocked quantity, and
   a demand's allocation never exceeds its requested quantity — an
-  allocation beyond the remaining shortage is refused (the explicitly
-  authorized beyond-demand correction is a separate command, not built
-  here). Both are judged inside ONE transaction under the ONE
+  allocation beyond the remaining shortage is refused (the one
+  exception is the authorized beyond-demand correction,
+  `allocate_beyond_demand` (Phase 14 slice 5): a separate typed
+  Management command, one demand line, more than its remaining demand,
+  mandatory reason, never above available stock, recorded
+  `exceeds_demand`). Both are judged inside ONE transaction under the ONE
   shared PN-level advisory lock (serializing every allocation and
   reversal of one PN, so two concurrent confirmations can never jointly
   exceed the available quantity — and serializing a reversal, which
@@ -83,8 +86,11 @@ Rules owned here:
   the removal of the last short line) that made the remaining lines
   all fully allocated (`complete_after_demand_change`, audited with
   its cause) — cleared by a reversal that reopens one, rebuildable
-  from the allocation rows and those completion audit rows
-  (`rebuild_completed_at`). A completed Work Order leaves the active
+  from the allocation rows, replayed command by command in commit
+  order, and those completion audit rows (`rebuild_completed_at`) — the
+  done date is the event that last turned the Work Order complete,
+  never simply the newest effective row (a beyond-demand correction or
+  a reversal can land on a Work Order that stays complete). A completed Work Order leaves the active
   list and becomes read-only history (`app.application.work_orders`).
   Movement history is never touched by any of this.
 - **Adjustment is a reversal** (§8.12 "every adjustment must be
@@ -107,7 +113,10 @@ Rules owned here:
   signed-in User of a Management command (NULL at the station); the
   legacy `actor_reference` text column is kept for history and written
   no more. A Management command replayed by another User is refused
-  (`RecordedByAnotherUserError`).
+  (`RecordedByAnotherUserError`). The beyond-demand correction
+  (`allocate_beyond_demand`, Phase 14 slice 5) is a third, separate
+  Management command; `management_allocation_context` is the read its
+  Management workflow judges from.
 - Deliberately absent: any return of stocked quantity to production
   (PROJECT_PROFILE §32 open decision 1).
 """
@@ -122,8 +131,13 @@ from sqlalchemy import Select, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.application import audit, hot_ranks, station_access, station_identity
-from app.application.common import device_event_id_text, optional_text, required_text
+from app.application import audit, hot_ranks, station_access, station_identity, user_access
+from app.application.common import (
+    device_event_id_text,
+    is_bindable_id,
+    optional_text,
+    required_text,
+)
 from app.application.errors import (
     RECORDED_BY_ANOTHER_USER_MESSAGE,
     ConflictError,
@@ -152,6 +166,10 @@ from app.infrastructure.models import (
 # had — read back verbatim on replay, never re-derived.
 FINGERPRINT_KEY: Final = "request_fingerprint"
 COMMAND_KEY: Final = "command"
+
+#: The command kind of the authorized beyond-demand correction (Phase 14
+#: slice 5) — its fingerprint ``command`` and its metadata block ``kind``.
+ALLOCATE_BEYOND_DEMAND: Final = "ALLOCATE_BEYOND_DEMAND"
 
 _REVERSES_UNIQUE_CONSTRAINT: Final = "uq_work_order_allocations_reverses_allocation_id"
 
@@ -456,6 +474,7 @@ class AllocationRow(NamedTuple):
     quantity: int
     source: str
     is_manual_override: bool
+    exceeds_demand: bool
     allocation_reason: str | None
     reverses_allocation_id: int | None
     station_id: str | None
@@ -537,6 +556,7 @@ def _result_from_rows(
                 quantity=row.quantity,
                 source=row.source,
                 is_manual_override=row.is_manual_override,
+                exceeds_demand=row.exceeds_demand,
                 allocation_reason=row.allocation_reason,
                 reverses_allocation_id=row.reverses_allocation_id,
                 station_id=row.station_id,
@@ -1254,6 +1274,287 @@ def reverse_allocation(
 
 
 # ---------------------------------------------------------------------------
+# The authorized beyond-demand correction (Phase 14 slice 5)
+# ---------------------------------------------------------------------------
+
+
+def allocate_beyond_demand(
+    session: Session,
+    *,
+    actor_user_id: int,
+    part_number: object,
+    work_order_demand_id: object,
+    quantity: object,
+    reason: object,
+    device_event_id: object,
+) -> AllocationResult:
+    """Allocate stocked quantity to ONE demand line beyond its remaining
+    demand — the explicitly authorized correction (PROJECT_PROFILE §8.12),
+    ONE transaction.
+
+    A distinct Management intent, never a relaxation of routine
+    allocation: the quantity must be MORE than the line's remaining
+    shortage (within it the routine allocation serves — refused here, so
+    the recorded flag stays truthful), never above the PN's available
+    stocked quantity, and the reason is mandatory. One row: source
+    MANAGEMENT, ``is_manual_override``, ``exceeds_demand`` (CHECK-guarded),
+    the signed-in User. A completed Work Order stays complete with its
+    done date unchanged; an open one completes when this fills its last
+    short line. A ranked line leaves the Hot list exactly as after a
+    routine full allocation (OD1). Lock order and idempotency are the
+    Management allocation's (PN → Hot → demand rows ascending → Work
+    Order; a replay by another User is refused). Reversible by
+    ``reverse_allocation`` like any allocation.
+    """
+    pn = canonical_part_number(part_number)
+    if not isinstance(work_order_demand_id, int) or isinstance(work_order_demand_id, bool):
+        raise InvalidInputError("work_order_demand_id must be a whole number.")
+    demand_id = work_order_demand_id
+    if not is_bindable_id(demand_id):
+        # Names no row: answered as missing before any query.
+        raise InvalidInputError(f"Demand line {demand_id} does not exist.")
+    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
+        raise InvalidInputError("The correction quantity must be a positive whole number.")
+    reason_text = required_text(reason, "The correction reason")
+    event_id = device_event_id_text(device_event_id)
+    # Identity is never part of the fingerprint — a different User is
+    # refused by the actor comparison of the replay instead.
+    fingerprint = _fingerprint(
+        {
+            "command": ALLOCATE_BEYOND_DEMAND,
+            "part_number": pn,
+            "work_order_demand_id": demand_id,
+            "quantity": quantity,
+            "reason": reason_text,
+        }
+    )
+
+    # -- Idempotency fast path (SLICE1 §14) ------------------------------
+    committed = committed_allocation_command(session, event_id)
+    if committed:
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
+
+    # -- Locks: the Management allocation's order -------------------------
+    _acquire_part_number_allocation_lock(session, pn)
+    hot_ranks.acquire_hot_list_lock(session)
+    scope = hot_ranks.hot_rank_scope(session, [demand_id])
+    locked = _lock_demands(session, {demand_id} | scope.shift_ids)
+    demand = locked[demand_id]
+    work_orders = _lock_work_orders(session, {demand.work_order_id})
+
+    # -- Idempotency RE-CHECK after the blocking locks -------------------
+    committed = committed_allocation_command(session, event_id)
+    if committed:
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
+
+    # -- Validation under the locks -------------------------------------
+    if demand.part_number != pn:
+        raise InvalidInputError(
+            f"Demand line {demand.id} is for Part Number '{demand.part_number}', not"
+            f" '{pn}'. Stocked quantity is allocated to its own PN's demand only."
+            " Nothing was allocated."
+        )
+    allocated = active_allocations_by_demand(session, [demand_id]).get(demand_id, 0)
+    shortage = max(demand.requested_quantity - allocated, 0)
+    if quantity <= shortage:
+        raise ConflictError(
+            f"Demand line {demand.id} (Work Order {demand.work_order_id}) still needs"
+            f" {shortage} pcs, so {quantity} pcs fit within its remaining demand. Use"
+            " Allocate from stock instead — a beyond-demand correction must allocate more"
+            " than the remaining demand. Nothing was allocated."
+        )
+    position = stock_position_of(session, pn)
+    if quantity > position.available_stocked_quantity:
+        raise ConflictError(
+            f"Only {max(position.available_stocked_quantity, 0)} pcs of Part Number '{pn}'"
+            f" are available in stock ({position.stocked_quantity} stocked,"
+            f" {position.active_allocated_quantity} already allocated); {quantity} pcs"
+            " cannot be allocated. A correction never exceeds the available stocked"
+            " quantity. Nothing was allocated."
+        )
+
+    # -- Writes — all inside the one open transaction --------------------
+    completed, reopened = _apply_completion(session, work_orders, {demand_id: quantity})
+    # Automatic Hot removal (OD1), BEFORE the row is staged (as in
+    # `_confirm_allocation`): the line is now more than fully allocated.
+    if demand_id in scope.ranked_candidates:
+        hot_ranks.remove_from_hot_list(
+            session,
+            scope=scope,
+            locked=locked,
+            removals={
+                demand_id: (
+                    hot_ranks.HotRemovalReason.WORK_ORDER_COMPLETED
+                    if demand.work_order_id in completed
+                    else hot_ranks.HotRemovalReason.FULLY_ALLOCATED
+                )
+            },
+            action=hot_ranks.HotRankEventAction.AUTO_REMOVE,
+            trigger=hot_ranks.HotRankTrigger.ALLOCATION,
+            reference={
+                "device_event_id": event_id,
+                "source": str(AllocationSource.MANAGEMENT),
+                "station_id": None,
+            },
+            actor_user_id=actor_user_id,
+        )
+    row = WorkOrderAllocation(
+        part_number=pn,
+        work_order_demand_id=demand_id,
+        quantity=quantity,
+        source=AllocationSource.MANAGEMENT,
+        is_manual_override=True,
+        exceeds_demand=True,
+        allocation_reason=reason_text,
+        reverses_allocation_id=None,
+        station_id=None,
+        actor_reference=None,
+        allocated_by_worker_id=None,
+        actor_user_id=actor_user_id,
+        allocated_at=func.now(),
+        device_event_id=event_id,
+        command_sequence=1,
+        metadata_={
+            FINGERPRINT_KEY: fingerprint,
+            COMMAND_KEY: {
+                "kind": ALLOCATE_BEYOND_DEMAND,
+                "size": 1,
+                "allocation_quantity": quantity,
+                "requested_quantity": demand.requested_quantity,
+                "allocated_before": allocated,
+                "completed_work_order_ids": completed,
+                "reopened_work_order_ids": reopened,
+            },
+        },
+    )
+    session.add(row)
+    demand.allocated_quantity = allocated + quantity
+    demand.updated_at = func.now()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        diagnostics = getattr(exc.orig, "diag", None)
+        if getattr(diagnostics, "constraint_name", None) == ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT:
+            winner = committed_allocation_command(session, event_id)
+            if winner:
+                return _replay_or_conflict(session, winner, fingerprint, actor_user_id)
+        raise
+    return _result_from_rows(session, [row], created=True)
+
+
+# ---------------------------------------------------------------------------
+# The Management allocation context (Phase 14 slice 5, a read)
+# ---------------------------------------------------------------------------
+
+
+class ContextAllocation(NamedTuple):
+    """One active allocation row of a line, with who recorded it."""
+
+    allocation: WorkOrderAllocation
+    actor_user: user_access.UserRef | None
+
+
+class ContextLine(NamedTuple):
+    """One demand line as the Management allocation workflow judges it."""
+
+    demand: WorkOrderDemand
+    work_order: WorkOrder
+    # Derived from the rows, never the projection.
+    allocated_quantity: int
+    # Not reversed, not reversals; oldest first.
+    active_allocations: list[ContextAllocation]
+
+    @property
+    def remaining_shortage(self) -> int:
+        return max(self.demand.requested_quantity - self.allocated_quantity, 0)
+
+    @property
+    def beyond_demand_quantity(self) -> int:
+        return max(self.allocated_quantity - self.demand.requested_quantity, 0)
+
+
+class AllocationContext(NamedTuple):
+    part_number: str
+    position: StockPosition
+    lines: list[ContextLine]
+
+
+def management_allocation_context(
+    session: Session, *, part_number: object | None = None, work_order_demand_id: int | None = None
+) -> AllocationContext:
+    """The stock figures and demand lines a Management allocation, reversal
+    or beyond-demand correction is prepared from (a read — nothing is
+    locked or written; every write re-judges under its own locks).
+
+    Exactly one scope: a PN — every demand line of its OPEN Work Orders
+    (fully and over-allocated lines included) in the canonical demand
+    order, Tracking's Active WO Demand scope; or one demand line —
+    whatever its Work Order's state (a completed Work Order's allocation
+    is adjusted from its Work Order Details).
+    """
+    if (part_number is None) == (work_order_demand_id is None):
+        raise InvalidInputError("Give exactly one of part_number or work_order_demand_id.")
+    pairs: list[tuple[WorkOrderDemand, WorkOrder]]
+    if work_order_demand_id is not None:
+        missing = NotFoundError(f"Demand line {work_order_demand_id} does not exist.")
+        if not is_bindable_id(work_order_demand_id):
+            raise missing
+        found = session.execute(
+            select(WorkOrderDemand, WorkOrder)
+            .join(WorkOrder, WorkOrder.id == WorkOrderDemand.work_order_id)
+            .where(WorkOrderDemand.id == work_order_demand_id)
+        ).one_or_none()
+        if found is None:
+            raise missing
+        demand, work_order = found
+        pn = demand.part_number
+        pairs = [(demand, work_order)]
+    else:
+        pn = canonical_part_number(part_number)
+        pairs = [
+            (context.demand, context.work_order)
+            for context in open_demand_context(session, [pn]).get(pn, [])
+        ]
+    demand_ids = [demand.id for demand, _ in pairs]
+    allocated = active_allocations_by_demand(session, demand_ids)
+    rows: list[WorkOrderAllocation] = (
+        list(
+            session.scalars(
+                _effective_allocation_rows()
+                .where(WorkOrderAllocation.work_order_demand_id.in_(demand_ids))
+                .order_by(WorkOrderAllocation.id)
+            )
+        )
+        if demand_ids
+        else []
+    )
+    actors = user_access.user_refs(
+        session, [row.actor_user_id for row in rows if row.actor_user_id is not None]
+    )
+    by_demand: dict[int, list[ContextAllocation]] = {}
+    for row in rows:
+        by_demand.setdefault(row.work_order_demand_id, []).append(
+            ContextAllocation(
+                row, actors.get(row.actor_user_id) if row.actor_user_id is not None else None
+            )
+        )
+    return AllocationContext(
+        part_number=pn,
+        position=stock_position_of(session, pn),
+        lines=[
+            ContextLine(
+                demand=demand,
+                work_order=work_order,
+                allocated_quantity=allocated.get(demand.id, 0),
+                active_allocations=by_demand.get(demand.id, []),
+            )
+            for demand, work_order in pairs
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Listing (audit visibility) and the projection replays
 # ---------------------------------------------------------------------------
 
@@ -1298,19 +1599,29 @@ def rebuild_allocated_quantities(session: Session) -> dict[int, int]:
 
 def rebuild_completed_at(session: Session) -> dict[int, datetime.datetime | None]:
     """Every Work Order's done date from the allocation rows and the
-    demand-change completion audit rows.
+    demand-change completion audit rows (a read: plain SELECTs, no lock).
 
-    Complete exactly when every demand line's active allocation covers
-    its requested quantity; the done date is then the newest of the
-    effective allocation rows' `allocated_at` and the Work Order's
-    demand-change completions (`complete_after_demand_change` — the
-    audit row's `occurred_at` is its `completed_at`) — the event that
-    completed the last open line (a completed Work Order takes no
-    further allocation or demand change, and after a reversal reopened
-    one, the event that completes it again is newer than every earlier
-    one).
+    The allocation commands are replayed in commit order — rows grouped
+    by ``device_event_id``, commands ordered by their smallest row id
+    (two commands touching one Work Order serialize on its row lock and
+    insert after it, so their ids follow commit order; ``allocated_at``,
+    the transaction start, does not). After each command every Work
+    Order it touched is judged against its CURRENT lines: turning
+    complete sets its replayed done date to the command's
+    ``allocated_at``, turning incomplete clears it; staying complete
+    keeps it — a beyond-demand correction, or a reversal leaving a Work
+    Order complete, never moves the done date (Phase 14 slice 5).
+
+    A Work Order not complete now (every current line's active
+    allocation covers its requested quantity) is ``None``; otherwise
+    the newer of its replayed done date and its newest demand-change
+    completion (``complete_after_demand_change`` — the audit row's
+    ``occurred_at`` is its ``completed_at``). A completed Work Order
+    takes no demand change, so its requested quantities are frozen from
+    its last completing event on: the replay is exact up to that event,
+    and when the event was a demand change the replay turned complete
+    at an earlier allocation command, so the audit row is the newer.
     """
-    allocated = rebuild_allocated_quantities(session)
     lines = list(
         session.execute(
             select(
@@ -1321,34 +1632,69 @@ def rebuild_completed_at(session: Session) -> dict[int, datetime.datetime | None
         )
     )
     by_work_order: dict[int, list[tuple[int, int]]] = {}
+    work_order_of: dict[int, int] = {}
     for work_order_id, demand_id, requested in lines:
         by_work_order.setdefault(int(work_order_id), []).append((int(demand_id), int(requested)))
-    effective = _effective_allocation_rows().subquery()
-    newest = {
-        int(work_order_id): stamp
-        for work_order_id, stamp in session.execute(
-            select(WorkOrderDemand.work_order_id, func.max(effective.c.allocated_at))
-            .join(WorkOrderDemand, WorkOrderDemand.id == effective.c.work_order_demand_id)
-            .group_by(WorkOrderDemand.work_order_id)
-        )
-    }
-    for entity_id, stamp in session.execute(
-        select(AuditEvent.entity_id, func.max(AuditEvent.occurred_at))
-        .where(
-            AuditEvent.entity_type == AuditEntityType.WORK_ORDER,
-            AuditEvent.metadata_.has_key(COMPLETION_AUDIT_KEY),
-        )
-        .group_by(AuditEvent.entity_id)
+        work_order_of[int(demand_id)] = int(work_order_id)
+    # Rows in id order, so a command's first appearance is its smallest id.
+    commands: dict[str, list[tuple[int, int, bool, datetime.datetime]]] = {}
+    for event_id, demand_id, quantity, reverses_id, allocated_at in session.execute(
+        select(
+            WorkOrderAllocation.device_event_id,
+            WorkOrderAllocation.work_order_demand_id,
+            WorkOrderAllocation.quantity,
+            WorkOrderAllocation.reverses_allocation_id,
+            WorkOrderAllocation.allocated_at,
+        ).order_by(WorkOrderAllocation.id)
     ):
-        work_order_id = int(entity_id)
-        if work_order_id not in newest or stamp > newest[work_order_id]:
-            newest[work_order_id] = stamp
-    return {
-        work_order_id: (
-            newest.get(work_order_id)
-            if demands
-            and all(allocated.get(demand_id, 0) >= requested for demand_id, requested in demands)
-            else None
+        commands.setdefault(str(event_id), []).append(
+            (int(demand_id), int(quantity), reverses_id is not None, allocated_at)
         )
-        for work_order_id, demands in by_work_order.items()
+
+    allocated: dict[int, int] = {}
+
+    def is_complete(work_order_id: int) -> bool:
+        demands = by_work_order.get(work_order_id, [])
+        return bool(demands) and all(
+            allocated.get(demand_id, 0) >= requested for demand_id, requested in demands
+        )
+
+    replayed: dict[int, datetime.datetime | None] = {}
+    for rows in commands.values():
+        touched: set[int] = set()
+        for demand_id, quantity, is_reversal, _ in rows:
+            allocated[demand_id] = allocated.get(demand_id, 0) + (
+                -quantity if is_reversal else quantity
+            )
+            touched.add(work_order_of[demand_id])
+        stamp = rows[0][3]
+        for work_order_id in sorted(touched):
+            if is_complete(work_order_id):
+                if replayed.get(work_order_id) is None:
+                    replayed[work_order_id] = stamp
+            else:
+                replayed[work_order_id] = None
+
+    audited: dict[int, datetime.datetime] = {
+        int(entity_id): stamp
+        for entity_id, stamp in session.execute(
+            select(AuditEvent.entity_id, func.max(AuditEvent.occurred_at))
+            .where(
+                AuditEvent.entity_type == AuditEntityType.WORK_ORDER,
+                AuditEvent.metadata_.has_key(COMPLETION_AUDIT_KEY),
+            )
+            .group_by(AuditEvent.entity_id)
+        )
     }
+    result: dict[int, datetime.datetime | None] = {}
+    for work_order_id in by_work_order:
+        if not is_complete(work_order_id):
+            result[work_order_id] = None
+            continue
+        stamps = [
+            stamp
+            for stamp in (replayed.get(work_order_id), audited.get(work_order_id))
+            if stamp is not None
+        ]
+        result[work_order_id] = max(stamps) if stamps else None
+    return result

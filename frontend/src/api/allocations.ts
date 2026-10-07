@@ -6,8 +6,9 @@
 // read), and the confirmed allocation (one command, idempotent per
 // `device_event_id`). Allocation is a record of its own — it never
 // references a Movement or a Quantity Flow and never changes the
-// Movement history. Management allocation and reversal are separate
-// authorized routes (no UI yet). Both station calls carry the
+// Movement history. Management allocation, reversal and the authorized
+// beyond-demand correction are separate signed-in routes
+// (`management-allocations.ts`). Both station calls carry the
 // enrolled-device header of the confirming station (Phase 14 slice 4).
 //
 // Production-safe: no mock data, no framework imports.

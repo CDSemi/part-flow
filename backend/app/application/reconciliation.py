@@ -1542,6 +1542,21 @@ def _check_f(context: _Context) -> _Outcome:
     orders = context.work_orders()
     allocated = context.allocated()
     replay_completed = context.completed()
+    # The authorized beyond-demand correction (Phase 14 slice 5): the
+    # active quantity of rows recorded `exceeds_demand` is allowed beyond
+    # the requested quantity — only an excess it does not cover is a
+    # finding (the CHECK makes such a row Management, reasoned and
+    # User-recorded, so the flag is trusted).
+    authorized = {
+        int(row.work_order_demand_id): int(row.quantity)
+        for row in context.rows(
+            "SELECT a.work_order_demand_id, sum(a.quantity) AS quantity"
+            " FROM work_order_allocations a WHERE a.exceeds_demand"
+            " AND a.reverses_allocation_id IS NULL AND NOT EXISTS"
+            " (SELECT 1 FROM work_order_allocations r WHERE r.reverses_allocation_id = a.id)"
+            " GROUP BY a.work_order_demand_id"
+        )
+    }
     findings: list[Finding] = []
     for demand in demands.values():
         derived = allocated.get(demand.id, 0)
@@ -1557,7 +1572,7 @@ def _check_f(context: _Context) -> _Outcome:
                     {"work_order_id": demand.work_order_id},
                 )
             )
-        if derived > demand.requested_quantity:
+        if derived - authorized.get(demand.id, 0) > demand.requested_quantity:
             findings.append(
                 Finding(
                     "ALLOCATED_EXCEEDS_REQUESTED",

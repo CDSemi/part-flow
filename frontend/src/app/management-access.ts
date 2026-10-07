@@ -42,8 +42,12 @@ export const MANAGEMENT_WRITE_ACCESS: Readonly<
   Record<ManagementSubview, readonly Permission[]>
 > = {
   'area-board': [],
-  'work-orders': ['MANAGE_WORK_ORDERS', 'EDIT_WORK_ORDER_DEMAND'],
-  tracking: [],
+  'work-orders': [
+    'MANAGE_WORK_ORDERS',
+    'EDIT_WORK_ORDER_DEMAND',
+    'EDIT_WORK_ORDER_ALLOCATION',
+  ],
+  tracking: ['EDIT_WORK_ORDER_ALLOCATION'],
   priority: ['SET_DEMAND_PRIORITY', 'REORDER_HOT_ITEMS'],
   'planned-routes': ['MANAGE_ROUTE_TEMPLATES'],
   'part-numbers': ['MANAGE_PART_NUMBER_MASTER'],

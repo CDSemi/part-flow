@@ -47,6 +47,7 @@ from pydantic import BaseModel
 
 from app.api.authorization import TRACKING_READ, RequireAnyPermission
 from app.api.dependencies import SessionDep
+from app.api.user_refs import UserRefResponse, user_ref_response
 from app.application import tracking
 from app.application.allocations import DemandContext
 from app.application.authentication import Principal
@@ -382,6 +383,8 @@ class AllocationResponse(BaseModel):
     work_order: TrackingWorkOrderRef
     source: str
     is_manual_override: bool
+    # Recorded by the authorized beyond-demand correction (Phase 14 slice 5).
+    exceeds_demand: bool
     allocation_reason: str | None
     # Set on a reversal row: the allocation it takes back.
     reverses_allocation_id: int | None
@@ -389,6 +392,9 @@ class AllocationResponse(BaseModel):
     reversed_by_allocation_id: int | None
     station_id: str | None
     allocated_at: datetime.datetime
+    # The signed-in User of a Management row; null for station rows and
+    # rows recorded before sign-in existed.
+    actor_user: UserRefResponse | None
 
 
 class MovementRouteStepRef(BaseModel):
@@ -602,11 +608,13 @@ def _allocation(entry: tracking.AllocationEntry) -> AllocationResponse:
         work_order=_work_order_ref(entry.demand, entry.work_order),
         source=row.source,
         is_manual_override=row.is_manual_override,
+        exceeds_demand=row.exceeds_demand,
         allocation_reason=row.allocation_reason,
         reverses_allocation_id=row.reverses_allocation_id,
         reversed_by_allocation_id=entry.reversed_by_allocation_id,
         station_id=row.station_id,
         allocated_at=row.allocated_at,
+        actor_user=user_ref_response(entry.actor_user),
     )
 
 
