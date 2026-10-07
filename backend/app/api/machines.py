@@ -41,9 +41,14 @@ Deliberate surface decisions:
   atomically with its ``machine_lifecycle_events`` row. A retirement
   may carry ``edits`` — the recorded Save decision of GUI_DESIGN
   §12.4 — applied in the same transaction as the retirement and its
-  event; a recorded Discard sends no draft. The optional
-  ``actor`` travels as the nullable, reference-free value Phase 3.5
-  defines — authenticated actor identity arrives with Phase 14.
+  event; a recorded Discard sends no draft. The acting User is the
+  signed-in User (``actor_user_id``, Phase 14 slice 3) — never a
+  request value: a body carrying ``actor`` is refused (422). Lifecycle
+  events answer ``actor_user`` (who recorded them) beside the legacy
+  ``actor`` text recorded before Phase 14.
+- Every write needs Manage Machines; ``GET /machines`` stays public
+  (the Scan Station and the boards read it), the single Machine and its
+  lifecycle history need View production data or Manage Machines.
 - Every Machine response carries the DERIVED operational state
   (``operational_state``: MAINTENANCE > RUNNING > IDLE, PROJECT_PROFILE
   §8.6) and the ACTIVE quantity currently assigned to the Machine
@@ -52,18 +57,24 @@ Deliberate surface decisions:
 """
 
 import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
+from app.api.authorization import MACHINES_READ, RequireAnyPermission, RequirePermission
 from app.api.dependencies import SessionDep
 from app.application import machines
+from app.application.authentication import Principal
 from app.application.common import UNSET
+from app.domain.enums import Permission
 from app.infrastructure.models import Machine
 
 router = APIRouter(prefix="/api")
+
+MachineManagerDep = Annotated[Principal, Depends(RequirePermission(Permission.MANAGE_MACHINES))]
+MachineReaderDep = Annotated[Principal, Depends(RequireAnyPermission(*MACHINES_READ))]
 
 
 class MachineResponse(BaseModel):
@@ -105,6 +116,12 @@ class AssignedLineResponse(BaseModel):
     quantity: int
 
 
+class UserRefResponse(BaseModel):
+    id: int
+    display_name: str
+    avatar_updated_at: datetime.datetime | None
+
+
 class MachineLifecycleEventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -112,7 +129,10 @@ class MachineLifecycleEventResponse(BaseModel):
     machine_id: int
     event_type: str
     occurred_at: datetime.datetime
+    # Legacy text recorded before Phase 14; written no more.
     actor: str | None
+    # The signed-in User who recorded the event (Phase 14 slice 3).
+    actor_user: UserRefResponse | None
     reason: str | None
     before_state: str
     after_state: str
@@ -175,7 +195,6 @@ class MachineRetireRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = None
-    actor: str | None = None
     # Recorded Save decision (GUI_DESIGN §12.4): an Edit draft applied
     # atomically with the retirement and its lifecycle event. A
     # recorded Discard sends no draft.
@@ -191,7 +210,6 @@ class MachineReactivateRequest(BaseModel):
     reason: str
     name: str | None = None
     area_id: int | None = None
-    actor: str | None = None
 
 
 _STORED_FIELDS = (
@@ -246,12 +264,16 @@ def list_machines(
 
 
 @router.get("/machines/{machine_id}")
-def get_machine(machine_id: int, session: SessionDep) -> MachineResponse:
+def get_machine(
+    principal: MachineReaderDep, machine_id: int, session: SessionDep
+) -> MachineResponse:
     return _one(session, machines.get_machine(session, machine_id))
 
 
 @router.post("/machines", status_code=201)
-def create_machine(body: MachineCreateRequest, session: SessionDep) -> MachineResponse:
+def create_machine(
+    principal: MachineManagerDep, body: MachineCreateRequest, session: SessionDep
+) -> MachineResponse:
     machine = machines.create_machine(
         session,
         area_id=body.area_id,
@@ -263,50 +285,77 @@ def create_machine(body: MachineCreateRequest, session: SessionDep) -> MachineRe
         installed_on=body.installed_on,
         notes=body.notes,
         expected_asset_tag=body.expected_asset_tag,
+        actor_user_id=principal.user_id,
     )
     return _one(session, machine)
 
 
 @router.patch("/machines/{machine_id}")
 def update_machine(
-    machine_id: int, body: MachineUpdateRequest, session: SessionDep
+    principal: MachineManagerDep,
+    machine_id: int,
+    body: MachineUpdateRequest,
+    session: SessionDep,
 ) -> MachineResponse:
-    machine = machines.update_machine(session, machine_id, **body.model_dump(exclude_unset=True))
+    machine = machines.update_machine(
+        session,
+        machine_id,
+        actor_user_id=principal.user_id,
+        **body.model_dump(exclude_unset=True),
+    )
     return _one(session, machine)
 
 
 @router.post("/machines/{machine_id}/maintenance", status_code=201)
 def start_maintenance(
-    machine_id: int, body: MaintenanceStartRequest, session: SessionDep
+    principal: MachineManagerDep,
+    machine_id: int,
+    body: MaintenanceStartRequest,
+    session: SessionDep,
 ) -> MachineResponse:
     machine = machines.start_maintenance(
-        session, machine_id, note=body.note, expected_return=body.expected_return
+        session,
+        machine_id,
+        note=body.note,
+        expected_return=body.expected_return,
+        actor_user_id=principal.user_id,
     )
     return _one(session, machine)
 
 
 @router.delete("/machines/{machine_id}/maintenance")
-def clear_maintenance(machine_id: int, session: SessionDep) -> MachineResponse:
-    return _one(session, machines.clear_maintenance(session, machine_id))
+def clear_maintenance(
+    principal: MachineManagerDep, machine_id: int, session: SessionDep
+) -> MachineResponse:
+    return _one(
+        session,
+        machines.clear_maintenance(session, machine_id, actor_user_id=principal.user_id),
+    )
 
 
 @router.post("/machines/{machine_id}/retire")
 def retire_machine(
-    machine_id: int, body: MachineRetireRequest, session: SessionDep
+    principal: MachineManagerDep,
+    machine_id: int,
+    body: MachineRetireRequest,
+    session: SessionDep,
 ) -> MachineResponse:
     machine = machines.retire_machine(
         session,
         machine_id,
         reason=body.reason,
-        actor=body.actor,
         edits=body.edits.model_dump(exclude_unset=True) if body.edits is not None else None,
+        actor_user_id=principal.user_id,
     )
     return _one(session, machine)
 
 
 @router.post("/machines/{machine_id}/reactivate")
 def reactivate_machine(
-    machine_id: int, body: MachineReactivateRequest, session: SessionDep
+    principal: MachineManagerDep,
+    machine_id: int,
+    body: MachineReactivateRequest,
+    session: SessionDep,
 ) -> MachineResponse:
     provided = body.model_dump(exclude_unset=True)
     machine = machines.reactivate_machine(
@@ -317,16 +366,36 @@ def reactivate_machine(
         # value error, not a keep — required_text rejects it.
         name=provided.get("name", UNSET),
         area_id=body.area_id,
-        actor=body.actor,
+        actor_user_id=principal.user_id,
     )
     return _one(session, machine)
 
 
 @router.get("/machines/{machine_id}/lifecycle-events")
 def list_lifecycle_events(
-    machine_id: int, session: SessionDep
+    principal: MachineReaderDep, machine_id: int, session: SessionDep
 ) -> list[MachineLifecycleEventResponse]:
     return [
-        MachineLifecycleEventResponse.model_validate(event)
-        for event in machines.list_lifecycle_events(session, machine_id)
+        MachineLifecycleEventResponse(
+            id=entry.event.id,
+            machine_id=entry.event.machine_id,
+            event_type=entry.event.event_type,
+            occurred_at=entry.event.occurred_at,
+            actor=entry.event.actor,
+            actor_user=(
+                UserRefResponse(
+                    id=entry.actor_user.id,
+                    display_name=entry.actor_user.display_name,
+                    avatar_updated_at=entry.actor_user.avatar_updated_at,
+                )
+                if entry.actor_user is not None
+                else None
+            ),
+            reason=entry.event.reason,
+            before_state=entry.event.before_state,
+            after_state=entry.event.after_state,
+            from_area_id=entry.event.from_area_id,
+            to_area_id=entry.event.to_area_id,
+        )
+        for entry in machines.lifecycle_history(session, machine_id)
     ]

@@ -10,6 +10,8 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
 
 // Completed Work Orders page tests (GUI_DESIGN §11.5; Phase 10). The
 // page is a REAL view on `GET /api/work-orders/completed`: completion
@@ -256,8 +258,35 @@ function completedPage(url: URL) {
   });
 }
 
+/**
+ * Management needs a signed-in user (Phase 14 slice 3): the fake signs
+ * in a user holding every permission.
+ */
+const sessionPermissions: readonly Permission[] = PERMISSIONS;
+
+function sessionResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      user: {
+        id: 90,
+        login_name: 'mia',
+        display_name: 'Mia Manager',
+        role_id: 2,
+        role_name: 'Manager',
+        avatar_updated_at: null,
+        permissions: sessionPermissions,
+        must_change_password: false,
+        session_expires_at: null,
+      },
+      setup_open: false,
+    }),
+    { status: 200 },
+  );
+}
+
 function handle(rawUrl: string, method: string): Response {
   const url = new URL(rawUrl, 'http://localhost');
+  if (url.pathname === '/api/session') return sessionResponse();
   requests.push(`${method} ${url.pathname}${url.search}`);
   if (url.pathname === '/api/health') return json({ status: 'ok' });
   if (url.pathname === '/api/policies/due-soon') {

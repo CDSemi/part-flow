@@ -6,9 +6,12 @@ import { listPartNumberPage, partNumberImageUrl } from '../../api/part-numbers';
 import type { PartNumberMaster } from '../../api/part-numbers';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { EditPartNumberDialog } from '../../components/EditPartNumberDialog';
 import { PnImage } from '../../components/PnImage';
+import { ViewOnlyPageNote } from '../../components/ViewOnlyPageNote';
 import {
   EmptyState,
   ErrorState,
@@ -74,6 +77,9 @@ export function PartNumbersView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  // Without Manage Part Numbers rows open the details read-only and no
+  // change is offered (Phase 14 slice 3); the server checks every write.
+  const canManage = useSession().can('MANAGE_PART_NUMBER_MASTER');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [limit, setLimit] = useState(PART_NUMBERS_PAGE_SIZE);
@@ -148,6 +154,11 @@ export function PartNumbersView() {
         Manage optional Part Number details, images, ERP IDs, and barcode
         labels.
       </p>
+      {canManage ? null : (
+        <ViewOnlyPageNote
+          permissions={MANAGEMENT_WRITE_ACCESS['part-numbers']}
+        />
+      )}
       <div className="pnm-toolbar">
         <input
           type="search"
@@ -157,13 +168,15 @@ export function PartNumbersView() {
           onChange={(e) => setSearch(e.target.value)}
         />
         <span className="spacer" />
-        <button
-          className="btn primary"
-          disabled={writeBlocked}
-          onClick={() => setDialog({ kind: 'new' })}
-        >
-          + New Part Number
-        </button>
+        {canManage ? (
+          <button
+            className="btn primary"
+            disabled={writeBlocked}
+            onClick={() => setDialog({ kind: 'new' })}
+          >
+            + New Part Number
+          </button>
+        ) : null}
       </div>
 
       {rows.length === 0 ? (
@@ -210,7 +223,11 @@ export function PartNumbersView() {
                   <td>
                     <button
                       className="rowbtn"
-                      aria-label={`Edit ${record.partNumber}`}
+                      aria-label={
+                        canManage
+                          ? `Edit ${record.partNumber}`
+                          : `Part Number ${record.partNumber} details`
+                      }
                     >
                       <span className="pnm-pn">{record.partNumber}</span>
                     </button>
@@ -250,6 +267,7 @@ export function PartNumbersView() {
       {dialog ? (
         <EditPartNumberDialog
           pn={dialog.kind === 'edit' ? dialog.pn : undefined}
+          readOnly={!canManage}
           writeBlocked={writeBlocked}
           onClose={closeDialog}
         />

@@ -2,17 +2,40 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../App';
+import { PERMISSIONS } from '../api/roles';
 
 // Development-only state previews (?state=…) drive the deterministic
 // loading / empty / error / long-data representations. The override is
 // compiled away outside development builds; vitest runs in DEV mode.
 
+/** Management needs a signed-in user (Phase 14 slice 3): the fake signs
+ * in a user holding every permission. */
+const SIGNED_IN = {
+  user: {
+    id: 90,
+    login_name: 'mia',
+    display_name: 'Mia Manager',
+    role_id: 2,
+    role_name: 'Manager',
+    avatar_updated_at: null,
+    permissions: PERMISSIONS,
+    must_change_password: false,
+    session_expires_at: null,
+  },
+  setup_open: false,
+};
+
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
-    vi.fn(() =>
+    vi.fn((input: RequestInfo | URL) =>
       Promise.resolve(
-        new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
+        new Response(
+          JSON.stringify(
+            String(input) === '/api/session' ? SIGNED_IN : { status: 'ok' },
+          ),
+          { status: 200 },
+        ),
       ),
     ),
   );

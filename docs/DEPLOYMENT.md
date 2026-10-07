@@ -47,7 +47,7 @@ artifacts. Observed constraints include:
 - no production reverse proxy, TLS policy, secret store, log rotation, release
   image tags, scheduled backup job, restore drill, or deployment rollback
   command is provided;
-- Phase 14 sign-in for application Users exists and server-side permission checks cover every Administration read and write; Management, master-data and monitoring routes stay open until Phase 14 slice 3, and Scan Station writes are callable by any client on the network until station devices are enrolled (slice 4);
+- Phase 14 sign-in for application Users exists and server-side permission checks cover every Administration and Management read and write; Scan Station writes are callable by any client on the network until station devices are enrolled (slice 4);
 - several approved views are still development-only previews or pending real
   backend/frontend integration.
 

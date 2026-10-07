@@ -155,7 +155,9 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -218,7 +220,7 @@ def _release(
     route_template_id: int | None = None,
 ) -> _Released:
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
     assert response.status_code == 201, response.text
@@ -235,7 +237,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release", json=payload
     )
     assert released.status_code == 201, released.text

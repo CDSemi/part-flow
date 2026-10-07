@@ -7,7 +7,12 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { ReactNode } from 'react';
 
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
+import { SessionContext, hasPermission } from '../../app/session-context';
+import type { SessionValue } from '../../app/session-context';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { prepareImageUpload } from '../../components/image-upload';
 import { PartNumbersView } from './PartNumbersView';
@@ -244,6 +249,7 @@ function deferred(): { promise: Promise<void>; release: () => void } {
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/part-numbers');
+  session = signedInSession();
   records = seedRecords();
   calls = [];
   writes = [];
@@ -266,11 +272,57 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The signed-in user of a test (Phase 14 slice 3): a Management view
+ * offers its changes only to a user holding their permissions, so a
+ * test holds every permission unless it signs in another user.
+ */
+function signedInSession(
+  permissions: readonly Permission[] = PERMISSIONS,
+): SessionValue {
+  const user = {
+    id: 90,
+    loginName: 'mia',
+    displayName: 'Mia Manager',
+    roleId: 2,
+    roleName: 'Manager',
+    avatarUpdatedAt: null,
+    permissions: [...permissions],
+    mustChangePassword: false,
+    sessionExpiresAt: null,
+  };
+  return {
+    status: 'signed-in',
+    user,
+    setupOpen: false,
+    checking: false,
+    endedBy: null,
+    can: (permission) => hasPermission(user, permission),
+    openSignIn: vi.fn(),
+    openSetup: vi.fn(),
+    openChangePassword: vi.fn(),
+    signOut: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+}
+
+let session: SessionValue = signedInSession();
+
+function SignedIn({ children }: { children: ReactNode }) {
+  return (
+    <SessionContext.Provider value={session}>
+      {children}
+    </SessionContext.Provider>
+  );
+}
+
 function view(status: 'connected' | 'unavailable') {
   return (
-    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
-      <PartNumbersView />
-    </ConnectivityContext.Provider>
+    <SignedIn>
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <PartNumbersView />
+      </ConnectivityContext.Provider>
+    </SignedIn>
   );
 }
 
@@ -1110,4 +1162,81 @@ test('?state=long adds long-PN/name/metadata records to the server rows', async 
   );
   expect(supplemental.textContent).toContain('REV-SUPPLEMENTAL-LONG');
   expect(document.body.textContent).toContain('0114-60-0101-00');
+});
+
+/* ============ Phase 14 slice 3 — without Manage Part Numbers ============ */
+
+test('FM-4: without Manage Part Numbers rows open the read-only Part Number details — the barcode label stays, nothing changes', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
+  await renderPartNumbers();
+
+  expect(
+    screen.getByText(
+      'View only — changing this needs the Manage Part Numbers, including hard deletion permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: '+ New Part Number' }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole('button', { name: 'Edit 2027-60-8114-00' }),
+  ).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Part Number 2027-60-8114-00 details' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Part Number details' });
+  expect(
+    await within(dialog).findByText(
+      'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByText('C')).toBeInTheDocument();
+  expect(within(dialog).getByText('ERP-PN-40412')).toBeInTheDocument();
+  expect(dialog.querySelector('img.pn-img')).toHaveAttribute(
+    'src',
+    `/api/part-numbers/image?number=2027-60-8114-00&v=${encodeURIComponent(IMAGE_AT)}`,
+  );
+  expect(dialog.querySelector('input')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: /Save|Add Part Number/ }),
+  ).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Remove image' }),
+  ).toBeNull();
+  expect(within(dialog).queryByText('Delete Part Number Details')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeNull();
+
+  // The barcode label stays reachable.
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Barcode label…' }),
+  );
+  expect(screen.getAllByRole('dialog').length).toBeGreaterThan(1);
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+
+  // Close asks nothing (nothing is editable) and writes nothing.
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Part Number details' }),
+    ).getByRole('button', { name: 'Close (Esc)' }),
+  );
+  expect(
+    screen.queryByRole('dialog', { name: 'Part Number details' }),
+  ).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+test('FM-4: a Part Number without saved details opens read-only as details, never as New', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
+  await renderPartNumbers();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Part Number 214-406 details' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Part Number details' });
+  await waitFor(() => expect(within(dialog).getAllByText('—')).toHaveLength(3));
+  expect(screen.queryByRole('dialog', { name: 'New Part Number' })).toBeNull();
+  expect(writes).toEqual([]);
 });

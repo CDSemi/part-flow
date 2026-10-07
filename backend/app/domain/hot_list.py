@@ -152,6 +152,18 @@ def require_action(
     raise InvalidHotListChangeError(f"The change does not match the action {action}.")
 
 
+def changes_membership(expected: Sequence[int], new: Sequence[int]) -> bool:
+    """Whether ``expected → new`` changes which demands are on the list.
+
+    For every valid single-entry change this is exactly "Insert or
+    Remove" — a Move keeps the id set. Total over any input (duplicates
+    included), so it can classify a request before it is validated
+    (Phase 14 slice 3: adding or removing needs another permission than
+    reordering).
+    """
+    return set(expected) != set(new)
+
+
 def target_ranks(new_order: Sequence[int]) -> dict[int, int]:
     """The dense ranks 1..N the new order assigns (H1)."""
     return {demand_id: index + 1 for index, demand_id in enumerate(new_order)}

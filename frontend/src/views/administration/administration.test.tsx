@@ -2839,7 +2839,7 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     'Perform authorized historical corrections — grants nothing yet',
   );
   expect(document.body.textContent).toContain(
-    'Choose which roles hold each correction permission. The correction permissions are not checked yet; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.',
+    "Choose which roles hold each correction permission. Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. How Undo recent eligible scans applies is decided later; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.",
   );
   expect(document.body.textContent).toContain(
     "Undo recent eligible scans covers exactly the actions the Scan Station's Undo offers — there is no extra time limit.",
@@ -3511,7 +3511,7 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
 /* ============ Users (Phase 13 — application accounts) ============ */
 
 const USERS_NOTE =
-  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions in Administration; Management and Scan Station screens stay open to anyone who can reach PartFlow for now. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
+  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions in Administration and Management; Scan Station screens stay open to anyone who can reach PartFlow until station devices are enrolled. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
 const USER_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the user before trying again.';
 const E_U2B =
@@ -3894,7 +3894,7 @@ test('FA-U5: an unanswered save is an unknown outcome; offline blocks writes; a 
 /* ============ Roles & permissions (Phase 13 — named roles) ============ */
 
 const ROLES_NOTE =
-  'Each user holds one role. PartFlow checks the Administration permissions; the Management and Scan Station permissions are recorded here and are not checked yet. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
+  'Each user holds one role. PartFlow checks the Administration and Management permissions; the Scan Station permissions are recorded here, and how they apply is decided later. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
 
 async function openRoles(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);

@@ -164,13 +164,13 @@ def _release(client: TestClient, cell: _Cell, quantity: int = 10) -> tuple[int, 
     """Management releases ``quantity`` of a new PN into ``cell`` (no station)."""
     pn = _unique("PN")
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
         ),
         201,
     )
     released = _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/work-orders/{work_order['id']}/demands/{work_order['demands'][0]['id']}/release",
             json={
                 "part_number": pn,

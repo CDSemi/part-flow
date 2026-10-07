@@ -104,6 +104,27 @@
   height: 47px;
 }
 
+/* Read-only details (a user who may not manage Part Numbers): the
+   field labels over their saved values as text. */
+.pnm-form .pnm-readonly {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+
+.pnm-form .pnm-readonly dt {
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.pnm-form .pnm-readonly dd {
+  font-size: 14px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
 .pnm-form .err {
   color: var(--err-t);
   font-size: 12.5px;

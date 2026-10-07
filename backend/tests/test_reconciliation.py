@@ -152,7 +152,7 @@ class _Builder:
         )
         assert tag_format.status_code == 200, tag_format.text
         for name in ("M1", "M2"):
-            machine = self.client.post(
+            machine = self.admin.post(
                 "/api/machines", json={"area_id": self.areas["LATHE"], "name": name}
             )
             assert machine.status_code == 201, machine.text
@@ -172,7 +172,7 @@ class _Builder:
             )
 
     def route_template(self) -> int:
-        response = self.client.post(
+        response = self.admin.post(
             "/api/route-templates",
             json={
                 "name": "MAT-DEBURR",
@@ -189,7 +189,7 @@ class _Builder:
     # -- demand ------------------------------------------------------------
 
     def work_order(self, key: str, lines: list[tuple[str, str, int]]) -> None:
-        response = self.client.post(
+        response = self.admin.post(
             "/api/work-orders",
             json={
                 "work_order_number": key,
@@ -226,7 +226,7 @@ class _Builder:
         if route_template_id is not None:
             payload["route_template_id"] = route_template_id
         work_order_id = self._work_order_of(line)
-        response = self.client.post(
+        response = self.admin.post(
             f"/api/work-orders/{work_order_id}/demands/{self.demands[line]}/release", json=payload
         )
         assert response.status_code == 201, response.text
@@ -243,10 +243,10 @@ class _Builder:
             )
 
     def rank(self, line: str) -> None:
-        hot_list = self.client.get("/api/hot-list")
+        hot_list = self.admin.get("/api/hot-list")
         assert hot_list.status_code == 200, hot_list.text
         order = [int(entry["work_order_demand_id"]) for entry in hot_list.json()["entries"]]
-        response = self.client.post(
+        response = self.admin.post(
             "/api/hot-list/changes",
             json={
                 "device_event_id": _event(),
@@ -258,8 +258,8 @@ class _Builder:
         assert response.status_code in (200, 201), response.text
 
     def allocate(self, part_number: str, line: str, quantity: int) -> int:
-        response = self.client.post(
-            "/api/allocations",
+        response = self.admin.post(
+            "/api/allocations/management",
             json={
                 "part_number": part_number,
                 "allocation_quantity": quantity,
@@ -280,7 +280,7 @@ class _Builder:
             )
 
     def reverse_allocation(self, allocation_id: int) -> None:
-        response = self.client.post(
+        response = self.admin.post(
             f"/api/allocations/{allocation_id}/reversals",
             json={"reason": "wrong Work Order", "device_event_id": _event()},
         )
@@ -478,7 +478,7 @@ def _build_scenario(client: TestClient) -> Scenario:
     )
     b.in_area("area-completions", "LATHE", "LATHE_ASSIGNED", _PN_A, 5, machine_id=b.machines["M2"])
     b.in_area("machine-assignments", "LATHE", "ON_M1", _PN_A, 3, machine_id=b.machines["M1"])
-    retired = b.client.post(f"/api/machines/{b.machines['M2']}/retire", json={})
+    retired = admin_of(b.client).post(f"/api/machines/{b.machines['M2']}/retire", json={})
     assert retired.status_code in (200, 201), retired.text
     # Repair: the completed quantity returns to MAT, which it visited.
     b.arrival(
@@ -557,7 +557,7 @@ def _build_scenario(client: TestClient) -> Scenario:
     b.stock("STOCKED_D", "WO4", _PN_D, 5)
     b.rank("WO4")
     b.allocate(_PN_D, "WO4", 5)
-    lowered = b.client.patch(
+    lowered = admin_of(b.client).patch(
         f"/api/work-orders/{b.work_orders['WO4']}",
         json={"line_edits": [{"id": b.demands["WO4"], "requested_quantity": 5}]},
     )
@@ -567,7 +567,7 @@ def _build_scenario(client: TestClient) -> Scenario:
     # WO5: completed by removing its last short, unreleased line.
     b.stock("STOCKED_E5", "WO5-X", "PN-E5", 3)
     b.allocate("PN-E5", "WO5-X", 3)
-    removed = b.client.delete(
+    removed = admin_of(b.client).delete(
         f"/api/work-orders/{b.work_orders['WO5']}/demands/{b.demands['WO5-Y']}"
     )
     assert removed.status_code == 204, removed.text

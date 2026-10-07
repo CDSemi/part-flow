@@ -57,6 +57,7 @@ from app.application.errors import InvalidInputError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_work_orders_api"
@@ -121,7 +122,7 @@ def _line(**overrides: Any) -> dict[str, Any]:
 def _create_work_order(client: TestClient, **overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"lines": [_line()]}
     payload.update(overrides)
-    response = client.post("/api/work-orders", json=payload)
+    response = admin_of(client).post("/api/work-orders", json=payload)
     assert response.status_code == 201, response.text
     return dict(response.json())
 
@@ -203,17 +204,17 @@ def test_entered_number_is_verbatim_and_never_duplicated(
     assert created["work_order_number"] == number
 
     counts_before = _write_counts(db_engine)
-    duplicate = client.post(
+    duplicate = admin_of(client).post(
         "/api/work-orders", json={"work_order_number": number, "lines": [_line()]}
     )
     assert duplicate.status_code == 409
     assert "already exists" in duplicate.json()["detail"]
     assert _write_counts(db_engine) == counts_before
 
-    resolved = client.get("/api/work-orders", params={"number": number})
+    resolved = admin_of(client).get("/api/work-orders", params={"number": number})
     assert [row["id"] for row in resolved.json()] == [created["id"]]
     # Verbatim equality: the trimmed variant is a different number.
-    assert client.get("/api/work-orders", params={"number": number.strip()}).json() == []
+    assert admin_of(client).get("/api/work-orders", params={"number": number.strip()}).json() == []
 
 
 def test_due_dates_are_nullable_valid_data(client: TestClient) -> None:
@@ -227,7 +228,7 @@ def test_due_dates_are_nullable_valid_data(client: TestClient) -> None:
     assert [line["due_date"] for line in body["demands"]] == [None, "2026-09-15"]
 
     # An explicit "No due date" edit is equally valid.
-    cleared = client.patch(
+    cleared = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={"line_edits": [{"id": body["demands"][1]["id"], "due_date": None}]},
     )
@@ -288,7 +289,7 @@ def test_internal_whitespace_pn_is_rejected_with_zero_writes(
     no PN master, no audit row."""
     counts_before = _write_counts(db_engine)
     for invalid in ("ABC 123", "ABC\t123", "ABC\n123", ""):
-        rejected = client.post(
+        rejected = admin_of(client).post(
             "/api/work-orders",
             json={"lines": [_line(), _line(part_number=invalid)]},
         )
@@ -301,7 +302,7 @@ def test_duplicate_pn_on_one_work_order_is_rejected(client: TestClient, db_engin
     when adding lines later (the UI focuses the existing line)."""
     canonical = _unique("PN")
     counts_before = _write_counts(db_engine)
-    rejected = client.post(
+    rejected = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [_line(part_number=canonical), _line(part_number=canonical.lower())]},
     )
@@ -310,7 +311,7 @@ def test_duplicate_pn_on_one_work_order_is_rejected(client: TestClient, db_engin
     assert _write_counts(db_engine) == counts_before
 
     body = _create_work_order(client, lines=[_line(part_number=canonical)])
-    added = client.patch(
+    added = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={"new_lines": [_line(part_number=f" {canonical.lower()} ")]},
     )
@@ -323,7 +324,7 @@ def test_requested_quantity_must_be_a_positive_integer(
 ) -> None:
     counts_before = _write_counts(db_engine)
     for quantity in (0, -5):
-        rejected = client.post(
+        rejected = admin_of(client).post(
             "/api/work-orders", json={"lines": [_line(requested_quantity=quantity)]}
         )
         assert rejected.status_code == 422, rejected.text
@@ -331,7 +332,7 @@ def test_requested_quantity_must_be_a_positive_integer(
     # Shape-level rejections (schema): non-integers never reach the
     # Application layer.
     for non_integer in ("three", 2.5, True, None):
-        rejected = client.post(
+        rejected = admin_of(client).post(
             "/api/work-orders", json={"lines": [_line(requested_quantity=non_integer)]}
         )
         assert rejected.status_code == 422, rejected.text
@@ -340,7 +341,7 @@ def test_requested_quantity_must_be_a_positive_integer(
 
 def test_a_work_order_needs_at_least_one_demand_line(client: TestClient, db_engine: Engine) -> None:
     counts_before = _write_counts(db_engine)
-    rejected = client.post("/api/work-orders", json={"lines": []})
+    rejected = admin_of(client).post("/api/work-orders", json={"lines": []})
     assert rejected.status_code == 422
     assert "at least one demand line" in rejected.json()["detail"]
     assert _write_counts(db_engine) == counts_before
@@ -359,7 +360,7 @@ def test_saving_demand_creates_zero_production_data(client: TestClient, db_engin
         lines=[_line(request_type="MODIFY", job_numbers=["17555", "17556"]), _line()],
     )
     line_id = body["demands"][0]["id"]
-    edited = client.patch(
+    edited = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={
             "due_date": "2026-10-01",
@@ -407,7 +408,10 @@ def test_create_appends_all_audit_rows_in_one_transaction(
     """One create: WorkOrder CREATED, one CREATED per demand line, and
     one PartNumber CREATED for the first-use PN only."""
     existing_pn = _unique("PN")
-    assert client.post("/api/part-numbers", json={"part_number": existing_pn}).status_code == 201
+    assert (
+        admin_of(client).post("/api/part-numbers", json={"part_number": existing_pn}).status_code
+        == 201
+    )
     new_pn = _unique("PN")
 
     number = _unique("WO")
@@ -445,7 +449,7 @@ def test_edits_append_updated_rows_and_unchanged_saves_append_nothing(
     line = body["demands"][0]
     number = _unique("WO")
 
-    edited = client.patch(
+    edited = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={
             "work_order_number": number,
@@ -466,7 +470,7 @@ def test_edits_append_updated_rows_and_unchanged_saves_append_nothing(
     assert line_events[1].after_data["requested_quantity"] == 42
 
     # Saving the same values again changes nothing and audits nothing.
-    unchanged = client.patch(
+    unchanged = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={
             "work_order_number": number,
@@ -490,7 +494,7 @@ def test_failed_audit_write_rolls_back_the_whole_save(
 
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     with pytest.raises(RuntimeError, match="audit persistence failed"):
-        client.post(
+        admin_of(client).post(
             "/api/work-orders",
             json={"work_order_number": _unique("WO"), "lines": [_line()]},
         )
@@ -515,7 +519,7 @@ def test_business_write_lost_at_commit_takes_its_audit_rows_with_it(
         "_reject_duplicate_work_order_number",
         lambda *args, **kwargs: None,
     )
-    conflicted = client.patch(
+    conflicted = admin_of(client).patch(
         f"/api/work-orders/{target['id']}",
         json={"work_order_number": taken["work_order_number"]},
     )
@@ -523,7 +527,7 @@ def test_business_write_lost_at_commit_takes_its_audit_rows_with_it(
     assert conflicted.status_code == 409
     assert "already exists" in conflicted.json()["detail"]
 
-    detail = client.get(f"/api/work-orders/{target['id']}")
+    detail = admin_of(client).get(f"/api/work-orders/{target['id']}")
     assert detail.json()["work_order_number"] == target["work_order_number"]
     assert len(_audit_rows(db_engine, "WorkOrder", str(target["id"]))) == events_before
 
@@ -537,23 +541,32 @@ def test_server_owned_fields_are_rejected(client: TestClient) -> None:
     """extra="forbid": status, allocation, priority, and the PN of a
     saved line are never client-writable."""
     assert (
-        client.post("/api/work-orders", json={"status": "RELEASED", "lines": [_line()]}).status_code
+        admin_of(client)
+        .post("/api/work-orders", json={"status": "RELEASED", "lines": [_line()]})
+        .status_code
         == 422
     )
     assert (
-        client.post("/api/work-orders", json={"lines": [_line(allocated_quantity=3)]}).status_code
+        admin_of(client)
+        .post("/api/work-orders", json={"lines": [_line(allocated_quantity=3)]})
+        .status_code
         == 422
     )
     assert (
-        client.post("/api/work-orders", json={"lines": [_line(priority_rank=1)]}).status_code == 422
+        admin_of(client)
+        .post("/api/work-orders", json={"lines": [_line(priority_rank=1)]})
+        .status_code
+        == 422
     )
     body = _create_work_order(client)
     line_id = body["demands"][0]["id"]
     assert (
-        client.patch(
+        admin_of(client)
+        .patch(
             f"/api/work-orders/{body['id']}",
             json={"line_edits": [{"id": line_id, "part_number": _unique("PN")}]},
-        ).status_code
+        )
+        .status_code
         == 422
     )
 
@@ -568,19 +581,19 @@ def test_explicit_null_request_type_on_edit_is_rejected(
     line = body["demands"][0]
     events_before = _audit_rows(db_engine, "WorkOrderDemand", str(line["id"]))
 
-    rejected = client.patch(
+    rejected = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={"line_edits": [{"id": line["id"], "request_type": None}]},
     )
     assert rejected.status_code == 422
     assert "Request Type cannot be cleared" in rejected.json()["detail"]
 
-    detail = client.get(f"/api/work-orders/{body['id']}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{body['id']}").json()
     assert detail["demands"][0]["request_type"] == "MODIFY"
     assert _audit_rows(db_engine, "WorkOrderDemand", str(line["id"])) == events_before
 
     # Omitted keeps the value; an explicit value still updates normally.
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={"line_edits": [{"id": line["id"], "request_type": "NEW"}]},
     )
@@ -593,30 +606,38 @@ def test_client_supplied_audit_actor_is_rejected(client: TestClient, db_engine: 
     extra="forbid" everywhere, and audit rows written by these
     workflows keep actor_reference NULL until Phase 14."""
     assert (
-        client.post(
+        admin_of(client)
+        .post(
             "/api/work-orders",
             json={"lines": [_line()], "actor": "mallory"},
-        ).status_code
+        )
+        .status_code
         == 422
     )
     assert (
-        client.post(
+        admin_of(client)
+        .post(
             "/api/part-numbers",
             json={"part_number": _unique("PN"), "actor": "mallory"},
-        ).status_code
+        )
+        .status_code
         == 422
     )
     body = _create_work_order(client)
     assert (
-        client.patch(
+        admin_of(client)
+        .patch(
             f"/api/work-orders/{body['id']}",
             json={"due_date": "2026-11-01", "actor": "mallory"},
-        ).status_code
+        )
+        .status_code
         == 422
     )
 
     # The rows the clean create/edit produced all carry a NULL actor.
-    edited = client.patch(f"/api/work-orders/{body['id']}", json={"due_date": "2026-11-01"})
+    edited = admin_of(client).patch(
+        f"/api/work-orders/{body['id']}", json={"due_date": "2026-11-01"}
+    )
     assert edited.status_code == 200
     wo_events = _audit_rows(db_engine, "WorkOrder", str(body["id"]))
     line_events = _audit_rows(db_engine, "WorkOrderDemand", str(body["demands"][0]["id"]))
@@ -637,7 +658,7 @@ def test_duplicate_demand_ids_in_one_save_are_rejected(
     counts_before = _write_counts(db_engine)
     events_before = _audit_rows(db_engine, "WorkOrderDemand", str(line["id"]))
 
-    rejected = client.patch(
+    rejected = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={
             "due_date": "2026-12-01",
@@ -652,16 +673,16 @@ def test_duplicate_demand_ids_in_one_save_are_rejected(
 
     assert _write_counts(db_engine) == counts_before
     assert _audit_rows(db_engine, "WorkOrderDemand", str(line["id"])) == events_before
-    detail = client.get(f"/api/work-orders/{body['id']}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{body['id']}").json()
     assert detail["demands"][0]["requested_quantity"] == 5
     assert detail["due_date"] is None
 
 
 def test_unknown_work_order_and_foreign_line_are_not_found(client: TestClient) -> None:
-    assert client.get("/api/work-orders/999999").status_code == 404
+    assert admin_of(client).get("/api/work-orders/999999").status_code == 404
     first = _create_work_order(client)
     second = _create_work_order(client)
-    foreign = client.patch(
+    foreign = admin_of(client).patch(
         f"/api/work-orders/{first['id']}",
         json={"line_edits": [{"id": second["demands"][0]["id"], "requested_quantity": 2}]},
     )
@@ -679,7 +700,7 @@ def test_list_and_search_over_work_order_numbers(client: TestClient) -> None:
         work_order_number=f"WO-{marker}-X",
         lines=[_line(part_number=pn_one), _line(part_number=pn_two)],
     )
-    found = client.get("/api/work-orders", params={"search": marker.lower()})
+    found = admin_of(client).get("/api/work-orders", params={"search": marker.lower()})
     assert found.status_code == 200
     rows = found.json()
     assert [row["id"] for row in rows] == [body["id"]]
@@ -746,8 +767,9 @@ def test_concurrent_adds_of_the_same_part_number_cannot_both_create_a_line(
     primary-key race inside `ensure_part_number`, which would prove
     nothing about this rule.
     """
+    actor_user_id = admin_of(client).user_id
     duplicate_pn = _unique("RACE")
-    master = client.post("/api/part-numbers", json={"part_number": duplicate_pn})
+    master = admin_of(client).post("/api/part-numbers", json={"part_number": duplicate_pn})
     assert master.status_code == 201, master.text
 
     body = _create_work_order(client, lines=[_line()])
@@ -764,6 +786,7 @@ def test_concurrent_adds_of_the_same_part_number_cannot_both_create_a_line(
                 work_orders.update_work_order(
                     session,
                     work_order_id,
+                    actor_user_id=actor_user_id,
                     new_lines=[{"part_number": duplicate_pn, "requested_quantity": 4}],
                 )
                 results[key] = "ok"
@@ -800,16 +823,16 @@ def test_concurrent_adds_of_the_same_part_number_cannot_both_create_a_line(
     assert after["part_movements"] == before["part_movements"]
 
     # The Work Order is not left in a state the UI cannot save again.
-    detail = client.get(f"/api/work-orders/{work_order_id}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{work_order_id}").json()
     assert [d["part_number"] for d in detail["demands"]].count(duplicate_pn) == 1
     line_id = next(d["id"] for d in detail["demands"] if d["part_number"] == duplicate_pn)
-    edited = client.patch(
+    edited = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={"line_edits": [{"id": line_id, "requested_quantity": 9}]},
     )
     assert edited.status_code == 200, edited.text
     assert edited.json()["demands"][-1]["requested_quantity"] == 9
-    added = client.patch(
+    added = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={"new_lines": [_line()]},
     )
@@ -825,7 +848,7 @@ def _race_one_add(client: TestClient, work_order_id: int, part_number: str) -> l
 
     def patch_add() -> None:
         barrier.wait(timeout=20)
-        response = client.patch(
+        response = admin_of(client).patch(
             f"/api/work-orders/{work_order_id}",
             json={"new_lines": [{"part_number": part_number, "requested_quantity": 3}]},
         )
@@ -853,7 +876,10 @@ def test_unsynchronized_concurrent_adds_never_duplicate_a_part_number(
     half-write.
     """
     duplicate_pn = _unique("STRESS")
-    assert client.post("/api/part-numbers", json={"part_number": duplicate_pn}).status_code == 201
+    assert (
+        admin_of(client).post("/api/part-numbers", json={"part_number": duplicate_pn}).status_code
+        == 201
+    )
 
     for _ in range(8):
         body = _create_work_order(client, lines=[_line()])
@@ -892,7 +918,7 @@ def test_active_list_and_search_are_bounded_by_the_server(
             {"marker": marker, "count": limit + 20},
         )
 
-    rows = client.get("/api/work-orders", params={"search": marker})
+    rows = admin_of(client).get("/api/work-orders", params={"search": marker})
     assert rows.status_code == 200
     numbers = [row["work_order_number"] for row in rows.json()]
     assert len(numbers) == limit
@@ -902,14 +928,14 @@ def test_active_list_and_search_are_bounded_by_the_server(
     assert numbers == expected
 
     # The unfiltered listing is bounded too.
-    assert len(client.get("/api/work-orders").json()) == limit
+    assert len(admin_of(client).get("/api/work-orders").json()) == limit
 
     # A Work Order outside the default page is still reachable: by a
     # narrower search...
-    narrow = client.get("/api/work-orders", params={"search": f"{marker}-0001"})
+    narrow = admin_of(client).get("/api/work-orders", params={"search": f"{marker}-0001"})
     assert [row["work_order_number"] for row in narrow.json()] == [f"{marker}-0001"]
     # ...and by the exact resolution, which is never bounded away.
-    exact = client.get("/api/work-orders", params={"number": f"{marker}-0007"})
+    exact = admin_of(client).get("/api/work-orders", params={"number": f"{marker}-0007"})
     assert exact.status_code == 200
     assert [row["work_order_number"] for row in exact.json()] == [f"{marker}-0007"]
 
@@ -941,9 +967,9 @@ def test_search_is_evaluated_in_the_database_not_after_the_bound(
             {"marker": marker, "count": limit + 20},
         )
 
-    everything = client.get("/api/work-orders", params={"search": marker})
+    everything = admin_of(client).get("/api/work-orders", params={"search": marker})
     assert needle not in [row["work_order_number"] for row in everything.json()]
-    found = client.get("/api/work-orders", params={"search": "NEEDLE"})
+    found = admin_of(client).get("/api/work-orders", params={"search": "NEEDLE"})
     assert [row["work_order_number"] for row in found.json()] == [needle]
 
 
@@ -967,7 +993,7 @@ def test_quantity_floor_also_binds_a_line_that_only_carries_allocation(
             {"id": line_id},
         )
 
-    too_low = client.patch(
+    too_low = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={"line_edits": [{"id": line_id, "requested_quantity": 11}]},
     )
@@ -976,13 +1002,15 @@ def test_quantity_floor_also_binds_a_line_that_only_carries_allocation(
 
     # Nothing about the line changed.
     assert (
-        client.get(f"/api/work-orders/{body['id']}").json()["demands"][0]["requested_quantity"]
+        admin_of(client)
+        .get(f"/api/work-orders/{body['id']}")
+        .json()["demands"][0]["requested_quantity"]
         == 30
     )
 
     # Down to exactly the committed quantity is valid, and Request Type
     # stays editable — nothing has been RELEASED for this line.
-    exact = client.patch(
+    exact = admin_of(client).patch(
         f"/api/work-orders/{body['id']}",
         json={"line_edits": [{"id": line_id, "requested_quantity": 12, "request_type": "MODIFY"}]},
     )

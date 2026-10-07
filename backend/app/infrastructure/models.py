@@ -875,11 +875,9 @@ class MachineLifecycleEvent(Base):
     record. Machine lifecycle is a Management action and Workers are
     never associated with these events. `actor_user_id` is the
     signed-in User, derived by the server from the session, never from
-    a request body (Phase 14; written only by the slice 1 password and
-    sign-in-policy commands so far). The legacy text column (`actor`) is
-    kept for history and never backfilled; existing writers keep writing
-    it until their slice converts them (the Machine retire/reactivate
-    request-body `actor` until slice 3 removes it). Machine configuration writes are
+    a request body (Phase 14 slice 3: retirement and reactivation record
+    it). The legacy text column (`actor`) is kept for history, written no
+    more and never backfilled. Machine configuration writes are
     audited in `audit_events` (Phase 13); lifecycle transitions are
     recorded only here.
     """
@@ -1979,12 +1977,11 @@ class WorkOrderAllocation(Base):
     rows under one id, replayed as a whole on a transport retry.
     `station_id` names the Stockroom Scan Station of a receiving
     confirmation (NULL for a Management allocation or adjustment);
-    `actor_user_id` is the signed-in User, derived by the server from
-    the session, never from a request body (Phase 14; written only by
-    the slice 1 password and sign-in-policy commands so far). The legacy
-    text column (`actor_reference`) is kept for history and never
-    backfilled; existing writers keep writing it until their slice
-    converts them; `allocated_by_worker_id` (Phase 13)
+    `actor_user_id` is the signed-in User of a Management allocation or
+    reversal, derived by the server from the session, never from a
+    request body (Phase 14 slice 3; NULL on station rows). The legacy
+    text column (`actor_reference`) is kept for history, written no more
+    and never backfilled; `allocated_by_worker_id` (Phase 13)
     is the Worker identified at the Stockroom station; NULL for
     Management rows.
     """
@@ -2113,9 +2110,10 @@ class AuditEvent(Base):
     signed-in User, derived by the server from the session, never from
     a request body (Phase 14; written by the Administration writers —
     environment, Workers, policies, roles, Users and passwords — since
-    slice 2). The legacy text column (`actor_reference`) is kept for
-    history and never backfilled; the remaining writers keep writing it
-    until their slice converts them.
+    slice 2, by every Management writer since slice 3; NULL on rows a
+    Scan Station command writes). The legacy text column
+    (`actor_reference`) is kept for history, written no more and never
+    backfilled.
     Append-only enforcement is the raise-on-write trigger owned by the
     Phase 4 migration.
     """

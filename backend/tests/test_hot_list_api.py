@@ -221,7 +221,7 @@ class _Cell:
         self.station_id = str(station.json()["station_id"])
         self.machine_ids: list[int] = []
         for _ in range(machine_count):
-            machine = client.post(
+            machine = admin_of(client).post(
                 "/api/machines", json={"area_id": self.area_id, "name": _unique("Lathe")}
             )
             assert machine.status_code == 201, machine.text
@@ -271,7 +271,7 @@ def _work_order(
         payload["work_order_number"] = number
     if received_date is not None:
         payload["received_date"] = received_date
-    response = client.post("/api/work-orders", json=payload)
+    response = admin_of(client).post("/api/work-orders", json=payload)
     assert response.status_code == 201, response.text
     return _WorkOrder(response.json())
 
@@ -290,7 +290,7 @@ def _release_response(
     pn: str,
     quantity: int,
 ) -> Any:
-    return client.post(
+    return admin_of(client).post(
         f"/api/work-orders/{work_order.id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -351,7 +351,8 @@ def _allocate(
     }
     if station_id is not None:
         payload["station_id"] = station_id
-    return client.post("/api/allocations", json=payload)
+        return client.post("/api/allocations", json=payload)
+    return admin_of(client).post("/api/allocations/management", json=payload)
 
 
 def _stocked(
@@ -381,7 +382,7 @@ def _fulfil(
 
 
 def _hot_list(client: TestClient) -> dict[str, Any]:
-    response = client.get("/api/hot-list")
+    response = admin_of(client).get("/api/hot-list")
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -408,7 +409,7 @@ def _change(
     *,
     device_event_id: str | None = None,
 ) -> Any:
-    return client.post(
+    return admin_of(client).post(
         "/api/hot-list/changes",
         json={
             "device_event_id": device_event_id or str(uuid.uuid4()),
@@ -770,7 +771,7 @@ def test_add_refusals_write_nothing(client: TestClient, db_engine: Engine) -> No
     assert _change(client, "PROMOTE", [listed], [listed, other]).status_code == 422
     response = _change(client, "ADD", [listed], [listed, other], device_event_id="not-a-uuid")
     assert response.status_code == 422
-    extra = client.post(
+    extra = admin_of(client).post(
         "/api/hot-list/changes",
         json={
             "device_event_id": str(uuid.uuid4()),
@@ -989,9 +990,9 @@ def test_completing_allocation_removes_the_entry_automatically(
     _assert_no_inactive_entry(db_engine)
 
     # The Work Order stays completed, read-only history.
-    detail = client.get(f"/api/work-orders/{work_order.id}")
+    detail = admin_of(client).get(f"/api/work-orders/{work_order.id}")
     assert detail.status_code == 200 and detail.json()["status"] == "COMPLETED"
-    edit = client.patch(
+    edit = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": work_order.demand_id, "requested_quantity": 9}]},
     )
@@ -1054,7 +1055,7 @@ def test_management_allocation_removes_a_fully_allocated_middle_entry(
     assert removed_block["part_number"] == pn
     assert removed_block["work_order_id"] == work_order.id
     assert removed_block["work_order_number"] == number
-    detail = client.get(f"/api/work-orders/{work_order.id}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{work_order.id}").json()
     assert detail["status"] != "COMPLETED" and detail["completed_at"] is None
 
     before = _audit_count(db_engine)
@@ -1139,13 +1140,13 @@ def test_a_reversal_reopens_but_never_re_adds(
     assert _rank_of(db_engine, work_order.demand_id) is None
     mark = _audit_mark(db_engine)
 
-    reversed_ = client.post(
+    reversed_ = admin_of(client).post(
         f"/api/allocations/{allocated.json()['rows'][0]['allocation_id']}/reversals",
         json={"reason": "Counted wrong", "device_event_id": str(uuid.uuid4())},
     )
     assert reversed_.status_code == 201, reversed_.text
     assert reversed_.json()["reopened_work_order_ids"] == [work_order.id]
-    assert client.get(f"/api/work-orders/{work_order.id}").json()["status"] != "COMPLETED"
+    assert admin_of(client).get(f"/api/work-orders/{work_order.id}").json()["status"] != "COMPLETED"
     assert _rank_of(db_engine, work_order.demand_id) is None
     assert _order(client) == [other]
     assert _hot_rows_since(db_engine, mark) == []
@@ -1169,7 +1170,7 @@ def test_a_save_lowering_the_quantity_to_the_allocated_quantity_removes_the_entr
     assert _rank_of(db_engine, hot) == 2
     mark = _audit_mark(db_engine)
 
-    saved = client.patch(
+    saved = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": hot, "requested_quantity": 4}]},
     )
@@ -1192,7 +1193,7 @@ def test_a_save_lowering_the_quantity_to_the_allocated_quantity_removes_the_entr
     _assert_no_inactive_entry(db_engine)
 
     mark = _audit_mark(db_engine)
-    raised = client.patch(
+    raised = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": hot, "requested_quantity": 6}]},
     )
@@ -1217,13 +1218,13 @@ def test_a_save_keeping_a_shortage_or_editing_only_the_due_date_keeps_the_rank(
     assert _allocate(client, pn, [(hot, 4)]).status_code == 201
     mark = _audit_mark(db_engine)
 
-    lowered = client.patch(
+    lowered = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": hot, "requested_quantity": 6}]},
     )
     assert lowered.status_code == 200, lowered.text
     with _recording() as locks:
-        dated = client.patch(
+        dated = admin_of(client).patch(
             f"/api/work-orders/{work_order.id}",
             json={"line_edits": [{"id": hot, "due_date": "2031-02-03"}]},
         )
@@ -1256,7 +1257,7 @@ def test_a_save_removes_only_a_line_whose_quantity_it_lowered(
         mark = _audit_mark(db_engine)
 
         with _recording() as locks:
-            saved = client.patch(
+            saved = admin_of(client).patch(
                 f"/api/work-orders/{work_order.id}",
                 json={
                     "line_edits": [
@@ -1288,7 +1289,7 @@ def test_a_receipt_raising_a_ranked_internal_line_keeps_its_rank(
     rank is set test-only."""
     _clear(client)
     pn = _unique("PN")
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -1316,7 +1317,7 @@ def test_a_receipt_raising_a_ranked_internal_line_keeps_its_rank(
         },
     )
     assert received.status_code == 201, received.text
-    detail = client.get(f"/api/work-orders/{work_order.id}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{work_order.id}").json()
     [reused] = [d for d in detail["demands"] if d["id"] == line]
     assert (reused["requested_quantity"], reused["priority_rank"]) == (7, 1)
     assert _hot_rows_since(db_engine, mark) == []
@@ -1449,7 +1450,7 @@ def test_a_replay_survives_the_deletion_of_the_removed_line(
     removed = _change(client, "REMOVE", [removable, kept], [kept], device_event_id=event_id)
     assert removed.status_code == 201, removed.text
 
-    deleted = client.delete(f"/api/work-orders/{work_order.id}/demands/{removable}")
+    deleted = admin_of(client).delete(f"/api/work-orders/{work_order.id}/demands/{removable}")
     assert deleted.status_code == 204, deleted.text
     assert not _demand_exists(db_engine, removable)
 
@@ -1622,7 +1623,7 @@ def test_a_hot_add_and_a_line_removal_serialize_on_the_demand_row(
     assert inside.wait(timeout=20)
     remover = threading.Thread(
         target=lambda: results.update(
-            delete=client.delete(f"/api/work-orders/{work_order.id}/demands/{target}")
+            delete=admin_of(client).delete(f"/api/work-orders/{work_order.id}/demands/{target}")
         )
     )
     remover.start()
@@ -1663,7 +1664,7 @@ def test_a_line_removal_and_a_hot_add_serialize_the_other_way(
     results: dict[str, Any] = {}
     remover = threading.Thread(
         target=lambda: results.update(
-            delete=client.delete(f"/api/work-orders/{work_order.id}/demands/{target}")
+            delete=admin_of(client).delete(f"/api/work-orders/{work_order.id}/demands/{target}")
         )
     )
     remover.start()
@@ -1749,8 +1750,8 @@ def test_several_active_departments_refuse_every_hot_list_route(
     before = _audit_count(db_engine)
     try:
         for response in (
-            client.get("/api/hot-list"),
-            client.get("/api/hot-list/candidates"),
+            admin_of(client).get("/api/hot-list"),
+            admin_of(client).get("/api/hot-list/candidates"),
             _change(client, "ADD", [], [candidate]),
         ):
             assert response.status_code == 409, response.text
@@ -1777,8 +1778,8 @@ def test_no_active_department_refuses_every_hot_list_route(
     _set_department_active(db_engine, shop.department_id, False)
     try:
         for response in (
-            client.get("/api/hot-list"),
-            client.get("/api/hot-list/candidates", params={"search": "x"}),
+            admin_of(client).get("/api/hot-list"),
+            admin_of(client).get("/api/hot-list/candidates", params={"search": "x"}),
             _change(client, "ADD", [], [candidate]),
         ):
             assert response.status_code == 404, response.text
@@ -1815,7 +1816,7 @@ def test_the_distribution_excludes_areas_of_another_department(
 
 
 def _candidates(client: TestClient, **params: str) -> dict[str, Any]:
-    response = client.get("/api/hot-list/candidates", params=params)
+    response = admin_of(client).get("/api/hot-list/candidates", params=params)
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -1895,17 +1896,19 @@ def test_a_barcode_returns_more_than_fifty_demands_untruncated(
 
 def test_candidate_refusals(client: TestClient, shop: _Shop) -> None:
     for barcode in ("PF:MACHINE:CD-0001", "hello", "PF:AREA:7"):
-        response = client.get("/api/hot-list/candidates", params={"barcode": barcode})
+        response = admin_of(client).get("/api/hot-list/candidates", params={"barcode": barcode})
         assert response.status_code == 422, response.text
         assert response.json()["detail"] == _NOT_A_PN_BARCODE
-    empty = client.get("/api/hot-list/candidates", params={"barcode": "PF:PN:"})
+    empty = admin_of(client).get("/api/hot-list/candidates", params={"barcode": "PF:PN:"})
     assert empty.status_code == 422
     assert empty.json()["detail"] == "Part Number must not be empty."
-    both = client.get("/api/hot-list/candidates", params={"barcode": "PF:PN:X", "search": "X"})
+    both = admin_of(client).get(
+        "/api/hot-list/candidates", params={"barcode": "PF:PN:X", "search": "X"}
+    )
     assert both.status_code == 422
     # PostgreSQL text cannot hold NUL: a 422 before any query, not a 500.
     for params in ({"search": "a\x00b"}, {"barcode": "PF:PN:A\x00B"}):
-        response = client.get("/api/hot-list/candidates", params=params)
+        response = admin_of(client).get("/api/hot-list/candidates", params=params)
         assert response.status_code == 422, response.text
         assert response.json()["detail"] == (
             "The search text or barcode contains a NUL character. Nothing was searched."
@@ -2018,7 +2021,7 @@ def _delete_line(
     client: TestClient, work_order_id: int, demand_id: int, *, confirm: bool = False
 ) -> Any:
     query = "?confirm_hot_removal=true" if confirm else ""
-    return client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}{query}")
+    return admin_of(client).delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}{query}")
 
 
 def _demand_state(engine: Engine) -> list[tuple[Any, ...]]:
@@ -2178,14 +2181,14 @@ def test_a_hot_line_with_reversed_allocation_history_says_so_and_is_refused(
     hot, untouched = work_order.demand_ids
     allocated = _allocate(client, pn, [(hot, 4)])
     assert allocated.status_code == 201, allocated.text
-    reversed_ = client.post(
+    reversed_ = admin_of(client).post(
         f"/api/allocations/{allocated.json()['rows'][0]['allocation_id']}/reversals",
         json={"reason": "Counted wrong", "device_event_id": str(uuid.uuid4())},
     )
     assert reversed_.status_code == 201, reversed_.text
     _added(client, hot)
 
-    detail = client.get(f"/api/work-orders/{work_order.id}")
+    detail = admin_of(client).get(f"/api/work-orders/{work_order.id}")
     assert detail.status_code == 200, detail.text
     lines = {d["id"]: d for d in detail.json()["demands"]}
     assert (
@@ -2285,7 +2288,7 @@ def test_the_command_rank_orders_every_consumer(client: TestClient, shop: _Shop)
     assert rows.index(board[0]) == 0 and rows.index(board[1]) == 1
 
     # PN Tracking.
-    tracking = client.get("/api/tracking", params={"search": f"XC{token}"})
+    tracking = admin_of(client).get("/api/tracking", params={"search": f"XC{token}"})
     assert tracking.status_code == 200, tracking.text
     assert [(row["part_number"], row["hot_rank"]) for row in tracking.json()["rows"]] == [
         (second_pn, 1),
@@ -2331,7 +2334,7 @@ def test_a_fully_allocated_hot_line_of_an_open_wo_leaves_the_hot_list_and_monito
     assert _order(client) == []
 
     assert board_rank() == [None]
-    tracking = client.get("/api/tracking", params={"search": pn, "hot_only": "true"})
+    tracking = admin_of(client).get("/api/tracking", params={"search": pn, "hot_only": "true"})
     assert tracking.status_code == 200 and tracking.json()["rows"] == []
     inventory = client.get(f"/api/areas/{shop.material.area_id}/inventory")
     assert inventory.status_code == 200, inventory.text
@@ -2343,12 +2346,12 @@ def test_a_fully_allocated_hot_line_of_an_open_wo_leaves_the_hot_list_and_monito
 
 
 def test_work_order_intake_still_rejects_priority_rank(client: TestClient) -> None:
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders", json={"lines": [_line(_unique("PN"), priority_rank=1)]}
     )
     assert created.status_code == 422
     work_order = _work_order(client, [_line(_unique("PN"))])
-    edited = client.patch(
+    edited = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": work_order.demand_id, "priority_rank": 1}]},
     )
@@ -2564,7 +2567,7 @@ def test_a_move_waiting_on_a_quantity_save_is_refused_as_stale(
     saver = _start(
         results,
         "save",
-        lambda: client.patch(
+        lambda: admin_of(client).patch(
             f"/api/work-orders/{target.id}",
             json={"line_edits": [{"id": d, "requested_quantity": 4}]},
         ),
@@ -2699,7 +2702,7 @@ def test_an_idempotency_race_lost_at_commit_answers_409_and_keeps_the_rank(
         results, "allocate", lambda: _allocate(client, x_pn, [(d, 4)], device_event_id=shared_id)
     )
     assert inside.wait(timeout=20)
-    reversal = client.post(
+    reversal = admin_of(client).post(
         f"/api/allocations/{y_allocation.json()['rows'][0]['allocation_id']}/reversals",
         json={"reason": "Wrong line", "device_event_id": shared_id},
     )
@@ -2753,40 +2756,27 @@ def test_every_hot_lock_taker_follows_the_global_lock_order(
     _assert_lock_order(locks, hot_lock=True)
     assert "R1" not in _classes(locks)
 
-    # Reversals: Management, and at the Stockroom (station before the demand).
+    # The reversal (Management only since Phase 14 slice 3): no station row.
     with _recording() as locks:
-        reversed_ = client.post(
+        reversed_ = admin_of(client).post(
             f"/api/allocations/{allocated.json()['rows'][0]['allocation_id']}/reversals",
             json={"reason": "Recount", "device_event_id": str(uuid.uuid4())},
         )
     assert reversed_.status_code == 201, reversed_.text
     assert _assert_lock_order(locks, hot_lock=False) == [partial.demand_id]
-    allocated = _allocate(client, partial_pn, [(partial.demand_id, 2)])
-    assert allocated.status_code == 201, allocated.text
-    with _recording() as locks:
-        reversed_ = client.post(
-            f"/api/allocations/{allocated.json()['rows'][0]['allocation_id']}/reversals",
-            json={
-                "reason": "Recount",
-                "station_id": shop.stockroom.station_id,
-                "device_event_id": str(uuid.uuid4()),
-            },
-        )
-    assert reversed_.status_code == 201, reversed_.text
-    _assert_lock_order(locks, hot_lock=False)
-    assert _classes(locks)[:3] == ["A1", "R1", "R2"]
+    assert "R1" not in _classes(locks)
 
     # Work Order saves: a quantity edit takes the Hot lock, a due date does not.
     _added(client, partial.demand_id)
     with _recording() as locks:
-        saved = client.patch(
+        saved = admin_of(client).patch(
             f"/api/work-orders/{partial.id}",
             json={"line_edits": [{"id": partial.demand_id, "requested_quantity": 9}]},
         )
     assert saved.status_code == 200, saved.text
     _assert_lock_order(locks, hot_lock=True)
     with _recording() as locks:
-        saved = client.patch(
+        saved = admin_of(client).patch(
             f"/api/work-orders/{partial.id}",
             json={"line_edits": [{"id": partial.demand_id, "due_date": "2031-04-05"}]},
         )
@@ -2842,7 +2832,7 @@ def _smoke_round(client: TestClient, shop: _Shop, round_number: int) -> dict[str
 
     calls: dict[str, Callable[[], Any]] = {
         "allocate": lambda: _allocate(client, x_pn, [(dx, 3)]),
-        "patch": lambda: client.patch(
+        "patch": lambda: admin_of(client).patch(
             f"/api/work-orders/{patched.id}",
             json={
                 "line_edits": [

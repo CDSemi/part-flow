@@ -1,4 +1,4 @@
-"""Permission checks of the Administration surfaces (Phase 14 slice 2; CD5, CD5b).
+"""Permission checks of the Administration and Management surfaces (Phase 14 slices 2–3).
 
 Plain rules over an :class:`Actor` — the acting User's id and the
 permission keys its role grants — with no model, no framework and no
@@ -17,7 +17,13 @@ read of its own:
   - a role change naming a protected key (``app.domain.permissions``)
     needs ``MANAGE_CORRECTION_PERMISSIONS``; a rename, any other key, or
     an empty change needs ``MANAGE_USERS_AND_ROLES`` — so a change of
-    correction keys only needs ``MANAGE_CORRECTION_PERMISSIONS`` alone.
+    correction keys only needs ``MANAGE_CORRECTION_PERMISSIONS`` alone;
+  - a Work Order edit needs ``MANAGE_WORK_ORDERS`` for its header and
+    ``EDIT_WORK_ORDER_DEMAND`` for its demand lines (slice 3, OD-P10);
+  - a Hot list change that adds or removes an entry needs
+    ``SET_DEMAND_PRIORITY``, one that only reorders needs
+    ``REORDER_HOT_ITEMS`` — whatever action the request names, Undo and
+    Redo included (slice 3, OD-P10).
 
 Where the actor's keys come from is the caller's business: a route
 checks the request's principal (a fast fail), and the role, user and
@@ -25,7 +31,7 @@ password services check again on the actor re-read under the
 User-administration lock (``app.application.user_access``).
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import NamedTuple
 
 from app.application.errors import (
@@ -33,10 +39,13 @@ from app.application.errors import (
     LastPermissionHolderError,
     PermissionDeniedError,
 )
+from app.domain import hot_list
 from app.domain.enums import Permission
 from app.domain.permissions import CORRECTION_PERMISSIONS, holds_protected
 
 _TIMEOUT_OVERRIDE = "worker_session_timeout_minutes"
+_WORK_ORDER_HEADER_FIELDS = ("work_order_number", "due_date")
+_WORK_ORDER_LINE_FIELDS = ("line_edits", "new_lines")
 
 #: G-1: a role change naming a protected key, by an actor who may not manage them.
 CORRECTION_GRANT_MESSAGE = (
@@ -126,6 +135,35 @@ def require_role_change(actor: Actor, required: frozenset[Permission]) -> None:
         and Permission.MANAGE_CORRECTION_PERMISSIONS not in actor.permissions
     )
     require(actor, required, detail=CORRECTION_GRANT_MESSAGE if lacks_guard_key else None)
+
+
+def work_order_update_permissions(fields: Mapping[str, object]) -> frozenset[Permission]:
+    """The keys a Work Order edit needs, by what it sends.
+
+    A header field (``work_order_number`` / ``due_date``, a null
+    included) needs ``MANAGE_WORK_ORDERS``; non-empty ``line_edits`` or
+    ``new_lines`` need ``EDIT_WORK_ORDER_DEMAND``; a request asking for
+    nothing at all needs ``MANAGE_WORK_ORDERS``.
+    """
+    required: set[Permission] = set()
+    if any(name in fields for name in _WORK_ORDER_HEADER_FIELDS):
+        required.add(Permission.MANAGE_WORK_ORDERS)
+    if any(fields.get(name) for name in _WORK_ORDER_LINE_FIELDS):
+        required.add(Permission.EDIT_WORK_ORDER_DEMAND)
+    if not required:
+        required.add(Permission.MANAGE_WORK_ORDERS)
+    return frozenset(required)
+
+
+def hot_list_change_permissions(
+    expected: Sequence[int], new: Sequence[int]
+) -> frozenset[Permission]:
+    """The key a Hot list change needs: ``SET_DEMAND_PRIORITY`` when it
+    changes the list's members, ``REORDER_HOT_ITEMS`` when it only
+    reorders them. The action label never selects the key."""
+    if hot_list.changes_membership(expected, new):
+        return frozenset({Permission.SET_DEMAND_PRIORITY})
+    return frozenset({Permission.REORDER_HOT_ITEMS})
 
 
 # ---------------------------------------------------------------------------

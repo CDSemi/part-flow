@@ -34,8 +34,9 @@ import { ADMIN_SECTIONS } from './sections';
 // independently, so either keeps working when the other cannot load.
 // Changing either needs the Manage correction permissions permission
 // (the server checks it; a change of only correction permissions needs
-// no other permission); without it both read as text. The correction
-// permissions themselves are not checked yet, and the section says so.
+// no other permission); without it both read as text. Of the correction
+// permissions themselves only Edit Work Order Allocation is checked so
+// far (Phase 14 slice 3), and the section says so.
 
 // No answer, a timeout or a 5xx: the write may or may not have
 // committed, so the copy never claims that nothing was changed.
@@ -70,10 +71,13 @@ export function CorrectionPermissionsSection() {
         <UndoReasonPanel canWrite={canWrite} writeBlocked={writeBlocked} />
         <h2>Who may undo or correct</h2>
         <p className="ad-confighelp">
-          Choose which roles hold each correction permission. The correction
-          permissions are not checked yet; Perform quantity corrections and
-          Perform authorized historical corrections grant nothing yet because
-          PartFlow has no such correction.
+          Choose which roles hold each correction permission. Edit Work Order
+          Allocation controls allocating stocked quantity from Management and
+          reversing allocations; the Stockroom station&apos;s receiving
+          allocation does not need it. How Undo recent eligible scans applies is
+          decided later; Perform quantity corrections and Perform authorized
+          historical corrections grant nothing yet because PartFlow has no such
+          correction.
         </p>
         <CorrectionRoleTable canWrite={canWrite} writeBlocked={writeBlocked} />
         <p className="ad-confighelp">

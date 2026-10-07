@@ -23,6 +23,22 @@ export const MANAGEMENT_SUBVIEWS = [
 export type ManagementSubview = (typeof MANAGEMENT_SUBVIEWS)[number];
 
 /**
+ * The order of the Management sub-view bar (GUI_DESIGN §1.1): Part
+ * Numbers sits next to last, Machines last — directly after it. The
+ * shell renders the bar from it, and the readable-aware entry redirect
+ * picks the first sub view the user may open in this order.
+ */
+export const MANAGEMENT_NAV_ORDER: readonly ManagementSubview[] = [
+  'area-board',
+  'work-orders',
+  'tracking',
+  'priority',
+  'planned-routes',
+  'part-numbers',
+  'machines',
+];
+
+/**
  * Scan Station presentation mode. `standard` keeps the normal
  * application chrome (Manager/Admin use); `production` hides the top
  * application navigation so operators cannot casually leave the
@@ -84,6 +100,23 @@ export function isChromeHidden(route: Route): boolean {
   );
 }
 
+/**
+ * The sub view bare `/management` enters (Phase 14 slice 3): the
+ * last-used one when the user may open it, otherwise the first one in
+ * the bar the user may open. `readable` is null while nobody is known
+ * to be signed in (the last-used one, as before); a user who may open
+ * none lands on the last-used one, which shows its access panel.
+ */
+export function managementEntrySubview(
+  lastUsed: ManagementSubview,
+  readable: ReadonlySet<ManagementSubview> | null,
+): ManagementSubview {
+  if (readable === null || readable.has(lastUsed)) return lastUsed;
+  return (
+    MANAGEMENT_NAV_ORDER.find((subview) => readable.has(subview)) ?? lastUsed
+  );
+}
+
 function isManagementSubview(value: string): value is ManagementSubview {
   return (MANAGEMENT_SUBVIEWS as readonly string[]).includes(value);
 }
@@ -91,10 +124,14 @@ function isManagementSubview(value: string): value is ManagementSubview {
 /**
  * Resolve a pathname to a route, or to a redirect target for the two
  * entry paths that forward elsewhere ('/' and bare '/management').
+ * `readable` (the sub views the signed-in user may open; null when
+ * unknown) steers only the bare '/management' entry — a deep link is
+ * never redirected.
  */
 export function resolvePath(
   pathname: string,
   lastManagementSubview: ManagementSubview,
+  readable: ReadonlySet<ManagementSubview> | null = null,
 ): Route | { redirect: string } {
   const path = pathname.replace(/\/+$/, '') || '/';
   if (path === '/') return { redirect: '/scan-station' };
@@ -116,8 +153,10 @@ export function resolvePath(
     return { view: 'production-board', mode: 'kiosk' };
   }
   if (path === '/administration') return { view: 'administration' };
-  if (path === '/management')
-    return { redirect: `/management/${lastManagementSubview}` };
+  if (path === '/management') {
+    const entry = managementEntrySubview(lastManagementSubview, readable);
+    return { redirect: `/management/${entry}` };
+  }
   // Completed Work Orders history page (GUI_DESIGN §11.5) — the one
   // Management sub-page route. Last-used-sub-view restoration still
   // re-enters through the active WO list (only the subview is stored).

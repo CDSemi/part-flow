@@ -38,6 +38,12 @@ Deliberate surface decisions:
   image is uploaded as the raw request body with its own
   ``Content-Type`` (``app.api.uploads``) and served with an ``ETag``
   and ``Cache-Control: private, no-cache``.
+- Access (Phase 14 slice 3, ``app.api.route_access``): every write needs
+  Manage Part Numbers and is audited with the signed-in User
+  (``actor_user_id``); the lookup needs View production data or a key
+  of a view that reads it (Work Orders or Part Numbers), the management
+  page View production data or Manage Part Numbers; the image read
+  stays public.
 """
 
 import datetime
@@ -46,9 +52,17 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Query, Response
 from pydantic import BaseModel, ConfigDict
 
+from app.api.authorization import (
+    PART_NUMBERS_READ,
+    WORK_ORDERS_READ,
+    RequireAnyPermission,
+    RequirePermission,
+)
 from app.api.dependencies import SessionDep
 from app.api.uploads import UploadedImage, read_image_body, stored_image_response
 from app.application import part_numbers
+from app.application.authentication import Principal
+from app.domain.enums import Permission
 from app.infrastructure.models import PartNumber
 
 router = APIRouter(prefix="/api")
@@ -81,9 +95,8 @@ class PartNumberPageResponse(BaseModel):
 
 
 class PartNumberCreateRequest(BaseModel):
-    """The PN and its optional details — the audit ``actor_reference``
-    is never client-writable: it stays NULL from this HTTP surface
-    until an authenticated identity exists (Phase 14)."""
+    """The PN and its optional details — the acting User is never
+    client-writable: it is the signed-in User (Phase 14 slice 3)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -107,9 +120,24 @@ def part_number_response(master: PartNumber) -> PartNumberResponse:
     return PartNumberResponse.model_validate(master)
 
 
+PartNumberManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_PART_NUMBER_MASTER))
+]
+# The lookup is read by the Work Orders views (Add Part, New Work Order,
+# Work Order Details) and the Part Numbers view's dialog.
+PartNumberLookupDep = Annotated[
+    Principal,
+    Depends(RequireAnyPermission(*dict.fromkeys(WORK_ORDERS_READ + PART_NUMBERS_READ))),
+]
+PartNumberPageReaderDep = Annotated[Principal, Depends(RequireAnyPermission(*PART_NUMBERS_READ))]
+
+
 @router.get("/part-numbers")
 def list_part_numbers(
-    session: SessionDep, search: str | None = None, number: str | None = None
+    principal: PartNumberLookupDep,
+    session: SessionDep,
+    search: str | None = None,
+    number: str | None = None,
 ) -> list[PartNumberResponse]:
     """PN lookup: ``number`` resolves one exact canonical PN (empty list
     on a miss — the Add Part flow then offers creation), ``search``
@@ -132,6 +160,7 @@ def list_part_numbers(
 
 @router.get("/part-numbers/page")
 def part_number_page(
+    principal: PartNumberPageReaderDep,
     session: SessionDep,
     search: str | None = None,
     offset: int = Query(0, ge=0),
@@ -149,45 +178,62 @@ def part_number_page(
 
 
 @router.post("/part-numbers", status_code=201)
-def create_part_number(body: PartNumberCreateRequest, session: SessionDep) -> PartNumberResponse:
+def create_part_number(
+    principal: PartNumberManagerDep, body: PartNumberCreateRequest, session: SessionDep
+) -> PartNumberResponse:
     master = part_numbers.create_part_number(
         session,
         body.part_number,
         name=body.name,
         current_revision=body.current_revision,
         erp_id=body.erp_id,
+        actor_user_id=principal.user_id,
     )
     return part_number_response(master)
 
 
 @router.patch("/part-numbers")
 def update_part_number(
-    number: str, body: PartNumberUpdateRequest, session: SessionDep
+    principal: PartNumberManagerDep,
+    number: str,
+    body: PartNumberUpdateRequest,
+    session: SessionDep,
 ) -> PartNumberResponse:
-    master = part_numbers.update_part_number(session, number, **body.model_dump(exclude_unset=True))
+    master = part_numbers.update_part_number(
+        session, number, actor_user_id=principal.user_id, **body.model_dump(exclude_unset=True)
+    )
     return part_number_response(master)
 
 
 @router.delete("/part-numbers", status_code=204)
-def delete_part_number(number: str, session: SessionDep) -> None:
-    part_numbers.delete_part_number(session, number)
+def delete_part_number(principal: PartNumberManagerDep, number: str, session: SessionDep) -> None:
+    part_numbers.delete_part_number(session, number, actor_user_id=principal.user_id)
 
 
 @router.put("/part-numbers/image")
 def set_part_number_image(
+    principal: PartNumberManagerDep,
     number: str,
     image: Annotated[UploadedImage, Depends(read_image_body)],
     session: SessionDep,
 ) -> PartNumberResponse:
     master = part_numbers.set_part_number_image(
-        session, number, data=image.data, declared_type=image.content_type
+        session,
+        number,
+        data=image.data,
+        declared_type=image.content_type,
+        actor_user_id=principal.user_id,
     )
     return part_number_response(master)
 
 
 @router.delete("/part-numbers/image")
-def remove_part_number_image(number: str, session: SessionDep) -> PartNumberResponse:
-    return part_number_response(part_numbers.remove_part_number_image(session, number))
+def remove_part_number_image(
+    principal: PartNumberManagerDep, number: str, session: SessionDep
+) -> PartNumberResponse:
+    return part_number_response(
+        part_numbers.remove_part_number_image(session, number, actor_user_id=principal.user_id)
+    )
 
 
 @router.get("/part-numbers/image")

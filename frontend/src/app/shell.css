@@ -19,6 +19,64 @@ main {
   overflow-anchor: none;
 }
 
+/* Sign-in panel (Phase 14): what a gated area — Administration,
+   Management — shows signed out, in place of its content. */
+.signin-gate {
+  flex: 1 0 auto;
+  background: var(--bg);
+  color: var(--text);
+  padding: 24px 28px;
+}
+
+.signin-gatepanel,
+.mgmt-access {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  max-width: 560px;
+}
+
+.signin-gatepanel h1,
+.mgmt-access h1 {
+  font-size: 22px;
+  margin-bottom: 8px;
+}
+
+.signin-gatepanel p,
+.mgmt-access p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+
+.signin-gatepanel .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* Management access panel (Phase 14 slice 3): a sub view the signed-in
+   user may not open names the permissions that open it. */
+.mgmt-access {
+  margin: 24px 28px;
+}
+
+.mgmt-access p:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 760px) {
+  .signin-gate {
+    padding: 16px;
+  }
+
+  .mgmt-access {
+    margin: 16px;
+  }
+}
+
 .appnav {
   display: flex;
   align-items: center;

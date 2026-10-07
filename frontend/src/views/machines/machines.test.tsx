@@ -7,7 +7,13 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { ReactNode } from 'react';
 
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
+import { SessionContext, hasPermission } from '../../app/session-context';
+import type { SessionValue } from '../../app/session-context';
+import { listLifecycleEvents } from '../../api/machines';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { MachinesView } from './MachinesView';
 
@@ -44,11 +50,21 @@ interface FakeMachine {
   assigned_lines?: { part_number: string; quantity: number }[];
 }
 
+/** The signed-in User the fake server records on lifecycle writes. */
+const ACTOR_USER = {
+  id: 90,
+  display_name: 'Mia Manager',
+  avatar_updated_at: '2026-09-01T08:00:00+00:00',
+};
+
 interface FakeEvent {
   id: number;
   machine_id: number;
   event_type: 'RETIRED' | 'REACTIVATED';
   occurred_at: string;
+  /** The User who recorded it (server-derived since Phase 14 slice 3);
+   * absent on a legacy event. */
+  actor_user?: unknown;
   actor: string | null;
   reason: string | null;
   from_area_id: number | null;
@@ -412,6 +428,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         machine_id: machine.id,
         event_type: 'RETIRED',
         occurred_at: NOW,
+        actor_user: ACTOR_USER,
         actor: null,
         reason: null,
         from_area_id: null,
@@ -437,6 +454,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         machine_id: machine.id,
         event_type: 'REACTIVATED',
         occurred_at: NOW,
+        actor_user: ACTOR_USER,
         actor: null,
         reason: typeof body.reason === 'string' ? body.reason : null,
         from_area_id: fromArea !== toArea ? fromArea : null,
@@ -454,6 +472,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/machines');
   state = seedState();
+  session = signedInSession();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -467,6 +486,50 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The signed-in user of a test (Phase 14 slice 3): a Management view
+ * offers its changes only to a user holding their permissions, so a
+ * test holds every permission unless it signs in another user.
+ */
+function signedInSession(
+  permissions: readonly Permission[] = PERMISSIONS,
+): SessionValue {
+  const user = {
+    id: 90,
+    loginName: 'mia',
+    displayName: 'Mia Manager',
+    roleId: 2,
+    roleName: 'Manager',
+    avatarUpdatedAt: null,
+    permissions: [...permissions],
+    mustChangePassword: false,
+    sessionExpiresAt: null,
+  };
+  return {
+    status: 'signed-in',
+    user,
+    setupOpen: false,
+    checking: false,
+    endedBy: null,
+    can: (permission) => hasPermission(user, permission),
+    openSignIn: vi.fn(),
+    openSetup: vi.fn(),
+    openChangePassword: vi.fn(),
+    signOut: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+}
+
+let session: SessionValue = signedInSession();
+
+function SignedIn({ children }: { children: ReactNode }) {
+  return (
+    <SessionContext.Provider value={session}>
+      {children}
+    </SessionContext.Provider>
+  );
+}
+
 /** Render Machines with a fixed connectivity status and wait for the
  * server data to arrive. Defaults to `connected` so the behavioral
  * tests exercise a fully-enabled view; offline-specific tests pass
@@ -478,6 +541,7 @@ async function renderMachines(
     <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
       <MachinesView />
     </ConnectivityContext.Provider>,
+    { wrapper: SignedIn },
   );
   await screen.findByText('Saw 1');
   return utils;
@@ -956,8 +1020,8 @@ test('reactivation blocks on a name collision until a rename, then returns the M
 
   // The lifecycle audit keeps both events, append-only — presented in
   // the shared timeline style, in its compact one-line-per-event
-  // variant inside Edit Machine. The reactivation reason is recorded;
-  // actor identity arrives with authentication (Phase 14).
+  // variant inside Edit Machine. The reactivation reason is recorded,
+  // with the signed-in User who recorded it.
   fireEvent.click(activeRow('Lathe 1B'));
   const edit = screen.getByRole('dialog', { name: 'Edit Machine' });
   await waitFor(() =>
@@ -969,6 +1033,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   expect(events[0].textContent).toContain('M. Chen (Production Manager)');
   expect(events[1].textContent).toContain('Reactivated');
   expect(events[1].textContent).toContain('Returned from overhaul');
+  expect(events[1].textContent).toContain(' · Mia Manager');
 });
 
 test('a reactivated Machine keeps its Asset Tag and confirms retirement with it', async () => {
@@ -1823,5 +1888,134 @@ test('?state=long renders many long-identifier Machines alongside the server dat
   expect(activeTable.textContent).toContain('CD-LONG-SUPPLEMENTAL');
   expect(activeTable.textContent).toContain(
     'Long preview Machine 1 — extended qualification cell',
+  );
+});
+
+/* ============ Phase 14 slice 3 — permissions and the recording User ============ */
+
+test('FM-4: without Manage Machines the view is view-only — no New Machine, inert active rows, details without Reactivate', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
+  await renderMachines();
+
+  expect(
+    screen.getByText(
+      'View only — changing this needs the Manage Machines permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '+ New Machine' })).toBeNull();
+  // Active rows open nothing; the state stays readable.
+  expect(screen.queryByRole('button', { name: 'Edit Saw 1' })).toBeNull();
+  expect(screen.queryAllByRole('switch')).toEqual([]);
+  fireEvent.click(activeRow('Saw 1'));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(activeRow('Saw 1').querySelector('.mg-state')).not.toBeNull();
+
+  // Retired rows still open their read-only details, without Reactivate.
+  fireEvent.click(
+    within(retiredTable())
+      .getByText('Retired on 2025-11-03')
+      .closest('tr') as HTMLElement,
+  );
+  const details = screen.getByRole('dialog', {
+    name: 'Retired Machine Details',
+  });
+  await waitFor(() =>
+    expect(details.querySelectorAll('.mg-tlevent').length).toBe(1),
+  );
+  expect(
+    within(details).queryByRole('button', { name: 'Reactivate' }),
+  ).toBeNull();
+  expect(
+    within(details).getByRole('button', { name: 'Close (Esc)' }),
+  ).toBeInTheDocument();
+  // Nothing but reads was sent.
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([, init]) => (init?.method ?? 'GET') !== 'GET'),
+  ).toEqual([]);
+});
+
+test('FM-4: with Manage Machines no view-only note shows', async () => {
+  await renderMachines();
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+  expect(screen.getByRole('button', { name: '+ New Machine' })).toBeEnabled();
+  expect(
+    screen.getByRole('button', { name: 'Edit Saw 1' }),
+  ).toBeInTheDocument();
+});
+
+test('FM-5: a lifecycle event shows the User who recorded it — avatar and name — and a legacy event its recorded text', async () => {
+  state.events.push({
+    id: 3,
+    machine_id: 202,
+    event_type: 'REACTIVATED',
+    occurred_at: '2026-09-02T09:00:00.000Z',
+    actor_user: ACTOR_USER,
+    actor: null,
+    reason: 'Back from overhaul',
+    from_area_id: null,
+    to_area_id: null,
+  });
+  await renderMachines();
+  fireEvent.click(
+    within(retiredTable())
+      .getByText('Retired on 2025-11-03')
+      .closest('tr') as HTMLElement,
+  );
+  const details = screen.getByRole('dialog', {
+    name: 'Retired Machine Details',
+  });
+  await waitFor(() =>
+    expect(details.querySelectorAll('.mg-tlevent').length).toBe(2),
+  );
+  const [legacy, recorded] = Array.from(
+    details.querySelectorAll('.mg-tlevent'),
+  );
+  // Legacy: the text recorded before sign-in existed, no avatar.
+  expect(legacy.textContent).toContain('M. Chen (Production Manager)');
+  expect(legacy.querySelector('.worker-avatar')).toBeNull();
+  // Since sign-in: the User's avatar beside the display name.
+  const actor = recorded.querySelector('.tl-actor') as HTMLElement;
+  expect(actor.textContent).toBe('Mia Manager');
+  expect(actor.querySelector('img.worker-avatar')).toHaveAttribute(
+    'src',
+    '/api/users/90/avatar?v=2026-09-01T08%3A00%3A00%2B00%3A00',
+  );
+});
+
+test('FM-5: the lifecycle converter maps a missing or null recording User to null and refuses a malformed one', async () => {
+  const wire = (actorUser: unknown) => ({
+    id: 9,
+    machine_id: 202,
+    event_type: 'RETIRED',
+    occurred_at: '2026-09-02T09:00:00.000Z',
+    ...(actorUser === undefined ? {} : { actor_user: actorUser }),
+    actor: null,
+    reason: null,
+    from_area_id: null,
+    to_area_id: null,
+  });
+  let answer: unknown[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(answer), { status: 200 })),
+    ),
+  );
+  answer = [wire(undefined), wire(null)];
+  expect((await listLifecycleEvents(202)).map((e) => e.actorUser)).toEqual([
+    null,
+    null,
+  ]);
+  answer = [wire({ id: 4, display_name: 'Ada', avatar_updated_at: null })];
+  expect((await listLifecycleEvents(202))[0].actorUser).toEqual({
+    id: 4,
+    displayName: 'Ada',
+    avatarUpdatedAt: null,
+  });
+  answer = [wire({ id: '4', display_name: 'Ada', avatar_updated_at: null })];
+  await expect(listLifecycleEvents(202)).rejects.toThrow(
+    'The server answered a malformed Machine history event.',
   );
 });

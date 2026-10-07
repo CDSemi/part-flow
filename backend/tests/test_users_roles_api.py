@@ -1180,6 +1180,13 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/api/route_access.py",
     "app/api/environment.py",
     "app/api/workers.py",
+    # Phase 14 slice 3: the Management routes that require a key.
+    "app/api/allocations.py",
+    "app/api/machines.py",
+    "app/api/part_numbers.py",
+    "app/api/production_release.py",
+    "app/api/route_templates.py",
+    "app/api/work_orders.py",
 }
 
 
@@ -1269,10 +1276,12 @@ def test_password_hashing_and_the_sign_in_import_graph() -> None:
 
 
 def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services() -> None:
-    """B-STATIC (Phase 14 slice 2): ``application/authorization.py`` reads no
-    model, no framework and no application module but ``errors``; the
-    environment, Worker and policy services know nothing about permissions
-    (their routes check them)."""
+    """B-STATIC (Phase 14 slices 2–3): ``application/authorization.py`` reads
+    no model, no framework and no application module but ``errors`` (the
+    Hot list membership rule is a domain import); the environment, Worker
+    and policy services and the Management services know nothing about
+    permissions (their routes check them) and never read the User model
+    (Machines reads display references through ``user_access``)."""
     trees = _trees()
     rules = trees["app/application/authorization.py"]
     imported = {
@@ -1288,7 +1297,23 @@ def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services()
     assert not {module for module in imported if module.startswith(("fastapi", "sqlalchemy"))}
     assert "app.infrastructure.models" not in imported
     assert _imported_application_modules(rules) == {"errors"}
+    assert not _reads(trees["app/domain/hot_list.py"], "app.domain.enums", {"Permission"})
     for service in ("environment", "workers", "policies"):
         tree = trees[f"app/application/{service}.py"]
         assert not _reads(tree, "app.domain.enums", {"Permission"}), service
         assert "authorization" not in _imported_application_modules(tree), service
+    for service in (
+        "machines",
+        "part_numbers",
+        "work_orders",
+        "production_release",
+        "hot_list",
+        "hot_ranks",
+        "allocations",
+        "route_templates",
+    ):
+        tree = trees[f"app/application/{service}.py"]
+        assert not _reads(tree, "app.domain.enums", {"Permission"}), service
+        assert "authorization" not in _imported_application_modules(tree), service
+        assert not _reads(tree, "app.infrastructure.models", {"User"}), service
+    assert "user_access" in _imported_application_modules(trees["app/application/machines.py"])

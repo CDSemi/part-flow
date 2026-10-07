@@ -158,15 +158,15 @@ def _create_machine(
     if area_id is None:
         area_id = int(_create_area(client)["id"])
     payload = {"area_id": area_id, "name": _unique("MACHINE"), **overrides}
-    return _ok(client.post("/api/machines", json=payload), 201)
+    return _ok(admin_of(client).post("/api/machines", json=payload), 201)
 
 
 def _retire(client: TestClient, machine_id: int, **overrides: Any) -> dict[str, Any]:
-    return _ok(client.post(f"/api/machines/{machine_id}/retire", json={**overrides}))
+    return _ok(admin_of(client).post(f"/api/machines/{machine_id}/retire", json={**overrides}))
 
 
 def _start_maintenance(client: TestClient, machine_id: int, **body: Any) -> dict[str, Any]:
-    return _ok(client.post(f"/api/machines/{machine_id}/maintenance", json=body), 201)
+    return _ok(admin_of(client).post(f"/api/machines/{machine_id}/maintenance", json=body), 201)
 
 
 def _audit_rows(engine: Engine, machine_id: object) -> list[sa.Row[Any]]:
@@ -330,7 +330,7 @@ def test_metadata_edits_are_audited_one_row_per_effective_request(
         {"notes": "first"},
     ]
     for edit in edits:
-        _ok(client.patch(path, json=edit))
+        _ok(admin_of(client).patch(path, json=edit))
         row = _audit_rows(db_engine, machine["id"])[-1]
         assert row.event_type == "UPDATED"
         assert row.before_data == expected
@@ -340,7 +340,7 @@ def test_metadata_edits_are_audited_one_row_per_effective_request(
         assert row.actor_reference is None
 
     multi = {"description": "multi", "notes": "second", "model": "DMU 65"}
-    _ok(client.patch(path, json=multi))
+    _ok(admin_of(client).patch(path, json=multi))
     rows = _audit_rows(db_engine, machine["id"])
     assert len(rows) == 1 + len(edits) + 1
     assert _changed_keys(rows[-1]) == set(multi)
@@ -348,8 +348,8 @@ def test_metadata_edits_are_audited_one_row_per_effective_request(
     assert rows[-1].after_data == expected
 
     count = _audit_count(db_engine)
-    _ok(client.patch(path, json={"description": "  multi  ", "notes": " second "}))
-    _ok(client.patch(path, json={}))
+    _ok(admin_of(client).patch(path, json={"description": "  multi  ", "notes": " second "}))
+    _ok(admin_of(client).patch(path, json={}))
     assert _audit_count(db_engine) == count
     _assert_chain(_audit_rows(db_engine, machine["id"]))
 
@@ -369,21 +369,24 @@ def test_machine_refusals_audit_nothing(client: TestClient, db_engine: Engine) -
     sequence = _next_sequence(db_engine)
 
     refusals: list[tuple[Callable[[], Response], int]] = [
-        (lambda: client.patch(path, json={"name": "   "}), 422),
-        (lambda: client.patch(path, json={"name": other["name"]}), 409),
-        (lambda: client.patch(path, json={"asset_tag": "CD-9999"}), 422),
-        (lambda: client.patch(path, json={"area_id": inactive["id"]}), 422),
-        (lambda: client.patch(path, json={"maintenance_note": "x"}), 409),
-        (lambda: client.patch(f"/api/machines/{retired['id']}", json={"notes": "x"}), 409),
-        (lambda: client.patch("/api/machines/999999", json={"notes": "x"}), 404),
+        (lambda: admin_of(client).patch(path, json={"name": "   "}), 422),
+        (lambda: admin_of(client).patch(path, json={"name": other["name"]}), 409),
+        (lambda: admin_of(client).patch(path, json={"asset_tag": "CD-9999"}), 422),
+        (lambda: admin_of(client).patch(path, json={"area_id": inactive["id"]}), 422),
+        (lambda: admin_of(client).patch(path, json={"maintenance_note": "x"}), 409),
         (
-            lambda: client.post(
+            lambda: admin_of(client).patch(f"/api/machines/{retired['id']}", json={"notes": "x"}),
+            409,
+        ),
+        (lambda: admin_of(client).patch("/api/machines/999999", json={"notes": "x"}), 404),
+        (
+            lambda: admin_of(client).post(
                 "/api/machines", json={"area_id": inactive["id"], "name": _unique("M")}
             ),
             409,
         ),
         (
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 "/api/machines",
                 json={"area_id": area["id"], "name": _unique("M"), "expected_asset_tag": "X-1"},
             ),
@@ -428,7 +431,7 @@ def test_maintenance_start_edit_and_clear_are_audited(
     assert started["maintenance_since"] is not None
 
     _ok(
-        client.patch(
+        admin_of(client).patch(
             f"/api/machines/{machine['id']}",
             json={"maintenance_note": "Waiting for parts", "maintenance_expected_return": None},
         )
@@ -438,12 +441,12 @@ def test_maintenance_start_edit_and_clear_are_audited(
     assert in_place.after_data["maintenance_since"] == start.after_data["maintenance_since"]
 
     count = _audit_count(db_engine)
-    again = client.post(f"/api/machines/{machine['id']}/maintenance", json={})
+    again = admin_of(client).post(f"/api/machines/{machine['id']}/maintenance", json={})
     assert again.status_code == 409
     assert "already under maintenance" in again.json()["detail"]
     assert _audit_count(db_engine) == count
 
-    _ok(client.delete(f"/api/machines/{machine['id']}/maintenance"))
+    _ok(admin_of(client).delete(f"/api/machines/{machine['id']}/maintenance"))
     cleared = _audit_rows(db_engine, machine["id"])[-1]
     assert _changed_keys(cleared) == {"maintenance_since", "maintenance_note"}
     assert {key: cleared.after_data[key] for key in _MAINTENANCE_KEYS} == dict.fromkeys(
@@ -486,7 +489,7 @@ def test_retirement_audits_only_the_save_draft_it_applies(
     failing = _create_machine(client, int(area["id"]))
     stored = _stored(db_engine, models.Machine, failing["id"])
     count = _audit_count(db_engine)
-    response = client.post(
+    response = admin_of(client).post(
         f"/api/machines/{failing['id']}/retire", json={"edits": {"name": taken["name"]}}
     )
     assert response.status_code == 409, response.text
@@ -501,7 +504,7 @@ def test_reactivation_audits_only_its_configuration_delta(
     area = _create_area(client)
     plain = _create_machine(client, int(area["id"]))
     _retire(client, int(plain["id"]))
-    _ok(client.post(f"/api/machines/{plain['id']}/reactivate", json={"reason": "back"}))
+    _ok(admin_of(client).post(f"/api/machines/{plain['id']}/reactivate", json={"reason": "back"}))
     assert [event.event_type for event in _lifecycle_events(db_engine, plain["id"])] == [
         "RETIRED",
         "REACTIVATED",
@@ -514,7 +517,7 @@ def test_reactivation_audits_only_its_configuration_delta(
     target = _create_area(client)
     new_name = _unique("MACHINE")
     _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/machines/{moved['id']}/reactivate",
             json={"reason": "moved", "name": new_name, "area_id": target["id"]},
         )
@@ -560,13 +563,13 @@ def test_production_assignment_moves_state_age_but_appends_no_machine_row(
     machine = _create_machine(client, int(area["id"]))
     pn = _unique("PN").upper()
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 50}]}
         ),
         201,
     )
     released = _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/work-orders/{work_order['id']}/demands/{work_order['demands'][0]['id']}/release",
             json={
                 "part_number": pn,
@@ -616,21 +619,23 @@ _LOCK_CASES = [
     _LockCase(
         "patch",
         False,
-        lambda client, machine_id: client.patch(
+        lambda client, machine_id: admin_of(client).patch(
             f"/api/machines/{machine_id}", json={"description": "edited"}
         ),
     ),
     _LockCase(
         "start-maintenance",
         False,
-        lambda client, machine_id: client.post(
+        lambda client, machine_id: admin_of(client).post(
             f"/api/machines/{machine_id}/maintenance", json={"note": "edited"}
         ),
     ),
     _LockCase(
         "clear-maintenance",
         True,
-        lambda client, machine_id: client.delete(f"/api/machines/{machine_id}/maintenance"),
+        lambda client, machine_id: admin_of(client).delete(
+            f"/api/machines/{machine_id}/maintenance"
+        ),
     ),
 ]
 
@@ -668,7 +673,9 @@ def test_concurrent_maintenance_start_loses_with_conflict(
             holder, machine_id, "maintenance_since = now(), maintenance_note = 'holder'"
         )
         thread, results = _start(
-            lambda: client.post(f"/api/machines/{machine_id}/maintenance", json={"note": "loser"})
+            lambda: admin_of(client).post(
+                f"/api/machines/{machine_id}/maintenance", json={"note": "loser"}
+            )
         )
         _assert_blocked(thread)
         holder.commit()
@@ -687,7 +694,7 @@ def test_edit_losing_to_a_retirement_is_refused(client: TestClient, db_engine: E
     with db_engine.connect() as holder:
         _lock_and_update(holder, machine_id, "retired_on = current_date")
         thread, results = _start(
-            lambda: client.patch(f"/api/machines/{machine_id}", json={"notes": "loser"})
+            lambda: admin_of(client).patch(f"/api/machines/{machine_id}", json={"notes": "loser"})
         )
         _assert_blocked(thread)
         holder.commit()
@@ -707,7 +714,9 @@ def test_concurrent_reactivation_loses_with_conflict(client: TestClient, db_engi
     with db_engine.connect() as holder:
         _lock_and_update(holder, machine_id, "retired_on = NULL")
         thread, results = _start(
-            lambda: client.post(f"/api/machines/{machine_id}/reactivate", json={"reason": "loser"})
+            lambda: admin_of(client).post(
+                f"/api/machines/{machine_id}/reactivate", json={"reason": "loser"}
+            )
         )
         _assert_blocked(thread)
         holder.commit()
@@ -727,7 +736,9 @@ def test_admin_edit_never_waits_on_key_share(client: TestClient, db_engine: Engi
             sa.text("SELECT 1 FROM machines WHERE id = :id FOR KEY SHARE"), {"id": machine_id}
         )
         # Completes while the holder is still open.
-        response = client.patch(f"/api/machines/{machine_id}", json={"notes": "key share"})
+        response = admin_of(client).patch(
+            f"/api/machines/{machine_id}", json={"notes": "key share"}
+        )
         holder.rollback()
 
     assert response.status_code == 200, response.text
@@ -778,15 +789,19 @@ def test_failed_audit_write_rolls_back_every_machine_path(
 
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     attempts: list[Callable[[], Response]] = [
-        lambda: client.post("/api/machines", json={"area_id": area["id"], "name": _unique("M")}),
-        lambda: client.patch(f"/api/machines/{edited['id']}", json={"notes": "changed"}),
-        lambda: client.post(f"/api/machines/{idle['id']}/maintenance", json={"note": "n"}),
-        lambda: client.delete(f"/api/machines/{serviced['id']}/maintenance"),
-        lambda: client.post(
+        lambda: admin_of(client).post(
+            "/api/machines", json={"area_id": area["id"], "name": _unique("M")}
+        ),
+        lambda: admin_of(client).patch(f"/api/machines/{edited['id']}", json={"notes": "changed"}),
+        lambda: admin_of(client).post(
+            f"/api/machines/{idle['id']}/maintenance", json={"note": "n"}
+        ),
+        lambda: admin_of(client).delete(f"/api/machines/{serviced['id']}/maintenance"),
+        lambda: admin_of(client).post(
             f"/api/machines/{retiring['id']}/retire",
             json={"edits": {"name": _unique("M"), "notes": "draft"}},
         ),
-        lambda: client.post(
+        lambda: admin_of(client).post(
             f"/api/machines/{retired['id']}/reactivate",
             json={"reason": "moved", "area_id": target["id"]},
         ),
@@ -810,19 +825,19 @@ def test_audit_chain_over_a_full_machine_history(client: TestClient, db_engine: 
     machine_id = int(machine["id"])
     path = f"/api/machines/{machine_id}"
     steps: list[tuple[Callable[[], Response], int]] = [
-        (lambda: client.patch(path, json={"description": "first"}), 200),
-        (lambda: client.patch(path, json={"description": "first"}), 200),  # no-op
-        (lambda: client.patch(path, json={"model": "M-2"}), 200),
-        (lambda: client.patch(path, json={"name": "   "}), 422),  # refusal
-        (lambda: client.patch(path, json={"notes": "third"}), 200),
-        (lambda: client.post(f"{path}/maintenance", json={"note": "start"}), 201),
-        (lambda: client.patch(path, json={"maintenance_note": "in place"}), 200),
-        (lambda: client.delete(f"{path}/maintenance"), 200),
-        (lambda: client.delete(f"{path}/maintenance"), 409),  # refusal
-        (lambda: client.patch(path, json={}), 200),  # no-op
-        (lambda: client.post(f"{path}/retire", json={"edits": {"notes": "draft"}}), 200),
+        (lambda: admin_of(client).patch(path, json={"description": "first"}), 200),
+        (lambda: admin_of(client).patch(path, json={"description": "first"}), 200),  # no-op
+        (lambda: admin_of(client).patch(path, json={"model": "M-2"}), 200),
+        (lambda: admin_of(client).patch(path, json={"name": "   "}), 422),  # refusal
+        (lambda: admin_of(client).patch(path, json={"notes": "third"}), 200),
+        (lambda: admin_of(client).post(f"{path}/maintenance", json={"note": "start"}), 201),
+        (lambda: admin_of(client).patch(path, json={"maintenance_note": "in place"}), 200),
+        (lambda: admin_of(client).delete(f"{path}/maintenance"), 200),
+        (lambda: admin_of(client).delete(f"{path}/maintenance"), 409),  # refusal
+        (lambda: admin_of(client).patch(path, json={}), 200),  # no-op
+        (lambda: admin_of(client).post(f"{path}/retire", json={"edits": {"notes": "draft"}}), 200),
         (
-            lambda: client.post(
+            lambda: admin_of(client).post(
                 f"{path}/reactivate", json={"reason": "back", "name": _unique("MACHINE")}
             ),
             200,
@@ -865,12 +880,14 @@ def test_name_race_lost_at_flush_is_a_conflict(
         )
         if retired is None:
             thread, results = _start(
-                lambda: client.post("/api/machines", json={"area_id": area["id"], "name": name})
+                lambda: admin_of(client).post(
+                    "/api/machines", json={"area_id": area["id"], "name": name}
+                )
             )
         else:
             machine_id = int(retired["id"])
             thread, results = _start(
-                lambda: client.post(
+                lambda: admin_of(client).post(
                     f"/api/machines/{machine_id}/reactivate",
                     json={"reason": "moved", "name": name, "area_id": area["id"]},
                 )

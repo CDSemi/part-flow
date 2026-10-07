@@ -1,12 +1,13 @@
 // Work Order Allocation API (Phase 10 — PROJECT_PROFILE §8.12, §18;
 // GUI_DESIGN §10).
 //
-// The receiving confirmation that follows a `STOCKED` arrival at the
-// Stockroom station: the server's canonical allocation suggestion (a
+// The Stockroom station's receiving confirmation that follows a
+// `STOCKED` arrival: the server's canonical allocation suggestion (a
 // read), and the confirmed allocation (one command, idempotent per
 // `device_event_id`). Allocation is a record of its own — it never
 // references a Movement or a Quantity Flow and never changes the
-// Movement history.
+// Movement history. Management allocation and reversal are separate
+// authorized routes (no UI yet).
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -65,7 +66,7 @@ export interface AllocationInput {
   allocationQuantity: number;
   lines: AllocationLine[];
   /** The Stockroom station confirming the receiving allocation. */
-  stationId: string | null;
+  stationId: string;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
   deviceEventId: string;
@@ -199,7 +200,7 @@ export async function confirmAllocation(
           work_order_demand_id: line.workOrderDemandId,
           quantity: line.quantity,
         })),
-        ...(input.stationId !== null ? { station_id: input.stationId } : {}),
+        station_id: input.stationId,
         device_event_id: input.deviceEventId,
       },
     },

@@ -79,8 +79,11 @@ Rules owned here:
 - **Audit** (PROJECT_PROFILE §28): one ``UPDATED`` ``WorkOrderDemand``
   row per demand whose rank changed, in the same transaction, with
   ``before_data`` / ``after_data`` holding only the rank and the
-  ``hot_list_change`` metadata block. ``actor_reference`` stays NULL
-  until authentication exists (Phase 14 — role enforcement too).
+  ``hot_list_change`` metadata block. ``actor_user_id`` is the signed-in
+  User (Phase 14 slice 3; the legacy ``actor_reference`` is written no
+  more), and a change replayed by another User is refused
+  (``RecordedByAnotherUserError``). Which permission a change needs is
+  decided before this command runs (``authorization.hot_list_change_permissions``).
 """
 
 import datetime
@@ -94,11 +97,13 @@ from app.application import audit, hot_ranks, production_release
 from app.application.allocations import canonical_demand_order
 from app.application.common import commit, device_event_id_text, flush
 from app.application.errors import (
+    RECORDED_BY_ANOTHER_USER_MESSAGE,
     ConflictError,
     HotListChangedError,
     IdempotencyConflictError,
     InvalidInputError,
     NotFoundError,
+    RecordedByAnotherUserError,
 )
 from app.application.hot_ranks import HOT_LIST_CHANGE_KEY
 from app.application.part_numbers import canonical_part_number
@@ -577,15 +582,22 @@ def _committed_change(session: Session, device_event_id: str) -> list[AuditEvent
 
 
 def _replay_or_conflict(
-    session: Session, rows: list[AuditEvent], change_fingerprint: str
+    session: Session, rows: list[AuditEvent], change_fingerprint: str, actor_user_id: int
 ) -> HotListChange:
-    """Resolve a duplicate ``device_event_id`` against its audit rows."""
+    """Resolve a duplicate ``device_event_id`` against its audit rows.
+
+    The fingerprint first; then the rows' actor must be the caller (a
+    change recorded by another User, or before sign-in existed, is not
+    replayed to this one).
+    """
     first = _change_block(rows[0])
     if first.get("fingerprint") != change_fingerprint:
         raise IdempotencyConflictError(
             "This device_event_id was already used for a different Hot list change."
             " Nothing was changed — a new change needs a new device_event_id."
         )
+    if any(row.actor_user_id != actor_user_id for row in rows):
+        raise RecordedByAnotherUserError(RECORDED_BY_ANOTHER_USER_MESSAGE)
     changes: list[HotListChangeLine] = []
     for row in rows:
         block = _change_block(row)
@@ -635,6 +647,7 @@ def apply_hot_list_change(
     action: object,
     expected_order: object,
     new_order: object,
+    actor_user_id: int,
 ) -> HotListChange:
     """Apply ONE confirmed single-entry change of the Hot list.
 
@@ -658,7 +671,7 @@ def apply_hot_list_change(
     # -- Idempotency fast path: a committed retry never waits ------------
     committed = _committed_change(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, change_fingerprint)
+        return _replay_or_conflict(session, committed, change_fingerprint, actor_user_id)
 
     department = resolve_hot_list_department(session)
     hot_ranks.acquire_hot_list_lock(session)
@@ -668,7 +681,7 @@ def apply_hot_list_change(
     # one waited: it replays instead of applying (or tripping) twice.
     committed = _committed_change(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, change_fingerprint)
+        return _replay_or_conflict(session, committed, change_fingerprint, actor_user_id)
 
     # -- Optimistic precondition ------------------------------------------
     current = current_ranked_order(session)
@@ -737,6 +750,7 @@ def apply_hot_list_change(
             entity_id=str(line.work_order_demand_id),
             before_data={"priority_rank": line.previous_rank},
             after_data={"priority_rank": line.new_rank},
+            actor_user_id=actor_user_id,
             metadata={
                 HOT_LIST_CHANGE_KEY: {
                     "device_event_id": event_id,

@@ -136,7 +136,7 @@ class _Cell:
         self.station_id = str(station.json()["station_id"])
         self.machine_ids: list[int] = []
         for index in range(machine_count):
-            machine = client.post(
+            machine = admin_of(client).post(
                 "/api/machines", json={"area_id": self.area_id, "name": f"{name} M{index + 1}"}
             )
             assert machine.status_code == 201, machine.text
@@ -189,7 +189,7 @@ def _work_order(
         payload["work_order_number"] = number
     if received_date is not None:
         payload["received_date"] = received_date
-    response = client.post("/api/work-orders", json=payload)
+    response = admin_of(client).post("/api/work-orders", json=payload)
     assert response.status_code == 201, response.text
     return _WorkOrder(response.json())
 
@@ -241,7 +241,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order.id}/demands/{demand_id or work_order.demand_id}/release",
         json=payload,
     )
@@ -367,8 +367,8 @@ def _undo(client: TestClient, cell: _Cell, pn: str, reverses: str) -> None:
 
 
 def _allocate(client: TestClient, pn: str, lines: list[tuple[int, int]]) -> int:
-    response = client.post(
-        "/api/allocations",
+    response = admin_of(client).post(
+        "/api/allocations/management",
         json={
             "part_number": pn,
             "allocation_quantity": sum(qty for _, qty in lines),
@@ -397,7 +397,7 @@ def _delete_master(engine: Engine, pn: str) -> None:
 
 def _rows(client: TestClient, **params: Any) -> list[dict[str, Any]]:
     params.setdefault("status", "ALL")
-    response = client.get("/api/tracking", params=params)
+    response = admin_of(client).get("/api/tracking", params=params)
     assert response.status_code == 200, response.text
     return cast(list[dict[str, Any]], response.json()["rows"])
 
@@ -411,7 +411,7 @@ def _row(client: TestClient, pn: str, **params: Any) -> dict[str, Any]:
 
 def _detail(client: TestClient, pn: str, **params: Any) -> dict[str, Any]:
     params["part_number"] = pn
-    response = client.get("/api/tracking/detail", params=params)
+    response = admin_of(client).get("/api/tracking/detail", params=params)
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -467,7 +467,7 @@ def test_status_follows_active_quantity_open_demand_and_stock(
     assert _row(client, scrapped_pn)["status"] == "OPEN"
 
     # The default status filter is ACTIVE; every other status hides.
-    default = client.get("/api/tracking", params={"search": "PN-"}).json()
+    default = admin_of(client).get("/api/tracking", params={"search": "PN-"}).json()
     assert active_pn in {row["part_number"] for row in default["rows"]}
     assert stocked_pn not in {row["part_number"] for row in default["rows"]}
     assert [row["part_number"] for row in _rows(client, status="STOCKED", search=stocked_pn)] == [
@@ -658,17 +658,21 @@ def test_rows_come_in_the_canonical_demand_order_and_page(
         undated_pn,
         none_pn,
     ]
-    page = client.get(
-        "/api/tracking", params={"search": prefix, "status": "ALL", "offset": 1, "limit": 2}
-    ).json()
+    page = (
+        admin_of(client)
+        .get("/api/tracking", params={"search": prefix, "status": "ALL", "offset": 1, "limit": 2})
+        .json()
+    )
     assert [row["part_number"] for row in page["rows"]] == [dated_pn, undated_pn]
     assert (page["total"], page["offset"], page["limit"], page["has_more"]) == (4, 1, 2, True)
-    last = client.get(
-        "/api/tracking", params={"search": prefix, "status": "ALL", "offset": 3, "limit": 2}
-    ).json()
+    last = (
+        admin_of(client)
+        .get("/api/tracking", params={"search": prefix, "status": "ALL", "offset": 3, "limit": 2})
+        .json()
+    )
     assert [row["part_number"] for row in last["rows"]] == [none_pn]
     assert last["has_more"] is False
-    assert client.get("/api/tracking", params={"limit": 0}).status_code == 422
+    assert admin_of(client).get("/api/tracking", params={"limit": 0}).status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -683,11 +687,16 @@ def test_an_unknown_pn_is_404_and_the_input_is_canonicalized(
     wo = _work_order(client, [_line(pn, 1)])
     _release(client, shop.material, wo, pn, quantity=1)
     assert _detail(client, f"  {pn.lower()} ")["part_number"] == pn
-    unknown = client.get("/api/tracking/detail", params={"part_number": _unique("PN-NO")})
+    unknown = admin_of(client).get("/api/tracking/detail", params={"part_number": _unique("PN-NO")})
     assert unknown.status_code == 404
-    assert client.get("/api/tracking/detail", params={"part_number": "A B"}).status_code == 422
     assert (
-        client.get("/api/tracking/movements", params={"part_number": _unique("PN-NO")}).status_code
+        admin_of(client).get("/api/tracking/detail", params={"part_number": "A B"}).status_code
+        == 422
+    )
+    assert (
+        admin_of(client)
+        .get("/api/tracking/movements", params={"part_number": _unique("PN-NO")})
+        .status_code
         == 404
     )
 
@@ -777,7 +786,7 @@ def test_detail_demand_positions_stock_allocation_and_reconciliation(
     assert len(source["children"]) == 2
 
     # An allocation reversal is history beside the allocation it undoes.
-    reversed_ = client.post(
+    reversed_ = admin_of(client).post(
         f"/api/allocations/{allocation_id}/reversals",
         json={"reason": "wrong line", "device_event_id": str(uuid.uuid4())},
     )
@@ -974,10 +983,14 @@ def test_history_pages_newest_first_and_keeps_a_reversed_original_visible(
     assert (completion["command_sequence"], original["command_sequence"]) == (1, 2)
     assert page["next_before_movement_id"] == completion["id"]
 
-    more = client.get(
-        "/api/tracking/movements",
-        params={"part_number": pn, "before": page["next_before_movement_id"], "limit": 4},
-    ).json()
+    more = (
+        admin_of(client)
+        .get(
+            "/api/tracking/movements",
+            params={"part_number": pn, "before": page["next_before_movement_id"], "limit": 4},
+        )
+        .json()
+    )
     assert _types(more["movements"]) == ["TRANSFERRED", "AREA_COMPLETED", "RECEIVED"]
     assert more["has_more"] is False
     assert more["next_before_movement_id"] is None
@@ -1132,15 +1145,19 @@ def test_scrap_history_lists_every_scrap_event_with_its_reversed_state(
     assert undone["reversed_by_movement_id"] is not None
     assert scrap["next_before_movement_id"] == undone["id"]
 
-    older = client.get(
-        "/api/tracking/movements",
-        params={
-            "part_number": pn,
-            "movement_type": "SCRAPPED",
-            "before": scrap["next_before_movement_id"],
-            "limit": 5,
-        },
-    ).json()
+    older = (
+        admin_of(client)
+        .get(
+            "/api/tracking/movements",
+            params={
+                "part_number": pn,
+                "movement_type": "SCRAPPED",
+                "before": scrap["next_before_movement_id"],
+                "limit": 5,
+            },
+        )
+        .json()
+    )
     assert [m["movement_type"] for m in older["movements"]] == ["SCRAPPED"]
     assert older["movements"][0]["quantity"] == 2
     assert older["movements"][0]["reversed_by_movement_id"] is None
@@ -1210,9 +1227,11 @@ def test_the_trace_keeps_the_whole_split_ancestry_beyond_the_flow_page(
     seen = list(listed)
     before = page["next_before_flow_id"]
     while before is not None:
-        more = client.get(
-            "/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 1}
-        ).json()
+        more = (
+            admin_of(client)
+            .get("/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 1})
+            .json()
+        )
         assert all(flow["status"] != "ACTIVE" for flow in more["flows"])
         seen.extend(flow["id"] for flow in more["flows"])
         before = more["next_before_flow_id"]
@@ -1258,9 +1277,11 @@ def test_flows_limit_bounds_every_page_and_the_pages_reach_every_flow_once_newes
     walked = list(page["flows"])
     before = page["next_before_flow_id"]
     while before is not None:
-        more = client.get(
-            "/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 3}
-        ).json()
+        more = (
+            admin_of(client)
+            .get("/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 3})
+            .json()
+        )
         assert len(more["flows"]) <= 3
         walked.extend(more["flows"])
         before = more["next_before_flow_id"]
@@ -1298,7 +1319,7 @@ def test_a_status_change_between_two_page_reads_neither_repeats_nor_skips_a_flow
     assert (page["has_more"], page["next_before_flow_id"]) == (True, cursor_flow)
 
     def continuation() -> Any:
-        response = client.get(
+        response = admin_of(client).get(
             "/api/tracking/flows",
             params={"part_number": pn, "before": cursor_flow, "limit": 2},
         )
@@ -1332,9 +1353,11 @@ def test_a_status_change_between_two_page_reads_neither_repeats_nor_skips_a_flow
     walked = list(first["flows"])
     before = first["next_before_flow_id"]
     while before is not None:
-        step = client.get(
-            "/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 1}
-        ).json()
+        step = (
+            admin_of(client)
+            .get("/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 1})
+            .json()
+        )
         walked.extend(step["flows"])
         before = step["next_before_flow_id"]
     assert [flow["id"] for flow in walked] == [newest, cursor_flow, older, oldest]
@@ -1357,7 +1380,9 @@ def test_a_flow_cursor_must_be_a_flow_of_the_same_pn(client: TestClient, shop: _
     assert other_closed == [theirs]
 
     def flows(before: int) -> Any:
-        return client.get("/api/tracking/flows", params={"part_number": pn, "before": before})
+        return admin_of(client).get(
+            "/api/tracking/flows", params={"part_number": pn, "before": before}
+        )
 
     # Another PN's flow — ACTIVE or closed — and an unknown id are
     # rejected outright, never read as a bare `id < before`.
@@ -1371,7 +1396,9 @@ def test_a_flow_cursor_must_be_a_flow_of_the_same_pn(client: TestClient, shop: _
         "next_before_flow_id": None,
     }
     assert (
-        client.get("/api/tracking/flows", params={"part_number": pn, "before": "x"}).status_code
+        admin_of(client)
+        .get("/api/tracking/flows", params={"part_number": pn, "before": "x"})
+        .status_code
         == 422
     )
 
@@ -1389,16 +1416,20 @@ def test_allocation_history_pages_newest_first_on_the_allocation_keyset(
     page = detail["allocations"]
     assert [a["id"] for a in page["allocations"]] == [ids[2], ids[1]]
     assert (page["total"], page["has_more"], page["next_before_allocation_id"]) == (3, True, ids[1])
-    more = client.get(
-        "/api/tracking/allocations",
-        params={"part_number": pn, "before": page["next_before_allocation_id"], "limit": 2},
-    ).json()
+    more = (
+        admin_of(client)
+        .get(
+            "/api/tracking/allocations",
+            params={"part_number": pn, "before": page["next_before_allocation_id"], "limit": 2},
+        )
+        .json()
+    )
     assert [a["id"] for a in more["allocations"]] == [ids[0]]
     assert (more["has_more"], more["next_before_allocation_id"]) == (False, None)
     assert (
-        client.get(
-            "/api/tracking/allocations", params={"part_number": pn, "before": 999_999_999}
-        ).status_code
+        admin_of(client)
+        .get("/api/tracking/allocations", params={"part_number": pn, "before": 999_999_999})
+        .status_code
         == 404
     )
 
@@ -1425,9 +1456,13 @@ def test_history_is_reverse_chronological_by_timestamp_and_pages_without_gaps(
     walked = [m["id"] for m in first["movements"]]
     before = first["next_before_movement_id"]
     while before is not None:
-        page = client.get(
-            "/api/tracking/movements", params={"part_number": pn, "before": before, "limit": 2}
-        ).json()
+        page = (
+            admin_of(client)
+            .get(
+                "/api/tracking/movements", params={"part_number": pn, "before": before, "limit": 2}
+            )
+            .json()
+        )
         walked.extend(m["id"] for m in page["movements"])
         before = page["next_before_movement_id"]
     # Every Movement exactly once, in (occurred_at DESC, id DESC).
@@ -1435,9 +1470,9 @@ def test_history_is_reverse_chronological_by_timestamp_and_pages_without_gaps(
     assert walked[0] == received_id
     assert walked[1:] == sorted(walked[1:], reverse=True)
     assert (
-        client.get(
-            "/api/tracking/movements", params={"part_number": pn, "before": 999_999_999}
-        ).status_code
+        admin_of(client)
+        .get("/api/tracking/movements", params={"part_number": pn, "before": 999_999_999})
+        .status_code
         == 404
     )
 

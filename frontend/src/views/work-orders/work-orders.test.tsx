@@ -10,6 +10,8 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
 
 // Work Orders regression tests (Phase 4): the view runs against the
 // REAL /api/work-orders surface — these tests exercise it against an
@@ -421,8 +423,42 @@ function releaseWire(
   };
 }
 
+/**
+ * Management needs a signed-in user (Phase 14 slice 3): the fake signs
+ * in a user holding every permission unless a test grants fewer.
+ */
+let sessionPermissions: readonly Permission[] = PERMISSIONS;
+
+/** Refuse the next release before anything is written (sign-in,
+ * permission, another user's request id). */
+let nextReleaseRefusal: {
+  status: number;
+  body: Record<string, unknown>;
+} | null = null;
+
+function sessionResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      user: {
+        id: 90,
+        login_name: 'mia',
+        display_name: 'Mia Manager',
+        role_id: 2,
+        role_name: 'Manager',
+        avatar_updated_at: null,
+        permissions: sessionPermissions,
+        must_change_password: false,
+        session_expires_at: null,
+      },
+      setup_open: false,
+    }),
+    { status: 200 },
+  );
+}
+
 async function handle(url: string, init?: RequestInit): Promise<Response> {
   const method = init?.method ?? 'GET';
+  if (url === '/api/session') return sessionResponse();
   state.calls.push(`${method} ${url}`);
   const body =
     typeof init?.body === 'string'
@@ -517,6 +553,11 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   if (releaseMatch && method === 'POST') {
     const deviceEventId = String(body.device_event_id);
     state.releaseAttempts.push(body);
+    if (nextReleaseRefusal) {
+      const refusal = nextReleaseRefusal;
+      nextReleaseRefusal = null;
+      return json(refusal.body, refusal.status);
+    }
     const replay = state.committedReleases.get(deviceEventId);
     if (replay) return json(replay.wire, 200);
     if (state.failNextRelease) {
@@ -796,6 +837,8 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
 
 beforeEach(() => {
   state = seedState();
+  sessionPermissions = PERMISSIONS;
+  nextReleaseRefusal = null;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -3844,4 +3887,210 @@ test('WO-1: due tones follow the served policy, and its first read gates only th
   const className = row?.querySelector('.duetxt')?.className ?? '';
   expect(className).toContain('ok');
   expect(className).not.toContain('soon');
+});
+
+/* ============ Phase 14 slice 3 — Work Order permissions ============ */
+
+function patchBodies(): Record<string, unknown>[] {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(([, init]) => init?.method === 'PATCH')
+    .map(
+      ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
+    );
+}
+
+test('FM-4: with Edit Work Order Demand only, the header reads as text and no release is offered; the lines stay editable', async () => {
+  sessionPermissions = ['EDIT_WORK_ORDER_DEMAND', 'MANAGE_PART_NUMBER_MASTER'];
+  await renderWorkOrders();
+  expect(
+    screen.queryByRole('button', { name: '＋ New Work Order' }),
+  ).toBeNull();
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  expect(within(dialog).queryByLabelText(/^WO due date/)).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Release to production…' }),
+  ).toBeNull();
+  expect(within(dialog).getByLabelText('Quantity for A-100')).toBeEnabled();
+  expect(
+    within(dialog).getByRole('button', { name: '＋ Add Part manually' }),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByLabelText('Scan PN barcode')).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('button', { name: 'Remove line A-100' }),
+  ).toBeInTheDocument();
+
+  // The internal Work Order offers no external-number entry either.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  const internal = await openWorkOrderDetail('—', 'C-300');
+  expect(within(internal).queryByLabelText(/^External WO Number/)).toBeNull();
+});
+
+test('FM-4: with Create and edit Work Orders only, the lines read as text — no draft line can be created — and a save sends only the header', async () => {
+  sessionPermissions = ['MANAGE_WORK_ORDERS', 'MANAGE_PART_NUMBER_MASTER'];
+  await renderWorkOrders();
+  expect(
+    screen.getByRole('button', { name: '＋ New Work Order' }),
+  ).toBeInTheDocument();
+
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  expect(within(dialog).queryByLabelText('Quantity for A-100')).toBeNull();
+  expect(within(dialog).queryByLabelText('Job Numbers for A-100')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: '＋ Add Part manually' }),
+  ).toBeNull();
+  expect(within(dialog).queryByLabelText('Scan PN barcode')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Remove line A-100' }),
+  ).toBeNull();
+  expect(
+    within(dialog).getAllByRole('button', { name: 'Release to production…' }),
+  ).toHaveLength(3);
+
+  // A new WO due date travels alone — the lines are not the user's to
+  // change, so they do not follow it.
+  fireEvent.change(within(dialog).getByLabelText(/^WO due date/), {
+    target: { value: '2026-09-20' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007201 demand updated — business demand only/);
+  expect(patchBodies()).toEqual([
+    { due_date: '2026-09-20', line_edits: [], new_lines: [] },
+  ]);
+});
+
+test('FM-4: a user who may change no Work Order only reads — no Save demand, the view-only note names both permissions', async () => {
+  sessionPermissions = ['VIEW_PRODUCTION_DATA'];
+  await renderWorkOrders();
+
+  expect(
+    screen.getByText(
+      'View only — changing this needs one of these permissions: Create and edit Work Orders, Edit Work Order Demand.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: '＋ New Work Order' }),
+  ).toBeNull();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  expect(
+    within(dialog).queryByRole('button', { name: 'Save demand' }),
+  ).toBeNull();
+  expect(dialog.querySelector('input')).toBeNull();
+  expect(within(dialog).queryByText(/Saving stores/)).toBeNull();
+});
+
+test('FM-4: without Manage Part Numbers the PN of a demand line opens the read-only Part Number details with its barcode label', async () => {
+  sessionPermissions = ['VIEW_PRODUCTION_DATA', 'EDIT_WORK_ORDER_DEMAND'];
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  expect(
+    within(dialog).queryByRole('button', { name: 'Edit Part Number A-100' }),
+  ).toBeNull();
+  const pn = within(dialog).getByRole('button', {
+    name: 'Part Number A-100 details',
+  });
+  expect(pn.textContent).toBe('A-100');
+  fireEvent.click(pn);
+  const details = screen.getByRole('dialog', { name: 'Part Number details' });
+  expect(
+    within(details).getByRole('button', { name: 'Barcode label…' }),
+  ).toBeInTheDocument();
+  expect(
+    within(details).queryByRole('button', { name: /Save|Add Part Number/ }),
+  ).toBeNull();
+  expect(
+    await within(details).findByRole('button', { name: 'Close (Esc)' }),
+  ).toBeInTheDocument();
+});
+
+/* ============ Phase 14 slice 3 — release retry copy ============ */
+
+test('FM-6: a release refused because the sign-in ended keeps the dialog and its key; submitting again after signing in records it once', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500');
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+  const A1 =
+    'You are not signed in, or your sign-in has ended. Sign in to continue.';
+  nextReleaseRefusal = {
+    status: 401,
+    body: { detail: A1, authentication_required: true },
+  };
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  expect(
+    await within(release).findByText(
+      `${A1} Sign in again, then submit again. PartFlow records this release only once.`,
+    ),
+  ).toBeInTheDocument();
+
+  // The sign-in provider asks for the sign-in; the same user signs in.
+  const signIn = await screen.findByRole('dialog', { name: 'Sign in' });
+  fireEvent.change(within(signIn).getByLabelText('Login name'), {
+    target: { value: 'mia' },
+  });
+  fireEvent.change(within(signIn).getByLabelText('Password'), {
+    target: { value: 'secret-password' },
+  });
+  fireEvent.click(within(signIn).getByRole('button', { name: 'Sign in' }));
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'Sign in' })).toBeNull(),
+  );
+
+  // The release dialog and its inputs are still there; the same key goes.
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', {
+        name: 'Release to production — explicit action',
+      }),
+    ).getByRole('button', { name: 'Retry release' }),
+  );
+  await screen.findByRole('dialog', { name: 'Release committed' });
+  expect(state.releaseAttempts).toHaveLength(2);
+  expect(state.releaseAttempts[1].device_event_id).toBe(
+    state.releaseAttempts[0].device_event_id,
+  );
+  expect(state.committedReleases.size).toBe(1);
+});
+
+test('FM-6: a release recorded by another user shows the server detail and keeps the key', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500');
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+  const R1 =
+    'This request was already recorded by another user. Nothing more was recorded — reload to see the current state.';
+  nextReleaseRefusal = {
+    status: 409,
+    body: { detail: R1, recorded_by_another_user: true },
+  };
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  expect(await within(release).findByText(R1)).toBeInTheDocument();
+  expect(release).not.toHaveTextContent('You can retry');
+  nextReleaseRefusal = {
+    status: 409,
+    body: { detail: R1, recorded_by_another_user: true },
+  };
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Retry release' }),
+  );
+  await waitFor(() => expect(state.releaseAttempts).toHaveLength(2));
+  expect(state.releaseAttempts[1].device_event_id).toBe(
+    state.releaseAttempts[0].device_event_id,
+  );
+  expect(state.committedReleases.size).toBe(0);
 });

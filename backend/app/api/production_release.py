@@ -26,21 +26,29 @@ Deliberate surface decisions:
   it (FLOATING by default in the UI, never defaulted here);
   ``route_template_id`` travels only with a PLANNED release.
 - No client-writable actor exists on this surface (same rule as the
-  intake endpoints): the informational actor context stays absent
-  until an authenticated identity exists (Phase 14).
+  intake endpoints): the release records the signed-in User in its
+  ``RECEIVED`` context (``actor_user_id``, Phase 14 slice 3), and a
+  replay of a release another User recorded is a 409
+  (``recorded_by_another_user``) that creates nothing.
+- A release needs Manage Work Orders (FLOATING and PLANNED alike).
 """
 
 import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
+from app.api.authorization import RequirePermission
 from app.api.dependencies import SessionDep
 from app.application import production_release
+from app.application.authentication import Principal
 from app.application.production_release import ProductionRelease
-from app.domain.enums import RouteMode
+from app.domain.enums import Permission, RouteMode
 
 router = APIRouter(prefix="/api")
+
+ReleaseDep = Annotated[Principal, Depends(RequirePermission(Permission.MANAGE_WORK_ORDERS))]
 
 
 class ProductionReleaseRequest(BaseModel):
@@ -104,6 +112,7 @@ def _response(result: ProductionRelease) -> ProductionReleaseResponse:
 
 @router.post("/work-orders/{work_order_id}/demands/{demand_id}/release")
 def release_to_production(
+    principal: ReleaseDep,
     work_order_id: int,
     demand_id: int,
     body: ProductionReleaseRequest,
@@ -122,6 +131,7 @@ def release_to_production(
         operation_id=body.operation_id,
         confirm_active_quantity=body.confirm_active_quantity,
         device_event_id=body.device_event_id,
+        actor_user_id=principal.user_id,
     )
     response.status_code = 201 if result.created else 200
     return _response(result)

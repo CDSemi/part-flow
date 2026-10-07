@@ -22,8 +22,9 @@ its section's permission — Departments ``MANAGE_DEPARTMENTS``, Areas
 ``MANAGE_BARCODE_CONFIGURATION``. An Area's Worker Session timeout
 override is a Worker session policy edit: sending it needs
 ``MANAGE_WORKER_SESSION_POLICIES`` (and an Area edit sending only the
-override needs nothing else). The Asset Tag format read is classified
-with the Management routes (Machines host it).
+override needs nothing else). The Asset Tag format read needs a
+signed-in User (Administration and Management → Machines read it;
+Phase 14 slice 3).
 
 Deliberate surface decisions:
 
@@ -426,7 +427,9 @@ class MachineAssetTagFormatPutRequest(BaseModel):
 
 
 @router.get("/barcode-configuration/machine-asset-tag-format")
-def get_machine_asset_tag_format(session: SessionDep) -> MachineAssetTagFormatResponse:
+def get_machine_asset_tag_format(
+    principal: SignedInDep, session: SessionDep
+) -> MachineAssetTagFormatResponse:
     config = environment.get_machine_asset_tag_format(session)
     return MachineAssetTagFormatResponse.model_validate(config)
 

@@ -160,7 +160,9 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -252,7 +254,7 @@ def _pinned_clock(instant: datetime.datetime) -> Iterator[None]:
 
 
 def _work_order(client: TestClient, work_order_id: int) -> dict[str, Any]:
-    response = client.get(f"/api/work-orders/{work_order_id}")
+    response = admin_of(client).get(f"/api/work-orders/{work_order_id}")
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -316,7 +318,7 @@ def _internal_modify_candidate(
     state in which `Receive Quantity` opens and §14 reuse applies.
     """
     other_pn = _unique("PN")
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -331,7 +333,7 @@ def _internal_modify_candidate(
     demand_id = int(
         next(line for line in created.json()["demands"] if line["part_number"] == pn)["id"]
     )
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -383,14 +385,14 @@ def _active_quantity_beside_a_settled_demand(
     becomes a SEPARATE flow only after an explicit confirmation.
     Returns the surviving flow's id and its quantity.
     """
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": pn, "requested_quantity": 4, "request_type": "MODIFY"}]},
     )
     assert created.status_code == 201, created.text
     work_order_id = int(created.json()["id"])
     demand_id = int(created.json()["demands"][0]["id"])
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -452,14 +454,14 @@ def _scrapped_beside_a_settled_demand(
     while undoing that Scrap would reopen the closed flow and give the
     PN active quantity again. Returns the Scrap's ``device_event_id``.
     """
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": pn, "requested_quantity": 4, "request_type": "MODIFY"}]},
     )
     assert created.status_code == 201, created.text
     work_order_id = int(created.json()["id"])
     demand_id = int(created.json()["demands"][0]["id"])
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -543,7 +545,7 @@ def test_unknown_part_number_opens_receive_quantity(client: TestClient) -> None:
 def test_active_demand_withholds_receive_quantity(client: TestClient) -> None:
     cell = _Cell(client)
     pn = _unique("PN")
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 12}]}
     )
     assert created.status_code == 201, created.text
@@ -895,14 +897,14 @@ def test_a_completed_internal_work_order_is_never_a_reuse_candidate(
     production = _Cell(client)
     stockroom = _Cell(client, is_terminal=True)
     pn = _unique("PN")
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": pn, "requested_quantity": 4, "request_type": "MODIFY"}]},
     )
     assert created.status_code == 201, created.text
     work_order_id = int(created.json()["id"])
     demand_id = int(created.json()["demands"][0]["id"])
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -1039,7 +1041,7 @@ def test_receipt_refuses_active_demand_that_appeared_meanwhile(
     cell = _Cell(client)
     pn = _unique("PN")
     payload = _receipt_payload(pn, 4)
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 9}]}
     )
     assert created.status_code == 201, created.text
@@ -1522,7 +1524,7 @@ def test_a_receipt_cannot_commit_beside_demand_created_meanwhile(
         client,
         cell,
         pn,
-        lambda: client.post(
+        lambda: admin_of(client).post(
             "/api/work-orders",
             json={"lines": [{"part_number": pn, "requested_quantity": 7}]},
         ),
@@ -1556,7 +1558,7 @@ def test_a_receipt_cannot_commit_beside_a_demand_line_raised_meanwhile(
         client,
         cell,
         pn,
-        lambda: client.patch(
+        lambda: admin_of(client).patch(
             f"/api/work-orders/{work_order_id}",
             json={"line_edits": [{"id": demand_id, "requested_quantity": 9}]},
         ),
@@ -1587,7 +1589,8 @@ def test_a_receipt_cannot_commit_beside_an_allocation_reversed_meanwhile(
     pn = _unique("PN")
     _internal_modify_candidate(client, production, stockroom, pn)
     before = _counts(db_engine, pn)
-    listed = client.get("/api/allocations", params={"part_number": pn})
+    admin = admin_of(client)
+    listed = admin.get("/api/allocations", params={"part_number": pn})
     assert listed.status_code == 200, listed.text
     allocation_id = int(listed.json()[0]["id"])
 
@@ -1598,13 +1601,9 @@ def test_a_receipt_cannot_commit_beside_an_allocation_reversed_meanwhile(
         client,
         cell,
         pn,
-        lambda: client.post(
+        lambda: admin.post(
             f"/api/allocations/{allocation_id}/reversals",
-            json={
-                "reason": "Wrong Work Order",
-                "station_id": stockroom.station_id,
-                "device_event_id": str(uuid.uuid4()),
-            },
+            json={"reason": "Wrong Work Order", "device_event_id": str(uuid.uuid4())},
         ),
         inside,
         release,

@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../App';
+import { PERMISSIONS } from '../api/roles';
 
 /**
  * Minimal real environment for the routing tests: two active Scan
@@ -29,7 +30,29 @@ function json(body: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), { status }));
 }
 
+/**
+ * The user sign-in the fake answers: signed out unless a test signs in.
+ * Management needs a signed-in user (Phase 14 slice 3), so its routing
+ * tests sign in a user holding every permission.
+ */
+let sessionUser: Record<string, unknown> | null = null;
+
+function signIn() {
+  sessionUser = {
+    id: 90,
+    login_name: 'mia',
+    display_name: 'Mia Manager',
+    role_id: 2,
+    role_name: 'Manager',
+    avatar_updated_at: null,
+    permissions: PERMISSIONS,
+    must_change_password: false,
+    session_expires_at: null,
+  };
+}
+
 beforeEach(() => {
+  sessionUser = null;
   // Health answers ok; the real views additionally load their
   // configuration lists — a near-empty environment keeps these routing
   // tests focused on navigation.
@@ -154,7 +177,7 @@ beforeEach(() => {
         return json({ department: { id: 1, name: 'Machining' }, entries: [] });
       }
       if (url === '/api/session') {
-        return json({ user: null, setup_open: false });
+        return json({ user: sessionUser, setup_open: false });
       }
       if (url === '/api/policies/due-soon') {
         return json({
@@ -373,6 +396,7 @@ test('top-level navigation switches views and updates the URL', async () => {
 });
 
 test('Management opens Area Board first and exposes the sub navigation', async () => {
+  signIn();
   renderAt('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
@@ -395,6 +419,7 @@ test('Management opens Area Board first and exposes the sub navigation', async (
 });
 
 test('returning to Management restores the last-used sub view during the session', async () => {
+  signIn();
   renderAt('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
@@ -412,6 +437,7 @@ test('returning to Management restores the last-used sub view during the session
 });
 
 test('a Management sub view renders directly from its URL', async () => {
+  signIn();
   renderAt('/management/priority');
 
   expect(
@@ -422,6 +448,7 @@ test('a Management sub view renders directly from its URL', async () => {
 });
 
 test('Management exposes the seven sub views in the approved order', async () => {
+  signIn();
   renderAt('/management/area-board');
 
   // Part Numbers sits next to last; Machines last, directly after it
@@ -441,6 +468,7 @@ test('Management exposes the seven sub views in the approved order', async () =>
 });
 
 test('the Completed Work Orders page renders from its URL with Work Orders active', async () => {
+  signIn();
   renderAt('/management/work-orders/completed');
 
   expect(
@@ -459,6 +487,7 @@ test('the Completed Work Orders page renders from its URL with Work Orders activ
 });
 
 test('returning to Management from the completed page re-enters the active WO list', async () => {
+  signIn();
   renderAt('/management/work-orders/completed');
   await screen.findByRole('heading', { name: 'Completed Work Orders' });
 
@@ -475,6 +504,7 @@ test('returning to Management from the completed page re-enters the active WO li
 });
 
 test('the Machines management view renders from its URL', async () => {
+  signIn();
   renderAt('/management/machines');
 
   expect(
@@ -484,6 +514,7 @@ test('the Machines management view renders from its URL', async () => {
 });
 
 test('the Part Numbers management view renders from its URL', async () => {
+  signIn();
   renderAt('/management/part-numbers');
 
   // The REAL view (Phase 13): it reads its first page from the server.
@@ -507,6 +538,7 @@ test('the Part Numbers management view renders from its URL', async () => {
 });
 
 test('the Planned Routes management view renders from its URL', async () => {
+  signIn();
   renderAt('/management/planned-routes');
 
   expect(

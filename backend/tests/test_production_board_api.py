@@ -183,7 +183,7 @@ class _Cell:
         self.machine_names: list[str] = []
         for _ in range(machine_count):
             machine_name = _unique("Lathe")
-            machine = client.post(
+            machine = admin_of(client).post(
                 "/api/machines", json={"area_id": self.area_id, "name": machine_name}
             )
             assert machine.status_code == 201, machine.text
@@ -238,7 +238,7 @@ def _create_work_order(
         payload["work_order_number"] = number
     if received_date is not None:
         payload["received_date"] = received_date
-    response = client.post("/api/work-orders", json=payload)
+    response = admin_of(client).post("/api/work-orders", json=payload)
     assert response.status_code == 201, response.text
     return _WorkOrder(response.json())
 
@@ -285,7 +285,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order.id}/demands/{demand_id or work_order.demand_id}/release",
         json=payload,
     )
@@ -422,8 +422,8 @@ def _undo(client: TestClient, cell: _Cell, pn: str, reverses: str) -> None:
 
 
 def _allocate(client: TestClient, pn: str, lines: list[tuple[int, int]]) -> None:
-    response = client.post(
-        "/api/allocations",
+    response = admin_of(client).post(
+        "/api/allocations/management",
         json={
             "part_number": pn,
             "allocation_quantity": sum(qty for _, qty in lines),

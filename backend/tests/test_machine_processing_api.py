@@ -170,13 +170,15 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
 
 def _machine(client: TestClient, machine_id: int) -> dict[str, Any]:
-    response = client.get(f"/api/machines/{machine_id}")
+    response = admin_of(client).get(f"/api/machines/{machine_id}")
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -204,13 +206,13 @@ def _release(
     A second release of the same PN confirms the existing active
     quantity (SLICE1 §8.2) and yields a second flow of that PN."""
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
     assert response.status_code == 201, response.text
     work_order_id = int(response.json()["id"])
     demand_id = int(response.json()["demands"][0]["id"])
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -494,9 +496,12 @@ def test_assign_refuses_retired_other_area_and_maintenance_machines(
     other = _Cell(client)
     flow_id, pn = _release(client, lathe, quantity=3)
     retired_id = lathe.machine_ids[1]
-    assert client.post(f"/api/machines/{retired_id}/retire", json={}).status_code == 200
+    assert admin_of(client).post(f"/api/machines/{retired_id}/retire", json={}).status_code == 200
     maintained_id = _create_machine(client, lathe.area_id)
-    assert client.post(f"/api/machines/{maintained_id}/maintenance", json={}).status_code == 201
+    assert (
+        admin_of(client).post(f"/api/machines/{maintained_id}/maintenance", json={}).status_code
+        == 201
+    )
     count = _movement_count(db_engine)
 
     retired = _assign(client, lathe, flow_id, pn, 3, machine_id=retired_id)
@@ -753,7 +758,9 @@ def test_done_and_queue_stay_allowed_under_maintenance(
     Maintenance state age (the derived state does not change)."""
     lathe = _Cell(client)
     flow_id, pn = _assigned(client, lathe, quantity=3)
-    started = client.post(f"/api/machines/{lathe.machine_id}/maintenance", json={"note": "belt"})
+    started = admin_of(client).post(
+        f"/api/machines/{lathe.machine_id}/maintenance", json={"note": "belt"}
+    )
     assert started.status_code == 201, started.text
     assert started.json()["operational_state"] == "MAINTENANCE"
     assert started.json()["assigned_quantity"] == 3
@@ -775,7 +782,7 @@ def test_done_and_queue_stay_allowed_under_maintenance(
     assert machine["assigned_quantity"] == 0
     assert machine["state_changed_at"] == maintenance_since
 
-    cleared = client.delete(f"/api/machines/{lathe.machine_id}/maintenance")
+    cleared = admin_of(client).delete(f"/api/machines/{lathe.machine_id}/maintenance")
     assert cleared.status_code == 200 and cleared.json()["operational_state"] == "IDLE"
 
 
@@ -784,8 +791,11 @@ def test_clearing_maintenance_returns_to_running_when_quantity_is_assigned(
 ) -> None:
     lathe = _Cell(client)
     _assigned(client, lathe, quantity=3)
-    assert client.post(f"/api/machines/{lathe.machine_id}/maintenance", json={}).status_code == 201
-    cleared = client.delete(f"/api/machines/{lathe.machine_id}/maintenance")
+    assert (
+        admin_of(client).post(f"/api/machines/{lathe.machine_id}/maintenance", json={}).status_code
+        == 201
+    )
+    cleared = admin_of(client).delete(f"/api/machines/{lathe.machine_id}/maintenance")
     assert cleared.status_code == 200
     assert cleared.json()["operational_state"] == "RUNNING"
     assert cleared.json()["assigned_quantity"] == 3
@@ -1077,7 +1087,7 @@ def test_release_ids_and_machine_command_ids_never_replay_each_other(
     is compared explicitly, never inferred from the fingerprint."""
     lathe = _Cell(client)
     pn = _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
     assert response.status_code == 201, response.text
@@ -1094,7 +1104,7 @@ def test_release_ids_and_machine_command_ids_never_replay_each_other(
         "confirm_active_quantity": False,
         "device_event_id": release_id,
     }
-    released = client.post(release_url, json=release_payload)
+    released = admin_of(client).post(release_url, json=release_payload)
     assert released.status_code == 201, released.text
     flow_id = int(released.json()["quantity_flow_id"])
     count = _movement_count(db_engine)
@@ -1121,11 +1131,11 @@ def test_release_ids_and_machine_command_ids_never_replay_each_other(
         assert reused.status_code == 409, reused.text
     # The release side: the assignment's id (a different fingerprint) and,
     # explicitly, a Machine command whose id is replayed as a release.
-    replayed_release = client.post(
+    replayed_release = admin_of(client).post(
         release_url, json={**release_payload, "confirm_active_quantity": True}
     )
     assert replayed_release.status_code == 200, replayed_release.text
-    reused_release = client.post(
+    reused_release = admin_of(client).post(
         release_url,
         json={**release_payload, "confirm_active_quantity": True, "device_event_id": assign_id},
     )
@@ -1145,7 +1155,7 @@ def test_release_replay_checks_the_command_kind_explicitly() -> None:
         metadata_={production_release._FINGERPRINT_KEY: fingerprint},
     )
     with pytest.raises(IdempotencyConflictError):
-        production_release._replay_or_conflict(cast(Session, None), foreign, fingerprint)
+        production_release._replay_or_conflict(cast(Session, None), foreign, fingerprint, 1)
 
 
 def test_leaving_quantity_keeps_running_while_another_pn_remains(
@@ -1305,12 +1315,14 @@ def test_retirement_is_blocked_while_quantity_is_assigned(
     lathe = _Cell(client)
     flow_id, pn = _assigned(client, lathe, quantity=7)
 
-    refused = client.post(f"/api/machines/{lathe.machine_id}/retire", json={"reason": "old"})
+    refused = admin_of(client).post(
+        f"/api/machines/{lathe.machine_id}/retire", json={"reason": "old"}
+    )
     assert refused.status_code == 409, refused.text
     assert "7 pcs" in refused.json()["detail"]
     machine = _machine(client, lathe.machine_id)
     assert machine["retired_on"] is None and machine["operational_state"] == "RUNNING"
-    events = client.get(f"/api/machines/{lathe.machine_id}/lifecycle-events").json()
+    events = admin_of(client).get(f"/api/machines/{lathe.machine_id}/lifecycle-events").json()
     assert events == []
 
     done = _act(
@@ -1323,7 +1335,9 @@ def test_retirement_is_blocked_while_quantity_is_assigned(
         quantity=7,
     )
     assert done.status_code == 201
-    retired = client.post(f"/api/machines/{lathe.machine_id}/retire", json={"reason": "old"})
+    retired = admin_of(client).post(
+        f"/api/machines/{lathe.machine_id}/retire", json={"reason": "old"}
+    )
     assert retired.status_code == 200, retired.text
     assert retired.json()["retired_on"] is not None
     # Retired: no new assignment, history untouched.
@@ -1417,10 +1431,13 @@ def test_assignment_versus_retirement_assignment_first(
     pause = _Pause(machines.lock_machine)
     monkeypatch.setattr(machine_processing, "lock_machine", pause)
     results: dict[str, Any] = {}
+    actor_user_id = admin_of(client).user_id
 
     def retire() -> Any:
         with Session(db_engine) as session:
-            return machines.retire_machine(session, lathe.machine_id, reason="race")
+            return machines.retire_machine(
+                session, lathe.machine_id, reason="race", actor_user_id=actor_user_id
+            )
 
     assign_thread = threading.Thread(
         target=_run_collecting,
@@ -1462,10 +1479,13 @@ def test_assignment_versus_retirement_retirement_first(
     pause = _Pause(machines.lock_machine)
     monkeypatch.setattr(machines, "lock_machine", pause)
     results: dict[str, Any] = {}
+    actor_user_id = admin_of(client).user_id
 
     def retire() -> Any:
         with Session(db_engine) as session:
-            return machines.retire_machine(session, lathe.machine_id, reason="race")
+            return machines.retire_machine(
+                session, lathe.machine_id, reason="race", actor_user_id=actor_user_id
+            )
 
     retire_thread = threading.Thread(
         target=_run_collecting, args=(results, "retire", retire), daemon=True
@@ -1705,10 +1725,13 @@ def test_machine_scan_refusals_resolve_nothing(client: TestClient, db_engine: En
     _release(client, lathe, quantity=1)
     retired_id = lathe.machine_ids[1]
     retired_tag = _machine(client, retired_id)["asset_tag"]
-    assert client.post(f"/api/machines/{retired_id}/retire", json={}).status_code == 200
+    assert admin_of(client).post(f"/api/machines/{retired_id}/retire", json={}).status_code == 200
     maintained_id = _create_machine(client, lathe.area_id)
     maintained_tag = _machine(client, maintained_id)["asset_tag"]
-    assert client.post(f"/api/machines/{maintained_id}/maintenance", json={}).status_code == 201
+    assert (
+        admin_of(client).post(f"/api/machines/{maintained_id}/maintenance", json={}).status_code
+        == 201
+    )
     other_tag = _machine(client, other.machine_id)["asset_tag"]
     count = _movement_count(db_engine)
 
@@ -1755,11 +1778,17 @@ def test_resolved_machine_context_is_re_validated_by_the_command(
         assert _resolve_machine(client, lathe.station_id, asset_tag=tag).status_code == 200
     count = _movement_count(db_engine)
 
-    assert client.post(f"/api/machines/{lathe.machine_ids[0]}/retire", json={}).status_code == 200
+    assert (
+        admin_of(client).post(f"/api/machines/{lathe.machine_ids[0]}/retire", json={}).status_code
+        == 200
+    )
     stale_retired = _assign(client, lathe, flow_id, pn, 6, machine_id=lathe.machine_ids[0])
     assert stale_retired.status_code == 409 and "retired" in stale_retired.json()["detail"]
     assert (
-        client.post(f"/api/machines/{lathe.machine_ids[1]}/maintenance", json={}).status_code == 201
+        admin_of(client)
+        .post(f"/api/machines/{lathe.machine_ids[1]}/maintenance", json={})
+        .status_code
+        == 201
     )
     stale_maintenance = _assign(client, lathe, flow_id, pn, 6, machine_id=lathe.machine_ids[1])
     assert stale_maintenance.status_code == 409
@@ -1917,8 +1946,10 @@ def test_inventory_separates_queued_on_machine_and_finished_quantity(
 
     # A retired Machine is no card; a maintained one keeps its quantity
     # on its card with the Maintenance state.
-    assert client.post(f"/api/machines/{machine_c}/retire", json={}).status_code == 200
-    assert client.post(f"/api/machines/{machine_b}/maintenance", json={}).status_code == 201
+    assert admin_of(client).post(f"/api/machines/{machine_c}/retire", json={}).status_code == 200
+    assert (
+        admin_of(client).post(f"/api/machines/{machine_b}/maintenance", json={}).status_code == 201
+    )
     inventory = _inventory(client, lathe.area_id)
     cards = {card["machine"]["id"]: card for card in inventory["machines"]}
     assert set(cards) == {machine_a, machine_b}

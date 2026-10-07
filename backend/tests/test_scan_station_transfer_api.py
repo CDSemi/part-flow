@@ -157,7 +157,9 @@ def _create_machine(client: TestClient, area_id: int) -> int:
         "/api/barcode-configuration/machine-asset-tag-format", json={"prefix": "CD-", "digits": 4}
     )
     assert configured.status_code == 200, configured.text
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -185,7 +187,7 @@ def _release(
 ) -> tuple[int, str]:
     """Release one flow into the cell's Area: (quantity_flow_id, pn)."""
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": pn, "requested_quantity": 500}]},
     )
@@ -203,7 +205,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release", json=payload
     )
     assert released.status_code == 201, released.text

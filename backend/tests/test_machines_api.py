@@ -133,19 +133,19 @@ def _create_machine(
     if area_id is None:
         area_id = int(_create_area(client)["id"])
     payload = {"area_id": area_id, "name": _unique("MACHINE"), **overrides}
-    response = client.post("/api/machines", json=payload)
+    response = admin_of(client).post("/api/machines", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _retire(client: TestClient, machine_id: int, **overrides: Any) -> dict[str, Any]:
-    response = client.post(f"/api/machines/{machine_id}/retire", json={**overrides})
+    response = admin_of(client).post(f"/api/machines/{machine_id}/retire", json={**overrides})
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _lifecycle_events(client: TestClient, machine_id: int) -> list[dict[str, Any]]:
-    response = client.get(f"/api/machines/{machine_id}/lifecycle-events")
+    response = admin_of(client).get(f"/api/machines/{machine_id}/lifecycle-events")
     assert response.status_code == 200, response.text
     return cast(list[dict[str, Any]], response.json())
 
@@ -209,7 +209,10 @@ def test_format_change_applies_forward_and_never_resets_the_counter(
     # The new format applies to Machines created afterwards only; the
     # existing tag is never renamed and the counter keeps counting.
     assert after["asset_tag"] == f"MS-{before_sequence:06d}"
-    assert client.get(f"/api/machines/{before['id']}").json()["asset_tag"] == before["asset_tag"]
+    assert (
+        admin_of(client).get(f"/api/machines/{before['id']}").json()["asset_tag"]
+        == before["asset_tag"]
+    )
 
     restored = admin_of(client).put(
         "/api/barcode-configuration/machine-asset-tag-format",
@@ -234,7 +237,7 @@ def test_create_requires_configured_asset_tag_format(client: TestClient, db_engi
     with db_engine.begin() as connection:
         connection.execute(sa.delete(models.MachineAssetTagConfig))
     try:
-        response = client.post(
+        response = admin_of(client).post(
             "/api/machines", json={"area_id": area["id"], "name": _unique("MACHINE")}
         )
         assert response.status_code == 409
@@ -269,7 +272,9 @@ def test_failed_creation_rolls_back_the_allocated_sequence(
             )
         )
 
-    blocked = client.post("/api/machines", json={"area_id": area["id"], "name": _unique("MACHINE")})
+    blocked = admin_of(client).post(
+        "/api/machines", json={"area_id": area["id"], "name": _unique("MACHINE")}
+    )
     assert blocked.status_code == 409
     assert "Asset Tag" in blocked.json()["detail"]
     # Rolled back together: no Machine row, counter unchanged.
@@ -294,7 +299,7 @@ def test_expected_asset_tag_is_a_precondition_never_an_identity(
 
     sequence_before = _next_sequence(db_engine)
     stale_name = _unique("MACHINE")
-    stale = client.post(
+    stale = admin_of(client).post(
         "/api/machines",
         json={"area_id": area["id"], "name": stale_name, "expected_asset_tag": previewed},
     )
@@ -308,7 +313,7 @@ def test_expected_asset_tag_is_a_precondition_never_an_identity(
     # A refreshed preview matches the very tag the failed attempt would
     # have consumed — proof the allocation rolled back.
     refreshed = f"CD-{sequence_before:04d}"
-    created = client.post(
+    created = admin_of(client).post(
         "/api/machines",
         json={"area_id": area["id"], "name": stale_name, "expected_asset_tag": refreshed},
     )
@@ -326,7 +331,7 @@ def test_expected_asset_tag_is_a_precondition_never_an_identity(
 def test_asset_tag_and_barcode_are_never_client_writable(client: TestClient) -> None:
     area = _create_area(client)
     for field in ({"asset_tag": "CD-9999"}, {"barcode_value": "PF:MACHINE:CD-9999"}):
-        response = client.post(
+        response = admin_of(client).post(
             "/api/machines", json={"area_id": area["id"], "name": _unique("MACHINE"), **field}
         )
         assert response.status_code == 422, field
@@ -339,12 +344,14 @@ def test_asset_tag_and_barcode_are_never_client_writable(client: TestClient) -> 
         {"retired_on": "2026-08-18"},
         {"maintenance_since": "2026-08-18T00:00:00Z"},
     ):
-        response = client.patch(f"/api/machines/{machine['id']}", json=field)
+        response = admin_of(client).patch(f"/api/machines/{machine['id']}", json=field)
         assert response.status_code == 422, field
 
 
 def test_create_requires_existing_active_area_and_name(client: TestClient) -> None:
-    missing = client.post("/api/machines", json={"area_id": 999999, "name": _unique("MACHINE")})
+    missing = admin_of(client).post(
+        "/api/machines", json={"area_id": 999999, "name": _unique("MACHINE")}
+    )
     assert missing.status_code == 422
 
     area = _create_area(client)
@@ -352,13 +359,15 @@ def test_create_requires_existing_active_area_and_name(client: TestClient) -> No
         admin_of(client).patch(f"/api/areas/{area['id']}", json={"is_active": False}).status_code
         == 200
     )
-    inactive = client.post(
+    inactive = admin_of(client).post(
         "/api/machines", json={"area_id": area["id"], "name": _unique("MACHINE")}
     )
     assert inactive.status_code == 409
 
     active_area = _create_area(client)
-    blank = client.post("/api/machines", json={"area_id": active_area["id"], "name": "   "})
+    blank = admin_of(client).post(
+        "/api/machines", json={"area_id": active_area["id"], "name": "   "}
+    )
     assert blank.status_code == 422
     assert "must not be empty" in blank.json()["detail"]
 
@@ -369,7 +378,9 @@ def test_display_name_unique_among_active_machines_of_one_area_only(
     area = _create_area(client)
     machine = _create_machine(client, area_id=int(area["id"]))
 
-    duplicate = client.post("/api/machines", json={"area_id": area["id"], "name": machine["name"]})
+    duplicate = admin_of(client).post(
+        "/api/machines", json={"area_id": area["id"], "name": machine["name"]}
+    )
     assert duplicate.status_code == 409
     assert "already exists" in duplicate.json()["detail"]
 
@@ -383,7 +394,7 @@ def test_display_name_unique_among_active_machines_of_one_area_only(
     _retire(client, int(machine["id"]))
     replacement = _create_machine(client, area_id=int(area["id"]), name=machine["name"])
     assert replacement["asset_tag"] != machine["asset_tag"]
-    retired_row = client.get(f"/api/machines/{machine['id']}").json()
+    retired_row = admin_of(client).get(f"/api/machines/{machine['id']}").json()
     assert retired_row["name"] == machine["name"]
 
 
@@ -394,7 +405,7 @@ def test_metadata_edit_keeps_identity_and_rejects_retired_records(
     assert machine["manufacturer"] == "Haas"
 
     new_name = _unique("MACHINE")
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/machines/{machine['id']}",
         json={
             "name": new_name,
@@ -414,17 +425,17 @@ def test_metadata_edit_keeps_identity_and_rejects_retired_records(
     assert body["updated_at"] > machine["updated_at"]
 
     rename_collision_target = _create_machine(client, area_id=int(machine["area_id"]))
-    collision = client.patch(
+    collision = admin_of(client).patch(
         f"/api/machines/{rename_collision_target['id']}", json={"name": new_name}
     )
     assert collision.status_code == 409
 
     _retire(client, int(machine["id"]))
-    frozen = client.patch(f"/api/machines/{machine['id']}", json={"notes": "changed"})
+    frozen = admin_of(client).patch(f"/api/machines/{machine['id']}", json={"notes": "changed"})
     assert frozen.status_code == 409
     assert "retired" in frozen.json()["detail"]
 
-    unknown = client.patch("/api/machines/999999", json={"notes": "x"})
+    unknown = admin_of(client).patch("/api/machines/999999", json={"notes": "x"})
     assert unknown.status_code == 404
 
 
@@ -436,7 +447,7 @@ def test_metadata_edit_keeps_identity_and_rejects_retired_records(
 def test_maintenance_start_update_in_place_and_clear(client: TestClient) -> None:
     machine = _create_machine(client)
 
-    started = client.post(
+    started = admin_of(client).post(
         f"/api/machines/{machine['id']}/maintenance",
         json={"note": "Spindle bearing change", "expected_return": "2026-08-25"},
     )
@@ -448,13 +459,13 @@ def test_maintenance_start_update_in_place_and_clear(client: TestClient) -> None
     # Starting the override changes the derived state — the age resets.
     assert body["state_changed_at"] > machine["state_changed_at"]
 
-    again = client.post(f"/api/machines/{machine['id']}/maintenance", json={})
+    again = admin_of(client).post(f"/api/machines/{machine['id']}/maintenance", json={})
     assert again.status_code == 409
     assert "already under maintenance" in again.json()["detail"]
 
     # The in-place context update is part of the ONE Edit Machine
     # Save-changes transaction (no maintenance PATCH sub-resource).
-    updated = client.patch(
+    updated = admin_of(client).patch(
         f"/api/machines/{machine['id']}",
         json={"maintenance_note": "Waiting for parts", "maintenance_expected_return": "2026-09-01"},
     )
@@ -466,7 +477,7 @@ def test_maintenance_start_update_in_place_and_clear(client: TestClient) -> None
     assert updated_body["maintenance_since"] == body["maintenance_since"]
     assert updated_body["state_changed_at"] == body["state_changed_at"]
 
-    cleared = client.delete(f"/api/machines/{machine['id']}/maintenance")
+    cleared = admin_of(client).delete(f"/api/machines/{machine['id']}/maintenance")
     assert cleared.status_code == 200
     cleared_body = cleared.json()
     assert cleared_body["maintenance_since"] is None
@@ -481,17 +492,17 @@ def test_maintenance_requires_an_active_override_and_an_active_record(
     machine = _create_machine(client)
 
     for response in (
-        client.patch(f"/api/machines/{machine['id']}", json={"maintenance_note": "x"}),
-        client.patch(
+        admin_of(client).patch(f"/api/machines/{machine['id']}", json={"maintenance_note": "x"}),
+        admin_of(client).patch(
             f"/api/machines/{machine['id']}", json={"maintenance_expected_return": "2026-09-01"}
         ),
-        client.delete(f"/api/machines/{machine['id']}/maintenance"),
+        admin_of(client).delete(f"/api/machines/{machine['id']}/maintenance"),
     ):
         assert response.status_code == 409
         assert "not under maintenance" in response.json()["detail"]
 
     _retire(client, int(machine["id"]))
-    retired_start = client.post(f"/api/machines/{machine['id']}/maintenance", json={})
+    retired_start = admin_of(client).post(f"/api/machines/{machine['id']}/maintenance", json={})
     assert retired_start.status_code == 409
     assert "retired" in retired_start.json()["detail"]
 
@@ -501,17 +512,19 @@ def test_edit_saves_metadata_and_maintenance_context_in_one_transaction(
 ) -> None:
     machine = _create_machine(client)
     assert (
-        client.post(
+        admin_of(client)
+        .post(
             f"/api/machines/{machine['id']}/maintenance",
             json={"note": "old note", "expected_return": "2026-08-30"},
-        ).status_code
+        )
+        .status_code
         == 201
     )
-    under_maintenance = client.get(f"/api/machines/{machine['id']}").json()
+    under_maintenance = admin_of(client).get(f"/api/machines/{machine['id']}").json()
 
     # One Save changes: metadata and maintenance context together.
     new_name = _unique("MACHINE")
-    saved = client.patch(
+    saved = admin_of(client).patch(
         f"/api/machines/{machine['id']}",
         json={
             "name": new_name,
@@ -535,13 +548,13 @@ def test_edit_saves_metadata_and_maintenance_context_in_one_transaction(
     # while NO override is active fails as a whole — the metadata part
     # is not applied either.
     plain = _create_machine(client, notes="untouched")
-    blocked = client.patch(
+    blocked = admin_of(client).patch(
         f"/api/machines/{plain['id']}",
         json={"name": _unique("MACHINE"), "notes": "changed", "maintenance_note": "z"},
     )
     assert blocked.status_code == 409
     assert "not under maintenance" in blocked.json()["detail"]
-    fresh = client.get(f"/api/machines/{plain['id']}").json()
+    fresh = admin_of(client).get(f"/api/machines/{plain['id']}").json()
     assert fresh["name"] == plain["name"]
     assert fresh["notes"] == "untouched"
     assert fresh["updated_at"] == plain["updated_at"]
@@ -555,16 +568,16 @@ def test_retirement_keeps_maintenance_context_until_reactivation(
     # the step that explicitly clears any override.
     machine = _create_machine(client)
     assert (
-        client.post(
-            f"/api/machines/{machine['id']}/maintenance", json={"note": "long repair"}
-        ).status_code
+        admin_of(client)
+        .post(f"/api/machines/{machine['id']}/maintenance", json={"note": "long repair"})
+        .status_code
         == 201
     )
     retired = _retire(client, int(machine["id"]))
     assert retired["maintenance_since"] is not None
     assert retired["maintenance_note"] == "long repair"
 
-    reactivated = client.post(
+    reactivated = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate", json={"reason": "Repair finished"}
     )
     assert reactivated.status_code == 200
@@ -581,9 +594,9 @@ def test_retire_records_the_atomic_lifecycle_event(client: TestClient) -> None:
     machine = _create_machine(client)
     assert _lifecycle_events(client, int(machine["id"])) == []
 
-    retired = client.post(
+    retired = admin_of(client).post(
         f"/api/machines/{machine['id']}/retire",
-        json={"reason": "Replaced by a new machine", "actor": "  Peter  "},
+        json={"reason": "Replaced by a new machine"},
     )
     assert retired.status_code == 200
     assert retired.json()["retired_on"] is not None
@@ -595,11 +608,13 @@ def test_retire_records_the_atomic_lifecycle_event(client: TestClient) -> None:
     assert event["before_state"] == "ACTIVE"
     assert event["after_state"] == "RETIRED"
     assert event["reason"] == "Replaced by a new machine"
-    assert event["actor"] == "Peter"
+    # The signed-in User recorded it (Phase 14 slice 3); no legacy text.
+    assert event["actor"] is None
+    assert event["actor_user"]["id"] == admin_of(client).user_id
     assert event["from_area_id"] is None and event["to_area_id"] is None
     assert event["occurred_at"]
 
-    again = client.post(f"/api/machines/{machine['id']}/retire", json={})
+    again = admin_of(client).post(f"/api/machines/{machine['id']}/retire", json={})
     assert again.status_code == 409
     assert "already retired" in again.json()["detail"]
     # The blocked retirement recorded nothing.
@@ -612,15 +627,15 @@ def test_retire_applies_the_recorded_save_draft_atomically(client: TestClient) -
     transaction."""
     machine = _create_machine(client)
     assert (
-        client.post(
-            f"/api/machines/{machine['id']}/maintenance", json={"note": "pre-retire note"}
-        ).status_code
+        admin_of(client)
+        .post(f"/api/machines/{machine['id']}/maintenance", json={"note": "pre-retire note"})
+        .status_code
         == 201
     )
-    under_maintenance = client.get(f"/api/machines/{machine['id']}").json()
+    under_maintenance = admin_of(client).get(f"/api/machines/{machine['id']}").json()
 
     new_name = _unique("MACHINE")
-    retired = client.post(
+    retired = admin_of(client).post(
         f"/api/machines/{machine['id']}/retire",
         json={
             "reason": "End of life",
@@ -654,7 +669,7 @@ def test_failed_retire_draft_rolls_back_edits_retirement_and_event(
 
     # Draft collides with an active Machine of the Area: the whole
     # command fails — no edits, no retirement, no lifecycle event.
-    blocked = client.post(
+    blocked = admin_of(client).post(
         f"/api/machines/{machine['id']}/retire",
         json={
             "reason": "Replaced",
@@ -666,14 +681,14 @@ def test_failed_retire_draft_rolls_back_edits_retirement_and_event(
 
     # A draft touching maintenance context without an active override
     # fails the same all-or-nothing way.
-    invalid_context = client.post(
+    invalid_context = admin_of(client).post(
         f"/api/machines/{machine['id']}/retire",
         json={"reason": "Replaced", "edits": {"maintenance_note": "x", "notes": "changed"}},
     )
     assert invalid_context.status_code == 409
     assert "not under maintenance" in invalid_context.json()["detail"]
 
-    fresh = client.get(f"/api/machines/{machine['id']}").json()
+    fresh = admin_of(client).get(f"/api/machines/{machine['id']}").json()
     assert fresh["name"] == machine["name"]
     assert fresh["notes"] == "original notes"
     assert fresh["retired_on"] is None
@@ -681,7 +696,7 @@ def test_failed_retire_draft_rolls_back_edits_retirement_and_event(
     assert _lifecycle_events(client, int(machine["id"])) == []
 
     # Without the failing draft parts the same retirement succeeds.
-    succeeded = client.post(
+    succeeded = admin_of(client).post(
         f"/api/machines/{machine['id']}/retire",
         json={"reason": "Replaced", "edits": {"notes": "changed"}},
     )
@@ -712,9 +727,9 @@ def test_reactivate_same_area_returns_idle_on_the_same_record(client: TestClient
     machine = _create_machine(client, serial_number="SN-REACT-1")
     _retire(client, int(machine["id"]), reason="Seasonal shutdown")
 
-    reactivated = client.post(
+    reactivated = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate",
-        json={"reason": "Season restart", "actor": "Mai"},
+        json={"reason": "Season restart"},
     )
     assert reactivated.status_code == 200
     body = reactivated.json()
@@ -732,7 +747,8 @@ def test_reactivate_same_area_returns_idle_on_the_same_record(client: TestClient
     assert reactivation["before_state"] == "RETIRED"
     assert reactivation["after_state"] == "ACTIVE"
     assert reactivation["reason"] == "Season restart"
-    assert reactivation["actor"] == "Mai"
+    assert reactivation["actor"] is None
+    assert reactivation["actor_user"]["id"] == admin_of(client).user_id
     # No Area move: the pair stays absent.
     assert reactivation["from_area_id"] is None and reactivation["to_area_id"] is None
 
@@ -745,7 +761,7 @@ def test_reactivate_with_forward_only_area_move_records_the_pair(
     machine = _create_machine(client, area_id=int(origin_area["id"]))
     _retire(client, int(machine["id"]))
 
-    moved = client.post(
+    moved = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate",
         json={"reason": "Machine moved to the new hall", "area_id": target_area["id"]},
     )
@@ -760,13 +776,15 @@ def test_reactivate_with_forward_only_area_move_records_the_pair(
 def test_reactivate_requires_a_reason_and_a_retired_machine(client: TestClient) -> None:
     machine = _create_machine(client)
 
-    not_retired = client.post(f"/api/machines/{machine['id']}/reactivate", json={"reason": "x"})
+    not_retired = admin_of(client).post(
+        f"/api/machines/{machine['id']}/reactivate", json={"reason": "x"}
+    )
     assert not_retired.status_code == 409
     assert "not retired" in not_retired.json()["detail"]
 
     _retire(client, int(machine["id"]))
     for payload in ({}, {"reason": "   "}):
-        response = client.post(f"/api/machines/{machine['id']}/reactivate", json=payload)
+        response = admin_of(client).post(f"/api/machines/{machine['id']}/reactivate", json=payload)
         assert response.status_code == 422, payload
     # Blocked attempts recorded nothing beyond the retirement.
     assert len(_lifecycle_events(client, int(machine["id"]))) == 1
@@ -785,12 +803,12 @@ def test_reactivate_blockers_area_name_and_serial(client: TestClient) -> None:
         .status_code
         == 200
     )
-    to_inactive = client.post(
+    to_inactive = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate",
         json={"reason": "back", "area_id": inactive_area["id"]},
     )
     assert to_inactive.status_code == 409
-    to_missing = client.post(
+    to_missing = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate", json={"reason": "back", "area_id": 999999}
     )
     assert to_missing.status_code == 422
@@ -798,14 +816,18 @@ def test_reactivate_blockers_area_name_and_serial(client: TestClient) -> None:
     # Display-name collision with an active Machine of the target Area;
     # renaming resolves it.
     occupant = _create_machine(client, area_id=int(area["id"]), name=machine["name"])
-    collision = client.post(f"/api/machines/{machine['id']}/reactivate", json={"reason": "back"})
+    collision = admin_of(client).post(
+        f"/api/machines/{machine['id']}/reactivate", json={"reason": "back"}
+    )
     assert collision.status_code == 409
     assert "already exists" in collision.json()["detail"]
 
     # Serial number meanwhile reissued to another active Machine.
-    reissued = client.patch(f"/api/machines/{occupant['id']}", json={"serial_number": "SN-DUP-77"})
+    reissued = admin_of(client).patch(
+        f"/api/machines/{occupant['id']}", json={"serial_number": "SN-DUP-77"}
+    )
     assert reissued.status_code == 200
-    serial_blocked = client.post(
+    serial_blocked = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate",
         json={"reason": "back", "name": _unique("MACHINE")},
     )
@@ -814,15 +836,17 @@ def test_reactivate_blockers_area_name_and_serial(client: TestClient) -> None:
 
     # Every blocked attempt left the record retired with only the
     # original RETIRED event — no partial write, no stray event.
-    frozen = client.get(f"/api/machines/{machine['id']}").json()
+    frozen = admin_of(client).get(f"/api/machines/{machine['id']}").json()
     assert frozen["retired_on"] is not None
     assert len(_lifecycle_events(client, int(machine["id"]))) == 1
 
     # Clearing both blockers, the rename-on-reactivate path succeeds.
-    resolved = client.patch(f"/api/machines/{occupant['id']}", json={"serial_number": None})
+    resolved = admin_of(client).patch(
+        f"/api/machines/{occupant['id']}", json={"serial_number": None}
+    )
     assert resolved.status_code == 200
     renamed = _unique("MACHINE")
-    reactivated = client.post(
+    reactivated = admin_of(client).post(
         f"/api/machines/{machine['id']}/reactivate",
         json={"reason": "back", "name": renamed},
     )
@@ -848,5 +872,5 @@ def test_lifecycle_events_are_append_only_in_the_database(
 
 
 def test_lifecycle_history_unknown_machine_not_found(client: TestClient) -> None:
-    response = client.get("/api/machines/999999/lifecycle-events")
+    response = admin_of(client).get("/api/machines/999999/lifecycle-events")
     assert response.status_code == 404

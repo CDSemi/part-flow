@@ -194,7 +194,7 @@ class _Cell:
         self.machine_ids = [
             int(
                 _ok(
-                    client.post(
+                    admin_of(client).post(
                         "/api/machines", json={"area_id": self.area_id, "name": _unique("Lathe")}
                     ),
                     201,
@@ -221,13 +221,13 @@ def _release(client: TestClient, cell: _Cell, *, quantity: int = 10) -> tuple[in
     """Management releases ``quantity`` of a new PN into ``cell`` (no station)."""
     pn = _unique("PN")
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
         ),
         201,
     )
     released = _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/work-orders/{work_order['id']}/demands/{work_order['demands'][0]['id']}/release",
             json={
                 "part_number": pn,
@@ -707,7 +707,7 @@ def test_state_refusals_precede_the_reason(client: TestClient, db_engine: Engine
     flow_id, pn = _release(client, cell)
     _in_area(client, cell, "machine-assignments", flow_id, pn, 10)
     done = _in_area(client, cell, "area-completions", flow_id, pn, 10)
-    _ok(client.post(f"/api/machines/{cell.machine_id}/retire", json={}))
+    _ok(admin_of(client).post(f"/api/machines/{cell.machine_id}/retire", json={}))
     retired = _Command(cell, pn, str(done["device_event_id"]), 1, [flow_id], [cell.machine_id])
     _assert_plain_conflict(_post_undo(client, retired, _undo_body(retired)), "retired")
 
@@ -979,7 +979,9 @@ def test_the_two_policy_sections_never_overwrite_each_other(
 def test_tracking_lists_the_reversal_reason(client: TestClient) -> None:
     command_ = _plain_transfer(client)
     _ok(_post_undo(client, command_, _undo_body(command_, reason="wrong PN")), 201)
-    detail = _ok(client.get("/api/tracking/detail", params={"part_number": command_.part_number}))
+    detail = _ok(
+        admin_of(client).get("/api/tracking/detail", params={"part_number": command_.part_number})
+    )
     reversed_ = [
         movement
         for movement in detail["movements"]["movements"]

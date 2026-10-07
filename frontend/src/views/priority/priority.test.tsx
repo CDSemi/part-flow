@@ -8,7 +8,12 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { ReactNode } from 'react';
 
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
+import { SessionContext, hasPermission } from '../../app/session-context';
+import type { SessionValue } from '../../app/session-context';
 import { ConnectivityProvider } from '../../app/connectivity-provider';
 import { clearHotHistory } from './hot-history';
 import { PriorityView } from './PriorityView';
@@ -47,7 +52,9 @@ type PostFailure =
   /** The server committed, then the response was lost. */
   | { kind: 'drop-after-commit' }
   /** A gateway/server error after the commit. */
-  | { kind: 'status-after-commit'; status: number };
+  | { kind: 'status-after-commit'; status: number }
+  /** A refusal before anything was written (sign-in, permission, …). */
+  | { kind: 'refuse'; status: number; body: Record<string, unknown> };
 
 interface FakeState {
   demands: FakeDemand[];
@@ -285,6 +292,7 @@ async function change(body: Record<string, unknown>): Promise<Response> {
   const failure = state.nextPost;
   state.nextPost = null;
   if (failure?.kind === 'drop-before') throw new TypeError('Failed to fetch');
+  if (failure?.kind === 'refuse') return json(failure.body, failure.status);
 
   const key = String(body.device_event_id);
   const expected = body.expected_order as number[];
@@ -410,6 +418,7 @@ async function handle(
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/priority');
+  session = signedInSession();
   state = seedState();
   // The session history is module-scoped (it survives sub-view
   // switches); every test starts a fresh session.
@@ -422,6 +431,50 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The signed-in user of a test (Phase 14 slice 3): a Management view
+ * offers its changes only to a user holding their permissions, so a
+ * test holds every permission unless it signs in another user.
+ */
+function signedInSession(
+  permissions: readonly Permission[] = PERMISSIONS,
+): SessionValue {
+  const user = {
+    id: 90,
+    loginName: 'mia',
+    displayName: 'Mia Manager',
+    roleId: 2,
+    roleName: 'Manager',
+    avatarUpdatedAt: null,
+    permissions: [...permissions],
+    mustChangePassword: false,
+    sessionExpiresAt: null,
+  };
+  return {
+    status: 'signed-in',
+    user,
+    setupOpen: false,
+    checking: false,
+    endedBy: null,
+    can: (permission) => hasPermission(user, permission),
+    openSignIn: vi.fn(),
+    openSetup: vi.fn(),
+    openChangePassword: vi.fn(),
+    signOut: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+}
+
+let session: SessionValue = signedInSession();
+
+function SignedIn({ children }: { children: ReactNode }) {
+  return (
+    <SessionContext.Provider value={session}>
+      {children}
+    </SessionContext.Provider>
+  );
+}
+
 const INITIAL = ['A-100', 'B-200', 'C-300', 'D-400'];
 
 async function renderPriority() {
@@ -429,6 +482,7 @@ async function renderPriority() {
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   // Wait for the list and the connectivity check so writes enable.
   await screen.findByRole('button', { name: '⟲ Undo' });
@@ -542,6 +596,7 @@ test('an empty Hot list says how to add an entry', async () => {
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   expect(await screen.findByText(/No Hot WO Demand/)).toBeInTheDocument();
 });
@@ -556,6 +611,7 @@ test('a Department refusal renders the error state with the server detail and Re
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent('The Hot list could not be loaded.');
@@ -1452,6 +1508,7 @@ test('disconnected: the list stays readable and every write control is disabled'
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   await waitFor(() => expect(listedPns()).toEqual(INITIAL));
   await waitFor(() =>
@@ -1617,6 +1674,7 @@ test('PR-1: a demand’s due tone follows the served Due Soon policy', async () 
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   await screen.findByText('A-100');
   const tone = () => rowOf('A-100').querySelector('.d2')?.className ?? '';
@@ -1628,6 +1686,7 @@ test('PR-1: a demand’s due tone follows the served Due Soon policy', async () 
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   await screen.findByText('A-100');
   expect(tone()).toContain('ok');
@@ -1640,6 +1699,7 @@ test('PR-1: a failed policy read is the view’s error state; Retry recovers', a
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
+    { wrapper: SignedIn },
   );
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent(
@@ -1653,4 +1713,208 @@ test('PR-1: a failed policy read is the view’s error state; Retry recovers', a
   expect(
     screen.queryByText('The Due Soon warning settings could not be loaded.'),
   ).toBeNull();
+});
+
+/* ============ Phase 14 slice 3 — priority permissions and retries ============ */
+
+const A1 =
+  'You are not signed in, or your sign-in has ended. Sign in to continue.';
+const A2 = 'Your account does not have permission to do this.';
+const R1 =
+  'This request was already recorded by another user. Nothing more was recorded — reload to see the current state.';
+
+async function renderPriorityAs(permissions: Permission[]) {
+  session = signedInSession(permissions);
+  render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+    { wrapper: SignedIn },
+  );
+  await waitFor(() => expect(listedPns()).toEqual(INITIAL));
+}
+
+test('FM-4: Set Work Order Demand priority alone adds and removes; the order cannot be changed', async () => {
+  await renderPriorityAs(['SET_DEMAND_PRIORITY']);
+
+  expect(
+    screen.getByRole('button', { name: '+ Add to Hot list' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: 'Remove A-100 from Hot list' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Move A-100 down' })).toBeNull();
+  expect(rowOf('A-100').getAttribute('draggable')).toBe('false');
+  expect(rowOf('A-100').querySelector('.grip')).toBeNull();
+  expect(undoButton()).toBeInTheDocument();
+  expect(redoButton()).toBeInTheDocument();
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+});
+
+test('FM-4: Reorder Hot items alone moves and drags; nothing is added or removed', async () => {
+  await renderPriorityAs(['REORDER_HOT_ITEMS']);
+
+  expect(
+    screen.queryByRole('button', { name: '+ Add to Hot list' }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole('button', { name: 'Remove A-100 from Hot list' }),
+  ).toBeNull();
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: 'Move A-100 down' }),
+    ).toBeEnabled(),
+  );
+  expect(rowOf('A-100').getAttribute('draggable')).toBe('true');
+  expect(undoButton()).toBeInTheDocument();
+  expect(redoButton()).toBeInTheDocument();
+});
+
+test('FM-4: without either priority permission the Hot list only reads — no Undo or Redo, one view-only note', async () => {
+  await renderPriorityAs(['VIEW_PRODUCTION_DATA']);
+
+  expect(
+    screen.getByText(
+      'View only — changing this needs one of these permissions: Set Work Order Demand priority, Reorder Hot items.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: '+ Add to Hot list' }),
+  ).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Remove / })).toBeNull();
+  expect(screen.queryByRole('button', { name: '⟲ Undo' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '⟳ Redo' })).toBeNull();
+});
+
+test('FM-4: an Undo the server refuses for a missing permission is an ordinary refusal', async () => {
+  await renderPriority();
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await waitFor(() => expect(undoButton()).toBeEnabled());
+
+  state.nextPost = {
+    kind: 'refuse',
+    status: 403,
+    body: {
+      detail: A2,
+      permission_denied: true,
+      required_permissions: ['REORDER_HOT_ITEMS'],
+    },
+  };
+  fireEvent.click(undoButton());
+  await applyRanking();
+  expect(await screen.findByText(A2)).toBeInTheDocument();
+  expect(screen.queryByText(/may already have been applied/)).toBeNull();
+  // Nothing was written: the step is still there to try again.
+  expect(undoButton()).toBeEnabled();
+});
+
+async function leaveOutcomeUnknown() {
+  await renderPriority();
+  state.nextPost = { kind: 'status-after-commit', status: 502 };
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await screen.findByText(/may already have been applied/);
+}
+
+test('FM-6: a Retry refused because the sign-in ended keeps the unknown outcome; the next Retry sends the same key', async () => {
+  await leaveOutcomeUnknown();
+  state.nextPost = {
+    kind: 'refuse',
+    status: 401,
+    body: { detail: A1, authentication_required: true },
+  };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  expect(
+    await screen.findByText(
+      `${A1} Sign in again, then use Retry. The change is applied only once.`,
+    ),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/may already have been applied/)).toBeInTheDocument();
+  expect(screen.queryByText(/Nothing was (recorded|changed)/)).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+  expect(state.posts).toHaveLength(3);
+  expect(state.posts[2]).toEqual(state.posts[0]);
+  expect(screen.queryByText(/may already have been applied/)).toBeNull();
+});
+
+test('FM-6: a Retry refused for a missing permission keeps the unknown outcome and says the change may already be applied', async () => {
+  await leaveOutcomeUnknown();
+  state.nextPost = {
+    kind: 'refuse',
+    status: 403,
+    body: {
+      detail: A2,
+      permission_denied: true,
+      required_permissions: ['REORDER_HOT_ITEMS'],
+    },
+  };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  expect(
+    await screen.findByText(
+      `${A2} The change may already be applied; reload the list to check.`,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/Sign in again/)).toBeNull();
+  expect(screen.queryByText(/Nothing was (recorded|changed)/)).toBeNull();
+});
+
+test('FM-6: a fresh change refused for a missing permission is an ordinary refusal', async () => {
+  await renderPriority();
+  state.nextPost = {
+    kind: 'refuse',
+    status: 403,
+    body: {
+      detail: A2,
+      permission_denied: true,
+      required_permissions: ['REORDER_HOT_ITEMS'],
+    },
+  };
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  expect(await screen.findByText(A2)).toBeInTheDocument();
+  expect(screen.queryByText(/may already have been applied/)).toBeNull();
+  expect(listedPns()).toEqual(INITIAL);
+});
+
+test('FM-6: a change already recorded by another user reloads the list and keeps the step in the history', async () => {
+  await renderPriority();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove D-400 from Hot list' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'B-200', 'C-300']));
+  const listReads = () =>
+    state.reads.filter((read) => read === '/api/hot-list').length;
+  const readsBefore = listReads();
+
+  // The Undo re-adds D-400 (an insert step); another user recorded
+  // this request id.
+  state.nextPost = {
+    kind: 'refuse',
+    status: 409,
+    body: { detail: R1, recorded_by_another_user: true },
+  };
+  fireEvent.click(undoButton());
+  await applyRanking();
+  expect(await screen.findByText(R1)).toBeInTheDocument();
+  await waitFor(() => expect(listReads()).toBe(readsBefore + 1));
+  // Never dropped like a refused insert: the step is still offered.
+  expect(undoButton()).toBeEnabled();
+  expect(screen.queryByText(/removed from the history/)).toBeNull();
+  expect(screen.queryByText(/may already have been applied/)).toBeNull();
 });

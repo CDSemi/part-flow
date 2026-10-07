@@ -35,6 +35,11 @@ import { ErrorState, LoadingState } from './view-states';
 // of only the changed fields), then a staged image change on its own
 // binary endpoint — so a partially completed save is handled
 // explicitly and entered input is never silently discarded (GUI §3.10).
+//
+// A user who may not manage Part Numbers opens the same dialog
+// read-only (Phase 14 slice 3): `Part Number details`, the saved values
+// as text, the image without its actions, the barcode label, and no
+// write at all.
 
 const UNKNOWN_OUTCOME_MESSAGE =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh, then check the Part Number before trying again.';
@@ -122,11 +127,15 @@ function IdentityHeader({
  */
 export function EditPartNumberDialog({
   pn,
+  readOnly: readOnlyAtOpen = false,
   writeBlocked,
   onClose,
 }: {
   /** Fixed PN (row, demand line) — or undefined for `+ New Part Number`. */
   pn?: string;
+  /** Show the details without any change (a user who may not manage
+   * Part Numbers); needs a fixed `pn`. Fixed when the dialog opens. */
+  readOnly?: boolean;
   /** Disables every write while the backend is unreachable; reading,
    * staging an image, the label and closing stay available. */
   writeBlocked: boolean;
@@ -140,6 +149,9 @@ export function EditPartNumberDialog({
   // The PN the dialog is fixed to: the given one, or — after a new
   // record was created from a typed entry — the server's canonical PN,
   // or — after a typed entry's create answered E1 — its canonical PN.
+  // An open dialog never changes mode under a later change of the
+  // sign-in.
+  const [readOnly] = useState(readOnlyAtOpen);
   const [fixedPn, setFixedPn] = useState<string | undefined>(pn);
   const [loadState, setLoadState] = useState<LoadState>(
     pn !== undefined ? { status: 'loading' } : { status: 'ready' },
@@ -251,15 +263,20 @@ export function EditPartNumberDialog({
   const ready = loadState.status === 'ready';
   // A fixed PN reads as Edit until its load says otherwise.
   const isEdit = record !== null || (fixedPn !== undefined && !ready);
-  const title = isEdit ? 'Edit Part Number' : 'New Part Number';
+  const title = readOnly
+    ? 'Part Number details'
+    : isEdit
+      ? 'Edit Part Number'
+      : 'New Part Number';
 
   const dirty =
-    staged !== null ||
-    (record
-      ? !sameText(name, record.name) ||
-        !sameText(revision, record.currentRevision) ||
-        !sameText(erpId, record.erpId)
-      : pnInput !== '' || name !== '' || revision !== '' || erpId !== '');
+    !readOnly &&
+    (staged !== null ||
+      (record
+        ? !sameText(name, record.name) ||
+          !sameText(revision, record.currentRevision) ||
+          !sameText(erpId, record.erpId)
+        : pnInput !== '' || name !== '' || revision !== '' || erpId !== ''));
 
   const close = () => {
     if (closed.current) return;
@@ -468,6 +485,31 @@ export function EditPartNumberDialog({
         }}
       />
     );
+  } else if (readOnly) {
+    formArea = (
+      <div className="pnm-form">
+        <dl className="pnm-readonly">
+          <div>
+            <dt>Name / Description</dt>
+            <dd>{record?.name ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Revision</dt>
+            <dd className="mono">{record?.currentRevision ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>ERP ID</dt>
+            <dd className="mono">{record?.erpId ?? '—'}</dd>
+          </div>
+        </dl>
+        <div className="pnm-imgblock">
+          <span className="pnm-imglabel">Image</span>
+          <div className="pnm-imgrow">
+            <PnImage pn={displayPn} image={shownImage} />
+          </div>
+        </div>
+      </div>
+    );
   } else {
     formArea = (
       <div className="pnm-form">
@@ -597,24 +639,36 @@ export function EditPartNumberDialog({
           </div>
         </div>
       ) : null}
-      <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
-          Cancel (Esc)
-        </button>
-        <button
-          className="bigbtn primary"
-          disabled={
-            writeBlocked ||
-            controlsBlocked ||
-            !ready ||
-            (fixedPn === undefined && duplicate)
-          }
-          onClick={() => void submit()}
-        >
-          {isEdit ? 'Save changes' : 'Add Part Number'}
-        </button>
-      </div>
-      {ready && record ? (
+      {readOnly ? (
+        <div className="row">
+          <button className="bigbtn ghost" onClick={close}>
+            Close (Esc)
+          </button>
+        </div>
+      ) : (
+        <div className="row">
+          <button
+            className="bigbtn ghost"
+            disabled={busy}
+            onClick={requestClose}
+          >
+            Cancel (Esc)
+          </button>
+          <button
+            className="bigbtn primary"
+            disabled={
+              writeBlocked ||
+              controlsBlocked ||
+              !ready ||
+              (fixedPn === undefined && duplicate)
+            }
+            onClick={() => void submit()}
+          >
+            {isEdit ? 'Save changes' : 'Add Part Number'}
+          </button>
+        </div>
+      )}
+      {ready && record && !readOnly ? (
         <div className="pnm-dangerzone">
           <div className="dz-title">Delete Part Number Details</div>
           <div className="dz-body">

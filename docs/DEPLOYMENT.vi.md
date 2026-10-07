@@ -47,7 +47,7 @@ giới hạn đã quan sát được gồm:
 - database và ứng dụng dùng chung PostgreSQL role do Compose tạo;
 - chưa có production reverse proxy, TLS policy, secret store, log rotation,
   release image tag, scheduled backup job, restore drill hoặc command rollback;
-- Phase 14 đã có sign-in cho application User và permission check phía server bao phủ mọi đọc và write Administration; các route Management, master-data và monitoring vẫn mở đến Phase 14 slice 3, và write của Scan Station gọi được từ bất kỳ client nào trên mạng cho đến khi thiết bị station được enroll (slice 4);
+- Phase 14 đã có sign-in cho application User và permission check phía server bao phủ mọi đọc và write Administration và Management; write của Scan Station gọi được từ bất kỳ client nào trên mạng cho đến khi thiết bị station được enroll (slice 4);
 - một số view đã duyệt vẫn là preview chỉ có ở development hoặc còn chờ tích
   hợp backend/frontend thật.
 

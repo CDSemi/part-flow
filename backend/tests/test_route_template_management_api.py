@@ -145,7 +145,9 @@ def _create_operation(client: TestClient, area_id: int) -> dict[str, Any]:
 
 
 def _create_machine(client: TestClient, area_id: int) -> dict[str, Any]:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
@@ -201,7 +203,7 @@ def _create(
     name: str | None = None,
     description: str | None = None,
 ) -> Any:
-    return client.post(
+    return admin_of(client).post(
         "/api/route-templates",
         json={"name": name or _unique("ROUTE"), "description": description, "steps": steps},
     )
@@ -232,11 +234,11 @@ def _write_body(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _put(client: TestClient, template_id: int, body: dict[str, Any]) -> Any:
-    return client.put(f"/api/route-templates/{template_id}", json=body)
+    return admin_of(client).put(f"/api/route-templates/{template_id}", json=body)
 
 
 def _records(client: TestClient) -> dict[int, dict[str, Any]]:
-    response = client.get("/api/route-templates/management")
+    response = admin_of(client).get("/api/route-templates/management")
     assert response.status_code == 200, response.text
     return {int(entry["id"]): entry for entry in response.json()}
 
@@ -246,7 +248,7 @@ def _record(client: TestClient, template_id: int) -> dict[str, Any]:
 
 
 def _demand(client: TestClient, part_number: str) -> tuple[int, int]:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": part_number, "requested_quantity": 500}]},
     )
@@ -264,7 +266,7 @@ def _release_response(
 ) -> tuple[Any, str]:
     pn = part_number or _unique("PN")
     work_order_id, demand_id = _demand(client, pn)
-    response = client.post(
+    response = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -338,7 +340,9 @@ def _merge(client: TestClient, cell: _Cell, pn: str, flow_ids: list[int]) -> Any
 
 
 def _retire(client: TestClient, machine_id: int) -> None:
-    response = client.post(f"/api/machines/{machine_id}/retire", json={"reason": "Worn out"})
+    response = admin_of(client).post(
+        f"/api/machines/{machine_id}/retire", json={"reason": "Worn out"}
+    )
     assert response.status_code == 200, response.text
 
 
@@ -566,6 +570,7 @@ def _release_call(
 ) -> tuple[str, Callable[[Session], Any]]:
     pn = part_number or _unique("PN")
     work_order_id, demand_id = _demand(client, pn)
+    actor_user_id = admin_of(client).user_id
 
     def action(session: Session) -> Any:
         return production_release.release_to_production(
@@ -580,6 +585,7 @@ def _release_call(
             operation_id=cell.operation_id,
             confirm_active_quantity=part_number is not None,
             device_event_id=str(uuid.uuid4()),
+            actor_user_id=actor_user_id,
         )
 
     return pn, action
@@ -619,11 +625,16 @@ def _inputs(steps: list[dict[str, Any]]) -> list[RouteStepInput]:
 
 
 def _replace_call(
-    template_id: int, steps: list[dict[str, Any]], name: str
+    template_id: int, steps: list[dict[str, Any]], name: str, actor_user_id: int
 ) -> Callable[[Session], Any]:
     def action(session: Session) -> Any:
         return route_templates.replace_route_template(
-            session, template_id, name=name, description=None, steps=_inputs(steps)
+            session,
+            template_id,
+            name=name,
+            description=None,
+            steps=_inputs(steps),
+            actor_user_id=actor_user_id,
         )
 
     return action
@@ -713,12 +724,14 @@ def test_management_list_orders_active_first_then_name(
     prefix = _unique("ORDER")
     archived = _created(client, [_step(cell)], name=f"{prefix} A")
     _release(client, cell, archived["id"])
-    assert client.post(f"/api/route-templates/{archived['id']}/archive").status_code == 200
+    assert (
+        admin_of(client).post(f"/api/route-templates/{archived['id']}/archive").status_code == 200
+    )
     second = _created(client, [_step(cell)], name=f"{prefix} C")
     first = _created(client, [_step(cell)], name=f"{prefix} B")
     ids = [
         entry["id"]
-        for entry in client.get("/api/route-templates/management").json()
+        for entry in admin_of(client).get("/api/route-templates/management").json()
         if entry["name"].startswith(prefix)
     ]
     assert ids == [first["id"], second["id"], archived["id"]]
@@ -833,7 +846,7 @@ def test_every_refusal_has_its_copy_and_writes_nothing(
     ]
     for body, status, detail in cases:
         for response in (
-            client.post("/api/route-templates", json=body),
+            admin_of(client).post("/api/route-templates", json=body),
             _put(client, template["id"], body),
         ):
             assert (response.status_code, response.json()) == (status, {"detail": detail}), body
@@ -848,7 +861,7 @@ def test_every_refusal_has_its_copy_and_writes_nothing(
         {"name": "R"},
     ]
     for body in framework_cases:
-        assert client.post("/api/route-templates", json=body).status_code == 422, body
+        assert admin_of(client).post("/api/route-templates", json=body).status_code == 422, body
         assert _put(client, template["id"], body).status_code == 422, body
 
     assert _counts(db_engine) == before
@@ -951,7 +964,7 @@ def test_put_refuses_an_absent_or_archived_route(client: TestClient, db_engine: 
     )
     created = _created(client, [_step(cell)])
     _release(client, cell, created["id"])
-    assert client.post(f"/api/route-templates/{created['id']}/archive").status_code == 200
+    assert admin_of(client).post(f"/api/route-templates/{created['id']}/archive").status_code == 200
     before = _counts(db_engine)
     refused = _put(client, created["id"], {**_write_body(created), "name": "New"})
     assert (refused.status_code, refused.json()) == (
@@ -976,9 +989,9 @@ def test_an_id_beyond_the_integer_range_is_answered_as_missing(
     path = f"/api/route-templates/{_UNBINDABLE_ID}"
     responses = {
         "put": _put(client, _UNBINDABLE_ID, {"name": "R", "steps": [_step(cell)]}),
-        "archive": client.post(f"{path}/archive"),
-        "delete": client.delete(path),
-        "usage": client.get(f"{path}/usage"),
+        "archive": admin_of(client).post(f"{path}/archive"),
+        "delete": admin_of(client).delete(path),
+        "usage": admin_of(client).get(f"{path}/usage"),
     }
     for name, response in responses.items():
         assert (response.status_code, response.json()) == (404, missing), name
@@ -1057,7 +1070,7 @@ def test_stale_references_are_kept_and_refused_on_the_next_save(
     _deactivate(client, f"/api/operations/{operation['id']}")
     _retire(client, cell.machine_ids[0])
     _retire(client, cell.machine_ids[1])
-    reactivated = client.post(
+    reactivated = admin_of(client).post(
         f"/api/machines/{cell.machine_ids[1]}/reactivate",
         json={"reason": "Moved", "area_id": elsewhere.area_id},
     )
@@ -1164,7 +1177,7 @@ def test_merge_compares_the_preferred_machine_and_snapshots_stay_independent(
     }
     assert _put(client, created["id"], rewritten).status_code == 200
     _retire(client, first)
-    assert client.post(f"/api/route-templates/{created['id']}/archive").status_code == 200
+    assert admin_of(client).post(f"/api/route-templates/{created['id']}/archive").status_code == 200
     assert {
         table: _all_rows(db_engine, table)
         for table in ("assigned_routes", "assigned_route_steps", "part_movements", "quantity_flows")
@@ -1191,7 +1204,7 @@ def test_archive_retires_a_used_route_from_new_assignments(
 ) -> None:
     cell = _Cell(client)
     created = _created(client, [_step(cell)])
-    never_used = client.post(f"/api/route-templates/{created['id']}/archive")
+    never_used = admin_of(client).post(f"/api/route-templates/{created['id']}/archive")
     assert (never_used.status_code, never_used.json()) == (
         409,
         {
@@ -1201,7 +1214,7 @@ def test_archive_retires_a_used_route_from_new_assignments(
     )
     _release(client, cell, created["id"])
 
-    archived = client.post(f"/api/route-templates/{created['id']}/archive")
+    archived = admin_of(client).post(f"/api/route-templates/{created['id']}/archive")
     assert archived.status_code == 200, archived.text
     body = archived.json()
     assert body["archived_at"] is not None
@@ -1226,11 +1239,11 @@ def test_archive_retires_a_used_route_from_new_assignments(
     assert receipt.status_code == 409 and "is archived" in receipt.json()["detail"]
     assert _counts(db_engine) == before
 
-    again = client.post(f"/api/route-templates/{created['id']}/archive")
+    again = admin_of(client).post(f"/api/route-templates/{created['id']}/archive")
     assert again.status_code == 200 and again.json() == body
     assert len(_audit_rows(db_engine, created["id"])) == 2
 
-    absent = client.post(f"/api/route-templates/{_MISSING_ID}/archive")
+    absent = admin_of(client).post(f"/api/route-templates/{_MISSING_ID}/archive")
     assert (absent.status_code, absent.json()) == (
         404,
         {"detail": f"Planned Route {_MISSING_ID} does not exist."},
@@ -1240,13 +1253,13 @@ def test_archive_retires_a_used_route_from_new_assignments(
 def test_delete_removes_only_a_never_used_route(client: TestClient, db_engine: Engine) -> None:
     cell = _Cell(client)
     created = _created(client, [_step(cell), _step(cell, instructions="Again")])
-    deleted = client.delete(f"/api/route-templates/{created['id']}")
+    deleted = admin_of(client).delete(f"/api/route-templates/{created['id']}")
     assert deleted.status_code == 204, deleted.text
     assert _template_rows(db_engine, created["id"]) == (None, [])
     events = _audit_rows(db_engine, created["id"])
     assert [event.event_type for event in events] == ["CREATED", "DELETED"]
     assert (events[1].before_data, events[1].after_data) == (_snapshot(created), None)
-    again = client.delete(f"/api/route-templates/{created['id']}")
+    again = admin_of(client).delete(f"/api/route-templates/{created['id']}")
     assert (again.status_code, again.json()) == (
         404,
         {"detail": f"Planned Route {created['id']} does not exist."},
@@ -1256,10 +1269,12 @@ def test_delete_removes_only_a_never_used_route(client: TestClient, db_engine: E
     _release(client, cell, used["id"])
     archived = _created(client, [_step(cell)])
     _release(client, cell, archived["id"])
-    assert client.post(f"/api/route-templates/{archived['id']}/archive").status_code == 200
+    assert (
+        admin_of(client).post(f"/api/route-templates/{archived['id']}/archive").status_code == 200
+    )
     for template in (used, archived):
         before = _counts(db_engine)
-        refused = client.delete(f"/api/route-templates/{template['id']}")
+        refused = admin_of(client).delete(f"/api/route-templates/{template['id']}")
         assert (refused.status_code, refused.json()) == (
             409,
             {
@@ -1290,7 +1305,7 @@ def test_usage_lists_the_released_flows_newest_first(
     split = _transfer(client, material, lathe, first, first_pn, 4)
     assert split.status_code == 201, split.text
 
-    response = client.get(f"/api/route-templates/{created['id']}/usage")
+    response = admin_of(client).get(f"/api/route-templates/{created['id']}/usage")
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["template_id"] == created["id"] and body["total"] == 3
@@ -1312,14 +1327,14 @@ def test_usage_lists_the_released_flows_newest_first(
     assert (record["ever_used"], record["usage_count"]) == (True, 3)
 
     monkeypatch.setattr(route_templates, "USAGE_LIST_LIMIT", 2)
-    limited = client.get(f"/api/route-templates/{created['id']}/usage").json()
+    limited = admin_of(client).get(f"/api/route-templates/{created['id']}/usage").json()
     assert limited["total"] == 3
     assert [flow["quantity_flow_id"] for flow in limited["flows"]] == [third, second]
     monkeypatch.undo()
 
-    assert client.post(f"/api/route-templates/{created['id']}/archive").status_code == 200
-    assert client.get(f"/api/route-templates/{created['id']}/usage").json()["total"] == 3
-    absent = client.get(f"/api/route-templates/{_MISSING_ID}/usage")
+    assert admin_of(client).post(f"/api/route-templates/{created['id']}/archive").status_code == 200
+    assert admin_of(client).get(f"/api/route-templates/{created['id']}/usage").json()["total"] == 3
+    absent = admin_of(client).get(f"/api/route-templates/{_MISSING_ID}/usage")
     assert (absent.status_code, absent.json()) == (
         404,
         {"detail": f"Planned Route {_MISSING_ID} does not exist."},
@@ -1343,7 +1358,12 @@ def test_release_holding_the_template_makes_a_delete_conflict(
     try:
         runner.start("release", release)
         assert pause.first_inside.wait(timeout=20)
-        runner.start("delete", lambda s: route_templates.delete_route_template(s, created["id"]))
+        runner.start(
+            "delete",
+            lambda s: route_templates.delete_route_template(
+                s, created["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
         _await_lock_waiters(db_engine, 1)
     finally:
         pause.let_first_finish.set()
@@ -1364,7 +1384,12 @@ def test_delete_holding_the_template_makes_the_release_find_nothing(
     pn, release = _release_call(client, cell, created["id"])
     runner = _Runner(db_engine)
     try:
-        runner.start("delete", lambda s: route_templates.delete_route_template(s, created["id"]))
+        runner.start(
+            "delete",
+            lambda s: route_templates.delete_route_template(
+                s, created["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
         assert pause.first_inside.wait(timeout=20)
         runner.start("release", release)
         _await_lock_waiters(db_engine, 1)
@@ -1390,7 +1415,9 @@ def test_edit_holding_the_template_is_what_the_release_snapshots(
     pn, release = _release_call(client, cell, created["id"])
     runner = _Runner(db_engine)
     try:
-        runner.start("put", _replace_call(created["id"], new_steps, "Edited"))
+        runner.start(
+            "put", _replace_call(created["id"], new_steps, "Edited", admin_of(client).user_id)
+        )
         assert pause.first_inside.wait(timeout=20)
         runner.start("release", release)
         _await_lock_waiters(db_engine, 1)
@@ -1418,7 +1445,12 @@ def test_release_holding_the_template_snapshots_the_old_steps(
     try:
         runner.start("release", release)
         assert pause.first_inside.wait(timeout=20)
-        runner.start("put", _replace_call(created["id"], [_step(cell, instructions="New")], "E"))
+        runner.start(
+            "put",
+            _replace_call(
+                created["id"], [_step(cell, instructions="New")], "E", admin_of(client).user_id
+            ),
+        )
         _await_lock_waiters(db_engine, 1)
     finally:
         pause.let_first_finish.set()
@@ -1444,7 +1476,12 @@ def test_archive_and_release_serialize_in_both_orders(
     try:
         runner.start("release", release)
         assert pause.first_inside.wait(timeout=20)
-        runner.start("archive", lambda s: route_templates.archive_route_template(s, unused["id"]))
+        runner.start(
+            "archive",
+            lambda s: route_templates.archive_route_template(
+                s, unused["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
         _await_lock_waiters(db_engine, 1)
     finally:
         pause.let_first_finish.set()
@@ -1463,7 +1500,12 @@ def test_archive_and_release_serialize_in_both_orders(
     pn, release = _release_call(client, cell, used["id"])
     runner = _Runner(db_engine)
     try:
-        runner.start("archive", lambda s: route_templates.archive_route_template(s, used["id"]))
+        runner.start(
+            "archive",
+            lambda s: route_templates.archive_route_template(
+                s, used["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
         assert pause.first_inside.wait(timeout=20)
         runner.start("release", release)
         _await_lock_waiters(db_engine, 1)
@@ -1487,7 +1529,12 @@ def test_receipt_holding_the_template_makes_a_delete_conflict(
     try:
         runner.start("receipt", _receipt_call(cell, created["id"]))
         assert pause.first_inside.wait(timeout=20)
-        runner.start("delete", lambda s: route_templates.delete_route_template(s, created["id"]))
+        runner.start(
+            "delete",
+            lambda s: route_templates.delete_route_template(
+                s, created["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
         _await_lock_waiters(db_engine, 1)
     finally:
         pause.let_first_finish.set()
@@ -1543,7 +1590,9 @@ def test_writer_and_release_waiting_on_one_area_never_deadlock(
             sa.text("SELECT id FROM areas WHERE id = :id FOR UPDATE"), {"id": cell.area_id}
         )
         # The writer holds the template and waits on the Area.
-        runner.start("put", _replace_call(created["id"], edited, "Edited"))
+        runner.start(
+            "put", _replace_call(created["id"], edited, "Edited", admin_of(client).user_id)
+        )
         _await_lock_waiters(db_engine, 1)
         # The release waits on the template, holding no Area lock.
         runner.start("release", release)
@@ -1583,9 +1632,13 @@ def test_writer_locks_the_machine_before_any_area(
     def action(session: Session) -> Any:
         if write == "create":
             return route_templates.create_route_template(
-                session, name="Locked", description=None, steps=_inputs(steps)
+                session,
+                name="Locked",
+                description=None,
+                steps=_inputs(steps),
+                actor_user_id=admin_of(client).user_id,
             )
-        return _replace_call(existing["id"], steps, "Locked")(session)
+        return _replace_call(existing["id"], steps, "Locked", admin_of(client).user_id)(session)
 
     runner = _Runner(db_engine)
     with db_engine.connect() as holder:
@@ -1622,7 +1675,11 @@ def test_writer_locks_areas_in_ascending_order(client: TestClient, db_engine: En
         runner.start(
             "writer",
             lambda s: route_templates.create_route_template(
-                s, name="Ascending", description=None, steps=_inputs(steps)
+                s,
+                name="Ascending",
+                description=None,
+                steps=_inputs(steps),
+                actor_user_id=admin_of(client).user_id,
             ),
         )
         _await_lock_waiters(db_engine, 1)
@@ -1752,13 +1809,32 @@ def test_template_writes_never_take_the_part_number_lock(
         runner.start(
             "create",
             lambda s: route_templates.create_route_template(
-                s, name="Free", description=None, steps=_inputs([_step(cell)])
+                s,
+                name="Free",
+                description=None,
+                steps=_inputs([_step(cell)]),
+                actor_user_id=admin_of(client).user_id,
             ),
         )
-        runner.start("replace", _replace_call(used["id"], [_step(cell, instructions="x")], "N"))
+        runner.start(
+            "replace",
+            _replace_call(
+                used["id"], [_step(cell, instructions="x")], "N", admin_of(client).user_id
+            ),
+        )
         runner.join()
-        runner.start("archive", lambda s: route_templates.archive_route_template(s, used["id"]))
-        runner.start("delete", lambda s: route_templates.delete_route_template(s, unused["id"]))
+        runner.start(
+            "archive",
+            lambda s: route_templates.archive_route_template(
+                s, used["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
+        runner.start(
+            "delete",
+            lambda s: route_templates.delete_route_template(
+                s, unused["id"], actor_user_id=admin_of(client).user_id
+            ),
+        )
         runner.join()
         transaction.rollback()
     for name in ("create", "replace", "archive", "delete"):
@@ -1783,11 +1859,21 @@ def test_a_failing_audit_row_leaves_nothing_written(
     monkeypatch.setattr(audit, "append_audit_event", broken)
     calls: list[Callable[[Session], Any]] = [
         lambda s: route_templates.create_route_template(
-            s, name="Never", description=None, steps=_inputs([_step(cell)])
+            s,
+            name="Never",
+            description=None,
+            steps=_inputs([_step(cell)]),
+            actor_user_id=admin_of(client).user_id,
         ),
-        _replace_call(used["id"], [_step(cell, instructions="Never")], "Never"),
-        lambda s: route_templates.archive_route_template(s, used["id"]),
-        lambda s: route_templates.delete_route_template(s, unused["id"]),
+        _replace_call(
+            used["id"], [_step(cell, instructions="Never")], "Never", admin_of(client).user_id
+        ),
+        lambda s: route_templates.archive_route_template(
+            s, used["id"], actor_user_id=admin_of(client).user_id
+        ),
+        lambda s: route_templates.delete_route_template(
+            s, unused["id"], actor_user_id=admin_of(client).user_id
+        ),
     ]
     for call in calls:
         with Session(db_engine) as session, pytest.raises(RuntimeError):

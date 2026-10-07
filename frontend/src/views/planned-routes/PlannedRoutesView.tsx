@@ -25,6 +25,8 @@ import type {
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { AreaDot } from '../../components/indicators';
@@ -32,6 +34,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
+import { ViewOnlyPageNote } from '../../components/ViewOnlyPageNote';
 import {
   EmptyState,
   ErrorState,
@@ -272,6 +275,11 @@ export function PlannedRoutesView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  // Without Manage Planned Routes every change is hidden (Phase 14
+  // slice 3): active rows open nothing (Duplicate, Archive and Delete
+  // live in their editor), archived rows offer no Duplicate; Used by
+  // stays. The server checks every write itself.
+  const canManage = useSession().can('MANAGE_ROUTE_TEMPLATES');
   const { state, reload } = useApiData(loadPlannedRoutes);
   const [search, setSearch] = useState('');
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
@@ -412,19 +420,32 @@ export function PlannedRoutesView() {
                 // island and stops propagation.
                 <tr
                   key={record.id}
-                  className="selrow"
-                  onClick={() => openDialog({ kind: 'edit', catalog, record })}
+                  className={canManage ? 'selrow' : undefined}
+                  onClick={
+                    canManage
+                      ? () => openDialog({ kind: 'edit', catalog, record })
+                      : undefined
+                  }
                 >
                   <td>
-                    <button
-                      className="rowbtn"
-                      aria-label={`Edit ${record.name}`}
-                    >
-                      <div className="rtname">{record.name}</div>
-                      {record.description ? (
-                        <div className="rtdesc">{record.description}</div>
-                      ) : null}
-                    </button>
+                    {canManage ? (
+                      <button
+                        className="rowbtn"
+                        aria-label={`Edit ${record.name}`}
+                      >
+                        <div className="rtname">{record.name}</div>
+                        {record.description ? (
+                          <div className="rtdesc">{record.description}</div>
+                        ) : null}
+                      </button>
+                    ) : (
+                      <>
+                        <div className="rtname">{record.name}</div>
+                        {record.description ? (
+                          <div className="rtdesc">{record.description}</div>
+                        ) : null}
+                      </>
+                    )}
                   </td>
                   <td>
                     <StepChips record={record} catalog={catalog} />
@@ -464,9 +485,11 @@ export function PlannedRoutesView() {
                   <th>Steps</th>
                   <th>Archived</th>
                   <th>Used by</th>
-                  <th>
-                    <span className="rt-visuallyquiet">Duplicate</span>
-                  </th>
+                  {canManage ? (
+                    <th>
+                      <span className="rt-visuallyquiet">Duplicate</span>
+                    </th>
+                  ) : null}
                 </tr>
               </thead>
               <tbody>
@@ -493,15 +516,17 @@ export function PlannedRoutesView() {
                         onOpen={() => openDialog({ kind: 'usage', record })}
                       />
                     </td>
-                    <td>
-                      <button
-                        className="rt-duplicate"
-                        disabled={writeBlocked || duplicating}
-                        onClick={() => void duplicateRow(record, catalog)}
-                      >
-                        Duplicate
-                      </button>
-                    </td>
+                    {canManage ? (
+                      <td>
+                        <button
+                          className="rt-duplicate"
+                          disabled={writeBlocked || duplicating}
+                          onClick={() => void duplicateRow(record, catalog)}
+                        >
+                          Duplicate
+                        </button>
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -526,6 +551,11 @@ export function PlannedRoutesView() {
         only — quantity already in production keeps the route it was released
         with, and actual Movement history stays authoritative.
       </p>
+      {canManage ? null : (
+        <ViewOnlyPageNote
+          permissions={MANAGEMENT_WRITE_ACCESS['planned-routes']}
+        />
+      )}
       <div className="rt-toolbar">
         <input
           type="search"
@@ -535,15 +565,17 @@ export function PlannedRoutesView() {
           onChange={(e) => setSearch(e.target.value)}
         />
         <span className="spacer" />
-        <button
-          className="btn primary"
-          disabled={writeBlocked || data === null}
-          onClick={() => {
-            if (data) openDialog({ kind: 'new', catalog: data });
-          }}
-        >
-          + New Planned Route
-        </button>
+        {canManage ? (
+          <button
+            className="btn primary"
+            disabled={writeBlocked || data === null}
+            onClick={() => {
+              if (data) openDialog({ kind: 'new', catalog: data });
+            }}
+          >
+            + New Planned Route
+          </button>
+        ) : null}
       </div>
 
       {body}

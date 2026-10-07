@@ -526,6 +526,13 @@
   line-height: 1.5;
 }
 
+/* The User who recorded the event: avatar beside the name. */
+.mg-tlevent .tl-actor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .mg-tlevent .tl-reason {
   font-size: 13px;
   color: var(--text);

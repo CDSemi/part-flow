@@ -46,8 +46,8 @@ import { canonicalLoginName, loginNameError } from './user-login';
 // Workers, who scan at the Scan Stations. The standard table + editor
 // pattern: Users are created and edited here and deactivated, never
 // deleted. Users sign in since Phase 14 slice 1, and the server checks
-// every Administration permission since slice 2; the section says what is
-// checked so far. Without the Manage users and roles permission the
+// every Administration permission since slice 2 and every Management
+// permission since slice 3; the section says what is checked so far. Without the Manage users and roles permission the
 // section is view-only (hidden, not disabled). A user administrator who
 // may not manage correction permissions may still rename users whose
 // role holds a correction permission or the permission to manage them,
@@ -241,10 +241,11 @@ export function UsersSection() {
         <div className="ad-notice">
           Users sign in with their login name and a password. Use Set password…
           to give a user a password. PartFlow checks permissions in
-          Administration; Management and Scan Station screens stay open to
-          anyone who can reach PartFlow for now. Workers who scan at the Scan
-          Stations are managed in Workers, not here. Users are deactivated,
-          never deleted; deactivating a user signs them out.
+          Administration and Management; Scan Station screens stay open to
+          anyone who can reach PartFlow until station devices are enrolled.
+          Workers who scan at the Scan Stations are managed in Workers, not
+          here. Users are deactivated, never deleted; deactivating a user signs
+          them out.
         </div>
         {guarded && users.some(inProtectedRole) ? (
           <p className="ad-confighelp">

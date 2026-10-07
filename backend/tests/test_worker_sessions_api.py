@@ -196,7 +196,7 @@ class _Cell:
         self.machine_ids = [
             int(
                 _ok(
-                    client.post(
+                    admin_of(client).post(
                         "/api/machines", json={"area_id": self.area_id, "name": _unique("Lathe")}
                     ),
                     201,
@@ -266,13 +266,13 @@ def _release(
     """Management releases ``quantity`` of a PN into ``cell`` (no station)."""
     pn = part_number or _unique("PN")
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
         ),
         201,
     )
     released = _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/work-orders/{work_order['id']}/demands/{work_order['demands'][0]['id']}/release",
             json={
                 "part_number": pn,
@@ -389,14 +389,6 @@ def _allocate_request(pn: str, demand_id: int, quantity: int, station_id: str) -
     }
 
 
-def _reverse_request(allocation_id: int, station_id: str) -> _Request:
-    return f"/api/allocations/{allocation_id}/reversals", {
-        "reason": "wrong Work Order",
-        "station_id": station_id,
-        "device_event_id": _event(),
-    }
-
-
 def _send(client: TestClient, request: _Request) -> Any:
     path, payload = request
     return client.post(path, json=payload)
@@ -408,7 +400,7 @@ def _created(client: TestClient, request: _Request) -> dict[str, Any]:
 
 def _demand(client: TestClient, pn: str, requested: int) -> int:
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders",
             json={"lines": [{"part_number": pn, "requested_quantity": requested}]},
         ),
@@ -862,14 +854,6 @@ def _scenario_allocation(client: TestClient) -> _Command:
     return _Command(stockroom, "allocations", request, 1)
 
 
-def _scenario_allocation_reversal(client: TestClient) -> _Command:
-    material, stockroom = _Cell(client, machine_count=1), _Cell(client, is_terminal=True)
-    pn, demand_id = _stocked(client, material, stockroom)
-    allocated = _created(client, _allocate_request(pn, demand_id, 4, stockroom.station_id))
-    request = _reverse_request(int(allocated["rows"][0]["allocation_id"]), stockroom.station_id)
-    return _Command(stockroom, "allocations", request, 1)
-
-
 _SCENARIOS: dict[str, Callable[[TestClient], _Command]] = {
     "receipt": _scenario_receipt,
     "transfer": _scenario_transfer,
@@ -886,7 +870,6 @@ _SCENARIOS: dict[str, Callable[[TestClient], _Command]] = {
     "addition": _scenario_addition,
     "undo": _scenario_undo,
     "allocation": _scenario_allocation,
-    "allocation_reversal": _scenario_allocation_reversal,
 }
 
 
@@ -991,7 +974,7 @@ def _resolve_machine(client: TestClient, cell: _Cell, asset_tag: str) -> Any:
 
 
 def _asset_tag(client: TestClient, machine_id: int) -> str:
-    return str(_ok(client.get(f"/api/machines/{machine_id}"))["asset_tag"])
+    return str(_ok(admin_of(client).get(f"/api/machines/{machine_id}"))["asset_tag"])
 
 
 def test_the_timeout_follows_the_override_else_the_default(
@@ -1335,7 +1318,7 @@ def _quantity_story(
         )
         for flow_id, row in flow_rows.items()
     )
-    machine = _ok(client.get(f"/api/machines/{machining.machine_id}"))
+    machine = _ok(admin_of(client).get(f"/api/machines/{machining.machine_id}"))
     recorded = {
         (movement["worker_id"], movement["scan_session_id"] is not None)
         for movement in movements

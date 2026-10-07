@@ -190,8 +190,10 @@ def _deactivate_area(client: TestClient, area_id: int) -> None:
 
 def _create_retired_machine(client: TestClient, area_id: int) -> dict[str, Any]:
     payload = {"area_id": area_id, "name": _unique("MACHINE")}
-    machine = _ok(client.post("/api/machines", json=payload), 201)
-    return _ok(client.post(f"/api/machines/{machine['id']}/retire", json={"reason": "Retired"}))
+    machine = _ok(admin_of(client).post("/api/machines", json=payload), 201)
+    return _ok(
+        admin_of(client).post(f"/api/machines/{machine['id']}/retire", json={"reason": "Retired"})
+    )
 
 
 def _deactivate_uncommitted(holder: Connection, table: str, row_id: int) -> None:
@@ -327,11 +329,9 @@ class _Child(NamedTuple):
 
 
 def _send(client: TestClient, child: _Child) -> Response:
-    # Environment writes need their permission (Phase 14 slice 2); the
-    # Machine writes stay open until slice 3.
-    environment = not child.path.startswith("/api/machines")
-    sender = admin_of(client) if environment else client
-    response: Response = sender.request(child.method, child.path, json=child.body)
+    # Environment writes need their permission (Phase 14 slice 2), the
+    # Machine writes theirs since slice 3.
+    response: Response = admin_of(client).request(child.method, child.path, json=child.body)
     return response
 
 
@@ -717,7 +717,7 @@ def test_area_deactivation_waits_for_an_in_flight_machine_reactivation(
     entered, release = _gate(monkeypatch, "Machine", "UPDATED")
     threads: list[threading.Thread] = []
     reactivate, reactivated = _start(
-        lambda: client.post(
+        lambda: admin_of(client).post(
             f"/api/machines/{machine_id}/reactivate",
             json={"reason": "Back in service", "name": _unique("MACHINE")},
         )

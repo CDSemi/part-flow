@@ -4,6 +4,7 @@ import { errorMessage } from '../../api/client';
 import { createWorkOrder, resolveWorkOrderNumber } from '../../api/work-orders';
 import type { WorkOrderDetail, WorkOrderSummary } from '../../api/work-orders';
 import { resolvePartNumber } from '../../api/part-numbers';
+import { useSession } from '../../app/session-context';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -64,6 +65,11 @@ export function NewWorkOrderDialog({
   showNotice: (message: string) => void;
 }) {
   const headingId = useId();
+  // A user who may not manage Part Numbers opens the PN details
+  // read-only (the barcode label stays reachable); fixed when the dialog
+  // opens.
+  const { can } = useSession();
+  const [pnReadOnly] = useState(() => !can('MANAGE_PART_NUMBER_MASTER'));
   const [workOrderNumber, setWorkOrderNumber] = useState('');
   const initialReceived = useRef(todayIso());
   const [received, setReceived] = useState(initialReceived.current);
@@ -425,6 +431,7 @@ export function NewWorkOrderDialog({
                         {line.pn ? (
                           <PnEditButton
                             pn={line.pn}
+                            readOnly={pnReadOnly}
                             onOpen={() => setEditPn(line.pn)}
                           />
                         ) : (
@@ -591,6 +598,7 @@ export function NewWorkOrderDialog({
         // result needs no follow-up here.
         <EditPartNumberDialog
           pn={editPn}
+          readOnly={pnReadOnly}
           writeBlocked={writeBlocked}
           onClose={() => setEditPn(null)}
         />

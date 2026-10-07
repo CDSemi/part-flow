@@ -34,22 +34,29 @@ A PN is addressed by its canonical value in a query parameter (a PN is
 an opaque string that may carry path-hostile characters); the input is
 canonicalized by the one domain rule. Reads only: nothing is written,
 and every derived time value stays with the display's shared clock.
+Every route needs View production data or a key of an action PN
+Tracking hosts (Edit Work Order Allocation, Assign routes) — Phase 14
+slice 3.
 """
 
 import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
+from app.api.authorization import TRACKING_READ, RequireAnyPermission
 from app.api.dependencies import SessionDep
 from app.application import tracking
 from app.application.allocations import DemandContext
+from app.application.authentication import Principal
 from app.application.production_board import BoardLocation, LocationState
 from app.application.transfers import ROUTE_DEVIATION_KEY
 from app.domain.enums import MovementType
 
 router = APIRouter(prefix="/api")
+
+TrackingReaderDep = Annotated[Principal, Depends(RequireAnyPermission(*TRACKING_READ))]
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +221,7 @@ def _row(row: tracking.TrackingRow) -> TrackingRowResponse:
 
 @router.get("/tracking")
 def list_tracking(
+    principal: TrackingReaderDep,
     session: SessionDep,
     search: str | None = None,
     area_id: int | None = None,
@@ -696,6 +704,7 @@ def _allocation_page(page: tracking.AllocationPage) -> AllocationPageResponse:
 
 @router.get("/tracking/detail")
 def get_tracking_detail(
+    principal: TrackingReaderDep,
     session: SessionDep,
     part_number: str,
     movements_before: int | None = None,
@@ -752,6 +761,7 @@ def get_tracking_detail(
 
 @router.get("/tracking/movements")
 def get_tracking_movements(
+    principal: TrackingReaderDep,
     session: SessionDep,
     part_number: str,
     before: int | None = None,
@@ -777,6 +787,7 @@ def get_tracking_movements(
 
 @router.get("/tracking/flows")
 def get_tracking_flows(
+    principal: TrackingReaderDep,
     session: SessionDep,
     part_number: str,
     before: int | None = None,
@@ -794,6 +805,7 @@ def get_tracking_flows(
 
 @router.get("/tracking/allocations")
 def get_tracking_allocations(
+    principal: TrackingReaderDep,
     session: SessionDep,
     part_number: str,
     before: int | None = None,

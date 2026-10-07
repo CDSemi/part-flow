@@ -65,25 +65,48 @@ Deliberate surface decisions:
   demand became inactive (an allocation, or a save lowering the
   requested quantity to the allocated quantity) and by the confirmed
   deletion of a Hot line (``app.application.hot_ranks``).
-- The audit ``actor_reference`` is never client-writable: no request
-  carries an actor, so audit rows from this surface stay NULL until an
-  authenticated (or server-configured) identity exists (Phase 14).
+- The acting User is never client-writable: no request carries an
+  actor; every audit row from this surface carries the signed-in User
+  (``actor_user_id``, Phase 14 slice 3).
+- Access (Phase 14 slice 3, ``app.api.route_access``): the reads need
+  View production data or a Work Orders key (Manage Work Orders, Edit
+  Work Order Demand, Edit Work Order Allocation); creating a Work Order
+  needs Manage Work Orders; a Save needs Manage Work Orders for its
+  header and Edit Work Order Demand for its demand lines
+  (``authorization.work_order_update_permissions`` — both when mixed);
+  removing a demand line needs Edit Work Order Demand.
 """
 
 import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from app.api.authorization import (
+    WORK_ORDERS_READ,
+    RequireAnyPermission,
+    RequirePermission,
+    SignedInDep,
+    actor_of,
+)
 from app.api.dependencies import SessionDep
-from app.application import work_orders
+from app.application import authorization, work_orders
+from app.application.authentication import Principal
 from app.application.common import UNSET
 from app.application.work_orders import WorkOrderDetail, WorkOrderSummary
-from app.domain.enums import RequestType
+from app.domain.enums import Permission, RequestType
 from app.infrastructure.models import WorkOrderDemand
 
 router = APIRouter(prefix="/api")
+
+WorkOrderReaderDep = Annotated[Principal, Depends(RequireAnyPermission(*WORK_ORDERS_READ))]
+WorkOrderManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_WORK_ORDERS))
+]
+DemandEditorDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.EDIT_WORK_ORDER_DEMAND))
+]
 
 
 class WorkOrderDemandResponse(BaseModel):
@@ -302,7 +325,10 @@ def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
 
 @router.get("/work-orders")
 def list_work_orders(
-    session: SessionDep, search: str | None = None, number: str | None = None
+    principal: WorkOrderReaderDep,
+    session: SessionDep,
+    search: str | None = None,
+    number: str | None = None,
 ) -> list[WorkOrderSummaryResponse]:
     return [
         _summary_response(summary)
@@ -325,6 +351,7 @@ class CompletedWorkOrdersResponse(BaseModel):
 
 @router.get("/work-orders/completed")
 def list_completed_work_orders(
+    principal: WorkOrderReaderDep,
     session: SessionDep,
     search: str | None = None,
     done_range: Literal["LAST_30_DAYS", "LAST_90_DAYS", "THIS_YEAR", "LAST_YEAR"] | None = None,
@@ -370,27 +397,35 @@ def list_completed_work_orders(
 
 
 @router.get("/work-orders/{work_order_id}")
-def get_work_order(work_order_id: int, session: SessionDep) -> WorkOrderDetailResponse:
+def get_work_order(
+    principal: WorkOrderReaderDep, work_order_id: int, session: SessionDep
+) -> WorkOrderDetailResponse:
     return _detail_response(work_orders.get_work_order(session, work_order_id))
 
 
 @router.post("/work-orders", status_code=201)
-def create_work_order(body: WorkOrderCreateRequest, session: SessionDep) -> WorkOrderDetailResponse:
+def create_work_order(
+    principal: WorkOrderManagerDep, body: WorkOrderCreateRequest, session: SessionDep
+) -> WorkOrderDetailResponse:
     detail = work_orders.create_work_order(
         session,
         work_order_number=body.work_order_number,
         received_date=body.received_date,
         due_date=body.due_date,
         lines=[line.model_dump() for line in body.lines],
+        actor_user_id=principal.user_id,
     )
     return _detail_response(detail)
 
 
 @router.patch("/work-orders/{work_order_id}")
 def update_work_order(
-    work_order_id: int, body: WorkOrderUpdateRequest, session: SessionDep
+    principal: SignedInDep, work_order_id: int, body: WorkOrderUpdateRequest, session: SessionDep
 ) -> WorkOrderDetailResponse:
     provided = body.model_dump(exclude_unset=True)
+    authorization.require(
+        actor_of(principal), authorization.work_order_update_permissions(provided)
+    )
     detail = work_orders.update_work_order(
         session,
         work_order_id,
@@ -400,12 +435,14 @@ def update_work_order(
         due_date=provided.get("due_date", UNSET),
         line_edits=[edit.model_dump(exclude_unset=True) for edit in body.line_edits],
         new_lines=[line.model_dump() for line in body.new_lines],
+        actor_user_id=principal.user_id,
     )
     return _detail_response(detail)
 
 
 @router.delete("/work-orders/{work_order_id}/demands/{demand_id}", status_code=204)
 def delete_work_order_demand(
+    principal: DemandEditorDep,
     work_order_id: int,
     demand_id: int,
     session: SessionDep,
@@ -424,5 +461,9 @@ def delete_work_order_demand(
     deleted in one transaction.
     """
     work_orders.delete_work_order_demand(
-        session, work_order_id, demand_id, confirm_hot_removal=confirm_hot_removal
+        session,
+        work_order_id,
+        demand_id,
+        confirm_hot_removal=confirm_hot_removal,
+        actor_user_id=principal.user_id,
     )

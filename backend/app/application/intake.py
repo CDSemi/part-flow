@@ -910,7 +910,7 @@ def receive_quantity(
     identity = station_identity.resolve_station_identity(session, station)
 
     # -- Writes — all inside the one open transaction --------------------
-    ensure_part_number(session, pn)
+    ensure_part_number(session, pn, actor_user_id=None)
     if reused is not None and reused.demand is not None:
         work_order = reused.work_order
         demand = reused.demand

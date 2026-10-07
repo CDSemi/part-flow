@@ -78,13 +78,25 @@ export interface Machine {
   notes?: string;
 }
 
+/** The User who recorded a lifecycle event (a history reference — the
+ * User may have been deactivated since). */
+export interface LifecycleActor {
+  id: number;
+  displayName: string;
+  /** Avatar cache version (ISO 8601); null when there is no avatar. */
+  avatarUpdatedAt: string | null;
+}
+
 /** One append-only Machine lifecycle event. */
 export interface MachineLifecycleEvent {
   id: number;
   event: 'RETIRED' | 'REACTIVATED';
   /** ISO timestamp of the lifecycle change. */
   at: string;
-  /** Recording actor — nullable until authentication (Phase 14). */
+  /** The User who recorded it (Phase 14 slice 3); null for an event
+   * recorded before sign-in existed. */
+  actorUser: LifecycleActor | null;
+  /** Legacy text recorded before Phase 14; never written any more. */
   actor: string | null;
   reason?: string;
   /** Present as a complete previous → current pair only when the
@@ -120,6 +132,7 @@ interface MachineLifecycleEventWire {
   machine_id: number;
   event_type: string;
   occurred_at: string;
+  actor_user?: unknown;
   actor: string | null;
   reason: string | null;
   from_area_id: number | null;
@@ -168,6 +181,27 @@ function toMachine(wire: MachineWire): Machine {
   };
 }
 
+function toLifecycleActor(wire: unknown): LifecycleActor | null {
+  if (wire === undefined || wire === null) return null;
+  if (typeof wire !== 'object' || Array.isArray(wire)) throw malformedActor();
+  const { id, display_name, avatar_updated_at } = wire as Record<
+    string,
+    unknown
+  >;
+  if (
+    typeof id !== 'number' ||
+    typeof display_name !== 'string' ||
+    (avatar_updated_at !== null && typeof avatar_updated_at !== 'string')
+  ) {
+    throw malformedActor();
+  }
+  return { id, displayName: display_name, avatarUpdatedAt: avatar_updated_at };
+}
+
+function malformedActor(): Error {
+  return new Error('The server answered a malformed Machine history event.');
+}
+
 function toLifecycleEvent(
   wire: MachineLifecycleEventWire,
 ): MachineLifecycleEvent {
@@ -175,6 +209,7 @@ function toLifecycleEvent(
     id: wire.id,
     event: wire.event_type === 'REACTIVATED' ? 'REACTIVATED' : 'RETIRED',
     at: wire.occurred_at,
+    actorUser: toLifecycleActor(wire.actor_user),
     actor: wire.actor,
     reason: wire.reason ?? undefined,
     fromAreaId: wire.from_area_id ?? undefined,
@@ -292,7 +327,8 @@ export async function clearMaintenance(id: number): Promise<Machine> {
  * Retire one Machine. `edits` is the recorded Save decision of the
  * retire flow — applied by the server in the same transaction as the
  * retirement and its lifecycle event; a recorded Discard sends none.
- * Actor identity arrives with authentication (Phase 14).
+ * The server records the signed-in User who retired it (no actor is
+ * sent).
  */
 export async function retireMachine(
   id: number,

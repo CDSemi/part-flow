@@ -1,4 +1,4 @@
-"""Static tests of the route registry (Phase 14 slice 2; owner decision OD-P7).
+"""Static tests of the route registry (Phase 14 slices 2–3; owner decision OD-P7).
 
 ``app.api.route_access`` classifies every API route; these cases fail
 when a route is added without a class, a registry entry goes stale, or a
@@ -13,10 +13,15 @@ from typing import Any
 from fastapi.routing import APIRoute
 from starlette.routing import BaseRoute
 
-from app.api.authorization import RequirePermission, current_user, optional_principal
+from app.api import route_access
+from app.api.authorization import (
+    RequireAnyPermission,
+    RequirePermission,
+    current_user,
+    optional_principal,
+)
 from app.api.route_access import (
     FRAMEWORK_ROUTES,
-    PENDING_S3,
     ROUTE_ACCESS,
     Access,
 )
@@ -74,46 +79,22 @@ def _permission_dependencies(route: APIRoute) -> list[RequirePermission]:
     return [call for call in _calls(route) if isinstance(call, RequirePermission)]
 
 
+def _any_permission_dependencies(route: APIRoute) -> list[RequireAnyPermission]:
+    return [call for call in _calls(route) if isinstance(call, RequireAnyPermission)]
+
+
 def test_every_route_is_classified_exactly_once() -> None:
-    """RA-1."""
+    """RA-1: no pending list remains (Phase 14 slice 3 classified it)."""
+    assert not hasattr(route_access, "PENDING_S3")
     routes = set(_api_routes())
-    assert routes - set(ROUTE_ACCESS) - PENDING_S3 == set()
-    assert not set(ROUTE_ACCESS) & PENDING_S3
+    assert routes - set(ROUTE_ACCESS) == set()
     assert _other_paths() == FRAMEWORK_ROUTES
 
 
 def test_no_registry_entry_is_stale() -> None:
-    """RA-2."""
+    """RA-2: every registry key exists in the app."""
     routes = set(_api_routes())
     assert set(ROUTE_ACCESS) - routes == set()
-    assert PENDING_S3 - routes == set()
-    assert not set(ROUTE_ACCESS) & PENDING_S3
-
-
-def test_pending_routes_are_management_and_monitoring_only() -> None:
-    """RA-3: only the Management, master-data and monitoring surfaces
-    wait for slice 3."""
-    for method, path in PENDING_S3:
-        if path == "/api/barcode-configuration/machine-asset-tag-format":
-            assert method == "GET"
-        elif path == "/api/machines":
-            assert method != "GET"
-        elif path.startswith("/api/part-numbers"):
-            assert (method, path) != ("GET", "/api/part-numbers/image")
-        elif path.startswith("/api/route-templates"):
-            assert (method, path) != ("GET", "/api/route-templates")
-        elif path.startswith("/api/allocations"):
-            assert path != "/api/allocations/suggestion"
-        else:
-            assert path.startswith(
-                (
-                    "/api/machines/",
-                    "/api/work-orders",
-                    "/api/hot-list",
-                    "/api/area-board",
-                    "/api/tracking",
-                )
-            ), (method, path)
 
 
 def test_dependencies_match_the_class() -> None:
@@ -122,20 +103,25 @@ def test_dependencies_match_the_class() -> None:
     for key, route in _api_routes().items():
         calls = _calls(route)
         permissions = _permission_dependencies(route)
-        if key in PENDING_S3:
-            assert not permissions and not any(call in principal_calls for call in calls), key
-            continue
+        any_permissions = _any_permission_dependencies(route)
         access = ROUTE_ACCESS[key]
         if access.access is Access.STATION:
-            assert not permissions and not any(call in principal_calls for call in calls), key
+            assert not permissions and not any_permissions, key
+            assert not any(call in principal_calls for call in calls), key
         elif access.access is Access.PUBLIC:
-            assert not permissions and current_user not in calls, key
+            assert not permissions and not any_permissions and current_user not in calls, key
         elif access.access is Access.SIGNED_IN:
+            assert not any_permissions, key
             if access.password_change_allowed:
                 assert not permissions and current_user in calls, key
             else:
                 assert len(permissions) == 1 and permissions[0].keys == (), key
+        elif access.any_of:
+            assert not access.requires and not access.conditional, key
+            assert not permissions and len(any_permissions) == 1, key
+            assert frozenset(any_permissions[0].keys) == access.any_of, key
         else:
+            assert not any_permissions, key
             assert len(permissions) == 1, key
             assert frozenset(permissions[0].keys) == access.requires, key
 
@@ -151,6 +137,8 @@ def test_only_the_content_and_guard_routes_have_conditional_keys() -> None:
         ("POST", "/api/users"),
         ("PATCH", "/api/users/{user_id}"),
         ("PUT", "/api/users/{user_id}/password"),
+        ("PATCH", "/api/work-orders/{work_order_id}"),
+        ("POST", "/api/hot-list/changes"),
     }
     assert all(
         access.access is Access.PERMISSION
@@ -166,7 +154,7 @@ def test_only_the_content_and_guard_routes_have_conditional_keys() -> None:
 def test_no_route_requires_an_inert_permission() -> None:
     """RA-6."""
     for key, access in ROUTE_ACCESS.items():
-        assert not (access.requires | access.conditional) & INERT_PERMISSIONS, key
+        assert not (access.requires | access.conditional | access.any_of) & INERT_PERMISSIONS, key
 
 
 def test_permission_sets_equal_the_spec_literals() -> None:
@@ -195,3 +183,46 @@ def test_permission_sets_equal_the_spec_literals() -> None:
         Permission.PERFORM_QUANTITY_CORRECTIONS,
         Permission.PERFORM_HISTORICAL_CORRECTIONS,
     } == INERT_PERMISSIONS
+
+
+_VPD = Permission.VIEW_PRODUCTION_DATA
+_WO_VIEW = {
+    _VPD,
+    Permission.MANAGE_WORK_ORDERS,
+    Permission.EDIT_WORK_ORDER_DEMAND,
+    Permission.EDIT_WORK_ORDER_ALLOCATION,
+}
+_PRIORITY_VIEW = {_VPD, Permission.SET_DEMAND_PRIORITY, Permission.REORDER_HOT_ITEMS}
+_TRACKING_VIEW = {_VPD, Permission.EDIT_WORK_ORDER_ALLOCATION, Permission.ASSIGN_ROUTES}
+_MACHINES_VIEW = {_VPD, Permission.MANAGE_MACHINES}
+_ROUTES_VIEW = {_VPD, Permission.MANAGE_ROUTE_TEMPLATES}
+_PN_VIEW = {_VPD, Permission.MANAGE_PART_NUMBER_MASTER}
+
+
+def test_management_read_sets_equal_the_spec_literals() -> None:
+    """RA-8: every any-of read opens with View production data, and each
+    read set is the union of the sets of the views reading the route (the
+    frontend's management-access test holds the same view literals)."""
+    expected = {
+        ("GET", "/api/work-orders"): _WO_VIEW,
+        ("GET", "/api/work-orders/completed"): _WO_VIEW,
+        ("GET", "/api/work-orders/{work_order_id}"): _WO_VIEW,
+        ("GET", "/api/part-numbers"): _WO_VIEW | _PN_VIEW,
+        ("GET", "/api/part-numbers/page"): _PN_VIEW,
+        ("GET", "/api/hot-list"): _PRIORITY_VIEW,
+        ("GET", "/api/hot-list/candidates"): _PRIORITY_VIEW,
+        ("GET", "/api/tracking"): _TRACKING_VIEW,
+        ("GET", "/api/tracking/detail"): _TRACKING_VIEW,
+        ("GET", "/api/tracking/movements"): _TRACKING_VIEW,
+        ("GET", "/api/tracking/flows"): _TRACKING_VIEW,
+        ("GET", "/api/tracking/allocations"): _TRACKING_VIEW,
+        ("GET", "/api/area-board"): {_VPD},
+        ("GET", "/api/machines/{machine_id}"): _MACHINES_VIEW,
+        ("GET", "/api/machines/{machine_id}/lifecycle-events"): _MACHINES_VIEW,
+        ("GET", "/api/route-templates/management"): _ROUTES_VIEW,
+        ("GET", "/api/route-templates/{template_id}/usage"): _ROUTES_VIEW,
+        ("GET", "/api/allocations"): {_VPD, Permission.EDIT_WORK_ORDER_ALLOCATION},
+    }
+    actual = {key: set(access.any_of) for key, access in ROUTE_ACCESS.items() if access.any_of}
+    assert actual == expected
+    assert all(_VPD in keys for keys in actual.values())

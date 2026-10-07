@@ -16,6 +16,13 @@ AUTHENTICATION_REQUIRED_MESSAGE: Final = (
 )
 PERMISSION_DENIED_MESSAGE: Final = "Your account does not have permission to do this."
 PASSWORD_CHANGE_REQUIRED_MESSAGE: Final = "Choose a new password before you continue."
+#: V-1 (Phase 14 slice 3): a Management read the User's role may not open.
+VIEW_PERMISSION_DENIED_MESSAGE: Final = "Your account does not have permission to view this."
+#: R-1 (Phase 14 slice 3): a Management command replayed by another User.
+RECORDED_BY_ANOTHER_USER_MESSAGE: Final = (
+    "This request was already recorded by another user. Nothing more was recorded"
+    " — reload to see the current state."
+)
 
 
 class ApplicationError(Exception):
@@ -60,6 +67,16 @@ class IdempotencyConflictError(ConflictError):
     SLICE1_DATA_MODEL §14: the mismatch signals a client defect (an id
     wrongly reused for a new intent) and is never silently honored —
     nothing is created.
+    """
+
+
+class RecordedByAnotherUserError(IdempotencyConflictError):
+    """A Management ``device_event_id`` was recorded by another User (409).
+
+    The fingerprint matched, but the stored actor differs from the
+    caller's (a NULL actor — recorded before sign-in existed — differs
+    from every User). Phase 14 slice 3: nothing more is written; the same
+    User replaying from another session or browser replays normally.
     """
 
 
@@ -135,12 +152,14 @@ class PermissionDeniedError(ApplicationError):
     """The signed-in User's role lacks a required permission (403).
 
     ``required`` names the permission keys the route requires, as plain
-    strings, so this vocabulary never depends on the permission enum.
+    strings, so this vocabulary never depends on the permission enum;
+    ``any_of`` marks a read that any ONE of them opens (Phase 14 slice 3).
     """
 
-    def __init__(self, message: str, required: tuple[str, ...]) -> None:
+    def __init__(self, message: str, required: tuple[str, ...], *, any_of: bool = False) -> None:
         super().__init__(message)
         self.required = required
+        self.any_of = any_of
 
 
 class LastPermissionHolderError(ConflictError):

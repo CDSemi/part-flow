@@ -154,7 +154,9 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -219,7 +221,7 @@ def _release(
 ) -> _Released:
     """Release one flow (FLOATING, or PLANNED with a template) into the cell's Area."""
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
     assert response.status_code == 201, response.text
@@ -236,7 +238,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release", json=payload
     )
     assert released.status_code == 201, released.text
@@ -394,7 +396,7 @@ def _active_quantity(engine: Engine, pn: str) -> int:
 
 
 def _demand_requested(client: TestClient, released: _Released) -> int:
-    detail = client.get(f"/api/work-orders/{released.work_order_id}")
+    detail = admin_of(client).get(f"/api/work-orders/{released.work_order_id}")
     assert detail.status_code == 200, detail.text
     for demand in detail.json()["demands"]:
         if demand["id"] == released.demand_id:
@@ -574,7 +576,7 @@ def test_partial_assign_splits_and_assigns_only_the_selected_part(
     assert inventory["total_quantity"] == 10
     assert inventory["queued_quantity"] == 6 and inventory["on_machine_quantity"] == 4
     assert inventory["machines"][0]["total_quantity"] == 4
-    machine = client.get(f"/api/machines/{lathe.machine_id}").json()
+    machine = admin_of(client).get(f"/api/machines/{lathe.machine_id}").json()
     assert machine["assigned_quantity"] == 4 and machine["operational_state"] == "RUNNING"
     _assert_projection_matches_history(db_engine, released.flow_id, selected, remainder)
     assert _state(db_engine, selected) == ProcessingState.ON_MACHINE
@@ -628,7 +630,9 @@ def test_partial_queue_and_machine_done_leave_the_remainder_on_the_machine(
     assert flows[remainder]["processing_state"] == "ON_MACHINE"
     assert flows[remainder]["machine_id"] == lathe.machine_id
     assert _inventory(client, lathe.area_id)["machines"][0]["total_quantity"] == 7
-    assert client.get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 7
+    assert (
+        admin_of(client).get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 7
+    )
     assert _active_quantity(db_engine, released.part_number) == 10
     _assert_projection_matches_history(db_engine, released.flow_id, selected, remainder)
     assert _state(db_engine, remainder) == ProcessingState.ON_MACHINE
@@ -736,7 +740,9 @@ def test_partial_transfer_from_every_source_state(client: TestClient, db_engine:
         )
         assert _active_quantity(db_engine, released.part_number) == 10
         _assert_projection_matches_history(db_engine, released.flow_id, selected, remainder)
-    assert client.get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 6
+    assert (
+        admin_of(client).get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 6
+    )
     # A PROCESSING source (direct-processing Area): the partial transfer
     # implicitly completes ONLY the selected part (one Machine-less
     # AREA_COMPLETED on the child), and the remainder stays PROCESSING
@@ -1113,7 +1119,9 @@ def test_merge_of_on_machine_flows_keeps_the_machine_and_the_work_order(
     assert body["processing_state"] == "ON_MACHINE" and body["machine_id"] == lathe.machine_id
     result = body["quantity_flow_id"]
     assert _flow_row(db_engine, result).current_machine_id == lathe.machine_id
-    assert client.get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 10
+    assert (
+        admin_of(client).get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 10
+    )
     flows = _inventory_flows(client, lathe.area_id)
     assert set(flows) == {result}
     assert flows[result]["work_order"]["work_order_demand_id"] == released.demand_id
@@ -1493,7 +1501,7 @@ def test_merge_replay_ignores_an_area_mode_change(client: TestClient, db_engine:
     assert replay.json()["processing_state"] == "PROCESSING"
     assert _counts(db_engine) == after
     # And back: retire the Machine, the replay is still the original.
-    retired = client.post(f"/api/machines/{machine_id}/retire", json={"reason": "audit"})
+    retired = admin_of(client).post(f"/api/machines/{machine_id}/retire", json={"reason": "audit"})
     assert retired.status_code == 200, retired.text
     assert _inventory_flows(client, plating.area_id)[result]["processing_state"] == "PROCESSING"
     again = _merge(client, plating, pn, flows, device_event_id=event_id)
@@ -1575,7 +1583,10 @@ def test_two_partial_commands_on_one_source_have_one_winner(
     assert results["second"].status_code == 409, results["second"].text
     assert "split" in results["second"].json()["detail"]
     assert _active_quantity(db_engine, released.part_number) == 10
-    assert client.get(f"/api/machines/{lathe.machine_ids[1]}").json()["assigned_quantity"] == 0
+    assert (
+        admin_of(client).get(f"/api/machines/{lathe.machine_ids[1]}").json()["assigned_quantity"]
+        == 0
+    )
     body = results["first"].json()
     _assert_projection_matches_history(
         db_engine, released.flow_id, body["quantity_flow_id"], body["remainder_quantity_flow_id"]

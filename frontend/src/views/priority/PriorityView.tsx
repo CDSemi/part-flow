@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 
 import { areaRefColor } from '../../api/area-inventory';
-import { ApiError, errorMessage } from '../../api/client';
+import { ApiError, errorMessage, refusalFlag } from '../../api/client';
 import {
   applyHotListChange,
   getHotList,
@@ -24,6 +24,8 @@ import { writeOutcomeUnknown } from '../../api/scan-station';
 import { getDueSoonPolicy } from '../../api/policies';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { useDueSoonPolicy } from '../../components/due-soon-policy-context';
 import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
@@ -33,6 +35,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { useUiClock } from '../../components/ui-clock';
+import { ViewOnlyPageNote } from '../../components/ViewOnlyPageNote';
 import { dueCountdown, formatIsoDate, formatIsoDateShort } from '../dates';
 import type { DueSoonPolicy } from '../dates';
 import {
@@ -220,6 +223,13 @@ export function PriorityView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const disconnected = status !== 'connected';
+  // Adding and removing Hot entries need Set Work Order Demand priority;
+  // changing the order needs Reorder Hot items (Phase 14 slice 3). Undo
+  // and Redo are offered to a holder of either; the server judges each
+  // step by what it changes. Presentation only.
+  const { can } = useSession();
+  const canSetPriority = can('SET_DEMAND_PRIORITY');
+  const canReorder = can('REORDER_HOT_ITEMS');
   const { showNotice, noticeElement } = useToastNotice();
   // Loaded on view activation (mount); every command answers with the
   // committed list, which then replaces the loaded one.
@@ -293,6 +303,9 @@ export function PriorityView() {
 
   async function submit(submission: Submission) {
     if (submitting.current || disconnected || loaded === null) return;
+    // The Retry of a change whose outcome is unknown resends the same
+    // submission (same idempotency key).
+    const retrying = submission === unknownOutcome;
     submitting.current = true;
     const base = loaded;
     setInFlight(true);
@@ -318,6 +331,25 @@ export function PriorityView() {
         // The intent is frozen: the exact same request replays the
         // committed change or applies it once.
         setUnknownOutcome(submission);
+      } else if (refusalFlag(error, 'recorded_by_another_user')) {
+        // Another user recorded this request: nothing more was written.
+        // The step is neither dropped nor completed; the list is read
+        // afresh.
+        setUnknownOutcome(null);
+        reloadList();
+        setMessage({ tone: 'warn', text: errorMessage(error) });
+      } else if (retrying && retryNeedsSignIn(error)) {
+        // The Retry was refused before it reached the change: the
+        // outcome stays unknown, and the same Retry applies it once.
+        setMessage({
+          tone: 'warn',
+          text: `${errorMessage(error)} Sign in again, then use Retry. The change is applied only once.`,
+        });
+      } else if (retrying && retryRefusedByPermission(error)) {
+        setMessage({
+          tone: 'warn',
+          text: `${errorMessage(error)} The change may already be applied; reload the list to check.`,
+        });
       } else {
         setUnknownOutcome(null);
         handleRefusal(error, submission, base);
@@ -536,17 +568,19 @@ export function PriorityView() {
       <div className="pr-head">
         <h1>Priority Management — Hot WO Demand</h1>
         <span className="spacer" />
-        <button
-          ref={addButton}
-          className="btn primary"
-          disabled={writesFrozen}
-          onClick={() => {
-            setMessage(null);
-            setAddOpen(true);
-          }}
-        >
-          + Add to Hot list
-        </button>
+        {canSetPriority ? (
+          <button
+            ref={addButton}
+            className="btn primary"
+            disabled={writesFrozen}
+            onClick={() => {
+              setMessage(null);
+              setAddOpen(true);
+            }}
+          >
+            + Add to Hot list
+          </button>
+        ) : null}
       </div>
       <p className="pr-sub">
         Priority belongs to <b>Work Order Demand</b>, ranked per Department.
@@ -556,6 +590,9 @@ export function PriorityView() {
         with Undo/Redo. New Hot entries are added at the bottom. Multiple Work
         Orders for the same PN may hold different priorities.
       </p>
+      {canSetPriority || canReorder ? null : (
+        <ViewOnlyPageNote permissions={MANAGEMENT_WRITE_ACCESS.priority} />
+      )}
     </>
   );
 
@@ -622,6 +659,7 @@ export function PriorityView() {
               answers with the recorded result, or applies it once. Or reload
               the list and check it. Nothing else can be changed until then.
             </div>
+            {message ? <div>{message.text}</div> : null}
             <div className="pr-msgbtns">
               <button
                 ref={retryButton}
@@ -668,15 +706,17 @@ export function PriorityView() {
                 <li
                   key={idOf(entry)}
                   className={`pr-item ${dragId === idOf(entry) ? 'dragging' : ''}`}
-                  draggable={!writesFrozen}
+                  draggable={canReorder && !writesFrozen}
                   onDragStart={() => setDragId(idOf(entry))}
                   onDragEnd={() => setDragId(null)}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={(e) => handleDrop(e, index)}
                 >
-                  <span className="grip" aria-hidden="true">
-                    ⠿
-                  </span>
+                  {canReorder ? (
+                    <span className="grip" aria-hidden="true">
+                      ⠿
+                    </span>
+                  ) : null}
                   <span className="body">
                     <span className="l1">
                       <HotPn
@@ -715,34 +755,38 @@ export function PriorityView() {
                       {due.note}
                     </span>
                   </span>
-                  <span className="movebtns">
+                  {canReorder ? (
+                    <span className="movebtns">
+                      <button
+                        aria-label={`Move ${entry.partNumber} up`}
+                        disabled={writesFrozen || index === 0}
+                        onClick={() => moveTo('Move Up', index, index - 1)}
+                      >
+                        ▲
+                      </button>
+                      <button
+                        aria-label={`Move ${entry.partNumber} down`}
+                        disabled={writesFrozen || index === entries.length - 1}
+                        onClick={() => moveTo('Move Down', index, index + 1)}
+                      >
+                        ▼
+                      </button>
+                    </span>
+                  ) : null}
+                  {canSetPriority ? (
                     <button
-                      aria-label={`Move ${entry.partNumber} up`}
-                      disabled={writesFrozen || index === 0}
-                      onClick={() => moveTo('Move Up', index, index - 1)}
+                      className="pr-x"
+                      title="Remove from Hot list"
+                      aria-label={`Remove ${entry.partNumber} from Hot list`}
+                      disabled={writesFrozen}
+                      onClick={() => {
+                        setMessage(null);
+                        setRemoveTarget(entry);
+                      }}
                     >
-                      ▲
+                      ✕
                     </button>
-                    <button
-                      aria-label={`Move ${entry.partNumber} down`}
-                      disabled={writesFrozen || index === entries.length - 1}
-                      onClick={() => moveTo('Move Down', index, index + 1)}
-                    >
-                      ▼
-                    </button>
-                  </span>
-                  <button
-                    className="pr-x"
-                    title="Remove from Hot list"
-                    aria-label={`Remove ${entry.partNumber} from Hot list`}
-                    disabled={writesFrozen}
-                    onClick={() => {
-                      setMessage(null);
-                      setRemoveTarget(entry);
-                    }}
-                  >
-                    ✕
-                  </button>
+                  ) : null}
                 </li>
               );
             })}
@@ -750,20 +794,24 @@ export function PriorityView() {
         )}
 
         <div className="pr-bar">
-          <button
-            className="btn ghost"
-            disabled={writesFrozen || !history.undo.length}
-            onClick={undo}
-          >
-            ⟲ Undo
-          </button>
-          <button
-            className="btn ghost"
-            disabled={writesFrozen || !history.redo.length}
-            onClick={redo}
-          >
-            ⟳ Redo
-          </button>
+          {canSetPriority || canReorder ? (
+            <>
+              <button
+                className="btn ghost"
+                disabled={writesFrozen || !history.undo.length}
+                onClick={undo}
+              >
+                ⟲ Undo
+              </button>
+              <button
+                className="btn ghost"
+                disabled={writesFrozen || !history.redo.length}
+                onClick={redo}
+              >
+                ⟳ Redo
+              </button>
+            </>
+          ) : null}
           {inFlight ? (
             <span className="pr-busy" role="status">
               Applying the change…
@@ -829,6 +877,26 @@ export function PriorityView() {
         {noticeElement}
       </DueSoonPolicyProvider>
     </section>
+  );
+}
+
+/** A Retry refused because the sign-in ended (401). */
+function retryNeedsSignIn(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 401 &&
+    refusalFlag(error, 'authentication_required')
+  );
+}
+
+/** A Retry refused for a missing permission or a password change (403):
+ * signing in again does not change it. */
+function retryRefusedByPermission(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 403 &&
+    (refusalFlag(error, 'permission_denied') ||
+      refusalFlag(error, 'password_change_required'))
   );
 }
 

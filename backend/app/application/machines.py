@@ -39,8 +39,9 @@ IMPLEMENTATION_ROADMAP Phase 3.5):
 - Retirement and reactivation commit atomically with their
   ``machine_lifecycle_events`` row: one transaction, no lifecycle
   change without its event and no event without its change. Events are
-  append-only (database trigger) and carry a nullable, reference-free
-  actor — no Worker/User linkage in Phase 3.5.
+  append-only (database trigger) and carry ``actor_user_id``, the
+  signed-in User who recorded them (Phase 14 slice 3); the legacy
+  reference-free ``actor`` text is kept for history and written no more.
 - Retirement while active quantity is assigned is blocked
   (PROJECT_PROFILE §8.6): the Machine row is locked ``FOR UPDATE``
   first and the assigned ACTIVE quantity (``quantity_flows
@@ -87,7 +88,8 @@ write locks its Machine row first, so each ``before_data`` is the
 committed predecessor. Production commands (``note_assignment_change``)
 never write audit rows — the state age is derived runtime state, not
 configuration — and rejected writes, lost races and no-ops append
-nothing.
+nothing. Every audit row and lifecycle event carries ``actor_user_id``,
+the signed-in User of the write (Phase 14 slice 3).
 """
 
 import datetime
@@ -97,7 +99,7 @@ from typing import Any, Final, Literal, NamedTuple
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.application import audit
+from app.application import audit, user_access
 from app.application.common import (
     UNSET,
     UnsetType,
@@ -359,6 +361,27 @@ def list_lifecycle_events(session: Session, machine_id: int) -> list[MachineLife
     )
 
 
+class LifecycleEntry(NamedTuple):
+    """One lifecycle event with the User who recorded it (None: none recorded)."""
+
+    event: MachineLifecycleEvent
+    actor_user: user_access.UserRef | None
+
+
+def lifecycle_history(session: Session, machine_id: int) -> list[LifecycleEntry]:
+    """The lifecycle history of one Machine with each event's User, oldest first."""
+    events = list_lifecycle_events(session, machine_id)
+    refs = user_access.user_refs(
+        session, [event.actor_user_id for event in events if event.actor_user_id is not None]
+    )
+    return [
+        LifecycleEntry(
+            event, refs.get(event.actor_user_id) if event.actor_user_id is not None else None
+        )
+        for event in events
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Creation — automatic Asset Tag assignment
 # ---------------------------------------------------------------------------
@@ -424,6 +447,7 @@ def create_machine(
     installed_on: datetime.date | None = None,
     notes: str | None = None,
     expected_asset_tag: str | None = None,
+    actor_user_id: int,
 ) -> Machine:
     """Create a Machine with its automatically assigned Asset Tag.
 
@@ -473,6 +497,7 @@ def create_machine(
         entity_id=str(machine.id),
         before_data=None,
         after_data=_machine_snapshot(machine),
+        actor_user_id=actor_user_id,
     )
     commit(session, _MACHINE_CONFLICTS)
     return machine
@@ -593,6 +618,7 @@ def update_machine(
     notes: str | None | UnsetType = UNSET,
     maintenance_note: str | None | UnsetType = UNSET,
     maintenance_expected_return: datetime.date | None | UnsetType = UNSET,
+    actor_user_id: int,
 ) -> Machine:
     """Save changes of the Edit Machine dialog as one transaction.
 
@@ -632,6 +658,7 @@ def update_machine(
                 entity_id=str(machine.id),
                 before_data=before,
                 after_data=after,
+                actor_user_id=actor_user_id,
             )
         commit(session, _MACHINE_CONFLICTS)
     return machine
@@ -648,6 +675,7 @@ def start_maintenance(
     *,
     note: str | None = None,
     expected_return: datetime.date | None = None,
+    actor_user_id: int,
 ) -> Machine:
     machine = _lock_machine_for_edit(session, machine_id)
     before = _machine_snapshot(machine)
@@ -674,12 +702,13 @@ def start_maintenance(
         entity_id=str(machine.id),
         before_data=before,
         after_data=_machine_snapshot(machine),
+        actor_user_id=actor_user_id,
     )
     commit(session, _MACHINE_CONFLICTS)
     return machine
 
 
-def clear_maintenance(session: Session, machine_id: int) -> Machine:
+def clear_maintenance(session: Session, machine_id: int, *, actor_user_id: int) -> Machine:
     machine = _lock_machine_for_edit(session, machine_id)
     before = _machine_snapshot(machine)
     _require_not_retired(machine, "clear maintenance")
@@ -700,6 +729,7 @@ def clear_maintenance(session: Session, machine_id: int) -> Machine:
         entity_id=str(machine.id),
         before_data=before,
         after_data=_machine_snapshot(machine),
+        actor_user_id=actor_user_id,
     )
     commit(session, _MACHINE_CONFLICTS)
     return machine
@@ -715,8 +745,8 @@ def retire_machine(
     machine_id: int,
     *,
     reason: str | None = None,
-    actor: str | None = None,
     edits: dict[str, Any] | None = None,
+    actor_user_id: int,
 ) -> Machine:
     """Retire a Machine, optionally applying a recorded Edit draft first.
 
@@ -753,7 +783,7 @@ def retire_machine(
         machine_id=machine.id,
         event_type=MachineLifecycleEventType.RETIRED,
         occurred_at=func.now(),
-        actor=optional_text(actor, "The actor"),
+        actor_user_id=actor_user_id,
         reason=optional_text(reason, "The reason"),
         before_state=MachineLifecycleState.ACTIVE,
         after_state=MachineLifecycleState.RETIRED,
@@ -772,6 +802,7 @@ def retire_machine(
             entity_id=str(machine.id),
             before_data=before,
             after_data=after,
+            actor_user_id=actor_user_id,
             metadata={"machine_lifecycle_event_id": event.id},
         )
     # One transaction: the retirement, its lifecycle event and any
@@ -787,7 +818,7 @@ def reactivate_machine(
     reason: object,
     name: object = UNSET,
     area_id: int | None = None,
-    actor: str | None = None,
+    actor_user_id: int,
 ) -> Machine:
     """Return the same physical machine to service (RETIRED → ACTIVE).
 
@@ -853,7 +884,7 @@ def reactivate_machine(
         machine_id=machine.id,
         event_type=MachineLifecycleEventType.REACTIVATED,
         occurred_at=func.now(),
-        actor=optional_text(actor),
+        actor_user_id=actor_user_id,
         reason=clean_reason,
         before_state=MachineLifecycleState.RETIRED,
         after_state=MachineLifecycleState.ACTIVE,
@@ -875,6 +906,7 @@ def reactivate_machine(
             entity_id=str(machine.id),
             before_data=before,
             after_data=after,
+            actor_user_id=actor_user_id,
             metadata={"machine_lifecycle_event_id": event.id},
         )
     # One transaction: the reactivation, its lifecycle event and any

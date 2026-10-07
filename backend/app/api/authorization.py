@@ -1,4 +1,4 @@
-"""Who is signed in, and what they may do (Phase 14 slices 1–2).
+"""Who is signed in, and what they may do (Phase 14 slices 1–3).
 
 FastAPI dependencies over ``app.application.authentication``:
 
@@ -12,11 +12,15 @@ FastAPI dependencies over ``app.application.authentication``:
   an administrator-set password first (else 403
   ``password_change_required``) and whose role holds every key (else
   403 ``permission_denied`` with ``required_permissions``);
-  ``SignedInDep`` is the key-less form.
+  ``SignedInDep`` is the key-less form;
+- ``RequireAnyPermission(*keys)`` — the same, but any ONE key opens it
+  (Management reads, slice 3; else 403 ``permission_denied`` with
+  ``any_permission``).
 
 Checks run before the route body, so before any lock or write. Since
-slice 2 every Administration read and write declares one (the class of
-every route is listed in ``app.api.route_access``); a route whose keys
+slice 2 every Administration read and write declares one, since slice 3
+every Management read and write (the class of every route is listed in
+``app.api.route_access``); a route whose keys
 depend on its request also checks ``authorization.require`` on
 ``actor_of(principal)`` first thing in its body. The principal is always
 derived on the server from the session — never from a request body.
@@ -39,6 +43,7 @@ from app.application.errors import (
     AUTHENTICATION_REQUIRED_MESSAGE,
     PASSWORD_CHANGE_REQUIRED_MESSAGE,
     PERMISSION_DENIED_MESSAGE,
+    VIEW_PERMISSION_DENIED_MESSAGE,
     AuthenticationRequiredError,
     PasswordChangeRequiredError,
     PermissionDeniedError,
@@ -83,6 +88,54 @@ class RequirePermission:
 
 
 SignedInDep = Annotated[Principal, Depends(RequirePermission())]
+
+# The Management views' read sets (owner decision OD-P7): View production
+# data, or a key whose action the view hosts. A route's read set is the
+# union of the sets of the views that read it (``app.api.route_access``).
+_VPD: Final = Permission.VIEW_PRODUCTION_DATA
+WORK_ORDERS_READ: Final = (
+    _VPD,
+    Permission.MANAGE_WORK_ORDERS,
+    Permission.EDIT_WORK_ORDER_DEMAND,
+    Permission.EDIT_WORK_ORDER_ALLOCATION,
+)
+PRIORITY_READ: Final = (
+    _VPD,
+    Permission.SET_DEMAND_PRIORITY,
+    Permission.REORDER_HOT_ITEMS,
+)
+TRACKING_READ: Final = (
+    _VPD,
+    Permission.EDIT_WORK_ORDER_ALLOCATION,
+    Permission.ASSIGN_ROUTES,
+)
+MACHINES_READ: Final = (_VPD, Permission.MANAGE_MACHINES)
+PLANNED_ROUTES_READ: Final = (_VPD, Permission.MANAGE_ROUTE_TEMPLATES)
+PART_NUMBERS_READ: Final = (_VPD, Permission.MANAGE_PART_NUMBER_MASTER)
+AREA_BOARD_READ: Final = (_VPD,)
+
+
+class RequireAnyPermission:
+    """Dependency factory: a signed-in User holding at least one given key.
+
+    A separate class (never a ``RequirePermission`` subclass), so the
+    route registry test tells all-of and any-of routes apart.
+    """
+
+    def __init__(self, *keys: Permission) -> None:
+        assert keys, "RequireAnyPermission needs at least one key"
+        self.keys = keys
+
+    def __call__(self, principal: CurrentUserDep) -> Principal:
+        if principal.must_change_password:
+            raise PasswordChangeRequiredError(PASSWORD_CHANGE_REQUIRED_MESSAGE)
+        if not any(key in principal.permissions for key in self.keys):
+            raise PermissionDeniedError(
+                VIEW_PERMISSION_DENIED_MESSAGE,
+                required=tuple(sorted(key.value for key in self.keys)),
+                any_of=True,
+            )
+        return principal
 
 
 def holds(principal: Principal | None, key: Permission) -> bool:

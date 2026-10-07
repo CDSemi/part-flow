@@ -146,7 +146,9 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -211,7 +213,7 @@ def _release(
     route_template_id: int | None = None,
 ) -> _Released:
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
     assert response.status_code == 201, response.text
@@ -229,7 +231,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release", json=payload
     )
     assert released.status_code == 201, released.text
@@ -369,7 +371,7 @@ def _active_total(engine: Engine, pn: str) -> int:
 
 
 def _machine(client: TestClient, machine_id: int) -> dict[str, Any]:
-    response = client.get(f"/api/machines/{machine_id}")
+    response = admin_of(client).get(f"/api/machines/{machine_id}")
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -901,7 +903,7 @@ def test_undo_refuses_to_restore_onto_a_retired_machine(
         machine_id=lathe.machine_id,
     )
     assert done.status_code == 201
-    retired = client.post(f"/api/machines/{lathe.machine_id}/retire", json={})
+    retired = admin_of(client).post(f"/api/machines/{lathe.machine_id}/retire", json={})
     assert retired.status_code == 200, retired.text
     response = _undo(client, lathe, released.part_number, str(done.json()["device_event_id"]))
     assert response.status_code == 409

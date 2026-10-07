@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { errorMessage, refusalFlag } from '../../api/client';
 import { areaColor, listAreas, listOperations } from '../../api/environment';
 import {
   activeQuantityConfirmation,
@@ -17,6 +17,9 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { isPositiveInteger } from './demand-lines';
 import type { ReleaseRequestContext } from './WorkOrderDetailPanel';
+
+const RETRY_NOTE =
+  'You can retry — a retry of this submission can never create a second Quantity Flow.';
 
 /**
  * Release to production — the explicit confirmation flow of GUI_DESIGN
@@ -231,7 +234,17 @@ export function ReleaseDialog({
         setConfirmActive(false);
         return;
       }
-      setServerError(errorMessage(error));
+      // An ended sign-in refused the release before it ran: the dialog
+      // keeps the submission (same key), so submitting again after
+      // signing in records it once. A request id another user recorded
+      // is refused again on every retry — only its detail shows.
+      setServerError(
+        refusalFlag(error, 'authentication_required')
+          ? `${errorMessage(error)} Sign in again, then submit again. PartFlow records this release only once.`
+          : refusalFlag(error, 'recorded_by_another_user')
+            ? errorMessage(error)
+            : `${errorMessage(error)} ${RETRY_NOTE}`,
+      );
     }
   }
 
@@ -512,8 +525,7 @@ export function ReleaseDialog({
           </div>
           {serverError ? (
             <div className="rowerr" role="alert">
-              {serverError} You can retry — a retry of this submission can never
-              create a second Quantity Flow.
+              {serverError}
             </div>
           ) : null}
           <div className="row">

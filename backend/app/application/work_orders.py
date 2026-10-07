@@ -461,7 +461,7 @@ def _stage_new_line(
     draft: Mapping[str, Any],
     taken_part_numbers: set[str],
     *,
-    actor: str | None,
+    actor_user_id: int,
 ) -> WorkOrderDemand:
     """Validate one new demand line and stage it with its PN master.
 
@@ -470,7 +470,7 @@ def _stage_new_line(
     also stages the PN ``CREATED`` audit row); the demand keeps the
     canonical PN by value.
     """
-    master, _ = ensure_part_number(session, draft.get("part_number"), actor=actor)
+    master, _ = ensure_part_number(session, draft.get("part_number"), actor_user_id=actor_user_id)
     if master.part_number in taken_part_numbers:
         raise InvalidInputError(
             f"Part Number '{master.part_number}' is already on this Work Order."
@@ -639,7 +639,7 @@ def create_work_order(
     received_date: datetime.date | None = None,
     due_date: datetime.date | None = None,
     lines: Sequence[Mapping[str, Any]],
-    actor: str | None = None,
+    actor_user_id: int,
 ) -> WorkOrderDetail:
     """Create a Work Order with its demand draft as ONE transaction.
 
@@ -676,7 +676,10 @@ def create_work_order(
     flush(session, _WORK_ORDER_CONFLICTS)
 
     taken: set[str] = set()
-    demands = [_stage_new_line(session, work_order, draft, taken, actor=actor) for draft in lines]
+    demands = [
+        _stage_new_line(session, work_order, draft, taken, actor_user_id=actor_user_id)
+        for draft in lines
+    ]
     flush(session, _WORK_ORDER_CONFLICTS)
 
     audit.append_audit_event(
@@ -686,7 +689,7 @@ def create_work_order(
         entity_id=str(work_order.id),
         before_data=None,
         after_data=work_order_snapshot(work_order),
-        actor_reference=actor,
+        actor_user_id=actor_user_id,
     )
     for demand in demands:
         audit.append_audit_event(
@@ -696,7 +699,7 @@ def create_work_order(
             entity_id=str(demand.id),
             before_data=None,
             after_data=demand_snapshot(demand),
-            actor_reference=actor,
+            actor_user_id=actor_user_id,
         )
     commit(session, _WORK_ORDER_CONFLICTS)
     return _build_detail(session, work_order, demands)
@@ -715,7 +718,7 @@ def update_work_order(
     due_date: datetime.date | None | UnsetType = UNSET,
     new_lines: Sequence[Mapping[str, Any]] = (),
     line_edits: Sequence[Mapping[str, Any]] = (),
-    actor: str | None = None,
+    actor_user_id: int,
 ) -> WorkOrderDetail:
     """Save the Work Order Details draft as ONE transaction.
 
@@ -930,7 +933,8 @@ def update_work_order(
                 quantity_changed.add(demand.id)
 
     created = [
-        _stage_new_line(session, work_order, draft, taken, actor=actor) for draft in new_lines
+        _stage_new_line(session, work_order, draft, taken, actor_user_id=actor_user_id)
+        for draft in new_lines
     ]
     flush(session, _WORK_ORDER_CONFLICTS)
 
@@ -941,7 +945,7 @@ def update_work_order(
     # can do so — a new line is always short, and a header, due-date or
     # Job Number edit never fills a line.
     completed = bool(quantity_changed) and allocations.complete_after_demand_change(
-        session, work_order, trigger="WORK_ORDER_SAVE", actor=actor
+        session, work_order, trigger="WORK_ORDER_SAVE", actor_user_id=actor_user_id
     )
 
     # Automatic Hot removal (OD1): a ranked line whose requested quantity
@@ -973,7 +977,7 @@ def update_work_order(
                 action=hot_ranks.HotRankEventAction.AUTO_REMOVE,
                 trigger=hot_ranks.HotRankTrigger.WORK_ORDER_SAVE,
                 reference={"work_order_id": work_order.id},
-                actor=actor,
+                actor_user_id=actor_user_id,
             )
 
     if header_changed:
@@ -985,7 +989,7 @@ def update_work_order(
             entity_id=str(work_order.id),
             before_data=header_before,
             after_data=work_order_snapshot(work_order),
-            actor_reference=actor,
+            actor_user_id=actor_user_id,
         )
     for demand, before in audited:
         audit.append_audit_event(
@@ -995,7 +999,7 @@ def update_work_order(
             entity_id=str(demand.id),
             before_data=before,
             after_data=demand_snapshot(demand),
-            actor_reference=actor,
+            actor_user_id=actor_user_id,
         )
     for demand in created:
         audit.append_audit_event(
@@ -1005,7 +1009,7 @@ def update_work_order(
             entity_id=str(demand.id),
             before_data=None,
             after_data=demand_snapshot(demand),
-            actor_reference=actor,
+            actor_user_id=actor_user_id,
         )
 
     if header_changed or audited or created or hot_changes:
@@ -1043,6 +1047,7 @@ def delete_work_order_demand(
     demand_id: int,
     *,
     confirm_hot_removal: bool = False,
+    actor_user_id: int,
 ) -> None:
     """Delete one saved demand line, blocked once quantity has released.
 
@@ -1180,7 +1185,7 @@ def delete_work_order_demand(
             action=hot_ranks.HotRankEventAction.LINE_DELETE,
             trigger=hot_ranks.HotRankTrigger.DEMAND_LINE_REMOVAL,
             reference={"work_order_id": work_order_id},
-            actor=None,
+            actor_user_id=actor_user_id,
         )
     session.delete(demand)
     flush(session, _WORK_ORDER_CONFLICTS)
@@ -1188,7 +1193,7 @@ def delete_work_order_demand(
     # leave only fully allocated lines: the removal then completes the
     # Work Order (PROJECT_PROFILE §8.2), under the Work Order lock above.
     allocations.complete_after_demand_change(
-        session, work_order, trigger="DEMAND_LINE_REMOVAL", actor=None
+        session, work_order, trigger="DEMAND_LINE_REMOVAL", actor_user_id=actor_user_id
     )
     commit(session, _WORK_ORDER_CONFLICTS)
 

@@ -162,7 +162,9 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -221,7 +223,7 @@ def _create_work_order(
         payload["received_date"] = received_date
     if due_date is not None:
         payload["due_date"] = due_date
-    response = client.post("/api/work-orders", json=payload)
+    response = admin_of(client).post("/api/work-orders", json=payload)
     assert response.status_code == 201, response.text
     return _WorkOrder(response.json())
 
@@ -268,7 +270,7 @@ def _release(
     }
     if route_template_id is not None:
         payload["route_template_id"] = route_template_id
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order.id}/demands/{demand_id or work_order.demand_id}/release",
         json=payload,
     )
@@ -429,7 +431,9 @@ def _allocate(
         payload["station_id"] = station_id
     payload.update(kw)
     payload = {key: value for key, value in payload.items() if value is not _OMIT}
-    return client.post("/api/allocations", json=payload)
+    if station_id is not None:
+        return client.post("/api/allocations", json=payload)
+    return admin_of(client).post("/api/allocations/management", json=payload)
 
 
 #: Sentinel: drop this key from a request payload.
@@ -439,24 +443,24 @@ _OMIT = object()
 def _reverse(client: TestClient, allocation_id: int, **kw: Any) -> Any:
     payload: dict[str, Any] = {"reason": "wrong Work Order", "device_event_id": str(uuid.uuid4())}
     payload.update(kw)
-    return client.post(f"/api/allocations/{allocation_id}/reversals", json=payload)
+    return admin_of(client).post(f"/api/allocations/{allocation_id}/reversals", json=payload)
 
 
 def _work_order(client: TestClient, work_order_id: int) -> dict[str, Any]:
-    response = client.get(f"/api/work-orders/{work_order_id}")
+    response = admin_of(client).get(f"/api/work-orders/{work_order_id}")
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _active_ids(client: TestClient, search: str | None = None) -> set[int]:
     params = {"search": search} if search is not None else {}
-    response = client.get("/api/work-orders", params=params)
+    response = admin_of(client).get("/api/work-orders", params=params)
     assert response.status_code == 200, response.text
     return {int(row["id"]) for row in response.json()}
 
 
 def _completed(client: TestClient, **params: Any) -> dict[str, Any]:
-    response = client.get("/api/work-orders/completed", params=params)
+    response = admin_of(client).get("/api/work-orders/completed", params=params)
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -614,7 +618,7 @@ def test_stocking_from_a_machine_completes_and_releases_the_machine(
     response = _stock(client, lathe, stockroom, flow_id, pn, 8)
     assert response.status_code == 201, response.text
     assert response.json()["completed_machine_id"] == lathe.machine_id
-    machine = client.get(f"/api/machines/{lathe.machine_id}").json()
+    machine = admin_of(client).get(f"/api/machines/{lathe.machine_id}").json()
     assert machine["assigned_quantity"] == 0 and machine["operational_state"] == "IDLE"
     assert _flow_row(db_engine, flow_id).status == "STOCKED"
 
@@ -1008,7 +1012,9 @@ def test_confirmation_records_the_allocation_and_derives_completion(
     assert detail["status"] == "COMPLETED" and detail["completed_at"] is not None
     assert work_order.id not in _active_ids(client)
     # The exact number resolution still finds it — never duplicated.
-    by_number = client.get("/api/work-orders", params={"number": work_order.number}).json()
+    by_number = (
+        admin_of(client).get("/api/work-orders", params={"number": work_order.number}).json()
+    )
     assert [row["id"] for row in by_number] == [work_order.id]
     assert by_number[0]["status"] == "COMPLETED"
     listed = _completed(client, search=work_order.number)
@@ -1351,7 +1357,7 @@ def test_reversal_reopens_the_work_order_and_returns_the_quantity_to_stock(
     assert _completed(client, search=pn)["total"] == 0
     assert _suggest(client, pn)["available_stocked_quantity"] == 5
     # The original row is untouched; both rows are listed for audit.
-    listed = client.get("/api/allocations", params={"part_number": pn}).json()
+    listed = admin_of(client).get("/api/allocations", params={"part_number": pn}).json()
     assert [(row["id"], row["reverses_allocation_id"]) for row in listed] == [
         (allocation_id, None),
         (body["rows"][0]["allocation_id"], allocation_id),
@@ -1362,10 +1368,12 @@ def test_reversal_reopens_the_work_order_and_returns_the_quantity_to_stock(
     assert _reverse(client, body["rows"][0]["allocation_id"]).status_code == 409
     assert _reverse(client, 999_999_999).status_code == 404
     assert (
-        client.post(
+        admin_of(client)
+        .post(
             f"/api/allocations/{allocation_id}/reversals",
             json={"reason": "", "device_event_id": str(uuid.uuid4())},
-        ).status_code
+        )
+        .status_code
         == 422
     )
     assert _counts(db_engine) == before
@@ -1425,32 +1433,34 @@ def test_completed_work_order_is_read_only_history(client: TestClient, db_engine
     assert _allocate(client, pn, [(work_order.demand_id, 5)]).status_code == 201
     # Not yet complete: lowering Qty below the allocated quantity is
     # refused (the committed-quantity floor), a raise is fine.
-    lowered = client.patch(
+    lowered = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": work_order.demand_id, "requested_quantity": 4}]},
     )
     assert lowered.status_code == 409 and "already allocated" in lowered.json()["detail"]
-    raised = client.patch(
+    raised = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": work_order.demand_id, "requested_quantity": 6}]},
     )
     assert raised.status_code == 200
     assert (
-        client.patch(
+        admin_of(client)
+        .patch(
             f"/api/work-orders/{work_order.id}",
             json={"line_edits": [{"id": work_order.demand_id, "requested_quantity": 5}]},
-        ).status_code
+        )
+        .status_code
         == 200
     )
     # Removing an allocated line is refused; the fully allocated line
     # needs no production release.
     assert (
-        client.delete(
-            f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}"
-        ).status_code
+        admin_of(client)
+        .delete(f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}")
+        .status_code
         == 409
     )
-    refused_release = client.post(
+    refused_release = admin_of(client).post(
         f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}/release",
         json={
             "part_number": pn,
@@ -1484,12 +1494,12 @@ def test_completed_work_order_is_read_only_history(client: TestClient, db_engine
         {"line_edits": [{"id": work_order.demand_id, "due_date": "2026-12-31"}]},
         {"new_lines": [{"part_number": _unique("PN"), "requested_quantity": 1}]},
     ):
-        edit = client.patch(f"/api/work-orders/{work_order.id}", json=payload)
+        edit = admin_of(client).patch(f"/api/work-orders/{work_order.id}", json=payload)
         assert edit.status_code == 409 and "completed" in edit.json()["detail"], payload
     assert (
-        client.delete(
-            f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}"
-        ).status_code
+        admin_of(client)
+        .delete(f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}")
+        .status_code
         == 409
     )
     assert _counts(db_engine) == before
@@ -1522,7 +1532,7 @@ def test_demand_save_judges_the_allocation_floor_on_the_locked_re_read(
         return detail
 
     monkeypatch.setattr(work_orders, "get_work_order", get_then_allocate)
-    lowered = client.patch(
+    lowered = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": work_order.demand_id, "requested_quantity": 4}]},
     )
@@ -1555,7 +1565,9 @@ def test_demand_line_with_allocation_history_is_not_removable(
     assert _demand_row(db_engine, work_order.demand_id).allocated_quantity == 0
 
     before = _counts(db_engine)
-    removed = client.delete(f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}")
+    removed = admin_of(client).delete(
+        f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}"
+    )
     assert removed.status_code == 409 and "allocat" in removed.json()["detail"]
     assert _counts(db_engine) == before
     assert len(_allocation_rows(db_engine, pn)) == 2
@@ -1616,7 +1628,7 @@ def test_demand_save_that_fully_allocates_the_last_short_line_completes_the_work
     _set_priority(db_engine, line_b, 1)
 
     # Lowering while the line stays short completes nothing.
-    still_short = client.patch(
+    still_short = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": line_b, "requested_quantity": 8}]},
     )
@@ -1626,7 +1638,7 @@ def test_demand_save_that_fully_allocates_the_last_short_line_completes_the_work
     assert _completion_audit_rows(db_engine, work_order.id) == []
     assert _demand_row(db_engine, line_b).priority_rank == 1
 
-    completing = client.patch(
+    completing = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": line_b, "requested_quantity": 6}]},
     )
@@ -1675,7 +1687,7 @@ def test_demand_save_that_fully_allocates_the_last_short_line_completes_the_work
     history = _completed(client, search=number)
     assert [row["id"] for row in history["work_orders"]] == [work_order.id]
     assert history["work_orders"][0]["done_date"] == body["done_date"]
-    refused = client.patch(
+    refused = admin_of(client).patch(
         f"/api/work-orders/{work_order.id}",
         json={"line_edits": [{"id": line_b, "requested_quantity": 7}]},
     )
@@ -1714,7 +1726,7 @@ def test_removing_the_last_short_line_completes_the_work_order(
     assert _allocate(client, pn, [(allocated_line, 4)]).status_code == 201
     assert _work_order_row(db_engine, work_order.id).completed_at is None
 
-    removed = client.delete(f"/api/work-orders/{work_order.id}/demands/{short_line}")
+    removed = admin_of(client).delete(f"/api/work-orders/{work_order.id}/demands/{short_line}")
     assert removed.status_code == 204, removed.text
 
     stored = _work_order_row(db_engine, work_order.id)
@@ -1787,10 +1799,17 @@ def test_completed_history_search_filters_and_pages(client: TestClient, db_engin
     assert empty_range["total"] == 0 and empty_range["history_total"] >= 3
     assert page["history_total"] >= page["total"]
     assert (
-        client.get("/api/work-orders/completed", params={"cursor": "nonsense"}).status_code == 422
+        admin_of(client)
+        .get("/api/work-orders/completed", params={"cursor": "nonsense"})
+        .status_code
+        == 422
     )
-    assert client.get("/api/work-orders/completed", params={"limit": 0}).status_code == 422
-    assert client.get("/api/work-orders/completed", params={"sort": "PN"}).status_code == 422
+    assert (
+        admin_of(client).get("/api/work-orders/completed", params={"limit": 0}).status_code == 422
+    )
+    assert (
+        admin_of(client).get("/api/work-orders/completed", params={"sort": "PN"}).status_code == 422
+    )
 
 
 def _complete(
@@ -1884,7 +1903,7 @@ def test_completed_history_sorts_on_the_server_with_keyset_paging_per_sort(
             ), (sort, direction)
     # A cursor is bound to the sort it was issued for.
     issued = _completed(client, search=search, sort="DUE", direction="ASC", limit=1)
-    mismatch = client.get(
+    mismatch = admin_of(client).get(
         "/api/work-orders/completed",
         params={
             "search": search,
@@ -2086,7 +2105,9 @@ def test_completed_history_presets_select_rows_on_the_site_calendar(
         {"done_range": "THIS_YEAR", "done_to": "2026-12-31"},
         {"done_range": "YESTERDAY"},
     ):
-        refused = client.get("/api/work-orders/completed", params={"search": search, **params})
+        refused = admin_of(client).get(
+            "/api/work-orders/completed", params={"search": search, **params}
+        )
         assert refused.status_code == 422, params
 
 
@@ -2180,7 +2201,7 @@ def test_preset_continuation_keeps_the_range_its_first_page_resolved_across_new_
         {},
         {"done_from": "2026-01-01"},
     ):
-        refused = client.get(
+        refused = admin_of(client).get(
             "/api/work-orders/completed",
             params={"search": search, "limit": 2, "cursor": first["next_cursor"], **params},
         )

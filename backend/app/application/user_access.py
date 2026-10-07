@@ -1,5 +1,5 @@
 """Sign-in primitives shared by Users, roles, authentication and first-run
-setup (Phase 14 slices 1–2).
+setup (Phase 14 slices 1–3).
 
 The small reads and writes that ``app.application.users``,
 ``app.application.roles``, ``app.application.authentication`` and
@@ -34,12 +34,14 @@ users, user_access, authentication``.
 - ``warn_if_correction_management_lost`` — the startup warning while no
   active User with a password may manage correction permissions but
   Users may be managed (logger ``app.user_access``);
-- ``sign_in_states`` — how each credential presents to administrators.
+- ``sign_in_states`` — how each credential presents to administrators;
+- ``UserRef`` / ``user_refs`` — who recorded a history row, for display
+  (slice 3: the Machine lifecycle timeline).
 """
 
 import datetime
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from typing import Final, NamedTuple
 
 from sqlalchemy import ColumnElement, Interval, case, func, or_, select, update
@@ -320,3 +322,28 @@ def sign_in_states(session: Session, user_ids: Iterable[int]) -> dict[int, SignI
         else:
             states[user_id] = SignInState.PASSWORD_SET
     return states
+
+
+class UserRef(NamedTuple):
+    """Who recorded a history row: display values only, no ORM object."""
+
+    id: int
+    display_name: str
+    avatar_updated_at: datetime.datetime | None
+
+
+def user_refs(session: Session, user_ids: Collection[int]) -> dict[int, UserRef]:
+    """The display reference of each given User — active or not (history).
+
+    One plain SELECT, no lock; an id with no row is simply absent.
+    """
+    ids = sorted(set(user_ids))
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(User.id, User.display_name, User.avatar_image_updated_at).where(User.id.in_(ids))
+    )
+    return {
+        int(user_id): UserRef(int(user_id), display_name, avatar_updated_at)
+        for user_id, display_name, avatar_updated_at in rows
+    }

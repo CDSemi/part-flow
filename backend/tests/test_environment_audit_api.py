@@ -1062,7 +1062,9 @@ def test_asset_tag_format_lifecycle_is_audited_without_next_sequence(
     sequence = _stored(engine, models.MachineAssetTagConfig, 1).next_sequence
     count = _audit_count(engine)
     format_count = _audit_count(engine, ("MachineAssetTagConfig",))
-    machine = client.post("/api/machines", json={"area_id": area["id"], "name": _unique("M")})
+    machine = admin_of(client).post(
+        "/api/machines", json={"area_id": area["id"], "name": _unique("M")}
+    )
     assert machine.status_code == 201, machine.text
     assert _stored(engine, models.MachineAssetTagConfig, 1).next_sequence == sequence + 1
     assert _audit_count(engine) == count + 1

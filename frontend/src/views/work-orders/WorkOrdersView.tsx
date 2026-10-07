@@ -9,13 +9,16 @@ import type { ApiDataState } from '../../api/use-api-data';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { Link } from '../../app/link';
+import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
 import { useRouter } from '../../app/router-context';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { useDueSoonPolicy } from '../../components/due-soon-policy-context';
 import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { useToastNotice } from '../../components/toast-notice';
 import { PageNote } from '../../components/PageNote';
 import { useUiClock } from '../../components/ui-clock';
+import { ViewOnlyPageNote } from '../../components/ViewOnlyPageNote';
 import {
   EmptyState,
   ErrorState,
@@ -98,6 +101,12 @@ function ActiveWorkOrdersView() {
   const { setNavigationGuard } = useRouter();
   const writeBlocked = status !== 'connected';
   const { showNotice, noticeElement } = useToastNotice();
+  // Creating a Work Order needs Create and edit Work Orders; a user who
+  // may neither create/edit Work Orders nor edit demand only reads
+  // (Phase 14 slice 3). The server checks every write itself.
+  const { can } = useSession();
+  const canCreate = can('MANAGE_WORK_ORDERS');
+  const viewOnly = !canCreate && !can('EDIT_WORK_ORDER_DEMAND');
 
   // Selected Work Order — its details open as a modal dialog over the
   // list (GUI_DESIGN §11.2); the list stays mounted and the URL never
@@ -266,7 +275,8 @@ function ActiveWorkOrdersView() {
         bounded={bounded}
         onSearch={setSearch}
         onOpen={openWorkOrder}
-        onNew={() => setNewWorkOrderOpen(true)}
+        onNew={canCreate ? () => setNewWorkOrderOpen(true) : undefined}
+        viewOnly={viewOnly}
         dueSoon={dueSoonData.state}
         onRetryDueSoon={dueSoonData.reload}
       />
@@ -324,6 +334,7 @@ function WorkOrderListPanel({
   onSearch,
   onOpen,
   onNew,
+  viewOnly,
   dueSoon,
   onRetryDueSoon,
 }: {
@@ -338,7 +349,10 @@ function WorkOrderListPanel({
   bounded: boolean;
   onSearch: (v: string) => void;
   onOpen: (id: number) => void;
-  onNew: () => void;
+  /** Absent for a user who may not create Work Orders. */
+  onNew?: () => void;
+  /** The user may change nothing here: the view-only note shows. */
+  viewOnly: boolean;
   /** The Due Soon warning policy read: the table renders only with it. */
   dueSoon: ApiDataState<DueSoonPolicy>;
   onRetryDueSoon: () => void;
@@ -362,6 +376,11 @@ function WorkOrderListPanel({
         <b>Release to production</b> action on a demand line. Select a Work
         Order to open its details.
       </p>
+      {viewOnly ? (
+        <ViewOnlyPageNote
+          permissions={MANAGEMENT_WRITE_ACCESS['work-orders']}
+        />
+      ) : null}
       {/* Toolbar (v15): search + primary action on one row, the action
           right-aligned with the full-width list — the same layout as
           the Machines page. */}
@@ -381,9 +400,11 @@ function WorkOrderListPanel({
         >
           Completed Work Orders ›
         </Link>
-        <button className="btn primary" onClick={onNew}>
-          ＋ New Work Order
-        </button>
+        {onNew ? (
+          <button className="btn primary" onClick={onNew}>
+            ＋ New Work Order
+          </button>
+        ) : null}
       </div>
       {searching ? (
         <div className="wo-bound" role="status">

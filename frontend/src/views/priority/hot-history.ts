@@ -3,7 +3,11 @@
 //
 // The history is a module-scoped store: it survives Management sub-view
 // switches (the Priority view unmounts and remounts) and ends with the
-// page session. Depth is unlimited — no numeric cap is ever applied.
+// page session. It belongs to the signed-in user (Phase 14 slice 3): it
+// also ends when that user signs out or another user signs in, so it
+// never offers one user's steps to another; an ended sign-in renewed by
+// the same user keeps it. Depth is unlimited — no numeric cap is ever
+// applied.
 //
 // A step is an INTENT about one Hot entry, never a stored full order:
 // pressing Undo/Redo re-bases the step's operation on the list as it is
@@ -13,9 +17,10 @@
 //
 // Production-safe: no mock data.
 
-import { useSyncExternalStore } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 
 import type { HotListEntry } from '../../api/hot-list';
+import { useSession } from '../../app/session-context';
 
 /** One single-entry operation on the current order. */
 export type HistoryOp =
@@ -85,6 +90,8 @@ export function rebaseOp(
 const EMPTY: HotHistory = { undo: [], redo: [] };
 
 let history: HotHistory = EMPTY;
+/** The user the history belongs to (the last signed-in user seen). */
+let historyOwner: number | null = null;
 const listeners = new Set<() => void>();
 
 function update(next: HotHistory) {
@@ -135,5 +142,25 @@ export function dropStep(step: HistoryStep) {
 
 /** Forget the whole history (a fresh session; isolated tests). */
 export function clearHotHistory() {
+  historyOwner = null;
   update(EMPTY);
+}
+
+/**
+ * Keep the history with the user it belongs to: forget it when another
+ * user signs in or the user signs out. Called once by the always-mounted
+ * application shell.
+ */
+export function useHotHistoryOwnerReset() {
+  const { status, user, endedBy } = useSession();
+  const userId = status === 'signed-in' ? (user?.id ?? null) : null;
+  const signedOut = status === 'signed-out' && endedBy === 'sign-out';
+  useEffect(() => {
+    if (userId !== null) {
+      if (historyOwner !== null && historyOwner !== userId) clearHotHistory();
+      historyOwner = userId;
+    } else if (signedOut) {
+      clearHotHistory();
+    }
+  }, [userId, signedOut]);
 }

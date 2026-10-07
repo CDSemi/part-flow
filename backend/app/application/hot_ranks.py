@@ -9,7 +9,8 @@ when the change that caused it is not a Hot list change:
   a Hot entry whose demand becomes inactive — the line fully allocated
   (``requested_quantity <= allocated_quantity``), which includes its
   Work Order completing — leaves the list in the same transaction as
-  the allocation confirmation (``allocations.confirm_allocation``) or
+  the allocation (``allocations.confirm_station_allocation`` /
+  ``allocations.allocate_from_stock``) or
   the quantity-lowering Work Order save
   (``work_orders.update_work_order``) that made it inactive. No
   confirmation is asked: the triggering action is the confirmed one. A
@@ -23,7 +24,9 @@ when the change that caused it is not a Hot list change:
 Either way the remaining ranks close the gap (invariant H1 — the
 ranks stay exactly 1..N) and every rank change is audited exactly like
 a Hot list change (one ``UPDATED`` ``WorkOrderDemand`` row per changed
-demand) with metadata that names the cause.
+demand) with metadata that names the cause and ``actor_user_id`` — the
+signed-in User of a Management trigger, NULL for a station allocation
+(Phase 14 slice 3; the legacy ``actor_reference`` is written no more).
 
 This is a leaf module — it imports neither ``hot_list`` nor
 ``allocations`` nor ``work_orders`` — so allocation and the Work Order
@@ -33,7 +36,7 @@ them.
 
 Lock order (one global order for every transaction): the PN advisory
 locks (ascending) → the Hot advisory lock → a Scan Station row (FOR
-KEY SHARE for allocation and reversal) → demand rows FOR UPDATE in ONE
+KEY SHARE for the station allocation) → demand rows FOR UPDATE in ONE
 ascending pass → Work Order rows FOR UPDATE ascending. A holder of the
 Hot lock locks, in that one pass, every demand row whose rank it may
 write — its own lines plus :attr:`HotRankScope.shift_ids` — before any
@@ -174,7 +177,7 @@ def remove_from_hot_list(
     action: HotRankEventAction,
     trigger: HotRankTrigger,
     reference: Mapping[str, Any],
-    actor: str | None,
+    actor_user_id: int | None,
 ) -> list[HotRankChange]:
     """Take ``removals`` off the Hot list, close the gaps and audit every change.
 
@@ -259,7 +262,7 @@ def remove_from_hot_list(
             entity_id=str(change.work_order_demand_id),
             before_data={"priority_rank": change.previous_rank},
             after_data={"priority_rank": change.new_rank},
-            actor_reference=actor,
+            actor_user_id=actor_user_id,
             metadata={
                 HOT_LIST_CHANGE_KEY: {
                     "action": str(action),

@@ -13,25 +13,39 @@ list order is the route order), ``POST …/{id}/archive`` (ever-used
 only, idempotent), ``DELETE …/{id}`` (never-used only) and
 ``GET …/{id}/usage``. Durations travel as ISO 8601 (``PT4H``); the
 ``*_on`` fields are site dates (``work_orders.site_date_of``). The rules
-live in ``app.application.route_templates``; permission enforcement is
-Phase 14.
+live in ``app.application.route_templates``.
+
+Access (Phase 14 slice 3, ``app.api.route_access``): the active list
+stays public (the release dialog and the Scan Station read it); the
+management list and the usage read need View production data or Manage
+Planned Routes; every write needs Manage Planned Routes and is audited
+with the signed-in User (``actor_user_id``).
 """
 
 import datetime
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
+from app.api.authorization import PLANNED_ROUTES_READ, RequireAnyPermission, RequirePermission
 from app.api.dependencies import SessionDep
 from app.application import route_templates, work_orders
+from app.application.authentication import Principal
 from app.application.route_templates import (
     RouteStepInput,
     RouteTemplateDetail,
     RouteTemplateRecord,
 )
+from app.domain.enums import Permission
 from app.infrastructure.models import RouteStep
 
 router = APIRouter(prefix="/api")
+
+RouteTemplateManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.MANAGE_ROUTE_TEMPLATES))
+]
+RouteTemplateReaderDep = Annotated[Principal, Depends(RequireAnyPermission(*PLANNED_ROUTES_READ))]
 
 
 class RouteStepResponse(BaseModel):
@@ -87,8 +101,8 @@ class RouteStepRequest(BaseModel):
 
 
 class RouteTemplateWriteRequest(BaseModel):
-    """The full template; the audit ``actor_reference`` is never
-    client-writable (NULL until Phase 14)."""
+    """The full template; the acting User is never client-writable (it is
+    the signed-in User, Phase 14 slice 3)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -174,7 +188,9 @@ def list_route_templates(session: SessionDep) -> list[RouteTemplateResponse]:
 
 # A literal segment, declared before every `{template_id}` route.
 @router.get("/route-templates/management")
-def list_route_template_records(session: SessionDep) -> list[RouteTemplateManagementResponse]:
+def list_route_template_records(
+    principal: RouteTemplateReaderDep, session: SessionDep
+) -> list[RouteTemplateManagementResponse]:
     """Every template (active first, then name, id) with usage."""
     return [
         _management_response(record) for record in route_templates.list_route_templates(session)
@@ -183,17 +199,24 @@ def list_route_template_records(session: SessionDep) -> list[RouteTemplateManage
 
 @router.post("/route-templates", status_code=201)
 def create_route_template(
-    body: RouteTemplateWriteRequest, session: SessionDep
+    principal: RouteTemplateManagerDep, body: RouteTemplateWriteRequest, session: SessionDep
 ) -> RouteTemplateManagementResponse:
     record = route_templates.create_route_template(
-        session, name=body.name, description=body.description, steps=_step_inputs(body)
+        session,
+        name=body.name,
+        description=body.description,
+        steps=_step_inputs(body),
+        actor_user_id=principal.user_id,
     )
     return _management_response(record)
 
 
 @router.put("/route-templates/{template_id}")
 def replace_route_template(
-    template_id: int, body: RouteTemplateWriteRequest, session: SessionDep
+    principal: RouteTemplateManagerDep,
+    template_id: int,
+    body: RouteTemplateWriteRequest,
+    session: SessionDep,
 ) -> RouteTemplateManagementResponse:
     record = route_templates.replace_route_template(
         session,
@@ -201,24 +224,33 @@ def replace_route_template(
         name=body.name,
         description=body.description,
         steps=_step_inputs(body),
+        actor_user_id=principal.user_id,
     )
     return _management_response(record)
 
 
 @router.post("/route-templates/{template_id}/archive")
 def archive_route_template(
-    template_id: int, session: SessionDep
+    principal: RouteTemplateManagerDep, template_id: int, session: SessionDep
 ) -> RouteTemplateManagementResponse:
-    return _management_response(route_templates.archive_route_template(session, template_id))
+    return _management_response(
+        route_templates.archive_route_template(
+            session, template_id, actor_user_id=principal.user_id
+        )
+    )
 
 
 @router.delete("/route-templates/{template_id}", status_code=204)
-def delete_route_template(template_id: int, session: SessionDep) -> None:
-    route_templates.delete_route_template(session, template_id)
+def delete_route_template(
+    principal: RouteTemplateManagerDep, template_id: int, session: SessionDep
+) -> None:
+    route_templates.delete_route_template(session, template_id, actor_user_id=principal.user_id)
 
 
 @router.get("/route-templates/{template_id}/usage")
-def route_template_usage(template_id: int, session: SessionDep) -> RouteTemplateUsageResponse:
+def route_template_usage(
+    principal: RouteTemplateReaderDep, template_id: int, session: SessionDep
+) -> RouteTemplateUsageResponse:
     """The Quantity Flows released with the template, newest first
     (at most ``route_templates.USAGE_LIST_LIMIT``), and the total."""
     usage = route_templates.route_template_usage(session, template_id)

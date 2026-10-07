@@ -1,4 +1,4 @@
-"""Who may call each route (Phase 14 slice 2; owner decisions OD-P7, OD-P10, OD-P19).
+"""Who may call each route (Phase 14 slices 2–3; owner decisions OD-P7, OD-P10, OD-P19).
 
 One registry classifies every API route by ``(METHOD, path)``; a test
 (``tests/test_route_access.py``) fails on any route that is missing,
@@ -10,17 +10,21 @@ route is added here in the same change.
   the Scan Station read, image reads, health, sign-in and first-run
   setup. May read the optional principal only.
 - ``STATION`` — a Scan Station route: never resolves the User principal
-  (the station authorization of a later Phase 14 slice is not built yet;
-  until then station writes stay callable by any client on the network).
+  (station device authorization is not built yet — owner decision
+  OD-P6; until then station writes, the Stockroom station's receiving
+  allocation included, stay callable by any client on the network).
 - ``SIGNED_IN`` — any signed-in User without a pending forced password
-  change (``RequirePermission()``): the Administration reads.
+  change (``RequirePermission()``): the Administration reads and the
+  Asset Tag format read.
 - ``PERMISSION`` — ``RequirePermission(*requires)``; ``conditional``
   names the keys a content or data rule may add for a given request
   (``app.application.authorization``; the guard of
-  ``app.application.users`` / ``roles`` / ``authentication``).
+  ``app.application.users`` / ``roles`` / ``authentication``). A
+  Management read instead names ``any_of``: ``RequireAnyPermission`` —
+  View production data or a key whose action a view reading the route
+  hosts (OD-P7). A route has static/conditional keys or ``any_of``,
+  never both.
 
-``PENDING_S3`` lists the Management, master-data and monitoring routes
-whose class Phase 14 slice 3 decides; they stay open until then.
 ``FRAMEWORK_ROUTES`` are FastAPI's own documentation routes (public).
 """
 
@@ -48,6 +52,8 @@ class RouteAccess:
     conditional: frozenset[Permission] = field(default_factory=frozenset)
     # Only PUT /api/session/password: allowed while a password change is pending.
     password_change_allowed: bool = False
+    # A Management read: RequireAnyPermission — any one of these keys opens it.
+    any_of: frozenset[Permission] = field(default_factory=frozenset)
 
 
 def _keys(*keys: Permission) -> frozenset[Permission]:
@@ -65,10 +71,31 @@ def _permission(
     return RouteAccess(Access.PERMISSION, _keys(*requires), conditional)
 
 
+def _any_of(*keys: frozenset[Permission]) -> RouteAccess:
+    """A Management read: the union of the read sets of the views reading it."""
+    return RouteAccess(Access.PERMISSION, any_of=frozenset[Permission]().union(*keys))
+
+
 _MUAR: Final = Permission.MANAGE_USERS_AND_ROLES
 _MCP: Final = Permission.MANAGE_CORRECTION_PERMISSIONS
 _CSS: Final = Permission.CONFIGURE_SYSTEM_SETTINGS
 _MWSP: Final = Permission.MANAGE_WORKER_SESSION_POLICIES
+_MWO: Final = Permission.MANAGE_WORK_ORDERS
+_EWOD: Final = Permission.EDIT_WORK_ORDER_DEMAND
+_EWOA: Final = Permission.EDIT_WORK_ORDER_ALLOCATION
+_MM: Final = Permission.MANAGE_MACHINES
+_MRT: Final = Permission.MANAGE_ROUTE_TEMPLATES
+_MPNM: Final = Permission.MANAGE_PART_NUMBER_MASTER
+_VPD: Final = Permission.VIEW_PRODUCTION_DATA
+
+# The Management views' read sets (OD-P7).
+_WO_VIEW: Final = _keys(_VPD, _MWO, _EWOD, _EWOA)
+_PRIORITY_VIEW: Final = _keys(_VPD, Permission.SET_DEMAND_PRIORITY, Permission.REORDER_HOT_ITEMS)
+_TRACKING_VIEW: Final = _keys(_VPD, _EWOA, Permission.ASSIGN_ROUTES)
+_MACHINES_VIEW: Final = _keys(_VPD, _MM)
+_ROUTES_VIEW: Final = _keys(_VPD, _MRT)
+_PN_VIEW: Final = _keys(_VPD, _MPNM)
+_AREA_BOARD_VIEW: Final = _keys(_VPD)
 
 _STATION_COMMANDS: Final = (
     "badge-scans",
@@ -116,6 +143,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PUT", "/api/scan-stations/{station_id}/theme-preference"): _STATION,
     ("GET", "/api/areas/{area_id}/inventory"): _STATION,
     ("GET", "/api/allocations/suggestion"): _STATION,
+    # The Stockroom station's receiving confirmation (station_id required).
+    ("POST", "/api/allocations"): _STATION,
     # --- SIGNED_IN ----------------------------------------------------------
     ("GET", "/api/workers"): _SIGNED_IN,
     ("GET", "/api/users"): _SIGNED_IN,
@@ -125,6 +154,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/data-retention"): _SIGNED_IN,
     ("GET", "/api/policies/sign-in"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
+    # Read by Administration and by Management → Machines (OD-S2-2).
+    ("GET", "/api/barcode-configuration/machine-asset-tag-format"): _SIGNED_IN,
     # --- PERMISSION (static) ------------------------------------------------
     ("POST", "/api/departments"): _permission(Permission.MANAGE_DEPARTMENTS),
     ("PATCH", "/api/departments/{department_id}"): _permission(Permission.MANAGE_DEPARTMENTS),
@@ -146,6 +177,27 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PUT", "/api/policies/sign-in"): _permission(_CSS),
     ("PUT", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     ("DELETE", "/api/users/{user_id}/avatar"): _permission(_MUAR),
+    # Management (slice 3)
+    ("POST", "/api/machines"): _permission(_MM),
+    ("PATCH", "/api/machines/{machine_id}"): _permission(_MM),
+    ("POST", "/api/machines/{machine_id}/maintenance"): _permission(_MM),
+    ("DELETE", "/api/machines/{machine_id}/maintenance"): _permission(_MM),
+    ("POST", "/api/machines/{machine_id}/retire"): _permission(_MM),
+    ("POST", "/api/machines/{machine_id}/reactivate"): _permission(_MM),
+    ("POST", "/api/part-numbers"): _permission(_MPNM),
+    ("PATCH", "/api/part-numbers"): _permission(_MPNM),
+    ("DELETE", "/api/part-numbers"): _permission(_MPNM),
+    ("PUT", "/api/part-numbers/image"): _permission(_MPNM),
+    ("DELETE", "/api/part-numbers/image"): _permission(_MPNM),
+    ("POST", "/api/route-templates"): _permission(_MRT),
+    ("PUT", "/api/route-templates/{template_id}"): _permission(_MRT),
+    ("POST", "/api/route-templates/{template_id}/archive"): _permission(_MRT),
+    ("DELETE", "/api/route-templates/{template_id}"): _permission(_MRT),
+    ("POST", "/api/work-orders"): _permission(_MWO),
+    ("POST", "/api/work-orders/{work_order_id}/demands/{demand_id}/release"): _permission(_MWO),
+    ("DELETE", "/api/work-orders/{work_order_id}/demands/{demand_id}"): _permission(_EWOD),
+    ("POST", "/api/allocations/management"): _permission(_EWOA),
+    ("POST", "/api/allocations/{allocation_id}/reversals"): _permission(_EWOA),
     # --- PERMISSION (static + conditional) ----------------------------------
     ("POST", "/api/areas"): _permission(Permission.MANAGE_AREAS, conditional=_keys(_MWSP)),
     ("POST", "/api/roles"): _permission(_MUAR, conditional=_keys(_MCP)),
@@ -157,60 +209,32 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
         conditional=_keys(Permission.MANAGE_AREAS, _MWSP)
     ),
     ("PATCH", "/api/roles/{role_id}"): _permission(conditional=_keys(_MUAR, _MCP)),
+    # Management (slice 3): a Work Order Save by its header and lines, a
+    # Hot list change by whether it changes the list's members.
+    ("PATCH", "/api/work-orders/{work_order_id}"): _permission(conditional=_keys(_MWO, _EWOD)),
+    ("POST", "/api/hot-list/changes"): _permission(
+        conditional=_keys(Permission.SET_DEMAND_PRIORITY, Permission.REORDER_HOT_ITEMS)
+    ),
+    # --- PERMISSION (any-of reads, slice 3) ---------------------------------
+    ("GET", "/api/work-orders"): _any_of(_WO_VIEW),
+    ("GET", "/api/work-orders/completed"): _any_of(_WO_VIEW),
+    ("GET", "/api/work-orders/{work_order_id}"): _any_of(_WO_VIEW),
+    ("GET", "/api/part-numbers"): _any_of(_WO_VIEW, _PN_VIEW),
+    ("GET", "/api/part-numbers/page"): _any_of(_PN_VIEW),
+    ("GET", "/api/hot-list"): _any_of(_PRIORITY_VIEW),
+    ("GET", "/api/hot-list/candidates"): _any_of(_PRIORITY_VIEW),
+    ("GET", "/api/tracking"): _any_of(_TRACKING_VIEW),
+    ("GET", "/api/tracking/detail"): _any_of(_TRACKING_VIEW),
+    ("GET", "/api/tracking/movements"): _any_of(_TRACKING_VIEW),
+    ("GET", "/api/tracking/flows"): _any_of(_TRACKING_VIEW),
+    ("GET", "/api/tracking/allocations"): _any_of(_TRACKING_VIEW),
+    ("GET", "/api/area-board"): _any_of(_AREA_BOARD_VIEW),
+    ("GET", "/api/machines/{machine_id}"): _any_of(_MACHINES_VIEW),
+    ("GET", "/api/machines/{machine_id}/lifecycle-events"): _any_of(_MACHINES_VIEW),
+    ("GET", "/api/route-templates/management"): _any_of(_ROUTES_VIEW),
+    ("GET", "/api/route-templates/{template_id}/usage"): _any_of(_ROUTES_VIEW),
+    # No view reads it yet: View production data ∪ its write surface's key.
+    ("GET", "/api/allocations"): _any_of(_keys(_VPD, _EWOA)),
 }
-
-PENDING_S3: Final[frozenset[tuple[str, str]]] = frozenset(
-    {
-        # Machines
-        ("GET", "/api/machines/{machine_id}"),
-        ("POST", "/api/machines"),
-        ("PATCH", "/api/machines/{machine_id}"),
-        ("POST", "/api/machines/{machine_id}/maintenance"),
-        ("DELETE", "/api/machines/{machine_id}/maintenance"),
-        ("POST", "/api/machines/{machine_id}/retire"),
-        ("POST", "/api/machines/{machine_id}/reactivate"),
-        ("GET", "/api/machines/{machine_id}/lifecycle-events"),
-        # Hosted by Management → Machines too (OD-S2-2).
-        ("GET", "/api/barcode-configuration/machine-asset-tag-format"),
-        # Part Numbers
-        ("GET", "/api/part-numbers"),
-        ("GET", "/api/part-numbers/page"),
-        ("POST", "/api/part-numbers"),
-        ("PATCH", "/api/part-numbers"),
-        ("DELETE", "/api/part-numbers"),
-        ("PUT", "/api/part-numbers/image"),
-        ("DELETE", "/api/part-numbers/image"),
-        # Planned Routes
-        ("GET", "/api/route-templates/management"),
-        ("POST", "/api/route-templates"),
-        ("PUT", "/api/route-templates/{template_id}"),
-        ("POST", "/api/route-templates/{template_id}/archive"),
-        ("DELETE", "/api/route-templates/{template_id}"),
-        ("GET", "/api/route-templates/{template_id}/usage"),
-        # Work Orders and release
-        ("GET", "/api/work-orders"),
-        ("GET", "/api/work-orders/completed"),
-        ("GET", "/api/work-orders/{work_order_id}"),
-        ("POST", "/api/work-orders"),
-        ("PATCH", "/api/work-orders/{work_order_id}"),
-        ("DELETE", "/api/work-orders/{work_order_id}/demands/{demand_id}"),
-        ("POST", "/api/work-orders/{work_order_id}/demands/{demand_id}/release"),
-        # Hot list
-        ("GET", "/api/hot-list"),
-        ("GET", "/api/hot-list/candidates"),
-        ("POST", "/api/hot-list/changes"),
-        # Allocations
-        ("POST", "/api/allocations"),
-        ("POST", "/api/allocations/{allocation_id}/reversals"),
-        ("GET", "/api/allocations"),
-        # Monitoring
-        ("GET", "/api/area-board"),
-        ("GET", "/api/tracking"),
-        ("GET", "/api/tracking/detail"),
-        ("GET", "/api/tracking/movements"),
-        ("GET", "/api/tracking/flows"),
-        ("GET", "/api/tracking/allocations"),
-    }
-)
 
 FRAMEWORK_ROUTES: Final = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})

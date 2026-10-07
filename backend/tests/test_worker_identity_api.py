@@ -171,7 +171,7 @@ class _Cell:
         self.machine_ids = [
             int(
                 _ok(
-                    client.post(
+                    admin_of(client).post(
                         "/api/machines", json={"area_id": self.area_id, "name": _unique("Lathe")}
                     ),
                     201,
@@ -220,13 +220,13 @@ def _release(
     """Management releases ``quantity`` of a PN into ``cell`` (no station)."""
     pn = part_number or _unique("PN")
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
         ),
         201,
     )
     released = _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/work-orders/{work_order['id']}/demands/{work_order['demands'][0]['id']}/release",
             json={
                 "part_number": pn,
@@ -380,7 +380,7 @@ def _preview(client: TestClient, cell: _Cell, reverses: str) -> dict[str, Any]:
 
 def _demand(client: TestClient, pn: str, requested: int) -> int:
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders",
             json={"lines": [{"part_number": pn, "requested_quantity": requested}]},
         ),
@@ -407,14 +407,14 @@ def _allocate(
     }
     if station_id is not None:
         payload["station_id"] = station_id
-    return client.post("/api/allocations", json=payload)
+        return client.post("/api/allocations", json=payload)
+    return admin_of(client).post("/api/allocations/management", json=payload)
 
 
-def _reverse(client: TestClient, allocation_id: int, station_id: str | None) -> Any:
+def _reverse(client: TestClient, allocation_id: int) -> Any:
+    """A reversal — Management only since Phase 14 slice 3."""
     payload: dict[str, Any] = {"reason": "wrong Work Order", "device_event_id": _event()}
-    if station_id is not None:
-        payload["station_id"] = station_id
-    return client.post(f"/api/allocations/{allocation_id}/reversals", json=payload)
+    return admin_of(client).post(f"/api/allocations/{allocation_id}/reversals", json=payload)
 
 
 # ---------------------------------------------------------------------------
@@ -651,16 +651,6 @@ def _scenario_allocation(client: TestClient, apply: _Apply) -> tuple[str, str, i
     return "allocations", str(response.json()["device_event_id"]), 1
 
 
-def _scenario_allocation_reversal(client: TestClient, apply: _Apply) -> tuple[str, str, int]:
-    material, stockroom = _Cell(client, machine_count=1), _Cell(client, is_terminal=True)
-    pn, demand_id = _stocked(client, material, stockroom)
-    allocated = _ok(_allocate(client, pn, demand_id, 4, stockroom.station_id), 201)
-    apply(stockroom)
-    response = _reverse(client, int(allocated["rows"][0]["allocation_id"]), stockroom.station_id)
-    assert response.status_code == 201, response.text
-    return "allocations", str(response.json()["device_event_id"]), 1
-
-
 _SCENARIOS: dict[str, _Scenario] = {
     "receipt": _scenario_receipt,
     "transfer": _scenario_transfer,
@@ -677,7 +667,6 @@ _SCENARIOS: dict[str, _Scenario] = {
     "addition": _scenario_addition,
     "undo": _scenario_undo,
     "allocation": _scenario_allocation,
-    "allocation_reversal": _scenario_allocation_reversal,
 }
 
 
@@ -758,8 +747,15 @@ def test_management_rows_stay_without_identity_in_a_fixed_area(
     demand_id = _demand(client, pn, 5)
     allocated = _ok(_allocate(client, pn, demand_id, 3, None), 201)
     assert _allocation_workers(db_engine, str(allocated["device_event_id"])) == [None]
-    reversed_ = _ok(_reverse(client, int(allocated["rows"][0]["allocation_id"]), None), 201)
-    assert _allocation_workers(db_engine, str(reversed_["device_event_id"])) == [None]
+    # The reversal is Management-only (Phase 14 slice 3): no Worker, and
+    # the signed-in User — the allocation of a reversed stocked receipt
+    # included.
+    station_allocated = _ok(_allocate(client, pn, demand_id, 2, stockroom.station_id), 201)
+    for reversed_allocation in (allocated, station_allocated):
+        reversed_ = _ok(_reverse(client, int(reversed_allocation["rows"][0]["allocation_id"])), 201)
+        assert _allocation_workers(db_engine, str(reversed_["device_event_id"])) == [None]
+        assert reversed_["rows"][0]["actor_user_id"] == admin_of(client).user_id
+        assert reversed_["rows"][0]["station_id"] is None
 
 
 def _role_map(roles: dict[int, str]) -> Callable[[int | None], str | None]:
@@ -842,7 +838,7 @@ def _quantity_story(client: TestClient, engine: Engine, worker_id: int | None) -
         )
         for flow_id, row in flow_rows.items()
     )
-    machine = _ok(client.get(f"/api/machines/{machining.machine_id}"))
+    machine = _ok(admin_of(client).get(f"/api/machines/{machining.machine_id}"))
     recorded = {movement["worker_id"] for movement in movements if movement["station_id"]}
     return {
         "movements": normalized_movements,
@@ -1569,13 +1565,13 @@ def _route_template(engine: Engine, area_ids: list[int]) -> int:
 def _planned_release(client: TestClient, cell: _Cell, template_id: int) -> tuple[int, str]:
     pn = _unique("PN")
     work_order = _ok(
-        client.post(
+        admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 50}]}
         ),
         201,
     )
     released = _ok(
-        client.post(
+        admin_of(client).post(
             f"/api/work-orders/{work_order['id']}/demands/{work_order['demands'][0]['id']}/release",
             json={
                 "part_number": pn,
@@ -1594,7 +1590,7 @@ def _planned_release(client: TestClient, cell: _Cell, template_id: int) -> tuple
 
 
 def _deviation_of(client: TestClient, pn: str, flow_id: int) -> dict[str, Any]:
-    detail = _ok(client.get("/api/tracking/detail", params={"part_number": pn}))
+    detail = _ok(admin_of(client).get("/api/tracking/detail", params={"part_number": pn}))
     [flow] = [flow for flow in detail["flows"]["flows"] if flow["id"] == flow_id]
     [deviation] = flow["deviations"]
     return cast(dict[str, Any], deviation)
@@ -1621,8 +1617,8 @@ def test_tracking_names_the_recorded_worker(client: TestClient, db_engine: Engin
     )
     expected = {"id": worker["id"], "name": worker["name"]}
     for response in (
-        _ok(client.get("/api/tracking/detail", params={"part_number": pn}))["movements"],
-        _ok(client.get("/api/tracking/movements", params={"part_number": pn})),
+        _ok(admin_of(client).get("/api/tracking/detail", params={"part_number": pn}))["movements"],
+        _ok(admin_of(client).get("/api/tracking/movements", params={"part_number": pn})),
     ):
         by_type = {movement["movement_type"]: movement for movement in response["movements"]}
         assert by_type["TRANSFERRED"]["worker"] == expected
@@ -1643,7 +1639,9 @@ def test_tracking_names_the_recorded_worker(client: TestClient, db_engine: Engin
             route_deviation_reason="Lathe backlog",
         )
     )
-    movements = _ok(client.get("/api/tracking/movements", params={"part_number": other_pn}))
+    movements = _ok(
+        admin_of(client).get("/api/tracking/movements", params={"part_number": other_pn})
+    )
     assert {movement["worker"] is None for movement in movements["movements"]} == {True}
     assert _deviation_of(client, other_pn, other_flow)["worker"] is None
 
@@ -1656,7 +1654,8 @@ _IDENTITY_FIELDS = ("worker_id", "allocated_by_worker_id", "scan_session_id")
 
 
 def _identity_free_requests(client: TestClient) -> dict[str, tuple[str, dict[str, Any]]]:
-    """An otherwise valid body for each of the 12 identity-recording routes."""
+    """An otherwise valid body for each of the 11 identity-recording routes
+    (the station reversal was removed in Phase 14 slice 3)."""
     machining, receiving = _Cell(client, machine_count=1), _Cell(client)
     material, stockroom = _Cell(client, machine_count=1), _Cell(client, is_terminal=True)
     flow_id, pn = _release(client, machining)
@@ -1664,7 +1663,6 @@ def _identity_free_requests(client: TestClient) -> dict[str, tuple[str, dict[str
     second_flow, _ = _release(client, receiving, part_number=direct_pn)
     stock_flow, stock_pn = _release(client, material)
     stocked_pn, demand_id = _stocked(client, material, stockroom)
-    allocated = _ok(_allocate(client, stocked_pn, demand_id, 1, stockroom.station_id), 201)
     transfer = _created(_transfer(client, receiving, machining, direct_flow, direct_pn, 1))
     machine_station = f"/api/scan-stations/{machining.station_id}"
     receiving_station = f"/api/scan-stations/{receiving.station_id}"
@@ -1739,20 +1737,12 @@ def _identity_free_requests(client: TestClient) -> dict[str, tuple[str, dict[str
                 "device_event_id": _event(),
             },
         ),
-        "allocation-reversals": (
-            f"/api/allocations/{allocated['rows'][0]['allocation_id']}/reversals",
-            {
-                "reason": "wrong Work Order",
-                "station_id": stockroom.station_id,
-                "device_event_id": _event(),
-            },
-        ),
     }
 
 
 def test_no_request_carries_identity(client: TestClient, db_engine: Engine) -> None:
     requests = _identity_free_requests(client)
-    assert len(requests) == 12
+    assert len(requests) == 11
     before = _counts(db_engine)
     for name, (path, body) in requests.items():
         for field in _IDENTITY_FIELDS:
@@ -1798,8 +1788,10 @@ def test_identity_stays_out_of_every_business_rule() -> None:
             1 if path.name == "station_identity.py" else 0
         ), path.name
     allocations = (_APPLICATION_DIR / "allocations.py").read_text(encoding="utf-8")
-    # Only the two row constructors name the allocation identity column.
-    assert allocations.count("allocated_by_worker_id=identity.worker_id") == 2
+    # Only the confirmation's row constructor names the allocation identity
+    # column; the Management-only reversal writes none (Phase 14 slice 3).
+    assert allocations.count("allocated_by_worker_id=identity.worker_id") == 1
+    assert allocations.count("allocated_by_worker_id=None") == 1
     assert len(re.findall(r"\ballocated_by_worker_id\b", allocations)) == 3  # + docstring
     undo = (_APPLICATION_DIR / "undo.py").read_text(encoding="utf-8")
     # The Undo command never reads the original's Worker: only the preview does.

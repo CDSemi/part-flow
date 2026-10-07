@@ -34,8 +34,12 @@ import type {
 } from '../../api/machines';
 import { useApiData } from '../../api/use-api-data';
 import type { ApiDataState } from '../../api/use-api-data';
+import { userAvatarUrl } from '../../api/users';
 import { useConnectivity } from '../../app/connectivity-context';
+import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
+import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { Avatar } from '../../components/Avatar';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
@@ -44,6 +48,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
+import { ViewOnlyPageNote } from '../../components/ViewOnlyPageNote';
 import {
   EmptyState,
   ErrorState,
@@ -210,6 +215,10 @@ export function MachinesView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
+  // Without Manage Machines every change is hidden (Phase 14 slice 3):
+  // active rows open nothing, retired rows open their details without
+  // Reactivate. The server checks every write itself.
+  const canManage = useSession().can('MANAGE_MACHINES');
   const machinesData = useApiData(listMachines);
   const areasData = useApiData(listAreas);
   const formatData = useApiData(getMachineAssetTagFormat);
@@ -401,6 +410,9 @@ export function MachinesView() {
         Monitor Machine status, assignments, maintenance, and configuration.
         Running and Idle are based on assigned quantity.
       </p>
+      {canManage ? null : (
+        <ViewOnlyPageNote permissions={MANAGEMENT_WRITE_ACCESS.machines} />
+      )}
       <div className="mg-toolbar">
         <input
           type="search"
@@ -410,15 +422,17 @@ export function MachinesView() {
           onChange={(e) => setSearch(e.target.value)}
         />
         <span className="spacer" />
-        <button
-          className="btn primary"
-          disabled={writeBlocked || !canCreate}
-          onClick={() => openDialog({ kind: 'new' })}
-        >
-          + New Machine
-        </button>
+        {canManage ? (
+          <button
+            className="btn primary"
+            disabled={writeBlocked || !canCreate}
+            onClick={() => openDialog({ kind: 'new' })}
+          >
+            + New Machine
+          </button>
+        ) : null}
       </div>
-      {!canCreate ? (
+      {canManage && !canCreate ? (
         <PageNote>
           {assetTagPreview === null
             ? 'New Machines need the Machine Asset Tag format. Configure it in Administration → Barcode configuration first.'
@@ -483,6 +497,7 @@ export function MachinesView() {
                 machine={machine}
                 area={areaById.get(machine.areaId)}
                 writeBlocked={writeBlocked}
+                editable={canManage}
                 onOpenEdit={() => openDialog({ kind: 'edit', machine })}
                 onToggleMaintenance={() =>
                   openDialog({
@@ -691,8 +706,11 @@ export function MachinesView() {
           areaById={areaById}
           writeBlocked={writeBlocked}
           onClose={() => setDialog(null)}
-          onReactivate={() =>
-            openDialog({ kind: 'reactivate', machine: dialog.machine })
+          onReactivate={
+            canManage
+              ? () =>
+                  openDialog({ kind: 'reactivate', machine: dialog.machine })
+              : undefined
           }
         />
       ) : null}
@@ -811,6 +829,7 @@ function ActiveMachineRow({
   machine,
   area,
   writeBlocked = false,
+  editable,
   onOpenEdit,
   onToggleMaintenance,
 }: {
@@ -820,6 +839,10 @@ function ActiveMachineRow({
    * unreachable (offline write-block); opening Edit Machine to read
    * stays available. */
   writeBlocked?: boolean;
+  /** The user may manage Machines: the row opens Edit Machine and the
+   * Maintenance cell is the switch. Otherwise the row is inert and the
+   * cell states the value. */
+  editable: boolean;
   onOpenEdit: () => void;
   onToggleMaintenance: () => void;
 }) {
@@ -836,11 +859,18 @@ function ActiveMachineRow({
     // its activation bubbles to this row handler. The Maintenance cell
     // is the one interactive island inside the row — it stops
     // propagation so the switch never also opens the dialog.
-    <tr className="selrow" onClick={onOpenEdit}>
+    <tr
+      className={editable ? 'selrow' : undefined}
+      onClick={editable ? onOpenEdit : undefined}
+    >
       <td>
-        <button className="rowbtn" aria-label={`Edit ${machine.name}`}>
+        {editable ? (
+          <button className="rowbtn" aria-label={`Edit ${machine.name}`}>
+            <MachineIdentityCell machine={machine} area={area} />
+          </button>
+        ) : (
           <MachineIdentityCell machine={machine} area={area} />
-        </button>
+        )}
       </td>
       <td className="mg-statecol">
         <span className={`mg-state ${status}`}>
@@ -883,11 +913,15 @@ function ActiveMachineRow({
         <AssetMeta machine={machine} />
       </td>
       <td className="mg-maintcol" onClick={(event) => event.stopPropagation()}>
-        <MaintenanceSwitch
-          machine={machine}
-          writeBlocked={writeBlocked}
-          onToggle={onToggleMaintenance}
-        />
+        {editable ? (
+          <MaintenanceSwitch
+            machine={machine}
+            writeBlocked={writeBlocked}
+            onToggle={onToggleMaintenance}
+          />
+        ) : (
+          <span className="mg-meta">{machine.maintenance ? 'On' : 'Off'}</span>
+        )}
       </td>
     </tr>
   );
@@ -1011,7 +1045,9 @@ function useLifecycleEvents(machineId: number | undefined) {
  * shared vertical-timeline presentation — tone-ringed markers on a
  * hairline rail (error for RETIRED, success for REACTIVATED; the event
  * name always renders — color is never the only distinction), with
- * date, actor (when recorded), reason, and the previous → current Area
+ * date, the User who recorded it (avatar and name; an event recorded
+ * before sign-in existed shows its legacy text, if any), reason, and
+ * the previous → current Area
  * on a move. Used by Edit Machine, Reactivate Machine and the Retired
  * Machine Details dialog. `compact` keeps the rail and markers but
  * renders each event on ONE line (Edit Machine — the audit stays
@@ -1065,7 +1101,11 @@ function LifecycleTimeline({
                     {LIFECYCLE_EVENT_LABEL[event.event]}
                   </span>{' '}
                   <span className="at">{event.at.slice(0, 10)}</span>
-                  {event.actor ? <> · {event.actor}</> : null}
+                  {event.actorUser ? (
+                    <> · {event.actorUser.displayName}</>
+                  ) : event.actor ? (
+                    <> · {event.actor}</>
+                  ) : null}
                   {event.reason ? <> — {event.reason}</> : null}
                   {event.fromAreaId !== undefined &&
                   event.toAreaId !== undefined ? (
@@ -1084,7 +1124,16 @@ function LifecycleTimeline({
                     </span>
                     <span className="at">{event.at.slice(0, 10)}</span>
                   </div>
-                  {event.actor ? (
+                  {event.actorUser ? (
+                    <div className="tl-meta tl-actor">
+                      <Avatar
+                        name={event.actorUser.displayName}
+                        size="sm"
+                        src={userAvatarUrl(event.actorUser)}
+                      />
+                      {event.actorUser.displayName}
+                    </div>
+                  ) : event.actor ? (
                     <div className="tl-meta">{event.actor}</div>
                   ) : null}
                   {event.reason ? (
@@ -2112,7 +2161,8 @@ function RetiredMachineDetailsDialog({
    * → Machines offline write-block); viewing history stays available. */
   writeBlocked?: boolean;
   onClose: () => void;
-  onReactivate: () => void;
+  /** Absent for a user who may not manage Machines: no Reactivate. */
+  onReactivate?: () => void;
 }) {
   const events = useLifecycleEvents(machine.id);
   return (
@@ -2171,13 +2221,15 @@ function RetiredMachineDetailsDialog({
         <button className="bigbtn ghost" onClick={onClose}>
           Close (Esc)
         </button>
-        <button
-          className="bigbtn primary"
-          disabled={writeBlocked}
-          onClick={onReactivate}
-        >
-          Reactivate
-        </button>
+        {onReactivate ? (
+          <button
+            className="bigbtn primary"
+            disabled={writeBlocked}
+            onClick={onReactivate}
+          >
+            Reactivate
+          </button>
+        ) : null}
       </div>
     </ModalDialog>
   );

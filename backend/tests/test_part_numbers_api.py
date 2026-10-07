@@ -49,6 +49,7 @@ from app.application.errors import InvalidInputError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
+from tests.auth_harness import admin_of
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_part_numbers_api"
@@ -146,7 +147,9 @@ def test_create_normalizes_and_derives_the_barcode(client: TestClient, db_engine
     """First valid use: trimmed, uppercased, created once with its
     CREATED audit row and the derived PF:PN barcode."""
     canonical = _unique_pn()
-    created = client.post("/api/part-numbers", json={"part_number": f"  {canonical.lower()}  "})
+    created = admin_of(client).post(
+        "/api/part-numbers", json={"part_number": f"  {canonical.lower()}  "}
+    )
     assert created.status_code == 201, created.text
     body = created.json()
     assert body["part_number"] == canonical
@@ -166,7 +169,7 @@ def test_pn_the_os_libc_would_uppercase_is_created(client: TestClient, db_engine
     raw = f"pnɤ-{uuid.uuid4().hex[:8]}"
     canonical = raw.upper()
     assert "ɤ" in canonical
-    created = client.post("/api/part-numbers", json={"part_number": raw})
+    created = admin_of(client).post("/api/part-numbers", json={"part_number": raw})
     assert created.status_code == 201, created.text
     assert created.json()["part_number"] == canonical
 
@@ -188,11 +191,11 @@ def test_post_is_create_only(client: TestClient, db_engine: Engine) -> None:
     """Every case/whitespace variant of an existing master answers 409
     naming the canonical PN; the one row and its one CREATED event stay."""
     canonical = _unique_pn()
-    first = client.post("/api/part-numbers", json={"part_number": canonical})
+    first = admin_of(client).post("/api/part-numbers", json={"part_number": canonical})
     assert first.status_code == 201, first.text
 
     for variant in (canonical, canonical.lower(), f" {canonical.lower()} ", f"\t{canonical}\n"):
-        refused = client.post("/api/part-numbers", json={"part_number": variant})
+        refused = admin_of(client).post("/api/part-numbers", json={"part_number": variant})
         assert refused.status_code == 409, refused.text
         assert refused.json()["detail"] == _already_saved(canonical)
 
@@ -204,7 +207,7 @@ def test_post_records_trimmed_details(client: TestClient, db_engine: Engine) -> 
     """The details are trimmed (blank → null) and the CREATED row
     carries the full four-key snapshot."""
     canonical = _unique_pn("DETAILS")
-    created = client.post(
+    created = admin_of(client).post(
         "/api/part-numbers",
         json={
             "part_number": canonical,
@@ -244,7 +247,9 @@ def test_post_refuses_non_text_and_unknown_fields_with_zero_writes(
         {"unknown": "x"},
     ]
     for extra in extras:
-        rejected = client.post("/api/part-numbers", json={"part_number": _unique_pn(), **extra})
+        rejected = admin_of(client).post(
+            "/api/part-numbers", json={"part_number": _unique_pn(), **extra}
+        )
         assert rejected.status_code == 422, (extra, rejected.text)
 
     assert _count(db_engine, models.PartNumber.__table__) == masters_before
@@ -252,15 +257,16 @@ def test_post_refuses_non_text_and_unknown_fields_with_zero_writes(
 
 
 def test_services_refuse_non_text_details_before_any_write(
-    api_database_url: URL, db_engine: Engine
+    api_database_url: URL, db_engine: Engine, client: TestClient
 ) -> None:
     """The Application guard (E5) runs before any lock or write — over
     HTTP the typed request model refuses a non-string first."""
     canonical = _unique_pn("GUARD")
+    actor_user_id = admin_of(client).user_id
     engine = create_engine(api_database_url)
     try:
         with Session(engine) as session:
-            part_numbers.create_part_number(session, canonical)
+            part_numbers.create_part_number(session, canonical, actor_user_id=actor_user_id)
         masters_before = _count(db_engine, models.PartNumber.__table__)
         audits_before = _count(db_engine, models.AuditEvent.__table__)
         cases = (
@@ -271,11 +277,15 @@ def test_services_refuse_non_text_details_before_any_write(
         for field, message in cases:
             with Session(engine) as session:
                 with pytest.raises(InvalidInputError) as created:
-                    part_numbers.create_part_number(session, _unique_pn(), **{field: 7})
+                    part_numbers.create_part_number(
+                        session, _unique_pn(), actor_user_id=actor_user_id, **{field: 7}
+                    )
                 assert created.value.message == message
             with Session(engine) as session:
                 with pytest.raises(InvalidInputError) as updated:
-                    part_numbers.update_part_number(session, canonical, **{field: 7})
+                    part_numbers.update_part_number(
+                        session, canonical, actor_user_id=actor_user_id, **{field: 7}
+                    )
                 assert updated.value.message == message
     finally:
         engine.dispose()
@@ -294,7 +304,7 @@ def test_concurrent_creates_have_one_winner(client: TestClient, db_engine: Engin
 
     def _post(raw: str) -> None:
         barrier.wait()
-        response = client.post("/api/part-numbers", json={"part_number": raw})
+        response = admin_of(client).post("/api/part-numbers", json={"part_number": raw})
         with guard:
             statuses.append(response.status_code)
 
@@ -319,7 +329,7 @@ def test_invalid_part_numbers_are_rejected_with_zero_writes(
     audits_before = _count(db_engine, models.AuditEvent.__table__)
 
     for invalid in ("ABC 123", "ABC\t123", "ABC\n123", "", "   "):
-        rejected = client.post("/api/part-numbers", json={"part_number": invalid})
+        rejected = admin_of(client).post("/api/part-numbers", json={"part_number": invalid})
         assert rejected.status_code == 422, rejected.text
 
     assert _count(db_engine, models.PartNumber.__table__) == masters_before
@@ -331,21 +341,24 @@ def test_lookup_by_number_and_search(client: TestClient) -> None:
     `search` is a case-insensitive contains-match (the name match is
     covered by the management tests)."""
     canonical = _unique_pn("LOOKUP")
-    assert client.post("/api/part-numbers", json={"part_number": canonical}).status_code == 201
+    assert (
+        admin_of(client).post("/api/part-numbers", json={"part_number": canonical}).status_code
+        == 201
+    )
 
-    exact = client.get("/api/part-numbers", params={"number": f" {canonical.lower()} "})
+    exact = admin_of(client).get("/api/part-numbers", params={"number": f" {canonical.lower()} "})
     assert exact.status_code == 200
     assert [master["part_number"] for master in exact.json()] == [canonical]
 
-    miss = client.get("/api/part-numbers", params={"number": _unique_pn("MISSING")})
+    miss = admin_of(client).get("/api/part-numbers", params={"number": _unique_pn("MISSING")})
     assert miss.status_code == 200
     assert miss.json() == []
 
-    invalid = client.get("/api/part-numbers", params={"number": "ABC 123"})
+    invalid = admin_of(client).get("/api/part-numbers", params={"number": "ABC 123"})
     assert invalid.status_code == 422
 
     fragment = canonical[len("LOOKUP-") :].lower()
-    found = client.get("/api/part-numbers", params={"search": fragment})
+    found = admin_of(client).get("/api/part-numbers", params={"search": fragment})
     assert found.status_code == 200
     assert canonical in [master["part_number"] for master in found.json()]
 
@@ -361,9 +374,12 @@ def test_search_results_are_bounded_by_the_server(client: TestClient) -> None:
     prefix = f"BOUND{uuid.uuid4().hex[:6].upper()}"
     seeded = [f"{prefix}-{index:03d}" for index in range(part_numbers.SEARCH_RESULT_LIMIT + 10)]
     for canonical in seeded:
-        assert client.post("/api/part-numbers", json={"part_number": canonical}).status_code == 201
+        assert (
+            admin_of(client).post("/api/part-numbers", json={"part_number": canonical}).status_code
+            == 201
+        )
 
-    bounded = client.get("/api/part-numbers", params={"search": prefix})
+    bounded = admin_of(client).get("/api/part-numbers", params={"search": prefix})
     assert bounded.status_code == 200
     returned = [master["part_number"] for master in bounded.json()]
     assert len(returned) == part_numbers.SEARCH_RESULT_LIMIT
@@ -372,13 +388,13 @@ def test_search_results_are_bounded_by_the_server(client: TestClient) -> None:
     assert returned == sorted(seeded)[: part_numbers.SEARCH_RESULT_LIMIT]
 
     # The unfiltered listing is bounded by the same query.
-    everything = client.get("/api/part-numbers")
+    everything = admin_of(client).get("/api/part-numbers")
     assert everything.status_code == 200
     assert len(everything.json()) <= part_numbers.SEARCH_RESULT_LIMIT
 
     # ...and the exact resolution reaches a master the bound cut off.
     beyond = sorted(seeded)[-1]
-    exact = client.get("/api/part-numbers", params={"number": beyond})
+    exact = admin_of(client).get("/api/part-numbers", params={"number": beyond})
     assert exact.status_code == 200
     assert [master["part_number"] for master in exact.json()] == [beyond]
 
@@ -388,19 +404,19 @@ def test_one_character_part_number_is_valid_and_exactly_resolvable(
 ) -> None:
     """A short PN is a PN: the search bound is an optimization, never a
     domain rule about what a Part Number may be."""
-    created = client.post("/api/part-numbers", json={"part_number": "x"})
+    created = admin_of(client).post("/api/part-numbers", json={"part_number": "x"})
     assert created.status_code == 201, created.text
     assert created.json()["part_number"] == "X"
     assert created.json()["barcode_value"] == "PF:PN:X"
 
-    exact = client.get("/api/part-numbers", params={"number": "x"})
+    exact = admin_of(client).get("/api/part-numbers", params={"number": "x"})
     assert exact.status_code == 200
     assert [master["part_number"] for master in exact.json()] == ["X"]
 
 
 def test_server_owned_fields_are_rejected(client: TestClient) -> None:
     """extra="forbid": a client cannot write the derived barcode."""
-    rejected = client.post(
+    rejected = admin_of(client).post(
         "/api/part-numbers",
         json={"part_number": _unique_pn(), "barcode_value": "PF:PN:FORGED"},
     )
@@ -419,9 +435,9 @@ def test_failed_audit_write_rolls_back_the_master(
     monkeypatch.setattr("app.application.audit.append_audit_event", _boom)
     canonical = _unique_pn("ATOMIC")
     with pytest.raises(RuntimeError, match="audit persistence failed"):
-        client.post("/api/part-numbers", json={"part_number": canonical})
+        admin_of(client).post("/api/part-numbers", json={"part_number": canonical})
 
     monkeypatch.undo()
-    lookup = client.get("/api/part-numbers", params={"number": canonical})
+    lookup = admin_of(client).get("/api/part-numbers", params={"number": canonical})
     assert lookup.json() == []
     assert _audit_rows(db_engine, canonical) == []

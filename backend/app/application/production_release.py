@@ -76,11 +76,13 @@ from sqlalchemy.orm import Session
 from app.application import allocations, route_templates
 from app.application.common import flush, required_flag
 from app.application.errors import (
+    RECORDED_BY_ANOTHER_USER_MESSAGE,
     ActiveQuantityConfirmationRequiredError,
     ConflictError,
     IdempotencyConflictError,
     InvalidInputError,
     NotFoundError,
+    RecordedByAnotherUserError,
 )
 from app.application.part_numbers import (
     acquire_part_number_lock,
@@ -103,12 +105,14 @@ from app.infrastructure.models import (
 
 # Keys of the immutable RECEIVED metadata (SLICE1 §11/§14). The
 # fingerprint is the idempotency comparison value; the context block
-# carries the informational initiating WorkOrderDemand (and actor,
-# until authentication exists — Phase 14).
+# carries the informational initiating WorkOrderDemand and the
+# signed-in User who released (``actor_user_id``, Phase 14 slice 3 —
+# server-derived, never a request value, never in the fingerprint;
+# the legacy ``actor`` text key is written no more).
 _FINGERPRINT_KEY: Final = "request_fingerprint"
 CONTEXT_KEY: Final = "context"
 DEMAND_ID_KEY: Final = "work_order_demand_id"
-_ACTOR_KEY: Final = "actor"
+ACTOR_USER_ID_KEY: Final = "actor_user_id"
 
 _DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
 
@@ -253,9 +257,14 @@ def _result_from_movement(
 
 
 def _replay_or_conflict(
-    session: Session, movement: PartMovement, fingerprint: str
+    session: Session, movement: PartMovement, fingerprint: str, actor_user_id: int
 ) -> ProductionRelease:
-    """Resolve a duplicate ``device_event_id`` against the committed row."""
+    """Resolve a duplicate ``device_event_id`` against the committed row.
+
+    The fingerprint first; then the recorded releaser must be the caller
+    (a release recorded by another User, or before sign-in existed, is
+    not replayed to this one).
+    """
     stored = (movement.metadata_ or {}).get(_FINGERPRINT_KEY)
     # A release replays ONLY a release: an id first used by another
     # command kind (a transfer or a Machine-Area command since Phase 6)
@@ -268,6 +277,10 @@ def _replay_or_conflict(
             " request. Nothing was created — a new release intent needs a"
             " new device_event_id."
         )
+    context = (movement.metadata_ or {}).get(CONTEXT_KEY)
+    recorded_by = context.get(ACTOR_USER_ID_KEY) if isinstance(context, dict) else None
+    if recorded_by != actor_user_id:
+        raise RecordedByAnotherUserError(RECORDED_BY_ANOTHER_USER_MESSAGE)
     return _result_from_movement(session, movement, created=False)
 
 
@@ -289,7 +302,7 @@ def release_to_production(
     operation_id: int,
     confirm_active_quantity: object,
     device_event_id: object,
-    actor: str | None = None,
+    actor_user_id: int,
 ) -> ProductionRelease:
     """Release production quantity as ONE idempotent transaction.
 
@@ -327,7 +340,7 @@ def release_to_production(
     # A committed retry replays without ever waiting on the PN lock.
     committed = _committed_release(session, event_id)
     if committed is not None:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
 
     # -- Serialize per canonical PN --------------------------------------
     # The ONE shared PN-level lock, taken before any row lock: it
@@ -342,7 +355,7 @@ def release_to_production(
     # over the now-active quantity of its own release.
     committed = _committed_release(session, event_id)
     if committed is not None:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
 
     # -- Validation before write ---------------------------------------
     # The demand row is locked for the duration of the transaction so a
@@ -521,9 +534,7 @@ def release_to_production(
     session.add(flow)
     flush(session, {})
 
-    context: dict[str, Any] = {DEMAND_ID_KEY: demand.id}
-    if actor is not None:
-        context[_ACTOR_KEY] = actor
+    context: dict[str, Any] = {DEMAND_ID_KEY: demand.id, ACTOR_USER_ID_KEY: actor_user_id}
     movement = PartMovement(
         quantity_flow_id=flow.id,
         part_number=pn,
@@ -558,7 +569,7 @@ def release_to_production(
             # Movement together).
             winner = _committed_release(session, event_id)
             if winner is not None:
-                return _replay_or_conflict(session, winner, fingerprint)
+                return _replay_or_conflict(session, winner, fingerprint, actor_user_id)
         raise
     # Built from the committed Movement — the same immutable source a
     # later replay reads — so fresh and replay responses are identical.

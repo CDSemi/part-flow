@@ -210,10 +210,12 @@ function sourcesMatching(pattern: RegExp): string[] {
     .sort();
 }
 
-test('only Administration and the session modules use the users and roles API', () => {
+test('only Administration, the Management access presentation and the session modules use the users and roles API', () => {
   expect(sourcesMatching(/from '[./]*api\/(users|roles)'/)).toEqual([
+    'app/management-access.ts',
     'app/session-context.ts',
     'components/AccountChip.tsx',
+    'components/ViewOnlyPageNote.tsx',
     'views/administration/CorrectionPermissionsSection.tsx',
     'views/administration/RolesSection.tsx',
     'views/administration/SetPasswordDialog.tsx',
@@ -221,22 +223,26 @@ test('only Administration and the session modules use the users and roles API', 
     'views/administration/permissions.ts',
     'views/administration/section-widgets.tsx',
     'views/administration/sections.ts',
+    'views/machines/MachinesView.tsx',
   ]);
 });
 
-test('only Administration and the session modules read a user, a role or a permission', () => {
+test('only Administration, the Management access presentation and the session modules read a user, a role or a permission', () => {
   expect(
     sourcesMatching(
       /\b(Permission|PERMISSIONS|PERMISSION_LABELS|CORRECTION_PERMISSIONS|listRoles|listUsers|roleId|roleName)\b/,
     ),
   ).toEqual([
+    'App.tsx',
     'api/roles.ts',
     'api/session.ts',
     'api/setup.ts',
     'api/users.ts',
+    'app/management-access.ts',
     'app/session-context.ts',
     'components/AccountChip.tsx',
     'components/FirstRunSetupDialog.tsx',
+    'components/ViewOnlyPageNote.tsx',
     'views/administration/CorrectionPermissionsSection.tsx',
     'views/administration/RolesSection.tsx',
     'views/administration/UsersSection.tsx',
@@ -246,11 +252,13 @@ test('only Administration and the session modules read a user, a role or a permi
   ]);
 });
 
-test('only the session UI, the Administration sections and the DEV demo badges ask for a permission', () => {
+test('only the session UI, the sign-in gate, the Administration sections, the Management views and the DEV demo badges ask for a permission', () => {
   expect(sourcesMatching(/\bcan\(|\bhasPermission\b/)).toEqual([
+    'App.tsx',
+    'app/SignInGate.tsx',
+    'app/management-access.ts',
     'app/session-context.ts',
     'app/session-provider.tsx',
-    'views/administration/AdministrationView.tsx',
     'views/administration/AreasSection.tsx',
     'views/administration/BarcodeConfigurationSection.tsx',
     'views/administration/CorrectionPermissionsSection.tsx',
@@ -265,6 +273,13 @@ test('only the session UI, the Administration sections and the DEV demo badges a
     'views/administration/UsersSection.tsx',
     'views/administration/WorkerSessionsSection.tsx',
     'views/administration/WorkersSection.tsx',
+    'views/machines/MachinesView.tsx',
+    'views/part-numbers/PartNumbersView.tsx',
+    'views/planned-routes/PlannedRoutesView.tsx',
+    'views/priority/PriorityView.tsx',
     'views/scan-station/scan-station-dev-badges.tsx',
+    'views/work-orders/NewWorkOrderDialog.tsx',
+    'views/work-orders/WorkOrderDetailPanel.tsx',
+    'views/work-orders/WorkOrdersView.tsx',
   ]);
 });

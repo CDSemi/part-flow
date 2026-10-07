@@ -145,7 +145,7 @@ def _create_operation(client: TestClient, area_id: int, **overrides: Any) -> dic
 def _create_demand(client: TestClient, part_number: str | None = None) -> tuple[int, int, str]:
     """One saved Work Order with one demand line: (wo_id, demand_id, pn)."""
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": pn, "requested_quantity": 50}]},
     )
@@ -200,7 +200,7 @@ def _release(
         "device_event_id": str(uuid.uuid4()),
     }
     payload.update(overrides)
-    return client.post(
+    return admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release", json=payload
     )
 
@@ -1072,7 +1072,7 @@ def test_terminal_area_never_accepts_a_release(client: TestClient, db_engine: En
 
 
 def _demand_state(client: TestClient, work_order_id: int, demand_id: int) -> dict[str, Any]:
-    response = client.get(f"/api/work-orders/{work_order_id}")
+    response = admin_of(client).get(f"/api/work-orders/{work_order_id}")
     assert response.status_code == 200, response.text
     body = response.json()
     line = next(demand for demand in body["demands"] if demand["id"] == demand_id)
@@ -1242,7 +1242,7 @@ def test_released_demand_line_takes_the_restricted_edit(
     )
     before = _counts(db_engine)
 
-    edited = client.patch(
+    edited = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={
             "line_edits": [
@@ -1302,7 +1302,7 @@ def test_raising_qty_of_a_fully_released_demand_reopens_the_work_order(
     state = _demand_state(client, work_order_id, demand_id)
     assert (state["remaining_quantity"], state["work_order_status"]) == (0, "RELEASED")
 
-    raised = client.patch(
+    raised = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={"line_edits": [{"id": demand_id, "requested_quantity": 65}]},
     )
@@ -1367,7 +1367,7 @@ def test_released_demand_line_qty_never_falls_below_what_is_committed(
     )
     before = _counts(db_engine)
 
-    refused = client.patch(
+    refused = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={"line_edits": [{"id": demand_id, "requested_quantity": 19}]},
     )
@@ -1378,7 +1378,7 @@ def test_released_demand_line_qty_never_falls_below_what_is_committed(
 
     # Down to exactly the released quantity is valid: the demand simply
     # has nothing left to release.
-    exact = client.patch(
+    exact = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={"line_edits": [{"id": demand_id, "requested_quantity": 20}]},
     )
@@ -1435,7 +1435,7 @@ def test_released_demand_line_locked_fields_refuse_the_whole_save(
         ("reason", "rework", "Reason"),
         ("notes", "handle with care", "Notes"),
     ):
-        refused = client.patch(
+        refused = admin_of(client).patch(
             f"/api/work-orders/{work_order_id}",
             json={
                 "line_edits": [
@@ -1452,7 +1452,7 @@ def test_released_demand_line_locked_fields_refuse_the_whole_save(
         assert state[field] == (None if field != "request_type" else "NEW")
 
     # An unchanged locked field is not an edit and never conflicts.
-    unchanged = client.patch(
+    unchanged = admin_of(client).patch(
         f"/api/work-orders/{work_order_id}",
         json={"line_edits": [{"id": demand_id, "request_type": "NEW", "due_date": "2026-11-02"}]},
     )
@@ -1485,14 +1485,16 @@ def test_released_demand_line_stays_unremovable_and_the_header_edit_stays_free(
     )
     before = _counts(db_engine)
 
-    removed = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
+    removed = admin_of(client).delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
     assert removed.status_code == 409, removed.text
     assert "already been released" in removed.json()["detail"]
     assert _counts(db_engine) == before
 
     # The audited header edit is unaffected by the released line.
     number = _unique("WO")
-    header = client.patch(f"/api/work-orders/{work_order_id}", json={"work_order_number": number})
+    header = admin_of(client).patch(
+        f"/api/work-orders/{work_order_id}", json={"work_order_number": number}
+    )
     assert header.status_code == 200, header.text
     assert header.json()["work_order_number"] == number
 
@@ -1506,7 +1508,7 @@ def test_demand_without_release_deletes_and_cascades_nothing(
     client: TestClient, db_engine: Engine
 ) -> None:
     pn = _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -1522,14 +1524,19 @@ def test_demand_without_release_deletes_and_cascades_nothing(
     sibling_id = body["demands"][1]["id"]
 
     # Wrong addressing removes nothing.
-    assert client.delete(f"/api/work-orders/{work_order_id}/demands/999999").status_code == 404
-    assert client.delete(f"/api/work-orders/999999/demands/{demand_id}").status_code == 404
+    assert (
+        admin_of(client).delete(f"/api/work-orders/{work_order_id}/demands/999999").status_code
+        == 404
+    )
+    assert (
+        admin_of(client).delete(f"/api/work-orders/999999/demands/{demand_id}").status_code == 404
+    )
 
     before = _counts(db_engine)
-    deleted = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
+    deleted = admin_of(client).delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
     assert deleted.status_code == 204, deleted.text
 
-    remaining = client.get(f"/api/work-orders/{work_order_id}").json()
+    remaining = admin_of(client).get(f"/api/work-orders/{work_order_id}").json()
     assert [demand["id"] for demand in remaining["demands"]] == [sibling_id]
     after = _counts(db_engine)
     assert after["work_order_demands"] == before["work_order_demands"] - 1
@@ -1568,7 +1575,7 @@ def test_demand_deletion_blocked_after_release(client: TestClient, db_engine: En
     # removable: the rule is per demand, not per PN. The other Work
     # Order carries a second line so the removal is not the last-line
     # case.
-    other = client.post(
+    other = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -1582,14 +1589,16 @@ def test_demand_deletion_blocked_after_release(client: TestClient, db_engine: En
     other_demand_id = other.json()["demands"][0]["id"]
 
     before = _counts(db_engine)
-    blocked = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
+    blocked = admin_of(client).delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
     assert blocked.status_code == 409, blocked.text
     assert (
         blocked.json()["detail"] == "Cannot remove: production quantity has already been released."
     )
     assert _counts(db_engine) == before  # nothing removed, nothing cascaded
 
-    removable = client.delete(f"/api/work-orders/{other_work_order_id}/demands/{other_demand_id}")
+    removable = admin_of(client).delete(
+        f"/api/work-orders/{other_work_order_id}/demands/{other_demand_id}"
+    )
     assert removable.status_code == 204, removable.text
     after = _counts(db_engine)
     assert after["work_order_demands"] == before["work_order_demands"] - 1
@@ -1651,16 +1660,16 @@ def test_last_demand_line_cannot_be_removed(client: TestClient, db_engine: Engin
     work_order_id, demand_id, _ = _create_demand(client)
     before = _counts(db_engine)
 
-    blocked = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
+    blocked = admin_of(client).delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
     assert blocked.status_code == 409, blocked.text
     assert "last demand line" in blocked.json()["detail"]
     assert _counts(db_engine) == before  # zero writes
-    remaining = client.get(f"/api/work-orders/{work_order_id}").json()
+    remaining = admin_of(client).get(f"/api/work-orders/{work_order_id}").json()
     assert [demand["id"] for demand in remaining["demands"]] == [demand_id]
 
     # With a sibling present the same unreleased line deletes fine —
     # until it IS the last one.
-    two_line = client.post(
+    two_line = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -1672,8 +1681,12 @@ def test_last_demand_line_cannot_be_removed(client: TestClient, db_engine: Engin
     assert two_line.status_code == 201, two_line.text
     wo_id = two_line.json()["id"]
     first_id, second_id = (demand["id"] for demand in two_line.json()["demands"])
-    assert client.delete(f"/api/work-orders/{wo_id}/demands/{first_id}").status_code == 204
-    assert client.delete(f"/api/work-orders/{wo_id}/demands/{second_id}").status_code == 409
+    assert (
+        admin_of(client).delete(f"/api/work-orders/{wo_id}/demands/{first_id}").status_code == 204
+    )
+    assert (
+        admin_of(client).delete(f"/api/work-orders/{wo_id}/demands/{second_id}").status_code == 409
+    )
 
 
 class _PauseFirstActiveCheck:
@@ -1708,6 +1721,7 @@ def test_concurrent_same_pn_releases_cannot_both_pass_active_check(
     """Two unconfirmed concurrent releases of one PN — two demands, two
     event ids — serialize on the PN lock: exactly one creates, the
     other must see the active quantity and require confirmation."""
+    actor_user_id = admin_of(client).user_id
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
     pn = _unique("PN")
@@ -1724,6 +1738,7 @@ def test_concurrent_same_pn_releases_cannot_both_pass_active_check(
             try:
                 results[name] = production_release.release_to_production(
                     session,
+                    actor_user_id=actor_user_id,
                     work_order_id=work_order_id,
                     work_order_demand_id=demand_id,
                     part_number=pn,
@@ -1776,6 +1791,7 @@ def test_concurrent_identical_retries_one_creates_one_replays(
     created release and one replay of the original result. The replay
     must NOT trip the active-quantity confirmation over the original's
     own flow: the idempotency re-check runs after the PN lock."""
+    actor_user_id = admin_of(client).user_id
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
     work_order_id, demand_id, pn = _create_demand(client)
@@ -1791,6 +1807,7 @@ def test_concurrent_identical_retries_one_creates_one_replays(
             try:
                 results[name] = production_release.release_to_production(
                     session,
+                    actor_user_id=actor_user_id,
                     work_order_id=work_order_id,
                     work_order_demand_id=demand_id,
                     part_number=pn,
@@ -1846,6 +1863,7 @@ def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
     Area — asserted sequentially below.) Either way no inactive Area
     ever holds an ACTIVE flow.
     """
+    actor_user_id = admin_of(client).user_id
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
     work_order_id, demand_id, pn = _create_demand(client)
@@ -1860,6 +1878,7 @@ def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
             try:
                 results["release"] = production_release.release_to_production(
                     session,
+                    actor_user_id=actor_user_id,
                     work_order_id=work_order_id,
                     work_order_demand_id=demand_id,
                     part_number=pn,
@@ -2005,7 +2024,7 @@ def test_release_evidence_and_derived_status_in_work_order_reads(
     area = _create_area(client)
     operation = _create_operation(client, area["id"])
     pn_a, pn_b = _unique("PN"), _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -2021,7 +2040,7 @@ def test_release_evidence_and_derived_status_in_work_order_reads(
 
     # Before any release: no evidence, status OPEN everywhere.
     assert all(line["has_released_quantity"] is False for line in body["demands"])
-    detail = client.get(f"/api/work-orders/{wo_id}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{wo_id}").json()
     assert detail["status"] == "OPEN"
     assert all(line["has_released_quantity"] is False for line in detail["demands"])
 
@@ -2037,11 +2056,11 @@ def test_release_evidence_and_derived_status_in_work_order_reads(
         operation_id=operation["id"],
     )
     assert released.status_code == 201, released.text
-    detail = client.get(f"/api/work-orders/{wo_id}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{wo_id}").json()
     flags = {int(line["id"]): line["has_released_quantity"] for line in detail["demands"]}
     assert flags == {demand_a: True, demand_b: False}
     assert detail["status"] == "OPEN"
-    listed = client.get("/api/work-orders").json()
+    listed = admin_of(client).get("/api/work-orders").json()
     assert {entry["id"]: entry["status"] for entry in listed}[wo_id] == "OPEN"
 
     # Release the second demand: every current demand carries evidence
@@ -2057,10 +2076,10 @@ def test_release_evidence_and_derived_status_in_work_order_reads(
         operation_id=operation["id"],
     )
     assert released.status_code == 201, released.text
-    detail = client.get(f"/api/work-orders/{wo_id}").json()
+    detail = admin_of(client).get(f"/api/work-orders/{wo_id}").json()
     assert detail["status"] == "RELEASED"
     assert all(line["has_released_quantity"] is True for line in detail["demands"])
-    listed = client.get("/api/work-orders").json()
+    listed = admin_of(client).get("/api/work-orders").json()
     assert {entry["id"]: entry["status"] for entry in listed}[wo_id] == "RELEASED"
     with db_engine.connect() as connection:
         stored = connection.execute(
@@ -2081,10 +2100,14 @@ def test_external_number_edit_stays_available_after_full_release(
     area = _create_area(client)
     operation = _create_operation(client, area["id"])
     pn = _unique("PN")
-    body = client.post(
-        "/api/work-orders",
-        json={"lines": [{"part_number": pn, "requested_quantity": 4}]},
-    ).json()
+    body = (
+        admin_of(client)
+        .post(
+            "/api/work-orders",
+            json={"lines": [{"part_number": pn, "requested_quantity": 4}]},
+        )
+        .json()
+    )
     wo_id, demand_id = int(body["id"]), int(body["demands"][0]["id"])
     assert body["work_order_number"] is None
 
@@ -2098,10 +2121,10 @@ def test_external_number_edit_stays_available_after_full_release(
         operation_id=operation["id"],
     )
     assert released.status_code == 201, released.text
-    assert client.get(f"/api/work-orders/{wo_id}").json()["status"] == "RELEASED"
+    assert admin_of(client).get(f"/api/work-orders/{wo_id}").json()["status"] == "RELEASED"
 
     number = f"  {_unique('WO')}  "
-    edited = client.patch(f"/api/work-orders/{wo_id}", json={"work_order_number": number})
+    edited = admin_of(client).patch(f"/api/work-orders/{wo_id}", json={"work_order_number": number})
     assert edited.status_code == 200, edited.text
     assert edited.json()["work_order_number"] == number
     with db_engine.connect() as connection:
@@ -2215,6 +2238,7 @@ def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
     same row lock and, once the release commits, recomputes the
     released quantity and refuses the quantity it was about to write.
     """
+    actor_user_id = admin_of(client).user_id
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
     work_order_id, demand_id, pn = _create_demand(client)  # requested 50
@@ -2228,6 +2252,7 @@ def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
             try:
                 results["release"] = production_release.release_to_production(
                     session,
+                    actor_user_id=actor_user_id,
                     work_order_id=work_order_id,
                     work_order_demand_id=demand_id,
                     part_number=pn,
@@ -2248,6 +2273,7 @@ def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
                 results["edit"] = work_orders.update_work_order(
                     session,
                     work_order_id,
+                    actor_user_id=actor_user_id,
                     line_edits=[{"id": demand_id, "requested_quantity": 5}],
                 )
             except Exception as exc:  # noqa: BLE001 — collected for assertions
@@ -2289,10 +2315,11 @@ def test_edit_winning_the_demand_lock_makes_the_release_use_the_new_quantity(
     own `FOR UPDATE` read refreshes the row, and the remaining cap is
     recomputed from the edited value.
     """
+    actor_user_id = admin_of(client).user_id
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
     pn = _unique("PN")
-    created = client.post(
+    created = admin_of(client).post(
         "/api/work-orders",
         json={
             "lines": [
@@ -2317,6 +2344,7 @@ def test_edit_winning_the_demand_lock_makes_the_release_use_the_new_quantity(
                 results["edit"] = work_orders.update_work_order(
                     session,
                     work_order_id,
+                    actor_user_id=actor_user_id,
                     line_edits=[{"id": demand_id, "requested_quantity": 30}],
                 )
             except Exception as exc:  # noqa: BLE001 — collected for assertions
@@ -2327,6 +2355,7 @@ def test_edit_winning_the_demand_lock_makes_the_release_use_the_new_quantity(
             try:
                 results["release"] = production_release.release_to_production(
                     session,
+                    actor_user_id=actor_user_id,
                     work_order_id=work_order_id,
                     work_order_demand_id=demand_id,
                     part_number=pn,
@@ -2384,6 +2413,7 @@ def test_unpaused_edit_release_races_never_over_release(
 ) -> None:
     """Six unsynchronized races, no seams: either order is acceptable,
     `released_quantity > requested_quantity` never is."""
+    actor_user_id = admin_of(client).user_id
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
     cases = [_create_demand(client) for _ in range(6)]  # requested 50 each
@@ -2400,7 +2430,10 @@ def test_unpaused_edit_release_races_never_over_release(
         with Session(db_engine) as session:
             try:
                 work_orders.update_work_order(
-                    session, work_order_id, line_edits=[{"id": demand_id, "requested_quantity": 10}]
+                    session,
+                    work_order_id,
+                    actor_user_id=actor_user_id,
+                    line_edits=[{"id": demand_id, "requested_quantity": 10}],
                 )
                 record("edit", True)
             except ConflictError as exc:
@@ -2412,6 +2445,7 @@ def test_unpaused_edit_release_races_never_over_release(
             try:
                 production_release.release_to_production(
                     session,
+                    actor_user_id=actor_user_id,
                     work_order_id=work_order_id,
                     work_order_demand_id=demand_id,
                     part_number=pn,

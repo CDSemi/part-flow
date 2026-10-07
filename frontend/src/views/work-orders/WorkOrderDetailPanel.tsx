@@ -9,6 +9,7 @@ import {
   updateWorkOrder,
 } from '../../api/work-orders';
 import type { WorkOrderDetail } from '../../api/work-orders';
+import { useSession } from '../../app/session-context';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { TypeChip } from '../../components/indicators';
@@ -96,6 +97,13 @@ const REMOVE_WHILE_DIRTY_EXPLANATION =
  * first. The Add Part and confirmation dialogs render as siblings of
  * this dialog so only the topmost dialog handles Escape, backdrop,
  * and focus.
+ *
+ * Permissions (Phase 14 slice 3; presentation only — the server checks
+ * every write): the header (external number, WO due date) and release
+ * need Create and edit Work Orders; the demand lines (their fields,
+ * adding and removing lines) need Edit Work Order Demand. What the user
+ * may not change renders as text, its controls are absent, and a save
+ * sends only what the user could change.
  */
 export function WorkOrderDetailPanel({
   workOrderId,
@@ -115,6 +123,14 @@ export function WorkOrderDetailPanel({
   showNotice: (message: string) => void;
 }) {
   const headingId = useId();
+  // What the user may change, fixed when the dialog opens: an open
+  // editor never changes under a later change of the sign-in.
+  const { can } = useSession();
+  const [{ canEditHeader, canEditDemand, pnReadOnly }] = useState(() => ({
+    canEditHeader: can('MANAGE_WORK_ORDERS'),
+    canEditDemand: can('EDIT_WORK_ORDER_DEMAND'),
+    pnReadOnly: !can('MANAGE_PART_NUMBER_MASTER'),
+  }));
   // The dialog owns its detail load so a committed save can adopt the
   // PATCH response as the fresh server state (never a simulated local
   // success).
@@ -178,6 +194,7 @@ export function WorkOrderDetailPanel({
   // never blocks that, so the entry stays available on a RELEASED Work
   // Order too (only demand-line editing is OPEN-only).
   const numberEditVisible =
+    canEditHeader &&
     detail !== null &&
     detail.workOrderNumber === null &&
     (detail.status === 'OPEN' || detail.status === 'RELEASED');
@@ -285,7 +302,12 @@ export function WorkOrderDetailPanel({
   // Work Order is exactly the case where every line is released, so
   // its lines stay editable that far and `Save demand` stays offered.
   // A completed Work Order is the exception: nothing is editable.
-  const linesRestricted = !completed && lines.some((line) => line.released);
+  const linesRestricted =
+    canEditDemand && !completed && lines.some((line) => line.released);
+  // What this user may change on an OPEN Work Order: its due date and
+  // releases (header), its lines (demand).
+  const headerEditable = editable && canEditHeader;
+  const linesEditable = editable && canEditDemand;
   const woDisplay = detail.workOrderNumber ?? '—';
   const internal = detail.workOrderNumber === null;
 
@@ -294,7 +316,8 @@ export function WorkOrderDetailPanel({
   // (`draftFromDemand`) — no session-local remapping.
   const display = lines;
   const savedLineCount = lines.filter((line) => line.saved).length;
-  const saveVisible = editable || numberEditVisible || linesRestricted;
+  const saveVisible =
+    headerEditable || linesEditable || numberEditVisible || linesRestricted;
 
   const errorFor = (id: number, field: LineField) =>
     lineErrors.find((e) => e.lineId === id && e.field === field)?.message;
@@ -323,7 +346,11 @@ export function WorkOrderDetailPanel({
 
   function handleDueChange(value: string) {
     setDue(value);
-    setLines((current) => applyWorkOrderDueDateChange(current, value));
+    // The lines follow the WO due date only for a user who may edit
+    // them (a save never carries a line change the user cannot make).
+    if (canEditDemand) {
+      setLines((current) => applyWorkOrderDueDateChange(current, value));
+    }
   }
 
   function addScannedLine(pn: string, isNewPn: boolean) {
@@ -586,7 +613,7 @@ export function WorkOrderDetailPanel({
         <p className="wo-sub">
           received <b className="mono">{formatIsoDate(detail.receivedDate)}</b>{' '}
           ·{' '}
-          {editable ? (
+          {headerEditable ? (
             <>
               WO due date{' '}
               <input
@@ -629,10 +656,10 @@ export function WorkOrderDetailPanel({
           <EmptyState message="This Work Order has no demand lines." />
         ) : null}
         <div className="wo-card">
-          {(editable || linesRestricted) && (
+          {(linesEditable || linesRestricted) && (
             <div className="woc-head">
               <span className="meta">
-                {editable ? (
+                {linesEditable ? (
                   <>
                     Demand lines — each line's due date defaults to the{' '}
                     <b>WO due date</b> and may be edited per line. Edits stay an
@@ -662,19 +689,20 @@ export function WorkOrderDetailPanel({
                   <th>Due date</th>
                   <th>Job Numbers</th>
                   <th>Status</th>
-                  {editable ? <th></th> : null}
+                  {headerEditable || linesEditable ? <th></th> : null}
                 </tr>
               </thead>
               <tbody>
                 {display.map((line) => {
                   // The full edit — PN and Request Type included —
                   // exists only while nothing is released for the line.
-                  const rowEditable = editable && !line.released;
+                  const rowEditable = linesEditable && !line.released;
                   // The restricted edit of a released line: Qty, due
                   // date and Job Numbers stay editable (§11.2), on an
                   // Open and on a Released Work Order alike.
                   const valueEditable =
-                    rowEditable || (line.released && !completed);
+                    rowEditable ||
+                    (canEditDemand && line.released && !completed);
                   const removeRule = lineRemoveRule(line, savedLineCount);
                   return (
                     <tr key={line.id}>
@@ -688,6 +716,7 @@ export function WorkOrderDetailPanel({
                           <div className="pncell">
                             <PnEditButton
                               pn={line.pn}
+                              readOnly={pnReadOnly}
                               onOpen={() => setEditPn(line.pn)}
                             />
                             {line.isNewPn ? (
@@ -916,10 +945,10 @@ export function WorkOrderDetailPanel({
                           </div>
                         ) : null}
                       </td>
-                      {editable ? (
+                      {headerEditable || linesEditable ? (
                         <td data-label="" className="wo-cell-actions">
                           <div className="wo-rowactions">
-                            {line.demandId !== null ? (
+                            {headerEditable && line.demandId !== null ? (
                               <button
                                 className="rel-btn"
                                 disabled={
@@ -954,41 +983,43 @@ export function WorkOrderDetailPanel({
                                 Release to production…
                               </button>
                             ) : null}
-                            <button
-                              className="pr-x"
-                              disabled={
-                                removeRule === 'blocked' ||
-                                busy ||
-                                ((removeRule === 'confirm' ||
-                                  removeRule === 'confirm-hot') &&
-                                  // A saved-line removal commits on the
-                                  // server — never with unsaved edits
-                                  // in flight (same rule as Release).
-                                  (writeBlocked || dirty))
-                              }
-                              title={
-                                removeRule === 'blocked'
-                                  ? RELEASED_REMOVE_EXPLANATION
-                                  : removeRule === 'draft'
-                                    ? 'Remove draft line'
-                                    : dirty
-                                      ? REMOVE_WHILE_DIRTY_EXPLANATION
-                                      : removeRule === 'confirm-hot' &&
-                                          line.hotRank !== null
-                                        ? hotRemoveTitle(line.hotRank)
-                                        : 'Remove line (asks for confirmation)'
-                              }
-                              aria-label={
-                                line.pn
-                                  ? `Remove line ${line.pn}`
-                                  : 'Remove draft line'
-                              }
-                              onClick={() => requestRemove(line)}
-                            >
-                              ✕
-                            </button>
+                            {linesEditable ? (
+                              <button
+                                className="pr-x"
+                                disabled={
+                                  removeRule === 'blocked' ||
+                                  busy ||
+                                  ((removeRule === 'confirm' ||
+                                    removeRule === 'confirm-hot') &&
+                                    // A saved-line removal commits on the
+                                    // server — never with unsaved edits
+                                    // in flight (same rule as Release).
+                                    (writeBlocked || dirty))
+                                }
+                                title={
+                                  removeRule === 'blocked'
+                                    ? RELEASED_REMOVE_EXPLANATION
+                                    : removeRule === 'draft'
+                                      ? 'Remove draft line'
+                                      : dirty
+                                        ? REMOVE_WHILE_DIRTY_EXPLANATION
+                                        : removeRule === 'confirm-hot' &&
+                                            line.hotRank !== null
+                                          ? hotRemoveTitle(line.hotRank)
+                                          : 'Remove line (asks for confirmation)'
+                                }
+                                aria-label={
+                                  line.pn
+                                    ? `Remove line ${line.pn}`
+                                    : 'Remove draft line'
+                                }
+                                onClick={() => requestRemove(line)}
+                              >
+                                ✕
+                              </button>
+                            ) : null}
                           </div>
-                          {removeRule === 'blocked' ? (
+                          {linesEditable && removeRule === 'blocked' ? (
                             <div className="bc">
                               {RELEASED_REMOVE_EXPLANATION}
                             </div>
@@ -1001,7 +1032,7 @@ export function WorkOrderDetailPanel({
               </tbody>
             </table>
           </div>
-          {editable && (
+          {linesEditable && (
             <div className="wo-addpart">
               <div className="nwo-scanrow">
                 <button
@@ -1060,7 +1091,7 @@ export function WorkOrderDetailPanel({
           ) : null}
           <span className="hint">
             {editable ? (
-              dirty ? (
+              !saveVisible ? null : dirty ? (
                 <>
                   Saving stores <b>business demand only</b>.{' '}
                   <b>{RELEASE_WITH_UNSAVED_EXPLANATION}</b>{' '}
@@ -1080,7 +1111,7 @@ export function WorkOrderDetailPanel({
                 edit, removal or release. Later work is a new Work Order Demand;
                 an audited allocation adjustment reopens it.
               </>
-            ) : (
+            ) : !linesRestricted ? null : (
               <>
                 This Work Order is <b>{workOrderStatusLabel(detail.status)}</b>{' '}
                 — every demand line is fully released. Qty, due date and Job
@@ -1175,6 +1206,7 @@ export function WorkOrderDetailPanel({
       {editPn !== null ? (
         <EditPartNumberDialog
           pn={editPn}
+          readOnly={pnReadOnly}
           writeBlocked={writeBlocked}
           onClose={({ exists }) => {
             setEditPn(null);

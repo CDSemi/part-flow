@@ -1,17 +1,9 @@
 import './administration.css';
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { RefObject } from 'react';
 
-import type { SessionUser } from '../../api/session';
-import { RetryFailedLoadsContext } from '../../api/use-api-data';
-import { useConnectivity } from '../../app/connectivity-context';
-import {
-  SessionContext,
-  hasPermission,
-  useSession,
-} from '../../app/session-context';
-import type { SessionValue } from '../../app/session-context';
+import { SignInGate } from '../../app/SignInGate';
 import { getViewStatePreview } from '../../app/view-state';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { AreasSection } from './AreasSection';
@@ -51,108 +43,16 @@ import type { AdminSection } from './sections';
 // honestly as not available yet.
 //
 // Access (Phase 14 slice 2): every section needs a signed-in user, and
-// no Administration request is sent before. Signed out, a sign-in panel
-// replaces the sections, and entering Administration signed out opens
-// the Sign-in dialog once over it (not while first-run setup is open —
-// setup needs the token from the server log). Any signed-in user may
-// view every section; a section whose permission the user lacks hides
-// its controls and says so. The server checks every permission. A user
-// who must still replace a password an administrator set is not signed
-// in yet for Administration (the server refuses every read until then):
-// a panel waits behind the Choose a new password dialog.
-//
-// Work survives an ended sign-in: when the server refuses a sign-in as
-// ended, the sections stay mounted with their open editors and drafts
-// (presented as the user and with the permissions they were rendered
-// with) while the Sign-in dialog — or, after an administrator set the
-// password, the Choose a new password dialog — is open. When the same
-// user's sign-in is usable again, every section load that failed in the
-// meantime runs again. The sections belong to the user they were
-// rendered for: a different user signing in remounts them, dropping the
-// drafts; an explicit sign-out shows the sign-in panel.
-
-type Presented = 'sections' | 'checking' | 'gate' | 'password';
+// no Administration request is sent before — the shared sign-in gate
+// (app/SignInGate.tsx) owns the sign-in panel, the kept work of an
+// ended sign-in and the per-user remount. Any signed-in user may view
+// every section; a section whose permission the user lacks hides its
+// controls and says so. The server checks every permission.
 
 export function AdministrationView() {
   const preview = getViewStatePreview();
-  const session = useSession();
-  const { status: connectivity } = useConnectivity();
-  const { status, setupOpen, endedBy, openSignIn } = session;
   const [sectionId, setSectionId] = useState('areas');
-  // The user the sections are rendered for (their drafts belong to them).
-  const [owner, setOwner] = useState<SessionUser | null>(null);
-  const user = status === 'signed-in' ? session.user : null;
-  const changePending = user?.mustChangePassword === true;
-  const signedInUser = changePending ? null : user;
-  // The sections stay for their owner while the sign-in is ended, or
-  // while the same user must first replace an administrator-set password.
-  const keepSections =
-    owner !== null &&
-    ((status !== 'signed-in' && endedBy === 'expired') ||
-      (changePending && user?.id === owner.id));
-  if (signedInUser !== null && signedInUser !== owner) {
-    setOwner(signedInUser);
-  } else if (
-    (status === 'signed-out' || changePending) &&
-    !keepSections &&
-    owner !== null
-  ) {
-    setOwner(null);
-  }
-  // Each time kept sections become usable again for the same user, the
-  // loads that failed meanwhile (refused as signed out) run again.
-  const [keptBefore, setKeptBefore] = useState(false);
-  const [resumed, setResumed] = useState(0);
-  if (keepSections !== keptBefore) {
-    setKeptBefore(keepSections);
-    if (
-      !keepSections &&
-      signedInUser !== null &&
-      signedInUser.id === owner?.id
-    ) {
-      setResumed((count) => count + 1);
-    }
-  }
-  const presented: Presented =
-    signedInUser !== null || keepSections
-      ? 'sections'
-      : changePending
-        ? 'password'
-        : status === 'unknown'
-          ? 'checking'
-          : 'gate';
-
   const navRef = useRef<HTMLElement>(null);
-  const gateSignInRef = useRef<HTMLButtonElement>(null);
-
-  // Entering Administration signed out (the first known sign-in of this
-  // entry) opens the Sign-in dialog once; closing it returns focus to
-  // the panel's Sign in button (the dialog restores focus to its opener).
-  const entryDecided = useRef(false);
-  useEffect(() => {
-    if (entryDecided.current || status === 'unknown') return;
-    entryDecided.current = true;
-    if (status === 'signed-out' && !setupOpen) {
-      gateSignInRef.current?.focus();
-      openSignIn();
-    }
-  }, [status, setupOpen, openSignIn]);
-
-  // A sign-in from the panel moves focus to the active section's
-  // navigation button.
-  const previouslyPresented = useRef<Presented | null>(null);
-  useEffect(() => {
-    const previous = previouslyPresented.current;
-    previouslyPresented.current = presented;
-    if (
-      presented === 'sections' &&
-      (previous === 'gate' || previous === 'password')
-    ) {
-      navRef.current
-        ?.querySelector<HTMLElement>('button[aria-current="true"]')
-        ?.focus();
-    }
-  }, [presented]);
 
   if (preview === 'loading') {
     return (
@@ -172,107 +72,27 @@ export function AdministrationView() {
     );
   }
 
-  if (presented === 'checking') {
-    return (
-      <section className="ad" aria-label="Administration">
-        {session.checking || connectivity === 'connecting' ? (
-          <LoadingState label="Checking your sign-in" />
-        ) : connectivity === 'unavailable' ? (
-          <ErrorState message="Administration needs the connection to the PartFlow server." />
-        ) : (
-          <ErrorState
-            message="Your sign-in could not be checked."
-            onRetry={() => void session.refresh()}
-          />
-        )}
-      </section>
-    );
-  }
-
-  if (presented === 'password') {
-    return (
-      <section className="ad" aria-label="Administration">
-        <div className="ad-gate">
-          <div className="ad-gatepanel">
-            <h1>Administration</h1>
-            <p>
-              Choose a new password to view and change PartFlow&apos;s
-              configuration.
-            </p>
-          </div>
-        </div>
-      </section>
-    );
-  }
-
-  if (presented === 'gate') {
-    return (
-      <section className="ad" aria-label="Administration">
-        <div className="ad-gate">
-          <div className="ad-gatepanel">
-            <h1>Administration</h1>
-            {setupOpen ? (
-              <>
-                <p>
-                  PartFlow has no administrator yet. Set up PartFlow with the
-                  setup token from the server log, or sign in if you already
-                  have an account.
-                </p>
-                <div className="row">
-                  <button className="btn primary" onClick={session.openSetup}>
-                    Set up PartFlow
-                  </button>
-                  <button
-                    ref={gateSignInRef}
-                    className="btn ghost"
-                    onClick={openSignIn}
-                  >
-                    Sign in
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p>Sign in to view and change PartFlow&apos;s configuration.</p>
-                <div className="row">
-                  <button
-                    ref={gateSignInRef}
-                    className="btn primary"
-                    onClick={openSignIn}
-                  >
-                    Sign in
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      </section>
-    );
-  }
-
   const section =
     ADMIN_SECTIONS.find((s) => s.id === sectionId) ?? ADMIN_SECTIONS[1];
-  const sectionsUser = signedInUser ?? owner;
-  // Kept sections are presented as the user and with the permissions
-  // they were rendered with; the server refuses every write until that
-  // user's sign-in is usable again.
-  const sectionsSession: SessionValue = keepSections
-    ? { ...session, user: owner, can: (key) => hasPermission(owner, key) }
-    : session;
 
+  // A sign-in from the panel moves focus to the active section's
+  // navigation button.
   return (
     <section className="ad" aria-label="Administration">
-      <SessionContext.Provider value={sectionsSession}>
-        <RetryFailedLoadsContext.Provider value={resumed}>
-          <SectionsWrap
-            key={sectionsUser?.id ?? 0}
-            navRef={navRef}
-            section={section}
-            onSelect={setSectionId}
-          />
-        </RetryFailedLoadsContext.Provider>
-      </SessionContext.Provider>
+      <SignInGate
+        area="Administration"
+        onSignedIn={() =>
+          navRef.current
+            ?.querySelector<HTMLElement>('button[aria-current="true"]')
+            ?.focus()
+        }
+      >
+        <SectionsWrap
+          navRef={navRef}
+          section={section}
+          onSelect={setSectionId}
+        />
+      </SignInGate>
     </section>
   );
 }

@@ -40,7 +40,9 @@ SLICE1_DATA_MODEL §6, §16):
   effective write appends exactly one ``PartNumber`` row: the details
   are snapshotted as :func:`master_snapshot` (never image data), the
   image as ``{"image": digest-or-null}``. Rejected writes, lost races
-  and no-ops append nothing.
+  and no-ops append nothing. Each row carries ``actor_user_id``, the
+  signed-in User of a Management write; a Scan Station receipt's
+  first use records none (Phase 14 slice 3).
 - Lock order: :func:`create_part_number` takes ONLY the PN advisory
   lock (it serializes with create-on-first-use, which the production
   commands run under that lock); every other management write takes
@@ -237,7 +239,7 @@ class EnsuredPartNumber(NamedTuple):
 
 
 def ensure_part_number(
-    session: Session, value: object, *, actor: str | None = None
+    session: Session, value: object, *, actor_user_id: int | None
 ) -> EnsuredPartNumber:
     """Reuse the existing master for the canonical PN or stage a new one.
 
@@ -263,7 +265,7 @@ def ensure_part_number(
         entity_id=canonical,
         before_data=None,
         after_data=master_snapshot(master),
-        actor_reference=actor,
+        actor_user_id=actor_user_id,
     )
     return EnsuredPartNumber(master, created=True)
 
@@ -492,6 +494,7 @@ def create_part_number(
     name: object = None,
     current_revision: object = None,
     erp_id: object = None,
+    actor_user_id: int,
 ) -> PartNumber:
     """Create a master with its details as its own transaction (create-only).
 
@@ -524,6 +527,7 @@ def create_part_number(
         entity_id=canonical,
         before_data=None,
         after_data=master_snapshot(master),
+        actor_user_id=actor_user_id,
     )
     return _commit_detached(session, master, conflicts)
 
@@ -535,6 +539,7 @@ def update_part_number(
     name: object = UNSET,
     current_revision: object = UNSET,
     erp_id: object = UNSET,
+    actor_user_id: int,
 ) -> PartNumber:
     """Apply the provided details; omitted fields stay, ``None`` clears.
 
@@ -569,11 +574,12 @@ def update_part_number(
         entity_id=canonical,
         before_data=before,
         after_data=master_snapshot(master),
+        actor_user_id=actor_user_id,
     )
     return _commit_detached(session, master, PART_NUMBER_CONFLICTS)
 
 
-def delete_part_number(session: Session, value: object) -> None:
+def delete_part_number(session: Session, value: object, *, actor_user_id: int) -> None:
     """Hard-delete the master — details and image — and nothing else.
 
     No production table references the master (PROJECT_PROFILE §8.1),
@@ -593,12 +599,18 @@ def delete_part_number(session: Session, value: object) -> None:
         entity_id=canonical,
         before_data=before,
         after_data=None,
+        actor_user_id=actor_user_id,
     )
     commit(session, PART_NUMBER_CONFLICTS)
 
 
 def set_part_number_image(
-    session: Session, value: object, *, data: bytes, declared_type: str | None
+    session: Session,
+    value: object,
+    *,
+    data: bytes,
+    declared_type: str | None,
+    actor_user_id: int,
 ) -> PartNumber:
     """Store or replace the PN image; identical bytes and type are a no-op.
 
@@ -626,11 +638,12 @@ def set_part_number_image(
         entity_id=canonical,
         before_data={"image": before},
         after_data={"image": after},
+        actor_user_id=actor_user_id,
     )
     return _commit_detached(session, master, PART_NUMBER_CONFLICTS)
 
 
-def remove_part_number_image(session: Session, value: object) -> PartNumber:
+def remove_part_number_image(session: Session, value: object, *, actor_user_id: int) -> PartNumber:
     """Remove the PN image; a master without one is a no-op."""
     canonical = canonical_part_number(value)
     master = _lock_master(session, canonical, with_image=True)
@@ -650,6 +663,7 @@ def remove_part_number_image(session: Session, value: object) -> PartNumber:
         entity_id=canonical,
         before_data={"image": before},
         after_data={"image": None},
+        actor_user_id=actor_user_id,
     )
     return _commit_detached(session, master, PART_NUMBER_CONFLICTS)
 

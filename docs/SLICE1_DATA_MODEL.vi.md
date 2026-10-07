@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in) và slice 2 (Administration enforcement) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth.
 >
@@ -178,7 +178,7 @@ Trong một transaction:
 4. Create Flow với `route_mode`, snapshot id hoặc NULL, và
    `current_area_id = starting Area`.
 5. Append `RECEIVED`; Planned reference first assigned step, Floating NULL; ghi
-   resolved Operation; metadata có fingerprint, actor/Demand context informational.
+   resolved Operation; metadata có fingerprint, User đã sign-in đã release dưới dạng `context.actor_user_id` (Phase 14 slice 3; do server suy ra, không bao giờ từ request; release cũ không có) và Demand context optional.
 6. Commit và trả flow id, mode, optional snapshot id, Area, Operation, quantity,
    Movement id.
 
@@ -244,7 +244,7 @@ Shape:
   transaction protocol + reconciliation/test enforce;
 - later canonical columns `movement_reason`, `reason`, `reverses_movement_id`,
   `station_id`, `worker_id`, `scan_session_id` chưa tạo trong slice (`worker_id` đến cùng `0019_phase13_worker_identity`; `scan_session_id` đến cùng `0020_phase13_worker_sessions` (FK tới `worker_sessions`, `ScanSession` của PROFILE));
-- timestamps; unique `device_event_id`; metadata fingerprint/context;
+- timestamps; unique `device_event_id`; metadata fingerprint/context (gồm User release `context.actor_user_id` từ Phase 14 slice 3);
 - immutable: app role không UPDATE/DELETE và raise-on-write trigger. Retention
   maintenance sau này dùng privileged Admin path riêng.
 
@@ -286,6 +286,7 @@ side effect trong transaction. Demand save là transaction trước, riêng bi�
 - Cùng id + cùng fingerprint → trả original committed result, không write.
 - Cùng id + khác fingerprint → explicit conflict, không write; đây là client defect.
 - New intent dùng id mới và vẫn chịu active-quantity confirmation.
+- **User khác (Phase 14 slice 3).** Một Management command (release, Management allocation và reversal của nó, Hot list change) bị replay bởi User khác với User đã ghi nó bị từ chối bằng 409 `recorded_by_another_user` và không ghi gì; record tạo trước khi có sign-in, không có User được ghi, được tính là do User khác ghi. Cùng User replay từ session hay browser khác thì replay bình thường. Fingerprint được kiểm tra trước, và identity không bao giờ là một phần của fingerprint.
 - Idempotency ở slice chỉ cho release vì đây là command introduce quantity. Demand
   save không cần key; file import tương lai có contract riêng.
 - Online synchronous: server có thể đặt `occurred_at = server_received_at`; không
@@ -310,7 +311,7 @@ Audit trong slice:
 
 - WorkOrder/Demand create/edit;
 - PN master creation (từ Phase 13 slice 7 còn sửa, đổi ảnh và hard delete master);
-- release do `RECEIVED` Movement audit, gồm actor/context informational.
+- release do `RECEIVED` Movement audit, gồm User release (`context.actor_user_id`, từ Phase 14 slice 3) và Demand context trong metadata.
 
 Hai mechanism tách trách nhiệm:
 
@@ -323,7 +324,7 @@ Hai mechanism tách trách nhiệm:
 `audit_events`: BIGSERIAL id, `CREATED|UPDATED`, entity type/key, nullable actor,
 timestamp, `before_data`/`after_data`, metadata. Entity id polymorphic không FK;
 integrity do audit row và change commit cùng transaction. PartNumber entity id là
-canonical PN. `actor_reference` là cột text cũ, nullable, được giữ cho lịch sử và không bao giờ backfill; enforce permission vẫn thuộc Phase 14 slice 2–3 và không bảng user nào được tạo ở slice này. `actor_user_id` — FK nullable → `users (id)` (`fk_audit_events_actor_user_id_users`, thêm bởi `0029_phase14_sign_in`) — là User đã sign in, **do server suy ra chỉ từ session principal và không bao giờ từ request body**; Phase 14 slice 1 ghi nó cho các write mật khẩu và các write user sign-in policy, và từ Phase 14 slice 2 mọi write cấu hình Administration cũng ghi nó (Departments, Areas, Operations, Scan Stations, định dạng Asset Tag, Workers, các section policy, Roles và Users); writer Machine và allocation theo sau ở Phase 14 slice 3, còn mọi writer khác vẫn ghi `actor_reference` và để `actor_user_id` NULL cho đến khi slice Phase 14 của chúng chuyển đổi. Row cũ giữ `actor_user_id` NULL. `machine_lifecycle_events` và `work_order_allocations` có thêm FK `actor_user_id` nullable tương tự (`fk_machine_lifecycle_events_actor_user_id_users`, `fk_work_order_allocations_actor_user_id_users`); các cột text cũ của chúng (`machine_lifecycle_events.actor`, vẫn lấy từ request body retire/reactivate Machine cho đến khi Phase 14 slice 3 bỏ field đó) được giữ và không bao giờ backfill. Ánh xạ event của PN master từ Phase 13 slice 7: tạo → `CREATED`, sửa → `UPDATED`, đổi ảnh → `UPDATED` (digest), hard delete → `DELETED` (`before_data` = snapshot cộng digest ảnh); snapshot `PartNumber` là `{part_number, name, current_revision, erp_id}`.
+canonical PN. `actor_reference` là cột text cũ, nullable, được giữ cho lịch sử và không bao giờ backfill; enforce permission đã được triển khai cho Administration (Phase 14 slice 2) và Management (slice 3); cột này không còn được writer đã chuyển đổi nào ghi, nên là NULL trên mọi row Management và Administration mới, còn trên row cũ là identifier actor development/system được cấu hình tường minh hoặc NULL. Không bảng user nào được tạo ở slice này. `actor_user_id` — FK nullable → `users (id)` (`fk_audit_events_actor_user_id_users`, thêm bởi `0029_phase14_sign_in`) — là User đã sign in, **do server suy ra chỉ từ session principal và không bao giờ từ request body**; Phase 14 slice 1 ghi nó cho các write mật khẩu và các write user sign-in policy, và từ Phase 14 slice 2 mọi write cấu hình Administration cũng ghi nó (Departments, Areas, Operations, Scan Stations, định dạng Asset Tag, Workers, các section policy, Roles và Users); và từ Phase 14 slice 3 mọi write Management cũng ghi nó (Machines kể cả lifecycle event, Planned Routes, Part Numbers, Work Orders và demand, Hot list, Management allocation và reversal, cùng các row completion và Hot-removal của Work Order do các write đó gây ra); row do Scan Station command ghi (receipt, station allocation và Hot removal của chúng, tạo Part Number và Work Order ở intake) giữ `actor_user_id` NULL. Row cũ giữ `actor_user_id` NULL. `machine_lifecycle_events` và `work_order_allocations` có thêm FK `actor_user_id` nullable tương tự (`fk_machine_lifecycle_events_actor_user_id_users`, `fk_work_order_allocations_actor_user_id_users`); các cột text cũ của chúng (`machine_lifecycle_events.actor`, trước đây lấy từ request body retire/reactivate Machine, field mà Phase 14 slice 3 đã bỏ) được giữ cho lịch sử, không còn được ghi và không bao giờ backfill. Management command lấy khóa `FOR KEY SHARE` trên row `users` của User thực hiện qua các FK này, tại lúc INSERT; khóa chỉ xung đột với việc đổi login name của chính User đó. Trong lúc đổi tên như vậy, Management command chờ **trong khi giữ advisory lock của nó** (PN lock của nó và, với allocation, Hot list change hoặc sửa quantity / xóa line đã xác nhận của Work Order, Hot list lock), nên các command xếp hàng trên các lock đó (mọi station allocation, receipt và reversal của PN đó, Hot list change, Work Order save lấy Hot lock) chờ đến khi việc đổi tên commit; thời gian chờ bị chặn bởi transaction đổi tên ngắn và không có cycle. Scan Station command không bao giờ đọc hay khóa `users`, `roles`, `role_permissions`, `user_credentials` hay `user_sessions`. Ánh xạ event của PN master từ Phase 13 slice 7: tạo → `CREATED`, sửa → `UPDATED`, đổi ảnh → `UPDATED` (digest), hard delete → `DELETED` (`before_data` = snapshot cộng digest ảnh); snapshot `PartNumber` là `{part_number, name, current_revision, erp_id}`.
 
 Mọi audited write phải có audit row cùng transaction. Audit immutable qua revoke +
 trigger; creation có before NULL, update append row mới, không rewrite row cũ.
@@ -455,7 +456,7 @@ protocol, reconciliation và concurrency test enforce.
 | Quản lý metadata PartNumber, ảnh, hard delete | Phase 13 — implemented (`0023_phase13_part_number_master`) | column nullable trên `part_numbers`; không chạm bảng production nào |
 | Theme preference của Scan Station (station tier) | Phase 13 — implemented (`0026_phase13_station_theme`) | một column nullable `scan_stations.theme_preference` có CHECK (`DARK` / `LIGHT`); không audit |
 | Quản lý Planned Routes | Phase 13 — implemented (`0024_phase13_planned_routes`) | hai column nullable `preferred_machine_id` (FK trên `route_steps`, không FK trên `assigned_route_steps`), một index, vocabulary audit `RouteTemplate`; không backfill |
-| Authentication/role | Cấu hình (users, role, permission) **implemented** ở Phase 13 (`0028_phase13_users_roles`); sign-in, session và cột actor **implemented** ở Phase 14 slice 1 (`0029_phase14_sign_in`); enforce permission trên đọc và write Administration **implemented** ở Phase 14 slice 2; Management theo sau ở slice 3 và Scan Station ở slice 4 | `actor_user_id` nằm cạnh cột text cũ `actor_reference`, không bao giờ backfill (§16); không couple Movement |
+| Authentication/role | Cấu hình (users, role, permission) **implemented** ở Phase 13 (`0028_phase13_users_roles`); sign-in, session và cột actor **implemented** ở Phase 14 slice 1 (`0029_phase14_sign_in`); enforce permission trên đọc và write Administration **implemented** ở Phase 14 slice 2 và trên đọc và write Management **implemented** ở Phase 14 slice 3; Scan Station theo sau ở slice 4 (thiết bị station, OD-P6) | `actor_user_id` nằm cạnh cột text cũ `actor_reference`, không bao giờ backfill (§16); không couple Movement |
 | File Work Order import | Phase 15 | reuse validation idempotently |
 | Worker/ScanSession persistence | Phase 13 — Workers registry **implemented** (`0014_phase13_workers`); `worker_id`, `allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` **implemented** (`0019_phase13_worker_identity`); `scan_session_id`, `worker_sessions`, `application_policy` và override theo Area **implemented** (`0020_phase13_worker_sessions`); badge-confirmation option **implemented** (`0021_phase13_badge_confirmation`) | bảng `workers` (badge UNIQUE trên dạng chuẩn hóa, avatar trên row) và vocabulary audit mở rộng (§16) đã có; `0019_phase13_worker_identity` thêm `worker_id`, `allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` (§11, §17); `0020_phase13_worker_sessions` thêm `scan_session_id`, `worker_sessions`, `application_policy` và `areas.worker_session_timeout_minutes` (§11, §17); `0021_phase13_badge_confirmation` thêm ba column option của `application_policy` (§17) |
 | ERP/offline sync | Deferred, chưa duyệt | isolated boundary; event id compatible |

@@ -1,9 +1,10 @@
 """Signed-in test identities (Phase 14 slice 2; PLAN CD6).
 
 Since slice 2 every Administration read needs a signed-in User and every
-Administration write its permission. Tests reach those routes through
-an identity created here; Scan Station, public and Management routes
-(the latter until slice 3) stay on the module's anonymous client.
+Administration write its permission, since slice 3 every Management read
+and write too. Tests reach those routes through an identity created
+here; Scan Station and public routes stay on the module's anonymous
+client.
 
 - ``create_identity(client, *permissions)`` — one transaction on the
   app's engine: a role ``test-role-<hex>`` holding exactly
@@ -19,7 +20,10 @@ an identity created here; Scan Station, public and Management routes
   permission, created on first use and reused for the app's lifetime
   (creating it closes first-run setup).
 - ``anonymous_client(client)`` — a ``TestClient`` on the same app that
-  sends neither.
+  sends neither;
+- ``another_session(client, identity_client)`` — the same User signed in
+  a second time (a new session row, as from another browser; Phase 14
+  slice 3).
 
 Harness rows are recognizable by name: role names start with
 ``test-role-`` and login names with ``test-``; list and count
@@ -157,3 +161,25 @@ def admin_of(client: TestClient) -> IdentityClient:
         admin = client_as(client, *ALL_PERMISSIONS)
         _ADMINS[app] = admin
     return admin
+
+
+def another_session(client: TestClient, identity_client: IdentityClient) -> IdentityClient:
+    """The same User in a second, independent session (another browser)."""
+    identity = identity_client.identity
+    assert identity is not None
+    token, digest = authentication.new_session_token()
+    with engine_of(client).begin() as connection:
+        connection.execute(
+            sa.text("INSERT INTO user_sessions (user_id, token_digest) VALUES (:user_id, :digest)"),
+            {"user_id": identity.user_id, "digest": digest},
+        )
+    return IdentityClient(
+        client,
+        TestIdentity(
+            user_id=identity.user_id,
+            role_id=identity.role_id,
+            login_name=identity.login_name,
+            token=token,
+            permissions=identity.permissions,
+        ),
+    )

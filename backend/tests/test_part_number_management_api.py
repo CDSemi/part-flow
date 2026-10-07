@@ -165,19 +165,21 @@ def _digest(data: bytes, content_type: str) -> dict[str, str | int]:
 
 
 def _create(client: TestClient, part_number: str, **details: Any) -> dict[str, Any]:
-    response = client.post("/api/part-numbers", json={"part_number": part_number, **details})
+    response = admin_of(client).post(
+        "/api/part-numbers", json={"part_number": part_number, **details}
+    )
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _patch(client: TestClient, part_number: str, body: dict[str, Any]) -> Any:
-    return client.patch("/api/part-numbers", params={"number": part_number}, json=body)
+    return admin_of(client).patch("/api/part-numbers", params={"number": part_number}, json=body)
 
 
 def _put_image(
     client: TestClient, part_number: str, data: bytes, content_type: str = "image/png"
 ) -> Any:
-    return client.put(
+    return admin_of(client).put(
         "/api/part-numbers/image",
         params={"number": part_number},
         content=data,
@@ -245,7 +247,7 @@ class _Cell:
 
 
 def _work_order(client: TestClient, part_number: str, quantity: int = 10) -> dict[str, Any]:
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders",
         json={"lines": [{"part_number": part_number, "requested_quantity": quantity}]},
     )
@@ -257,7 +259,7 @@ def _release(
     client: TestClient, cell: _Cell, work_order: dict[str, Any], part_number: str, quantity: int
 ) -> int:
     demand_id = int(work_order["demands"][0]["id"])
-    response = client.post(
+    response = admin_of(client).post(
         f"/api/work-orders/{work_order['id']}/demands/{demand_id}/release",
         json={
             "part_number": part_number,
@@ -296,7 +298,9 @@ def _board_row(client: TestClient, cell: _Cell, part_number: str) -> dict[str, A
 
 
 def _tracking_row(client: TestClient, part_number: str) -> dict[str, Any]:
-    response = client.get("/api/tracking", params={"search": part_number, "status": "ALL"})
+    response = admin_of(client).get(
+        "/api/tracking", params={"search": part_number, "status": "ALL"}
+    )
     assert response.status_code == 200, response.text
     found = [row for row in response.json()["rows"] if row["part_number"] == part_number]
     assert len(found) == 1
@@ -304,7 +308,7 @@ def _tracking_row(client: TestClient, part_number: str) -> dict[str, Any]:
 
 
 def _tracking_detail(client: TestClient, part_number: str) -> dict[str, Any]:
-    response = client.get("/api/tracking/detail", params={"part_number": part_number})
+    response = admin_of(client).get("/api/tracking/detail", params={"part_number": part_number})
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -438,9 +442,9 @@ def test_writes_on_a_pn_without_details_are_404_with_zero_writes(
     counts = _write_counts(db_engine)
     for response in (
         _patch(client, pn, {"name": "X"}),
-        client.delete("/api/part-numbers", params={"number": pn.lower()}),
+        admin_of(client).delete("/api/part-numbers", params={"number": pn.lower()}),
         _put_image(client, pn, _PNG),
-        client.delete("/api/part-numbers/image", params={"number": pn}),
+        admin_of(client).delete("/api/part-numbers/image", params={"number": pn}),
         client.get("/api/part-numbers/image", params={"number": pn}),
     ):
         assert response.status_code == 404, response.text
@@ -449,18 +453,20 @@ def test_writes_on_a_pn_without_details_are_404_with_zero_writes(
 
     for response in (
         _patch(client, "ABC 123", {"name": "X"}),
-        client.delete("/api/part-numbers", params={"number": "ABC 123"}),
+        admin_of(client).delete("/api/part-numbers", params={"number": "ABC 123"}),
         _put_image(client, "ABC\t123", _PNG),
-        client.delete("/api/part-numbers/image", params={"number": "ABC 123"}),
+        admin_of(client).delete("/api/part-numbers/image", params={"number": "ABC 123"}),
         client.get("/api/part-numbers/image", params={"number": "ABC 123"}),
     ):
         assert response.status_code == 422, response.text
         assert response.json()["detail"] == "Part Number must not contain internal whitespace."
     for response in (
-        client.patch("/api/part-numbers", json={"name": "X"}),
-        client.delete("/api/part-numbers"),
-        client.put("/api/part-numbers/image", content=_PNG, headers={"Content-Type": "image/png"}),
-        client.delete("/api/part-numbers/image"),
+        admin_of(client).patch("/api/part-numbers", json={"name": "X"}),
+        admin_of(client).delete("/api/part-numbers"),
+        admin_of(client).put(
+            "/api/part-numbers/image", content=_PNG, headers={"Content-Type": "image/png"}
+        ),
+        admin_of(client).delete("/api/part-numbers/image"),
         client.get("/api/part-numbers/image"),
     ):
         assert response.status_code == 422, response.text
@@ -485,28 +491,30 @@ def test_nul_characters_are_refused_or_match_nothing_with_zero_writes(
     ):
         for response in (
             _patch(client, pn, {field: "A\x00B"}),
-            client.post("/api/part-numbers", json={"part_number": _unique("NUL"), field: "x\x00"}),
+            admin_of(client).post(
+                "/api/part-numbers", json={"part_number": _unique("NUL"), field: "x\x00"}
+            ),
         ):
             assert response.status_code == 422, response.text
             assert response.json()["detail"] == f"{label} must be text."
 
     nul_pn = f"{pn}\x00"
     for response in (
-        client.post("/api/part-numbers", json={"part_number": nul_pn}),
+        admin_of(client).post("/api/part-numbers", json={"part_number": nul_pn}),
         _patch(client, nul_pn, {"name": "X"}),
-        client.delete("/api/part-numbers", params={"number": nul_pn}),
+        admin_of(client).delete("/api/part-numbers", params={"number": nul_pn}),
         _put_image(client, nul_pn, _PNG),
-        client.delete("/api/part-numbers/image", params={"number": nul_pn}),
+        admin_of(client).delete("/api/part-numbers/image", params={"number": nul_pn}),
         client.get("/api/part-numbers/image", params={"number": nul_pn}),
-        client.get("/api/part-numbers", params={"number": nul_pn}),
+        admin_of(client).get("/api/part-numbers", params={"number": nul_pn}),
     ):
         assert response.status_code == 422, response.text
         assert response.json()["detail"] == "Part Number must not contain a NUL character."
 
-    page = client.get("/api/part-numbers/page", params={"search": "a\x00"})
+    page = admin_of(client).get("/api/part-numbers/page", params={"search": "a\x00"})
     assert page.status_code == 200, page.text
     assert (page.json()["rows"], page.json()["total"], page.json()["has_more"]) == ([], 0, False)
-    lookup = client.get("/api/part-numbers", params={"search": "a\x00"})
+    lookup = admin_of(client).get("/api/part-numbers", params={"search": "a\x00"})
     assert lookup.status_code == 200, lookup.text
     assert lookup.json() == []
 
@@ -543,7 +551,7 @@ def test_url_hostile_pns_round_trip_through_every_route(client: TestClient, stem
     pn = f"{stem}-{uuid.uuid4().hex[:8].upper()}"
     assert _create(client, pn)["part_number"] == pn
 
-    found = client.get("/api/part-numbers", params={"number": pn})
+    found = admin_of(client).get("/api/part-numbers", params={"number": pn})
     assert [master["part_number"] for master in found.json()] == [pn]
 
     patched = _patch(client, pn, {"name": "Hostile"})
@@ -558,14 +566,16 @@ def test_url_hostile_pns_round_trip_through_every_route(client: TestClient, stem
     )
     assert served.status_code == 200
     assert served.content == _PNG
-    assert client.delete("/api/part-numbers/image", params={"number": pn}).status_code == 200
+    assert (
+        admin_of(client).delete("/api/part-numbers/image", params={"number": pn}).status_code == 200
+    )
 
-    page = client.get("/api/part-numbers/page", params={"search": pn})
+    page = admin_of(client).get("/api/part-numbers/page", params={"search": pn})
     assert [row["part_number"] for row in page.json()["rows"]] == [pn]
 
-    deleted = client.delete("/api/part-numbers", params={"number": pn})
+    deleted = admin_of(client).delete("/api/part-numbers", params={"number": pn})
     assert deleted.status_code == 204, deleted.text
-    assert client.get("/api/part-numbers", params={"number": pn}).json() == []
+    assert admin_of(client).get("/api/part-numbers", params={"number": pn}).json() == []
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +638,7 @@ def test_image_replace_no_op_and_remove(client: TestClient, db_engine: Engine) -
     assert replaced.before_data == {"image": _digest(_PNG, "image/png")}
     assert replaced.after_data == {"image": _digest(_WEBP, "image/webp")}
 
-    removed = client.delete("/api/part-numbers/image", params={"number": pn})
+    removed = admin_of(client).delete("/api/part-numbers/image", params={"number": pn})
     assert removed.status_code == 200, removed.text
     assert removed.json()["image_updated_at"] is None
     assert removed.json()["name"] == "KEEP"
@@ -643,7 +653,10 @@ def test_image_replace_no_op_and_remove(client: TestClient, db_engine: Engine) -
     assert (row.image, row.image_type, row.image_updated_at) == (None, None, None)
 
     # Removing again is a no-op; no audit row carries bytes.
-    assert client.delete("/api/part-numbers/image", params={"number": pn}).json() == removed.json()
+    assert (
+        admin_of(client).delete("/api/part-numbers/image", params={"number": pn}).json()
+        == removed.json()
+    )
     assert len(_audit_rows(db_engine, pn)) == len(events)
     for event in events:
         for data in (event.before_data, event.after_data):
@@ -699,11 +712,11 @@ def test_no_list_payload_or_list_query_carries_image_bytes(
     sa.event.listen(Engine, "before_cursor_execute", _record)
     try:
         responses = [
-            client.get("/api/part-numbers", params={"number": pn}),
-            client.get("/api/part-numbers", params={"search": "NOBYTES"}),
-            client.get("/api/part-numbers"),
-            client.get("/api/part-numbers/page", params={"search": pn}),
-            client.post("/api/part-numbers", json={"part_number": _unique("NOBYTES")}),
+            admin_of(client).get("/api/part-numbers", params={"number": pn}),
+            admin_of(client).get("/api/part-numbers", params={"search": "NOBYTES"}),
+            admin_of(client).get("/api/part-numbers"),
+            admin_of(client).get("/api/part-numbers/page", params={"search": pn}),
+            admin_of(client).post("/api/part-numbers", json={"part_number": _unique("NOBYTES")}),
             _patch(client, pn, {"erp_id": "ERP-NB"}),
         ]
     finally:
@@ -778,7 +791,7 @@ def test_delete_removes_only_the_details_and_the_pn_comes_back_on_first_use(
     production = _table_snapshot(db_engine)
     history = _all_audit_rows(db_engine)
 
-    deleted = client.delete("/api/part-numbers", params={"number": f" {pn.lower()} "})
+    deleted = admin_of(client).delete("/api/part-numbers", params={"number": f" {pn.lower()} "})
     assert deleted.status_code == 204, deleted.text
     assert deleted.content == b""
 
@@ -795,7 +808,7 @@ def test_delete_removes_only_the_details_and_the_pn_comes_back_on_first_use(
     assert event.after_data is None
     assert _stored(db_engine, pn) is None
 
-    assert client.get("/api/part-numbers", params={"number": pn}).json() == []
+    assert admin_of(client).get("/api/part-numbers", params={"number": pn}).json() == []
     detail = _tracking_detail(client, pn)
     assert detail["master"] is None
     assert detail["demands"] == detail_before["demands"]
@@ -803,15 +816,15 @@ def test_delete_removes_only_the_details_and_the_pn_comes_back_on_first_use(
     assert _tracking_row(client, pn)["has_master"] is False
     assert _board_row(client, cell, pn)["master"] is None
 
-    again = client.delete("/api/part-numbers", params={"number": pn})
+    again = admin_of(client).delete("/api/part-numbers", params={"number": pn})
     assert again.status_code == 404
     assert again.json()["detail"] == _no_details(pn)
 
     # Re-created explicitly with empty details...
-    recreated = client.post("/api/part-numbers", json={"part_number": pn})
+    recreated = admin_of(client).post("/api/part-numbers", json={"part_number": pn})
     assert recreated.status_code == 201, recreated.text
     assert (recreated.json()["name"], recreated.json()["image_updated_at"]) == (None, None)
-    assert client.delete("/api/part-numbers", params={"number": pn}).status_code == 204
+    assert admin_of(client).delete("/api/part-numbers", params={"number": pn}).status_code == 204
 
     # ...or on its next first use by a Work Order line.
     events_before = len(_audit_rows(db_engine, pn))
@@ -837,24 +850,30 @@ def test_page_searches_every_detail_and_pages(client: TestClient) -> None:
     by_revision = _create(client, _unique("ZREV"), current_revision=f"R{marker}")["part_number"]
     by_erp = _create(client, _unique("ZERP"), erp_id=f"ERP-{marker.upper()}")["part_number"]
 
-    first = client.get("/api/part-numbers/page", params={"search": prefix.lower(), "limit": 2})
+    first = admin_of(client).get(
+        "/api/part-numbers/page", params={"search": prefix.lower(), "limit": 2}
+    )
     assert first.status_code == 200, first.text
     body = first.json()
     assert set(body) == {"rows", "total", "offset", "limit", "has_more"}
     assert [row["part_number"] for row in body["rows"]] == seeded[:2]
     assert (body["total"], body["offset"], body["limit"], body["has_more"]) == (5, 0, 2, True)
 
-    last = client.get(
-        "/api/part-numbers/page", params={"search": prefix, "offset": 4, "limit": 2}
-    ).json()
+    last = (
+        admin_of(client)
+        .get("/api/part-numbers/page", params={"search": prefix, "offset": 4, "limit": 2})
+        .json()
+    )
     assert [row["part_number"] for row in last["rows"]] == seeded[4:]
     assert (last["total"], last["has_more"]) == (5, False)
 
-    matched = client.get("/api/part-numbers/page", params={"search": marker.upper()}).json()
+    matched = (
+        admin_of(client).get("/api/part-numbers/page", params={"search": marker.upper()}).json()
+    )
     assert [row["part_number"] for row in matched["rows"]] == sorted([by_name, by_revision, by_erp])
     assert matched["total"] == 3
 
-    default = client.get("/api/part-numbers/page").json()
+    default = admin_of(client).get("/api/part-numbers/page").json()
     assert default["limit"] == part_numbers.DEFAULT_PAGE_LIMIT
     assert default["offset"] == 0
     assert [row["part_number"] for row in default["rows"]] == sorted(
@@ -862,7 +881,7 @@ def test_page_searches_every_detail_and_pages(client: TestClient) -> None:
     )
 
     for params in ({"limit": 0}, {"limit": 201}, {"offset": -1}):
-        assert client.get("/api/part-numbers/page", params=params).status_code == 422
+        assert admin_of(client).get("/api/part-numbers/page", params=params).status_code == 422
 
 
 def test_search_wildcards_are_literal(client: TestClient) -> None:
@@ -870,10 +889,10 @@ def test_search_wildcards_are_literal(client: TestClient) -> None:
     literal = _create(client, f"W{marker}%_\\X")["part_number"]
     _create(client, f"W{marker}AB\\X")
     for term in (f"{marker}%", f"{marker}%_", "%_\\"):
-        page = client.get("/api/part-numbers/page", params={"search": term}).json()
+        page = admin_of(client).get("/api/part-numbers/page", params={"search": term}).json()
         assert literal in [row["part_number"] for row in page["rows"]]
         assert all("%" in row["part_number"] for row in page["rows"])
-        lookup = client.get("/api/part-numbers", params={"search": term}).json()
+        lookup = admin_of(client).get("/api/part-numbers", params={"search": term}).json()
         assert all("%" in row["part_number"] for row in lookup)
 
 
@@ -884,7 +903,7 @@ def test_add_part_search_matches_the_pn_or_the_name_only(client: TestClient) -> 
     _create(client, _unique("LOOKR"), current_revision=marker)
     _create(client, _unique("LOOKE"), erp_id=marker)
 
-    found = client.get("/api/part-numbers", params={"search": marker.lower()})
+    found = admin_of(client).get("/api/part-numbers", params={"search": marker.lower()})
     assert found.status_code == 200
     assert [row["part_number"] for row in found.json()] == sorted([by_pn, by_name])
     named = [row for row in found.json() if row["part_number"] == by_name]
@@ -906,7 +925,7 @@ def test_create_waits_on_production_creators_and_production_reuses_it(
     cell = _Cell(client)
 
     def _save(pn: str) -> Any:
-        return client.post(
+        return admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 3}]}
         )
 
@@ -923,7 +942,7 @@ def test_create_waits_on_production_creators_and_production_reuses_it(
         monkeypatch.setattr(part_numbers, "flush", pause)
         create = _Call(
             functools.partial(
-                client.post,
+                admin_of(client).post,
                 "/api/part-numbers",
                 json={"part_number": pn, "name": "FROM MANAGEMENT"},
             )
@@ -940,7 +959,7 @@ def test_create_waits_on_production_creators_and_production_reuses_it(
         assert response.status_code == 201, (name, response.text)
         monkeypatch.undo()
 
-        rows = client.get("/api/part-numbers", params={"number": pn}).json()
+        rows = admin_of(client).get("/api/part-numbers", params={"number": pn}).json()
         assert [row["name"] for row in rows] == ["FROM MANAGEMENT"], name
         events = _audit_rows(db_engine, pn)
         created = [event.after_data for event in events if event.event_type == "CREATED"]
@@ -957,13 +976,13 @@ def test_create_after_a_production_creator_answers_already_saved(
     pause = _Pause(common.flush)
     monkeypatch.setattr(part_numbers, "flush", pause)
     save = _Call(
-        lambda: client.post(
+        lambda: admin_of(client).post(
             "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 3}]}
         )
     )
     try:
         assert pause.first_inside.wait(timeout=10)
-        create = _Call(lambda: client.post("/api/part-numbers", json={"part_number": pn}))
+        create = _Call(lambda: admin_of(client).post("/api/part-numbers", json={"part_number": pn}))
         _await_lock_waiters(db_engine, 1, wait_event="advisory")
         assert create.thread.is_alive()
     finally:
@@ -986,8 +1005,8 @@ def test_edit_image_and_delete_never_wait_on_the_production_lock(
             for action in (
                 lambda: _patch(client, pn, {"name": "NO WAIT"}),
                 lambda: _put_image(client, pn, _PNG),
-                lambda: client.delete("/api/part-numbers/image", params={"number": pn}),
-                lambda: client.delete("/api/part-numbers", params={"number": pn}),
+                lambda: admin_of(client).delete("/api/part-numbers/image", params={"number": pn}),
+                lambda: admin_of(client).delete("/api/part-numbers", params={"number": pn}),
             ):
                 response = _Call(action).finish(timeout=5)
                 assert response.status_code in {200, 204}, response.text
@@ -999,7 +1018,9 @@ def test_edit_image_and_delete_never_wait_on_the_production_lock(
     with db_engine.connect() as holder:
         _hold_part_number_lock(holder, new_pn)
         try:
-            create = _Call(lambda: client.post("/api/part-numbers", json={"part_number": new_pn}))
+            create = _Call(
+                lambda: admin_of(client).post("/api/part-numbers", json={"part_number": new_pn})
+            )
             _await_lock_waiters(db_engine, 1, wait_event="advisory")
             assert create.thread.is_alive()
         finally:
@@ -1046,19 +1067,21 @@ def test_a_committed_write_answers_success_when_a_delete_commits_right_after(
     if write == "remove image":
         assert _put_image(client, pn, _PNG).status_code == 200
     actions: dict[str, Callable[[], Any]] = {
-        "create": lambda: client.post(
+        "create": lambda: admin_of(client).post(
             "/api/part-numbers", json={"part_number": pn, "name": "COMMITTED"}
         ),
         "patch": lambda: _patch(client, pn, {"name": "COMMITTED"}),
         "image": lambda: _put_image(client, pn, _PNG),
-        "remove image": lambda: client.delete("/api/part-numbers/image", params={"number": pn}),
+        "remove image": lambda: admin_of(client).delete(
+            "/api/part-numbers/image", params={"number": pn}
+        ),
     }
     pause = _Pause(common.commit)
     monkeypatch.setattr(part_numbers, "commit", pause)
     call = _Call(actions[write])
     try:
         assert pause.first_inside.wait(timeout=10)
-        deleted = client.delete("/api/part-numbers", params={"number": pn})
+        deleted = admin_of(client).delete("/api/part-numbers", params={"number": pn})
         assert deleted.status_code == 204, deleted.text
     finally:
         pause.let_first_finish.set()
@@ -1096,7 +1119,7 @@ def test_a_failed_audit_write_leaves_the_master_unchanged(
     actions: list[Callable[[], Any]] = [
         lambda: _patch(client, pn, {"name": "AFTER"}),
         lambda: _put_image(client, pn, _PNG),
-        lambda: client.delete("/api/part-numbers", params={"number": pn}),
+        lambda: admin_of(client).delete("/api/part-numbers", params={"number": pn}),
     ]
     for action in actions:
         with pytest.raises(RuntimeError, match="audit persistence failed"):
@@ -1126,7 +1149,10 @@ def test_read_models_carry_the_saved_details(client: TestClient) -> None:
         return {row["part_number"]: row for row in response.json()["rows"]}
 
     order_before = list(_board())
-    assert client.delete("/api/part-numbers", params={"number": without_master}).status_code == 204
+    assert (
+        admin_of(client).delete("/api/part-numbers", params={"number": without_master}).status_code
+        == 204
+    )
     _patch(client, with_details, {"name": "PLATE", "current_revision": "B", "erp_id": "ERP-9"})
     uploaded = _put_image(client, with_details, _PNG).json()
     _patch(client, name_only, {"name": "ONLY NAME"})

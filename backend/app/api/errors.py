@@ -37,7 +37,10 @@ clears the session cookie —, ``permission_denied`` with
 right dialog without parsing the message; a change refused because it
 would leave no active User with a password who may manage users and
 roles, or correction permissions, carries ``last_permission_holder``
-(Phase 14 slice 2).
+(Phase 14 slice 2). Since slice 3 a refused Management read adds
+``any_permission`` (any one of ``required_permissions`` opens it), and a
+Management command replayed by another User carries
+``recorded_by_another_user``.
 
 Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
@@ -68,6 +71,7 @@ from app.application.errors import (
     PasswordCheckBusyError,
     PayloadTooLargeError,
     PermissionDeniedError,
+    RecordedByAnotherUserError,
     RouteDeviationConfirmationRequiredError,
     SetupClosedError,
     SetupTokenInvalidError,
@@ -250,6 +254,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         (SetupTokenInvalidError, 403, "setup_token_invalid"),
         # Phase 14 slice 2: the last-holder rule — nothing was written.
         (LastPermissionHolderError, 409, "last_permission_holder"),
+        # Phase 14 slice 3: another User recorded this device_event_id.
+        (RecordedByAnotherUserError, 409, "recorded_by_another_user"),
     )
     for error_type, status_code, flag in _sign_in_refusals:
         _register_gate_refusal(error_type, status_code, flag)
@@ -270,13 +276,13 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     async def permission_denied_handler(request: Request, exc: Exception) -> JSONResponse:
         error = cast(PermissionDeniedError, exc)
-        return JSONResponse(
-            status_code=403,
-            content={
-                "detail": error.message,
-                "permission_denied": True,
-                "required_permissions": list(error.required),
-            },
-        )
+        content: dict[str, Any] = {
+            "detail": error.message,
+            "permission_denied": True,
+            "required_permissions": list(error.required),
+        }
+        if error.any_of:
+            content["any_permission"] = True
+        return JSONResponse(status_code=403, content=content)
 
     app.add_exception_handler(PermissionDeniedError, permission_denied_handler)

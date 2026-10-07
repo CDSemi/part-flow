@@ -752,7 +752,7 @@ def test_machine_asset_tag_format_singleton_lifecycle(
 ) -> None:
     # Unconfigured deployment: nothing is seeded, and Machine creation
     # will require this to exist.
-    unconfigured = client.get("/api/barcode-configuration/machine-asset-tag-format")
+    unconfigured = admin_of(client).get("/api/barcode-configuration/machine-asset-tag-format")
     assert unconfigured.status_code == 404
     assert "not configured" in unconfigured.json()["detail"]
 
@@ -765,7 +765,7 @@ def test_machine_asset_tag_format_singleton_lifecycle(
     assert created.json()["digits"] == 4
     assert created.json()["next_sequence"] == 1
 
-    fetched = client.get("/api/barcode-configuration/machine-asset-tag-format")
+    fetched = admin_of(client).get("/api/barcode-configuration/machine-asset-tag-format")
     assert fetched.status_code == 200
     assert fetched.json() == created.json()
 

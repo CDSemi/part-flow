@@ -1,4 +1,4 @@
-"""Integration tests for Phase 14 slice 2 — Administration route authorization.
+"""Integration tests for Phase 14 slices 2–3 — route authorization.
 
 Exercises the full request path against a dedicated temporary database
 migrated to head by the real Alembic chain (owner decisions OD-P7,
@@ -14,8 +14,9 @@ OD-P10, OD-P19):
 - the Area content rule (the timeout override is a Worker session policy
   edit);
 - Worker badge values only for callers who may manage Workers;
-- public and Scan Station routes stay anonymous (and the Management
-  routes stay open until slice 3).
+- public and Scan Station routes stay anonymous; since slice 3 every
+  Management route is checked too (its writes' allowed triples are in
+  ``test_management_authorization_api``).
 
 Identities come from ``tests.auth_harness``; set-up data is created
 through the harness administrator.
@@ -51,6 +52,7 @@ from tests.auth_harness import (
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_route_authorization_api"
 _A2 = "Your account does not have permission to do this."
+_V1 = "Your account does not have permission to view this."
 _G1 = (
     "Granting or removing correction permissions, or the permission to manage them, needs"
     " the Manage correction permissions permission."
@@ -162,6 +164,11 @@ def _concrete(path: str) -> str:
         .replace("{worker_id}", "1")
         .replace("{user_id}", "1")
         .replace("{role_id}", "1")
+        .replace("{machine_id}", "1")
+        .replace("{template_id}", "1")
+        .replace("{work_order_id}", "1")
+        .replace("{demand_id}", "1")
+        .replace("{allocation_id}", "1")
     )
 
 
@@ -198,13 +205,31 @@ def test_callers_without_the_keys_are_refused(
     caller = client_as(client)
     before = _audit_count(db_engine)
     if access.access is Access.SIGNED_IN:
+        if path == "/api/barcode-configuration/machine-asset-tag-format":
+            # Read by Administration and Management → Machines (slice 3):
+            # answered once a format exists.
+            _ok(admin_of(client).put(path, json={"prefix": "RZ-", "digits": 4}))
         if method == "GET":
             _ok(caller.get(_concrete(path)))
         return
-    if access.requires:
+    if access.any_of:
+        _denied(caller.request(method, _concrete(path)), list(access.any_of), _V1)
+        assert caller.request(method, _concrete(path)).json()["any_permission"] is True
+    elif access.requires:
         _denied(caller.request(method, _concrete(path)), list(access.requires))
     elif path == "/api/areas/{area_id}":
         _denied(caller.patch(_concrete(path), json={}), [MA])
+    elif path == "/api/work-orders/{work_order_id}":
+        _denied(caller.patch(_concrete(path), json={}), [Permission.MANAGE_WORK_ORDERS])
+    elif path == "/api/hot-list/changes":
+        # A valid Move body (same id set) — the content rule names Reorder.
+        move = {
+            "device_event_id": _FIXED_UUID,
+            "action": "MOVE_DOWN",
+            "expected_order": [1, 2],
+            "new_order": [2, 1],
+        }
+        _denied(caller.post(path, json=move), [Permission.REORDER_HOT_ITEMS])
     else:
         assert path == "/api/roles/{role_id}"
         _denied(caller.patch(_concrete(path), json={}), [MUAR])
@@ -715,12 +740,47 @@ def _state(engine: Engine, table: str, key_column: str, path: str) -> tuple[int,
     return rows, audits, target
 
 
+#: The Management writes of Phase 14 slice 3 — their allowed triples are
+#: MA-1 of ``test_management_authorization_api``.
+_MANAGEMENT_WRITES = {
+    ("POST", "/api/machines"),
+    ("PATCH", "/api/machines/{machine_id}"),
+    ("POST", "/api/machines/{machine_id}/maintenance"),
+    ("DELETE", "/api/machines/{machine_id}/maintenance"),
+    ("POST", "/api/machines/{machine_id}/retire"),
+    ("POST", "/api/machines/{machine_id}/reactivate"),
+    ("POST", "/api/part-numbers"),
+    ("PATCH", "/api/part-numbers"),
+    ("DELETE", "/api/part-numbers"),
+    ("PUT", "/api/part-numbers/image"),
+    ("DELETE", "/api/part-numbers/image"),
+    ("POST", "/api/route-templates"),
+    ("PUT", "/api/route-templates/{template_id}"),
+    ("POST", "/api/route-templates/{template_id}/archive"),
+    ("DELETE", "/api/route-templates/{template_id}"),
+    ("POST", "/api/work-orders"),
+    ("PATCH", "/api/work-orders/{work_order_id}"),
+    ("DELETE", "/api/work-orders/{work_order_id}/demands/{demand_id}"),
+    ("POST", "/api/work-orders/{work_order_id}/demands/{demand_id}/release"),
+    ("POST", "/api/hot-list/changes"),
+    ("POST", "/api/allocations/management"),
+    ("POST", "/api/allocations/{allocation_id}/reversals"),
+}
+
+
 def test_the_write_table_covers_every_permission_route() -> None:
-    """Every Administration write route has a row whose keys match the registry."""
+    """Every Administration write route has a row whose keys match the
+    registry; together with the Management writes (MA-1) every write
+    route with static or conditional keys is covered exactly once (the
+    any-of reads are RZ-1 … RZ-3 and MA-2)."""
     permission_routes = {
-        key for key, access in ROUTE_ACCESS.items() if access.access is Access.PERMISSION
+        key
+        for key, access in ROUTE_ACCESS.items()
+        if access.access is Access.PERMISSION and not access.any_of
     }
-    assert {(write.method, write.route) for write in _WRITES} == permission_routes
+    administration = {(write.method, write.route) for write in _WRITES}
+    assert not administration & _MANAGEMENT_WRITES
+    assert administration | _MANAGEMENT_WRITES == permission_routes
     for write in _WRITES:
         access = ROUTE_ACCESS[(write.method, write.route)]
         assert access.requires == write.static, write.name
@@ -893,9 +953,9 @@ def test_public_and_station_routes_need_no_sign_in(client: TestClient) -> None:
         json={"part_number": f"PN-{_suffix()}"},
     )
     assert resolved.status_code not in (401, 403), resolved.text
-    # A Management write stays open until slice 3 (interim; slice 3 classifies it).
+    # A Management write needs a signed-in User since slice 3.
     machine = anonymous.post(
         "/api/machines",
         json={"name": f"M {_suffix()}", "area_id": station["area_id"]},
     )
-    assert machine.status_code not in (401, 403), machine.text
+    assert machine.status_code == 401, machine.text

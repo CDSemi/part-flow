@@ -80,6 +80,20 @@ function authFailureKind(
 }
 
 /**
+ * Whether a refusal carries the boolean flag `flag` in its JSON body
+ * (e.g. `authentication_required`, `permission_denied`,
+ * `recorded_by_another_user`).
+ */
+export function refusalFlag(error: unknown, flag: string): boolean {
+  return (
+    error instanceof ApiError &&
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    (error.body as Record<string, unknown>)[flag] === true
+  );
+}
+
+/**
  * User-facing message of a failed call: the backend's own message for
  * an `ApiError`, one generic unreachable-server sentence for network
  * failures (never a raw internal error).

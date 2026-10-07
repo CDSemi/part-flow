@@ -2,11 +2,11 @@
 // permissions): named, editable roles and the permissions each one
 // grants. Every application User holds exactly one role.
 //
-// The server checks the Administration permissions of the signed-in
-// user's role (Phase 14 slice 2); the Management and Scan Station
-// permissions are recorded and checked by later slices. The client only
-// hides what the role does not allow — the server decides. Workers who
-// scan at the Scan Stations hold no role.
+// The server checks the Administration (Phase 14 slice 2) and
+// Management (slice 3) permissions of the signed-in user's role; the
+// Scan Station permissions are recorded, and how they apply is decided
+// later. The client only hides what the role does not allow — the
+// server decides. Workers who scan at the Scan Stations hold no role.
 //
 // Wire responses are the backend's snake_case schema; this module maps
 // them to the camelCase application type. Permission edits travel as

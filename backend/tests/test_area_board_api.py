@@ -162,7 +162,7 @@ class _Cell:
         self.machine_names: list[str] = []
         for index in range(machine_count):
             machine_name = f"{name} M{index + 1}"
-            machine = client.post(
+            machine = admin_of(client).post(
                 "/api/machines", json={"area_id": self.area_id, "name": machine_name}
             )
             assert machine.status_code == 201, machine.text
@@ -219,7 +219,7 @@ def _create_work_order(
         payload["work_order_number"] = number
     if received_date is not None:
         payload["received_date"] = received_date
-    response = client.post("/api/work-orders", json=payload)
+    response = admin_of(client).post("/api/work-orders", json=payload)
     assert response.status_code == 201, response.text
     return _WorkOrder(response.json())
 
@@ -254,7 +254,7 @@ def _release(
     quantity: int = 10,
     confirm_active_quantity: bool = False,
 ) -> int:
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order.id}/demands/{demand_id or work_order.demand_id}/release",
         json={
             "part_number": pn,
@@ -363,8 +363,8 @@ def _undo(client: TestClient, cell: _Cell, pn: str, reverses: str) -> None:
 
 
 def _allocate(client: TestClient, pn: str, lines: list[tuple[int, int]]) -> None:
-    response = client.post(
-        "/api/allocations",
+    response = admin_of(client).post(
+        "/api/allocations/management",
         json={
             "part_number": pn,
             "allocation_quantity": sum(qty for _, qty in lines),
@@ -412,7 +412,7 @@ def _set_occurred_at(engine: Engine, movement_id: int, occurred_at: datetime.dat
 
 def _board(client: TestClient, department_id: int | None) -> dict[str, Any]:
     params = {"department_id": department_id} if department_id is not None else {}
-    response = client.get("/api/area-board", params=params)
+    response = admin_of(client).get("/api/area-board", params=params)
     assert response.status_code == 200, response.text
     return cast(dict[str, Any], response.json())
 
@@ -455,7 +455,7 @@ def test_the_board_names_its_department_and_refuses_an_unknown_one(
     board = _board(client, shop.department_id)
     assert board["department"]["id"] == shop.department_id
 
-    missing = client.get("/api/area-board", params={"department_id": 999_999})
+    missing = admin_of(client).get("/api/area-board", params={"department_id": 999_999})
     assert missing.status_code == 404
     assert "does not exist" in missing.json()["detail"]
 
@@ -468,7 +468,7 @@ def test_without_an_id_an_ambiguous_department_configuration_is_refused(
     # ambiguous, and the refusal names both.
     second = _create_department(client, name=_unique("Assembly"))
     try:
-        ambiguous = client.get("/api/area-board")
+        ambiguous = admin_of(client).get("/api/area-board")
         assert ambiguous.status_code == 409
         detail = ambiguous.json()["detail"]
         assert f"(id {shop.department_id})" in detail
@@ -479,7 +479,7 @@ def test_without_an_id_an_ambiguous_department_configuration_is_refused(
         )
         assert deactivated.status_code == 200, deactivated.text
 
-    resolved = client.get("/api/area-board")
+    resolved = admin_of(client).get("/api/area-board")
     assert resolved.status_code == 200
     assert resolved.json()["department"]["id"] == shop.department_id
 
@@ -683,9 +683,9 @@ def test_finished_quantity_keeps_its_completing_machine_after_retirement(
 
     # Retirement is allowed now: the Machine holds no assigned quantity
     # any more — the finished quantity waits in the Area.
-    retired = client.post(
+    retired = admin_of(client).post(
         f"/api/machines/{cell.machine_ids[0]}/retire",
-        json={"reason": "replaced", "actor": "tester"},
+        json={"reason": "replaced"},
     )
     assert retired.status_code == 200, retired.text
 

@@ -41,9 +41,9 @@ Rules owned here:
 - **Two invariants, enforced under locks** (§8.12): the total active
   allocation of a PN never exceeds its available stocked quantity, and
   a demand's allocation never exceeds its requested quantity — an
-  allocation beyond the remaining shortage is refused (no "explicitly
-  authorized correction" exists before Phase 14 authorization, so none
-  is simulated). Both are judged inside ONE transaction under the ONE
+  allocation beyond the remaining shortage is refused (the explicitly
+  authorized beyond-demand correction is a separate command, not built
+  here). Both are judged inside ONE transaction under the ONE
   shared PN-level advisory lock (serializing every allocation and
   reversal of one PN, so two concurrent confirmations can never jointly
   exceed the available quantity — and serializing a reversal, which
@@ -53,11 +53,11 @@ Rules owned here:
   (serializing against the demand edit's committed-quantity floor and
   against a release) and on every affected Work Order row (the
   completion projection). A confirmation also takes the Hot advisory
-  lock after the PN lock, the Stockroom station FOR KEY SHARE, and
-  locks the ranked demand rows its Hot removal can shift in the same
-  ascending demand pass (lock order: PN → Hot → station → demand rows
-  → Work Orders; a reversal takes PN → station → demand → Work Order
-  and never the Hot lock).
+  lock after the PN lock, the Stockroom station FOR KEY SHARE (station
+  confirmation only), and locks the ranked demand rows its Hot removal
+  can shift in the same ascending demand pass (lock order: PN → Hot →
+  station → demand rows → Work Orders; a reversal takes PN → demand →
+  Work Order and never the Hot lock).
 - **Automatic Hot removal** (Phase 12 follow-up, owner decision OD1;
   PROJECT_PROFILE §21): a ranked line this confirmation fully allocates
   — its Work Order completing included — leaves the Hot list in the
@@ -94,12 +94,18 @@ Rules owned here:
   result whatever changed since; a mismatched reuse is an explicit
   conflict; a race lost at COMMIT replays the winner; every refusal
   writes nothing.
-- Deliberately absent: authorization for Management adjustments
-  (Phase 14 — the `source` and the reference-free `actor_reference`
-  record who/where without pretending to authorize) and any return of
-  stocked quantity to production (PROJECT_PROFILE §32 open decision 1).
-  A station allocation or reversal records `allocated_by_worker_id`
-  from the station Area's mode; a Management one records none.
+- **Two entry points, one command** (Phase 14 slice 3): the Stockroom
+  station's receiving confirmation (`confirm_station_allocation`, source
+  STOCKROOM, `allocated_by_worker_id` from the station Area's mode) and
+  the Management allocation (`allocate_from_stock`, source MANAGEMENT);
+  the reversal is Management-only. Which one runs is decided by the
+  entry point, never by an optional argument. `actor_user_id` is the
+  signed-in User of a Management command (NULL at the station); the
+  legacy `actor_reference` text column is kept for history and written
+  no more. A Management command replayed by another User is refused
+  (`RecordedByAnotherUserError`).
+- Deliberately absent: any return of stocked quantity to production
+  (PROJECT_PROFILE §32 open decision 1).
 """
 
 import datetime
@@ -115,10 +121,12 @@ from sqlalchemy.orm import Session, aliased
 from app.application import audit, hot_ranks, station_identity
 from app.application.common import device_event_id_text, optional_text, required_text
 from app.application.errors import (
+    RECORDED_BY_ANOTHER_USER_MESSAGE,
     ConflictError,
     IdempotencyConflictError,
     InvalidInputError,
     NotFoundError,
+    RecordedByAnotherUserError,
 )
 from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import stocked_quantity_of
@@ -437,6 +445,7 @@ class AllocationRow(NamedTuple):
     reverses_allocation_id: int | None
     station_id: str | None
     actor_reference: str | None
+    actor_user_id: int | None
     allocated_at: datetime.datetime
     command_sequence: int
 
@@ -517,6 +526,7 @@ def _result_from_rows(
                 reverses_allocation_id=row.reverses_allocation_id,
                 station_id=row.station_id,
                 actor_reference=row.actor_reference,
+                actor_user_id=row.actor_user_id,
                 allocated_at=row.allocated_at,
                 command_sequence=row.command_sequence,
             )
@@ -530,13 +540,26 @@ def _result_from_rows(
 
 
 def _replay_or_conflict(
-    session: Session, rows: Sequence[WorkOrderAllocation], fingerprint: str
+    session: Session,
+    rows: Sequence[WorkOrderAllocation],
+    fingerprint: str,
+    actor_user_id: int | None,
 ) -> AllocationResult:
+    """Replay the committed command, or refuse a reuse.
+
+    The fingerprint is checked first (a different intent is the plain
+    idempotency conflict); then the stored actor must be the caller's —
+    a Management command recorded by another User, or before sign-in
+    existed (NULL), is not replayed to this one. Station rows carry
+    NULL, so a station replay compares NULL with NULL.
+    """
     stored = (rows[-1].metadata_ or {}).get(FINGERPRINT_KEY)
     if stored != fingerprint or any(
         (row.metadata_ or {}).get(FINGERPRINT_KEY) != stored for row in rows
     ):
         raise _reused_for_other_intent()
+    if any(row.actor_user_id != actor_user_id for row in rows):
+        raise RecordedByAnotherUserError(RECORDED_BY_ANOTHER_USER_MESSAGE)
     return _result_from_rows(session, rows, created=False)
 
 
@@ -691,7 +714,7 @@ def complete_after_demand_change(
     work_order: WorkOrder,
     *,
     trigger: DemandChangeTrigger,
-    actor: str | None,
+    actor_user_id: int,
 ) -> bool:
     """Complete an open Work Order a demand change left fully allocated (§8.2).
 
@@ -711,7 +734,8 @@ def complete_after_demand_change(
     own timestamp — the completing event, as `_apply_completion` uses
     the allocation's — and the completion is audited on the Work Order
     with its cause (the allocation rows carry theirs in their command
-    metadata). Returns whether the Work Order completed.
+    metadata) and the signed-in User who made the demand change.
+    Returns whether the Work Order completed.
     """
     if work_order.completed_at is not None or not _work_order_is_complete(
         session, work_order.id, {}
@@ -731,7 +755,7 @@ def complete_after_demand_change(
         entity_id=str(work_order.id),
         before_data={"completed_at": None},
         after_data={"completed_at": completed_at.isoformat()},
-        actor_reference=actor,
+        actor_user_id=actor_user_id,
         metadata={COMPLETION_AUDIT_KEY: {"trigger": trigger}},
     )
     return True
@@ -772,22 +796,77 @@ def _normalized_lines(lines: Sequence[Mapping[str, Any]]) -> list[ConfirmedLine]
     return normalized
 
 
-def confirm_allocation(
+def confirm_station_allocation(
     session: Session,
     *,
+    station_id: str,
     part_number: object,
     allocation_quantity: object,
     lines: Sequence[Mapping[str, Any]],
-    station_id: str | None = None,
-    actor: str | None = None,
     reason: str | None = None,
+    device_event_id: object,
+) -> AllocationResult:
+    """The Stockroom station's receiving confirmation (PROJECT_PROFILE §18).
+
+    The routine Operator workflow: source STOCKROOM, the Worker identity
+    of the station Area's mode, no User (``actor_user_id`` NULL).
+    """
+    return _confirm_allocation(
+        session,
+        station_id=station_id,
+        actor_user_id=None,
+        part_number=part_number,
+        allocation_quantity=allocation_quantity,
+        lines=lines,
+        reason=reason,
+        device_event_id=device_event_id,
+    )
+
+
+def allocate_from_stock(
+    session: Session,
+    *,
+    actor_user_id: int,
+    part_number: object,
+    allocation_quantity: object,
+    lines: Sequence[Mapping[str, Any]],
+    reason: str | None = None,
+    device_event_id: object,
+) -> AllocationResult:
+    """A Management allocation of stocked quantity (allocate-later, §8.12).
+
+    Source MANAGEMENT, recorded with the signed-in User; no station and
+    no Worker identity. The routine limit holds: never beyond a line's
+    remaining shortage.
+    """
+    return _confirm_allocation(
+        session,
+        station_id=None,
+        actor_user_id=actor_user_id,
+        part_number=part_number,
+        allocation_quantity=allocation_quantity,
+        lines=lines,
+        reason=reason,
+        device_event_id=device_event_id,
+    )
+
+
+def _confirm_allocation(
+    session: Session,
+    *,
+    station_id: str | None,
+    actor_user_id: int | None,
+    part_number: object,
+    allocation_quantity: object,
+    lines: Sequence[Mapping[str, Any]],
+    reason: str | None,
     device_event_id: object,
 ) -> AllocationResult:
     """Allocate stocked quantity of one PN to demand lines, ONE transaction.
 
-    The Stockroom receiving confirmation (``station_id`` set — the
-    routine Operator workflow, PROJECT_PROFILE §18) and a Management
-    allocation (``station_id`` None) are the same command.
+    Exactly one of ``station_id`` (the Stockroom confirmation) and
+    ``actor_user_id`` (a Management allocation) is set — the entry
+    point decides, never a client input.
     ``allocation_quantity`` is the explicit quantity being allocated:
     the lines must sum to exactly it, and the PN's available stocked
     quantity must still cover it when the command is judged under the
@@ -805,6 +884,7 @@ def confirm_allocation(
     COMMIT (or replay of a race winner). A replay never touches the Hot
     list: it returns before any lock.
     """
+    assert (station_id is None) != (actor_user_id is None), "one of station or User"
     pn = canonical_part_number(part_number)
     confirmed = _normalized_lines(lines)
     if (
@@ -824,6 +904,10 @@ def confirm_allocation(
     reason_text = optional_text(reason, "The allocation reason")
     event_id = device_event_id_text(device_event_id)
     source = AllocationSource.STOCKROOM if station_id is not None else AllocationSource.MANAGEMENT
+    # The key set is the pre-Phase 14 one: "actor" stays, always None, so
+    # every command committed before slice 3 still replays to the same
+    # hash. Identity is never part of the fingerprint — a different User
+    # is refused by the actor comparison of the replay instead.
     fingerprint = _fingerprint(
         {
             "command": "ALLOCATE",
@@ -831,7 +915,7 @@ def confirm_allocation(
             "allocation_quantity": allocation_quantity,
             "lines": [list(line) for line in sorted(confirmed)],
             "station_id": station_id,
-            "actor": actor,
+            "actor": None,
             "reason": reason_text,
         }
     )
@@ -839,7 +923,7 @@ def confirm_allocation(
     # -- Idempotency fast path (SLICE1 §14) ------------------------------
     committed = committed_allocation_command(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
 
     # -- Serialize per PN and on the Hot list, then lock the rows --------
     # The Hot lock is taken unconditionally: whether a line is ranked is
@@ -859,7 +943,7 @@ def confirm_allocation(
     # -- Idempotency RE-CHECK after the blocking locks -------------------
     committed = committed_allocation_command(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
 
     # -- Validation under the locks -------------------------------------
     for line in confirmed:
@@ -941,7 +1025,7 @@ def confirm_allocation(
                 "source": str(source),
                 "station_id": station_id or None,
             },
-            actor=actor,
+            actor_user_id=actor_user_id,
         )
     metadata: dict[str, Any] = {
         FINGERPRINT_KEY: fingerprint,
@@ -963,7 +1047,7 @@ def confirm_allocation(
             allocation_reason=reason_text,
             reverses_allocation_id=None,
             station_id=station.station_id if station is not None else None,
-            actor_reference=actor,
+            actor_user_id=actor_user_id,
             allocated_by_worker_id=identity.worker_id,
             allocated_at=func.now(),
             device_event_id=event_id,
@@ -986,7 +1070,7 @@ def confirm_allocation(
         if getattr(diagnostics, "constraint_name", None) == ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT:
             winner = committed_allocation_command(session, event_id)
             if winner:
-                return _replay_or_conflict(session, winner, fingerprint)
+                return _replay_or_conflict(session, winner, fingerprint, actor_user_id)
         raise
     return _result_from_rows(session, rows, created=True)
 
@@ -1001,32 +1085,35 @@ def reverse_allocation(
     *,
     allocation_id: int,
     reason: object,
-    station_id: str | None = None,
-    actor: str | None = None,
     device_event_id: object,
+    actor_user_id: int,
 ) -> AllocationResult:
     """Take one allocation back — the auditable adjustment (§8.12), ONE transaction.
 
-    Appends a REVERSAL row referencing the allocation (UNIQUE — once),
-    returns the quantity to the PN's available stock, lowers the
-    demand's projection and reopens the Work Order when it was
-    complete. The original row is never touched. A smaller allocation
-    is this reversal followed by a new confirmation.
+    Management only (Phase 14 slice 3): source MANAGEMENT, no station,
+    no Worker identity, recorded with the signed-in User. Appends a
+    REVERSAL row referencing the allocation (UNIQUE — once), returns the
+    quantity to the PN's available stock, lowers the demand's projection
+    and reopens the Work Order when it was complete. The original row is
+    never touched. A smaller allocation is this reversal followed by a
+    new allocation.
     """
     reason_text = required_text(reason, "The adjustment reason")
     event_id = device_event_id_text(device_event_id)
+    # The pre-Phase 14 key set, "station_id" and "actor" constant None, so
+    # every reversal committed before slice 3 still replays to its hash.
     fingerprint = _fingerprint(
         {
             "command": "REVERSE_ALLOCATION",
             "allocation_id": allocation_id,
             "reason": reason_text,
-            "station_id": station_id,
-            "actor": actor,
+            "station_id": None,
+            "actor": None,
         }
     )
     committed = committed_allocation_command(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
 
     original = session.get(WorkOrderAllocation, allocation_id)
     if original is None:
@@ -1038,16 +1125,13 @@ def reverse_allocation(
             " Nothing was recorded."
         )
     _acquire_part_number_allocation_lock(session, original.part_number)
-    # The station (FOR KEY SHARE) after the PN lock and before the demand
-    # row: no row lock precedes the advisory lock, and no demand row is
-    # held while waiting on a station. No Hot lock: a reversal never
-    # removes a Hot entry, and nothing is re-added (OD1).
-    station = _require_stockroom_station(session, station_id) if station_id is not None else None
+    # No Hot lock: a reversal never removes a Hot entry, and nothing is
+    # re-added (OD1).
     demand = _lock_demands(session, [original.work_order_demand_id])[original.work_order_demand_id]
     work_order = _lock_work_orders(session, [demand.work_order_id])[demand.work_order_id]
     committed = committed_allocation_command(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
     already = session.scalar(
         select(WorkOrderAllocation.id)
         .where(WorkOrderAllocation.reverses_allocation_id == original.id)
@@ -1057,11 +1141,6 @@ def reverse_allocation(
         raise ConflictError(
             f"Allocation {allocation_id} has already been reversed. Nothing was recorded."
         )
-    identity = (
-        station_identity.resolve_station_identity(session, station)
-        if station is not None
-        else station_identity.NO_IDENTITY
-    )
     allocated_before = active_allocations_by_demand(session, [demand.id]).get(demand.id, 0)
     completed, reopened = _apply_completion(
         session, {work_order.id: work_order}, {demand.id: -original.quantity}
@@ -1080,13 +1159,13 @@ def reverse_allocation(
         part_number=original.part_number,
         work_order_demand_id=original.work_order_demand_id,
         quantity=original.quantity,
-        source=AllocationSource.STOCKROOM if station is not None else AllocationSource.MANAGEMENT,
+        source=AllocationSource.MANAGEMENT,
         is_manual_override=True,
         allocation_reason=reason_text,
         reverses_allocation_id=original.id,
-        station_id=station.station_id if station is not None else None,
-        actor_reference=actor,
-        allocated_by_worker_id=identity.worker_id,
+        station_id=None,
+        actor_user_id=actor_user_id,
+        allocated_by_worker_id=None,
         allocated_at=func.now(),
         device_event_id=event_id,
         command_sequence=1,
@@ -1104,7 +1183,7 @@ def reverse_allocation(
         if constraint == ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT:
             winner = committed_allocation_command(session, event_id)
             if winner:
-                return _replay_or_conflict(session, winner, fingerprint)
+                return _replay_or_conflict(session, winner, fingerprint, actor_user_id)
         if constraint == _REVERSES_UNIQUE_CONSTRAINT:
             raise ConflictError(
                 f"Allocation {allocation_id} has already been reversed. Nothing was recorded."

@@ -49,8 +49,9 @@ exactly one ``audit_events`` row in it (entity ``RouteTemplate``,
 ``DELETED``. Rejected writes and no-ops append nothing. Configuration
 writes carry no idempotency key: an identical PUT and an archive of an
 archived template are no-ops, a repeated DELETE is 404; a retried POST
-may create a second never-used template (S8-OD15). Permission
-enforcement is Phase 14.
+may create a second never-used template (S8-OD15). Each audit row
+carries ``actor_user_id``, the signed-in User; the routes require Manage
+Planned Routes (Phase 14 slice 3).
 """
 
 import datetime
@@ -597,7 +598,12 @@ def _lock_for_edit(session: Session, template_id: int) -> RouteTemplate:
 
 
 def create_route_template(
-    session: Session, *, name: object, description: object, steps: Sequence[RouteStepInput]
+    session: Session,
+    *,
+    name: object,
+    description: object,
+    steps: Sequence[RouteStepInput],
+    actor_user_id: int,
 ) -> RouteTemplateRecord:
     """Create an active, never-used template with its ordered steps."""
     route_name = _route_name(name)
@@ -616,6 +622,7 @@ def create_route_template(
         entity_id=str(template.id),
         before_data=None,
         after_data=route_template_snapshot(template, rows),
+        actor_user_id=actor_user_id,
     )
     return _commit_record(session, template, rows, ever_used=False, usage_count=0)
 
@@ -627,6 +634,7 @@ def replace_route_template(
     name: object,
     description: object,
     steps: Sequence[RouteStepInput],
+    actor_user_id: int,
 ) -> RouteTemplateRecord:
     """Replace name, description and the whole step set (full PUT).
 
@@ -687,6 +695,7 @@ def replace_route_template(
         entity_id=str(template.id),
         before_data=before,
         after_data=route_template_snapshot(template, rows),
+        actor_user_id=actor_user_id,
     )
     return _commit_record(
         session,
@@ -697,7 +706,9 @@ def replace_route_template(
     )
 
 
-def archive_route_template(session: Session, template_id: int) -> RouteTemplateRecord:
+def archive_route_template(
+    session: Session, template_id: int, *, actor_user_id: int
+) -> RouteTemplateRecord:
     """Archive an ever-used template; already archived is a no-op.
 
     Ever-used is read under the edit lock, which a release or receipt
@@ -728,11 +739,12 @@ def archive_route_template(session: Session, template_id: int) -> RouteTemplateR
         entity_id=str(template.id),
         before_data=before,
         after_data=route_template_snapshot(template, steps),
+        actor_user_id=actor_user_id,
     )
     return _commit_record(session, template, steps, ever_used=True, usage_count=usage_count)
 
 
-def delete_route_template(session: Session, template_id: int) -> None:
+def delete_route_template(session: Session, template_id: int, *, actor_user_id: int) -> None:
     """Delete a never-used template and its steps.
 
     The row is locked FOR UPDATE (the DELETE's own mode): a release or
@@ -758,5 +770,6 @@ def delete_route_template(session: Session, template_id: int) -> None:
         entity_id=str(template_id),
         before_data=before,
         after_data=None,
+        actor_user_id=actor_user_id,
     )
     commit(session, conflicts)

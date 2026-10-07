@@ -41,23 +41,35 @@ Department contract: every route resolves the single active Department
 change answers regardless, as above) — and there is deliberately no
 ``department_id`` parameter (the rank is one column per demand).
 
-No authorization is enforced or simulated (Phase 14): no request
-carries an actor, so the audit rows stay NULL.
+Access (Phase 14 slice 3, ``app.api.route_access``): the reads need View
+production data or a priority key; a change that adds or removes an
+entry needs Set Work Order Demand priority, one that only reorders needs
+Reorder Hot items — judged on ``expected_order → new_order`` as sent,
+never on the action label, Undo and Redo included
+(``authorization.hot_list_change_permissions``). No request carries an
+actor: the audit rows carry the signed-in User (``actor_user_id``), and a
+replay of a change another User recorded is a 409
+(``recorded_by_another_user``).
 """
 
 import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, StrictInt
 
+from app.api.authorization import PRIORITY_READ, RequireAnyPermission, SignedInDep, actor_of
 from app.api.dependencies import SessionDep
-from app.application import hot_list
+from app.application import authorization, hot_list
+from app.application.authentication import Principal
 from app.application.hot_list import HotEntry, HotLocation
 from app.application.production_board import LocationState
 from app.domain.enums import RequestType
 from app.domain.hot_list import HotListAction
 
 router = APIRouter(prefix="/api")
+
+HotListReaderDep = Annotated[Principal, Depends(RequireAnyPermission(*PRIORITY_READ))]
 
 
 class HotListAreaRef(BaseModel):
@@ -192,7 +204,7 @@ def entry_response(entry: HotEntry) -> HotListEntryResponse:
 
 
 @router.get("/hot-list")
-def get_hot_list(session: SessionDep) -> HotListResponse:
+def get_hot_list(principal: HotListReaderDep, session: SessionDep) -> HotListResponse:
     result = hot_list.hot_list(session)
     return HotListResponse(
         department=HotListDepartmentRef(id=result.department.id, name=result.department.name),
@@ -202,7 +214,10 @@ def get_hot_list(session: SessionDep) -> HotListResponse:
 
 @router.get("/hot-list/candidates")
 def get_hot_list_candidates(
-    session: SessionDep, search: str | None = None, barcode: str | None = None
+    principal: HotListReaderDep,
+    session: SessionDep,
+    search: str | None = None,
+    barcode: str | None = None,
 ) -> HotListCandidatesResponse:
     result = hot_list.hot_list_candidates(session, search=search, barcode=barcode)
     return HotListCandidatesResponse(
@@ -215,14 +230,19 @@ def get_hot_list_candidates(
 
 @router.post("/hot-list/changes")
 def apply_hot_list_change(
-    body: HotListChangeRequest, session: SessionDep, response: Response
+    principal: SignedInDep, body: HotListChangeRequest, session: SessionDep, response: Response
 ) -> HotListChangeResponse:
+    authorization.require(
+        actor_of(principal),
+        authorization.hot_list_change_permissions(body.expected_order, body.new_order),
+    )
     result = hot_list.apply_hot_list_change(
         session,
         device_event_id=body.device_event_id,
         action=body.action,
         expected_order=body.expected_order,
         new_order=body.new_order,
+        actor_user_id=principal.user_id,
     )
     response.status_code = 201 if result.created else 200
     return HotListChangeResponse(

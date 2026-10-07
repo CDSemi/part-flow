@@ -14,13 +14,20 @@ import './pn-barcode.css';
  * Opening the dialog never touches the line draft, the dirty state, or
  * release behavior — the dialog's own writes concern only the Part
  * Number details, never the demand.
+ *
+ * For a user who may not manage Part Numbers (`readOnly`) the PN stays
+ * the control without the glyph and its host opens the dialog
+ * read-only — the barcode label stays reachable from every demand line.
  */
 export function PnEditButton({
   pn,
+  readOnly = false,
   onOpen,
 }: {
   /** The canonical uppercase PN. */
   pn: string;
+  /** The host opens the read-only `Part Number details`. */
+  readOnly?: boolean;
   onOpen: () => void;
 }) {
   return (
@@ -28,13 +35,17 @@ export function PnEditButton({
       type="button"
       className="pnb-pnbtn"
       title={pn}
-      aria-label={`Edit Part Number ${pn}`}
+      aria-label={
+        readOnly ? `Part Number ${pn} details` : `Edit Part Number ${pn}`
+      }
       onClick={onOpen}
     >
       {pn}
-      <span className="pnb-pnicon" aria-hidden="true">
-        ✎
-      </span>
+      {readOnly ? null : (
+        <span className="pnb-pnicon" aria-hidden="true">
+          ✎
+        </span>
+      )}
     </button>
   );
 }

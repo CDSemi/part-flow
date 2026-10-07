@@ -16,10 +16,13 @@ omitted, the single active Department is used — none is 404, several is
 
 A read: nothing is written, and every derived time value (the dwell
 time, the due countdown) is left to the view's shared clock — the
-response carries only the fixed source timestamps and dates.
+response carries only the fixed source timestamps and dates. It needs
+View production data (Phase 14 slice 3).
 """
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.api.area_inventory import (
@@ -30,8 +33,10 @@ from app.api.area_inventory import (
     demand_entries,
     operation_ref,
 )
+from app.api.authorization import AREA_BOARD_READ, RequireAnyPermission
 from app.api.dependencies import SessionDep
 from app.application import area_board
+from app.application.authentication import Principal
 
 router = APIRouter(prefix="/api")
 
@@ -85,7 +90,11 @@ def _area(entry: area_board.AreaBoardArea) -> AreaBoardAreaResponse:
 
 
 @router.get("/area-board")
-def get_area_board(session: SessionDep, department_id: int | None = None) -> AreaBoardResponse:
+def get_area_board(
+    principal: Annotated[Principal, Depends(RequireAnyPermission(*AREA_BOARD_READ))],
+    session: SessionDep,
+    department_id: int | None = None,
+) -> AreaBoardResponse:
     board = area_board.area_board(session, department_id)
     return AreaBoardResponse(
         department=AreaBoardDepartmentRef(id=board.department.id, name=board.department.name),

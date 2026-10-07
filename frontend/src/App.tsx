@@ -2,7 +2,14 @@ import './styles/tokens.css';
 import './styles/global.css';
 import './app/shell.css';
 
-import { Suspense, useEffect, useRef, useState } from 'react';
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 
 import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
@@ -13,13 +20,22 @@ import type { AppViewKey } from './app/view-keys';
 import { Link } from './app/link';
 import { NotFoundView } from './app/NotFoundView';
 import { useRouter } from './app/router-context';
-import { isChromeHidden } from './app/router-core';
+import {
+  canReadManagementView,
+  MANAGEMENT_READ_ACCESS,
+  readableManagementSubviews,
+} from './app/management-access';
+import { isChromeHidden, MANAGEMENT_NAV_ORDER } from './app/router-core';
 import type { ManagementSubview, Route } from './app/router-core';
 import { RouterProvider } from './app/router-provider';
+import { useSession } from './app/session-context';
 import { SessionProvider } from './app/session-provider';
+import { SignInGate } from './app/SignInGate';
 import { ThemeProvider } from './app/theme-provider';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LoadingState } from './components/view-states';
+import { PERMISSION_LABELS } from './views/administration/permissions';
+import { useHotHistoryOwnerReset } from './views/priority/hot-history';
 
 const TOP_NAV: {
   to: string;
@@ -48,17 +64,23 @@ const TOP_NAV: {
   },
 ];
 
+const MANAGEMENT_LABELS: Record<ManagementSubview, string> = {
+  'area-board': 'Area Board',
+  'work-orders': 'Work Orders',
+  tracking: 'PN Tracking',
+  priority: 'Priority',
+  'planned-routes': 'Planned Routes',
+  'part-numbers': 'Part Numbers',
+  machines: 'Machines',
+};
+
 // Sub-view order: Part Numbers sits next to last, Machines last —
-// directly after it (GUI_DESIGN §1.1).
-const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
-  { subview: 'area-board', label: 'Area Board' },
-  { subview: 'work-orders', label: 'Work Orders' },
-  { subview: 'tracking', label: 'PN Tracking' },
-  { subview: 'priority', label: 'Priority' },
-  { subview: 'planned-routes', label: 'Planned Routes' },
-  { subview: 'part-numbers', label: 'Part Numbers' },
-  { subview: 'machines', label: 'Machines' },
-];
+// directly after it (GUI_DESIGN §1.1; router-core owns the order).
+const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] =
+  MANAGEMENT_NAV_ORDER.map((subview) => ({
+    subview,
+    label: MANAGEMENT_LABELS[subview],
+  }));
 
 function OfflineBanner() {
   const { status, retry } = useConnectivity();
@@ -94,8 +116,60 @@ function ViewForRoute({ route }: { route: Route }) {
   return <RealView />;
 }
 
+/**
+ * What a signed-in user who may not open a Management sub view sees in
+ * its place (Phase 14 slice 3): the permissions that open it. No request
+ * of the sub view is sent.
+ */
+function ManagementAccessPanel({ subview }: { subview: ManagementSubview }) {
+  const labels = MANAGEMENT_READ_ACCESS[subview].map(
+    (key) => PERMISSION_LABELS[key],
+  );
+  const title = MANAGEMENT_LABELS[subview];
+  return (
+    <section className="mgmt-access" aria-label={title}>
+      <h1 tabIndex={-1}>{title}</h1>
+      <p>
+        {labels.length === 1
+          ? `Your account cannot open ${title}. Opening it needs the ${labels[0]} permission.`
+          : `Your account cannot open ${title}. Opening it needs one of these permissions: ${labels.join(', ')}.`}
+      </p>
+      <p>Ask an administrator if you need access.</p>
+    </section>
+  );
+}
+
+/** A Management sub view, or its access panel (inside the sign-in gate,
+ * so `can()` is the gated area's owner's). */
+function ManagementSubviewContent({
+  route,
+}: {
+  route: Extract<Route, { view: 'management' }>;
+}) {
+  const { can } = useSession();
+  if (!canReadManagementView(can, route.subview)) {
+    return <ManagementAccessPanel subview={route.subview} />;
+  }
+  return <ViewForRoute route={route} />;
+}
+
 function AppShell() {
-  const { route } = useRouter();
+  const { route, path, setManagementReadable } = useRouter();
+  const session = useSession();
+  useHotHistoryOwnerReset();
+  // The Management sub views the signed-in user may open; null while
+  // nobody is known to be signed in (or a new password is still to be
+  // chosen) — navigation is never authorization, so then all are listed.
+  const signedIn =
+    session.status === 'signed-in' && session.user?.mustChangePassword !== true;
+  const { can } = session;
+  const readable = useMemo(
+    () => (signedIn ? readableManagementSubviews(can) : null),
+    [signedIn, can],
+  );
+  useEffect(() => {
+    setManagementReadable(readable);
+  }, [readable, setManagementReadable]);
   // Phone-width top navigation (GUI_DESIGN §2.5): the nav links live
   // behind an explicit menu button and open as a vertical panel. The
   // state exists at every width — CSS decides whether the button is
@@ -105,6 +179,25 @@ function AppShell() {
   const navRef = useRef<HTMLElement>(null);
   const mgmtNavRef = useRef<HTMLElement>(null);
   const mainRef = useRef<HTMLElement>(null);
+  // After a sign-in from the Management panel, focus moves to the active
+  // sub-view link — or the access panel heading — once the entry
+  // redirect that sign-in may cause has settled.
+  const [focusRequest, setFocusRequest] = useState(0);
+  const focusHandled = useRef(0);
+  const requestManagementFocus = useCallback(
+    () => setFocusRequest((count) => count + 1),
+    [],
+  );
+  useEffect(() => {
+    if (focusRequest === focusHandled.current) return;
+    // The router is still moving to the entry's new landing.
+    if (window.location.pathname !== path) return;
+    focusHandled.current = focusRequest;
+    const target =
+      mgmtNavRef.current?.querySelector<HTMLElement>('[aria-current="page"]') ??
+      mainRef.current?.querySelector<HTMLElement>('.mgmt-access h1');
+    target?.focus();
+  }, [focusRequest, path, readable]);
   // Scroll-direction condensing for the sticky sub-nav: scrolling
   // down condenses the bar, the first upward scroll (or being near
   // the top) restores it.
@@ -233,7 +326,9 @@ function AppShell() {
             ref={mgmtNavRef}
           >
             <span className="subgrp">Management</span>
-            {MANAGEMENT_NAV.map((item) => (
+            {MANAGEMENT_NAV.filter(
+              (item) => readable === null || readable.has(item.subview),
+            ).map((item) => (
               <Link
                 key={item.subview}
                 to={`/management/${item.subview}`}
@@ -248,7 +343,13 @@ function AppShell() {
           </nav>
         )}
         <Suspense fallback={<LoadingState label="Loading view" />}>
-          <ViewForRoute route={route} />
+          {route.view === 'management' ? (
+            <SignInGate area="Management" onSignedIn={requestManagementFocus}>
+              <ManagementSubviewContent route={route} />
+            </SignInGate>
+          ) : (
+            <ViewForRoute route={route} />
+          )}
         </Suspense>
       </main>
     </>

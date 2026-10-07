@@ -36,9 +36,9 @@ import { ADMIN_SECTIONS } from './sections';
 // permissions each one grants (initially Administrator, Manager and
 // Operator with exactly the PROJECT_PROFILE §20 capabilities). The
 // standard table + editor pattern: roles are created and renamed here,
-// never deleted. The server checks the Administration permissions (the
-// Management and Scan Station ones are recorded and not checked yet),
-// and the section says so. Without the Manage users and roles
+// never deleted. The server checks the Administration and Management
+// permissions (the Scan Station ones are recorded; how they apply is
+// decided later), and the section says so. Without the Manage users and roles
 // permission the section is view-only; without the Manage correction
 // permissions permission the editor neither shows nor sends that
 // permission (the server refuses changing it).
@@ -127,10 +127,11 @@ export function RolesSection() {
           </table>
         )}
         <div className="ad-notice">
-          Each user holds one role. PartFlow checks the Administration
-          permissions; the Management and Scan Station permissions are recorded
-          here and are not checked yet. Correction permissions are set in
-          Policies → Correction permissions. Roles are renamed, never deleted.
+          Each user holds one role. PartFlow checks the Administration and
+          Management permissions; the Scan Station permissions are recorded
+          here, and how they apply is decided later. Correction permissions are
+          set in Policies → Correction permissions. Roles are renamed, never
+          deleted.
         </div>
       </>
     );

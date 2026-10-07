@@ -169,7 +169,9 @@ def _create_station(client: TestClient, area_id: int) -> str:
 
 
 def _create_machine(client: TestClient, area_id: int) -> int:
-    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    response = admin_of(client).post(
+        "/api/machines", json={"area_id": area_id, "name": _unique("Lathe")}
+    )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
 
@@ -203,13 +205,13 @@ def _release(
 ) -> tuple[int, str]:
     """Release one FLOATING flow into the cell's Area: (quantity_flow_id, pn)."""
     pn = part_number or _unique("PN")
-    response = client.post(
+    response = admin_of(client).post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
     assert response.status_code == 201, response.text
     work_order_id = int(response.json()["id"])
     demand_id = int(response.json()["demands"][0]["id"])
-    released = client.post(
+    released = admin_of(client).post(
         f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
         json={
             "part_number": pn,
@@ -1212,7 +1214,9 @@ def test_the_area_mode_follows_from_its_active_machines(
     assert refused.status_code == 409 and "has Machines" in refused.json()["detail"]
     _assert_replay_matches(db_engine, flow_id, ProcessingState.QUEUED)
 
-    retired = client.post(f"/api/machines/{machine_id}/retire", json={"reason": "end of life"})
+    retired = admin_of(client).post(
+        f"/api/machines/{machine_id}/retire", json={"reason": "end of life"}
+    )
     assert retired.status_code == 200, retired.text
     assert _context(client, cell.station_id)["has_machines"] is False
     flow = _inventory_flow(client, cell.area_id, flow_id)

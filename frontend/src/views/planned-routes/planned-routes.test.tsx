@@ -7,7 +7,12 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { ReactNode } from 'react';
 
+import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
+import { SessionContext, hasPermission } from '../../app/session-context';
+import type { SessionValue } from '../../app/session-context';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { PlannedRoutesView } from './PlannedRoutesView';
 
@@ -386,6 +391,7 @@ async function handle(
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/planned-routes');
+  session = signedInSession();
   templates = seedTemplates();
   usages = {
     7: {
@@ -429,11 +435,57 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The signed-in user of a test (Phase 14 slice 3): a Management view
+ * offers its changes only to a user holding their permissions, so a
+ * test holds every permission unless it signs in another user.
+ */
+function signedInSession(
+  permissions: readonly Permission[] = PERMISSIONS,
+): SessionValue {
+  const user = {
+    id: 90,
+    loginName: 'mia',
+    displayName: 'Mia Manager',
+    roleId: 2,
+    roleName: 'Manager',
+    avatarUpdatedAt: null,
+    permissions: [...permissions],
+    mustChangePassword: false,
+    sessionExpiresAt: null,
+  };
+  return {
+    status: 'signed-in',
+    user,
+    setupOpen: false,
+    checking: false,
+    endedBy: null,
+    can: (permission) => hasPermission(user, permission),
+    openSignIn: vi.fn(),
+    openSetup: vi.fn(),
+    openChangePassword: vi.fn(),
+    signOut: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+}
+
+let session: SessionValue = signedInSession();
+
+function SignedIn({ children }: { children: ReactNode }) {
+  return (
+    <SessionContext.Provider value={session}>
+      {children}
+    </SessionContext.Provider>
+  );
+}
+
 function view(status: 'connected' | 'unavailable') {
   return (
-    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
-      <PlannedRoutesView />
-    </ConnectivityContext.Provider>
+    <SignedIn>
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <PlannedRoutesView />
+      </ConnectivityContext.Provider>
+    </SignedIn>
   );
 }
 
@@ -1767,4 +1819,48 @@ test('?state=long adds read-only negative-id preview routes', async () => {
   expect(within(dialog).getByLabelText('Route name')).toBeEnabled();
   expect(writes).toEqual([]);
   expect(calls.some((c) => c.includes('/usage'))).toBe(false);
+});
+
+/* ============ Phase 14 slice 3 — without Manage Planned Routes ============ */
+
+test('FM-4: without Manage Planned Routes nothing opens an editor — no New, no row edit, no archived Duplicate; Used by stays', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
+  await renderPlannedRoutes();
+
+  expect(
+    screen.getByText(
+      'View only — changing this needs the Manage Planned Routes permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: '+ New Planned Route' }),
+  ).toBeNull();
+  const bracket = routeRow('Bracket std v3');
+  expect(
+    within(bracket).queryByRole('button', { name: 'Edit Bracket std v3' }),
+  ).toBeNull();
+  expect(bracket.className).not.toContain('selrow');
+  fireEvent.click(bracket);
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  const legacy = routeRow('Legacy plating route');
+  expect(
+    within(legacy).queryByRole('button', { name: 'Duplicate' }),
+  ).toBeNull();
+
+  // The usage read stays available.
+  fireEvent.click(
+    within(bracket).getByRole('button', { name: '2 Quantity Flows…' }),
+  );
+  const usage = screen.getByRole('dialog', { name: 'Usage of Bracket std v3' });
+  expect(await within(usage).findByText('#140')).toBeInTheDocument();
+  expect(calls.filter((call) => !call.startsWith('GET '))).toEqual([]);
+});
+
+test('FM-4: with Manage Planned Routes no view-only note shows', async () => {
+  await renderPlannedRoutes();
+  expect(screen.queryByText(/^View only — /)).toBeNull();
+  expect(
+    screen.getByRole('button', { name: '+ New Planned Route' }),
+  ).toBeInTheDocument();
 });
