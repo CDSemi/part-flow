@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station (Phase 9 — Undo, corrections and auditable quantity
 // events) against a fake in-memory `/api` with the backend's Phase 9
@@ -370,6 +371,8 @@ function handle(url: string, method: string, body: unknown): Response {
         ...(workerIdentification as object),
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: stationPermissions,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -874,7 +877,11 @@ function handle(url: string, method: string, body: unknown): Response {
   return json({ detail: `Unhandled ${method} ${url}` }, 500);
 }
 
+/** The station permissions the context reports (Phase 14 slice 4). */
+let stationPermissions: string[] = [];
+
 beforeEach(() => {
+  stationPermissions = [...STATION_PERMISSIONS];
   window.sessionStorage.removeItem('partflow.dev.mock-preview');
   flows = [
     // Lathe (Machines): a queued PN with a repair-eligible source at
@@ -2113,5 +2120,37 @@ test('going offline disables the pending confirmation and the UNDO action in pla
     writes().filter((r) => /\/quantity-additions$/.test(r.url)),
   ).toHaveLength(0);
   fireEvent.click(within(box).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(undoButton()).toBeDisabled();
+});
+
+/* ============ Station permissions (Phase 14 slice 4) ============ */
+
+test('FS-9: without the Undo permission the UNDO region is absent, not disabled, and no preview is read', async () => {
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'UNDO_RECENT_SCANS',
+  );
+  await renderStation('LATHE-ST-01');
+  expect(undoButton()).toBeNull();
+  await completeDoneOnPnB();
+  const block = lastActionBlock();
+  // One region: the information spans the block — no action region,
+  // no divider, no empty zone.
+  expect(Array.from(block.children, (child) => child.className)).toEqual([
+    'ss-lastpninfo',
+  ]);
+  expect(block.querySelector('.zone-action, .ss-undo')).toBeNull();
+  expect(within(block).queryByRole('button')).toBeNull();
+  expect(block.textContent).toContain('PN-B');
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+  expect(reads(/\/undo-preview\//)).toEqual([]);
+});
+
+test('FS-9: with the Undo permission the block keeps its two regions', async () => {
+  await renderStation('LATHE-ST-01');
+  expect(
+    Array.from(lastActionBlock().children, (child) => child.className),
+  ).toEqual(['ss-lastpninfo', 'ss-undo zone-action']);
   expect(undoButton()).toBeDisabled();
 });

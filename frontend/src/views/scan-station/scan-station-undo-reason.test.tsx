@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station Undo with the Undo reason policy (Phase 13 —
 // PROJECT_PROFILE §16 "require a reason when configured"; GUI_DESIGN
@@ -345,6 +346,8 @@ function handle(url: string, method: string, body: unknown): Response {
         final_gates: { ...contextGates },
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   if (/^\/api\/areas\/\d+\/inventory$/.test(url)) return inventory();

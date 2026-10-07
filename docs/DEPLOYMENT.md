@@ -47,7 +47,7 @@ artifacts. Observed constraints include:
 - no production reverse proxy, TLS policy, secret store, log rotation, release
   image tags, scheduled backup job, restore drill, or deployment rollback
   command is provided;
-- Phase 14 sign-in for application Users exists and server-side permission checks cover every Administration and Management read and write; Scan Station writes are callable by any client on the network until station devices are enrolled (slice 4);
+- Phase 14 sign-in for application Users exists and server-side permission checks cover every Administration and Management read and write; every Scan Station route requires a station device enrolled by an administrator for that station and each station action the permission of the role applied at Scan Stations (Phase 14 slice 4) — the network-wide anonymous station access is closed;
 - several approved views are still development-only previews or pending real
   backend/frontend integration.
 
@@ -129,6 +129,11 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
 
 - Phase 14 authentication and server-side role enforcement are complete and
   tested; hiding navigation is never authorization.
+- Every Scan Station device is enrolled, its name recorded, and lost or retired
+  devices are revoked. Enrollment codes and device tokens are bearer credentials:
+  like session cookies they travel only over HTTPS or the formally accepted
+  isolated LAN (Network and host below), and the reverse proxy never logs the
+  `X-PartFlow-Station-Device` header.
 - `SESSION_COOKIE_SECURE=true` is set behind TLS. The first-run setup token
   is the only secret ever written to the backend log: complete first-run
   setup before exposing the service and restrict log access until then.
@@ -224,7 +229,8 @@ Every platform follows the same release order:
 7. Run Alembic migration once and capture its output.
 8. Start the target application release. On a database with no
    Administrator, complete first-run setup (the setup token is in the backend
-   log) before opening access.
+   log) before opening access. Then enroll each Scan Station device
+   (Administration → Scan Stations).
 9. Run health, API, UI, authorization, scan-focus, and write/read-back smoke
    checks using designated test data.
 10. Run quantity/movement reconciliation checks.

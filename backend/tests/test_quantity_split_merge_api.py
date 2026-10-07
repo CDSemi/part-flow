@@ -54,12 +54,13 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import machine_processing, machines, projections
+from app.application import machine_processing, machines, merges, projections
+from app.application.errors import NotFoundError
 from app.core.config import get_settings
 from app.domain.enums import ProcessingState
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_quantity_split_merge_api"
@@ -96,7 +97,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ[_DB_URL_ENV] = original_url
         get_settings.cache_clear()
@@ -1257,7 +1258,17 @@ def test_merge_station_preconditions(client: TestClient, db_engine: Engine) -> N
             "device_event_id": str(uuid.uuid4()),
         },
     )
-    assert unknown.status_code == 404
+    # Phase 14 slice 4: no device exists for an unknown station (401 first);
+    # the station's own 404 stays a service rule.
+    assert unknown.status_code == 401 and unknown.json()["station_device_required"] is True
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        merges.merge_flows(
+            session,
+            station_id="NO-SUCH-STATION",
+            part_number=pn,
+            quantity_flow_ids=[a.flow_id, b.flow_id],
+            device_event_id=str(uuid.uuid4()),
+        )
     deactivated = admin_of(client).patch(
         f"/api/scan-stations/{lathe.station_id}", json={"is_active": False}
     )

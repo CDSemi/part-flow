@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station (Phase 5) against a fake in-memory `/api` with the
 // backend's route surface and semantics: station context, PN scan
@@ -369,6 +370,8 @@ function handle(url: string, method: string, body: unknown): Response {
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

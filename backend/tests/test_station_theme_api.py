@@ -10,7 +10,9 @@ CD2, CD3; owner default OD-13):
   ``DARK`` / ``LIGHT`` value and echoes the value this request saved or
   kept; a repeat performs no UPDATE (``xmin`` unchanged);
 - the write is never audited and never changes ``updated_at``; invalid
-  bodies are 422 and an unknown station 404, each with nothing written;
+  bodies are 422 and an unknown station is refused (401 / 403 by the
+  station device check since Phase 14 slice 4, E1 by the service), each
+  with nothing written;
 - any existing station saves it, active or not, on an active or
   inactive Area;
 - the service refuses a non-member value (E2) and returns the validated
@@ -44,11 +46,16 @@ from sqlalchemy.orm import Session
 
 from alembic import command
 from app.application import environment
-from app.application.errors import InvalidInputError
+from app.application.errors import InvalidInputError, NotFoundError
 from app.core.config import get_settings
 from app.domain.enums import ThemePreference
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import (
+    admin_of,
+    enroll_station_device,
+    station_device_client,
+    station_device_headers,
+)
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_station_theme_api"
@@ -93,7 +100,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ[_DB_URL_ENV] = original_url
         get_settings.cache_clear()
@@ -391,13 +398,24 @@ def test_invalid_bodies_are_refused_with_nothing_written(
     assert _count(db_engine, "audit_events") == audits
 
 
-def test_an_unknown_station_is_404_with_nothing_created(
+def test_an_unknown_station_is_refused_with_nothing_created(
     client: TestClient, db_engine: Engine
 ) -> None:
+    """T-6 (Phase 14 slice 4): every device token is bound to an existing
+    station, so over HTTP an unknown station answers the device refusals;
+    the service still refuses it with E1."""
+    cell = _Cell(client)
     stations = _count(db_engine, "scan_stations")
     response = client.put(_path("NOPE"), json={"theme_preference": "LIGHT"})
-    assert response.status_code == 404, response.text
-    assert response.json() == {"detail": _E1.format(station_id="NOPE")}
+    assert response.status_code == 401, response.text
+    assert response.json()["station_device_required"] is True
+    other = station_device_headers(enroll_station_device(db_engine, cell.station_id))
+    response = client.put(_path("NOPE"), json={"theme_preference": "LIGHT"}, headers=other)
+    assert response.status_code == 403, response.text
+    assert response.json()["station_device_mismatch"] is True
+    with Session(db_engine) as session, pytest.raises(NotFoundError) as raised:
+        environment.update_scan_station_theme_preference(session, "NOPE", theme_preference="LIGHT")
+    assert str(raised.value) == _E1.format(station_id="NOPE")
     assert _count(db_engine, "scan_stations") == stations
 
 

@@ -261,8 +261,10 @@ class AuditEntityType(StrEnum):
     Planned Routes configuration (create, edit, archive, delete) — never
     the Assigned Route snapshots, which are production records. Phase 13
     (slice 12) adds User (application accounts, never Workers) and Role
-    (named roles with their permission grants). Widens additively in
-    later phases.
+    (named roles with their permission grants). Phase 14 slice 4 adds
+    ScanStationDevice: enrollment, activation, replacement and
+    revocation of a station device — configuration of a terminal, never
+    production activity. Widens additively in later phases.
     """
 
     WORK_ORDER = "WorkOrder"
@@ -279,6 +281,7 @@ class AuditEntityType(StrEnum):
     ROUTE_TEMPLATE = "RouteTemplate"
     USER = "User"
     ROLE = "Role"
+    SCAN_STATION_DEVICE = "ScanStationDevice"
 
 
 class WorkerIdentificationMode(StrEnum):
@@ -443,3 +446,55 @@ class SignInState(StrEnum):
     TEMPORARY_PASSWORD = "TEMPORARY_PASSWORD"
     PASSWORD_SET = "PASSWORD_SET"
     LOCKED = "LOCKED"
+
+
+class StationDeviceState(StrEnum):
+    """How a Scan Station device presents (Phase 14 slice 4; owner decision OD-P6).
+
+    Derived from the device row on every read, never stored: PENDING —
+    an enrollment code was issued and may still be used; ACTIVE — a
+    station browser exchanged the code for its device token; EXPIRED —
+    the code was never used and is past its lifetime; REVOKED — revoked
+    by an administrator, or replaced by a re-enrolled device.
+    """
+
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+
+
+class StationDeviceRevokedReason(StrEnum):
+    """Why a Scan Station device stopped working (Phase 14 slice 4).
+
+    REVOKED — an administrator revoked it (pending or active); REPLACED —
+    a re-enrolled device of the same station was activated in its place.
+    """
+
+    REVOKED = "REVOKED"
+    REPLACED = "REPLACED"
+
+
+class StationCommand(StrEnum):
+    """What a Scan Station request asks to do (Phase 14 slice 4; owner decision OD-S4-1).
+
+    Each kind maps to exactly one permission key of the role applied at
+    Scan Stations (``app.application.station_access``): the enrolled
+    device authenticates the terminal, the key authorizes the kind.
+    """
+
+    PN_SCAN = "PN_SCAN"
+    MACHINE_SCAN = "MACHINE_SCAN"
+    BADGE_SCAN = "BADGE_SCAN"
+    RECEIPT = "RECEIPT"
+    MACHINE_ASSIGNMENT = "MACHINE_ASSIGNMENT"
+    MACHINE_RELEASE = "MACHINE_RELEASE"
+    AREA_COMPLETION = "AREA_COMPLETION"
+    TRANSFER = "TRANSFER"
+    MERGE = "MERGE"
+    SCRAP = "SCRAP"
+    QUANTITY_ADDITION = "QUANTITY_ADDITION"
+    STOCKING = "STOCKING"
+    ALLOCATION = "ALLOCATION"
+    ALLOCATION_ADJUSTMENT = "ALLOCATION_ADJUSTMENT"
+    UNDO = "UNDO"

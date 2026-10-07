@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station with the badge-confirmation final gate (Phase 13 —
 // PROJECT_PROFILE §16, §19; GUI_DESIGN §4.6, §4.12) against a fake
@@ -408,6 +409,8 @@ function handle(url: string, method: string, body: unknown): Response {
         final_gates: { ...contextGates },
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

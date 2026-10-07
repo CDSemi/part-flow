@@ -1431,6 +1431,8 @@ A Scan Station's identity and its binding to one Area are stable application and
 
 ScanSession remains temporary context. Neither Scan Station configuration nor ScanSession is the source of truth for production state — that remains the immutable Part Movement history. Part Movement records the stable station identity (`station_id`) for audit.
 
+A Scan Station is used only from devices an administrator has enrolled for it (§20; owner decision OD-P6, 2026-10-06); enrollment is configuration, never production state, and is never recorded on a Movement.
+
 ---
 
 # 16. Undo and Correction
@@ -1692,6 +1694,8 @@ PartFlow uses role-based authorization.
 Roles are **named and editable**. Every capability below is a **permission key**; a role grants a set of permission keys and a User holds one role. **Permission keys are the only authority**: authorization is decided by the keys the User's role grants — never by a role's name — and no role is an implicit superuser. The Administrator, Manager and Operator lists below are the **initial roles with their initial grants**, seeded exactly as listed; an authorized administrator may rename these roles or change what any role grants, and every such change is audited.
 
 **Role-named sentences and the permission-management guard (decided 2026-10-06).** Wherever this profile names a role as the one who performs or configures something in the application (for example "Admin or Manager", "Admin-configured"), it names that role's initial grant: the permission the action requires decides. Changing who holds a correction permission or the permission to manage correction permissions — by changing a role's permissions, or a User's role, activity or password — itself requires the permission to manage correction permissions, and PartFlow never lets a change leave no active User with a password holding the permission to manage users and roles, or the permission to manage correction permissions.
+
+**Scan Station actions (decided 2026-10-06).** Scan Station actions are performed by Workers, who hold no role (§7), on a Scan Station device that an administrator has enrolled for that station; a device that is not enrolled, or is enrolled for another station, can perform nothing there (owner decision OD-P6). What an enrolled Scan Station may do — including Undo of recent eligible scans (§16) — is decided by the permissions of the one role applied at Scan Stations, initially the Operator role with its initial grants listed below (owner decision OD-S4-1); Worker identity never grants or restricts an action.
 
 Machines, Route Templates (Planned Routes), and PartNumber master metadata are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines, Route Templates, and PartNumber master metadata without being an Administrator. The initial Administrator role holds these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines, Route Templates, or Part Numbers screens (§21).
 

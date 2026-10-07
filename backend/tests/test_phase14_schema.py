@@ -4,11 +4,12 @@ Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0029_phase14_sign_in` adds (IMPLEMENTATION_ROADMAP
 Phase 14; PROJECT_PROFILE §7 User; owner decisions OD-P1–OD-P5,
-OD-P17):
+OD-P17) — pinned to `0029` since slice 4 added the next revision — and
+what `0030_phase14_station_devices` adds (owner decisions OD-P6,
+OD-S4-1):
 
-- exact head boundary: `0029_phase14_sign_in` is the single head
-  (moved here from the Phase 13 schema test, which is now pinned to
-  `0028_phase13_users_roles`);
+- exact head boundary: `0030_phase14_station_devices` is the single
+  head (the 0029 cases run against `0029` explicitly);
 - the sign-in policy columns on `application_policy` (types, server
   defaults, the seeded row's values) with their exact range CHECKs;
 - the `user_credentials` and `user_sessions` shapes with their exact
@@ -21,14 +22,21 @@ OD-P17):
 - the database refuses out-of-range policy values, a non-scrypt hash, a
   negative counter, a 31-byte or duplicate token digest, an unknown end
   reason and an end time without a reason;
-- models↔migration metadata parity at head;
-- the downgrade on a clean head restores the previous boundary and
-  re-upgrades; it refuses — keeping the version at head — for each of
-  its triggers separately (a credential, a session, an `actor_user_id`
-  on each of the three tables, a `sign-in` audit row, each non-default
-  policy value).
+- the 0029 downgrade on a clean 0029 database restores the previous
+  boundary and re-upgrades; it refuses — keeping the version at 0029 —
+  for each of its triggers separately (a credential, a session, an
+  `actor_user_id` on each of the three tables, a `sign-in` audit row,
+  each non-default policy value);
+- 0030: the `scan_station_devices` shape with its exact constraint
+  names and CHECK refusals, the NOT NULL `scan_station_role_id` set to
+  the seeded Operator role, the widened audit entity CHECK, literal
+  parity with the model constants, models↔migration metadata parity at
+  head; up/down/up on a clean head; the downgrade refuses with a device
+  row and, separately, with a `ScanStationDevice` audit row; the upgrade
+  refuses (exact message) when no role is named Operator.
 """
 
+import functools
 import importlib.util
 import os
 from collections.abc import Callable, Iterator
@@ -45,15 +53,19 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from alembic import command
 from app.application import policies
-from app.domain.enums import UserSessionEndReason
+from app.domain.enums import StationDeviceRevokedReason, UserSessionEndReason
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0028_phase13_users_roles"
 _SIGN_IN_REVISION = "0029_phase14_sign_in"
-_HEAD_REVISION = _SIGN_IN_REVISION
-_MIGRATION_FILE = _BACKEND_DIR / "alembic" / "versions" / "20261006_0029_phase14_sign_in.py"
+_DEVICES_REVISION = "0030_phase14_station_devices"
+_HEAD_REVISION = _DEVICES_REVISION
+_VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
+_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0029_phase14_sign_in.py"
+_DEVICES_MIGRATION_FILE = _VERSIONS_DIR / "20261007_0030_phase14_station_devices.py"
 _TEMPLATE_DATABASE = "partflow_test_phase14_template"
+_DEVICES_TEMPLATE_DATABASE = "partflow_test_phase14_devices_template"
 _ACTOR_TABLES = ("audit_events", "machine_lifecycle_events", "work_order_allocations")
 _POLICY_DEFAULTS = {
     "user_session_expires": (sa.Boolean, "true", True),
@@ -111,13 +123,14 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → previous → head through real Alembic runs."""
+    """Temporary database migrated 0029 → previous → 0029 through real Alembic
+    runs (the 0029 cases are pinned to their own boundary)."""
     name = "partflow_test_phase14_schema"
     _create_temp_database(admin_engine, name)
     config = _alembic_config(_url(name))
-    command.upgrade(config, "head")
+    command.upgrade(config, _SIGN_IN_REVISION)
     command.downgrade(config, _PREVIOUS_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, _SIGN_IN_REVISION)
     engine = create_engine(_url(name))
     yield engine
     engine.dispose()
@@ -135,9 +148,9 @@ def connection(migrated_engine: Engine) -> Iterator[Connection]:
 
 @pytest.fixture(scope="module")
 def head_template(admin_engine: Engine) -> Iterator[str]:
-    """A clean database at head, cloned (CREATE DATABASE … TEMPLATE) per case."""
+    """A clean database at 0029, cloned (CREATE DATABASE … TEMPLATE) per case."""
     _create_temp_database(admin_engine, _TEMPLATE_DATABASE)
-    command.upgrade(_alembic_config(_url(_TEMPLATE_DATABASE)), "head")
+    command.upgrade(_alembic_config(_url(_TEMPLATE_DATABASE)), _SIGN_IN_REVISION)
     yield _TEMPLATE_DATABASE
     _drop_temp_database(admin_engine, _TEMPLATE_DATABASE)
 
@@ -201,9 +214,9 @@ def test_alembic_has_a_single_head() -> None:
     assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
 
 
-def test_head_is_the_phase14_revision(migrated_engine: Engine) -> None:
+def test_the_sign_in_revision_boundary(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _SIGN_IN_REVISION
     migration = _load_migration()
     assert migration.revision == _SIGN_IN_REVISION
     assert migration.down_revision == _PREVIOUS_REVISION
@@ -340,16 +353,6 @@ def test_migration_literals_repeat_the_model_constants() -> None:
     assert (models.SIGN_IN_LOCKOUT_MINUTES_MIN, models.SIGN_IN_LOCKOUT_MINUTES_MAX) == (1, 1440)
 
 
-def test_models_metadata_matches_the_migrated_schema(migrated_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with migrated_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 # ---------------------------------------------------------------------------
 # Database refusals
 # ---------------------------------------------------------------------------
@@ -450,9 +453,9 @@ def test_clean_downgrade_restores_the_previous_boundary(head_database: URL) -> N
             assert "actor_user_id" not in {str(c["name"]) for c in inspector.get_columns(table)}
         with engine.connect() as connection:
             assert _version(connection) == _PREVIOUS_REVISION
-        command.upgrade(config, "head")
+        command.upgrade(config, _SIGN_IN_REVISION)
         with engine.connect() as connection:
-            assert _version(connection) == _HEAD_REVISION
+            assert _version(connection) == _SIGN_IN_REVISION
     finally:
         engine.dispose()
 
@@ -556,7 +559,7 @@ def test_downgrade_refuses_while_sign_in_data_exists(head_database: URL, trigger
         with pytest.raises(ProgrammingError, match="Sign-in data or configuration exists"):
             command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
         with engine.connect() as connection:
-            assert _version(connection) == _HEAD_REVISION
+            assert _version(connection) == _SIGN_IN_REVISION
         assert {"user_credentials", "user_sessions"} <= set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
@@ -573,3 +576,380 @@ def test_downgrade_is_not_refused_by_a_plain_user(head_database: URL) -> None:
             assert _version(connection) == _PREVIOUS_REVISION
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0030 — enrolled Scan Station devices (Phase 14 slice 4)
+# ---------------------------------------------------------------------------
+
+_DEVICE_CHECKS = {
+    "ck_scan_station_devices_enrollment_code_digest_length",
+    "ck_scan_station_devices_token_digest_length",
+    "ck_scan_station_devices_code_or_token",
+    "ck_scan_station_devices_activation_shape",
+    "ck_scan_station_devices_revocation_shape",
+    "ck_scan_station_devices_revoked_reason",
+    "ck_scan_station_devices_replaced_shape",
+    "ck_scan_station_devices_last_seen_shape",
+    "ck_scan_station_devices_no_self_replace",
+}
+_NO_OPERATOR = (
+    "No role is named Operator. Rename the role whose permissions Scan Stations should use"
+    " to Operator, run the upgrade, then rename it back."
+)
+
+
+def _load_devices_migration() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "phase14_station_devices_migration", _DEVICES_MIGRATION_FILE
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def devices_engine(admin_engine: Engine) -> Iterator[Engine]:
+    """Temporary database migrated head → 0029 → head through real Alembic runs."""
+    name = "partflow_test_phase14_devices_schema"
+    _create_temp_database(admin_engine, name)
+    config = _alembic_config(_url(name))
+    command.upgrade(config, "head")
+    command.downgrade(config, _SIGN_IN_REVISION)
+    command.upgrade(config, "head")
+    engine = create_engine(_url(name))
+    yield engine
+    engine.dispose()
+    _drop_temp_database(admin_engine, name)
+
+
+@pytest.fixture
+def devices_connection(devices_engine: Engine) -> Iterator[Connection]:
+    """Per-test connection at head whose transaction is always rolled back."""
+    with devices_engine.connect() as conn:
+        transaction = conn.begin()
+        yield conn
+        transaction.rollback()
+
+
+@pytest.fixture(scope="module")
+def devices_template(admin_engine: Engine) -> Iterator[str]:
+    _create_temp_database(admin_engine, _DEVICES_TEMPLATE_DATABASE)
+    command.upgrade(_alembic_config(_url(_DEVICES_TEMPLATE_DATABASE)), "head")
+    yield _DEVICES_TEMPLATE_DATABASE
+    _drop_temp_database(admin_engine, _DEVICES_TEMPLATE_DATABASE)
+
+
+@pytest.fixture
+def devices_head_database(admin_engine: Engine, devices_template: str) -> Iterator[URL]:
+    name = "partflow_test_phase14_devices_downgrade"
+    _create_temp_database(admin_engine, name, template=devices_template)
+    yield _url(name)
+    _drop_temp_database(admin_engine, name)
+
+
+def _insert_station(connection: Connection, station_id: str = "DEV-ST") -> str:
+    department = _scalar_id(
+        connection, "INSERT INTO departments (name) VALUES (:name) RETURNING id", name=station_id
+    )
+    area = _scalar_id(
+        connection,
+        "INSERT INTO areas (department_id, name) VALUES (:department, :name) RETURNING id",
+        department=department,
+        name=station_id,
+    )
+    connection.execute(
+        sa.text("INSERT INTO scan_stations (station_id, area_id) VALUES (:station, :area)"),
+        {"station": station_id, "area": area},
+    )
+    return station_id
+
+
+def _insert_device(connection: Connection, station_id: str, **columns: object) -> int:
+    values: dict[str, object] = {
+        "station_id": station_id,
+        "label": "Device",
+        "enrollment_expires_at": sa.func.now(),
+        "enrollment_code_digest": b"\x01" * 32,
+        **columns,
+    }
+    table = models.Base.metadata.tables["scan_station_devices"]
+    return int(
+        connection.execute(sa.insert(table).values(values).returning(table.c.id)).scalar_one()
+    )
+
+
+def test_head_is_the_station_devices_revision(devices_engine: Engine) -> None:
+    with devices_engine.connect() as connection:
+        assert _version(connection) == _DEVICES_REVISION
+    migration = _load_devices_migration()
+    assert migration.revision == _DEVICES_REVISION
+    assert migration.down_revision == _SIGN_IN_REVISION
+
+
+def test_scan_station_devices_shape(devices_engine: Engine) -> None:
+    inspector = inspect(devices_engine)
+    columns = {str(c["name"]): c for c in inspector.get_columns("scan_station_devices")}
+    expected = {
+        "id": (sa.Integer, False),
+        "station_id": (sa.Text, False),
+        "label": (sa.Text, False),
+        "enrollment_code_digest": (sa.LargeBinary, True),
+        "enrollment_expires_at": (sa.DateTime, False),
+        "token_digest": (sa.LargeBinary, True),
+        "replaces_device_id": (sa.Integer, True),
+        "issued_at": (sa.DateTime, False),
+        "activated_at": (sa.DateTime, True),
+        "last_seen_at": (sa.DateTime, True),
+        "revoked_at": (sa.DateTime, True),
+        "revoked_reason": (sa.Text, True),
+    }
+    assert set(columns) == set(expected)
+    for name, (type_, nullable) in expected.items():
+        assert isinstance(columns[name]["type"], type_), name
+        assert columns[name]["nullable"] is nullable, name
+    assert inspector.get_pk_constraint("scan_station_devices")["name"] == "pk_scan_station_devices"
+    assert {
+        (str(fk["name"]), fk["referred_table"])
+        for fk in inspector.get_foreign_keys("scan_station_devices")
+    } == {
+        ("fk_scan_station_devices_station_id_scan_stations", "scan_stations"),
+        (
+            "fk_scan_station_devices_replaces_device_id_scan_station_devices",
+            "scan_station_devices",
+        ),
+    }
+    assert {
+        (str(uq["name"]), tuple(uq["column_names"]))
+        for uq in inspector.get_unique_constraints("scan_station_devices")
+    } == {
+        ("uq_scan_station_devices_enrollment_code_digest", ("enrollment_code_digest",)),
+        ("uq_scan_station_devices_token_digest", ("token_digest",)),
+    }
+    checks = {str(c["name"]) for c in inspector.get_check_constraints("scan_station_devices")}
+    assert checks == _DEVICE_CHECKS
+    assert not [
+        index
+        for index in inspector.get_indexes("scan_station_devices")
+        if not index.get("duplicates_constraint")
+    ]
+
+
+def test_the_station_role_pointer_is_the_seeded_operator_role(devices_engine: Engine) -> None:
+    inspector = inspect(devices_engine)
+    columns = {str(c["name"]): c for c in inspector.get_columns("application_policy")}
+    column = columns["scan_station_role_id"]
+    assert isinstance(column["type"], sa.Integer) and column["nullable"] is False
+    assert column["default"] is None
+    fks = {str(fk["name"]): fk for fk in inspector.get_foreign_keys("application_policy")}
+    fk = fks["fk_application_policy_scan_station_role_id_roles"]
+    assert (fk["referred_table"], fk["constrained_columns"]) == ("roles", ["scan_station_role_id"])
+    with devices_engine.connect() as connection:
+        pointer, operator = connection.execute(
+            sa.text(
+                "SELECT p.scan_station_role_id, r.id FROM application_policy p"
+                " JOIN roles r ON r.name = 'Operator'"
+            )
+        ).one()
+    assert pointer == operator
+
+
+def test_device_migration_literals_repeat_the_model_constants() -> None:
+    migration = _load_devices_migration()
+    assert (
+        migration._DIGEST_LEN_SQL.format(col="enrollment_code_digest")
+        == models.SCAN_STATION_DEVICE_ENROLLMENT_CODE_DIGEST_SQL
+    )
+    assert (
+        migration._DIGEST_LEN_SQL.format(col="token_digest")
+        == models.SCAN_STATION_DEVICE_TOKEN_DIGEST_SQL
+    )
+    assert migration._CODE_OR_TOKEN_SQL == models.SCAN_STATION_DEVICE_CODE_OR_TOKEN_SQL
+    assert migration._ACTIVATION_SHAPE_SQL == models.SCAN_STATION_DEVICE_ACTIVATION_SHAPE_SQL
+    assert migration._REVOCATION_SHAPE_SQL == models.SCAN_STATION_DEVICE_REVOCATION_SHAPE_SQL
+    assert migration._REVOKED_REASON_SQL == models.SCAN_STATION_DEVICE_REVOKED_REASON_SQL
+    assert migration._REPLACED_SHAPE_SQL == models.SCAN_STATION_DEVICE_REPLACED_SHAPE_SQL
+    assert migration._LAST_SEEN_SHAPE_SQL == models.SCAN_STATION_DEVICE_LAST_SEEN_SHAPE_SQL
+    assert migration._NO_SELF_REPLACE_SQL == models.SCAN_STATION_DEVICE_NO_SELF_REPLACE_SQL
+    assert tuple(StationDeviceRevokedReason) == migration._REVOKED_REASONS
+    entity_check = next(
+        constraint
+        for constraint in models.Base.metadata.tables["audit_events"].constraints
+        if constraint.name == "ck_audit_events_entity_type"
+    )
+    assert isinstance(entity_check, sa.CheckConstraint)
+    assert str(entity_check.sqltext) == migration._DEVICE_ENTITY_TYPES
+    assert (
+        migration._PREVIOUS_ENTITY_TYPES[:-1] + ", 'ScanStationDevice')"
+    ) == migration._DEVICE_ENTITY_TYPES
+    assert models.SCAN_STATION_DEVICE_LABEL_MAX == 80
+
+
+def test_models_metadata_matches_the_migrated_schema(devices_engine: Engine) -> None:
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    with devices_engine.connect() as conn:
+        context = MigrationContext.configure(conn)
+        diffs = compare_metadata(context, models.Base.metadata)
+    assert diffs == []
+
+
+def test_device_rows_are_refused_when_malformed(devices_connection: Connection) -> None:
+    connection = devices_connection
+    station = _insert_station(connection)
+    now = sa.func.now()
+    refusals: list[tuple[str, dict[str, object]]] = [
+        (
+            "ck_scan_station_devices_code_or_token",
+            {"token_digest": b"\x02" * 32, "activated_at": now},
+        ),
+        ("ck_scan_station_devices_code_or_token", {"enrollment_code_digest": None}),
+        (
+            "ck_scan_station_devices_enrollment_code_digest_length",
+            {"enrollment_code_digest": b"\x03" * 31},
+        ),
+        ("ck_scan_station_devices_activation_shape", {"activated_at": now}),
+        ("ck_scan_station_devices_revocation_shape", {"revoked_at": now}),
+        (
+            "ck_scan_station_devices_revoked_reason",
+            {"revoked_at": now, "revoked_reason": "LOST"},
+        ),
+        (
+            "ck_scan_station_devices_replaced_shape",
+            {"revoked_at": now, "revoked_reason": "REPLACED"},
+        ),
+        ("ck_scan_station_devices_last_seen_shape", {"last_seen_at": now}),
+    ]
+    for constraint, columns in refusals:
+        _refused_by(
+            connection,
+            constraint,
+            functools.partial(_insert_device, connection, station, **columns),
+        )
+    _refused_by(
+        connection,
+        "fk_scan_station_devices_station_id_scan_stations",
+        functools.partial(
+            _insert_device, connection, "NO-SUCH", enrollment_code_digest=bytes([5]) * 32
+        ),
+    )
+    device = _insert_device(connection, station)
+    _refused_by(
+        connection,
+        "ck_scan_station_devices_no_self_replace",
+        lambda: connection.execute(
+            sa.text("UPDATE scan_station_devices SET replaces_device_id = id WHERE id = :id"),
+            {"id": device},
+        ),
+    )
+    _refused_by(
+        connection,
+        "uq_scan_station_devices_enrollment_code_digest",
+        lambda: _insert_device(connection, station),
+    )
+    active: dict[str, object] = {
+        "enrollment_code_digest": None,
+        "token_digest": b"\x04" * 32,
+        "activated_at": now,
+    }
+    _insert_device(connection, station, **active)
+    _refused_by(
+        connection,
+        "uq_scan_station_devices_token_digest",
+        lambda: _insert_device(connection, station, **active),
+    )
+    # The widened audit vocabulary admits the device entity.
+    connection.execute(
+        sa.text(
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at)"
+            " VALUES ('CREATED', 'ScanStationDevice', :id, now())"
+        ),
+        {"id": str(device)},
+    )
+
+
+def test_clean_device_downgrade_restores_the_sign_in_boundary(
+    devices_head_database: URL,
+) -> None:
+    config = _alembic_config(devices_head_database)
+    engine = create_engine(devices_head_database)
+    try:
+        command.downgrade(config, _SIGN_IN_REVISION)
+        inspector = inspect(engine)
+        assert "scan_station_devices" not in set(inspector.get_table_names())
+        policy_columns = {str(c["name"]) for c in inspector.get_columns("application_policy")}
+        assert "scan_station_role_id" not in policy_columns
+        with engine.connect() as connection:
+            assert _version(connection) == _SIGN_IN_REVISION
+            check = connection.execute(
+                sa.text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                    " WHERE conname = 'ck_audit_events_entity_type'"
+                )
+            ).scalar_one()
+        assert "ScanStationDevice" not in str(check)
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert _version(connection) == _DEVICES_REVISION
+    finally:
+        engine.dispose()
+
+
+def _device_row(connection: Connection) -> None:
+    _insert_device(connection, _insert_station(connection))
+
+
+def _device_audit_row(connection: Connection) -> None:
+    connection.execute(
+        sa.text(
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at)"
+            " VALUES ('CREATED', 'ScanStationDevice', '1', now())"
+        )
+    )
+
+
+_DEVICE_TRIGGERS: dict[str, Callable[[Connection], None]] = {
+    "device row": _device_row,
+    "device audit row": _device_audit_row,
+}
+
+
+@pytest.mark.parametrize("trigger", sorted(_DEVICE_TRIGGERS))
+def test_device_downgrade_refuses_while_device_data_exists(
+    devices_head_database: URL, trigger: str
+) -> None:
+    engine = create_engine(devices_head_database)
+    try:
+        with engine.begin() as connection:
+            _DEVICE_TRIGGERS[trigger](connection)
+        with pytest.raises(ProgrammingError, match="Scan Station device data exists"):
+            command.downgrade(_alembic_config(devices_head_database), _SIGN_IN_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _DEVICES_REVISION
+        assert "scan_station_devices" in set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+
+def test_the_upgrade_refuses_without_an_operator_role(admin_engine: Engine) -> None:
+    name = "partflow_test_phase14_no_operator"
+    _create_temp_database(admin_engine, name)
+    engine = create_engine(_url(name))
+    try:
+        config = _alembic_config(_url(name))
+        command.upgrade(config, _SIGN_IN_REVISION)
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text("UPDATE roles SET name = 'Line Crew' WHERE name = 'Operator'")
+            )
+        with pytest.raises(ProgrammingError) as raised:
+            command.upgrade(config, "head")
+        assert _NO_OPERATOR in str(raised.value.orig)
+        with engine.connect() as connection:
+            assert _version(connection) == _SIGN_IN_REVISION
+        assert "scan_station_devices" not in set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+        _drop_temp_database(admin_engine, name)

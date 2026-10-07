@@ -23,6 +23,7 @@ from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
 from app.api.session import router as session_router
 from app.api.setup import router as setup_router
+from app.api.station_devices import router as station_devices_router
 from app.api.tracking import router as tracking_router
 from app.api.users import router as users_router
 from app.api.work_orders import router as work_orders_router
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(production_release_router)
     app.include_router(route_templates_router)
     app.include_router(scan_station_router)
+    app.include_router(station_devices_router)
     app.include_router(allocations_router)
     app.include_router(production_board_router)
     app.include_router(area_board_router)

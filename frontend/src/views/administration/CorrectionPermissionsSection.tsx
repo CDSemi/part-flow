@@ -74,10 +74,10 @@ export function CorrectionPermissionsSection() {
           Choose which roles hold each correction permission. Edit Work Order
           Allocation controls allocating stocked quantity from Management and
           reversing allocations; the Stockroom station&apos;s receiving
-          allocation does not need it. How Undo recent eligible scans applies is
-          decided later; Perform quantity corrections and Perform authorized
-          historical corrections grant nothing yet because PartFlow has no such
-          correction.
+          allocation does not need it. Undo recent eligible scans applies at the
+          Scan Stations through the role marked Applied at Scan Stations;
+          Perform quantity corrections and Perform authorized historical
+          corrections grant nothing yet because PartFlow has no such correction.
         </p>
         <CorrectionRoleTable canWrite={canWrite} writeBlocked={writeBlocked} />
         <p className="ad-confighelp">

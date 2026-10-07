@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station `Receive Quantity` (Phase 10.5 — GUI_DESIGN §4.7
 // item 1, PROJECT_PROFILE §14) against a fake in-memory `/api` with the
@@ -285,6 +286,8 @@ function handle(url: string, method: string, body: unknown): Response {
         ...(workerIdentification as object),
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

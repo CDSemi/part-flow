@@ -55,13 +55,22 @@ from app.application import users as users_service
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APP_DIR = _BACKEND_DIR / "app"
 _TEST_DATABASE = "partflow_test_users_roles_api"
 
-_ROLE_KEYS = {"id", "name", "permissions", "user_count", "created_at", "updated_at"}
+_ROLE_KEYS = {
+    "id",
+    "name",
+    "permissions",
+    "user_count",
+    "created_at",
+    "updated_at",
+    # Phase 14 slice 4.
+    "applies_at_scan_stations",
+}
 _USER_KEYS = {
     "id",
     "login_name",
@@ -135,7 +144,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()
@@ -1187,6 +1196,11 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/api/production_release.py",
     "app/api/route_templates.py",
     "app/api/work_orders.py",
+    # Phase 14 slice 4: what the role applied at Scan Stations grants, the
+    # device list's enrollment keys and the station context's keys.
+    "app/application/station_access.py",
+    "app/api/station_devices.py",
+    "app/api/scan_station.py",
 }
 
 
@@ -1317,3 +1331,100 @@ def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services()
         assert "authorization" not in _imported_application_modules(tree), service
         assert not _reads(tree, "app.infrastructure.models", {"User"}), service
     assert "user_access" in _imported_application_modules(trees["app/application/machines.py"])
+
+
+_STATION_COMMAND_MODULES = (
+    "scan_station",
+    "intake",
+    "machine_processing",
+    "direct_processing",
+    "transfers",
+    "stockroom",
+    "merges",
+    "quantity_events",
+    "undo",
+    "allocations",
+)
+# One station key check per service body (Phase 14 slice 4, §3.6): the
+# shared bodies ``_leave_machine`` and ``record_arrival`` each map two
+# command kinds; the station allocation checks twice (confirmation and
+# adjustment), both only for a station.
+_STATION_KEY_CHECKS = {
+    ("scan_station", "badge_scan"): 1,
+    ("scan_station", "resolve_part_number_scan"): 1,
+    ("scan_station", "resolve_machine_scan"): 1,
+    ("intake", "receive_quantity"): 1,
+    ("machine_processing", "assign_to_machine"): 1,
+    ("machine_processing", "_leave_machine"): 1,
+    ("direct_processing", "complete_direct_processing"): 1,
+    ("transfers", "record_arrival"): 1,
+    ("merges", "merge_flows"): 1,
+    ("quantity_events", "scrap_flow"): 1,
+    ("quantity_events", "add_quantity"): 1,
+    ("allocations", "suggest_station_allocation"): 1,
+    ("allocations", "_confirm_allocation"): 2,
+    ("undo", "undo_preview"): 1,
+    ("undo", "undo_command"): 1,
+}
+
+
+def _is_key_check(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "require_station_capability"
+    )
+
+
+def _guards_station(test: ast.expr) -> bool:
+    """``station_id is not None`` (alone or in an ``and``)."""
+    return any(
+        isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "station_id"
+        and isinstance(node.ops[0], ast.IsNot)
+        for node in ast.walk(test)
+    )
+
+
+def test_station_commands_check_the_station_role_once_per_service_body() -> None:
+    """SD-26 (Phase 14 slice 4): the station command modules know no
+    permission, role or User and no device; the station role's keys are
+    checked through ``station_access`` exactly once per service body (twice
+    in the station allocation, each only for a station); the device
+    service is judged like the other guard writes, without a permission
+    key of its own."""
+    trees = _trees()
+    counts: dict[tuple[str, str], int] = {}
+    for module in _STATION_COMMAND_MODULES:
+        tree = trees[f"app/application/{module}.py"]
+        assert not _reads(tree, "app.domain.enums", {"Permission"}), module
+        assert not _reads(tree, "app.infrastructure.models", {"Role", "RolePermission", "User"}), (
+            module
+        )
+        assert not {"station_devices", "authorization"} & _imported_application_modules(tree)
+        for function in tree.body:
+            if isinstance(function, ast.FunctionDef):
+                calls = sum(1 for node in ast.walk(function) if _is_key_check(node))
+                if calls:
+                    counts[(module, function.name)] = calls
+    assert counts == _STATION_KEY_CHECKS
+    confirm = next(
+        node
+        for node in trees["app/application/allocations.py"].body
+        if isinstance(node, ast.FunctionDef) and node.name == "_confirm_allocation"
+    )
+    guarded = sum(
+        1
+        for branch in ast.walk(confirm)
+        if isinstance(branch, ast.If) and _guards_station(branch.test)
+        for statement in branch.body
+        for node in ast.walk(statement)
+        if _is_key_check(node)
+    )
+    assert guarded == 2
+    devices = trees["app/application/station_devices.py"]
+    assert {"station_access", "authorization", "user_access", "audit"} <= (
+        _imported_application_modules(devices)
+    )
+    assert not _reads(devices, "app.domain.enums", {"Permission"})

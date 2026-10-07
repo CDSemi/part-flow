@@ -16,14 +16,25 @@ import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { useStationTheme, useTheme } from '../../app/theme-context';
 import { isMockPreviewRequested } from '../../app/view-state';
-import { ApiError, errorMessage } from '../../api/client';
 import {
+  ApiError,
+  errorMessage,
+  refusalFlag,
+  setStationDeviceRefusalListener,
+} from '../../api/client';
+import {
+  areaColor,
   listAreas,
   listDepartments,
   listOperations,
   listScanStations,
 } from '../../api/environment';
-import type { Area, Department, Operation } from '../../api/environment';
+import type {
+  Area,
+  Department,
+  Operation,
+  ScanStation,
+} from '../../api/environment';
 import { listMachines } from '../../api/machines';
 import type { AllocationResult } from '../../api/allocations';
 import { newDeviceEventId } from '../../api/production-release';
@@ -43,7 +54,6 @@ import {
   workerSessionRequired,
 } from '../../api/scan-station';
 import type {
-  AreaInventory,
   AreaRef,
   BadgeScanResult,
   CombineResult,
@@ -62,6 +72,12 @@ import type {
   WorkOrderContext,
 } from '../../api/scan-station';
 import { getDueSoonPolicy } from '../../api/policies';
+import {
+  forgetStationDeviceToken,
+  readStationDeviceToken,
+  stationDeviceRefusal,
+  stationPermissionDenied,
+} from '../../api/station-devices';
 import { useApiData } from '../../api/use-api-data';
 import {
   AreaMachineLayout,
@@ -101,6 +117,8 @@ import {
 import {
   StationSessionContext,
   useRequireWorkerSession,
+  useStationDeviceRefused,
+  useTrackOutcomeUnknown,
   useWorkerSessionClock,
 } from './scan-station-session';
 import type { StationSession } from './scan-station-session';
@@ -129,6 +147,13 @@ import {
   stationWorkerName,
 } from './scan-station-wizard';
 import type { Notice } from './scan-station-presentation';
+import { stationActionRefusal, stationCan } from './station-capabilities';
+import type {
+  ScanLedStationAction,
+  StationAction,
+} from './station-capabilities';
+import { StationEnrollment } from './station-enrollment';
+import type { EnrollmentReason } from './station-enrollment';
 
 /**
  * Scan Station — the REAL Phase 5/6/7 view (GUI_DESIGN §4;
@@ -178,7 +203,12 @@ import type { Notice } from './scan-station-presentation';
  * server reports per action: the toned question, or a Worker badge scan
  * that the server matches, signs in and records on the action; a typed
  * gate refusal keeps the draft and re-reads the context in the
- * background. Every approved Scan Station workflow is implemented here,
+ * background. Phase 14 slice 4: the station works only on a device
+ * enrolled for it — without one the enrollment panel (or, mid-session,
+ * the blocking enrollment dialog that keeps every draft) asks for the
+ * one-time code — and it hides the actions the role applied at Scan
+ * Stations does not grant (the server refuses them anyway). Every
+ * approved Scan Station workflow is implemented here,
  * including Worker sessions and the badge-confirmation gates; the mock
  * preview of the approved design stays reachable with `?preview=mock`
  * in development builds only.
@@ -556,8 +586,64 @@ function StationView({
     return { ...loaded, themeEpoch };
   }, [stationId, sessionTicket, applySession, stationThemeEpoch]);
   const context = useApiData(loadContext);
-  const { revalidate: revalidateContext } = context;
-  const ready = context.state.status === 'ready' ? context.state.data : null;
+  const { revalidate: revalidateContext, reload: reloadContext } = context;
+
+  // Enrolled station device (Phase 14 slice 4 — owner decision OD-P6):
+  // every station request carries this browser's device token for the
+  // station. A refusal for want of an enrolled device — none was sent,
+  // the token was revoked or replaced (401), or it belongs to another
+  // station (403) — blocks the station behind the enrollment dialog (or
+  // the enrollment panel, when the station never loaded); open dialogs
+  // keep their drafts and requests underneath. The token is forgotten
+  // only on the 401 and only if it is still the one that request sent,
+  // and a refusal of a token this browser no longer holds is stale (the
+  // next request carries the newer token) and is ignored.
+  const [deviceRefusal, setDeviceRefusal] = useState<EnrollmentReason | null>(
+    null,
+  );
+  // Set synchronously by an accepted refusal: a write refused in the
+  // same answer reports itself to the dialog through `deviceRefused`.
+  const deviceRefusalPending = useRef(false);
+  // A first attempt of a write was refused for want of a device.
+  const [writeNotSent, setWriteNotSent] = useState(false);
+  // Open intents whose outcome is unknown (reported by the dialogs).
+  const [unknownOutcomes, setUnknownOutcomes] = useState(0);
+  // The context re-read after an enrollment from the panel is pending.
+  const [awaitingEnrolledContext, setAwaitingEnrolledContext] = useState(false);
+  const deviceBlocked = deviceRefusal !== null;
+  useEffect(() => {
+    setStationDeviceRefusalListener((kind, sentToken) => {
+      if (kind === 'required' && sentToken !== null) {
+        forgetStationDeviceToken(stationId, sentToken);
+      }
+      const held = readStationDeviceToken(stationId);
+      if (kind === 'required' ? held !== null : held !== sentToken) return;
+      deviceRefusalPending.current = true;
+      setDeviceRefusal(
+        (current) =>
+          current ??
+          (kind === 'mismatch'
+            ? 'mismatch'
+            : sentToken === null
+              ? 'not-enrolled'
+              : 'revoked'),
+      );
+    });
+    return () => setStationDeviceRefusalListener(null);
+  }, [stationId]);
+  useEffect(() => setAwaitingEnrolledContext(false), [context.state]);
+
+  // While the device is refused, a station that had loaded keeps
+  // rendering its last context under the enrollment dialog — a failed
+  // re-read never tears down the open dialog and its draft.
+  const loadedContext =
+    context.state.status === 'ready' ? context.state.data : null;
+  const lastLoadedContext = useRef(loadedContext);
+  useEffect(() => {
+    if (loadedContext !== null) lastLoadedContext.current = loadedContext;
+  }, [loadedContext]);
+  const ready =
+    loadedContext ?? (deviceBlocked ? lastLoadedContext.current : null);
   // The station every header element and dialog renders: the context as
   // read, with the Scanned session replaced by the LIVE one (unexpired,
   // from the latest applied answer) — the pill and every summary's
@@ -584,14 +670,33 @@ function StationView({
   // sign-in modal renders above everything until the server accepts a
   // badge (GUI_DESIGN §4.12).
   const sessionBlocked = scannedMode && liveSession === null;
-  const areaId = ready?.area.id ?? null;
-  const loadInventory = useCallback(
-    () =>
-      areaId === null
-        ? Promise.resolve<AreaInventory | null>(null)
-        : getAreaInventory(areaId),
-    [areaId],
+  // What the role applied at Scan Stations grants (Phase 14 slice 4,
+  // OD-S4-1): an action it does not grant is not rendered and never
+  // opens; the server judges every command again.
+  const stationPermissions = ready?.stationPermissions;
+  const allows = useCallback(
+    (action: StationAction) => stationCan(action, stationPermissions ?? []),
+    [stationPermissions],
   );
+  const areaId = ready?.area.id ?? null;
+  // The inventory read answered that the station is no longer bound to
+  // this Area (409 `station_context_changed` — an administrator rebound
+  // it): not a device refusal, the token stays. Set below.
+  const contextChanged = useRef<(message: string) => void>(() => undefined);
+  const loadInventory = useCallback(async () => {
+    if (areaId === null) return null;
+    try {
+      return await getAreaInventory(areaId, stationId);
+    } catch (error) {
+      if (refusalFlag(error, 'station_context_changed')) {
+        // The station re-reads its context; the inventory then follows
+        // the current Area.
+        contextChanged.current(errorMessage(error));
+        return null;
+      }
+      throw error;
+    }
+  }, [areaId, stationId]);
   const inventory = useApiData(loadInventory);
   // The Due Soon warning policy behind the `In this Area now` due tones
   // (GUI_DESIGN §3.12): a SEPARATE read that never joins the inventory,
@@ -610,6 +715,12 @@ function StationView({
   const inputRef = useRef<HTMLInputElement>(null);
   const [touchPrimary] = useState(isTouchPrimaryDevice);
   const [notice, setNotice] = useState<Notice | null>(null);
+  useEffect(() => {
+    contextChanged.current = (message) => {
+      reloadContext();
+      setNotice({ kind: 'info', title: message });
+    };
+  }, [reloadContext]);
   // The station tier of the theme (GUI_DESIGN §2.1, Phase 13): the saved
   // preference applies when the context loads; the toggle saves it only
   // while the context is loaded and the connection is up (session-only
@@ -792,11 +903,34 @@ function StationView({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [flow, navigate, productionMode, stationId]);
 
+  // The active Machines of the station's Area, as last read with the
+  // inventory (the in-Area action dialog's ON_MACHINE choices).
+  const inAreaMachines = useMemo(
+    () => inventoryReady?.machines.map((card) => card.machine) ?? [],
+    [inventoryReady],
+  );
+
   const closeFlow = useCallback(
     (message?: string) => {
       setFlow(null);
       if (message) setNotice({ kind: 'info', title: message });
       focusScan();
+    },
+    [focusScan],
+  );
+
+  /** A scan would open only an action the role applied at Scan
+   * Stations does not grant: nothing opens and nothing is sent. */
+  const refuseAction = useCallback(
+    (action: ScanLedStationAction) => {
+      setFlow(null);
+      focusScan();
+      setNotice({
+        kind: 'err',
+        icon: '✕',
+        title: 'Not allowed at this Scan Station',
+        detail: stationActionRefusal(action),
+      });
     },
     [focusScan],
   );
@@ -817,11 +951,17 @@ function StationView({
    * explicit Transfer-or-Repair choice; exactly one valid source → the
    * transfer's quantity/review flow; several → the explicit source
    * selection — never an automatic pick; nothing transferable → the
-   * honest placeholder.
+   * honest placeholder. A dialog that would offer only actions the role
+   * applied at Scan Stations does not grant, or a flow that is only
+   * such an action, never opens: the refusal is shown instead.
    */
   const openResolution = useCallback(
     (resolution: ScanResolution, parent?: Flow) => {
       if (resolution.stockAvailable) {
+        if (!allows('STOCK')) {
+          refuseAction('STOCK');
+          return;
+        }
         // A station bound to a terminal Area (the Stockroom): the
         // candidates are the sources the operator STOCKS from — the
         // same explicit source selection, then the Stockroom arrival
@@ -847,6 +987,14 @@ function StationView({
         return;
       }
       if (resolution.resolution === 'ALREADY_IN_AREA') {
+        const offered = inAreaActions(
+          inAreaChoices(resolution, inAreaMachines),
+          resolution,
+        );
+        if (!offered.some(allows)) {
+          refuseAction(offered[0] ?? 'ADD_QUANTITY');
+          return;
+        }
         setFlow({ kind: 'in-area', resolution, parent });
         return;
       }
@@ -861,7 +1009,16 @@ function StationView({
         // explicitly — a previously visited destination alone never
         // turns a transfer into a Repair, and quantity waiting
         // elsewhere never makes the transfer the only possible intent.
+        const offered = pnIntentActions(resolution);
+        if (!offered.some(allows)) {
+          refuseAction(offered[0]);
+          return;
+        }
         setFlow({ kind: 'pn-intent', resolution, parent });
+        return;
+      }
+      if (resolution.candidates.length > 0 && !allows('TRANSFER')) {
+        refuseAction('TRANSFER');
         return;
       }
       if (resolution.candidates.length === 1) {
@@ -881,12 +1038,16 @@ function StationView({
         // Nothing to transfer and no active Work Order Demand: the PN
         // is RECEIVED here (GUI_DESIGN §4.7 item 1) — the server
         // judged the entry condition, the station never guesses it.
+        if (!allows('RECEIVE')) {
+          refuseAction('RECEIVE');
+          return;
+        }
         setFlow({ kind: 'intake', resolution, parent });
         return;
       }
       setFlow({ kind: 'no-quantity', resolution, parent });
     },
-    [],
+    [allows, refuseAction, inAreaMachines],
   );
 
   const resolvePn = useCallback(
@@ -968,6 +1129,11 @@ function StationView({
         }
         applySession(resolution.workerSession, sent);
         context.revalidate();
+        if (!allows('ASSIGN')) {
+          // A Machine scan opens only `Assign to Machine`.
+          refuseAction('ASSIGN');
+          return;
+        }
         const known = inventoryReady?.machines.map((card) => card.machine);
         const machines = known?.some(
           (machine) => machine.id === resolution.machine.id,
@@ -1008,6 +1174,8 @@ function StationView({
       focusScan,
       sessionTicket,
       applySession,
+      allows,
+      refuseAction,
     ],
   );
 
@@ -1181,7 +1349,9 @@ function StationView({
   // Keyboard-wedge capture (§4.4): the main input never loses a scan
   // while no dialog is open — identical to the approved presentation.
   useEffect(() => {
-    if (flow || writeBlocked || resolving || sessionBlocked) return;
+    if (flow || writeBlocked || resolving || sessionBlocked || deviceBlocked) {
+      return;
+    }
     function onKeyDown(event: KeyboardEvent) {
       const input = inputRef.current;
       if (!input || event.defaultPrevented) return;
@@ -1223,7 +1393,14 @@ function StationView({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [flow, writeBlocked, resolving, sessionBlocked, handleScan]);
+  }, [
+    flow,
+    writeBlocked,
+    resolving,
+    sessionBlocked,
+    deviceBlocked,
+    handleScan,
+  ]);
 
   /** A transfer the SERVER confirmed: refresh the Area, note it, refocus.
    * `repair` marks the Phase 9 Repair intent of the same command. */
@@ -1304,9 +1481,17 @@ function StationView({
       });
       context.reload();
       reloadAreaReads();
+      if (!allows('ALLOCATE')) {
+        // The role applied at Scan Stations does not confirm suggested
+        // allocations: the stocked quantity stays available and is
+        // allocated from Management.
+        setFlow(null);
+        focusScan();
+        return;
+      }
       setFlow({ kind: 'allocate', stocked: result, candidate });
     },
-    [context, reloadAreaReads, ready],
+    [context, reloadAreaReads, ready, allows, focusScan],
   );
 
   /** A receiving allocation the SERVER confirmed: note it, refresh, refocus. */
@@ -1601,8 +1786,18 @@ function StationView({
    * changes, the next sync re-runs the walk and re-enables Undo. Reads
    * only; a failed walk leaves the target unresolved for the next sync.
    */
+  // Undo is hidden — and its preview never requested — while the role
+  // applied at Scan Stations does not grant it.
+  const canUndo = allows('UNDO');
   useEffect(() => {
-    if (history.length === 0 || undoTarget !== null || writeBlocked) return;
+    if (
+      !canUndo ||
+      history.length === 0 ||
+      undoTarget !== null ||
+      writeBlocked
+    ) {
+      return;
+    }
     // Each run walks with the state it saw; a newer run (fresher
     // history or a fresher server sync) supersedes it — only the
     // latest walk may apply its result.
@@ -1618,7 +1813,14 @@ function StationView({
     return () => {
       cancelled = true;
     };
-  }, [history, undoTarget, writeBlocked, inventoryReady, walkUndoEligibility]);
+  }, [
+    canUndo,
+    history,
+    undoTarget,
+    writeBlocked,
+    inventoryReady,
+    walkUndoEligibility,
+  ]);
 
   /**
    * Open the Undo of the most recent ELIGIBLE completed PN operation
@@ -1635,7 +1837,7 @@ function StationView({
    * nothing.
    */
   const openUndo = useCallback(async () => {
-    if (history.length === 0 || writeBlocked) return;
+    if (!canUndo || history.length === 0 || writeBlocked) return;
     setResolving(true);
     try {
       const walk = await walkUndoEligibility(history);
@@ -1673,7 +1875,7 @@ function StationView({
     } finally {
       setResolving(false);
     }
-  }, [history, writeBlocked, walkUndoEligibility, focusScan]);
+  }, [canUndo, history, writeBlocked, walkUndoEligibility, focusScan]);
 
   /**
    * The server refused a write (nothing recorded — the flow moved, the
@@ -1717,13 +1919,70 @@ function StationView({
     markRequired();
     revalidateContext();
   }, [markRequired, revalidateContext]);
+  /**
+   * A write was refused for want of an enrolled device (the listener
+   * above already raised the enrollment dialog): on a first attempt the
+   * dialog says it was not sent; after an unknown outcome it says to
+   * confirm again once enrolled.
+   */
+  const deviceRefused = useCallback(
+    ({ outcomeUnknown }: { outcomeUnknown: boolean }) => {
+      if (deviceRefusalPending.current && !outcomeUnknown) {
+        setWriteNotSent(true);
+      }
+    },
+    [],
+  );
+  const trackOutcomeUnknown = useCallback(() => {
+    setUnknownOutcomes((count) => count + 1);
+    return () => setUnknownOutcomes((count) => count - 1);
+  }, []);
   const stationSession = useMemo<StationSession>(
     () => ({
       requireSession,
       ticket: sessionTicket,
       applyWorkerSession: applySession,
+      deviceRefused,
+      trackOutcomeUnknown,
     }),
-    [requireSession, sessionTicket, applySession],
+    [
+      requireSession,
+      sessionTicket,
+      applySession,
+      deviceRefused,
+      trackOutcomeUnknown,
+    ],
+  );
+
+  /**
+   * The device is enrolled (its token stored): lift the block, re-read
+   * the station and its Area, and return focus to the barcode input —
+   * or, when a production dialog is open, to that dialog (the operator
+   * confirms the same action again; it is recorded once).
+   */
+  const completeEnrollment = useCallback(
+    ({ persisted }: { persisted: boolean }) => {
+      deviceRefusalPending.current = false;
+      setDeviceRefusal(null);
+      setWriteNotSent(false);
+      const title = `This device is enrolled for Scan Station ${stationId}.`;
+      setNotice(
+        persisted
+          ? { kind: 'ok', icon: '✓', title }
+          : {
+              kind: 'warn',
+              icon: '⚠',
+              title,
+              detail:
+                'This browser cannot keep the enrollment. It lasts until this page is closed.',
+            },
+      );
+      setAwaitingEnrolledContext(true);
+      reloadContext();
+      reloadAreaReads();
+      focusScan();
+    },
+    [stationId, reloadContext, reloadAreaReads, focusScan],
   );
 
   /**
@@ -1809,40 +2068,46 @@ function StationView({
     setFlow({ kind: 'machine-action', action, flow: flowOfRow, machine });
   };
 
-  const doneRowAction = (flowOfRow: FlowInArea, machine: MachineRef | null) => (
-    <button
-      className="rowact done"
-      aria-label="Complete Area processing"
-      title="Complete processing — move this quantity to the finished rack, ready to transfer"
-      disabled={writeBlocked}
-      onClick={() => openMachineAction('DONE', flowOfRow, machine)}
-    >
-      <span className="ric" aria-hidden="true">
-        ✓
-      </span>
-      DONE
-    </button>
-  );
+  // Row actions the role applied at Scan Stations does not grant are
+  // not rendered; the rail keeps its layout for the remaining ones.
+  const doneRowAction = (flowOfRow: FlowInArea, machine: MachineRef | null) =>
+    allows('DONE') ? (
+      <button
+        className="rowact done"
+        aria-label="Complete Area processing"
+        title="Complete processing — move this quantity to the finished rack, ready to transfer"
+        disabled={writeBlocked || deviceBlocked}
+        onClick={() => openMachineAction('DONE', flowOfRow, machine)}
+      >
+        <span className="ric" aria-hidden="true">
+          ✓
+        </span>
+        DONE
+      </button>
+    ) : null;
 
   const machineRowAction = (entry: AreaAssignment) => {
     const flowOfRow = presented.flowOf.get(entry.card);
     const machineOfRow = presented.machineByName.get(entry.context);
     if (!flowOfRow || !machineOfRow) return null;
+    if (!allows('DONE') && !allows('QUEUE')) return null;
     return (
       <>
         {doneRowAction(flowOfRow, machineOfRow)}
-        <button
-          className="rowact"
-          aria-label="Return to Area queue"
-          title="Return unfinished or paused quantity to the Area queue"
-          disabled={writeBlocked}
-          onClick={() => openMachineAction('QUEUE', flowOfRow, machineOfRow)}
-        >
-          <span className="ric" aria-hidden="true">
-            ⟲
-          </span>
-          QUEUE
-        </button>
+        {allows('QUEUE') ? (
+          <button
+            className="rowact"
+            aria-label="Return to Area queue"
+            title="Return unfinished or paused quantity to the Area queue"
+            disabled={writeBlocked || deviceBlocked}
+            onClick={() => openMachineAction('QUEUE', flowOfRow, machineOfRow)}
+          >
+            <span className="ric" aria-hidden="true">
+              ⟲
+            </span>
+            QUEUE
+          </button>
+        ) : null}
       </>
     );
   };
@@ -1875,7 +2140,10 @@ function StationView({
           return doneRowAction(flowOfRow, null);
         };
 
-  if (context.state.status === 'loading') {
+  if (
+    ready === null &&
+    (context.state.status === 'loading' || awaitingEnrolledContext)
+  ) {
     // No scan input yet: the station is usable only once its context
     // (Area, Operations) is known — a scan before that has nowhere to
     // resolve.
@@ -1885,7 +2153,19 @@ function StationView({
       </section>
     );
   }
-  if (context.state.status === 'error') {
+  if (ready === null && deviceRefusal !== null) {
+    // The station never loaded: this browser is not an enrolled device
+    // of it (GUI_DESIGN §4.13).
+    return (
+      <EnrollmentPanel
+        stationId={stationId}
+        reason={deviceRefusal}
+        writeBlocked={writeBlocked}
+        onEnrolled={completeEnrollment}
+      />
+    );
+  }
+  if (context.state.status === 'error' && ready === null) {
     return (
       <UnknownStation
         stationId={stationId}
@@ -1974,7 +2254,9 @@ function StationView({
                   className="ss-scaninput"
                   autoComplete="off"
                   inputMode={touchPrimary ? 'none' : undefined}
-                  disabled={writeBlocked || resolving || sessionBlocked}
+                  disabled={
+                    writeBlocked || resolving || sessionBlocked || deviceBlocked
+                  }
                   placeholder={
                     disconnected
                       ? 'Disconnected — scanning disabled'
@@ -1994,7 +2276,9 @@ function StationView({
                 <button
                   className="ss-manualbtn"
                   onClick={() => setFlow({ kind: 'manual-pn' })}
-                  disabled={writeBlocked || resolving || sessionBlocked}
+                  disabled={
+                    writeBlocked || resolving || sessionBlocked || deviceBlocked
+                  }
                 >
                   ⌨ Enter PN manually
                 </button>
@@ -2031,23 +2315,32 @@ function StationView({
                   first eligible one serves the summary confirmation.
                   With nothing to reverse, nothing currently eligible,
                   or while writes are blocked, the action region stays
-                  present and disabled, never a hidden control. */}
-                <button
-                  className="ss-undo zone-action"
-                  disabled={
-                    writeBlocked || resolving || sessionBlocked || !undoTarget
-                  }
-                  title={
-                    history.length === 0
-                      ? 'No completed Part Number action to reverse yet'
-                      : !undoTarget
-                        ? 'No completed action of this session can currently be reversed'
-                        : 'Reverse the most recent eligible completed action'
-                  }
-                  onClick={() => void openUndo()}
-                >
-                  ⟲ UNDO
-                </button>
+                  present and disabled. Only when the role applied at
+                  Scan Stations does not grant Undo is the region not
+                  rendered at all: the information region then spans
+                  the whole block (Phase 14 slice 4). */}
+                {canUndo ? (
+                  <button
+                    className="ss-undo zone-action"
+                    disabled={
+                      writeBlocked ||
+                      resolving ||
+                      sessionBlocked ||
+                      deviceBlocked ||
+                      !undoTarget
+                    }
+                    title={
+                      history.length === 0
+                        ? 'No completed Part Number action to reverse yet'
+                        : !undoTarget
+                          ? 'No completed action of this session can currently be reversed'
+                          : 'Reverse the most recent eligible completed action'
+                    }
+                    onClick={() => void openUndo()}
+                  >
+                    ⟲ UNDO
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
@@ -2151,6 +2444,7 @@ function StationView({
         {flow?.kind === 'allocate' && (
           <AllocationDialog
             station={station}
+            canAdjust={allows('ADJUST_ALLOCATION')}
             stocked={flow.stocked}
             sourceArea={flow.candidate.currentArea}
             writeBlocked={writeBlocked}
@@ -2178,6 +2472,7 @@ function StationView({
         {flow?.kind === 'pn-intent' && (
           <PnIntentDialog
             resolution={flow.resolution}
+            allows={allows}
             onReceiveNew={() =>
               setFlow({
                 kind: 'intake',
@@ -2363,9 +2658,8 @@ function StationView({
         {flow?.kind === 'in-area' && (
           <InAreaDialog
             resolution={flow.resolution}
-            machines={
-              inventoryReady?.machines.map((card) => card.machine) ?? []
-            }
+            machines={inAreaMachines}
+            allows={allows}
             onAssign={(queuedFlow) =>
               setFlow({
                 kind: 'assign',
@@ -2503,13 +2797,29 @@ function StationView({
           <WorkerSignInDialog
             stationId={stationId}
             expired={sessionClock.hadSession}
-            writeBlocked={writeBlocked}
+            writeBlocked={writeBlocked || deviceBlocked}
             ticket={sessionTicket}
             onSignedIn={(result, sent) => {
               applySignIn(result, sent);
               focusScan();
             }}
             onModeChanged={revalidateContext}
+          />
+        ) : null}
+
+        {/* The enrollment dialog (§4.13) renders above everything, the
+          Worker sign-in modal included: open dialogs keep their drafts
+          underneath, and the same action is confirmed again once this
+          device is enrolled. */}
+        {deviceRefusal !== null ? (
+          <StationEnrollment
+            stationId={stationId}
+            variant="dialog"
+            reason={deviceRefusal}
+            pendingUnknownOutcome={unknownOutcomes > 0}
+            writeNotSent={writeNotSent}
+            writeBlocked={writeBlocked}
+            onEnrolled={completeEnrollment}
           />
         ) : null}
 
@@ -2522,6 +2832,104 @@ function StationView({
         </footer>
       </section>
     </StationSessionContext.Provider>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Device enrollment panel                                             */
+/* ------------------------------------------------------------------ */
+
+interface StationRecordData {
+  stations: ScanStation[];
+  areas: Area[];
+  departments: Department[];
+}
+
+/** The public lists the Station Selector reads — no device needed. */
+async function loadStationRecords(): Promise<StationRecordData> {
+  const [stations, areas, departments] = await Promise.all([
+    listScanStations(),
+    listAreas(),
+    listDepartments(),
+  ]);
+  return { stations, areas, departments };
+}
+
+/**
+ * The station never loaded because this browser is not an enrolled
+ * device of it (GUI_DESIGN §4.13). The station's public record decides
+ * what is shown: an unknown or inactive Station ID is the explicit
+ * unavailable-station error (PROJECT_PROFILE §21) — never the
+ * enrollment panel, whose code could not even be issued; otherwise the
+ * panel replaces the station content under a header naming the
+ * station, its Department and its Area.
+ */
+function EnrollmentPanel({
+  stationId,
+  reason,
+  writeBlocked,
+  onEnrolled,
+}: {
+  stationId: string;
+  reason: EnrollmentReason;
+  writeBlocked: boolean;
+  onEnrolled: (result: { persisted: boolean }) => void;
+}) {
+  const records = useApiData(loadStationRecords);
+  if (records.state.status === 'loading') {
+    return (
+      <section className="ss" aria-label="Scan Station">
+        <LoadingState label="Loading Scan Station" />
+      </section>
+    );
+  }
+  if (records.state.status === 'error') {
+    return (
+      <UnknownStation
+        stationId={stationId}
+        detail={records.state.message}
+        onRetry={records.reload}
+      />
+    );
+  }
+  const { stations, areas, departments } = records.state.data;
+  const station = stations.find((item) => item.stationId === stationId);
+  if (!station) return <UnknownStation stationId={stationId} />;
+  if (!station.isActive) {
+    return (
+      <UnknownStation
+        stationId={stationId}
+        detail={`Scan Station '${stationId}' is inactive and accepts no production use.`}
+      />
+    );
+  }
+  const area = areas.find((item) => item.id === station.areaId);
+  const department = area
+    ? departments.find((item) => item.id === area.departmentId)
+    : undefined;
+  return (
+    <section className="ss" aria-label="Scan Station">
+      <header className="ss-head">
+        <div className="ss-id">
+          <div className="dept">
+            {department?.name ?? '—'} ·{' '}
+            <span className="mono">{stationId}</span>
+          </div>
+          <div className="area">
+            <AreaDot colorVar={areaColor(area)} size={16} />
+            {area?.name ?? '—'}
+          </div>
+        </div>
+      </header>
+      <StationEnrollment
+        stationId={stationId}
+        variant="panel"
+        reason={reason}
+        pendingUnknownOutcome={false}
+        writeBlocked={writeBlocked}
+        onEnrolled={onEnrolled}
+      />
+    </section>
   );
 }
 
@@ -2596,6 +3004,7 @@ function candidateLabel(candidate: TransferCandidate): string {
  */
 function PnIntentDialog({
   resolution,
+  allows,
   onTransfer,
   onRepair,
   onReceiveNew,
@@ -2603,6 +3012,8 @@ function PnIntentDialog({
   onCancel,
 }: {
   resolution: ScanResolution;
+  /** Whether the role applied at Scan Stations grants an action. */
+  allows: (action: StationAction) => boolean;
   onTransfer: () => void;
   onRepair: () => void;
   onReceiveNew: () => void;
@@ -2613,9 +3024,11 @@ function PnIntentDialog({
     (sum, candidate) => sum + candidate.quantity,
     0,
   );
-  const repairable = resolution.candidates.filter(
-    (candidate) => candidate.repairAvailable,
-  );
+  // Intents the role applied at Scan Stations does not grant are not
+  // rendered; the others keep their order.
+  const repairable = allows('REPAIR')
+    ? resolution.candidates.filter((candidate) => candidate.repairAvailable)
+    : [];
   return (
     <ModalDialog label="Select an action" onClose={onCancel}>
       <h3>Select an action</h3>
@@ -2626,22 +3039,24 @@ function PnIntentDialog({
           ? ` ${resolution.scrappedQuantity} pcs scrapped.`
           : ''}
       </div>
-      <button className="choice" onClick={onTransfer}>
-        <span className="cic run" aria-hidden="true">
-          RCV
-        </span>
-        <span>
-          <span className="ct1">Receive from another Area</span>
-          <br />
-          <span className="ct2">
-            {elsewhere} pcs available in{' '}
-            {resolution.candidates.length === 1
-              ? resolution.candidates[0].currentArea.name
-              : `${resolution.candidates.length} places`}
-            .
+      {allows('TRANSFER') ? (
+        <button className="choice" onClick={onTransfer}>
+          <span className="cic run" aria-hidden="true">
+            RCV
           </span>
-        </span>
-      </button>
+          <span>
+            <span className="ct1">Receive from another Area</span>
+            <br />
+            <span className="ct2">
+              {elsewhere} pcs available in{' '}
+              {resolution.candidates.length === 1
+                ? resolution.candidates[0].currentArea.name
+                : `${resolution.candidates.length} places`}
+              .
+            </span>
+          </span>
+        </button>
+      ) : null}
       {repairable.length > 0 ? (
         <button className="choice" onClick={onRepair}>
           <span className="cic rep" aria-hidden="true">
@@ -2664,7 +3079,7 @@ function PnIntentDialog({
           </span>
         </button>
       ) : null}
-      {resolution.intakeAvailable ? (
+      {resolution.intakeAvailable && allows('RECEIVE') ? (
         <button className="choice" onClick={onReceiveNew}>
           <span className="cic run" aria-hidden="true">
             NEW
@@ -2856,6 +3271,8 @@ function TransferDialog({
   // transfer instead of recording it twice.
   const deviceEventId = useRef(newDeviceEventId());
   const requireSession = useRequireWorkerSession();
+  const deviceRefused = useStationDeviceRefused();
+  useTrackOutcomeUnknown(outcomeUnknown);
 
   // Route deviation (PROJECT_PROFILE §17): the station's Area is not
   // the Planned Route's next step, or the chosen Operation is not the
@@ -2944,6 +3361,16 @@ function TransferDialog({
         setBusy(false);
         return;
       }
+      if (stationDeviceRefusal(error) !== null) {
+        // This device is not enrolled for the station (any more): judged
+        // before the idempotency fast path, so an earlier unknown
+        // outcome stays unknown. The intent, its `device_event_id` and
+        // the draft stay; the enrollment dialog opens above this one
+        // and Confirm resends the identical request afterwards.
+        deviceRefused({ outcomeUnknown });
+        setBusy(false);
+        return;
+      }
       if (transferOutcomeUnknown(error)) {
         // Transport failure, timeout or 5xx: the request may or may
         // not have reached and been committed by the server. NEVER
@@ -2961,6 +3388,9 @@ function TransferDialog({
         onRejected?.();
       } else {
         // An explicit application rejection (4xx): nothing was recorded.
+        // A refusal by the role applied at Scan Stations is judged after
+        // the idempotency re-check, so it also ends an unknown outcome.
+        if (stationPermissionDenied(error)) setOutcomeUnknown(false);
         setServerError(errorMessage(error));
         setRejected(true);
         onRejected?.();
@@ -3314,9 +3744,105 @@ function TransferDialog({
 /* PN already in the Area                                              */
 /* ------------------------------------------------------------------ */
 
+/** The choices the in-Area action dialog derives from a resolution. */
+interface InAreaChoices {
+  queued: FlowInArea[];
+  onMachine: { flow: FlowInArea; machine: MachineRef }[];
+  processing: FlowInArea[];
+  combineGroups: FlowInArea[][];
+  repairable: TransferCandidate[];
+  scrappable: FlowInArea[];
+}
+
+/**
+ * The valid choices come from the server's derived state of EACH flow,
+ * just resolved (PROJECT_PROFILE §12) — never from an Area mode loaded
+ * earlier: a queued flow offers Assign, a flow on a Machine offers
+ * completion on that Machine, a directly processing flow of an Area
+ * without Machines offers completion without one. Several flows of the
+ * PN are several explicit choices — never one merged action. Combine
+ * (Phase 8) is offered for exactly the groups the SERVER judged
+ * combinable; Repair (Phase 9) only for the sources the SERVER marked
+ * repair-eligible; Scrap (Phase 9) once per in-Area quantity the server
+ * reports scrappable.
+ */
+function inAreaChoices(
+  resolution: ScanResolution,
+  machines: MachineRef[],
+): InAreaChoices {
+  return {
+    queued: resolution.inArea.filter((flow) =>
+      flow.availableActions.includes('ASSIGN'),
+    ),
+    onMachine: resolution.inArea.flatMap((flow) => {
+      if (
+        flow.processingState !== 'ON_MACHINE' ||
+        !flow.availableActions.includes('DONE')
+      ) {
+        return [];
+      }
+      const machine = machines.find((item) => item.id === flow.machineId);
+      return machine ? [{ flow, machine }] : [];
+    }),
+    processing: resolution.inArea.filter(
+      (flow) =>
+        flow.processingState === 'PROCESSING' &&
+        flow.availableActions.includes('DONE'),
+    ),
+    combineGroups: resolution.combineGroups
+      .map((ids) =>
+        ids.flatMap((id) => {
+          const portion = resolution.inArea.find(
+            (flow) => flow.quantityFlowId === id,
+          );
+          return portion ? [portion] : [];
+        }),
+      )
+      .filter((portions) => portions.length >= 2),
+    repairable: resolution.candidates.filter(
+      (candidate) => candidate.repairAvailable,
+    ),
+    scrappable: resolution.inArea.filter((flow) =>
+      flow.availableActions.includes('SCRAP'),
+    ),
+  };
+}
+
+/** Every action the in-Area dialog would offer, in its order. */
+function inAreaActions(
+  choices: InAreaChoices,
+  resolution: ScanResolution,
+): ScanLedStationAction[] {
+  const actions: ScanLedStationAction[] = [
+    ...choices.queued.map((): ScanLedStationAction => 'ASSIGN'),
+    ...choices.onMachine.map((): ScanLedStationAction => 'DONE'),
+    ...choices.processing.map((): ScanLedStationAction => 'DONE'),
+    ...choices.combineGroups.map((): ScanLedStationAction => 'COMBINE'),
+  ];
+  if (resolution.candidates.length > 0) actions.push('TRANSFER');
+  actions.push('ADD_QUANTITY');
+  if (resolution.intakeAvailable) actions.push('RECEIVE');
+  if (choices.repairable.length > 0) actions.push('REPAIR');
+  for (let index = 0; index < choices.scrappable.length; index += 1) {
+    actions.push('SCRAP');
+  }
+  return actions;
+}
+
+/** Every intent the PN action dialog would offer, in its order. */
+function pnIntentActions(resolution: ScanResolution): ScanLedStationAction[] {
+  const actions: ScanLedStationAction[] = ['TRANSFER'];
+  if (resolution.candidates.some((candidate) => candidate.repairAvailable)) {
+    actions.push('REPAIR');
+  }
+  if (resolution.intakeAvailable) actions.push('RECEIVE');
+  return actions;
+}
+
 function InAreaDialog({
   resolution,
   machines,
+  allows,
   onAssign,
   onComplete,
   onCombine,
@@ -3331,6 +3857,8 @@ function InAreaDialog({
   resolution: ScanResolution;
   /** The active Machines of the station's Area (for the ON_MACHINE rows). */
   machines: MachineRef[];
+  /** Whether the role applied at Scan Stations grants an action. */
+  allows: (action: StationAction) => boolean;
   /** PN-first assignment of ONE queued flow (GUI_DESIGN §4.7). */
   onAssign: (flow: FlowInArea) => void;
   /** `Complete Area processing on {Machine}` for ONE ON_MACHINE flow, or
@@ -3367,56 +3895,18 @@ function InAreaDialog({
     (sum, candidate) => sum + candidate.quantity,
     0,
   );
-  // The valid choices come from the server's derived state of EACH
-  // flow, just resolved (PROJECT_PROFILE §12) — never from an Area mode
-  // loaded earlier: a queued flow offers Assign, a flow on a Machine
-  // offers completion on that Machine, a directly processing flow of an
-  // Area without Machines offers completion without one. Several flows
-  // of the PN are several explicit choices — never one merged action.
-  const queued = resolution.inArea.filter((flow) =>
-    flow.availableActions.includes('ASSIGN'),
-  );
-  const onMachine = resolution.inArea.flatMap((flow) => {
-    if (
-      flow.processingState !== 'ON_MACHINE' ||
-      !flow.availableActions.includes('DONE')
-    ) {
-      return [];
-    }
-    const machine = machines.find((item) => item.id === flow.machineId);
-    return machine ? [{ flow, machine }] : [];
-  });
-  const processing = resolution.inArea.filter(
-    (flow) =>
-      flow.processingState === 'PROCESSING' &&
-      flow.availableActions.includes('DONE'),
-  );
+  const choices = inAreaChoices(resolution, machines);
+  // Choices the role applied at Scan Stations does not grant are not
+  // rendered; the others keep their order.
+  const queued = allows('ASSIGN') ? choices.queued : [];
+  const onMachine = allows('DONE') ? choices.onMachine : [];
+  const processing = allows('DONE') ? choices.processing : [];
+  const combineGroups = allows('COMBINE') ? choices.combineGroups : [];
+  const repairable = allows('REPAIR') ? choices.repairable : [];
+  const scrappable = allows('SCRAP') ? choices.scrappable : [];
   const finishedQty = resolution.inArea
     .filter((flow) => flow.processingState === 'READY_TO_TRANSFER')
     .reduce((sum, flow) => sum + flow.quantity, 0);
-  // Combine quantities (Phase 8): offered for exactly the groups the
-  // SERVER judged combinable — never derived here, never automatic.
-  const combineGroups = resolution.combineGroups
-    .map((ids) =>
-      ids.flatMap((id) => {
-        const portion = resolution.inArea.find(
-          (flow) => flow.quantityFlowId === id,
-        );
-        return portion ? [portion] : [];
-      }),
-    )
-    .filter((portions) => portions.length >= 2);
-  // Repair (Phase 9) is offered only for the sources the SERVER marked
-  // repair-eligible (this Area previously visited) — never inferred
-  // here, and never replacing the normal transfer to the same Area.
-  const repairable = resolution.candidates.filter(
-    (candidate) => candidate.repairAvailable,
-  );
-  // Scrap (Phase 9): one explicit choice per in-Area quantity the
-  // server reports scrappable.
-  const scrappable = resolution.inArea.filter((flow) =>
-    flow.availableActions.includes('SCRAP'),
-  );
   return (
     <ModalDialog label="Select an action" onClose={onCancel}>
       <h3>Select an action</h3>
@@ -3517,7 +4007,7 @@ function InAreaDialog({
           through a transfer at the destination station.
         </Guidance>
       ) : null}
-      {resolution.candidates.length > 0 ? (
+      {!allows('TRANSFER') ? null : resolution.candidates.length > 0 ? (
         <button className="choice" onClick={onReceiveMore}>
           <span className="cic run" aria-hidden="true">
             RCV
@@ -3538,20 +4028,22 @@ function InAreaDialog({
           No other quantity of this Part Number is available to receive.
         </Guidance>
       )}
-      <button className="choice" onClick={onAdd}>
-        <span className="cic add" aria-hidden="true">
-          ADD
-        </span>
-        <span>
-          <span className="ct1">Add more quantity</span>
-          <br />
-          <span className="ct2">
-            Add physical quantity found at this Area that was not transferred
-            from another Area. A reason is required.
+      {allows('ADD_QUANTITY') ? (
+        <button className="choice" onClick={onAdd}>
+          <span className="cic add" aria-hidden="true">
+            ADD
           </span>
-        </span>
-      </button>
-      {resolution.intakeAvailable ? (
+          <span>
+            <span className="ct1">Add more quantity</span>
+            <br />
+            <span className="ct2">
+              Add physical quantity found at this Area that was not transferred
+              from another Area. A reason is required.
+            </span>
+          </span>
+        </button>
+      ) : null}
+      {resolution.intakeAvailable && allows('RECEIVE') ? (
         <button className="choice" onClick={onReceiveNew}>
           <span className="cic run" aria-hidden="true">
             NEW

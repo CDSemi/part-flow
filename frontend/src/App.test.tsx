@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from './App';
+import { STATION_PERMISSIONS } from './api/scan-station';
 
 beforeEach(() => {
   // A concrete station URL: /scan-station itself is the Station
@@ -59,6 +60,8 @@ function stationFixture(url: string): Promise<Response> {
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   if (url === '/api/session') {

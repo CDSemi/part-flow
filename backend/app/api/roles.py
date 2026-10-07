@@ -57,6 +57,9 @@ class RoleResponse(BaseModel):
     user_count: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    # The role applied at Scan Stations (Phase 14 slice 4): every enrolled
+    # station device has its Scan Station permissions.
+    applies_at_scan_stations: bool
 
 
 class RoleCreateRequest(BaseModel):
@@ -86,6 +89,7 @@ def role_response(view: roles.RoleView) -> RoleResponse:
         user_count=view.user_count,
         created_at=view.created_at,
         updated_at=view.updated_at,
+        applies_at_scan_stations=view.applies_at_scan_stations,
     )
 
 

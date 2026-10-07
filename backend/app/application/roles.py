@@ -53,7 +53,7 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.application import audit, authorization, user_access
+from app.application import audit, authorization, station_access, user_access
 from app.application.common import (
     UNSET,
     UnsetType,
@@ -88,6 +88,8 @@ class RoleView(NamedTuple):
     user_count: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    # The role applied at Scan Stations (Phase 14 slice 4).
+    applies_at_scan_stations: bool
 
 
 def role_snapshot(name: str, permissions: Iterable[Permission]) -> dict[str, Any]:
@@ -137,6 +139,7 @@ def _view(session: Session, role: Role, permissions: Iterable[Permission]) -> Ro
         user_count=_user_count(session, role.id),
         created_at=role.created_at,
         updated_at=role.updated_at,
+        applies_at_scan_stations=role.id == station_access.station_role_id(session),
     )
 
 
@@ -154,6 +157,7 @@ def list_roles(session: Session) -> list[RoleView]:
             select(User.role_id, func.count()).group_by(User.role_id)
         )
     }
+    station_role_id = station_access.station_role_id(session)
     return [
         RoleView(
             id=role.id,
@@ -162,6 +166,7 @@ def list_roles(session: Session) -> list[RoleView]:
             user_count=counts.get(role.id, 0),
             created_at=role.created_at,
             updated_at=role.updated_at,
+            applies_at_scan_stations=role.id == station_role_id,
         )
         for role in roles
     ]

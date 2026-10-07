@@ -54,7 +54,7 @@ from alembic import command
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APP_DIR = _BACKEND_DIR / "app"
@@ -113,7 +113,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()

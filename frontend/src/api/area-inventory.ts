@@ -16,6 +16,7 @@
 // Production-safe: no mock data, no framework imports.
 
 import { apiRequest } from './client';
+import { stationDeviceHeaders } from './station-devices';
 
 export interface AreaRef {
   id: number;
@@ -429,9 +430,16 @@ export function toAreaInventory(wire: AreaInventoryWire): AreaInventory {
   };
 }
 
-export async function getAreaInventory(areaId: number): Promise<AreaInventory> {
+export async function getAreaInventory(
+  areaId: number,
+  stationId: string,
+): Promise<AreaInventory> {
+  // A Scan Station read: the device of `stationId` must belong to the
+  // station currently bound to this Area (else 409
+  // `station_context_changed` — the station reloads its context).
   const wire = await apiRequest<AreaInventoryWire>(
     `/api/areas/${areaId}/inventory`,
+    { headers: stationDeviceHeaders(stationId) },
   );
   return toAreaInventory(wire);
 }

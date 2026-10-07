@@ -18,6 +18,15 @@ PERMISSION_DENIED_MESSAGE: Final = "Your account does not have permission to do 
 PASSWORD_CHANGE_REQUIRED_MESSAGE: Final = "Choose a new password before you continue."
 #: V-1 (Phase 14 slice 3): a Management read the User's role may not open.
 VIEW_PERMISSION_DENIED_MESSAGE: Final = "Your account does not have permission to view this."
+#: D-1 / D-2 (Phase 14 slice 4): the station device refusals. They precede
+#: the idempotency fast path, so they never say that nothing was recorded.
+STATION_DEVICE_REQUIRED_MESSAGE: Final = (
+    "This device is not enrolled for this Scan Station, or its enrollment was revoked or"
+    " replaced. Ask an administrator for an enrollment code."
+)
+STATION_DEVICE_MISMATCH_MESSAGE: Final = (
+    "This device is enrolled for a different Scan Station. Enroll it for this station to continue."
+)
 #: R-1 (Phase 14 slice 3): a Management command replayed by another User.
 RECORDED_BY_ANOTHER_USER_MESSAGE: Final = (
     "This request was already recorded by another user. Nothing more was recorded"
@@ -202,6 +211,43 @@ class UnknownLoginError(ApplicationError):
 class RecoveryUnavailableError(ApplicationError):
     """The recovery reset may not run for this User or in this state
     (recovery command only; never HTTP)."""
+
+
+class StationDeviceRequiredError(ApplicationError):
+    """A Scan Station request without a valid, unrevoked device token (401;
+    Phase 14 slice 4, D-1). Judged before the idempotency fast path, so it
+    never proves that nothing was recorded; never clears the User cookie."""
+
+
+class StationDeviceMismatchError(ApplicationError):
+    """The device is enrolled for another Scan Station than the one the
+    request addresses (403; Phase 14 slice 4, D-2)."""
+
+
+class StationPermissionDeniedError(ApplicationError):
+    """The role applied at Scan Stations lacks a key this station command
+    needs (403; Phase 14 slice 4, K-1; owner decision OD-S4-1).
+
+    ``required`` names every key the refused command kinds map to, as
+    plain strings sorted by value, so this vocabulary never depends on
+    the permission enum. Judged after the post-lock idempotency re-check:
+    nothing was recorded under the request's ``device_event_id``.
+    """
+
+    def __init__(self, message: str, required: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.required = required
+
+
+class StationContextChangedError(ConflictError):
+    """The Scan Station's Area changed under an open station (409; Phase
+    14 slice 4, C-1): the device is valid, the station's context is stale."""
+
+
+class EnrollmentCodeInvalidError(ApplicationError):
+    """An enrollment code that is unknown, used, expired, revoked or issued
+    for another Scan Station (403; Phase 14 slice 4, E-1) — one answer for
+    every reason."""
 
 
 class RecoveryOutcomeUnknownError(ApplicationError):

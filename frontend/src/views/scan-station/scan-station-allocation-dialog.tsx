@@ -10,6 +10,10 @@ import type {
   SuggestedAllocationLine,
 } from '../../api/allocations';
 import { errorMessage } from '../../api/client';
+import {
+  stationDeviceRefusal,
+  stationPermissionDenied,
+} from '../../api/station-devices';
 import { newDeviceEventId } from '../../api/production-release';
 import {
   areaRefColor,
@@ -28,7 +32,11 @@ import { formatIsoDate } from '../dates';
 import { EntityChip, Guidance, StepButtons } from './scan-station-presentation';
 import { enterKeyHandler } from './scan-station-wizard';
 import { WriteGuidance } from './scan-station-machine-dialogs';
-import { useRequireWorkerSession } from './scan-station-session';
+import {
+  useRequireWorkerSession,
+  useStationDeviceRefused,
+  useTrackOutcomeUnknown,
+} from './scan-station-session';
 
 /**
  * The receiving allocation of the Stockroom station (GUI_DESIGN §10;
@@ -52,17 +60,26 @@ import { useRequireWorkerSession } from './scan-station-session';
  * Nothing is reported as allocated before the server confirmed it.
  * Leaving without allocating is legitimate: the stocked quantity stays
  * available for allocation from Management.
+ *
+ * Without the adjust permission of the role applied at Scan Stations
+ * (Phase 14 slice 4) the steppers are not rendered: the proposal is
+ * shown read-only and confirmed as shown (`suggestionUnchanged`), so a
+ * suggestion that changed meanwhile is refused as stale and refreshed.
  */
 export function AllocationDialog({
   station,
   stocked,
   sourceArea,
   writeBlocked,
+  canAdjust,
   onDone,
   onLeave,
   onAbandonUnknown,
 }: {
   station: StationContext;
+  /** The role applied at Scan Stations may adjust suggested
+   * allocations: only then are the steppers rendered. */
+  canAdjust: boolean;
   /** The server-confirmed STOCKED command whose quantity is allocated. */
   stocked: TransferResult;
   sourceArea: AreaRef;
@@ -80,6 +97,7 @@ export function AllocationDialog({
   onAbandonUnknown: () => void;
 }) {
   const pn = stocked.partNumber;
+  const stationId = station.stationId;
   // The quantity being allocated: the just-stocked quantity, fixed for
   // the life of this dialog — never re-read from the suggestion's
   // available figure.
@@ -100,7 +118,7 @@ export function AllocationDialog({
   useEffect(() => {
     let cancelled = false;
     setSuggestion(null);
-    getAllocationSuggestion(pn, allocationQuantity).then(
+    getAllocationSuggestion(stationId, pn, allocationQuantity).then(
       (fresh) => {
         if (cancelled) return;
         setSuggestion(fresh);
@@ -122,7 +140,7 @@ export function AllocationDialog({
     return () => {
       cancelled = true;
     };
-  }, [pn, allocationQuantity, generation]);
+  }, [stationId, pn, allocationQuantity, generation]);
 
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -133,6 +151,8 @@ export function AllocationDialog({
   // outcome keeps the frozen one.
   const deviceEventId = useRef(newDeviceEventId());
   const requireSession = useRequireWorkerSession();
+  const deviceRefused = useStationDeviceRefused();
+  useTrackOutcomeUnknown(outcomeUnknown);
 
   const total = [...quantities.values()].reduce((sum, value) => sum + value, 0);
   const totalMatches = total === allocationQuantity;
@@ -161,6 +181,15 @@ export function AllocationDialog({
     });
   }
 
+  // The lines go out exactly as the server proposed them: every line at
+  // its proposed quantity (so every proposed line is sent).
+  const suggestionUnchanged =
+    suggestion !== null &&
+    lines.every(
+      (line) =>
+        (quantities.get(line.workOrderDemandId) ?? 0) === line.proposedQuantity,
+    );
+
   async function confirm() {
     if (busy || !totalMatches) return;
     if (writeBlocked) {
@@ -182,8 +211,9 @@ export function AllocationDialog({
             workOrderDemandId,
             quantity,
           })),
-        stationId: station.stationId,
+        stationId,
         deviceEventId: deviceEventId.current,
+        suggestionUnchanged,
       });
     } catch (error) {
       if (workerSessionRequired(error)) {
@@ -191,6 +221,15 @@ export function AllocationDialog({
         // draft and the `device_event_id` stay — after the badge the
         // operator confirms the identical request again.
         requireSession();
+        setBusy(false);
+        return;
+      }
+      if (stationDeviceRefusal(error) !== null) {
+        // This device is not enrolled for the station (any more): judged
+        // before the idempotency fast path, so nothing is known about an
+        // earlier attempt — the draft, the `device_event_id` and the
+        // unknown-outcome state stay; the enrollment dialog opens above.
+        deviceRefused({ outcomeUnknown });
         setBusy(false);
         return;
       }
@@ -202,7 +241,10 @@ export function AllocationDialog({
       } else {
         // An explicit refusal — nothing recorded. The suggestion is
         // re-read from the server so the operator adjusts against the
-        // current figures, under a fresh idempotency key.
+        // current figures, under a fresh idempotency key. A refusal by
+        // the role applied at Scan Stations is judged after the
+        // idempotency re-check: it also ends an unknown outcome.
+        if (stationPermissionDenied(error)) setOutcomeUnknown(false);
         setServerError(
           `${errorMessage(error)} The suggestion was refreshed from the server — review the lines and confirm again.`,
         );
@@ -246,7 +288,7 @@ export function AllocationDialog({
         </EntityChip>{' '}
         — recorded by the server. Allocate exactly this quantity to the
         outstanding Work Order Demand below; the suggestion follows the
-        canonical demand ordering and may be adjusted.
+        canonical demand ordering{canAdjust ? ' and may be adjusted' : ''}.
       </div>
       {loadError !== null ? (
         <ErrorState
@@ -310,45 +352,56 @@ export function AllocationDialog({
                     </td>
                     <td className="num mono">{line.remainingShortage}</td>
                     <td className="num">
-                      <div className="ss-alloc-stepper">
-                        <button
-                          type="button"
-                          className="pickbtn"
-                          aria-label={`Allocate one less to ${line.workOrderNumber ?? 'internal Work Order'}`}
-                          disabled={frozen || value <= 0}
-                          onClick={() => setQuantity(line, value - 1)}
-                        >
-                          −
-                        </button>
-                        <input
-                          className="field mono ss-alloc-qty"
-                          inputMode="numeric"
+                      {canAdjust ? (
+                        <div className="ss-alloc-stepper">
+                          <button
+                            type="button"
+                            className="pickbtn"
+                            aria-label={`Allocate one less to ${line.workOrderNumber ?? 'internal Work Order'}`}
+                            disabled={frozen || value <= 0}
+                            onClick={() => setQuantity(line, value - 1)}
+                          >
+                            −
+                          </button>
+                          <input
+                            className="field mono ss-alloc-qty"
+                            inputMode="numeric"
+                            aria-label={`Quantity for ${line.workOrderNumber ?? 'internal Work Order'}`}
+                            value={value}
+                            disabled={frozen}
+                            onChange={(event) =>
+                              setQuantity(
+                                line,
+                                Number.parseInt(
+                                  event.target.value || '0',
+                                  10,
+                                ) || 0,
+                              )
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="pickbtn"
+                            aria-label={`Allocate one more to ${line.workOrderNumber ?? 'internal Work Order'}`}
+                            disabled={frozen || value >= line.remainingShortage}
+                            onClick={() => setQuantity(line, value + 1)}
+                          >
+                            +
+                          </button>
+                          {changed ? (
+                            <span className="ss-alloc-adj">
+                              adjusted (suggested {line.proposedQuantity})
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <span
+                          className="mono"
                           aria-label={`Quantity for ${line.workOrderNumber ?? 'internal Work Order'}`}
-                          value={value}
-                          disabled={frozen}
-                          onChange={(event) =>
-                            setQuantity(
-                              line,
-                              Number.parseInt(event.target.value || '0', 10) ||
-                                0,
-                            )
-                          }
-                        />
-                        <button
-                          type="button"
-                          className="pickbtn"
-                          aria-label={`Allocate one more to ${line.workOrderNumber ?? 'internal Work Order'}`}
-                          disabled={frozen || value >= line.remainingShortage}
-                          onClick={() => setQuantity(line, value + 1)}
                         >
-                          +
-                        </button>
-                        {changed ? (
-                          <span className="ss-alloc-adj">
-                            adjusted (suggested {line.proposedQuantity})
-                          </span>
-                        ) : null}
-                      </div>
+                          {value}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 );

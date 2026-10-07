@@ -1028,12 +1028,16 @@ def test_cookie_requests_need_the_csrf_header(client: TestClient, db_engine: Eng
         _A4,
     )
     # Anonymous requests without the cookie are not CSRF-checked: a route
-    # that stays anonymous (a Scan Station command, Phase 14 slice 2)
+    # that stays anonymous (the station device activation, Phase 14 slice
+    # 4 — re-homed from a Scan Station command, which needs a device now)
     # answers with its own outcome.
-    unknown_station = client.post(
-        "/api/scan-stations/999999/scans/resolve", json={"part_number": "PN-" + _suffix()}
+    activation = client.post(
+        "/api/scan-stations/999999/device-activations",
+        json={"enrollment_code": "ABCDE-FGHJK"},
     )
-    assert unknown_station.status_code == 404, unknown_station.text
+    assert activation.status_code == 403, activation.text
+    assert activation.json()["enrollment_code_invalid"] is True
+    assert "csrf_rejected" not in activation.json()
 
 
 def test_sign_in_policy_section(client: TestClient, db_engine: Engine) -> None:

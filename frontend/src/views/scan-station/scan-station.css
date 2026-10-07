@@ -1599,3 +1599,35 @@
 .ss-alloc-total .cnt.ok {
   color: var(--ok-t);
 }
+
+/* Device enrollment (Phase 14 slice 4, GUI_DESIGN §4.13): the panel
+   that replaces the station content while this browser is not an
+   enrolled device of the station, and the code field it shares with
+   the blocking enrollment dialog. */
+.ss-enroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 640px;
+  margin: 32px auto;
+  padding: 0 22px;
+  width: 100%;
+}
+
+.ss-enroll h2 {
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.ss-enroll-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ss-enroll-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+}

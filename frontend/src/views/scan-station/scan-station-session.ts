@@ -3,8 +3,12 @@
 // switches, refreshes and expires it, and judges it again at every
 // production command. The station only keeps the latest server answer
 // to render the pill countdown and to raise the blocking sign-in modal
-// when the session is missing or its deadline passed. Production-safe:
-// no mock data, no JSX.
+// when the session is missing or its deadline passed. The same station
+// owner also hears its dialogs' enrolled-device refusals (Phase 14
+// slice 4): a write refused because this device is not (or no longer)
+// enrolled for the station raises the enrollment dialog over the open
+// dialog, which keeps its draft and its request. Production-safe: no
+// mock data, no JSX.
 
 import {
   createContext,
@@ -122,17 +126,46 @@ export interface StationSession {
   requireSession: () => void;
   ticket: () => number;
   applyWorkerSession: (session: WorkerSession | null, ticket: number) => void;
+  /**
+   * A write was refused because this device is not enrolled for the
+   * station (any more) or is enrolled for another one — judged before
+   * the idempotency fast path, so it proves nothing about an earlier
+   * attempt. `outcomeUnknown`: the refused intent was already in the
+   * unknown-outcome state. The open dialog keeps its draft, its request
+   * and its `device_event_id`.
+   */
+  deviceRefused: (write: { outcomeUnknown: boolean }) => void;
+  /** One open intent entered the unknown-outcome state; the returned
+   * function says it left it (answered, abandoned or closed). */
+  trackOutcomeUnknown: () => () => void;
 }
 
 export const StationSessionContext = createContext<StationSession>({
   requireSession: () => undefined,
   ticket: () => 0,
   applyWorkerSession: () => undefined,
+  deviceRefused: () => undefined,
+  trackOutcomeUnknown: () => () => undefined,
 });
 
 /** The handler of a `worker_session_required` refusal. */
 export function useRequireWorkerSession(): () => void {
   return useContext(StationSessionContext).requireSession;
+}
+
+/** The handler of an enrolled-device refusal of a write. */
+export function useStationDeviceRefused(): StationSession['deviceRefused'] {
+  return useContext(StationSessionContext).deviceRefused;
+}
+
+/** Report this dialog's unknown-outcome state to the station, which
+ * says so in the enrollment dialog (confirm again after enrolling). */
+export function useTrackOutcomeUnknown(outcomeUnknown: boolean): void {
+  const { trackOutcomeUnknown } = useContext(StationSessionContext);
+  useEffect(
+    () => (outcomeUnknown ? trackOutcomeUnknown() : undefined),
+    [outcomeUnknown, trackOutcomeUnknown],
+  );
 }
 
 /** Ticket + apply, for a dialog sending its own session-bearing read. */

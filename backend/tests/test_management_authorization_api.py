@@ -17,7 +17,8 @@ OD-P10, OD-P17):
 - MA-8: the Machine lifecycle actor; MA-10: refusals never wait on a
   production lock; LK-S3-1 / LK-S3-2: the actor-row wait during a login
   rename is a bounded stall, never a deadlock; MA-12: public and station
-  routes stay anonymous.
+  routes stay anonymous (station routes behind an enrolled station device
+  since Phase 14 slice 4).
 
 Set-up data is created through the harness administrator; identities
 come from ``tests.auth_harness``.
@@ -54,6 +55,9 @@ from tests.auth_harness import (
     anonymous_client,
     another_session,
     client_as,
+    enroll_station_device,
+    station_device_client,
+    station_device_headers,
 )
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -111,7 +115,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()
@@ -1138,21 +1142,34 @@ def test_the_station_and_management_allocation_routes_are_split(
     """MA-6."""
     pn, _, demand = _stocked(client, shop, 10, 10)
     anonymous = anonymous_client(client)
+    # Phase 14 slice 4: the station route needs an enrolled device first —
+    # with the Stockroom's device a body without a station is still 422.
+    stockroom_device = station_device_headers(
+        enroll_station_device(db_engine, shop.stockroom.station_id)
+    )
     for body in (
         _allocation_body(pn, demand, 1),
         _allocation_body(pn, demand, 1, station_id=None),
     ):
         refused = _refused_without_writes(
-            db_engine, None, functools.partial(anonymous.post, "/api/allocations", json=body)
+            db_engine,
+            None,
+            functools.partial(
+                anonymous.post, "/api/allocations", json=body, headers=stockroom_device
+            ),
         )
         assert refused.status_code == 422, refused.text
-    station = _ok(
-        anonymous.post(
-            "/api/allocations",
-            json=_allocation_body(pn, demand, 1, station_id=shop.stockroom.station_id),
-        ),
-        201,
+        refused = _refused_without_writes(
+            db_engine, None, functools.partial(anonymous.post, "/api/allocations", json=body)
+        )
+        assert refused.status_code == 401, refused.text
+        assert refused.json()["station_device_required"] is True
+    station_body = _allocation_body(pn, demand, 1, station_id=shop.stockroom.station_id)
+    refused = _refused_without_writes(
+        db_engine, None, functools.partial(anonymous.post, "/api/allocations", json=station_body)
     )
+    assert refused.status_code == 401 and refused.json()["station_device_required"] is True
+    station = _ok(station_device_client(anonymous).post("/api/allocations", json=station_body), 201)
     assert station["rows"][0]["source"] == "STOCKROOM"
 
     path = "/api/allocations/management"
@@ -1681,23 +1698,30 @@ def test_a_login_rename_of_the_actor_is_a_bounded_stall(
 
 
 def test_public_and_station_routes_stay_anonymous(client: TestClient, shop: _Shop) -> None:
-    """MA-12: no cookie and no CSRF header."""
+    """MA-12: no cookie and no CSRF header. Since Phase 14 slice 4 the
+    station routes need an enrolled station device (still no sign-in)."""
     anonymous = anonymous_client(client)
+    station_device = station_device_client(anonymous)
     pn, _, demand = _stocked(client, shop, 10, 4)
     for path in (
         f"/api/scan-stations/{shop.material.station_id}",
         "/api/machines",
         "/api/route-templates",
+    ):
+        assert anonymous.get(path).status_code == 200, path
+    for path in (
         f"/api/allocations/suggestion?part_number={pn}",
         f"/api/scan-stations/{shop.stockroom.station_id}/context",
     ):
-        assert anonymous.get(path).status_code == 200, path
+        assert station_device.get(path).status_code == 200, path
+        refused = anonymous.get(path)
+        assert refused.status_code == 401 and refused.json()["station_device_required"], path
     board = anonymous.get("/api/production-board")
     assert board.status_code == 200, board.text
     image = anonymous.get(f"/api/part-numbers/image?number={pn}")
     assert image.status_code == 404, image.text
-    allocated = anonymous.post(
-        "/api/allocations",
-        json=_allocation_body(pn, demand, 4, station_id=shop.stockroom.station_id),
-    )
+    body = _allocation_body(pn, demand, 4, station_id=shop.stockroom.station_id)
+    refused = anonymous.post("/api/allocations", json=body)
+    assert refused.status_code == 401 and refused.json()["station_device_required"] is True
+    allocated = station_device.post("/api/allocations", json=body)
     assert allocated.status_code == 201, allocated.text

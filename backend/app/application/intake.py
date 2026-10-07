@@ -142,7 +142,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import audit, route_templates, station_identity, work_orders
+from app.application import (
+    audit,
+    route_templates,
+    station_access,
+    station_identity,
+    work_orders,
+)
 from app.application.common import device_event_id_text, flush, optional_text, required_flag
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -176,6 +182,7 @@ from app.domain.enums import (
     QuantityFlowStatus,
     RequestType,
     RouteMode,
+    StationCommand,
     WorkOrderStatus,
 )
 from app.infrastructure.models import (
@@ -792,6 +799,9 @@ def receive_quantity(
     committed = committed_command(session, event_id)
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
+    # Phase 14 slice 4: the station role must grant receiving — judged
+    # after the re-check, so a committed receipt always replays.
+    station_access.require_station_capability(session, StationCommand.RECEIPT)
 
     # The Scan Station row locked until COMMIT and judged on the locked
     # re-read: a station deactivated or rebound since the wizard opened

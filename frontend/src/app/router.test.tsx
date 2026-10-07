@@ -10,6 +10,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../App';
 import { PERMISSIONS } from '../api/roles';
+import { STATION_PERMISSIONS } from '../api/scan-station';
 
 /**
  * Minimal real environment for the routing tests: two active Scan
@@ -92,6 +93,8 @@ beforeEach(() => {
             },
           },
           theme_preference: null,
+          device: { id: 1, label: 'Station PC' },
+          station_permissions: [...STATION_PERMISSIONS],
         });
       }
       if (/\/api\/areas\/\d+\/inventory$/.test(url)) {

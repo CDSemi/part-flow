@@ -131,7 +131,8 @@ in a rehearsal command.
 5. Capture migration output and new revision.
 6. Start/recreate application services at the target release. On a database
    with no Administrator, complete first-run setup (the setup token is in the
-   backend log) before opening access.
+   backend log) before opening access. Then enroll each Scan Station device
+   (Administration → Scan Stations → `Devices…`).
 7. Check health internally and through HTTPS.
 8. Run authorization, SPA-route, `/api`, scan-focus/connectivity, and designated
    write/read-back smoke tests.

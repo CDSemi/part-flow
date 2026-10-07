@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 import type { StationContext, TransferResult } from '../../api/scan-station';
 import { AllocationDialog } from './scan-station-allocation-dialog';
 import {
@@ -125,6 +126,8 @@ let userPermissions: string[] | null;
 let badgeFailure: boolean;
 /** The sign-in loses the open-session race (the server's own 409). */
 let badgeConflict: boolean;
+/** Every badge check is refused with this answer, if set. */
+let badgeRefusal: { status: number; body: unknown } | null = null;
 let previewFailure: boolean;
 /** While set, the matching reads stay pending until it resolves. */
 let contextHold: Promise<void> | null;
@@ -276,6 +279,8 @@ function handle(url: string, method: string, body: unknown): Response {
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: stationPermissions,
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -365,6 +370,7 @@ function handle(url: string, method: string, body: unknown): Response {
     if (badgeConflict) {
       return json({ detail: BADGE_CONFLICT }, 409);
     }
+    if (badgeRefusal) return json(badgeRefusal.body, badgeRefusal.status);
     const badge = String((body as { badge: string }).badge)
       .trim()
       .toUpperCase();
@@ -538,7 +544,11 @@ function handle(url: string, method: string, body: unknown): Response {
   return json({ detail: `Unhandled ${method} ${url}` }, 500);
 }
 
+/** The station permissions the context reports (Phase 14 slice 4). */
+let stationPermissions: string[] = [];
+
 beforeEach(() => {
+  stationPermissions = [...STATION_PERMISSIONS];
   window.sessionStorage.removeItem('partflow.dev.mock-preview');
   mode = 'SCANNED';
   flows = [
@@ -982,6 +992,8 @@ test('the allocation dialog treats worker_session_required the same way: modal r
       finalGates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
     },
     themePreference: null,
+    device: { id: 1, label: 'Stockroom PC' },
+    stationPermissions: [...STATION_PERMISSIONS],
   };
   const stocked = {
     movementId: 1,
@@ -1074,10 +1086,13 @@ test('the allocation dialog treats worker_session_required the same way: modal r
         requireSession,
         ticket: () => 0,
         applyWorkerSession: () => undefined,
+        deviceRefused: () => undefined,
+        trackOutcomeUnknown: () => () => undefined,
       }}
     >
       <AllocationDialog
         station={station}
+        canAdjust
         stocked={stocked}
         sourceArea={{
           id: 3,
@@ -1434,4 +1449,35 @@ test('the session clock ignores an answer sent before one already applied', () =
   const fresh = result.current.ticket();
   act(() => result.current.apply(at(NGUYEN, 15 * MINUTE), fresh));
   expect(result.current.live?.worker.name).toBe('H. Nguyen');
+});
+
+/* ============ Station permissions (Phase 14 slice 4) ============ */
+
+test('FS-16: a badge scan refused by the station permissions stays inside the Worker badge modal', async () => {
+  const K1_BADGE =
+    'Scan Stations are not allowed to scan Worker badges. An administrator can grant it to the role applied at Scan Stations. Nothing was recorded.';
+  badgeRefusal = {
+    status: 403,
+    body: {
+      detail: K1_BADGE,
+      station_permission_denied: true,
+      required_permissions: ['SCAN_WORKER_BARCODES'],
+    },
+  };
+  try {
+    await renderStation();
+    await waitFor(() => expect(signInModal()).not.toBeNull());
+    scanBadgeInModal('100482');
+    expect(
+      await within(signInModal()!).findByText(
+        `Badge could not be checked — ${K1_BADGE}`,
+      ),
+    ).toBeInTheDocument();
+    // The modal stays, its field keeps focus; no session opened.
+    expect(signInModal()).toHaveAccessibleName('Worker sign-in required');
+    await waitFor(() => expect(document.activeElement).toBe(badgeField()));
+    expect(serverSession).toBeNull();
+  } finally {
+    badgeRefusal = null;
+  }
 });

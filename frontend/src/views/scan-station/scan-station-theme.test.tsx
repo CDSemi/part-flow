@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // The Scan Station theme tier (Phase 13 slice 10, GUI_DESIGN §2.1)
 // against a fake in-memory `/api` that models the wire contract exactly:
@@ -201,6 +202,8 @@ function handle(
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: undoGate },
       },
       theme_preference: themePreference,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   if (

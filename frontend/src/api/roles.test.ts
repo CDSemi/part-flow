@@ -13,6 +13,7 @@ const ROLE_WIRE = {
   name: 'Manager',
   permissions: ['EXPORT_REPORTS', 'VIEW_PRODUCTION_DATA'],
   user_count: 1,
+  applies_at_scan_stations: false,
   created_at: '2026-10-01T08:00:00+00:00',
   updated_at: '2026-10-01T08:00:00+00:00',
 };
@@ -77,10 +78,19 @@ test('a role converts to the application shape; an unknown key fails loudly', as
       name: 'Manager',
       permissions: ['EXPORT_REPORTS', 'VIEW_PRODUCTION_DATA'],
       userCount: 1,
+      appliesAtScanStations: false,
     },
   ]);
+  answer = [{ ...ROLE_WIRE, applies_at_scan_stations: true }];
+  expect((await listRoles())[0].appliesAtScanStations).toBe(true);
   answer = [{ ...ROLE_WIRE, permissions: ['NOPE'] }];
   await expect(listRoles()).rejects.toThrow(/NOPE/);
+  // The Scan Station flag is part of the contract: a role without it
+  // means this client is out of date.
+  const { applies_at_scan_stations: _omitted, ...withoutFlag } = ROLE_WIRE;
+  void _omitted;
+  answer = [withoutFlag];
+  await expect(listRoles()).rejects.toThrow(/Malformed role/);
 });
 
 test('updateUser sends only the provided keys, in snake_case', async () => {

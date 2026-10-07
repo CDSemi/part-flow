@@ -63,10 +63,11 @@ from sqlalchemy.orm import Session
 
 from alembic import command
 from app.application import allocations, projections, work_orders
+from app.application.errors import NotFoundError
 from app.core.config import Settings, get_settings
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_stockroom_allocation_api"
@@ -103,7 +104,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ[_DB_URL_ENV] = original_url
         get_settings.cache_clear()
@@ -1098,9 +1099,19 @@ def test_confirmation_refusals_write_nothing(
             client, pn, [(work_order.demand_id, 1)], station_id=material.station_id
         )
         assert response.status_code == 409 and "terminal" in response.json()["detail"]
-        assert (
-            _allocate(client, pn, [(work_order.demand_id, 1)], station_id="NOPE").status_code == 404
-        )
+        # Phase 14 slice 4: no device exists for an unknown station (401
+        # first); the station's own 404 stays a service rule.
+        unknown = _allocate(client, pn, [(work_order.demand_id, 1)], station_id="NOPE")
+        assert unknown.status_code == 401 and unknown.json()["station_device_required"]
+        with Session(db_engine) as session, pytest.raises(NotFoundError):
+            allocations.confirm_station_allocation(
+                session,
+                station_id="NOPE",
+                part_number=pn,
+                allocation_quantity=1,
+                lines=[{"work_order_demand_id": work_order.demand_id, "quantity": 1}],
+                device_event_id=str(uuid.uuid4()),
+            )
     assert _counts(db_engine) == before
     _assert_projections_match_replay(db_engine)
 

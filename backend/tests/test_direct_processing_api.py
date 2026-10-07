@@ -70,12 +70,12 @@ from app.application import (
     projections,
     transfers,
 )
-from app.application.errors import ConflictError, IdempotencyConflictError
+from app.application.errors import ConflictError, IdempotencyConflictError, NotFoundError
 from app.core.config import get_settings
 from app.domain.enums import ProcessingState
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_direct_processing_api"
@@ -111,7 +111,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()
@@ -612,7 +612,18 @@ def test_direct_done_refusals_write_nothing(client: TestClient, db_engine: Engin
     unknown_station = _act(
         client, "DONE", "NO-SUCH-STATION", part_number=pn, quantity_flow_id=flow_id, quantity=10
     )
-    assert unknown_station.status_code == 404
+    assert unknown_station.status_code == 401
+    assert unknown_station.json()["station_device_required"]
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        direct_processing.complete_direct_processing(
+            session,
+            station_id="NO-SUCH-STATION",
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            quantity=10,
+            device_event_id=str(uuid.uuid4()),
+            confirming_badge=None,
+        )
 
     deactivated = admin_of(client).patch(
         f"/api/scan-stations/{plating.station_id}", json={"is_active": False}

@@ -141,7 +141,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import station_identity
+from app.application import station_access, station_identity
 from app.application.common import device_event_id_text, optional_text, required_flag
 from app.application.errors import (
     ConflictError,
@@ -177,6 +177,7 @@ from app.domain.enums import (
     ProcessingState,
     QuantityFlowStatus,
     RouteMode,
+    StationCommand,
 )
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -900,6 +901,9 @@ def record_arrival(
     committed = _committed_transfer(session, event_id)
     if committed:
         return _replay_or_conflict(committed, fingerprint, kind)
+    station_access.require_station_capability(
+        session, StationCommand.TRANSFER if kind == "TRANSFER" else StationCommand.STOCKING
+    )
 
     # -- Station context under the station row lock ---------------------
     # The confirmed destination is an optimistic precondition: the

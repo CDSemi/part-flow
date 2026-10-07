@@ -103,7 +103,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.application import policies, station_identity
+from app.application import policies, station_access, station_identity
 from app.application.common import device_event_id_text, optional_text
 from app.application.errors import (
     ConflictError,
@@ -126,7 +126,7 @@ from app.application.machines import (
 from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import effective_latest_movement, processing_state_of
 from app.application.transfers import require_production_station
-from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
+from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, StationCommand
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
     Area,
@@ -442,8 +442,10 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
     source and destination, Machine, timestamp, and the effect of the
     reversal) and says whether Undo is currently possible and why not,
     and whether the Undo reason policy currently asks for a reason (the
-    command re-judges that too).
+    command re-judges that too). Refused first (403) unless the role
+    applied at Scan Stations may undo recent scans.
     """
+    station_access.require_station_capability(session, StationCommand.UNDO)
     station, station_area = require_production_station(session, station_id)
     event_id = device_event_id_text(device_event_id)
     rows = committed_command(session, event_id)
@@ -709,6 +711,7 @@ def undo_command(
     committed = committed_command(session, event_id)
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
+    station_access.require_station_capability(session, StationCommand.UNDO)
 
     # -- Station under its row lock --------------------------------------
     station = session.get(ScanStation, station_id, with_for_update=True)

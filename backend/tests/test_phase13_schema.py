@@ -533,7 +533,10 @@ def test_audit_admits_the_worker_entity_and_the_deleted_event(connection: Connec
 
 def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> None:
     entity_check = _audit_checks(migrated_engine)["ck_audit_events_entity_type"]
-    assert set(re.findall(r"'([^']*)'", entity_check)) == {e.value for e in AuditEntityType}
+    # 0030 (Phase 14 slice 4) appends ScanStationDevice after this boundary.
+    assert set(re.findall(r"'([^']*)'", entity_check)) == {e.value for e in AuditEntityType} - {
+        AuditEntityType.SCAN_STATION_DEVICE.value
+    }
 
 
 def test_audit_admits_the_environment_entities(connection: Connection) -> None:
@@ -1456,13 +1459,14 @@ def test_worker_sessions_migration_repeats_the_model_literals() -> None:
         reason.value for reason in WorkerSessionEndReason
     }
     # 0024 (slice 8) appends RouteTemplate after this literal, 0028
-    # (slice 12) User and Role.
+    # (slice 12) User and Role, 0030 (Phase 14 slice 4) ScanStationDevice.
     assert set(re.findall(r"'([^']*)'", migration._POLICY_ENTITY_TYPES)) == {
         entity.value for entity in AuditEntityType
     } - {
         AuditEntityType.ROUTE_TEMPLATE.value,
         AuditEntityType.USER.value,
         AuditEntityType.ROLE.value,
+        AuditEntityType.SCAN_STATION_DEVICE.value,
     }
 
 
@@ -2522,10 +2526,15 @@ def test_planned_routes_migration_restores_the_0020_literal() -> None:
     assert planned_routes._PREVIOUS_ENTITY_TYPES == worker_sessions._POLICY_ENTITY_TYPES
     widened = worker_sessions._POLICY_ENTITY_TYPES[:-1] + ", 'RouteTemplate')"
     assert widened == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES
-    # 0028 (slice 12) appends User and Role after this literal.
+    # 0028 (slice 12) appends User and Role after this literal, 0030
+    # (Phase 14 slice 4) ScanStationDevice.
     assert set(re.findall(r"'([^']*)'", planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES)) == {
         entity.value for entity in AuditEntityType
-    } - {AuditEntityType.USER.value, AuditEntityType.ROLE.value}
+    } - {
+        AuditEntityType.USER.value,
+        AuditEntityType.ROLE.value,
+        AuditEntityType.SCAN_STATION_DEVICE.value,
+    }
 
 
 def test_audit_admits_the_route_template_entity(connection: Connection) -> None:
@@ -3712,7 +3721,8 @@ def test_users_roles_migration_repeats_the_model_literals() -> None:
         if isinstance(constraint, sa.CheckConstraint)
         and constraint.name == "ck_audit_events_entity_type"
     ]
-    assert entity_checks == [migration._USER_ROLE_ENTITY_TYPES]
+    # 0030 (Phase 14 slice 4) appends ScanStationDevice to this literal.
+    assert entity_checks == [migration._USER_ROLE_ENTITY_TYPES[:-1] + ", 'ScanStationDevice')"]
     planned_routes = _load_migration(_PLANNED_ROUTES_MIGRATION_FILE)
     assert migration._PREVIOUS_ENTITY_TYPES == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES
     assert (

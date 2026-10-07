@@ -25,11 +25,17 @@
 // (app/application/transfers.py, machine_processing.py,
 // quantity_events.py, undo.py); this module only carries the confirmed
 // intent across and reads the typed outcomes.
+// Since Phase 14 slice 4 every call carries the enrolled-device header
+// of its station (`./station-devices`), and the context names the
+// requesting device and the station permissions — the grants of the
+// role applied at Scan Stations, which the station uses only to hide
+// what it may not do; the server judges every command again.
 //
 // Production-safe: no mock data, no framework imports.
 
 import { ApiError, apiRequest, apiRequestWithStatus } from './client';
 import type { WorkerIdentificationMode } from './environment';
+import { stationDeviceHeaders } from './station-devices';
 import type { WorkerRef, WorkerRefWire } from './workers';
 import { toWorkerRef } from './workers';
 // The shared Area monitoring model lives in ./area-inventory — the ONE
@@ -83,6 +89,41 @@ export { areaRefColor, getAreaInventory } from './area-inventory';
 // Station context
 // ---------------------------------------------------------------------------
 
+/**
+ * The ten station keys (PROJECT_PROFILE §20 Operator capabilities): the
+ * only grants of the role applied at Scan Stations a station context
+ * reports.
+ */
+export const STATION_PERMISSIONS = [
+  'SCAN_PN_BARCODES',
+  'SCAN_MACHINE_BARCODES',
+  'SCAN_WORKER_BARCODES',
+  'RECEIVE_QUANTITY',
+  'ASSIGN_QUANTITY_TO_MACHINE',
+  'CONFIRM_QUANTITY',
+  'COMPLETE_INTO_STOCKROOM',
+  'CONFIRM_SUGGESTED_ALLOCATION',
+  'ADJUST_SUGGESTED_ALLOCATION',
+  'UNDO_RECENT_SCANS',
+] as const;
+
+export type StationPermission = (typeof STATION_PERMISSIONS)[number];
+
+const KNOWN_STATION_PERMISSIONS: ReadonlySet<string> = new Set(
+  STATION_PERMISSIONS,
+);
+
+function toStationPermission(key: unknown): StationPermission {
+  // The server reports only the ten station keys; anything else means
+  // this client is out of date — fail loudly rather than drop a grant.
+  if (typeof key !== 'string' || !KNOWN_STATION_PERMISSIONS.has(key)) {
+    throw new Error(
+      `Unknown station permission from the server: ${String(key)}`,
+    );
+  }
+  return key as StationPermission;
+}
+
 export interface StationContext {
   stationId: string;
   department: { id: number; name: string };
@@ -96,6 +137,12 @@ export interface StationContext {
   workerIdentification: StationWorkerIdentification;
   /** The station's saved theme (GUI_DESIGN §2.1 station tier); null = no preference. */
   themePreference: 'dark' | 'light' | null;
+  /** The enrolled device this request came from. */
+  device: { id: number; label: string };
+  /** The grants of the role applied at Scan Stations (station keys
+   * only): the station hides the actions missing here; the server
+   * judges every command again. */
+  stationPermissions: StationPermission[];
 }
 
 export interface StationWorkerIdentification {
@@ -178,6 +225,8 @@ interface StationContextWire {
     final_gates: { done: FinalGate; queue: FinalGate; undo: FinalGate };
   };
   theme_preference: ThemePreferenceWire | null;
+  device: { id: number; label: string };
+  station_permissions: string[];
 }
 
 export async function getStationContext(
@@ -185,6 +234,7 @@ export async function getStationContext(
 ): Promise<StationContext> {
   const wire = await apiRequest<StationContextWire>(
     `/api/scan-stations/${encodeURIComponent(stationId)}/context`,
+    { headers: stationDeviceHeaders(stationId) },
   );
   return {
     stationId: wire.station_id,
@@ -205,7 +255,24 @@ export async function getStationContext(
       },
     },
     themePreference: toThemePreference(wire.theme_preference),
+    device: toDeviceRef(wire.device),
+    stationPermissions: toStationPermissions(wire.station_permissions),
   };
+}
+
+function toDeviceRef(wire: unknown): { id: number; label: string } {
+  const device = wire as { id?: unknown; label?: unknown } | null;
+  if (typeof device?.id !== 'number' || typeof device.label !== 'string') {
+    throw new Error('Malformed station device in the station context.');
+  }
+  return { id: device.id, label: device.label };
+}
+
+function toStationPermissions(wire: unknown): StationPermission[] {
+  if (!Array.isArray(wire)) {
+    throw new Error('Malformed station permissions in the station context.');
+  }
+  return wire.map(toStationPermission);
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +301,7 @@ export async function saveStationThemePreference(
     theme_preference: ThemePreferenceWire;
   }>(`/api/scan-stations/${encodeURIComponent(stationId)}/theme-preference`, {
     method: 'PUT',
+    headers: stationDeviceHeaders(stationId),
     body: { theme_preference: theme === 'dark' ? 'DARK' : 'LIGHT' },
   });
   // The server echoes the value this request saved or kept.
@@ -458,6 +526,7 @@ export async function resolveScan(
     `/api/scan-stations/${encodeURIComponent(stationId)}/scans/resolve`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(stationId),
       body:
         'barcode' in input
           ? { barcode: input.barcode }
@@ -549,6 +618,7 @@ export async function resolveMachineScan(
     `/api/scan-stations/${encodeURIComponent(stationId)}/machine-scans/resolve`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(stationId),
       body:
         'barcode' in input
           ? { barcode: input.barcode }
@@ -606,7 +676,11 @@ export async function scanBadge(
 ): Promise<BadgeScanResult> {
   const wire = await apiRequest<BadgeScanResultWire>(
     `/api/scan-stations/${encodeURIComponent(stationId)}/badge-scans`,
-    { method: 'POST', body: { badge } },
+    {
+      method: 'POST',
+      body: { badge },
+      headers: stationDeviceHeaders(stationId),
+    },
   );
   return {
     outcome: wire.outcome,
@@ -827,6 +901,7 @@ export async function transferToStationArea(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/transfers`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         quantity_flow_id: input.quantityFlowId,
@@ -868,6 +943,7 @@ export async function stockAtStationArea(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/stockings`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         quantity_flow_id: input.quantityFlowId,
@@ -1039,6 +1115,7 @@ export async function recordMachineAction(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/${MACHINE_ACTION_PATH[kind]}`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         quantity_flow_id: input.quantityFlowId,
@@ -1136,6 +1213,7 @@ export async function combineQuantities(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/merges`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         quantity_flow_ids: input.quantityFlowIds,
@@ -1285,6 +1363,7 @@ export async function receiveQuantity(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/receipts`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         quantity: input.quantity,
@@ -1442,6 +1521,7 @@ export async function scrapQuantity(input: ScrapInput): Promise<ScrapResult> {
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/scraps`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         quantity_flow_id: input.quantityFlowId,
@@ -1534,6 +1614,7 @@ export async function addQuantity(
       `/api/scan-stations/${encodeURIComponent(input.stationId)}/quantity-additions`,
       {
         method: 'POST',
+        headers: stationDeviceHeaders(input.stationId),
         body: {
           part_number: input.partNumber,
           quantity: input.quantity,
@@ -1668,6 +1749,7 @@ export async function getUndoPreview(
 ): Promise<UndoPreview> {
   const wire = await apiRequest<UndoPreviewWire>(
     `/api/scan-stations/${encodeURIComponent(stationId)}/undo-preview/${encodeURIComponent(deviceEventId)}`,
+    { headers: stationDeviceHeaders(stationId) },
   );
   return {
     reversesDeviceEventId: wire.reverses_device_event_id,
@@ -1795,6 +1877,7 @@ export async function undoProductionCommand(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/undos`,
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         reverses_device_event_id: input.reversesDeviceEventId,

@@ -1,4 +1,4 @@
-"""Who may call each route (Phase 14 slices 2–3; owner decisions OD-P7, OD-P10, OD-P19).
+"""Who may call each route (Phase 14 slices 2–4; owner decisions OD-P6, OD-P7, OD-P10, OD-P19).
 
 One registry classifies every API route by ``(METHOD, path)``; a test
 (``tests/test_route_access.py``) fails on any route that is missing,
@@ -9,10 +9,10 @@ route is added here in the same change.
   lists, the active Planned Route list, the Due Soon policy the board and
   the Scan Station read, image reads, health, sign-in and first-run
   setup. May read the optional principal only.
-- ``STATION`` — a Scan Station route: never resolves the User principal
-  (station device authorization is not built yet — owner decision
-  OD-P6; until then station writes, the Stockroom station's receiving
-  allocation included, stay callable by any client on the network).
+- ``STATION`` — a Scan Station route: requires an enrolled station
+  device (``RequireStationDevice``); never resolves the User principal;
+  keys of the role applied at Scan Stations are checked by the
+  Application per command (``app.application.station_access``).
 - ``SIGNED_IN`` — any signed-in User without a pending forced password
   change (``RequirePermission()``): the Administration reads and the
   Asset Tag format read.
@@ -133,6 +133,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/workers/{worker_id}/avatar"): _PUBLIC,
     ("GET", "/api/users/{user_id}/avatar"): _PUBLIC,
     ("GET", "/api/part-numbers/image"): _PUBLIC,
+    # Gated by the one-time enrollment code (Phase 14 slice 4).
+    ("POST", "/api/scan-stations/{station_id}/device-activations"): _PUBLIC,
     # --- STATION ------------------------------------------------------------
     ("GET", "/api/scan-stations/{station_id}/context"): _STATION,
     **{
@@ -153,6 +155,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/correction-permissions"): _SIGNED_IN,
     ("GET", "/api/policies/data-retention"): _SIGNED_IN,
     ("GET", "/api/policies/sign-in"): _SIGNED_IN,
+    ("GET", "/api/scan-station-devices"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
     # Read by Administration and by Management → Machines (OD-S2-2).
     ("GET", "/api/barcode-configuration/machine-asset-tag-format"): _SIGNED_IN,
@@ -163,6 +166,9 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PATCH", "/api/operations/{operation_id}"): _permission(Permission.MANAGE_OPERATIONS),
     ("POST", "/api/scan-stations"): _permission(Permission.MANAGE_SCAN_STATIONS),
     ("PATCH", "/api/scan-stations/{station_id}"): _permission(Permission.MANAGE_SCAN_STATIONS),
+    ("POST", "/api/scan-station-devices/{device_id}/revocation"): _permission(
+        Permission.MANAGE_SCAN_STATIONS
+    ),
     ("PUT", "/api/barcode-configuration/machine-asset-tag-format"): _permission(
         Permission.MANAGE_BARCODE_CONFIGURATION
     ),
@@ -204,6 +210,11 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/users"): _permission(_MUAR, conditional=_keys(_MCP)),
     ("PATCH", "/api/users/{user_id}"): _permission(_MUAR, conditional=_keys(_MCP)),
     ("PUT", "/api/users/{user_id}/password"): _permission(_MUAR, conditional=_keys(_MCP)),
+    # Phase 14 slice 4 (OD-S4-9): while the role applied at Scan Stations
+    # holds a protected key.
+    ("POST", "/api/scan-stations/{station_id}/device-enrollments"): _permission(
+        Permission.MANAGE_SCAN_STATIONS, conditional=_keys(_MCP)
+    ),
     # --- PERMISSION (content only) ------------------------------------------
     ("PATCH", "/api/areas/{area_id}"): _permission(
         conditional=_keys(Permission.MANAGE_AREAS, _MWSP)

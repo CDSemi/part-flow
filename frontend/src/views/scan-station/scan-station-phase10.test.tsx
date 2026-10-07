@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station at a Stockroom station (Phase 10 — GUI_DESIGN §10,
 // PROJECT_PROFILE §18) against a fake in-memory `/api` with the
@@ -261,6 +262,8 @@ function handle(url: string, method: string, body: unknown): Response {
         final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: stationPermissions,
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -550,7 +553,11 @@ function handle(url: string, method: string, body: unknown): Response {
   return json({ detail: `Unhandled ${method} ${url}` }, 500);
 }
 
+/** The station permissions the context reports (Phase 14 slice 4). */
+let stationPermissions: string[] = [];
+
 beforeEach(() => {
+  stationPermissions = [...STATION_PERMISSIONS];
   window.sessionStorage.removeItem('partflow.dev.mock-preview');
   flows = [
     { id: 100, pn: 'PN-A', qty: 12, areaId: 1 },
@@ -1259,4 +1266,70 @@ test('going offline disables the stocking and the allocation confirmations in pl
     'Disconnected — the allocation cannot be recorded',
   );
   expect(allocationRequests()).toHaveLength(0);
+});
+
+/* ============ Station permissions (Phase 14 slice 4) ============ */
+
+test('FS-13: without the allocation permission a confirmed stocking opens no allocation dialog', async () => {
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'CONFIRM_SUGGESTED_ALLOCATION',
+  );
+  const input = await renderStation();
+  scan('PF:PN:PN-A');
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive into Stockroom',
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm stocking' }),
+  );
+  const toast = await notice();
+  expect(toast).toHaveTextContent('PN-A × 12 stocked');
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Receive into Stockroom' }),
+    ).toBeNull(),
+  );
+  expect(
+    screen.queryByRole('dialog', { name: 'Allocate stocked quantity' }),
+  ).toBeNull();
+  expect(suggestionRequests()).toEqual([]);
+  await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+test('FS-13: without the adjust permission no stepper renders and the suggestion is confirmed as shown', async () => {
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'ADJUST_SUGGESTED_ALLOCATION',
+  );
+  await renderStation();
+  const allocation = await stockPnA(12);
+  expect(
+    within(allocation).queryByRole('button', {
+      name: /^Allocate one (less|more)/,
+    }),
+  ).toBeNull();
+  expect(within(allocation).queryByRole('textbox')).toBeNull();
+  expect(allocation).not.toHaveTextContent('may be adjusted');
+  fireEvent.click(
+    within(allocation).getByRole('button', { name: 'Confirm allocation' }),
+  );
+  await waitFor(() => expect(allocationRequests()).toHaveLength(1));
+  expect(allocationRequests()[0].body.suggestion_unchanged).toBe(true);
+});
+
+test('with the adjust permission an adjusted line is sent as a changed suggestion', async () => {
+  await renderStation();
+  const adjusted = await stockPnA(12);
+  // 007003: 5 → 3, 007010: 3 → 5 — the same total, other lines.
+  fireEvent.change(lineQuantity(adjusted, '007003'), {
+    target: { value: '3' },
+  });
+  fireEvent.change(lineQuantity(adjusted, '007010'), {
+    target: { value: '5' },
+  });
+  fireEvent.click(
+    within(adjusted).getByRole('button', { name: 'Confirm allocation' }),
+  );
+  await waitFor(() => expect(allocationRequests()).toHaveLength(1));
+  expect(allocationRequests()[0].body.suggestion_unchanged).toBe(false);
 });

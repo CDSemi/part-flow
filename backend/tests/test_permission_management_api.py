@@ -52,6 +52,7 @@ from tests.auth_harness import (
     TestIdentity,
     client_as,
     create_identity,
+    station_device_client,
 )
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -129,7 +130,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()

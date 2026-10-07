@@ -69,14 +69,15 @@ from app.application import (
     machines,
     production_release,
     projections,
+    scan_station,
     transfers,
 )
-from app.application.errors import ConflictError, IdempotencyConflictError
+from app.application.errors import ConflictError, IdempotencyConflictError, NotFoundError
 from app.core.config import get_settings
 from app.domain.enums import MovementType, ProcessingState
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_machine_processing_api"
@@ -112,7 +113,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()
@@ -565,18 +566,28 @@ def test_assign_refuses_wrong_station_state_quantity_and_pn(
         quantity=10,
     )
     assert inactive.status_code == 409 and "inactive" in inactive.json()["detail"]
-    assert (
-        _act(
-            client,
-            "ASSIGN",
-            "NO-SUCH-STATION",
+    # Phase 14 slice 4: no device exists for an unknown station (401 first);
+    # the station's own 404 stays a service rule.
+    unknown = _act(
+        client,
+        "ASSIGN",
+        "NO-SUCH-STATION",
+        part_number=pn,
+        quantity_flow_id=flow_id,
+        machine_id=lathe.machine_id,
+        quantity=10,
+    )
+    assert unknown.status_code == 401 and unknown.json()["station_device_required"] is True
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        machine_processing.assign_to_machine(
+            session,
+            station_id="NO-SUCH-STATION",
             part_number=pn,
             quantity_flow_id=flow_id,
             machine_id=lathe.machine_id,
             quantity=10,
-        ).status_code
-        == 404
-    )
+            device_event_id=str(uuid.uuid4()),
+        )
 
     assert _movement_count(db_engine) == count
     assert _flow_row(db_engine, flow_id).current_machine_id is None
@@ -1762,7 +1773,10 @@ def test_machine_scan_refusals_resolve_nothing(client: TestClient, db_engine: En
     inactive_station = _create_station(client, lathe.area_id)
     admin_of(client).patch(f"/api/scan-stations/{inactive_station}", json={"is_active": False})
     assert _resolve_machine(client, inactive_station, asset_tag=other_tag).status_code == 409
-    assert _resolve_machine(client, "NO-SUCH", asset_tag=other_tag).status_code == 404
+    unknown = _resolve_machine(client, "NO-SUCH", asset_tag=other_tag)
+    assert unknown.status_code == 401 and unknown.json()["station_device_required"] is True
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        scan_station.resolve_machine_scan(session, "NO-SUCH", barcode=None, asset_tag=other_tag)
     assert _movement_count(db_engine) == count
 
 

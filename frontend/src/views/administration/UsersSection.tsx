@@ -241,11 +241,10 @@ export function UsersSection() {
         <div className="ad-notice">
           Users sign in with their login name and a password. Use Set password…
           to give a user a password. PartFlow checks permissions in
-          Administration and Management; Scan Station screens stay open to
-          anyone who can reach PartFlow until station devices are enrolled.
-          Workers who scan at the Scan Stations are managed in Workers, not
-          here. Users are deactivated, never deleted; deactivating a user signs
-          them out.
+          Administration and Management; Scan Station screens work only on
+          devices an administrator has enrolled for that station. Workers who
+          scan at the Scan Stations are managed in Workers, not here. Users are
+          deactivated, never deleted; deactivating a user signs them out.
         </div>
         {guarded && users.some(inProtectedRole) ? (
           <p className="ad-confighelp">

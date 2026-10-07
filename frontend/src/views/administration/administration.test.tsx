@@ -15,6 +15,7 @@ import type { ConnectivityStatus } from '../../app/connectivity-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { prepareImageUpload } from '../../components/image-upload';
+import { formatTimeOfDay } from '../dates';
 import { AdministrationView } from './AdministrationView';
 
 // Administration (GUI_DESIGN §9): the minimum environment setup
@@ -150,7 +151,24 @@ interface FakeState {
   /** `application_policy` Movement-history retention period (months;
    * null = no retention period). */
   retentionMonths: number | null;
+  /** Scan Station devices (Phase 14 slice 4), every state. */
+  devices: DeviceRow[];
+  /** What issuing an enrollment code needs (the server's answer). */
+  enrollmentPermissions: string[];
   nextId: number;
+}
+
+interface DeviceRow {
+  id: number;
+  station_id: string;
+  label: string;
+  state: 'PENDING' | 'ACTIVE' | 'EXPIRED' | 'REVOKED';
+  enrollment_expires_at: string;
+  activated_at: string | null;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+  revoked_reason: 'REVOKED' | 'REPLACED' | null;
+  replaces_device_id: number | null;
 }
 
 const T0 = '2026-08-01T00:00:00.000Z';
@@ -294,6 +312,11 @@ function seedState(): FakeState {
     undoReasonRequired: false,
     dueSoon: { min: 2, percent: 15, max: 7 },
     retentionMonths: null,
+    devices: [],
+    enrollmentPermissions: [
+      'MANAGE_CORRECTION_PERMISSIONS',
+      'MANAGE_SCAN_STATIONS',
+    ],
     nextId: 100,
   };
 }
@@ -323,6 +346,10 @@ let userFailures: Partial<Record<UserRoute, FakeFailure>>;
 let roleHold: Promise<void> | null;
 /** While set, a user password PUT stays pending until it resolves. */
 let userHold: Promise<void> | null;
+/** A refusal of every `GET /api/scan-station-devices`, if set. */
+let deviceFailure: { status: number; detail: string } | null;
+/** A refusal (or no answer) of every enrollment-code request, if set. */
+let enrollmentFailure: FakeFailure | null;
 
 interface SignInPolicyRow {
   user_session_expires: boolean;
@@ -733,6 +760,54 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     if (typeof body.is_active === 'boolean') station.is_active = body.is_active;
     return json(stamp(station));
   }
+  if (url === '/api/scan-station-devices' && method === 'GET') {
+    if (deviceFailure)
+      return json({ detail: deviceFailure.detail }, deviceFailure.status);
+    return json({
+      devices: state.devices.filter(
+        (d) => d.state === 'ACTIVE' || d.state === 'PENDING',
+      ),
+      enrollment_permissions: state.enrollmentPermissions,
+    });
+  }
+  const enrollMatch =
+    /^\/api\/scan-stations\/([^/]+)\/device-enrollments$/.exec(url);
+  if (enrollMatch && method === 'POST') {
+    const failure = routeFailure(enrollmentFailure ?? undefined);
+    if (failure) return failure;
+    const device: DeviceRow = {
+      id: state.nextId++,
+      station_id: decodeURIComponent(enrollMatch[1]),
+      label: String(body.label).trim(),
+      state: 'PENDING',
+      enrollment_expires_at: '2026-10-07T09:15:00Z',
+      activated_at: null,
+      last_seen_at: null,
+      revoked_at: null,
+      revoked_reason: null,
+      replaces_device_id: (body.replaces_device_id as number | null) ?? null,
+    };
+    state.devices.push(device);
+    return json({ device, enrollment_code: 'K7M2Q-X9RTA' }, 201);
+  }
+  const revokeMatch = /^\/api\/scan-station-devices\/(\d+)\/revocation$/.exec(
+    url,
+  );
+  if (revokeMatch && method === 'POST') {
+    const device = state.devices.find((d) => d.id === Number(revokeMatch[1]));
+    if (!device) {
+      return json(
+        { detail: `Scan Station device ${revokeMatch[1]} does not exist.` },
+        404,
+      );
+    }
+    if (device.state !== 'REVOKED') {
+      device.state = 'REVOKED';
+      device.revoked_at = '2026-10-07T09:05:00Z';
+      device.revoked_reason = 'REVOKED';
+    }
+    return json(device);
+  }
   if (url === '/api/barcode-configuration/machine-asset-tag-format') {
     if (method === 'GET') {
       return state.format === null
@@ -899,6 +974,7 @@ function roleWire(role: RoleRow) {
     ...stamp({ id: role.id, name: role.name }),
     permissions: [...role.permissions].sort(),
     user_count: state.users.filter((u) => u.role_id === role.id).length,
+    applies_at_scan_stations: role.id === OPERATOR_ID,
   };
 }
 
@@ -1104,6 +1180,8 @@ beforeEach(() => {
   signInPolicy = { ...DEFAULT_SIGN_IN_POLICY };
   signInPolicyFailure = null;
   userHold = null;
+  deviceFailure = null;
+  enrollmentFailure = null;
   session = sessionValue();
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
@@ -1715,6 +1793,427 @@ test('Scan Stations validate the canonical Station ID and create through the API
   const edit = screen.getByRole('dialog', { name: 'Edit Scan Station' });
   expect(within(edit).queryByLabelText('Station ID')).toBeNull();
   expect(edit.textContent).toContain('never renamed');
+});
+
+/* ============ Scan Station devices (Phase 14 slice 4) ============ */
+
+const DEVICES_HELP =
+  "An enrolled device can use this Scan Station until it is revoked. Each device has its own enrollment; a device enrolled for another station cannot act here. Last seen is the device's most recent request to PartFlow, including refused ones.";
+
+function deviceRow(
+  overrides: Partial<DeviceRow> & Pick<DeviceRow, 'id' | 'label'>,
+): DeviceRow {
+  return {
+    station_id: 'LATHE-ST-77',
+    state: 'ACTIVE',
+    enrollment_expires_at: '2026-10-07T08:00:00Z',
+    activated_at: '2026-10-07T08:01:00Z',
+    last_seen_at: null,
+    revoked_at: null,
+    revoked_reason: null,
+    replaces_device_id: null,
+    ...overrides,
+  };
+}
+
+function seedDevices() {
+  state.stations.push({
+    station_id: 'MILL-ST-01',
+    area_id: 1,
+    is_active: true,
+  });
+  state.devices = [
+    deviceRow({ id: 61, label: 'Lathe cell PC' }),
+    deviceRow({
+      id: 62,
+      label: 'Spare PC',
+      state: 'PENDING',
+      enrollment_expires_at: '2026-10-07T09:15:00Z',
+      activated_at: null,
+    }),
+  ];
+}
+
+async function openDevices(
+  stationId = 'LATHE-ST-77',
+  status: ConnectivityStatus = 'connected',
+) {
+  renderAdmin(status);
+  openSection('Scan Stations');
+  fireEvent.click(
+    await screen.findByRole('button', { name: `Devices of ${stationId}` }),
+  );
+  return screen.getByRole('dialog', {
+    name: `Devices of Scan Station ${stationId}`,
+  });
+}
+
+function deviceRows(dialog: HTMLElement): string[][] {
+  return Array.from(dialog.querySelectorAll('tbody tr'), (row) =>
+    Array.from(row.querySelectorAll('td'), (td) => td.textContent ?? '').slice(
+      0,
+      3,
+    ),
+  );
+}
+
+test('FS-10: each station shows its devices; the Devices dialog lists state and last seen', async () => {
+  seedDevices();
+  state.devices[0].last_seen_at = new Date(
+    Date.now() - 5 * 60_000,
+  ).toISOString();
+  renderAdmin();
+  openSection('Scan Stations');
+
+  const lathe = (
+    await screen.findByRole('button', { name: 'Devices of LATHE-ST-77' })
+  ).closest('td') as HTMLElement;
+  expect(lathe).toHaveAttribute('data-label', 'Devices');
+  expect(lathe.textContent).toBe('1 enrolled · code issuedDevices…');
+  const mill = screen
+    .getByRole('button', { name: 'Devices of MILL-ST-01' })
+    .closest('td') as HTMLElement;
+  expect(mill.textContent).toBe('Not enrolledDevices…');
+  expect(document.body.textContent).toContain(
+    'Scan Stations work only on devices enrolled here. What an enrolled station may do follows the role marked "Applied at Scan Stations" in Roles & permissions.',
+  );
+
+  // The opener never opens the station editor of its row.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Devices of LATHE-ST-77' }),
+  );
+  expect(
+    screen.queryByRole('dialog', { name: 'Edit Scan Station' }),
+  ).toBeNull();
+  const dialog = screen.getByRole('dialog', {
+    name: 'Devices of Scan Station LATHE-ST-77',
+  });
+  expect(deviceRows(dialog)).toEqual([
+    ['Lathe cell PC', 'Enrolled', '5m ago'],
+    [
+      'Spare PC',
+      `Code issued — expires ${formatTimeOfDay('2026-10-07T09:15:00Z')}`,
+      'Never',
+    ],
+  ]);
+  expect(dialog.textContent).toContain(DEVICES_HELP);
+  // A reader writes nothing.
+  expect(writes).toEqual([]);
+});
+
+test('FS-10: enrolling shows the one-time code once; closing requests nothing; re-enrolling names the replaced device', async () => {
+  seedDevices();
+  let dialog = await openDevices();
+
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Enroll device…' }),
+  );
+  let enroll = screen.getByRole('dialog', { name: 'Enroll a device' });
+  expect(enroll.textContent).toContain(
+    'For example "Lathe cell PC" — shown in this list only.',
+  );
+  // A blank name is refused in place; nothing is sent.
+  fireEvent.click(
+    within(enroll).getByRole('button', { name: 'Create enrollment code' }),
+  );
+  expect(within(enroll).getByRole('alert').textContent).toBe(
+    'Enter a device name of 1 to 80 characters.',
+  );
+  expect(writes).toEqual([]);
+
+  fireEvent.change(within(enroll).getByLabelText('Device name'), {
+    target: { value: '  Desk PC ' },
+  });
+  fireEvent.click(
+    within(enroll).getByRole('button', { name: 'Create enrollment code' }),
+  );
+  const code = await within(enroll).findByLabelText(
+    'Enrollment code K 7 M 2 Q - X 9 R T A',
+  );
+  expect(code.textContent).toBe('K7M2Q-X9RTA');
+  expect(enroll.textContent).toContain(
+    `Enter this code on the Scan Station LATHE-ST-77 device before ${formatTimeOfDay('2026-10-07T09:15:00Z')}. It is shown only once and works only once.`,
+  );
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/scan-stations/LATHE-ST-77/device-enrollments',
+      body: { label: 'Desk PC', replaces_device_id: null },
+    },
+  ]);
+  fireEvent.click(within(enroll).getByRole('button', { name: 'Done' }));
+  dialog = screen.getByRole('dialog', {
+    name: 'Devices of Scan Station LATHE-ST-77',
+  });
+  // Closing the code view requested nothing; the list shows the code.
+  expect(writes).toHaveLength(1);
+  await waitFor(() =>
+    expect(deviceRows(dialog).map((row) => row[0])).toContain('Desk PC'),
+  );
+  expect(screen.queryByText('K7M2Q-X9RTA')).toBeNull();
+
+  // Re-enroll: the name is prefilled and the replacement is stated.
+  const latheRow = within(dialog)
+    .getByText('Lathe cell PC')
+    .closest('tr') as HTMLElement;
+  fireEvent.click(within(latheRow).getByRole('button', { name: 'Re-enroll…' }));
+  enroll = screen.getByRole('dialog', { name: 'Re-enroll Lathe cell PC' });
+  expect(within(enroll).getByLabelText('Device name')).toHaveValue(
+    'Lathe cell PC',
+  );
+  expect(enroll.textContent).toContain(
+    'When the new code is used, Lathe cell PC stops working at once.',
+  );
+  fireEvent.click(
+    within(enroll).getByRole('button', { name: 'Create enrollment code' }),
+  );
+  await within(enroll).findByText('K7M2Q-X9RTA');
+  expect(writes[1].body).toEqual({
+    label: 'Lathe cell PC',
+    replaces_device_id: 61,
+  });
+
+  // Escape closes the code view without a request too.
+  fireEvent.keyDown(enroll, { key: 'Escape' });
+  expect(writes).toHaveLength(2);
+});
+
+test('FS-10: an unanswered enrollment is an unknown outcome; a refusal shows the server text', async () => {
+  seedDevices();
+  const dialog = await openDevices();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Enroll device…' }),
+  );
+  const enroll = screen.getByRole('dialog', { name: 'Enroll a device' });
+  fireEvent.change(within(enroll).getByLabelText('Device name'), {
+    target: { value: 'Desk PC' },
+  });
+  enrollmentFailure = 'network';
+  fireEvent.click(
+    within(enroll).getByRole('button', { name: 'Create enrollment code' }),
+  );
+  expect((await within(enroll).findByRole('alert')).textContent).toBe(
+    'The server did not answer — a code may or may not have been created. Create a new one; an unused code expires by itself.',
+  );
+  enrollmentFailure = {
+    status: 409,
+    detail:
+      "Scan Station 'LATHE-ST-77' is inactive. Reactivate it before enrolling a device.",
+  };
+  fireEvent.click(
+    within(enroll).getByRole('button', { name: 'Create enrollment code' }),
+  );
+  await waitFor(() =>
+    expect(within(enroll).getByRole('alert').textContent).toBe(
+      "Scan Station 'LATHE-ST-77' is inactive. Reactivate it before enrolling a device.",
+    ),
+  );
+});
+
+test('FS-10: revoking a device and cancelling a code confirm first, then toast and reload', async () => {
+  seedDevices();
+  let dialog = await openDevices();
+
+  const latheRow = within(dialog)
+    .getByText('Lathe cell PC')
+    .closest('tr') as HTMLElement;
+  fireEvent.click(within(latheRow).getByRole('button', { name: 'Revoke…' }));
+  let confirm = screen.getByRole('dialog', { name: 'Revoke Lathe cell PC?' });
+  expect(confirm.textContent).toContain(
+    'This device can no longer use Scan Station LATHE-ST-77 until it is enrolled again. A scan in progress there fails and must be confirmed again after re-enrollment.',
+  );
+  // Cancel changes nothing.
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(writes).toEqual([]);
+  dialog = screen.getByRole('dialog', {
+    name: 'Devices of Scan Station LATHE-ST-77',
+  });
+  fireEvent.click(
+    within(
+      within(dialog).getByText('Lathe cell PC').closest('tr') as HTMLElement,
+    ).getByRole('button', { name: 'Revoke…' }),
+  );
+  confirm = screen.getByRole('dialog', { name: 'Revoke Lathe cell PC?' });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Revoke device' }),
+  );
+  expect(
+    await screen.findByText('Lathe cell PC was revoked.'),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/scan-station-devices/61/revocation',
+      body: {},
+    },
+  ]);
+  dialog = screen.getByRole('dialog', {
+    name: 'Devices of Scan Station LATHE-ST-77',
+  });
+  await waitFor(() =>
+    expect(deviceRows(dialog).map((row) => row[0])).toEqual(['Spare PC']),
+  );
+
+  const spareRow = within(dialog)
+    .getByText('Spare PC')
+    .closest('tr') as HTMLElement;
+  fireEvent.click(
+    within(spareRow).getByRole('button', { name: 'Cancel code' }),
+  );
+  confirm = screen.getByRole('dialog', {
+    name: 'Cancel this enrollment code?',
+  });
+  expect(confirm.textContent).toContain('It can no longer be used.');
+  fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel code' }));
+  expect(
+    await screen.findByText('The enrollment code was cancelled.'),
+  ).toBeInTheDocument();
+  expect(writes[1].url).toBe('/api/scan-station-devices/62/revocation');
+});
+
+test('FS-10: enrolling needs the keys the server names; revoking needs Manage Scan Stations; offline disables writes', async () => {
+  seedDevices();
+  // Manage Scan Stations only, while the station role holds a
+  // correction permission: revoke yes, enroll no.
+  session = sessionValue(signedInUser(['MANAGE_SCAN_STATIONS']));
+  let dialog = await openDevices();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Enroll device…' }),
+  ).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Re-enroll…' }),
+  ).toBeNull();
+  expect(within(dialog).getByRole('button', { name: 'Revoke…' })).toBeEnabled();
+  expect(dialog.textContent).toContain(
+    'Enrolling a device needs the Manage correction permissions permission while the role applied at Scan Stations holds correction permissions.',
+  );
+  expect(within(dialog).queryByText(/^View only — /)).toBeNull();
+  cleanup();
+
+  // Without a correction permission at the stations, Manage Scan
+  // Stations alone enrolls.
+  state.enrollmentPermissions = ['MANAGE_SCAN_STATIONS'];
+  dialog = await openDevices();
+  expect(
+    within(dialog).getByRole('button', { name: 'Enroll device…' }),
+  ).toBeEnabled();
+  expect(
+    within(dialog).getByRole('button', { name: 'Re-enroll…' }),
+  ).toBeEnabled();
+  cleanup();
+
+  // A reader without keys sees the list only.
+  session = sessionValue(signedInUser([]));
+  dialog = await openDevices();
+  expect(
+    within(dialog).getByText(
+      'View only — changing this needs the Manage Scan Stations permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog)
+      .getAllByRole('button')
+      .map((button) => button.textContent),
+  ).toEqual(['Close']);
+  expect(deviceRows(dialog).map((row) => row[0])).toEqual([
+    'Lathe cell PC',
+    'Spare PC',
+  ]);
+  cleanup();
+
+  // Offline: the write controls stay visible, disabled.
+  session = sessionValue();
+  state.enrollmentPermissions = [
+    'MANAGE_CORRECTION_PERMISSIONS',
+    'MANAGE_SCAN_STATIONS',
+  ];
+  dialog = await openDevices('LATHE-ST-77', 'unavailable');
+  for (const name of [
+    'Enroll device…',
+    'Re-enroll…',
+    'Revoke…',
+    'Cancel code',
+  ]) {
+    expect(within(dialog).getByRole('button', { name })).toBeDisabled();
+  }
+  expect(writes).toEqual([]);
+});
+
+test('FS-10: an inactive station cannot enroll; a failed device list keeps the station table', async () => {
+  seedDevices();
+  state.stations[0].is_active = false;
+  const dialog = await openDevices();
+  const enroll = within(dialog).getByRole('button', { name: 'Enroll device…' });
+  expect(enroll).toBeDisabled();
+  expect(enroll).toHaveAttribute('title', 'Reactivate the Scan Station first');
+  cleanup();
+
+  deviceFailure = { status: 503, detail: 'The server is restarting.' };
+  renderAdmin();
+  openSection('Scan Stations');
+  expect(
+    await screen.findByText('The station devices could not be loaded.'),
+  ).toBeInTheDocument();
+  expect(screen.getByText('LATHE-ST-77')).toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: 'Devices of LATHE-ST-77' }).closest('td')
+      ?.textContent,
+  ).toBe('—Devices…');
+  deviceFailure = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() =>
+    expect(
+      screen
+        .getByRole('button', { name: 'Devices of LATHE-ST-77' })
+        .closest('td')?.textContent,
+    ).toBe('1 enrolled · code issuedDevices…'),
+  );
+});
+
+test('FS-11: the role applied at Scan Stations is marked; no Administration copy defers the Scan Station rules', async () => {
+  renderAdmin();
+  openSection('Roles & permissions');
+  await screen.findByRole('button', { name: 'Edit Operator' });
+  expect(screen.getAllByText('Applied at Scan Stations')).toHaveLength(1);
+  expect(
+    screen
+      .getByText('Applied at Scan Stations')
+      .closest('tr')
+      ?.querySelector('b')?.textContent,
+  ).toBe('Operator');
+  const NOTE =
+    'The permissions of this role decide what every enrolled Scan Station device may do. Removing one stops that action at every Scan Station.';
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Manager' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Edit role' }).textContent,
+  ).not.toContain(NOTE);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Operator' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Edit role' }).textContent,
+  ).toContain(NOTE);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+
+  for (const section of [
+    'Users',
+    'Roles & permissions',
+    'Correction permissions',
+    'Scan Stations',
+  ]) {
+    const main = await openLoadedSection(section);
+    expect(main.textContent).not.toMatch(/stay open to anyone/);
+    expect(main.textContent).not.toMatch(/decided later/);
+  }
+  await openLoadedSection('Correction permissions');
+  expect(document.body.textContent).toContain(
+    'Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations;',
+  );
+  await openLoadedSection('Users');
+  expect(document.body.textContent).toContain(
+    'Scan Station screens work only on devices an administrator has enrolled for that station.',
+  );
 });
 
 /* ============ Barcode configuration ============ */
@@ -2839,7 +3338,7 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     'Perform authorized historical corrections — grants nothing yet',
   );
   expect(document.body.textContent).toContain(
-    "Choose which roles hold each correction permission. Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. How Undo recent eligible scans applies is decided later; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.",
+    "Choose which roles hold each correction permission. Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.",
   );
   expect(document.body.textContent).toContain(
     "Undo recent eligible scans covers exactly the actions the Scan Station's Undo offers — there is no extra time limit.",
@@ -3511,7 +4010,7 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
 /* ============ Users (Phase 13 — application accounts) ============ */
 
 const USERS_NOTE =
-  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions in Administration and Management; Scan Station screens stay open to anyone who can reach PartFlow until station devices are enrolled. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
+  'Users sign in with their login name and a password. Use Set password… to give a user a password. PartFlow checks permissions in Administration and Management; Scan Station screens work only on devices an administrator has enrolled for that station. Workers who scan at the Scan Stations are managed in Workers, not here. Users are deactivated, never deleted; deactivating a user signs them out.';
 const USER_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the user before trying again.';
 const E_U2B =
@@ -3894,7 +4393,7 @@ test('FA-U5: an unanswered save is an unknown outcome; offline blocks writes; a 
 /* ============ Roles & permissions (Phase 13 — named roles) ============ */
 
 const ROLES_NOTE =
-  'Each user holds one role. PartFlow checks the Administration and Management permissions; the Scan Station permissions are recorded here, and how they apply is decided later. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
+  'Each user holds one role. PartFlow checks the Administration and Management permissions; what an enrolled Scan Station may do follows the role marked Applied at Scan Stations. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
 
 async function openRoles(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);
@@ -3916,7 +4415,12 @@ test('FA-RO1: Roles & permissions lists the seeded roles with permission and use
 
   expect(roleRow('Administrator')).toEqual(['Administrator', '17 of 35', '0']);
   expect(roleRow('Manager')).toEqual(['Manager', '10 of 35', '1']);
-  expect(roleRow('Operator')).toEqual(['Operator', '10 of 35', '0']);
+  // The role applied at Scan Stations carries its badge (slice 4).
+  expect(roleRow('Operator')).toEqual([
+    'Operator Applied at Scan Stations',
+    '10 of 35',
+    '0',
+  ]);
   const managerRow = screen
     .getByRole('button', { name: 'Edit Manager' })
     .closest('tr') as HTMLElement;
@@ -5108,7 +5612,16 @@ test('FA-3: without its permission every section is view-only — values as text
       'spinbutton',
       'combobox',
     ] as const) {
-      expect(within(main).queryAllByRole(role)).toEqual([]);
+      // Scan Stations keeps one read-only control per station: the
+      // `Devices…` list every signed-in user may open (slice 4).
+      expect(
+        within(main)
+          .queryAllByRole(role)
+          .filter(
+            (element) =>
+              !element.getAttribute('aria-label')?.startsWith('Devices of '),
+          ),
+      ).toEqual([]);
     }
     expect(main.querySelector('.selrow')).toBeNull();
   }

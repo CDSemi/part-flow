@@ -160,7 +160,8 @@ migrations and creating a verified backup.
 
 On a new database with no Administrator, complete first-run setup before opening
 access: read the setup token with `docker compose logs backend | grep "Setup token"`
-and use **Set up PartFlow** in the application.
+and use **Set up PartFlow** in the application. Then enroll each Scan Station
+device in Administration → Scan Stations → `Devices…`.
 
 ### 4.6 Smoke test
 

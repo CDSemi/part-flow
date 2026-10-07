@@ -157,7 +157,8 @@ staging cần giữ nếu chưa review migration cụ thể và chưa có backup
 
 Với database mới chưa có Administrator, hoàn tất first-run setup trước khi mở truy cập:
 đọc setup token bằng `docker compose logs backend | grep "Setup token"` và dùng
-**Set up PartFlow** trong ứng dụng.
+**Set up PartFlow** trong ứng dụng. Sau đó enroll từng thiết bị Scan Station trong
+Administration → Scan Stations → `Devices…`.
 
 ### 4.6 Smoke test
 

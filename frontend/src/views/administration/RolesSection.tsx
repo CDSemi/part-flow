@@ -37,8 +37,9 @@ import { ADMIN_SECTIONS } from './sections';
 // Operator with exactly the PROJECT_PROFILE §20 capabilities). The
 // standard table + editor pattern: roles are created and renamed here,
 // never deleted. The server checks the Administration and Management
-// permissions (the Scan Station ones are recorded; how they apply is
-// decided later), and the section says so. Without the Manage users and roles
+// permissions; what an enrolled Scan Station may do follows the one role
+// marked Applied at Scan Stations (Phase 14 slice 4), and the section says
+// so. Without the Manage users and roles
 // permission the section is view-only; without the Manage correction
 // permissions permission the editor neither shows nor sends that
 // permission (the server refuses changing it).
@@ -116,6 +117,14 @@ export function RolesSection() {
                     <RowOpener editable={canWrite} label={`Edit ${role.name}`}>
                       <b>{role.name}</b>
                     </RowOpener>
+                    {role.appliesAtScanStations ? (
+                      <>
+                        {' '}
+                        <span className="pillnav on">
+                          Applied at Scan Stations
+                        </span>
+                      </>
+                    ) : null}
                   </td>
                   <td data-label="Permissions">
                     {role.permissions.length} of {PERMISSIONS.length}
@@ -128,8 +137,8 @@ export function RolesSection() {
         )}
         <div className="ad-notice">
           Each user holds one role. PartFlow checks the Administration and
-          Management permissions; the Scan Station permissions are recorded
-          here, and how they apply is decided later. Correction permissions are
+          Management permissions; what an enrolled Scan Station may do follows
+          the role marked Applied at Scan Stations. Correction permissions are
           set in Policies → Correction permissions. Roles are renamed, never
           deleted.
         </div>
@@ -296,6 +305,12 @@ function RoleDialog({
           <div className="err" role="alert">
             A role name is required.
           </div>
+        ) : null}
+        {role?.appliesAtScanStations ? (
+          <p className="ad-fieldhelp">
+            The permissions of this role decide what every enrolled Scan Station
+            device may do. Removing one stops that action at every Scan Station.
+          </p>
         ) : null}
         {ROLE_PERMISSION_GROUPS.map((group) => (
           <fieldset key={group.label} className="ad-permgroup">

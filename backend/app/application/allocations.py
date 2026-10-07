@@ -69,7 +69,11 @@ Rules owned here:
   lines may differ from the suggestion; the command re-computes the
   canonical suggestion for the confirmed total under the locks and
   records `is_manual_override` on every line that differs — audit
-  context, never a rule.
+  context, never a rule. At the station (Phase 14 slice 4) an
+  adjustment needs the station role's `ADJUST_SUGGESTED_ALLOCATION`,
+  and the confirmation itself (and the station's suggestion read,
+  `suggest_station_allocation`) its `CONFIRM_SUGGESTED_ALLOCATION`,
+  judged after the idempotency re-check (`app.application.station_access`).
 - **Completion is derived** (§8.2, §18 Work Order Completion): a Work
   Order is complete when every one of its demand lines is fully
   allocated. `work_orders.completed_at` is the persisted done-date
@@ -118,7 +122,7 @@ from sqlalchemy import Select, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.application import audit, hot_ranks, station_identity
+from app.application import audit, hot_ranks, station_access, station_identity
 from app.application.common import device_event_id_text, optional_text, required_text
 from app.application.errors import (
     RECORDED_BY_ANOTHER_USER_MESSAGE,
@@ -130,7 +134,7 @@ from app.application.errors import (
 )
 from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import stocked_quantity_of
-from app.domain.enums import AllocationSource, AuditEntityType, AuditEventType
+from app.domain.enums import AllocationSource, AuditEntityType, AuditEventType, StationCommand
 from app.infrastructure.models import (
     ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT,
     Area,
@@ -424,6 +428,16 @@ def suggest_allocation(
         available_stocked_quantity=position.available_stocked_quantity,
         lines=_propose(outstanding_demands(session, pn), wanted),
     )
+
+
+def suggest_station_allocation(
+    session: Session, *, part_number: object, quantity: object | None = None
+) -> AllocationSuggestion:
+    """The suggestion a Scan Station reads (Phase 14 slice 4): refused first
+    (403) unless the role applied at Scan Stations may confirm suggested
+    allocations; otherwise exactly ``suggest_allocation``."""
+    station_access.require_station_capability(session, StationCommand.ALLOCATION)
+    return suggest_allocation(session, part_number=part_number, quantity=quantity)
 
 
 # ---------------------------------------------------------------------------
@@ -796,6 +810,25 @@ def _normalized_lines(lines: Sequence[Mapping[str, Any]]) -> list[ConfirmedLine]
     return normalized
 
 
+#: C-2 (Phase 14 slice 4): the suggestion shown went stale and the station
+#: role may not adjust suggested allocations.
+_STALE_SUGGESTION_MESSAGE: Final = (
+    "The suggested allocation changed since it was shown, and Scan Stations are not allowed"
+    " to adjust suggested allocations. Nothing was allocated."
+)
+
+
+def _differs_from_suggestion(
+    confirmed: Sequence[ConfirmedLine], suggested: Mapping[int, int]
+) -> bool:
+    """Whether the confirmed lines differ from the canonical suggestion: a
+    line's quantity differs, or a line the suggestion proposes is missing."""
+    sent = {line.work_order_demand_id for line in confirmed}
+    return any(
+        suggested.get(line.work_order_demand_id, 0) != line.quantity for line in confirmed
+    ) or any(quantity > 0 and demand_id not in sent for demand_id, quantity in suggested.items())
+
+
 def confirm_station_allocation(
     session: Session,
     *,
@@ -805,11 +838,18 @@ def confirm_station_allocation(
     lines: Sequence[Mapping[str, Any]],
     reason: str | None = None,
     device_event_id: object,
+    suggestion_unchanged: bool = False,
 ) -> AllocationResult:
     """The Stockroom station's receiving confirmation (PROJECT_PROFILE §18).
 
     The routine Operator workflow: source STOCKROOM, the Worker identity
-    of the station Area's mode, no User (``actor_user_id`` NULL).
+    of the station Area's mode, no User (``actor_user_id`` NULL). The
+    role applied at Scan Stations must grant confirming suggested
+    allocations, and adjusting them when the lines differ from the
+    suggestion recomputed under the locks (Phase 14 slice 4);
+    ``suggestion_unchanged`` — the client sent the suggestion it was
+    shown, unmodified — only chooses which refusal explains a mismatch
+    and is never part of the fingerprint.
     """
     return _confirm_allocation(
         session,
@@ -820,6 +860,7 @@ def confirm_station_allocation(
         lines=lines,
         reason=reason,
         device_event_id=device_event_id,
+        suggestion_unchanged=suggestion_unchanged,
     )
 
 
@@ -861,6 +902,7 @@ def _confirm_allocation(
     lines: Sequence[Mapping[str, Any]],
     reason: str | None,
     device_event_id: object,
+    suggestion_unchanged: bool = False,
 ) -> AllocationResult:
     """Allocate stocked quantity of one PN to demand lines, ONE transaction.
 
@@ -875,9 +917,11 @@ def _confirm_allocation(
     station FOR KEY SHARE (when ``station_id`` is set) → the demand row
     locks in ONE ascending pass (the lines plus every ranked row a Hot
     removal of them can shift, ``hot_ranks.hot_rank_scope``) → the Work
-    Order row locks (ascending) → idempotency re-check → validation
+    Order row locks (ascending) → idempotency re-check → (station only)
+    the station role's ``CONFIRM_SUGGESTED_ALLOCATION`` → validation
     under the locks (PN agreement, shortage per line, available stocked
-    quantity for the allocation quantity) → the completion → the
+    quantity for the allocation quantity) → the canonical suggestion →
+    (station only) the adjustment check → the completion → the
     automatic Hot removal of every ranked line this command fully
     allocates (OD1 — its Work Order completing included; the remaining
     ranks close the gap, audited) → the rows and the projection →
@@ -944,6 +988,10 @@ def _confirm_allocation(
     committed = committed_allocation_command(session, event_id)
     if committed:
         return _replay_or_conflict(session, committed, fingerprint, actor_user_id)
+    # Phase 14 slice 4: the station role must grant the confirmation (the
+    # Management allocation is authorized by its route instead).
+    if station_id is not None:
+        station_access.require_station_capability(session, StationCommand.ALLOCATION)
 
     # -- Validation under the locks -------------------------------------
     for line in confirmed:
@@ -987,6 +1035,18 @@ def _confirm_allocation(
         line.demand.id: line.proposed_quantity
         for line in _propose(outstanding_demands(session, pn), total)
     }
+    # -- The station adjustment check (Phase 14 slice 4) ------------------
+    # Lines differing from that suggestion are an adjustment, which the
+    # station role must grant — unless the client sent the suggestion it
+    # was shown unmodified: then the suggestion went stale (C-2).
+    if station_id is not None and _differs_from_suggestion(confirmed, suggested):
+        if suggestion_unchanged and not station_access.station_may(
+            session, StationCommand.ALLOCATION_ADJUSTMENT
+        ):
+            raise ConflictError(_STALE_SUGGESTION_MESSAGE)
+        station_access.require_station_capability(
+            session, StationCommand.ALLOCATION, StationCommand.ALLOCATION_ADJUSTMENT
+        )
     identity = (
         station_identity.resolve_station_identity(session, station)
         if station is not None

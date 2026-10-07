@@ -42,7 +42,7 @@ from app.core.config import get_settings
 from app.domain.enums import MovementType, QuantityFlowStatus
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEMPLATE_DATABASE = "partflow_test_reconciliation"
@@ -605,7 +605,7 @@ def scenario() -> Iterator[Scenario]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as client:
-            built = _build_scenario(client)
+            built = _build_scenario(station_device_client(client))
     finally:
         os.environ[_DB_URL_ENV] = original_url
         get_settings.cache_clear()

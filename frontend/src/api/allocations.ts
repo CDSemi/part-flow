@@ -7,11 +7,13 @@
 // `device_event_id`). Allocation is a record of its own — it never
 // references a Movement or a Quantity Flow and never changes the
 // Movement history. Management allocation and reversal are separate
-// authorized routes (no UI yet).
+// authorized routes (no UI yet). Both station calls carry the
+// enrolled-device header of the confirming station (Phase 14 slice 4).
 //
 // Production-safe: no mock data, no framework imports.
 
 import { apiRequest, apiRequestWithStatus } from './client';
+import { stationDeviceHeaders } from './station-devices';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -67,6 +69,14 @@ export interface AllocationInput {
   lines: AllocationLine[];
   /** The Stockroom station confirming the receiving allocation. */
   stationId: string;
+  /**
+   * The operator confirms the suggestion exactly as shown (every line
+   * at its proposed quantity, every proposed line sent). Not part of
+   * the idempotency fingerprint: it only lets the server explain a
+   * suggestion that changed meanwhile instead of refusing an
+   * adjustment the station may not make.
+   */
+  suggestionUnchanged: boolean;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
   deviceEventId: string;
@@ -144,9 +154,11 @@ interface AllocationResultWire {
  * The canonical allocation suggestion for a PN — a read, nothing is
  * recorded. `quantity` is the quantity about to be allocated (the
  * just-stocked quantity); omitted, the server suggests for the whole
- * available stock.
+ * available stock. `stationId` is the station asking (its device
+ * header travels with the read).
  */
 export async function getAllocationSuggestion(
+  stationId: string,
   partNumber: string,
   quantity?: number,
 ): Promise<AllocationSuggestion> {
@@ -154,6 +166,7 @@ export async function getAllocationSuggestion(
   if (quantity !== undefined) params.set('quantity', String(quantity));
   const wire = await apiRequest<SuggestionWire>(
     `/api/allocations/suggestion?${params.toString()}`,
+    { headers: stationDeviceHeaders(stationId) },
   );
   return {
     partNumber: wire.part_number,
@@ -193,6 +206,7 @@ export async function confirmAllocation(
     '/api/allocations',
     {
       method: 'POST',
+      headers: stationDeviceHeaders(input.stationId),
       body: {
         part_number: input.partNumber,
         allocation_quantity: input.allocationQuantity,
@@ -202,6 +216,7 @@ export async function confirmAllocation(
         })),
         station_id: input.stationId,
         device_event_id: input.deviceEventId,
+        suggestion_unchanged: input.suggestionUnchanged,
       },
     },
   );

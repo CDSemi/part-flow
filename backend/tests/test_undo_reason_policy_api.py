@@ -58,7 +58,7 @@ from app.application.errors import InvalidInputError
 from app.application.machine_processing import FINGERPRINT_KEY
 from app.core.config import get_settings
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _UNDO_MODULE = _BACKEND_DIR / "app" / "application" / "undo.py"
@@ -118,7 +118,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ[_DB_URL_ENV] = original_url
         get_settings.cache_clear()

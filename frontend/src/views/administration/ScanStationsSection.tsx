@@ -9,11 +9,13 @@ import {
   updateScanStation,
 } from '../../api/environment';
 import type { Area, ScanStation } from '../../api/environment';
+import { listStationDevices } from '../../api/station-devices';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { useToastNotice } from '../../components/toast-notice';
 import {
   EmptyState,
   ErrorState,
@@ -28,6 +30,7 @@ import {
   StatusPill,
   ViewOnlyNote,
 } from './section-widgets';
+import { StationDevicesDialog } from './StationDevicesDialog';
 
 // Administration → Scan Stations (Phase 3.5): stations bound to one
 // Area, identified by their stable Station ID (one URL path segment —
@@ -35,8 +38,14 @@ import {
 // and is never renamed; a station can be rebound to another active
 // Area and deactivated, never deleted. Stations have no barcode.
 // Without the Manage Scan Stations permission the section is view-only.
+// Since Phase 14 slice 4 each station lists its enrolled devices
+// (`Devices…`, readable by every signed-in user; enrolling, re-enrolling
+// and revoking follow the permissions the server names).
 
-type PendingDialog = { kind: 'new' } | { kind: 'edit'; station: ScanStation };
+type PendingDialog =
+  | { kind: 'new' }
+  | { kind: 'edit'; station: ScanStation }
+  | { kind: 'devices'; stationId: string };
 
 /** The canonical URL-safe Station ID shape (mirrors the backend). */
 const STATION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -47,7 +56,9 @@ export function ScanStationsSection() {
   const canWrite = useSession().can('MANAGE_SCAN_STATIONS');
   const stationsData = useApiData(listScanStations);
   const areasData = useApiData(listAreas);
+  const devicesData = useApiData(listStationDevices);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  const { showNotice, noticeElement } = useToastNotice();
 
   const header = (ready: boolean, canCreate: boolean) => (
     <>
@@ -120,6 +131,21 @@ export function ScanStationsSection() {
     stationsData.reload();
     setDialog(null);
   };
+  const devices =
+    devicesData.state.status === 'ready' ? devicesData.state.data : null;
+  const devicesOf = (stationId: string) =>
+    devices?.devices.filter((device) => device.stationId === stationId) ?? [];
+  const devicesSummary = (stationId: string) => {
+    if (devices === null) return '—';
+    const own = devicesOf(stationId);
+    const enrolled = own.filter((device) => device.state === 'ACTIVE').length;
+    const codeIssued = own.some((device) => device.state === 'PENDING');
+    return `${enrolled > 0 ? `${enrolled} enrolled` : 'Not enrolled'}${codeIssued ? ' · code issued' : ''}`;
+  };
+  const devicesStation =
+    dialog?.kind === 'devices'
+      ? stations.find((station) => station.stationId === dialog.stationId)
+      : undefined;
 
   return (
     <>
@@ -133,6 +159,7 @@ export function ScanStationsSection() {
               <th>Station ID</th>
               <th>Area</th>
               <th>Status</th>
+              <th>Devices</th>
             </tr>
           </thead>
           <tbody>
@@ -163,6 +190,25 @@ export function ScanStationsSection() {
                   <td>
                     <StatusPill active={station.isActive} />
                   </td>
+                  <td data-label="Devices">
+                    <span className="ad-devices">
+                      {devicesSummary(station.stationId)}
+                      <button
+                        className="rowbtn"
+                        aria-label={`Devices of ${station.stationId}`}
+                        onClick={(event) => {
+                          // The row itself opens the station editor.
+                          event.stopPropagation();
+                          setDialog({
+                            kind: 'devices',
+                            stationId: station.stationId,
+                          });
+                        }}
+                      >
+                        Devices…
+                      </button>
+                    </span>
+                  </td>
                 </tr>
               );
             })}
@@ -173,8 +219,31 @@ export function ScanStationsSection() {
         The Station ID is the station's stable identity and its address (Scan
         Station → <span className="mono">/scan-station/&lt;id&gt;</span>) — it
         is never renamed. Stations are identified by this ID and their Area
-        binding; there is no station barcode.
+        binding; there is no station barcode. Scan Stations work only on devices
+        enrolled here. What an enrolled station may do follows the role marked
+        "Applied at Scan Stations" in Roles & permissions.
       </div>
+      {devicesData.state.status === 'error' ? (
+        <ErrorState
+          message="The station devices could not be loaded."
+          detail={devicesData.state.message}
+          onRetry={devicesData.reload}
+        />
+      ) : null}
+      {devicesStation && devices ? (
+        <StationDevicesDialog
+          station={devicesStation}
+          devices={devicesOf(devicesStation.stationId)}
+          enrollmentPermissions={devices.enrollmentPermissions}
+          writeBlocked={writeBlocked}
+          // A background re-read: a failed refresh keeps the list as
+          // read, so an open code view never disappears.
+          onChanged={devicesData.revalidate}
+          onNotice={showNotice}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+      {noticeElement}
       {dialog?.kind === 'new' ? (
         <ScanStationDialog
           areas={activeAreas}

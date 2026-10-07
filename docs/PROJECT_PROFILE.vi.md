@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và đoạn §20 mới của Phase 14 slice 2, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
@@ -866,6 +866,8 @@ chỉ sau server-confirmed write; heartbeat không cho phép optimistic success.
 Station identity và Area binding là stable application/infrastructure config;
 bare route hiển thị selector, không auto-pick; unknown/inactive ID là explicit
 error. Có thể dùng bảng `scan_stations`; config không phải core aggregate.
+
+Một Scan Station chỉ được dùng từ các thiết bị mà administrator đã enroll cho nó (§20; quyết định owner OD-P6, 2026-10-06); enrollment là configuration, không bao giờ là production state, và không bao giờ được ghi lên Movement.
 Movement ghi `station_id`; production state vẫn từ Movement, không từ Session.
 
 ---
@@ -1062,6 +1064,8 @@ luôn visible ở Scan Station.
 RBAC áp dụng. Role là **named và editable**. Mỗi capability dưới đây là một **permission key**; role cấp một tập permission key và một User giữ một role. **Permission key là authority duy nhất**: quyết định authorization dựa trên các key mà role của User cấp — không bao giờ dựa trên tên role — và không role nào là implicit superuser. Các danh sách Administrator, Manager và Operator dưới đây là **role ban đầu với grant ban đầu**, được seed đúng như liệt kê; administrator được ủy quyền có thể đổi tên role hoặc đổi những gì một role cấp, và mọi thay đổi như vậy đều được audit.
 
 **Câu nêu tên role và permission-management guard (quyết định 2026-10-06).** Bất cứ chỗ nào profile này nêu một role là bên thực hiện hoặc cấu hình điều gì đó trong ứng dụng (ví dụ "Admin or Manager", "Admin-configured"), đó là nêu initial grant của role: permission mà action cần mới quyết định. Việc đổi ai giữ một correction permission hoặc permission quản lý correction permission — bằng cách đổi permission của role, hoặc role, trạng thái hoạt động hay mật khẩu của một User — tự nó cần permission quản lý correction permission, và PartFlow không bao giờ cho một thay đổi khiến không còn User active có mật khẩu nào giữ permission quản lý user và role, hoặc permission quản lý correction permission.
+
+**Action của Scan Station (quyết định 2026-10-06).** Action của Scan Station do Worker thực hiện — Worker không giữ role (§7) — trên một thiết bị Scan Station mà administrator đã enroll cho station đó; thiết bị chưa enroll, hoặc đã enroll cho station khác, không thể thực hiện gì ở đó (quyết định owner OD-P6). Một Scan Station đã enroll được làm gì — gồm cả Undo các scan gần đây đủ điều kiện (§16) — do các permission của một role duy nhất áp dụng tại Scan Station quyết định, ban đầu là role Operator với các initial grant liệt kê bên dưới (quyết định owner OD-S4-1); Worker identity không bao giờ cấp hay hạn chế một action.
 
 Machine, Planned Route và PartNumber metadata là production master
 data trong Management, do authorized specialist quản lý; không bắt buộc Admin. Role Administrator ban đầu giữ các capability này, nhưng chúng không độc quyền của Administrator.

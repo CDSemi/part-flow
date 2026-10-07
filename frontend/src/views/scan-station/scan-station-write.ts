@@ -19,6 +19,17 @@
 // after the idempotency fast path, so nothing is recorded under this
 // `device_event_id` — it also ends an unknown outcome — and the owner
 // asks for the reason before the same key is confirmed again.
+// An enrolled-device refusal (Phase 14 slice 4: 401
+// `station_device_required`, 403 `station_device_mismatch`) is not a
+// rejection either, but unlike the refusals above it is judged BEFORE
+// the idempotency fast path: it proves nothing about an earlier
+// attempt, so the unknown-outcome state is KEPT as it was, the same
+// `device_event_id` stays, and the station raises its enrollment dialog;
+// after enrolling, the operator confirms the identical request again
+// (it replays a committed original or records it once). A refusal by
+// the role applied at Scan Stations (403 `station_permission_denied`)
+// is an ordinary rejection — and since it is judged after the fast path
+// and the post-lock re-check, it also ends an unknown outcome.
 // Production-safe: no mock data, no JSX.
 
 import { useCallback, useRef, useState } from 'react';
@@ -32,13 +43,21 @@ import {
   workerSessionRequired,
   writeOutcomeUnknown,
 } from '../../api/scan-station';
+import {
+  stationDeviceRefusal,
+  stationPermissionDenied,
+} from '../../api/station-devices';
 import type {
   BadgeGateRefusal,
   FinalGate,
   SensitiveAction,
   StationContext,
 } from '../../api/scan-station';
-import { useRequireWorkerSession } from './scan-station-session';
+import {
+  useRequireWorkerSession,
+  useStationDeviceRefused,
+  useTrackOutcomeUnknown,
+} from './scan-station-session';
 
 export interface OneShotWrite<T> {
   /** A request is in flight. */
@@ -116,12 +135,14 @@ export function useOneShotWrite<T>({
   onReasonRequired?: (message: string) => void;
 }): OneShotWrite<T> {
   const requireSession = useRequireWorkerSession();
+  const deviceRefused = useStationDeviceRefused();
   const deviceEventId = useRef(newDeviceEventId());
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [outcomeUnknown, setOutcomeUnknown] = useState(false);
   const [rejected, setRejected] = useState(false);
   const [result, setResult] = useState<T | null>(null);
+  useTrackOutcomeUnknown(outcomeUnknown);
 
   const submit = useCallback(async () => {
     if (busy) return;
@@ -148,6 +169,15 @@ export function useOneShotWrite<T>({
         setBusy(false);
         return;
       }
+      if (stationDeviceRefusal(error) !== null) {
+        // Refused before the idempotency fast path: no error, no
+        // rejection, the same `device_event_id` and the unknown-outcome
+        // state exactly as it was — the enrollment dialog opens above
+        // this dialog and Confirm resends the same request afterwards.
+        deviceRefused({ outcomeUnknown });
+        setBusy(false);
+        return;
+      }
       const refusal = badgeGateRefusal(error);
       if (refusal && onGateRefusal) {
         // Judged after the idempotency fast path and the post-lock
@@ -171,6 +201,10 @@ export function useOneShotWrite<T>({
         setOutcomeUnknown(true);
         setServerError(null);
       } else {
+        // A station-permission refusal is judged after the fast path
+        // and the post-lock re-check: nothing is recorded under this
+        // key, so an earlier unknown outcome is now known.
+        if (stationPermissionDenied(error)) setOutcomeUnknown(false);
         setServerError(errorMessage(error));
         setRejected(true);
         onRejected?.();
@@ -190,6 +224,8 @@ export function useOneShotWrite<T>({
     onGateRefusal,
     onReasonRequired,
     requireSession,
+    deviceRefused,
+    outcomeUnknown,
   ]);
 
   const clearError = useCallback(() => setServerError(null), []);

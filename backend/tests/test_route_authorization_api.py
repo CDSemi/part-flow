@@ -22,6 +22,7 @@ Identities come from ``tests.auth_harness``; set-up data is created
 through the harness administrator.
 """
 
+import hashlib
 import os
 import uuid
 from collections.abc import Callable, Iterator
@@ -47,6 +48,9 @@ from tests.auth_harness import (
     admin_of,
     anonymous_client,
     client_as,
+    engine_of,
+    enroll_station_device,
+    station_device_client,
 )
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -60,6 +64,12 @@ _G1 = (
 _G3 = (
     "Giving a user a role that holds correction permissions or the permission to manage"
     " them, or moving them out of such a role, needs the Manage correction permissions"
+    " permission."
+)
+#: G-4 (Phase 14 slice 4): an enrollment code while the station role holds Undo.
+_G4 = (
+    "Enrolling a device gives it the permissions of the role applied at Scan Stations,"
+    " which include correction permissions. It needs the Manage correction permissions"
     " permission."
 )
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x01" * 16
@@ -110,7 +120,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()
@@ -348,6 +358,19 @@ def _with_user_avatar(client: TestClient) -> tuple[str, dict[str, Any]]:
     return f"/api/users/{user['id']}/avatar", {}
 
 
+def _enrolled_device(client: TestClient) -> int:
+    """An activated device of a new station (Phase 14 slice 4), inserted directly."""
+    token = enroll_station_device(engine_of(client), _station(client)["station_id"])
+    digest = hashlib.sha256(token.encode("ascii")).digest()
+    with engine_of(client).connect() as connection:
+        return int(
+            connection.execute(
+                sa.text("SELECT id FROM scan_station_devices WHERE token_digest = :d"),
+                {"d": digest},
+            ).scalar_one()
+        )
+
+
 def _key(*keys: Permission) -> frozenset[Permission]:
     return frozenset(keys)
 
@@ -479,6 +502,31 @@ _WRITES: list[_Write] = [
         ),
         "scan_stations",
         "station_id",
+    ),
+    # Phase 14 slice 4 (OD-S4-9): the seeded station role holds Undo, so
+    # issuing an enrollment code also needs Manage correction permissions.
+    _Write(
+        "station-device-enrollment",
+        "POST",
+        "/api/scan-stations/{station_id}/device-enrollments",
+        _key(MSS),
+        _key(MSS, MCP),
+        lambda c: (
+            f"/api/scan-stations/{_station(c)['station_id']}/device-enrollments",
+            {"json": {"label": "Desk"}},
+        ),
+        "scan_station_devices",
+        "station_id",
+        detail={MCP: _G4},
+    ),
+    _Write(
+        "station-device-revocation",
+        "POST",
+        "/api/scan-station-devices/{device_id}/revocation",
+        _key(MSS),
+        _key(MSS),
+        lambda c: (f"/api/scan-station-devices/{_enrolled_device(c)}/revocation", {}),
+        "scan_station_devices",
     ),
     _Write(
         "asset-tag-format",
@@ -935,10 +983,16 @@ def test_public_and_station_routes_need_no_sign_in(client: TestClient) -> None:
         "/api/route-templates",
         "/api/policies/due-soon",
         f"/api/production-board?department_id={area['department_id']}",
-        f"/api/scan-stations/{station['station_id']}/context",
     ):
         response = anonymous.get(path)
         assert response.status_code == 200, (path, response.text)
+    # A Scan Station route needs no sign-in, but an enrolled device (Phase 14
+    # slice 4): through a device of the station it answers, without one 401.
+    station_device = station_device_client(anonymous)
+    context = f"/api/scan-stations/{station['station_id']}/context"
+    assert station_device.get(context).status_code == 200
+    refused = anonymous.get(context)
+    assert refused.status_code == 401 and refused.json()["station_device_required"] is True
     # Image reads answer for a missing image themselves, never 401 / 403.
     for path in (
         f"/api/workers/{worker['id']}/avatar",
@@ -948,11 +1002,11 @@ def test_public_and_station_routes_need_no_sign_in(client: TestClient) -> None:
         response = anonymous.get(path)
         assert response.status_code == 404, (path, response.text)
     # A station command is answered by the station itself (no sign-in asked).
-    resolved = anonymous.post(
-        f"/api/scan-stations/{station['station_id']}/scans/resolve",
-        json={"part_number": f"PN-{_suffix()}"},
-    )
+    resolve = f"/api/scan-stations/{station['station_id']}/scans/resolve"
+    resolved = station_device.post(resolve, json={"part_number": f"PN-{_suffix()}"})
     assert resolved.status_code not in (401, 403), resolved.text
+    refused = anonymous.post(resolve, json={"part_number": f"PN-{_suffix()}"})
+    assert refused.status_code == 401 and refused.json()["station_device_required"] is True
     # A Management write needs a signed-in User since slice 3.
     machine = anonymous.post(
         "/api/machines",

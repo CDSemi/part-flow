@@ -18,7 +18,8 @@ Surface:
 - ``POST /allocations`` — the Stockroom station's receiving
   confirmation: the confirmed allocation of one PN's stocked quantity
   to demand lines (``station_id`` required). A Scan Station route — it
-  never resolves the User principal. 201 fresh, 200 on an idempotent
+  never resolves the User principal; it requires an enrolled device of
+  that station. 201 fresh, 200 on an idempotent
   replay of the same
   ``device_event_id`` + same intent, 422 when the lines do not sum to
   the explicit ``allocation_quantity`` (or when it is missing), 409 on
@@ -42,17 +43,27 @@ Surface:
 
 The acting User (``actor_user_id``) is derived from the session, never
 from a request body (Phase 14 slice 3); station rows carry none.
+
+The two station routes (the suggestion and ``POST /allocations``)
+require an enrolled station device (Phase 14 slice 4, owner decision
+OD-P6; ``X-PartFlow-Station-Device``): 401 ``station_device_required``
+without one, and for the confirmation 403 ``station_device_mismatch``
+when the body's ``station_id`` is not the device's station. The role
+applied at Scan Stations must grant ``CONFIRM_SUGGESTED_ALLOCATION``
+(and ``ADJUST_SUGGESTED_ALLOCATION`` for lines that differ from the
+suggestion; 409 when ``suggestion_unchanged`` shows the suggestion went
+stale) — 403 ``station_permission_denied`` otherwise.
 """
 
 import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, ConfigDict, StrictInt
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
-from app.api.authorization import RequireAnyPermission, RequirePermission
+from app.api.authorization import RequireAnyPermission, RequirePermission, StationDeviceDep
 from app.api.dependencies import SessionDep
-from app.application import allocations
+from app.application import allocations, station_devices
 from app.application.authentication import Principal
 from app.domain.enums import Permission
 
@@ -96,9 +107,14 @@ class AllocationSuggestionResponse(BaseModel):
 
 @router.get("/allocations/suggestion")
 def get_allocation_suggestion(
-    session: SessionDep, part_number: str, quantity: int | None = None
+    device: StationDeviceDep,
+    session: SessionDep,
+    part_number: str,
+    quantity: int | None = None,
 ) -> AllocationSuggestionResponse:
-    suggestion = allocations.suggest_allocation(session, part_number=part_number, quantity=quantity)
+    suggestion = allocations.suggest_station_allocation(
+        session, part_number=part_number, quantity=quantity
+    )
     return AllocationSuggestionResponse(
         part_number=suggestion.part_number,
         quantity=suggestion.quantity,
@@ -148,6 +164,11 @@ class AllocationRequest(BaseModel):
     station_id: str
     reason: str | None = None
     device_event_id: str
+    # The client sends the suggestion it was shown, unmodified (Phase 14
+    # slice 4): it only chooses which refusal explains lines that differ
+    # from the suggestion recomputed under the locks — never part of the
+    # idempotency fingerprint.
+    suggestion_unchanged: StrictBool = False
 
 
 class ManagementAllocationRequest(BaseModel):
@@ -227,8 +248,9 @@ def _response(result: allocations.AllocationResult) -> AllocationResponse:
 
 @router.post("/allocations")
 def confirm_allocation(
-    body: AllocationRequest, session: SessionDep, response: Response
+    device: StationDeviceDep, body: AllocationRequest, session: SessionDep, response: Response
 ) -> AllocationResponse:
+    station_devices.require_station_binding(device, body.station_id)
     result = allocations.confirm_station_allocation(
         session,
         station_id=body.station_id,
@@ -237,6 +259,7 @@ def confirm_allocation(
         lines=[line.model_dump() for line in body.lines],
         reason=body.reason,
         device_event_id=body.device_event_id,
+        suggestion_unchanged=body.suggestion_unchanged,
     )
     response.status_code = 201 if result.created else 200
     return _response(result)

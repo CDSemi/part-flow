@@ -24,8 +24,10 @@ import { ADMIN_SECTIONS } from './sections';
 // permission, and that only the session UI, the Administration sections
 // and the development-only demo badges ask whether the signed-in user
 // holds a permission: the server checks the Administration permissions
-// (Phase 14 slice 2), and no Management, Scan Station or Production Board
-// screen is hidden or refused by role yet.
+// (Phase 14 slice 2). The Scan Station never reads a user, a role or the
+// permission vocabulary: it hides actions from its own context's station
+// permissions (`stationCan`, slice 4), and the device list of
+// Administration → Scan Stations reads the keys enrolling needs.
 
 /** The server's vocabulary, in order (literal copy of the contract). */
 const CONTRACT_KEYS = [
@@ -150,6 +152,7 @@ test('a role is protected when it holds a correction permission or the permissio
     name: 'R',
     permissions,
     userCount: 0,
+    appliesAtScanStations: false,
   });
   expect(roleHoldsProtected(role([]))).toBe(false);
   expect(roleHoldsProtected(role(['MANAGE_USERS_AND_ROLES']))).toBe(false);
@@ -219,6 +222,7 @@ test('only Administration, the Management access presentation and the session mo
     'views/administration/CorrectionPermissionsSection.tsx',
     'views/administration/RolesSection.tsx',
     'views/administration/SetPasswordDialog.tsx',
+    'views/administration/StationDevicesDialog.tsx',
     'views/administration/UsersSection.tsx',
     'views/administration/permissions.ts',
     'views/administration/section-widgets.tsx',
@@ -237,6 +241,7 @@ test('only Administration, the Management access presentation and the session mo
     'api/roles.ts',
     'api/session.ts',
     'api/setup.ts',
+    'api/station-devices.ts',
     'api/users.ts',
     'app/management-access.ts',
     'app/session-context.ts',
@@ -245,6 +250,7 @@ test('only Administration, the Management access presentation and the session mo
     'components/ViewOnlyPageNote.tsx',
     'views/administration/CorrectionPermissionsSection.tsx',
     'views/administration/RolesSection.tsx',
+    'views/administration/StationDevicesDialog.tsx',
     'views/administration/UsersSection.tsx',
     'views/administration/permissions.ts',
     'views/administration/section-widgets.tsx',
@@ -270,6 +276,7 @@ test('only the session UI, the sign-in gate, the Administration sections, the Ma
     'views/administration/ScanStationsSection.tsx',
     'views/administration/SettingsSection.tsx',
     'views/administration/SignInSettingsPanel.tsx',
+    'views/administration/StationDevicesDialog.tsx',
     'views/administration/UsersSection.tsx',
     'views/administration/WorkerSessionsSection.tsx',
     'views/administration/WorkersSection.tsx',

@@ -1,4 +1,4 @@
-"""Who is signed in, and what they may do (Phase 14 slices 1–3).
+"""Who is signed in, and what they may do (Phase 14 slices 1–4).
 
 FastAPI dependencies over ``app.application.authentication``:
 
@@ -15,7 +15,12 @@ FastAPI dependencies over ``app.application.authentication``:
   ``SignedInDep`` is the key-less form;
 - ``RequireAnyPermission(*keys)`` — the same, but any ONE key opens it
   (Management reads, slice 3; else 403 ``permission_denied`` with
-  ``any_permission``).
+  ``any_permission``);
+- ``RequireStationDevice`` (slice 4) — an enrolled Scan Station device
+  from the ``X-PartFlow-Station-Device`` header, never the User
+  principal (``StationDeviceForPathDep`` also binds it to the path's
+  station; ``StationDeviceDep`` does not). What the station may do is
+  checked per command by the Application (``station_access``).
 
 Checks run before the route body, so before any lock or write. Since
 slice 2 every Administration read and write declares one, since slice 3
@@ -33,21 +38,24 @@ lifetime).
 
 from typing import Annotated, Final
 
-from fastapi import Depends, Request, Response
+from fastapi import Depends, Header, Request, Response
 
 from app.api.dependencies import SessionDep
-from app.application import authentication
+from app.application import authentication, station_devices
 from app.application.authentication import SESSION_COOKIE, Principal
 from app.application.authorization import Actor
 from app.application.errors import (
     AUTHENTICATION_REQUIRED_MESSAGE,
     PASSWORD_CHANGE_REQUIRED_MESSAGE,
     PERMISSION_DENIED_MESSAGE,
+    STATION_DEVICE_REQUIRED_MESSAGE,
     VIEW_PERMISSION_DENIED_MESSAGE,
     AuthenticationRequiredError,
     PasswordChangeRequiredError,
     PermissionDeniedError,
+    StationDeviceRequiredError,
 )
+from app.application.station_devices import StationDevice
 from app.core.config import get_settings
 from app.domain.enums import Permission
 
@@ -136,6 +144,45 @@ class RequireAnyPermission:
                 any_of=True,
             )
         return principal
+
+
+STATION_DEVICE_HEADER: Final = "X-PartFlow-Station-Device"
+
+
+class RequireStationDevice:
+    """Dependency factory: an enrolled, unrevoked Scan Station device
+    (Phase 14 slice 4; owner decision OD-P6).
+
+    Reads the ``X-PartFlow-Station-Device`` header and resolves it on its
+    own short transaction (``station_devices.resolve_station_device``),
+    never on the request session and never on the User principal: no
+    token, a malformed, unknown or revoked one → 401
+    ``station_device_required``; with ``bind_path_station`` a device of
+    another station than the path's ``station_id`` → 403
+    ``station_device_mismatch``. A header, not a cookie: nothing ambient,
+    so it needs no CSRF defence.
+    """
+
+    def __init__(self, *, bind_path_station: bool) -> None:
+        self.bind_path_station = bind_path_station
+
+    def __call__(
+        self,
+        request: Request,
+        header: Annotated[str | None, Header(alias=STATION_DEVICE_HEADER)] = None,
+    ) -> StationDevice:
+        device = station_devices.resolve_station_device(request.app.state.engine, header)
+        if device is None:
+            raise StationDeviceRequiredError(STATION_DEVICE_REQUIRED_MESSAGE)
+        if self.bind_path_station:
+            station_devices.require_station_binding(device, request.path_params["station_id"])
+        return device
+
+
+StationDeviceForPathDep = Annotated[
+    StationDevice, Depends(RequireStationDevice(bind_path_station=True))
+]
+StationDeviceDep = Annotated[StationDevice, Depends(RequireStationDevice(bind_path_station=False))]
 
 
 def holds(principal: Principal | None, key: Permission) -> bool:

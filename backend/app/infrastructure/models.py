@@ -32,7 +32,9 @@ and the global policy singleton (`application_policy`,
 `areas.worker_session_timeout_minutes`); plus the Phase 13 users, roles
 and permissions configuration (`roles`, `role_permissions`, `users` —
 users sign in since Phase 14 slice 1 (`user_credentials`,
-`user_sessions`); never linked to Workers). Business
+`user_sessions`); never linked to Workers); plus the Phase 14 enrolled
+Scan Station devices (`scan_station_devices`) and the role applied at
+Scan Stations (`application_policy.scan_station_role_id`). Business
 rules stay
 in the Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
@@ -97,6 +99,7 @@ from app.domain.enums import (
     QuantityFlowStatus,
     RequestType,
     RouteMode,
+    StationDeviceRevokedReason,
     ThemePreference,
     UserSessionEndReason,
     WorkerIdentificationMode,
@@ -406,6 +409,30 @@ USER_SESSION_END_REASON_SQL = (
 )
 USER_SESSION_END_SHAPE_SQL = "(ended_at IS NULL) = (end_reason IS NULL)"
 
+# Scan Station devices (Phase 14 slice 4, owner decision OD-P6): only
+# SHA-256 digests of the enrollment code and the device token are
+# stored, never both at once (activation clears the code's digest, so a
+# used code can never match again); a token exactly with an activation
+# time; a revocation time exactly with its closed reason, REPLACED only
+# for an activated device; a last-seen time only for an activated
+# device; a device never replaces itself. The name rule (trimmed, 1-80
+# characters) is an Application rule. Repeated verbatim by migration
+# `0030_phase14_station_devices`.
+SCAN_STATION_DEVICE_LABEL_MAX = 80
+SCAN_STATION_DEVICE_ENROLLMENT_CODE_DIGEST_SQL = "octet_length(enrollment_code_digest) = 32"
+SCAN_STATION_DEVICE_TOKEN_DIGEST_SQL = "octet_length(token_digest) = 32"
+SCAN_STATION_DEVICE_CODE_OR_TOKEN_SQL = "(enrollment_code_digest IS NULL) <> (token_digest IS NULL)"
+SCAN_STATION_DEVICE_ACTIVATION_SHAPE_SQL = "(token_digest IS NULL) = (activated_at IS NULL)"
+SCAN_STATION_DEVICE_REVOCATION_SHAPE_SQL = "(revoked_at IS NULL) = (revoked_reason IS NULL)"
+SCAN_STATION_DEVICE_REVOKED_REASON_SQL = (
+    "revoked_reason IN (" + ", ".join(f"'{reason}'" for reason in StationDeviceRevokedReason) + ")"
+)
+SCAN_STATION_DEVICE_REPLACED_SHAPE_SQL = (
+    "revoked_reason IS DISTINCT FROM 'REPLACED' OR activated_at IS NOT NULL"
+)
+SCAN_STATION_DEVICE_LAST_SEEN_SHAPE_SQL = "last_seen_at IS NULL OR activated_at IS NOT NULL"
+SCAN_STATION_DEVICE_NO_SELF_REPLACE_SQL = "replaces_device_id IS NULL OR replaces_device_id <> id"
+
 # Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
 # closed end-reason vocabulary, an end time exactly with an end reason,
 # an expiry after the start, an end inside the session's window, and an
@@ -627,6 +654,102 @@ class ScanStation(Base):
         CheckConstraint(SCAN_STATION_ID_SQL, name=conv("ck_scan_stations_station_id_canonical")),
         CheckConstraint(
             SCAN_STATION_THEME_PREFERENCE_SQL, name=conv("ck_scan_stations_theme_preference")
+        ),
+    )
+
+
+class ScanStationDevice(Base):
+    """One enrollment of a Scan Station device (Phase 14 slice 4; owner decision OD-P6).
+
+    Configuration of a terminal, never production state and never a
+    person: a device token authenticates a station browser for ONE Scan
+    Station; Workers are never Users and a badge never authorizes. A
+    PENDING row holds only the SHA-256 digest of its one-time enrollment
+    code (valid until `enrollment_expires_at`, judged on the database
+    clock); activation clears it and stores the digest of the device
+    token instead, so the two secrets never coexist and a used code can
+    never match again. Only digests are stored: a database read never
+    yields a usable code or token. Revocation is terminal (`revoked_at`
+    with `revoked_reason`: REVOKED by an administrator, REPLACED when a
+    re-enrolled device naming it in `replaces_device_id` was activated).
+    `last_seen_at` records the last request with a valid token (at most
+    once a minute) — device-contact metadata, never audited. The state
+    (PENDING / ACTIVE / EXPIRED / REVOKED) is derived, never stored. No
+    actor columns: the audit rows carry the User. Rows are never deleted
+    at runtime; stations are never deleted.
+    """
+
+    __tablename__ = "scan_station_devices"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    station_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey(
+            "scan_stations.station_id", name="fk_scan_station_devices_station_id_scan_stations"
+        ),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    enrollment_code_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
+    enrollment_expires_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    token_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
+    replaces_device_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "scan_station_devices.id",
+            name="fk_scan_station_devices_replaces_device_id_scan_station_devices",
+        ),
+    )
+    issued_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    activated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "enrollment_code_digest", name="uq_scan_station_devices_enrollment_code_digest"
+        ),
+        UniqueConstraint("token_digest", name="uq_scan_station_devices_token_digest"),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_ENROLLMENT_CODE_DIGEST_SQL,
+            name=conv("ck_scan_station_devices_enrollment_code_digest_length"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_TOKEN_DIGEST_SQL,
+            name=conv("ck_scan_station_devices_token_digest_length"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_CODE_OR_TOKEN_SQL,
+            name=conv("ck_scan_station_devices_code_or_token"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_ACTIVATION_SHAPE_SQL,
+            name=conv("ck_scan_station_devices_activation_shape"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_REVOCATION_SHAPE_SQL,
+            name=conv("ck_scan_station_devices_revocation_shape"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_REVOKED_REASON_SQL,
+            name=conv("ck_scan_station_devices_revoked_reason"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_REPLACED_SHAPE_SQL,
+            name=conv("ck_scan_station_devices_replaced_shape"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_LAST_SEEN_SHAPE_SQL,
+            name=conv("ck_scan_station_devices_last_seen_shape"),
+        ),
+        CheckConstraint(
+            SCAN_STATION_DEVICE_NO_SELF_REPLACE_SQL,
+            name=conv("ck_scan_station_devices_no_self_replace"),
         ),
     )
 
@@ -1018,6 +1141,11 @@ class ApplicationPolicy(Base):
     a lock and the lock duration, and whether an administrator-set
     password must be replaced at the next sign-in. Read on every
     request, so a change applies to open sign-ins at once.
+
+    Phase 14 slice 4 adds `scan_station_role_id`: the role whose
+    permissions every enrolled Scan Station device has (owner decision
+    OD-S4-1) — set once by migration to the seeded Operator role; no API
+    writes it; changed only by editing that role's grants.
     """
 
     __tablename__ = "application_policy"
@@ -1067,6 +1195,13 @@ class ApplicationPolicy(Base):
     )
     require_password_change: Mapped[bool] = mapped_column(
         nullable=False, server_default=text("true")
+    )
+    # The role applied at Scan Stations (Phase 14 slice 4): its station
+    # keys authorize each station command. Set once by migration.
+    scan_station_role_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("roles.id", name="fk_application_policy_scan_station_role_id_roles"),
+        nullable=False,
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -2093,7 +2228,9 @@ class AuditEvent(Base):
     (slice 8) RouteTemplate — Planned Routes configuration, never the
     Assigned Route snapshots — and (slice 12) User and Role, the
     application accounts and the named roles with their permission
-    grants. Rows are descriptive history for
+    grants — and (Phase 14 slice 4) ScanStationDevice, the enrollment,
+    activation, replacement and revocation of a station device (never a
+    code, token or digest). Rows are descriptive history for
     display and accountability: never replayed to build state, never
     describing production actions (the `RECEIVED` PartMovement is the
     production audit record), and deliberately not an event-sourcing
@@ -2151,7 +2288,7 @@ class AuditEvent(Base):
             f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}',"
             f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}',"
             f" '{AuditEntityType.ROUTE_TEMPLATE}', '{AuditEntityType.USER}',"
-            f" '{AuditEntityType.ROLE}')",
+            f" '{AuditEntityType.ROLE}', '{AuditEntityType.SCAN_STATION_DEVICE}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.

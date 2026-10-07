@@ -133,7 +133,8 @@ diễn tập.
 5. Lưu migration output và revision mới.
 6. Start/recreate application service ở target release. Với database chưa có
    Administrator, hoàn tất first-run setup (setup token nằm trong backend log)
-   trước khi mở truy cập.
+   trước khi mở truy cập. Sau đó enroll từng thiết bị Scan Station
+   (Administration → Scan Stations → `Devices…`).
 7. Check health nội bộ và qua HTTPS.
 8. Chạy smoke test authorization, SPA route, `/api`, scan-focus/connectivity và
    designated write/read-back.

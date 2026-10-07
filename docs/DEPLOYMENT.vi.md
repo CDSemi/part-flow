@@ -47,7 +47,7 @@ giới hạn đã quan sát được gồm:
 - database và ứng dụng dùng chung PostgreSQL role do Compose tạo;
 - chưa có production reverse proxy, TLS policy, secret store, log rotation,
   release image tag, scheduled backup job, restore drill hoặc command rollback;
-- Phase 14 đã có sign-in cho application User và permission check phía server bao phủ mọi đọc và write Administration và Management; write của Scan Station gọi được từ bất kỳ client nào trên mạng cho đến khi thiết bị station được enroll (slice 4);
+- Phase 14 đã có sign-in cho application User và permission check phía server bao phủ mọi đọc và write Administration và Management; mọi route Scan Station yêu cầu thiết bị station do administrator enroll cho station đó và mỗi action của station cần permission của role áp dụng tại Scan Station (Phase 14 slice 4) — truy cập station ẩn danh trên toàn mạng đã được đóng;
 - một số view đã duyệt vẫn là preview chỉ có ở development hoặc còn chờ tích
   hợp backend/frontend thật.
 
@@ -120,6 +120,7 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
 
 - Authentication và server-side role enforcement Phase 14 hoàn tất và đã test;
   ẩn navigation không bao giờ là authorization.
+- Mọi thiết bị Scan Station đã được enroll, tên của nó được ghi lại, và thiết bị bị mất hoặc ngừng dùng được revoke. Enrollment code và device token là bearer credential: giống session cookie, chúng chỉ đi qua HTTPS hoặc LAN cô lập được chấp nhận chính thức (Network and host bên dưới), và reverse proxy không bao giờ log header `X-PartFlow-Station-Device`.
 - `SESSION_COOKIE_SECURE=true` được đặt phía sau TLS. Setup token của first-run
   là secret duy nhất từng được ghi vào backend log: hoàn tất first-run setup
   trước khi mở service ra ngoài và hạn chế quyền đọc log cho đến lúc đó.
@@ -211,7 +212,7 @@ Mọi nền tảng dùng cùng thứ tự release:
 6. Vào maintenance mode/window đã duyệt nếu cần.
 7. Chạy Alembic migration đúng một lần và lưu output.
 8. Khởi động target application release. Với database chưa có Administrator,
-   hoàn tất first-run setup (setup token nằm trong backend log) trước khi mở truy cập.
+   hoàn tất first-run setup (setup token nằm trong backend log) trước khi mở truy cập. Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations).
 9. Chạy health, API, UI, authorization, scan-focus và write/read-back smoke test
    bằng dữ liệu test được chỉ định.
 10. Chạy quantity/Movement reconciliation.

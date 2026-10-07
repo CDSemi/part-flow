@@ -66,7 +66,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import station_identity
+from app.application import station_access, station_identity
 from app.application.common import device_event_id_text, flush, required_text
 from app.application.errors import (
     ConflictError,
@@ -98,6 +98,7 @@ from app.domain.enums import (
     ProcessingState,
     QuantityFlowStatus,
     RouteMode,
+    StationCommand,
 )
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -251,6 +252,7 @@ def scrap_flow(
     committed = committed_command(session, event_id)
     if committed:
         return _scrap_replay_or_conflict(committed, fingerprint)
+    station_access.require_station_capability(session, StationCommand.SCRAP)
 
     # -- The Machine the quantity would leave (ON_MACHINE only) ---------
     machine: Machine | None = None
@@ -543,6 +545,7 @@ def add_quantity(
     committed = committed_command(session, event_id)
     if committed:
         return _addition_replay_or_conflict(committed, fingerprint)
+    station_access.require_station_capability(session, StationCommand.QUANTITY_ADDITION)
     # The Area row locked until COMMIT, flags judged on the locked
     # re-read (the same protocol as a transfer destination): Area
     # deactivation and an addition have one serial outcome.

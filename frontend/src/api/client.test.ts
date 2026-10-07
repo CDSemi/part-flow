@@ -5,6 +5,7 @@ import {
   apiRequest,
   apiUpload,
   setAuthFailureListener,
+  setStationDeviceRefusalListener,
 } from './client';
 
 // The API client core: the JSON path and the one raw-body upload path
@@ -163,6 +164,102 @@ test('the auth-failure listener hears an ended sign-in and a required password c
     }
     expect(listener).toHaveBeenCalledTimes(2);
   } finally {
+    setAuthFailureListener(null);
+  }
+});
+
+test('FS-1: extra headers follow Content-Type and the request-origin header, never replacing them', async () => {
+  fetchMock.mockResolvedValue(json({}));
+  await apiRequest('/api/scan-stations/ST-1/transfers', {
+    method: 'POST',
+    body: { quantity: 1 },
+    headers: {
+      'X-PartFlow-Station-Device': 'tok-1',
+      'X-PartFlow-CSRF': '0',
+      'Content-Type': 'text/plain',
+    },
+  });
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(init.headers).toEqual({
+    'Content-Type': 'application/json',
+    'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Station-Device': 'tok-1',
+  });
+  expect(Object.keys(init.headers as object)).toEqual([
+    'Content-Type',
+    'X-PartFlow-CSRF',
+    'X-PartFlow-Station-Device',
+  ]);
+});
+
+test('FS-1: the station-device listener hears exactly the two device refusals, with the token the request sent', async () => {
+  const listener = vi.fn();
+  const authListener = vi.fn();
+  setStationDeviceRefusalListener(listener);
+  setAuthFailureListener(authListener);
+  try {
+    fetchMock.mockResolvedValueOnce(
+      json({ detail: 'not enrolled', station_device_required: true }, 401),
+    );
+    await expect(
+      apiRequest('/api/scan-stations/ST-1/context', {
+        headers: { 'X-PartFlow-Station-Device': 'tok-old' },
+      }),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(listener).toHaveBeenLastCalledWith('required', 'tok-old');
+
+    fetchMock.mockResolvedValueOnce(
+      json({ detail: 'not enrolled', station_device_required: true }, 401),
+    );
+    await expect(
+      apiRequest('/api/scan-stations/ST-1/context'),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(listener).toHaveBeenLastCalledWith('required', null);
+
+    fetchMock.mockResolvedValueOnce(
+      json({ detail: 'other station', station_device_mismatch: true }, 403),
+    );
+    await expect(
+      apiRequest('/api/scan-stations/ST-1/context', {
+        headers: { 'X-PartFlow-Station-Device': 'tok-b' },
+      }),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(listener).toHaveBeenLastCalledWith('mismatch', 'tok-b');
+    expect(listener).toHaveBeenCalledTimes(3);
+
+    // Never for a stale station context, a missing station permission
+    // or the user sign-in refusal.
+    for (const [body, status] of [
+      [
+        {
+          detail: "This Scan Station's Area changed.",
+          station_context_changed: true,
+        },
+        409,
+      ],
+      [
+        {
+          detail: 'Scan Stations are not allowed to confirm quantity.',
+          station_permission_denied: true,
+          required_permissions: ['CONFIRM_QUANTITY'],
+        },
+        403,
+      ],
+      [{ detail: 'Sign in.', authentication_required: true }, 401],
+    ] as const) {
+      fetchMock.mockResolvedValueOnce(json(body, status));
+      await expect(
+        apiRequest('/api/areas/2/inventory', {
+          headers: { 'X-PartFlow-Station-Device': 'tok-1' },
+        }),
+      ).rejects.toBeInstanceOf(ApiError);
+    }
+    expect(listener).toHaveBeenCalledTimes(3);
+    // The device refusals never reach the sign-in listener.
+    expect(authListener).toHaveBeenCalledTimes(1);
+    expect(authListener).toHaveBeenLastCalledWith('authentication_required');
+  } finally {
+    setStationDeviceRefusalListener(null);
     setAuthFailureListener(null);
   }
 });

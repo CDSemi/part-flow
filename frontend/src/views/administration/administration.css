@@ -652,3 +652,20 @@
 .ad-table .ad-matrixcell input:disabled {
   cursor: default;
 }
+
+/* Scan Station device enrollment code (Phase 14 slice 4): shown once,
+   large enough to read across a desk and type at the station. */
+.ad-enrollcode {
+  margin: 10px 0 6px;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  user-select: all;
+}
+
+.ad-devices {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}

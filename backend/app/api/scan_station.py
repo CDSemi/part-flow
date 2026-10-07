@@ -195,8 +195,8 @@ context reports ``worker_identification`` (mode, Fixed Worker and, in
 Scanned session mode, the valid ``session``), and the Undo preview the
 original command's ``worker`` and the ``reversed_by`` Worker the
 reversal would record now. A successful PN or Machine resolve refreshes
-a valid session server-side and reports it as ``worker_session``. No
-role authorization exists yet (Phase 14).
+a valid session server-side and reports it as ``worker_session``. A
+Worker never authorizes anything (Phase 14 slice 4 below).
 
 - ``POST /scan-stations/{station_id}/badge-scans`` — a scanned Worker
   badge (in the body, never in the URL) answered with the Area's
@@ -223,6 +223,23 @@ scan), 409 ``badge_confirmation_not_expected`` (a badge where the gate
 is the question) and 422 ``badge_not_recognized`` (no active Worker's
 badge). A committed command replays whatever the badge or the
 configuration says now.
+
+Phase 14 slice 4 — enrolled station devices (owner decisions OD-P6,
+OD-S4-1). Every route here requires an enrolled station device: the
+``X-PartFlow-Station-Device`` header carries its token, and a
+``/scan-stations/{station_id}/…`` route answers 401
+``station_device_required`` without a valid, unrevoked one and 403
+``station_device_mismatch`` for a device of another station — both
+before the station's own 404 / 409 and before any fast path, so they
+never prove that nothing was recorded. The Area inventory answers only
+for the Area the device's station is bound to now (409
+``station_context_changed`` otherwise). The User principal is never
+resolved here. What the station may do is the role applied at Scan
+Stations: each command kind needs its key (403
+``station_permission_denied`` with ``required_permissions``, judged after
+the idempotency re-check, so a committed command always replays); the
+context reports the requesting ``device`` and the role's
+``station_permissions``.
 """
 
 import datetime
@@ -248,6 +265,7 @@ from app.api.area_inventory import (
     operation_ref,
     work_order_context,
 )
+from app.api.authorization import StationDeviceDep, StationDeviceForPathDep
 from app.api.dependencies import SessionDep
 from app.application import (
     direct_processing,
@@ -257,13 +275,15 @@ from app.application import (
     merges,
     quantity_events,
     scan_station,
+    station_access,
+    station_devices,
     stockroom,
     transfers,
     undo,
 )
 from app.application.station_identity import FinalGate, SensitiveAction
 from app.application.worker_sessions import OpenSession
-from app.domain.enums import ThemePreference
+from app.domain.enums import Permission, ThemePreference
 from app.infrastructure.models import Worker
 
 router = APIRouter(prefix="/api")
@@ -357,6 +377,11 @@ class WorkerIdentificationResponse(BaseModel):
     final_gates: FinalGatesResponse
 
 
+class StationDeviceRef(BaseModel):
+    id: int
+    label: str
+
+
 class StationContextResponse(BaseModel):
     station_id: str
     department: DepartmentRef
@@ -371,11 +396,19 @@ class StationContextResponse(BaseModel):
     # The station's own saved theme (Phase 13 slice 10, GUI_DESIGN §2.1
     # station tier); null = no preference (the Dark default applies).
     theme_preference: ThemePreferenceLiteral | None
+    # The requesting enrolled device (Phase 14 slice 4).
+    device: StationDeviceRef
+    # The role applied at Scan Stations: its grants among the ten Scan
+    # Station keys, sorted — the station hides what it may not do.
+    station_permissions: list[Permission]
 
 
 @router.get("/scan-stations/{station_id}/context")
-def get_station_context(station_id: str, session: SessionDep) -> StationContextResponse:
+def get_station_context(
+    device: StationDeviceForPathDep, station_id: str, session: SessionDep
+) -> StationContextResponse:
     context = scan_station.station_context(session, station_id)
+    permissions = sorted(station_access.station_permissions(session), key=lambda key: key.value)
     return StationContextResponse(
         station_id=context.station.station_id,
         department=DepartmentRef(id=context.department.id, name=context.department.name),
@@ -389,6 +422,8 @@ def get_station_context(station_id: str, session: SessionDep) -> StationContextR
             final_gates=final_gates_response(context.worker_identification.final_gates),
         ),
         theme_preference=_theme_preference(context.station.theme_preference),
+        device=StationDeviceRef(id=device.device_id, label=device.label),
+        station_permissions=permissions,
     )
 
 
@@ -415,7 +450,10 @@ class StationThemePreferenceResponse(BaseModel):
 
 @router.put("/scan-stations/{station_id}/theme-preference")
 def save_station_theme_preference(
-    station_id: str, body: StationThemePreferenceRequest, session: SessionDep
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: StationThemePreferenceRequest,
+    session: SessionDep,
 ) -> StationThemePreferenceResponse:
     """The station's own Dark/Light preference — a display preference, not
     configuration: not audited (OD-13), accepted for any existing station,
@@ -450,7 +488,9 @@ class BadgeScanResponse(BaseModel):
 
 
 @router.post("/scan-stations/{station_id}/badge-scans")
-def scan_badge(station_id: str, body: BadgeScanRequest, session: SessionDep) -> BadgeScanResponse:
+def scan_badge(
+    device: StationDeviceForPathDep, station_id: str, body: BadgeScanRequest, session: SessionDep
+) -> BadgeScanResponse:
     result = scan_station.badge_scan(session, station_id, body.badge)
     return BadgeScanResponse(
         outcome=result.outcome.value,
@@ -597,7 +637,7 @@ class ScanResolveResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
 def resolve_scan(
-    station_id: str, body: ScanResolveRequest, session: SessionDep
+    device: StationDeviceForPathDep, station_id: str, body: ScanResolveRequest, session: SessionDep
 ) -> ScanResolveResponse:
     result = scan_station.resolve_part_number_scan(
         session, station_id, barcode=body.barcode, part_number=body.part_number
@@ -689,7 +729,10 @@ class MachineScanResolveResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/machine-scans/resolve")
 def resolve_machine_scan(
-    station_id: str, body: MachineScanResolveRequest, session: SessionDep
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: MachineScanResolveRequest,
+    session: SessionDep,
 ) -> MachineScanResolveResponse:
     result = scan_station.resolve_machine_scan(
         session, station_id, barcode=body.barcode, asset_tag=body.asset_tag
@@ -780,6 +823,7 @@ class AreaTransferResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/transfers")
 def transfer_to_station_area(
+    device: StationDeviceForPathDep,
     station_id: str,
     body: AreaTransferRequest,
     session: SessionDep,
@@ -856,6 +900,7 @@ class StockRequest(BaseModel):
 
 @router.post("/scan-stations/{station_id}/stockings")
 def stock_at_station_area(
+    device: StationDeviceForPathDep,
     station_id: str,
     body: StockRequest,
     session: SessionDep,
@@ -981,7 +1026,11 @@ def _processing_response(
 
 @router.post("/scan-stations/{station_id}/machine-assignments")
 def assign_to_machine(
-    station_id: str, body: MachineProcessingRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: MachineProcessingRequest,
+    session: SessionDep,
+    response: Response,
 ) -> MachineProcessingResponse:
     result = machine_processing.assign_to_machine(
         session,
@@ -997,7 +1046,11 @@ def assign_to_machine(
 
 @router.post("/scan-stations/{station_id}/machine-releases")
 def release_to_queue(
-    station_id: str, body: MachineReleaseRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: MachineReleaseRequest,
+    session: SessionDep,
+    response: Response,
 ) -> MachineProcessingResponse:
     result = machine_processing.release_to_queue(
         session,
@@ -1014,7 +1067,11 @@ def release_to_queue(
 
 @router.post("/scan-stations/{station_id}/area-completions")
 def complete_area_processing(
-    station_id: str, body: AreaCompletionRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: AreaCompletionRequest,
+    session: SessionDep,
+    response: Response,
 ) -> MachineProcessingResponse:
     if body.machine_id is None:
         result = direct_processing.complete_direct_processing(
@@ -1076,7 +1133,11 @@ class MergeResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/merges")
 def merge_flows(
-    station_id: str, body: MergeRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: MergeRequest,
+    session: SessionDep,
+    response: Response,
 ) -> MergeResponse:
     result = merges.merge_flows(
         session,
@@ -1146,7 +1207,11 @@ class ScrapResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/scraps")
 def scrap_quantity(
-    station_id: str, body: ScrapRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: ScrapRequest,
+    session: SessionDep,
+    response: Response,
 ) -> ScrapResponse:
     result = quantity_events.scrap_flow(
         session,
@@ -1215,7 +1280,11 @@ class QuantityAdditionResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/quantity-additions")
 def add_quantity(
-    station_id: str, body: QuantityAdditionRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: QuantityAdditionRequest,
+    session: SessionDep,
+    response: Response,
 ) -> QuantityAdditionResponse:
     result = quantity_events.add_quantity(
         session,
@@ -1317,7 +1386,11 @@ class ReceiptResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/receipts")
 def receive_quantity(
-    station_id: str, body: ReceiptRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: ReceiptRequest,
+    session: SessionDep,
+    response: Response,
 ) -> ReceiptResponse:
     """Record one confirmed `Receive Quantity` as ONE transaction: 201 fresh,
     200 on an idempotent replay (whatever the scan window says by then),
@@ -1439,7 +1512,7 @@ class UndoPreviewResponse(BaseModel):
 
 @router.get("/scan-stations/{station_id}/undo-preview/{device_event_id}")
 def get_undo_preview(
-    station_id: str, device_event_id: str, session: SessionDep
+    device: StationDeviceForPathDep, station_id: str, device_event_id: str, session: SessionDep
 ) -> UndoPreviewResponse:
     result = undo.undo_preview(session, station_id, device_event_id)
     return UndoPreviewResponse(
@@ -1525,7 +1598,11 @@ class UndoResponse(BaseModel):
 
 @router.post("/scan-stations/{station_id}/undos")
 def undo_production_command(
-    station_id: str, body: UndoRequest, session: SessionDep, response: Response
+    device: StationDeviceForPathDep,
+    station_id: str,
+    body: UndoRequest,
+    session: SessionDep,
+    response: Response,
 ) -> UndoResponse:
     result = undo.undo_command(
         session,
@@ -1572,5 +1649,10 @@ def undo_production_command(
 
 
 @router.get("/areas/{area_id}/inventory")
-def get_area_inventory(area_id: int, session: SessionDep) -> AreaInventoryResponse:
+def get_area_inventory(
+    device: StationDeviceDep, area_id: int, session: SessionDep
+) -> AreaInventoryResponse:
+    """The station's own Area only: the device's station must be bound to it
+    now (409 ``station_context_changed`` after a rebinding)."""
+    station_devices.require_area_binding(session, device, area_id)
     return area_inventory_response(scan_station.area_inventory(session, area_id))

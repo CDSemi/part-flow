@@ -94,7 +94,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import station_identity
+from app.application import station_access, station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import (
     ConflictError,
@@ -111,7 +111,7 @@ from app.application.machines import (
 )
 from app.application.part_numbers import canonical_part_number
 from app.application.projections import effective_latest_movement, processing_state_of
-from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
+from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, StationCommand
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
     Area,
@@ -587,6 +587,7 @@ def assign_to_machine(
     committed = committed_command(session, event_id)
     if committed:
         return replay_or_conflict(committed, "ASSIGN", fingerprint)
+    station_access.require_station_capability(session, StationCommand.MACHINE_ASSIGNMENT)
 
     if context.state == ProcessingState.ON_MACHINE:
         raise ConflictError(
@@ -701,6 +702,11 @@ def _leave_machine(
     committed = committed_command(session, event_id)
     if committed:
         return replay_or_conflict(committed, kind, fingerprint)
+    # QUEUE assigns quantity back to the queue; DONE confirms it.
+    station_access.require_station_capability(
+        session,
+        StationCommand.MACHINE_RELEASE if kind == "QUEUE" else StationCommand.AREA_COMPLETION,
+    )
 
     machine = _machine_on_flow(session, context, machine_id, action)
     identity = station_identity.resolve_station_identity(

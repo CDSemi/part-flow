@@ -63,7 +63,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import station_identity
+from app.application import station_access, station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import (
     ConflictError,
@@ -81,7 +81,7 @@ from app.application.machine_processing import (
 from app.application.machines import area_has_machines, lock_machine
 from app.application.part_numbers import canonical_part_number
 from app.application.projections import effective_latest_movement, processing_state_of
-from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
+from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, StationCommand
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
     Area,
@@ -270,6 +270,7 @@ def merge_flows(
     committed = committed_command(session, event_id)
     if committed:
         return _replay_or_conflict(committed, fingerprint)
+    station_access.require_station_capability(session, StationCommand.MERGE)
 
     # -- Station under its row lock, bound to the flows' Area -----------
     station = session.get(ScanStation, station_id, with_for_update=True)

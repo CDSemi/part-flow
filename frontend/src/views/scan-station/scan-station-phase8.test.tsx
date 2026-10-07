@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station (Phase 8 — partial quantity and `Combine
 // quantities`) against a fake in-memory `/api` with the backend's Phase
@@ -334,6 +335,8 @@ function handle(url: string, method: string, body: unknown): Response {
         ...(workerIdentification as object),
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: [...STATION_PERMISSIONS],
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

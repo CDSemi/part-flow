@@ -82,7 +82,8 @@ required account/service. PostgreSQL data is never inside a Git checkout.
 7. Run `alembic upgrade head` once from the release backend image.
 8. Start backend, frontend, and reverse proxy. On a database with no
    Administrator, complete first-run setup (the setup token is in the backend
-   log) before opening access.
+   log) before opening access. Then enroll each Scan Station device
+   (Administration → Scan Stations → `Devices…`).
 9. Run the runbook smoke and reconciliation checks through HTTPS.
 10. Enable monitoring and backup schedules, then run a backup immediately.
 11. Perform and time an isolated restore before pilot data is accepted.

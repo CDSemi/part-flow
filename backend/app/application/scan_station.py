@@ -90,7 +90,14 @@ from typing import Final, Literal, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.application import allocations, intake, work_orders, worker_sessions, workers
+from app.application import (
+    allocations,
+    intake,
+    station_access,
+    work_orders,
+    worker_sessions,
+    workers,
+)
 from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
@@ -127,6 +134,7 @@ from app.domain.enums import (
     MovementType,
     ProcessingState,
     QuantityFlowStatus,
+    StationCommand,
     WorkerIdentificationMode,
 )
 from app.infrastructure.models import (
@@ -223,7 +231,10 @@ def badge_scan(session: Session, station_id: str, badge: object) -> BadgeScanRes
     refreshes the station's Worker Session (one transaction,
     `worker_sessions.sign_in`); an unknown or inactive badge records and
     refreshes nothing. A badge scan never touches production state.
+    Refused first (403) unless the role applied at Scan Stations may
+    scan Worker badges — before any session row is touched.
     """
+    station_access.require_station_capability(session, StationCommand.BADGE_SCAN)
     _, area = require_production_station(session, station_id)
     if area.worker_identification_mode == WorkerIdentificationMode.SCANNED:
         worker = workers.resolve_badge(session, badge)
@@ -613,8 +624,10 @@ def resolve_part_number_scan(
 
     A successful resolve refreshes the station's valid Worker Session
     (Scanned session mode) as its last step; every refusal is raised
-    before, so it refreshes nothing.
+    before, so it refreshes nothing — the first one (403) unless the
+    role applied at Scan Stations may scan Part Number barcodes.
     """
+    station_access.require_station_capability(session, StationCommand.PN_SCAN)
     station, area = require_production_station(session, station_id)
     pn = part_number_from_scan(barcode, part_number)
     flows = list(
@@ -799,8 +812,10 @@ def resolve_machine_scan(
     nothing — except the server-side Worker Session refresh of a
     Scanned-session station (PROJECT_PROFILE §19), its last step, the
     one timestamp update, committed only when a valid session was
-    refreshed.
+    refreshed. Refused first (403) unless the role applied at Scan
+    Stations may scan Machine barcodes.
     """
+    station_access.require_station_capability(session, StationCommand.MACHINE_SCAN)
     station, area = require_production_station(session, station_id)
     tag = asset_tag_from_scan(barcode, asset_tag)
     machine = session.scalar(select(Machine).where(Machine.asset_tag == tag))

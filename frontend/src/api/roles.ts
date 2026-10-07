@@ -3,10 +3,11 @@
 // grants. Every application User holds exactly one role.
 //
 // The server checks the Administration (Phase 14 slice 2) and
-// Management (slice 3) permissions of the signed-in user's role; the
-// Scan Station permissions are recorded, and how they apply is decided
-// later. The client only hides what the role does not allow — the
-// server decides. Workers who scan at the Scan Stations hold no role.
+// Management (slice 3) permissions of the signed-in user's role; what
+// an enrolled Scan Station may do follows the one role applied at Scan
+// Stations (slice 4, `appliesAtScanStations`). The client only hides
+// what the role does not allow — the server decides. Workers who scan
+// at the Scan Stations hold no role.
 //
 // Wire responses are the backend's snake_case schema; this module maps
 // them to the camelCase application type. Permission edits travel as
@@ -69,6 +70,9 @@ export interface Role {
   permissions: Permission[];
   /** Users holding the role, active and inactive. */
   userCount: number;
+  /** This is the role whose permissions every enrolled Scan Station
+   * device has (exactly one role; initially Operator). */
+  appliesAtScanStations: boolean;
 }
 
 interface RoleWire {
@@ -76,6 +80,7 @@ interface RoleWire {
   name: string;
   permissions: string[];
   user_count: number;
+  applies_at_scan_stations: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -87,6 +92,9 @@ function isPermission(value: string): value is Permission {
 }
 
 function toRole(wire: RoleWire): Role {
+  if (typeof wire.applies_at_scan_stations !== 'boolean') {
+    throw new Error('Malformed role from the server.');
+  }
   return {
     id: wire.id,
     name: wire.name,
@@ -99,6 +107,7 @@ function toRole(wire: RoleWire): Role {
       return key;
     }),
     userCount: wire.user_count,
+    appliesAtScanStations: wire.applies_at_scan_stations,
   };
 }
 

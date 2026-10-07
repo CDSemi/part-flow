@@ -65,12 +65,12 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import environment, projections, transfers
-from app.application.errors import ConflictError
+from app.application import environment, projections, scan_station, transfers
+from app.application.errors import ConflictError, NotFoundError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_scan_station_transfer_api"
@@ -106,7 +106,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ["DATABASE_URL"] = original_url
         get_settings.cache_clear()
@@ -382,10 +382,15 @@ def test_station_context_reports_the_bound_area_environment(
 
 
 def test_unknown_and_inactive_stations_are_refused_never_substituted(
-    client: TestClient,
+    client: TestClient, db_engine: Engine
 ) -> None:
     cell = _Cell(client)
-    assert client.get("/api/scan-stations/NOPE-01/context").status_code == 404
+    # Phase 14 slice 4: no device can be enrolled for an unknown station, so
+    # the device check answers first; the station's own 404 stays a rule.
+    unknown = client.get("/api/scan-stations/NOPE-01/context")
+    assert unknown.status_code == 401 and unknown.json()["station_device_required"]
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        scan_station.station_context(session, "NOPE-01")
 
     inactive_station = _create_station(client, cell.area_id, is_active=False)
     response = client.get(f"/api/scan-stations/{inactive_station}/context")
@@ -981,7 +986,22 @@ def test_invalid_station_source_and_target_create_nothing(
         payload.update(overrides)
         return _transfer(client, station_id, **payload)
 
-    assert attempt("NOPE-99").status_code == 404
+    unknown = attempt("NOPE-99")
+    assert unknown.status_code == 401 and unknown.json()["station_device_required"]
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        transfers.transfer_to_station_area(
+            session,
+            station_id="NOPE-99",
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            source_area_id=material.area_id,
+            target_area_id=lathe.area_id,
+            quantity=10,
+            operation_id=None,
+            confirm_route_deviation=False,
+            route_deviation_reason=None,
+            device_event_id=str(uuid.uuid4()),
+        )
     inactive_station = _create_station(client, lathe.area_id, is_active=False)
     assert attempt(inactive_station).status_code == 409
     # Unknown flow / PN mismatch / wrong claimed source.

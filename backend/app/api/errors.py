@@ -40,7 +40,14 @@ roles, or correction permissions, carries ``last_permission_holder``
 (Phase 14 slice 2). Since slice 3 a refused Management read adds
 ``any_permission`` (any one of ``required_permissions`` opens it), and a
 Management command replayed by another User carries
-``recorded_by_another_user``.
+``recorded_by_another_user``. Since slice 4 a Scan Station request
+without a valid enrolled device carries ``station_device_required``
+(401 — the User cookie is left alone), one from another station's
+device ``station_device_mismatch`` (403), a station command the role
+applied at Scan Stations does not grant ``station_permission_denied``
+with ``required_permissions`` (403), an inventory read of an Area the
+station was rebound away from ``station_context_changed`` (409), and a
+refused enrollment code ``enrollment_code_invalid`` (403).
 
 Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
@@ -62,6 +69,7 @@ from app.application.errors import (
     ApplicationError,
     AuthenticationRequiredError,
     ConflictError,
+    EnrollmentCodeInvalidError,
     HotDemandRemovalConfirmationRequiredError,
     HotListChangedError,
     InvalidInputError,
@@ -76,6 +84,10 @@ from app.application.errors import (
     SetupClosedError,
     SetupTokenInvalidError,
     SignInFailedError,
+    StationContextChangedError,
+    StationDeviceMismatchError,
+    StationDeviceRequiredError,
+    StationPermissionDeniedError,
     UnsupportedMediaTypeError,
 )
 from app.application.intake import WorkOrderSelectionRequiredError
@@ -259,6 +271,31 @@ def register_exception_handlers(app: FastAPI) -> None:
     )
     for error_type, status_code, flag in _sign_in_refusals:
         _register_gate_refusal(error_type, status_code, flag)
+
+    # Phase 14 slice 4: the station device refusals — nothing was written
+    # (only the device's last-seen time); D-1 never clears the User cookie.
+    _station_refusals: tuple[tuple[type[ApplicationError], int, str], ...] = (
+        (StationDeviceRequiredError, 401, "station_device_required"),
+        (StationDeviceMismatchError, 403, "station_device_mismatch"),
+        (StationContextChangedError, 409, "station_context_changed"),
+        (EnrollmentCodeInvalidError, 403, "enrollment_code_invalid"),
+    )
+    for error_type, status_code, flag in _station_refusals:
+        _register_gate_refusal(error_type, status_code, flag)
+
+    async def station_permission_denied_handler(request: Request, exc: Exception) -> JSONResponse:
+        # K-1: the role applied at Scan Stations lacks the command's key.
+        error = cast(StationPermissionDeniedError, exc)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": error.message,
+                "station_permission_denied": True,
+                "required_permissions": list(error.required),
+            },
+        )
+
+    app.add_exception_handler(StationPermissionDeniedError, station_permission_denied_handler)
 
     async def authentication_required_handler(request: Request, exc: Exception) -> JSONResponse:
         # No usable sign-in: the stale cookie (if any) is cleared too.

@@ -52,11 +52,12 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import audit
+from app.application import audit, scan_station
+from app.application.errors import NotFoundError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of
+from tests.auth_harness import admin_of, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -96,7 +97,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
     get_settings.cache_clear()
     try:
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield station_device_client(test_client)
     finally:
         os.environ[_DB_URL_ENV] = original_url
         get_settings.cache_clear()
@@ -1488,7 +1489,10 @@ def test_badge_scans_are_a_read_that_answers_not_used_or_unknown(
         assert _counts(db_engine) == before
 
     unknown_station = "/api/scan-stations/NO-SUCH-STATION/badge-scans"
-    assert client.post(unknown_station, json={"badge": badge}).status_code == 404
+    unknown = client.post(unknown_station, json={"badge": badge})
+    assert unknown.status_code == 401 and unknown.json()["station_device_required"]
+    with Session(db_engine) as session, pytest.raises(NotFoundError):
+        scan_station.badge_scan(session, "NO-SUCH-STATION", badge)
     assert client.post(path, json={"badge": 5}).status_code == 422
     assert client.post(path, json={"badge": badge, "worker_id": worker["id"]}).status_code == 422
     assert client.post(path, json={}).status_code == 422

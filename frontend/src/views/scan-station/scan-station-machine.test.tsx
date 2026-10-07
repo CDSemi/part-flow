@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { STATION_PERMISSIONS } from '../../api/scan-station';
 
 // Real Scan Station (Phase 6) against a fake in-memory `/api` with the
 // backend's Machine-Area surface and semantics: Machine barcode
@@ -360,6 +361,8 @@ function handle(url: string, method: string, body: unknown): Response {
         ...(workerIdentification as object),
       },
       theme_preference: null,
+      device: { id: 1, label: 'Station PC' },
+      station_permissions: stationPermissions,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -585,7 +588,11 @@ function handle(url: string, method: string, body: unknown): Response {
   return json({ detail: `Unhandled ${method} ${url}` }, 500);
 }
 
+/** The station permissions the context reports (Phase 14 slice 4). */
+let stationPermissions: string[] = [];
+
 beforeEach(() => {
+  stationPermissions = [...STATION_PERMISSIONS];
   window.sessionStorage.removeItem('partflow.dev.mock-preview');
   flows = [
     {
@@ -2026,4 +2033,48 @@ test('SS-3: a policy that loaded once keeps its value through a failed revalidat
   );
   expect(screen.queryByText(POLICY_NOTICE)).toBeNull();
   expect(dueOf('2027-60-8114-00')?.className).toContain('soon');
+});
+
+/* ============ Station permissions (Phase 14 slice 4) ============ */
+
+test('FS-13: Machine-card actions the station may not do are not rendered; the others stay', async () => {
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'CONFIRM_QUANTITY',
+  );
+  await renderStation();
+  const card = machineCard('Lathe 1');
+  expect(
+    within(card).queryByRole('button', { name: 'Complete Area processing' }),
+  ).toBeNull();
+  expect(
+    within(card).getByRole('button', { name: 'Return to Area queue' }),
+  ).toBeInTheDocument();
+  cleanup();
+
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'ASSIGN_QUANTITY_TO_MACHINE',
+  );
+  await renderStation();
+  const second = machineCard('Lathe 1');
+  expect(
+    within(second).getByRole('button', { name: 'Complete Area processing' }),
+  ).toBeInTheDocument();
+  expect(
+    within(second).queryByRole('button', { name: 'Return to Area queue' }),
+  ).toBeNull();
+});
+
+test('FS-13: a Machine scan opens only Assign to Machine — refused at once without the assign permission', async () => {
+  stationPermissions = STATION_PERMISSIONS.filter(
+    (key) => key !== 'ASSIGN_QUANTITY_TO_MACHINE',
+  );
+  const input = await renderStation();
+  scan('PF:MACHINE:CD-0001');
+  const toast = await notice();
+  expect(toast).toHaveTextContent(
+    'Scan Stations are not allowed to assign quantity to Machines. An administrator can grant it to the role applied at Scan Stations. Nothing was recorded.',
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(input).toHaveValue('');
+  expect(writes()).toEqual([]);
 });

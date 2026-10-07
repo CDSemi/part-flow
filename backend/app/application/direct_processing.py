@@ -71,7 +71,7 @@ Undo (Phase 9), Repair, Scrap, Stockroom.
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.application import station_identity
+from app.application import station_access, station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import ConflictError, InvalidInputError
 from app.application.machine_processing import (
@@ -87,7 +87,7 @@ from app.application.machine_processing import (
     split_if_partial,
 )
 from app.application.part_numbers import canonical_part_number
-from app.domain.enums import MovementType, ProcessingState
+from app.domain.enums import MovementType, ProcessingState, StationCommand
 
 _ACTION = "Completion"
 
@@ -144,6 +144,7 @@ def complete_direct_processing(
     committed = committed_command(session, event_id)
     if committed:
         return replay_or_conflict(committed, "DONE", fingerprint)
+    station_access.require_station_capability(session, StationCommand.AREA_COMPLETION)
 
     # -- Direct processing only (PROJECT_PROFILE §12) --------------------
     if context.state == ProcessingState.READY_TO_TRANSFER:
