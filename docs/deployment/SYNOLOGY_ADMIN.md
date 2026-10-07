@@ -166,8 +166,9 @@
 > *Restore authority.* `recoveries` and `restore-instance` list and verify bundles only in the
 > selected instance's own `recovery/<project>/` directory. `--project` is a Compose project name,
 > never a path, and with `--instance` it must name that instance's project (`selection-conflict`).
-> A bundle outside that directory is refused (`recovery-outside-instance`), and a bundle restores
-> only `deployed.json`, `last-reset.json` and `observed-tags.json` into protected state
+> A bundle outside that directory, or a link to one, is never listed and is refused
+> (`recovery-outside-instance`). A bundle restores only `deployed.json`, `last-reset.json` and
+> `observed-tags.json` into protected state, and its manifest must name them as a list
 > (`recovery-state-file-refused`).
 > This block **supersedes** the passthrough sentences of the PF-A1.2 and PF-A1.3 blocks above.
 
@@ -1049,10 +1050,10 @@ Nothing was changed.
 
 `selection-conflict`: `--project` names a different project than the instance selected with
 `--instance`; use `--instance` alone. `recovery-outside-instance`: the bundle is not a directory
-of the selected instance's own `recovery/<project>/`; bundles of other instances or copies
-elsewhere are never listed or restored. `recovery-state-file-refused`: the bundle manifest lists
-a state file other than `deployed.json`, `last-reset.json` or `observed-tags.json`. Nothing was
-changed.
+of the selected instance's own `recovery/<project>/`; bundles of other instances, copies
+elsewhere and links to them are never listed or restored. `recovery-state-file-refused`: the
+bundle manifest lists a state file other than `deployed.json`, `last-reset.json` or
+`observed-tags.json`, or its state files are not a list. Nothing was changed.
 
 ### `logs-bound-reached`
 

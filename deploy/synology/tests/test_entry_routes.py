@@ -30,9 +30,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import types
 import unittest
 import urllib.parse
@@ -525,6 +528,17 @@ class DispatchTables(unittest.TestCase):
                 self.assertEqual(len(tests), 1, entry.test)
                 self.assertEqual(tests[0].id().rsplit(".", 1)[-1], entry.test.rsplit(".", 1)[-1])
                 self.assertNotIn("_FailedTest", type(tests[0]).__name__)
+                if target == "fail_closed":
+                    # PF-A1.4 audit A14-AUD-03: the proving test must reach fail_closed, either directly or
+                    # through a route whose failures always run it (a `backup` signal test never does).
+                    method = getattr(tests[0], tests[0]._testMethodName)
+                    tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+                    calls = {node.func.attr for node in ast.walk(tree)
+                             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+                    words = {node.value for node in ast.walk(tree)
+                             if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+                    always = {name for name, route in pf.DISPATCH.items() if route.fail_closed == "always"}
+                    self.assertTrue("fail_closed" in calls or words & always, entry.test)
 
     def test_dt9_every_terminal_route_reaches_a_typed_confirmation(self):
         _, tree = parse_module("pf-admin.py")
@@ -1166,6 +1180,66 @@ class ErrorHandler(Base):
         self.assertEqual(self.stops(), [["stop", "--time", "30", "1" * 64], ["stop", "--time", "30", "b" * 64]])
         self.assertIn(["stop", "frontend", "backend"], self.verbs())
 
+    def test_eh7_a_real_signal_through_the_installed_launcher_runs_fail_closed_before_the_lock_is_free(self):
+        """E10 (PF-A1.4 audit A14-AUD-03): each catchable signal, sent for real to the installed launcher during
+        an `always` route (`resume`) with an existing journal, unwinds into fail_closed: the owned one-offs are
+        stopped, then `compose stop frontend backend`, all while the instance lock is still held."""
+        marker = self.base / "blocked-child.pid"
+        record = self.base / "lock-probe.txt"
+        for signum in (signal.SIGHUP, signal.SIGQUIT, signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                journal = self.write_journal("update", "paused")
+                for path in (marker, record):
+                    if path.exists():
+                        path.unlink()
+                state = self.fake.state()
+                # resume -> database_ready -> `compose ps -a -q db` is the child the signal interrupts.
+                state["block"] = {"argv_contains": ["compose", "ps", "-q", "db"], "seconds": 300,
+                                  "marker": str(marker)}
+                state["lock_probe"] = {"argv_contains": ["stop"], "lock": str(self.context.lock_path),
+                                       "record": str(record)}
+                self.fake.write_state(state)
+                self.fake.clear_calls()
+                with open(str(self.base / "cli-out.txt"), "wb") as out, \
+                        open(str(self.base / "cli-err.txt"), "wb") as err, pfx.interactive_stdin() as terminal:
+                    process = subprocess.Popen(
+                        [str(self.layout.launcher), "--instance", "staging", "resume"],
+                        env={"PATH": "/usr/bin:/bin", "TERM": "dumb"}, cwd=str(self.layout.root.parent),
+                        stdin=terminal, stdout=out, stderr=err)
+                    try:
+                        deadline = time.monotonic() + 60
+                        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.05)
+                        self.assertTrue(marker.exists(), (self.base / "cli-err.txt").read_text())
+                        time.sleep(0.3)  # the blocked child is running; the controller is in the runner
+                        process.send_signal(signum)
+                        returncode = process.wait(timeout=120)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+                stdout = (self.base / "cli-out.txt").read_text()
+                stderr = (self.base / "cli-err.txt").read_text()
+                self.assertEqual(returncode, 1, stderr)
+                self.assertIn(f"Interrupted by signal {int(signum)}", stderr)
+                calls = self.fake.argvs()
+                blocked = next(index for index, argv in enumerate(calls) if argv[-4:] == ["ps", "-a", "-q", "db"])
+                after = calls[blocked + 1:]
+                self.assertEqual([argv for argv in after if argv[:1] == ["stop"]],
+                                 [["stop", "--time", "30", "1" * 64], ["stop", "--time", "30", "b" * 64]])
+                compose_stop = [index for index, argv in enumerate(after)
+                                if argv[:1] == ["compose"] and argv[-3:] == ["stop", "frontend", "backend"]]
+                self.assertEqual(len(compose_stop), 1, after)
+                self.assertLess(after.index(["stop", "--time", "30", "b" * 64]), compose_stop[0])
+                # Every stop ran while this process still held the instance lock.
+                self.assertEqual(record.read_text().splitlines(),
+                                 ["--time 30 " + "1" * 64 + " held", "--time 30 " + "b" * 64 + " held",
+                                  "stop frontend backend held"])
+                self.assertIn("Operation incomplete. Application services are intentionally stopped. Inspect "
+                              "'pf --instance staging status'. Automation and Compose writes remain blocked.", stdout)
+                self.assertEqual(self.context.journal_path.read_bytes(), journal)  # journal kept for status
+                self.assert_lock_free()
+
     def test_eh6_container_identity_shape_is_unchanged_and_frozen_plans_still_compare(self):
         container = {"id": "c" * 64, "name": "/x", "labels": pfx.compose_run_labels(self.context, "backend"),
                      "created": "2026-10-06T00:00:00Z", "image": "sha256:i"}
@@ -1285,6 +1359,59 @@ class CrossInstance(Base):
         self.assertFalse(self.context.journal_path.exists())
         self.assertEqual((self.paths["configuration"] / ".env").read_bytes(), env_before)
         self.assertEqual(self.fake.calls(), [])
+
+    def test_ci4_state_files_that_are_not_a_list_are_refused_before_confirmation(self):
+        """PF-A1.4 audit A14-AUD-01: the checked value is the consumed value. A string was wrapped for the
+        allowlist check and then iterated per character by the restore; a dict was checked by its keys."""
+        (self.context.state_dir / "deployed.json").unlink()
+        env_before = (self.paths["configuration"] / ".env").read_bytes()
+        for label, value in (("str", "observed-tags.json"), ("dict", {"deployed.json": True})):
+            with self.subTest(state_files=label):
+                folder = self.own()
+                try:
+                    manifest = pf.load_json(folder / "manifest.json")
+                    manifest["state_files"] = value
+                    pf.write_json(folder / "manifest.json", manifest)
+                    (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
+                    (folder / "state").mkdir()
+                    (folder / "state" / "o").write_text("planted\n")
+                    with self.assertRaisesRegex(pf.Failure, "^recovery-state-file-refused: bundle " + RECOVERY_ID
+                                                + " lists state files as " + label + ", not a list of file names; "):
+                        self.controller().verify_recovery({"_folder": str(folder), "id": folder.name})
+                    with mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation")) as confirm:
+                        code, out, err = self.run_main(["--instance", "staging", "restore-instance", RECOVERY_ID],
+                                                       interactive=True)
+                    self.assertEqual(code, 1, err)
+                    self.assertIn(f"ERROR: recovery-state-file-refused: bundle {RECOVERY_ID} lists state files as "
+                                  f"{label}, not a list of file names; only deployed.json, last-reset.json, "
+                                  "observed-tags.json can be restored into protected state. Nothing was changed.", err)
+                    confirm.assert_not_called()
+                    self.assertFalse((self.context.state_dir / "o").exists())
+                    self.assertFalse(self.context.journal_path.exists())
+                    self.assertEqual((self.paths["configuration"] / ".env").read_bytes(), env_before)
+                    self.assertEqual(self.fake.calls(), [])
+                finally:
+                    shutil.rmtree(str(folder))
+
+    def test_ci3_a_linked_bundle_directory_is_neither_listed_nor_restored(self):
+        """PF-A1.4 audit A14-AUD-02: listing and restore share one rule; a `purge-*` link to a bundle outside
+        the instance is not listed with the outside manifest and cannot be restored."""
+        outside = self.bundle(self.base / "outside" / RECOVERY_ID, project="outside-project")
+        root = self.context.paths.recovery / self.context.compose_project
+        root.mkdir(parents=True, exist_ok=True)
+        link = root / RECOVERY_ID
+        os.symlink(str(outside), str(link))
+        self.assertEqual(self.controller().recoveries(), [])
+        code, out, err = self.run_main(["--instance", "staging", "recoveries"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(RECOVERY_ID, out)
+        self.assertNotIn("outside-project", out)
+        code, out, err = self.run_main(["--instance", "staging", "restore-instance", RECOVERY_ID], interactive=True)
+        self.assertEqual(code, 1, err)
+        self.assertIn("ERROR: No purge recovery bundles were found.", err)
+        with self.assertRaisesRegex(pf.Failure, "^recovery-outside-instance: " + re.escape(str(link))):
+            self.controller().verify_recovery({"_folder": str(link), "id": RECOVERY_ID})
+        self.assertFalse(self.context.journal_path.exists())
 
     def test_ci5_a_bundle_of_another_project_or_root_is_refused_before_confirmation(self):
         (self.context.state_dir / "deployed.json").unlink()

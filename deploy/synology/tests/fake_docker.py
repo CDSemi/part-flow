@@ -366,6 +366,13 @@ def main(argv):
         stream.write(json.dumps(entry) + "\n")
     number = sum(1 for _ in calls_path.open(encoding="utf-8"))
     result = dispatch(state, argv, env)
+    probe_lock(state, argv)
+    block = state.get("block")
+    if block and all(word in argv for word in block["argv_contains"]):
+        # PF-A1.4 audit: one blocking child for a real-signal test; later calls answer at once.
+        del state["block"]
+        Path(block["marker"]).write_text(str(os.getpid()) + "\n", encoding="utf-8")
+        result.sleep = block["seconds"]
     for hook in state.get("hooks", []):
         prefix = hook.get("after_argv_prefix")
         fired = hook.get("after_call_n") == number
@@ -383,6 +390,26 @@ def main(argv):
         sys.stdout.flush()
         time.sleep(result.sleep)
     return result.code
+
+
+def probe_lock(state, argv):
+    """``lock_probe`` = {"argv_contains": [...], "lock": path, "record": path}: on a matching call, record
+    whether another process holds the instance lock right now ("held") or not ("free")."""
+    probe = state.get("lock_probe")
+    if not probe or not all(word in argv for word in probe["argv_contains"]):
+        return
+    import fcntl
+    descriptor = os.open(probe["lock"], os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        held = "free"
+    except BlockingIOError:
+        held = "held"
+    finally:
+        os.close(descriptor)
+    with open(probe["record"], "a", encoding="utf-8") as stream:
+        stream.write(" ".join(argv[-3:]) + " " + held + "\n")
 
 
 def apply_state_patch(state, patch):

@@ -200,6 +200,22 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > a PF-A4.3 policy grant (OD-A14-13); the wrappers are not installed by A1; `install-control.sh` is
 > still the legacy installer; the real Compose one-off labels are unproven offline; no managed
 > application-CLI route.
+>
+> **PF-A1.4 independent audit (fixes on 7d332e7).** Four minor findings, no blocker or major. Fixed
+> with regression tests that fail on 7d332e7 and pass after: (1) `verify_recovery` refuses a
+> manifest `state_files` that is not a list (`recovery-state-file-refused … lists state files as
+> str|dict, not a list of file names`) instead of wrapping it, so the checked value is the value
+> the restore consumes (CI-4 variant); (2) `recoveries()` uses the same lstat real-directory rule
+> as `verify_recovery`, so a `purge-*` link to a bundle elsewhere is neither listed nor restored
+> (CI-3 variant); (3) entry route E10 now names EH-7, a real SIGHUP/SIGQUIT/SIGTERM/SIGINT sent to
+> the installed launcher during `resume` with an existing journal, which asserts the owned
+> one-offs and then `compose stop frontend backend` are stopped while the instance lock is still
+> held; DT-8 now requires the test of a `fail_closed` row to reach `fail_closed` (directly or
+> through an `always` route); (4) the evidence package was refreshed (documentation only).
+> Executed: the same discovery on `python:3.12` (CPython 3.12.15) and `python:3.9` (CPython
+> 3.9.25), uid 0: **398 tests OK, 0 skipped** on both (395 + 3 new). Gate vocabulary (design r3
+> WORK_PACKAGES §5): PF-A1 as a whole **PASS_WITH_DECLARED_LIMITS** (offline formal exit; docker gate
+> A1-T11…T14 and host gate A1-T17 blocked; releases PF-A2.1 offline development only).
 
 ## Executed checks
 

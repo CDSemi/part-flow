@@ -160,9 +160,10 @@
 > *Thẩm quyền restore.* `recoveries` và `restore-instance` chỉ liệt kê và kiểm tra bundle trong
 > thư mục `recovery/<project>/` của chính instance đã chọn. `--project` là tên Compose project,
 > không bao giờ là đường dẫn, và khi đi cùng `--instance` thì phải đúng project của instance đó
-> (`selection-conflict`). Bundle nằm ngoài thư mục đó bị từ chối (`recovery-outside-instance`), và
-> bundle chỉ được restore `deployed.json`, `last-reset.json` và `observed-tags.json` vào protected
-> state (`recovery-state-file-refused`).
+> (`selection-conflict`). Bundle nằm ngoài thư mục đó, hoặc link trỏ tới một bundle như vậy, không
+> bao giờ được liệt kê và bị từ chối (`recovery-outside-instance`). Bundle chỉ được restore
+> `deployed.json`, `last-reset.json` và `observed-tags.json` vào protected state, và manifest phải
+> nêu chúng dưới dạng một danh sách (`recovery-state-file-refused`).
 > Khối này **thay thế** các câu về passthrough trong khối PF-A1.2 và PF-A1.3 ở trên.
 
 ## 1. Mục đích
@@ -1018,10 +1019,10 @@ và apply release bằng tay với `pf --instance <slug> update --release <tag>`
 
 `selection-conflict`: `--project` nêu project khác với instance đã chọn bằng `--instance`; chỉ dùng
 `--instance`. `recovery-outside-instance`: bundle không phải thư mục nằm trong
-`recovery/<project>/` của chính instance đã chọn; bundle của instance khác hoặc bản sao ở nơi khác
-không bao giờ được liệt kê hay restore. `recovery-state-file-refused`: manifest của bundle liệt kê
-state file khác `deployed.json`, `last-reset.json` hoặc `observed-tags.json`. Không có gì bị thay
-đổi.
+`recovery/<project>/` của chính instance đã chọn; bundle của instance khác, bản sao ở nơi khác và
+link trỏ tới chúng không bao giờ được liệt kê hay restore. `recovery-state-file-refused`: manifest
+của bundle liệt kê state file khác `deployed.json`, `last-reset.json` hoặc `observed-tags.json`,
+hoặc danh sách state file không phải là một list. Không có gì bị thay đổi.
 
 ### `logs-bound-reached`
 

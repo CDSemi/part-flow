@@ -167,6 +167,14 @@ def utc():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def real_directory(path):
+    """True only for an existing directory that is not a symbolic link (lstat; nothing is followed)."""
+    try:
+        return stat.S_ISDIR(os.lstat(str(path)).st_mode)
+    except OSError:
+        return False
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -3291,7 +3299,8 @@ class Controller:
         if not base.is_dir():
             return result
         for folder in base.iterdir():
-            if not folder.is_dir() or not RECOVERY_RE.fullmatch(folder.name):
+            # The same rule as verify_recovery: a real directory, never a link followed elsewhere.
+            if not RECOVERY_RE.fullmatch(folder.name) or not real_directory(folder):
                 continue
             try:
                 metadata = load_json(folder / "manifest.json")
@@ -3304,11 +3313,7 @@ class Controller:
     def verify_recovery(self, item):
         folder = Path(item.get("_folder") or self.recovery_root / item["id"])
         # PF-A1.4: restore authority is the selected instance's own recovery directory, exactly.
-        try:
-            info = os.lstat(folder)
-        except OSError:
-            info = None
-        if folder.parent != self.recovery_root or info is None or not stat.S_ISDIR(info.st_mode):
+        if folder.parent != self.recovery_root or not real_directory(folder):
             raise Failure(
                 f"recovery-outside-instance: {folder} is not a bundle directory of instance {self.context.slug} "
                 f"({self.recovery_root}); only the selected instance's own recovery bundles can be listed or "
@@ -3322,8 +3327,13 @@ class Controller:
         if metadata.get("kind") != "partflow-purge-recovery" or metadata.get("status") != "complete":
             raise Failure("Recovery bundle is incomplete or unsupported.")
         state_files = metadata.get("state_files", [])
+        # The checked value is the value restore_instance consumes: a list, never a string iterated
+        # per character or any other shape normalized here; a non-string entry fails the allowlist.
         if not isinstance(state_files, list):
-            state_files = [state_files]
+            raise Failure(
+                f"recovery-state-file-refused: bundle {metadata.get('id', folder.name)} lists state files as "
+                f"{type(state_files).__name__}, not a list of file names; only {', '.join(RESTORABLE_STATE_FILES)} "
+                "can be restored into protected state. Nothing was changed.")
         for name in state_files:
             if name not in RESTORABLE_STATE_FILES:
                 raise Failure(
@@ -4302,8 +4312,8 @@ ENTRY_ROUTES = (
                "test_entry_routes.ErrorHandler.test_eh1_only_owned_oneoffs_are_stopped_then_the_application",
                "PF-A1.4"),
     EntryRoute("E10", "SIGINT/SIGTERM/SIGHUP/SIGQUIT", "fail_closed", "mutating", "held", "existing-journal",
-               "test_runner_config_source.TimeoutAndCancellation."
-               "test_real_termination_signals_through_the_installed_cli_record_the_effect_before_the_lock_is_free",
+               "test_entry_routes.ErrorHandler."
+               "test_eh7_a_real_signal_through_the_installed_launcher_runs_fail_closed_before_the_lock_is_free",
                "PF-A1.4"),
     EntryRoute("E11", "install-control.sh", "refuse", "none", "none", "n/a",
                "test_entry_routes.StaticScan.test_ss7_shell_entry_points", "PF-A2"),
