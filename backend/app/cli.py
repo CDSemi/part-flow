@@ -50,7 +50,7 @@ from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from pydantic import ValidationError
 from sqlalchemy import Engine
-from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.application import authentication, reconciliation
@@ -259,30 +259,40 @@ def _reconcile_summary(report: reconciliation.ReconciliationReport) -> str:
     )
 
 
+def _reconcile_report(
+    started_at: datetime.datetime, options: dict[str, Any]
+) -> reconciliation.ReconciliationReport:
+    """Always a complete report: a run that cannot start is an error report (exit 2)."""
+    try:
+        options["expected_alembic_revision"] = _code_alembic_head()
+        try:
+            engine = _engine()
+        except (ValidationError, ArgumentError, ValueError):
+            # DATABASE_URL missing or malformed (an unknown dialect, an
+            # unparseable URL or port). The report never repeats the URL.
+            return reconciliation.error_report(
+                "configuration_invalid", started_at=started_at, **options
+            )
+        try:
+            return reconciliation.run_reconciliation(engine, **options)
+        finally:
+            engine.dispose()
+    except Exception as exc:
+        # Any escaping error still yields a complete report (exit 2).
+        return reconciliation.error_report(
+            "internal_error", started_at=started_at, exception=exc, **options
+        )
+
+
 def _run_reconcile(args: argparse.Namespace) -> int:
     started_at = datetime.datetime.now(datetime.UTC)
     options: dict[str, Any] = {
         "checks": args.check or reconciliation.CHECK_IDS,
         "statement_timeout_seconds": args.statement_timeout,
         "max_findings": args.max_findings,
-        "expected_alembic_revision": _code_alembic_head(),
+        "expected_alembic_revision": None,
     }
-    try:
-        engine = _engine()
-    except ValidationError:
-        report = reconciliation.error_report(
-            "configuration_invalid", started_at=started_at, **options
-        )
-    else:
-        try:
-            report = reconciliation.run_reconciliation(engine, **options)
-        except Exception as exc:
-            # Any escaping error still yields a complete report (exit 2).
-            report = reconciliation.error_report(
-                "internal_error", started_at=started_at, exception=exc, **options
-            )
-        finally:
-            engine.dispose()
+    report = _reconcile_report(started_at, options)
     sys.stdout.write(
         json.dumps(reconciliation.report_document(report), indent=2, ensure_ascii=True) + "\n"
     )

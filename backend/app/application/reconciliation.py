@@ -178,11 +178,18 @@ _CONNECTION_LOST: Final = (
 )
 
 
-def _lock_timeout_message() -> str:
+def _lock_timeout_message(seconds: int | None = None) -> str:
+    waited = LOCK_TIMEOUT_SECONDS if seconds is None else seconds
     return (
-        f"The run waited more than {LOCK_TIMEOUT_SECONDS} s for a table lock. A migration or"
+        f"The run waited more than {waited} s for a table lock. A migration or"
         " maintenance may be running. Nothing was checked."
     )
+
+
+_LOCK_DEADLOCK: Final = (
+    "The run's table locks deadlocked with another session. A migration or maintenance may be"
+    " running. Nothing was checked."
+)
 
 
 class Finding(NamedTuple):
@@ -614,10 +621,51 @@ def _database_block(session: Session) -> dict[str, object]:
     }
 
 
+#: Statement-level refusals psycopg raises as ``OperationalError``
+#: subclasses: the connection is still usable, so none of them means
+#: "the database could not be reached".
+_STATEMENT_REFUSALS: Final = (
+    psycopg.errors.QueryCanceled,
+    psycopg.errors.LockNotAvailable,
+    psycopg.errors.DeadlockDetected,
+)
+
+
 def _is_connection_failure(exc: BaseException) -> bool:
-    return isinstance(exc, (OperationalError, InterfaceError)) or (
-        isinstance(exc, DBAPIError) and exc.connection_invalidated
-    )
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    if isinstance(exc, InterfaceError):
+        return True
+    return isinstance(exc, OperationalError) and not isinstance(exc.orig, _STATEMENT_REFUSALS)
+
+
+def _lock_failure_message(exc: DBAPIError, statement_timeout_seconds: int) -> str | None:
+    """The run-level ``lock_timeout`` message when step 4 could not take
+    its table locks (None: another failure)."""
+    original = exc.orig
+    if isinstance(original, psycopg.errors.LockNotAvailable):
+        return _lock_timeout_message()
+    if isinstance(original, psycopg.errors.QueryCanceled):
+        # A statement timeout shorter than the lock timeout fired first
+        # while LOCK TABLE waited.
+        return _lock_timeout_message(statement_timeout_seconds)
+    if isinstance(original, psycopg.errors.DeadlockDetected):
+        return _LOCK_DEADLOCK
+    return None
+
+
+def _advisory_guard(session: Session) -> RunError | None:
+    """Step 8: the run must hold no advisory lock. A database failure
+    here is a run-level error that keeps the completed results."""
+    try:
+        advisory = _held_locks(session).advisory
+    except DBAPIError as exc:
+        if _is_connection_failure(exc):
+            return RunError("database_unavailable", _CONNECTION_LOST, exc)
+        return RunError("internal_error", RUN_ERROR_MESSAGES["internal_error"], exc)
+    if advisory > 0:
+        return RunError("advisory_lock_held", RUN_ERROR_MESSAGES["advisory_lock_held"])
+    return None
 
 
 def run_reconciliation(
@@ -684,15 +732,21 @@ def run_reconciliation(
                 try:
                     session.execute(text(f"LOCK TABLE {', '.join(tables)} IN ACCESS SHARE MODE"))
                 except DBAPIError as exc:
-                    if isinstance(exc.orig, psycopg.errors.LockNotAvailable):
-                        return run_error("lock_timeout", _lock_timeout_message())
+                    lock_failure = _lock_failure_message(exc, statement_timeout)
+                    if lock_failure is not None:
+                        return run_error("lock_timeout", lock_failure)
                     if isinstance(exc.orig, psycopg.errors.UndefinedTable):
                         return run_error("schema_mismatch")
                     if _is_connection_failure(exc):
                         return run_error("database_unavailable")
                     raise
             # 5. First SELECT: the snapshot starts here.
-            database = _database_block(session)
+            try:
+                database = _database_block(session)
+            except DBAPIError as exc:
+                if _is_connection_failure(exc):
+                    return run_error("database_unavailable")
+                raise
             results, error = _run_checks(
                 session,
                 selected,
@@ -703,8 +757,8 @@ def run_reconciliation(
             )
             # 8. No advisory lock may ever be taken by a reconciliation run
             # (skipped once the run already stopped on an error).
-            if error is None and _held_locks(session).advisory > 0:
-                error = RunError("advisory_lock_held", RUN_ERROR_MESSAGES["advisory_lock_held"])
+            if error is None:
+                error = _advisory_guard(session)
             return finish(database, results, error)
         finally:
             # 9. Never commit. Session.rollback() on a lost connection

@@ -179,10 +179,21 @@ docker compose exec -T backend uv run python -m app.cli reconcile --check j     
 ```
 
 - **pf-managed staging:** `pf` refuses `exec`/`run`, so run the raw Compose form
-  of `SYNOLOGY_ADMIN.md` §14 (`docker compose ... exec -T backend uv run python
-  -m app.cli reconcile`) outside the controller, never concurrently with
+  of `SYNOLOGY_ADMIN.md` §14 outside the controller, never concurrently with
   `pf update`, `pf backup`, `pf reset-db`, `pf purge` or `pf restore-instance`.
-  Write the report to the operator's home, never into a pf-managed directory.
+  Write the report to the operator's home, never into a pf-managed directory:
+
+  ```sh
+  f="$HOME/partflow-reconcile-$(date -u +%Y%m%dT%H%M%SZ).json"
+  sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo     PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<percent-encoded password>@db:5432/<db>'     DEPLOY_ADMIN_INSTANCE_ID=<instance UUID from 'pf instances'>     docker compose     --project-directory /volume1/docker/partflow/repo     --env-file /volume1/docker/partflow/config/.env     -p partflow-staging     -f /volume1/docker/partflow/control/compose.nas.yaml     exec -T backend uv run python -m app.cli reconcile > "$f"; rc=$?
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code"]==int(sys.argv[2]); print(r["result"], r["exit_code"])' "$f" "$rc"     || echo "could not run: no complete report (exit $rc)"
+  ```
+
+  Paths, project name and UUID are the instance's own (`SYNOLOGY_ADMIN.md` §14
+  example values shown). All three variables are required; Compose refuses to
+  start without them and writes no report. A wrong `DEPLOY_ADMIN_INSTANCE_ID`
+  mislabels every resource Compose creates (§14); `exec` itself creates no
+  container, volume or network.
 - **Production:** the invocation arrives with the Phase 16 production artifacts.
 - **Options:** `--check ID` (repeatable, `a` to `j`; the others are `skipped`),
   `--statement-timeout SECONDS` (1-3600, default 300), `--max-findings N`
@@ -218,7 +229,9 @@ Operating rules:
 
 - One read-only snapshot; the command takes only `ACCESS SHARE` table locks,
   before the snapshot, and no row or advisory locks. It fails after 5 s waiting
-  for a table lock. Never run a migration concurrently, and run it off-peak.
+  for a table lock (sooner when `--statement-timeout` is shorter), or at once
+  when its lock request deadlocks with another session. Never run a migration
+  concurrently, and run it off-peak.
 - Platform-upgrade rehearsal for (j): for a Python/UCD upgrade, run
   `--check j` from the candidate backend image against the current database;
   for a glibc or PostgreSQL-image change, run `--check j` on a restore onto the

@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
+import psycopg.errors
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
@@ -36,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from alembic import command
 from app import cli
-from app.application import projections, reconciliation
+from app.application import production_release, projections, reconciliation
 from app.core.config import get_settings
 from app.domain.enums import MovementType, QuantityFlowStatus
 from app.infrastructure import models
@@ -933,6 +934,36 @@ def test_clean_scenario_reports_clean(
     assert locks.advisory == 0
     allowed = {table for tables in reconciliation.CHECK_TABLES.values() for table in tables}
     assert locks.tables <= allowed | {"alembic_version"}, locks.tables - allowed
+
+
+def test_each_check_reads_only_the_tables_it_locks_up_front(
+    case: Case, run: Callable[..., Run], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-1b: CHECK_TABLES is complete PER check.
+
+    A full run locks the union of every check's tables up front, so it
+    cannot reveal a table missing from one check's own entry. Run alone,
+    a check that reads a table outside its entry takes that lock
+    implicitly after the snapshot started, and the step-8 guard sees it.
+    """
+    held: list[reconciliation.HeldLocks] = []
+    original = reconciliation._held_locks
+
+    def recording(session: Session) -> reconciliation.HeldLocks:
+        locks = original(session)
+        held.append(locks)
+        return locks
+
+    monkeypatch.setattr(reconciliation, "_held_locks", recording)
+    for check_id in reconciliation.CHECK_IDS:
+        held.clear()
+        result = run(case.url, "--check", check_id)
+        assert result.exit_code == 0, (check_id, json.dumps(result.report["checks"], indent=1))
+        [locks] = held
+        declared = set(reconciliation.CHECK_TABLES[check_id])
+        assert locks.advisory == 0, check_id
+        assert declared <= locks.tables, (check_id, declared - locks.tables)
+        assert locks.tables <= declared | {"alembic_version"}, (check_id, locks.tables - declared)
 
 
 def _table_state(engine: Engine) -> dict[str, Any]:
@@ -1844,6 +1875,98 @@ def test_lock_timeout_behind_ddl(
     assert result.stderr.strip().endswith("Nothing was checked.")
 
 
+def test_statement_timeout_while_waiting_for_a_table_lock(
+    case: Case, run: Callable[..., Run]
+) -> None:
+    """N-3b: a statement timeout shorter than the lock timeout cancels
+    LOCK TABLE first; that is a lock wait, never an unreachable database."""
+    with case.engine.connect() as holder:
+        holder.execute(sa.text("LOCK TABLE quantity_flows IN ACCESS EXCLUSIVE MODE"))
+        try:
+            result = run(case.url, "--statement-timeout", "1")
+        finally:
+            holder.rollback()
+    assert result.exit_code == 2
+    assert result.report["checks"] == []
+    assert result.report["error"] == {
+        "code": "lock_timeout",
+        "message": (
+            "The run waited more than 1 s for a table lock. A migration or maintenance may be"
+            " running. Nothing was checked."
+        ),
+    }
+    assert result.report["options"]["lock_timeout_seconds"] == 5
+
+
+def test_connection_lost_at_the_advisory_guard_keeps_the_results(
+    case: Case, run: Callable[..., Run], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-5b: the connection drops after the last check; the completed
+    results stay in the report and the run reads as could-not-run."""
+    original = reconciliation._held_locks
+
+    def terminated(session: Session) -> reconciliation.HeldLocks:
+        with case.engine.connect() as killer:
+            killer.execute(
+                sa.text(
+                    "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity"
+                    " WHERE application_name = 'partflow-reconcile' AND datname = :name"
+                ),
+                {"name": _CASE_DATABASE},
+            )
+        return original(session)
+
+    monkeypatch.setattr(reconciliation, "_held_locks", terminated)
+    result = run(case.url)
+    checks = _checks(result.report)
+    assert result.exit_code == 2
+    assert result.report["error"] == {
+        "code": "database_unavailable",
+        "message": (
+            "The connection to the PartFlow database was lost. The report is incomplete."
+            " Nothing was repaired."
+        ),
+    }
+    assert result.report["database"] is not None
+    for check_id in _ALL_RUN:
+        assert checks[check_id]["status"] == "pass", checks[check_id]
+    assert checks["g"]["status"] == checks["h"]["status"] == "not_applicable"
+
+
+def test_run_level_database_errors_are_classified_by_their_origin() -> None:
+    """U-3: statement-level refusals are never "could not be reached"."""
+
+    def wrapped(original: Exception, *, invalidated: bool = False) -> sa.exc.DBAPIError:
+        return sa.exc.OperationalError(
+            "LOCK TABLE", {}, original, connection_invalidated=invalidated
+        )
+
+    for refusal in (
+        psycopg.errors.QueryCanceled("canceled"),
+        psycopg.errors.LockNotAvailable("lock"),
+        psycopg.errors.DeadlockDetected("deadlock"),
+    ):
+        assert not reconciliation._is_connection_failure(wrapped(refusal)), refusal
+        assert reconciliation._is_connection_failure(wrapped(refusal, invalidated=True))
+    assert reconciliation._is_connection_failure(wrapped(psycopg.OperationalError("refused")))
+    assert reconciliation._is_connection_failure(
+        sa.exc.InterfaceError("SELECT 1", {}, psycopg.InterfaceError("closed"))
+    )
+    assert reconciliation._lock_failure_message(
+        wrapped(psycopg.errors.DeadlockDetected("deadlock")), 300
+    ) == (
+        "The run's table locks deadlocked with another session. A migration or maintenance may"
+        " be running. Nothing was checked."
+    )
+    assert reconciliation._lock_failure_message(
+        wrapped(psycopg.errors.QueryCanceled("canceled")), 3
+    ) == (
+        "The run waited more than 3 s for a table lock. A migration or maintenance may be"
+        " running. Nothing was checked."
+    )
+    assert reconciliation._lock_failure_message(wrapped(psycopg.OperationalError("x")), 3) is None
+
+
 def test_one_snapshot_for_every_check(
     case: Case, run: Callable[..., Run], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1904,6 +2027,38 @@ def test_missing_configuration(
         "message": "DATABASE_URL is not set or the configuration is invalid. Nothing was checked.",
     }
     assert result.report["checks"] == []
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgres://partflow:s3cret-pw@db/partflow",  # unknown dialect name
+        "postgresql+psycopg://partflow:s3cret-pw@db:notaport/partflow",  # bad port
+        "s3cret-pw-garbage",  # not a URL
+    ],
+)
+def test_malformed_database_url(
+    database_url: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-6b: a malformed DATABASE_URL still yields one complete report and
+    exit 2 (never a traceback with Python's status 1, which reads as a
+    mismatch), and the report never repeats the URL or its password."""
+    monkeypatch.setenv(_DB_URL_ENV, database_url)
+    get_settings.cache_clear()
+    capsys.readouterr()
+    try:
+        exit_code = cli.main(["reconcile"])
+    finally:
+        get_settings.cache_clear()
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 2
+    assert (report["result"], report["exit_code"]) == ("error", 2)
+    assert report["error"]["code"] == "configuration_invalid"
+    assert report["checks"] == []
+    assert report["runtime"]["alembic_head"] is not None
+    assert "s3cret-pw" not in captured.out + captured.err
+    assert "Traceback" not in captured.err
 
 
 @pytest.mark.parametrize(
@@ -1986,6 +2141,23 @@ def test_missing_alembic_version_table(case: Case, run: Callable[..., Run]) -> N
     assert checks["j"]["status"] == "pass"
 
 
+def test_id_lookups_take_more_ids_than_bind_parameters(case: Case) -> None:
+    """N-11: check (e) passes every demand id and the positions replay
+    every active flow id; both lookups must stay correct past the
+    protocol's 65,535 bind-parameter limit."""
+    many = range(1, 70_001)
+    with Session(case.engine) as session:
+        demand_ids = list(session.scalars(sa.text("SELECT id FROM work_order_demands")))
+        flow_ids = set(session.scalars(sa.text("SELECT id FROM quantity_flows")))
+        assert max(demand_ids) < many.stop and max(flow_ids) < many.stop
+        released = production_release.released_quantities(session, list(many))
+        latest = projections._own_latest_position_bearing(session, set(many))
+        assert released and released == production_release.released_quantities(session, demand_ids)
+        assert latest and latest.keys() == (
+            projections._own_latest_position_bearing(session, flow_ids).keys()
+        )
+
+
 # ---------------------------------------------------------------------------
 # Static and pure checks
 # ---------------------------------------------------------------------------
@@ -1994,8 +2166,9 @@ def test_missing_alembic_version_table(case: Case, run: Callable[..., Run]) -> N
 def test_hot_list_query_is_the_documented_one() -> None:
     """D-1: the check runs the DEPLOYMENT §5 query verbatim.
 
-    The development backend container mounts only ``backend/``; the
-    test runs wherever the repository's ``docs/`` is reachable.
+    The development backend container mounts ``docs/`` read-only at
+    ``/docs`` (compose.yaml) for this test; it runs wherever the
+    repository's ``docs/`` is reachable (Compose, CI, the host).
     """
     deployment = _BACKEND_DIR.parent / "docs" / "DEPLOYMENT.md"
     if not deployment.is_file():

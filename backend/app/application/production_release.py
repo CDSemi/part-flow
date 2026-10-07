@@ -68,7 +68,8 @@ import uuid
 from collections.abc import Collection
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, any_, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -599,7 +600,10 @@ def released_quantities(session: Session, work_order_demand_ids: Collection[int]
             # movement types may carry demand context for other
             # reasons without meaning "this demand released".
             PartMovement.movement_type == MovementType.RECEIVED,
-            demand_id_value.in_(ids),
+            # ONE array parameter, not one bind parameter per id: a
+            # whole-table caller (reconcile check (e)) may pass more ids
+            # than the protocol's 65,535-parameter limit.
+            demand_id_value == any_(literal(ids, ARRAY(Integer))),
         )
         .group_by(demand_id_value)
     )

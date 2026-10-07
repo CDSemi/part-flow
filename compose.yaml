@@ -36,6 +36,11 @@ services:
             # image's /app/.venv).
             - ./backend:/app
             - /app/.venv
+            # The reconciliation test D-1 compares check (i) with the
+            # DEPLOYMENT §5 Hot-list query. From /app that path resolves
+            # to /docs, so the docs tree is mounted read-only for
+            # in-container test runs.
+            - ./docs:/docs:ro
         depends_on:
             db:
                 condition: service_healthy

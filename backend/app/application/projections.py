@@ -50,7 +50,8 @@ import datetime
 from collections.abc import Iterable
 from typing import Final, NamedTuple
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Integer, Select, any_, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session, aliased
 
 from app.application.errors import ConflictError
@@ -292,7 +293,10 @@ def _own_latest_position_bearing(session: Session, flow_ids: set[int]) -> dict[i
     newest = (
         select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
         .where(
-            PartMovement.quantity_flow_id.in_(flow_ids),
+            # ONE array parameter, not one bind parameter per id: the
+            # whole-history replay passes every active flow, which may
+            # exceed the protocol's 65,535-parameter limit.
+            PartMovement.quantity_flow_id == any_(literal(sorted(flow_ids), ARRAY(Integer))),
             PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
             ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
         )

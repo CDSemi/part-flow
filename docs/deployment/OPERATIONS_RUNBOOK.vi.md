@@ -179,10 +179,22 @@ docker compose exec -T backend uv run python -m app.cli reconcile --check j     
 ```
 
 - **Staging do pf quản lý:** `pf` từ chối `exec`/`run`, nên chạy dạng raw Compose
-  trong `SYNOLOGY_ADMIN.md` §14 (`docker compose ... exec -T backend uv run python
-  -m app.cli reconcile`) bên ngoài controller, không bao giờ chạy đồng thời với
-  `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
-  Ghi report vào home của operator, không bao giờ vào thư mục do pf quản lý.
+  trong `SYNOLOGY_ADMIN.md` §14 bên ngoài controller, không bao giờ chạy đồng thời
+  với `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc
+  `pf restore-instance`. Ghi report vào home của operator, không bao giờ vào thư
+  mục do pf quản lý:
+
+  ```sh
+  f="$HOME/partflow-reconcile-$(date -u +%Y%m%dT%H%M%SZ).json"
+  sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo     PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<percent-encoded password>@db:5432/<db>'     DEPLOY_ADMIN_INSTANCE_ID=<instance UUID từ 'pf instances'>     docker compose     --project-directory /volume1/docker/partflow/repo     --env-file /volume1/docker/partflow/config/.env     -p partflow-staging     -f /volume1/docker/partflow/control/compose.nas.yaml     exec -T backend uv run python -m app.cli reconcile > "$f"; rc=$?
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code"]==int(sys.argv[2]); print(r["result"], r["exit_code"])' "$f" "$rc"     || echo "could not run: no complete report (exit $rc)"
+  ```
+
+  Path, project name và UUID là của chính instance đó (giá trị ví dụ lấy từ
+  `SYNOLOGY_ADMIN.md` §14). Cả ba biến đều bắt buộc; thiếu biến thì Compose từ
+  chối khởi động và không ghi report nào. `DEPLOY_ADMIN_INSTANCE_ID` sai sẽ gắn
+  nhầm label mọi resource mà Compose tạo ra (§14); bản thân `exec` không tạo
+  container, volume hay network nào.
 - **Production:** cách gọi sẽ có cùng các production artifact của Phase 16.
 - **Option:** `--check ID` (lặp lại được, `a` đến `j`; các check còn lại là
   `skipped`), `--statement-timeout SECONDS` (1-3600, mặc định 300),
@@ -218,7 +230,9 @@ Quy tắc vận hành:
 
 - Một snapshot chỉ đọc; command chỉ lấy table lock `ACCESS SHARE`, trước
   snapshot, và không lấy row lock hay advisory lock. Nó fail sau 5 s chờ table
-  lock. Không bao giờ chạy migration đồng thời, và chạy ngoài giờ cao điểm.
+  lock (sớm hơn khi `--statement-timeout` ngắn hơn), hoặc ngay lập tức khi yêu
+  cầu lock của nó bị deadlock với một session khác. Không bao giờ chạy migration
+  đồng thời, và chạy ngoài giờ cao điểm.
 - Rehearsal platform-upgrade cho (j): với nâng cấp Python/UCD, chạy `--check j`
   từ candidate backend image trên database hiện tại; với thay đổi glibc hoặc
   PostgreSQL image, chạy `--check j` trên bản restore vào candidate server
