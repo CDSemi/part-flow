@@ -15,6 +15,7 @@ Case mapping (PF-A2.1 SPEC section 6.1; design r3 acceptance cases A2-T01..A2-T0
   LB-1..LB-3   global launcher                           -> LauncherBinding
   LM-1..LM-3   legacy v2.5 migration                     -> LegacyMigration
   SC-S1        wire schema                               -> Schema
+  AU-1..AU-16  PF-A2.1 audit regressions (audit-findings.json AF-01..AF-18) -> AuditRegressions
 
 Everything runs as uid 0 in disposable temporary roots. Docker is never contacted: the registered ``docker`` tool is
 ``tests/fake_docker.py``. "Forked crash" = the test forks; the child patches a pf_install seam
@@ -22,8 +23,11 @@ Everything runs as uid 0 in disposable temporary roots. Docker is never contacte
 then resumes through the installed CLI. When ``PF_A21_EVIDENCE`` names a directory, transcripts, the crash matrix
 and before/after identities are written there (checkpoint evidence only; never asserted).
 """
+import ast
 import contextlib
 import copy
+import errno
+import fcntl
 import grp
 import io
 import json
@@ -1901,6 +1905,412 @@ class CrashMatrix(InstallBase):
                               resume_mode=mode, observed_generation=self.bound().name, old_release_retained=True,
                               config_bytes_equal=True, docker_argv=self.fake.argvs(),
                               outcome=self.journal()["phase"])
+
+
+# ============================================================================ AU: audit regressions
+
+
+class _Hung(Exception):
+    """Raised by the SIGALRM guard when a read blocks (a FIFO opened without O_NONBLOCK)."""
+
+
+@contextlib.contextmanager
+def alarm_guard(seconds=20):
+    def expired(signum, frame):
+        raise _Hung(f"blocked for {seconds} s")
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def patched_rename(target, failure):
+    """os.rename that raises ``failure`` (an exception instance or class) when renaming onto ``target``."""
+    real = os.rename
+
+    def rename(source, destination, *args, **kwargs):
+        if str(destination) == str(target):
+            raise failure
+        return real(source, destination, *args, **kwargs)
+
+    return mock.patch.object(pf_install.os, "rename", rename)
+
+
+def crash_after_link(target):
+    """Inside a forked child: end the process right after ``os.link(temp, target)`` (before the temp unlink)."""
+    real = os.link
+
+    def link(source, destination, *args, **kwargs):
+        real(source, destination, *args, **kwargs)
+        if str(destination) == str(target):
+            os._exit(137)
+
+    return mock.patch.object(pf_install.os, "link", link)
+
+
+@ROOT_REQUIRED
+class AuditRegressions(InitBase):
+    """Each test fails on 964aefb and passes with the audit fix (audit-findings.json names the finding)."""
+
+    instances = ("a",)
+
+    def init_arguments(self, root=None, launcher=None):
+        arguments = ["--root", str(root or self.new_root), "--interpreter", PY]
+        return arguments + (["--launcher-path", str(launcher)] if launcher is not None else ["--no-launcher"])
+
+    def init_resume(self, root):
+        operation = [name for name in op_dirs(root) if not name.startswith(".")][0]
+        return self.cli(["install", "resume"], ["RESUME " + operation[-8:]], executable=root / "bootstrap" / "pf")
+
+    def temps(self, directory):
+        return [name for name in os.listdir(directory) if name.startswith(".pf.tmp-")]
+
+    def migrate_request(self, home, launcher=None):
+        return {"legacy-home": str(home["home"]), "workspace": str(home["workspace"]), "slug": "legacy",
+                "no_launcher": launcher is None, "launcher_path": None if launcher is None else str(launcher),
+                "docker_endpoint": self.layout.daemon_endpoint}
+
+    # AF-01: the under-lock re-check sees another init's busy build.
+    def test_au1_a_second_init_that_confirmed_concurrently_refuses_under_the_locks(self):
+        other = self.parent / ".install.init-0badc0de"
+        held = []
+
+        def confirm_while_another_init_builds():
+            pf_instance._create_private_dir(other, 0o700)
+            fd = os.open(str(other), os.O_RDONLY | os.O_DIRECTORY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(fd)
+            return "INSTALL CONTROL " + self.rid
+
+        try:
+            code, out, err = self.run_init(self.init_arguments(), [confirm_while_another_init_builds])
+        finally:
+            for fd in held:
+                os.close(fd)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ERROR: install-plan-changed:", err)
+        self.assertIn("install-busy", err)
+        self.assertFalse(self.new_root.exists())
+        self.assertEqual(self.leftovers(), [other.name])
+
+    # AF-01/AF-08: a stop or failure at the root rename is before the commit point.
+    def test_au2_a_failed_or_interrupted_root_rename_cancels_and_never_names_resume(self):
+        cases = (("EXDEV", OSError(errno.EXDEV, "Invalid cross-device link"), "install-failed"),
+                 ("EBUSY", OSError(errno.EBUSY, "Device or resource busy"), "install-failed"),
+                 ("interrupt", KeyboardInterrupt, "install-cancelled"))
+        for label, failure, code_expected in cases:
+            with self.subTest(case=label):
+                self.new_root.mkdir()
+                os.chmod(self.new_root, 0o755)
+                with patched_rename(self.new_root, failure):
+                    code, out, err = self.run_init(self.init_arguments(), ["INSTALL CONTROL " + self.rid])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"ERROR: {code_expected}:", err)
+                self.assertIn("private build directory", err)
+                self.assertNotIn("install resume", err)
+                self.assertEqual(os.listdir(self.new_root), [])
+                self.assertEqual(self.leftovers(), [])
+                os.rmdir(self.new_root)
+        code, out, err = self.run_init(self.init_arguments(), ["INSTALL CONTROL " + self.rid])
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(pf_instance.validate_installation_root(self.new_root).blocking(), [])
+
+    # AF-08: an empty root that is a mount point (or another device) is refused before anything is written.
+    def test_au3_an_empty_root_on_another_filesystem_is_refused_by_the_preflight(self):
+        self.new_root.mkdir()
+        os.chmod(self.new_root, 0o755)
+        request = {"root": str(self.new_root), "source_root": str(REPO_PACKAGE), "interpreter": PY, "tools": {},
+                   "no_launcher": True}
+        result = pf_install._preflight(None, "init", request, runner=None, running_release=None)
+        self.assertEqual(result.conflicts, [])
+        real = os.path.ismount
+        with mock.patch.object(pf_install.os.path, "ismount", lambda path: str(path) == str(self.new_root) or real(path)):
+            result = pf_install._preflight(None, "init", request, runner=None, running_release=None)
+        conflicts = [item for item in result.conflicts if item.code == "root-exists"]
+        self.assertEqual(len(conflicts), 1, result.conflicts)
+        self.assertIn("mount point or another filesystem than its parent", conflicts[0].detail)
+
+    # AF-02: an own build stopped between creating install-operations/ and the intent is recognized.
+    def test_au4_an_empty_install_operations_in_an_own_build_is_an_own_leftover(self):
+        foreign = self.parent / ".install.init-0123abcd"
+        pf_instance._create_private_dir(foreign, 0o700)
+        pf_instance._create_private_dir(foreign / "install-operations", 0o700)
+        (foreign / "data").write_text("not ours")
+        code, out, err = self.run_init(self.init_arguments(), ["INSTALL CONTROL " + self.rid])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"  - init-leftover-unknown: {foreign}:", err)
+        os.unlink(foreign / "data")
+        code, out, err = self.run_init(self.init_arguments(), ["INSTALL CONTROL " + self.rid])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"Note: init-leftover-removed: {foreign} is an unpublished build", out)
+        self.assertEqual(sorted(os.listdir(self.parent)), ["install"])
+
+    # AF-03: --source and --release are never re-guessed from the value.
+    def test_au5_the_typed_control_flag_decides_source_or_release(self):
+        source = self.candidate()
+        before = snapshot(self.root)
+        code, out, err = self.run_pf(["install", "control", "--release", str(source)])
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(conflict_codes(err), ["release-not-retained"], err)
+        self.assertNotIn("INSTALL CONTROL", out)
+        for value in ("candidate", self.old_release.name):
+            with self.subTest(source=value):
+                code, out, err = self.run_pf(["install", "control", "--source", value])
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(conflict_codes(err), ["source-missing"], err)
+                self.assertIn("the source must be one canonical absolute path", err)
+        self.assertEqual(snapshot(self.root), before)
+
+    # AF-04: a wrapper-only candidate says which wrapper it does not install.
+    def test_au6_a_wrapper_only_candidate_names_the_wrapper_it_does_not_install(self):
+        source = pfx.candidate_copy(self.base, name="wrapper-only",
+                                    mutate={"deploy/synology/backup.sh": lambda data: data + b"# wrapper fix\n"})
+        before = snapshot(self.root)
+        code, out, err = self.run_pf(["install", "control", "--source", str(source)])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"Release {self.old_release.name} is already the bound control; nothing was changed. The "
+                      "candidate's scheduler wrapper(s) backup.sh differ from", out)
+        self.assertIn("installed together with the next control release whose files change.", out)
+        self.assertNotIn("release-check.sh", out)
+        self.assertEqual(snapshot(self.root), before)
+
+    # AF-05: a stop after the intent rename cancels the open operation instead of claiming nothing was written.
+    def test_au7_an_interrupt_after_the_intent_rename_cancels_the_open_operation(self):
+        source = self.candidate()
+        operations_dir = self.root / "install-operations"
+        real = pf_instance._fsync_directory
+        fired = []
+
+        def fsync(path):
+            if Path(path) == operations_dir and not fired:
+                fired.append(path)
+                raise KeyboardInterrupt
+            return real(path)
+
+        records = self.records()
+        with mock.patch.object(pf_instance, "_fsync_directory", fsync):
+            code, out, err = self.run_pf(["install", "control", "--source", str(source)],
+                                         ["INSTALL CONTROL " + self.release_id(source)])
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(fired)
+        journal = self.journal()
+        self.assertEqual(journal["phase"], "cancelled")
+        self.assertIn(f"ERROR: install-cancelled: Cancelled during planned; the private staging of operation "
+                      f"{journal['operation_id']} was removed and the installed control is unchanged.", err)
+        self.assertIsNone(self.open_operation())
+        self.assertEqual(self.records(), records)
+
+    # AF-09: the .env hash stays in plan.json only.
+    def test_au8_the_env_hash_is_never_printed_or_journaled(self):
+        home = pfx.legacy_home(self.base, env_repo=pfx.ENV_TEXT, admin_legacy={})
+        request = self.migrate_request(home)
+        # effects: stage env, stage admin-config, validate, publish env (intended, then the crash)
+        self.assertEqual(self.forked("_apply_effect", "before", 3, lambda: self.operation("migrate-legacy", request)),
+                         137)
+        data = (home["workspace"] / ".env").read_bytes()
+        digest = pf_instance.sha256_bytes(data)
+        target = home["config"] / ".env"
+        self.assertFalse(target.exists())
+        target.write_bytes(data)  # the same bytes, another identity: written by someone else after the crash
+        result = self.resume_cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR: install-needs-operator:", result.stderr)
+        self.assertIn("expected absent or the planned .env copy, found a file with the planned bytes but another "
+                      "identity", result.stderr)
+        journal = self.journal()
+        directory = self.root / "install-operations" / journal["operation_id"]
+        for label, text in (("stdout", result.stdout), ("stderr", result.stderr),
+                            ("journal", (directory / "journal.json").read_text())):
+            with self.subTest(where=label):
+                self.assertNotIn(digest, text)
+                self.assertNotIn(digest[:12], text)
+        self.assertIn(digest, (directory / "plan.json").read_text())
+
+    # AF-10: a launcher another writer created before resume is left, never needs_operator.
+    def test_au9_a_launcher_created_by_another_writer_before_resume_is_left(self):
+        foreign = b"#!/bin/sh\necho another writer\n"
+        # init effects: build-root 0, smoke 1, publish-root 2, verify 3, bind-launcher 4
+        for label, when, index in (("bind-launcher intended", "before", 4), ("before bind-launcher", "after", 2)):
+            with self.subTest(case=label):
+                root = self.parent / ("install-" + str(index))
+                launcher = self.bin / ("pf-" + str(index))
+                body = lambda: pf_install.run_init(self.init_arguments(root, launcher),  # noqa: E731
+                                                   interaction(["INSTALL CONTROL " + self.rid]),
+                                                   source_root=REPO_PACKAGE)
+                self.assertEqual(self.forked("_apply_effect", when, index, body), 137)
+                self.assertFalse(launcher.exists())
+                launcher.write_bytes(foreign)
+                result = self.init_resume(root)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"Note: launcher-left: {launcher} appeared while installing", result.stdout)
+                self.assertEqual(launcher.read_bytes(), foreign)
+                operation = [name for name in op_dirs(root) if not name.startswith(".")][0]
+                journal = pf_install.load_operation(root, operation)[2]
+                self.assertEqual(journal["phase"], "completed")
+                entry = next(item for item in journal["effects"] if item["effect_id"] == "bind-launcher")
+                self.assertEqual((entry["state"], entry["target_identity"]), ("complete", None))
+                self.assertIsNone(journal["result"]["launcher"])
+
+    # AF-11: the hard-linked launcher temp of a stop inside bind-launcher is removed by resume and by abandon.
+    def test_au10_a_stop_between_the_launcher_link_and_the_temp_unlink_leaves_no_temp(self):
+        launcher = self.bin / "pf-init"
+
+        def init_body():
+            with crash_after_link(launcher):
+                pf_install.run_init(self.init_arguments(self.new_root, launcher),
+                                    interaction(["INSTALL CONTROL " + self.rid]), source_root=REPO_PACKAGE)
+
+        self.assertEqual(self.forked("_journal_write", "after", 10 ** 6, init_body), 137)
+        self.assertEqual(len(self.temps(self.bin)), 1)
+        result = self.init_resume(self.new_root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.temps(self.bin), [])
+        self.assertEqual(launcher.read_bytes(), pf_install.render_launcher(self.new_root))
+        home = pfx.legacy_home(self.base, env_repo=pfx.ENV_TEXT, admin_legacy={})
+        migrate_launcher = self.bin / "pf-migrate"
+        request = self.migrate_request(home, migrate_launcher)
+
+        def migrate_body():
+            with crash_after_link(migrate_launcher):
+                self.operation("migrate-legacy", request)
+
+        self.assertEqual(self.forked("_journal_write", "after", 10 ** 6, migrate_body), 137)
+        self.assertEqual(len(self.temps(self.bin)), 1)
+        result = self.resume_cli(abandon=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.journal()["phase"], "abandoned")
+        self.assertFalse(migrate_launcher.exists())
+        self.assertEqual(self.temps(self.bin), [])
+
+    # AF-12: an unreadable entry of install-operations/ names a manual step; resume does not say "nothing to do".
+    def test_au11_an_unreadable_entry_names_its_manual_step(self):
+        entry = self.root / "install-operations" / "lost+found"
+        entry.mkdir(mode=0o700)
+        code, out, err = self.run_pf(["--instance", "a", "backup"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ERROR: install-operation-pending: Install operation lost+found (unreadable)", err)
+        self.assertIn(f"inspect {entry} as root and move it out of", err)
+        self.assertNotIn("(none)", err)
+        code, out, err = self.run_pf(["install", "status"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"next: inspect {entry} as root", out)
+        code, out, err = self.run_pf(["install", "resume"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"ERROR: install-operation-unreadable: {entry} is not a readable install operation", err)
+        self.assertNotIn("nothing to do", out + err)
+
+    # AF-13: a FIFO in an editor-writable place never blocks the installer.
+    def test_au12_a_fifo_never_blocks_the_installer(self):
+        env = self.paths["a"]["configuration"] / ".env"
+        env.unlink()
+        os.mkfifo(str(env), 0o600)
+        with alarm_guard():
+            self.assertEqual(pf_install._config_categories(self.contexts["a"]), ("ok", "invalid"))
+        env.unlink()
+        env.write_text(pfx.ENV_TEXT)
+        home = pfx.legacy_home(self.base, env_repo=pfx.ENV_TEXT, admin_legacy={})
+        request = self.migrate_request(home)
+        runner = pf_install._installed_runner(self.root, request["docker_endpoint"])
+        result = pf_install._preflight(self.root, "migrate-legacy", request, runner=runner,
+                                       running_release=self.bound())
+        self.assertEqual(result.conflicts, [])
+        source = home["workspace"] / ".env"
+        source.unlink()
+        os.mkfifo(str(source), 0o600)  # swapped in after the summary
+        with alarm_guard(), self.assertRaises(pf_install.InstallError) as caught:
+            pf_install.execute(self.root, result.plan, runner=runner, interaction=silent(), candidate=None,
+                               running_release=self.bound(), request=None)
+        self.assertEqual(caught.exception.code, "install-plan-changed")
+        self.assertEqual(self.journal()["phase"], "cancelled")
+        self.assertEqual(sorted(os.listdir(home["config"])), [])
+
+    # AF-14: an invalid admin configuration does not hide the other migration conflicts.
+    def test_au13_an_invalid_admin_config_still_reports_every_other_conflict(self):
+        open_bin = self.base / "open-bin"
+        open_bin.mkdir()
+        os.chmod(open_bin, 0o777)
+        home = pfx.legacy_home(self.base, env_repo=pfx.ENV_TEXT, admin_legacy={}, pending=True)
+        (home["workspace"] / "deploy/synology/pf-config.json").write_text("{not json\n")
+        before = snapshot(self.root, home["home"])
+        code, out, err = self.run_pf(migrate_arguments(home, launcher=open_bin / "pf", layout=self.layout))
+        self.assertEqual(code, 1, out + err)
+        codes = conflict_codes(err)
+        self.assertIn("admin-config-invalid", codes)
+        self.assertIn("launcher-parent-untrusted", codes)
+        self.assertNotIn("project-invalid", codes)
+        self.assertIn("Note: legacy-state-unchecked:", out)
+        self.assertEqual(snapshot(self.root, home["home"]), before)
+
+    # AF-15: an interrupted automatic restore is reported open, never as "nothing was changed".
+    def test_au14_an_interrupted_automatic_restore_is_reported_open(self):
+        source = self.candidate(mutate={"deploy/synology/pf-admin.py": failing_instances})
+        records, conf = self.records(), (self.root / "bootstrap/bootstrap.conf").read_bytes()
+        real = pf_instance._write_private_file
+
+        def write(path, data, mode=0o600):
+            if Path(path).name in ("bootstrap.conf", "record.json"):
+                journals = list((self.root / "install-operations").glob("inst-*/journal.json"))
+                if journals and json.loads(journals[0].read_bytes())["phase"] == "rolling_back":
+                    raise KeyboardInterrupt
+            return real(path, data, mode)
+
+        with mock.patch.object(pf_instance, "_write_private_file", write):
+            code, out, err = self.run_pf(["install", "control", "--source", str(source)],
+                                         ["INSTALL CONTROL " + self.release_id(source)])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ERROR: install-interrupted: Control release", err)
+        self.assertIn("stays open in phase rolling_back", err)
+        self.assertIn("install resume' to finish the restore", err)
+        self.assertNotIn("nothing was changed", err)
+        self.assertEqual(self.journal()["phase"], "rolling_back")
+        result = self.resume_cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.journal()["phase"], "rolled_back")
+        self.assertEqual(self.records(), records)
+        self.assertEqual((self.root / "bootstrap/bootstrap.conf").read_bytes(), conf)
+
+    # AF-15: a stop while a cancel removes a published release never leaves it partial under releases/.
+    def test_au15_a_cancel_after_publication_never_leaves_a_partial_release(self):
+        source = self.candidate()
+        rid = self.release_id(source)
+        real_apply, real_remove = pf_install._apply_effect, pf_instance._remove_tree
+
+        def apply(run, effect_id, etype):
+            if etype == "pre-bind-verify":
+                raise pf_install._SmokeFailed("forced pre-bind failure")
+            return real_apply(run, effect_id, etype)
+
+        def remove(path):
+            path = Path(path)
+            if path.name in (rid, "release.cancelled"):
+                os.unlink(str(sorted(path.iterdir())[0]))  # a partial removal, then the stop
+                os._exit(137)
+            return real_remove(path)
+
+        def body():
+            with mock.patch.object(pf_install, "_apply_effect", apply), \
+                    mock.patch.object(pf_instance, "_remove_tree", remove):
+                self.operation("control", self.control_request(source))
+
+        self.assertEqual(self.forked("_journal_write", "after", 10 ** 6, body), 137)
+        self.assertEqual(self.journal()["phase"], "cancelled")
+        self.assertFalse((self.root / "releases" / rid).exists())
+        code, out, err = self.run_pf(["install", "control", "--source", str(source)], ["INSTALL CONTROL " + rid])
+        self.assertEqual(code, 0, out + err)
+        self.assert_one_generation(self.root / "releases" / rid)
+
+    # AF-07/AF-18: no module-level import of the entry or installer module is unused.
+    def test_au16_no_unused_module_imports(self):
+        for name in ("pf-admin.py", "pf_install.py"):
+            with self.subTest(module=name):
+                tree = ast.parse((PACKAGE / name).read_text(encoding="utf-8"))
+                imported = {(alias.asname or alias.name).split(".")[0]
+                            for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
+                used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+                self.assertEqual(sorted(imported - used), [])
 
 
 class types_result:  # noqa: N801 - a CompletedProcess-shaped value for in-process reruns

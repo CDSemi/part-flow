@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Deployment Admin install operation v1 (PF-A2.1)",
-  "description": "Frozen InstallPlan and InstallJournal of one install operation under <root>/install-operations/<operation-id>/. Strict UTF-8 JSON; duplicate keys, non-finite numbers and unknown keys are rejected; booleans are not integers.",
+  "description": "Frozen InstallPlan and InstallJournal of one install operation under <root>/install-operations/<operation-id>/. Strict UTF-8 JSON; duplicate keys, non-finite numbers and unknown keys are rejected; booleans are not integers. Normative markers: a nullable value, an array item rule and a map value rule are written as the description \"null or <target>\", \"items <target>\" or \"map <target>\" (<target>: $defs.<name>, string, sha256, path or release-id). They are enforced by pf_install.validate_document only; a generic JSON Schema validator ignores them, so every consumer validates with pf_install.validate_document.",
   "$defs": {
     "plan": {
       "type": "object",

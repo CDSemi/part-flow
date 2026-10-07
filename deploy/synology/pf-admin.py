@@ -20,7 +20,6 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-import signal
 import socket
 import stat
 import sys

@@ -397,7 +397,11 @@ v2.5 launcher (or another root's) and does not reach the new root.
    Missing inputs are asked; `--interpreter`, `--tool <id>=<path>`, `--launcher-path <path>` and
    `--no-launcher` override the detected defaults shown in the summary. Confirm with
    `INSTALL CONTROL <release-id>`. Any other verb of `install-control.sh` is refused with
-   `installer-verb-installed-only`.
+   `installer-verb-installed-only`. An existing empty root must be on its parent's filesystem: a mount
+   point or a DSM shared folder itself is refused (`root-exists`), because the root is published with one
+   atomic rename of a sibling build directory; name an absent path below it instead. If the publication
+   fails or is interrupted, nothing was published: the build directory is removed and you run the same
+   `install-control.sh init` again (there is no `resume` for a root that does not exist yet).
 2. Create `<config>/pf-config.json` and `<config>/.env` by hand from
    `<root>/releases/<id>/pf-config.example.json` and `nas.env.example` (owner, group and modes as in
    section 6). PF-A2.1 creates no configuration; the PF-A2.2 wizard will.
@@ -1026,6 +1030,15 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   the same way.
 - An interrupted operation is continued with `pf install resume` or undone with
   `pf install resume --abandon`; an interrupted rollback always finishes the restore.
+- `--source` always names a source tree and `--release` a retained release id; a value of the wrong kind
+  is refused, never re-interpreted. Only an answer typed at the `candidate` prompt is classified (a
+  leading `/` is a source tree).
+- A candidate whose only change is a scheduler wrapper (`backup.sh`, `release-check.sh`) is
+  `control-unchanged` (exit 0): the message names the differing wrapper. A wrapper-only change is not
+  installed on its own; it is installed together with the next control release whose files change.
+- An interrupt during the automatic restore after a failed verification is `install-interrupted`: the
+  operation stays `rolling_back` and every instance route is refused until `pf install resume` finishes
+  the restore.
 - The launcher and verifier bytes are frozen: a candidate that changes `pf.sh` or `pf_bootstrap.py` is
   refused with `bootstrap-change-unsupported` (a launcher migration is PF-A4.3).
 - The legacy `recovery/control-upgrades/` archive no longer applies; old releases stay under
@@ -1089,8 +1102,10 @@ again.
 ### `install-needs-operator`, `bootstrap-change-unsupported` or `install-busy`
 
 `install-needs-operator`: resume found a target in a state the installer did not write; the message names
-the target, the expected hashes and what it found, and the journal records the evidence. Restore the
-target, then `pf install resume` (or `pf install resume --abandon` where offered).
+the target, the expected hashes and what it found, and the journal records the evidence (for `.env` it
+names the planned copy and what was found, never the file's hash). Restore the target, then
+`pf install resume` (or `pf install resume --abandon` where offered). A global launcher that another
+writer created meanwhile is never a reason: resume leaves it in place with the note `launcher-left`.
 `bootstrap-change-unsupported`: the candidate changes the launcher or verifier; reinstall into a new root
 or keep those bytes. `install-busy`: another operation holds a needed lock (registry, instance, v2.5 or
 an init build directory); nothing was changed, retry after it finishes.
@@ -1103,6 +1118,17 @@ live configuration); it was not activated and its staging was removed. `install-
 `needs_operator` with its next step. `abandon-not-possible`: an `init` that already published its root, or
 a registration that has been used (default set, operations recorded, record changed, lock held), cannot be
 abandoned; finish it with `pf install resume`.
+
+### `install-operation-unreadable` or `install-interrupted`
+
+`install-operation-unreadable`: an entry of `<root>/install-operations/` is not a readable install
+operation (for example a stray directory). It refuses every route, fail closed, and `resume` cannot
+continue it. Inspect it as root and move it out of `install-operations/` (keep a copy: an operation
+journal is evidence), then run the command again. `install status` and the gate message name the same
+step. `install-interrupted`: the operation stopped after its commit point or during the automatic
+restore; it stays open in the phase the message names. Run `pf install resume`. When the message says
+the operation is cancelled but its cleanup was interrupted, nothing else was changed: what remains stays
+in its operation directory or is recognized by the next run of the same command.
 
 ### `compose-route-removed`, `compose-override-refused`, `unknown-option` or `unknown-command`
 

@@ -251,7 +251,7 @@ WRITE_SITE_ALLOWLIST = {
         ("_write_private_file", "_Run._apply_smoke"), ("_write_private_file", "_Run._apply_stage_release"),
         ("_write_private_file", "_Run._write_binding"), ("_write_private_file", "_Run.restore_bindings"),
         ("_write_private_file", "_journal_write"), ("os.rename", "_Run._apply_publish_release"),
-        ("os.rename", "_Run._apply_publish_root"), ("os.rename", "_Run.write_intent"),
+        ("os.rename", "_Run._apply_publish_root"), ("os.rename", "_Run.cancel"), ("os.rename", "_Run.write_intent"),
     },
 }
 # PF-A2.1 (SS-3 for pf_install.py): every call that can change the filesystem, with the wider installer vocabulary
@@ -276,8 +276,9 @@ INSTALL_WRITE_SITES = {
     ("os.link", "_Run._apply_bind_launcher"), ("os.link", "_Run._apply_publish_legacy_file"),
     ("os.open(O_CREAT)", "_Run._apply_bind_launcher"), ("os.open(O_CREAT)", "_Run._apply_stage_legacy_file"),
     ("os.rename", "_Run._apply_publish_release"), ("os.rename", "_Run._apply_publish_root"),
-    ("os.rename", "_Run.write_intent"), ("os.rmdir", "_Run._remove_build"), ("os.rmdir", "_remove_own_leftover"),
-    ("os.unlink", "_Run._after_observed_complete"), ("os.unlink", "_Run._apply_bind_launcher"),
+    ("os.rename", "_Run.cancel"), ("os.rename", "_Run.write_intent"), ("os.rmdir", "_Run._remove_build"),
+    ("os.rmdir", "_remove_own_leftover"), ("os.unlink", "_Run._after_observed_complete"),
+    ("os.unlink", "_Run._apply_bind_launcher"), ("os.unlink", "_Run._remove_own_launcher_temp"),
     ("os.unlink", "_Run._apply_publish_legacy_file"), ("os.unlink", "_Run._reconcile"),
     ("os.unlink", "_Run._remove_build"), ("os.unlink", "_Run._remove_legacy_copies"), ("os.unlink", "_Run.abandon"),
     ("os.unlink", "_Run.restore_bindings"), ("os.unlink", "_remove_own_leftover"),

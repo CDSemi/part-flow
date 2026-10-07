@@ -190,7 +190,11 @@ INSTALL_OPERATION_SCHEMA = {
     "title": "Deployment Admin install operation v1 (PF-A2.1)",
     "description": ("Frozen InstallPlan and InstallJournal of one install operation under "
                     "<root>/install-operations/<operation-id>/. Strict UTF-8 JSON; duplicate keys, non-finite "
-                    "numbers and unknown keys are rejected; booleans are not integers."),
+                    "numbers and unknown keys are rejected; booleans are not integers. Normative markers: a nullable "
+                    "value, an array item rule and a map value rule are written as the description \"null or "
+                    "<target>\", \"items <target>\" or \"map <target>\" (<target>: $defs.<name>, string, sha256, "
+                    "path or release-id). They are enforced by pf_install.validate_document only; a generic JSON "
+                    "Schema validator ignores them, so every consumer validates with pf_install.validate_document."),
     "$defs": {
         "plan": _object({
             "schema_version": {"const": 1},
@@ -479,10 +483,36 @@ def _document_bytes(value):
     return pf_instance.normalize_json(value)
 
 
+def _read_regular(path, *, single_link=False):
+    """Bytes of a regular file: opened without following links and without blocking (a FIFO or device is refused
+    on the open descriptor, so an editor-writable directory cannot stall the installer while it holds locks),
+    bounded by SOURCE_FILE_LIMIT. ``single_link`` also refuses a file with another hard link. Raises
+    FileNotFoundError when absent and OSError otherwise."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        if single_link and info.st_nlink != 1:
+            raise OSError(errno.EMLINK, "not a single-link file", str(path))
+        chunks, total = [], 0
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > SOURCE_FILE_LIMIT:
+                raise OSError(errno.EFBIG, f"more than {SOURCE_FILE_LIMIT} bytes", str(path))
+            chunks.append(block)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _read_optional(path):
     """Bytes of a regular file read without following links, or None when it is absent."""
     try:
-        return pf_instance.read_bytes_nofollow(path)
+        return _read_regular(path)
     except FileNotFoundError:
         return None
 
@@ -716,6 +746,16 @@ def render_next(root, journal, launcher_path=DEFAULT_LAUNCHER):
     return " or ".join(steps) or "none"
 
 
+def unreadable_step(root, item):
+    """The manual next step of an entry of install-operations/ that is not a readable operation."""
+    return (f"inspect {_operations_dir(root) / item['operation_id']} as root and move it out of "
+            f"{_operations_dir(root)} (keep a copy: an operation journal is evidence), then run the command again")
+
+
+def _next_text(root, item):
+    return unreadable_step(root, item) if item["phase"] == "unreadable" else render_next(root, item["journal"] or {})
+
+
 # ----------------------------------------------------------------------------- reading operations
 
 
@@ -794,7 +834,7 @@ def require_no_pending_install(root, instance_id, *, route="this command"):
                 "install-operation-pending",
                 f"Install operation {item['operation_id']} ({item['kind'] or 'unreadable'}) is open in phase "
                 f"{item['phase']}; {route} was refused and nothing was changed. Inspect it with '{prefix} install "
-                f"status', then follow its next step ({render_next(root, item['journal'] or {})}).")
+                f"status', then follow its next step ({_next_text(root, item)}).")
         if item["kind"] == "migrate-legacy" and item["phase"] == "completed" and pinned \
                 and os.path.lexists(plan["legacy"]["control_dir"]):
             raise InstallError(
@@ -826,7 +866,7 @@ def describe_installation(root, *, instance_ids=None):
     for item in operations(root):
         if item["phase"] in OPEN_PHASES or item["phase"] == "unreadable":
             lines.append(f"INSTALL OPERATION {item['operation_id']} kind={item['kind'] or 'unknown'} "
-                         f"phase={item['phase']}: next: {render_next(root, item['journal'] or {})}")
+                         f"phase={item['phase']}: next: {_next_text(root, item)}")
         plan = item["plan"]
         if item["kind"] == "migrate-legacy" and item["phase"] == "completed" \
                 and (instance_ids is None or plan["instance"]["instance_id"] in instance_ids) \
@@ -973,7 +1013,7 @@ def _open_operation_checks(report, root):
     for item in pending_operations(root):
         report.conflict("install-operation-pending", item["operation_id"],
                         f"install operation ({item['kind'] or 'unreadable'}) is open in phase {item['phase']}; follow "
-                        f"its next step ({render_next(root, item['journal'] or {})}) first")
+                        f"its next step ({_next_text(root, item)}) first")
 
 
 def _verify_baseline(root, contexts):
@@ -1023,8 +1063,9 @@ def _config_categories(context):
 
 
 def _read_optional_safe(path):
+    """Bytes, None when absent, False when not a readable regular file (never blocks; see _read_regular)."""
     try:
-        return pf_instance.read_bytes_nofollow(path)
+        return _read_regular(path)
     except FileNotFoundError:
         return None
     except OSError:
@@ -1102,10 +1143,11 @@ def _daemon_check(report, runner, endpoint, root):
     return observation.engine_id, resolved
 
 
-def _registration_checks(report, root, registry, *, slug, project, paths, engine_id, own_instance_id=None):
+def _registration_checks(report, root, registry, *, slug, project, paths, engine_id, own_instance_id=None,
+                         check_project=True):
     if not isinstance(slug, str) or not re.fullmatch(pf_instance.NAME_PATTERN[1:-1], slug):
         report.conflict("slug-invalid", slug, "a slug is 1-40 characters of a-z 0-9 _ - starting with a letter or digit")
-    if not isinstance(project, str) or not re.fullmatch(pf_instance.NAME_PATTERN[1:-1], project):
+    if check_project and (not isinstance(project, str) or not re.fullmatch(pf_instance.NAME_PATTERN[1:-1], project)):
         report.conflict("project-invalid", project, "a Compose project is 1-40 characters of a-z 0-9 _ -")
     if registry is not None:
         for entry, context, _ in registry.records():
@@ -1155,7 +1197,8 @@ def _preflight_registration_common(report, root, plan, request, runner, *, proje
     engine_id, resolved = _daemon_check(report, runner, endpoint, root)
     slug = request.get("slug")
     paths = {role: request.get(role) for role in pf_instance.ROLE_NAMES}
-    _registration_checks(report, root, registry, slug=slug, project=project, paths=paths, engine_id=engine_id)
+    _registration_checks(report, root, registry, slug=slug, project=project, paths=paths, engine_id=engine_id,
+                         check_project=not (legacy and config is None))  # the admin-config conflict names the cause
     if all(isinstance(value, str) for value in paths.values()) and project and engine_id:
         plan["instance"] = {"instance_id": request.get("instance_id") or str(uuid.uuid4()), "slug": slug,
                             "compose_project": project, "approved_environment": "staging",
@@ -1189,9 +1232,15 @@ def _legacy_file(report, role, source, target, staged):
         return None
     if source_info is None:
         return None
-    source_bytes = pf_instance.read_bytes_nofollow(source)
+    try:
+        source_bytes = _read_regular(source, single_link=True)
+        target_bytes = None if target_info is None else _read_regular(target, single_link=True)
+    except OSError as exc:  # replaced after the lstat: never block on it or read another file's bytes
+        report.conflict("legacy-file-unsafe", getattr(exc, "filename", None) or source,
+                        f"changed while it was read ({exc.strerror or exc}); replace it with a regular file first")
+        return None
     if target_info is not None:
-        if pf_instance.read_bytes_nofollow(target) != source_bytes:
+        if target_bytes != source_bytes:
             legacy_path = source
             report.conflict("legacy-env-conflict" if role == "env" else "legacy-admin-config-conflict", target,
                             f"{legacy_path} and {target} both exist and differ. Neither is chosen automatically: "
@@ -1290,7 +1339,14 @@ def _preflight_migrate(report, root, plan, request, runner, *, under_lock):
     env_entry = next((item for item in files if item["role"] == "env"), None)
     _app_env_note(report, Path(env_entry["source"]) if env_entry else config_dir / ".env")
     project = plan["instance"]["compose_project"] if plan["instance"] else project
+    # Every check that does not need the project runs first, so one report holds every conflict (A2-T01).
+    launcher_path = None if request.get("no_launcher") else Path(request.get("launcher_path") or DEFAULT_LAUNCHER)
+    plan["launcher"] = _launcher_plan(report, "migrate-legacy", launcher_path, root)
+    _free_space(report, config_dir if os.path.isdir(str(config_dir)) else root, sum(item["size"] for item in files))
     if project is None:
+        report.note("legacy-state-unchecked", f"the v2.5 state checks ({home}/.pf-state-<project>/pending.json and its "
+                                              "operation.lock) need the project of a valid pf-config.json; they run "
+                                              "after it is fixed")
         return
     state_dir = home / (".pf-state-" + project)
     lock_path = state_dir / "operation.lock"
@@ -1330,9 +1386,6 @@ def _preflight_migrate(report, root, plan, request, runner, *, under_lock):
     report.note("legacy-control-retained", f"{control_dir} and its launcher stay the working v2.5 control plane")
     report.note("legacy-resources-not-adopted", "Docker resources, containers, volumes and credentials are not "
                                                 "adopted; pf mutation stays refused until legacy adoption (OD-A21-05)")
-    launcher_path = None if request.get("no_launcher") else Path(request.get("launcher_path") or DEFAULT_LAUNCHER)
-    plan["launcher"] = _launcher_plan(report, "migrate-legacy", launcher_path, root)
-    _free_space(report, config_dir if os.path.isdir(str(config_dir)) else root, sum(item["size"] for item in files))
 
 
 def _instance_journal_checks(report, contexts):
@@ -1485,8 +1538,19 @@ def _init_documents(version):
     return profile, policy
 
 
-def _init_leftovers(report, root, *, own=None):
-    """Classify every ``.<name>.init-*`` sibling of ``root``. Returns the own, unlocked leftovers."""
+def _other_filesystem(root):
+    """True when the existing directory ``root`` is a mount point or not on its parent's device (a btrfs
+    subvolume or DSM shared folder): the init build directory is renamed onto it, which cannot cross devices."""
+    try:
+        return os.path.ismount(str(root)) or os.lstat(str(root)).st_dev != os.lstat(str(root.parent)).st_dev
+    except OSError:
+        return True
+
+
+def _init_leftovers(report, root, *, own=None, notes=True):
+    """Classify every ``.<name>.init-*`` sibling of ``root``. Returns the own, unlocked leftovers.
+
+    ``notes`` False (the re-check under the locks): an own leftover found then is left for the next init."""
     root = Path(root)
     parent = root.parent
     prefix = "." + root.name + ".init-"
@@ -1503,6 +1567,8 @@ def _init_leftovers(report, root, *, own=None):
         if verdict == "busy":
             report.conflict("install-busy", path, "another init holds this build directory; let it finish first")
         elif verdict == "own":
+            if not notes:
+                continue
             own_leftovers.append(path)
             report.note("init-leftover-removed", f"{path} is an unpublished build of an interrupted init; it is "
                                                  "removed after the confirmation")
@@ -1537,8 +1603,15 @@ def _leftover_verdict(path, root, op8):
                 entries = os.listdir(str(operations_dir))
             except OSError:
                 return "no install-operations/"
-            if len(entries) != 1:
+            if not entries:
+                # An own crash window: write_intent created install-operations/ but not the intent yet, or the
+                # removal of a cancelled build stopped after the operation directory.
+                if names != [str(OPERATIONS_RELATIVE)]:
+                    return "an empty install-operations/ beside other content"
+                entries = None
+            elif len(entries) != 1:
                 return "install-operations/ must hold exactly one operation"
+        if names and entries is not None:
             entry = entries[0]
             operation_id = entry[1:-4] if entry.startswith(".") and entry.endswith(".new") else entry
             match = OPERATION_ID_RE.fullmatch(operation_id)
@@ -1605,11 +1678,17 @@ def _preflight_init(report, root_text, plan, request, *, under_lock=False, own_b
                                        or os.listdir(root_text)):
         report.conflict("root-exists", root, "init creates a new installation root only; choose an absent or empty "
                                              "directory (an existing root is managed with 'pf install')")
+    elif os.path.isdir(root_text) and _other_filesystem(root):
+        report.conflict("root-exists", root, "the empty root is a mount point or another filesystem than its parent "
+                                             f"{root.parent}; init publishes with one atomic rename of a sibling build "
+                                             "directory, so choose an absent path on the parent's filesystem")
     try:
         render_launcher(root)
     except InstallError as exc:
         report.conflict("root-noncanonical", root, str(exc))
-    leftovers = tuple(_init_leftovers(report, root, own=own_build)) if not under_lock else ()
+    # Under the locks the scan runs again without this init's own build: another init's busy build (one that
+    # confirmed at the same time) refuses here, before anything is published (CC-6).
+    leftovers = tuple(_init_leftovers(report, root, own=own_build, notes=not under_lock))
     interpreter = request.get("interpreter") or os.path.realpath(sys.executable)
     runner = None
     try:
@@ -1646,6 +1725,8 @@ def _preflight_init(report, root_text, plan, request, *, under_lock=False, own_b
         if interpreter is not None:
             conf = pf_instance.render_bootstrap_conf(interpreter, str(root / "releases" / candidate.release_id),
                                                      candidate.inventory_sha256)
+            # Descriptive bindings: both files are bytes of the one build-root effect, so both carry its effect id;
+            # init resolves them by type (_apply_build_root), never with _Run.binding(effect_id).
             plan["bindings"] = [
                 _binding("build-root", "bootstrap-conf",
                          root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_CONF_NAME, None, conf),
@@ -1677,8 +1758,13 @@ def _preflight(root, kind, request, *, runner, running_release, under_lock=False
     elif kind == "control":
         candidate, unchanged = _preflight_control(report, Path(root), plan, request, runner, running_release)
         if unchanged and not report.conflicts:
+            wrappers = [Path(item["target"]).name for item in plan["bindings"] if item["type"] == "wrapper"]
+            extra = "" if not wrappers else (
+                f" The candidate's scheduler wrapper(s) {', '.join(wrappers)} differ from "
+                f"{Path(root) / pf_instance.BOOTSTRAP_DIR}; a wrapper-only change is not installed on its own: it is "
+                "installed together with the next control release whose files change.")
             raise InstallError("control-unchanged", f"Release {candidate.release_id} is already the bound control; "
-                                                    "nothing was changed.", exit_code=0)
+                                                    "nothing was changed." + extra, exit_code=0)
     else:
         request = dict(request)
         if instance_id is not None:
@@ -1906,7 +1992,11 @@ class _Run:
         self.save(phase=self._advance(AFTER.get(etype)))
 
     def committed(self):
-        return self.entry(COMMIT_EFFECT[self.plan["kind"]]) is not None
+        item = self.entry(COMMIT_EFFECT[self.plan["kind"]])
+        if item is not None and self.plan["kind"] == "init" and item["state"] != "complete" \
+                and os.path.lexists(str(self.build_dir)):
+            return False  # publish-root is one rename: while the build directory exists nothing was published
+        return item is not None
 
     def direction(self):
         if self.entry("abandon") is not None:
@@ -2089,9 +2179,14 @@ class _Run:
         if not os.path.lexists(str(target)):
             return "not_started", "absent"
         data = _read_optional_safe(target)
-        if isinstance(data, bytes) and _sha(data) == item["sha256"] and _same_identity(target, identity):
-            return "complete", _sha(data)
-        return "unknown", _sha(data) if isinstance(data, bytes) else "unreadable"
+        if not isinstance(data, bytes):
+            return "unknown", "unreadable"
+        if _sha(data) == item["sha256"]:
+            if _same_identity(target, identity):
+                return "complete", "the planned copy"
+            return "unknown", "a file with the planned bytes but another identity (not this operation's copy)"
+        # Section 3.10: the hash of a secret-bearing .env is never printed or journaled outside plan.json.
+        return "unknown", "a file with different bytes" if role == "env" else _sha(data)
 
     def _observe_bind_launcher(self, effect_id):
         launcher = self.plan["launcher"]
@@ -2100,7 +2195,9 @@ class _Run:
             return "not_started", "absent"
         if isinstance(data, bytes) and data == launcher["after_text"].encode("utf-8"):
             return "complete", _sha(data)
-        return "unknown", _sha(data) if isinstance(data, bytes) else "unreadable"
+        # Another writer's launcher (or anything else at the path): section 3.7 never takes or replaces an
+        # existing launcher, so resume treats it as the live EEXIST case and leaves it, never as unknown.
+        return "left", "present and not written by this operation"
 
     def _observe_register_instance(self, effect_id):
         instance = self.plan["instance"]
@@ -2156,6 +2253,12 @@ class _Run:
             if item is not None and self._consumed(etype):
                 continue
             state, detail = self.observe(effect_id, etype)
+            if state == "left":  # bind-launcher only: journaled like the live no-clobber EEXIST (identity null)
+                if item is None:
+                    self.intend(effect_id, etype)
+                self.complete(effect_id, etype)
+                self._launcher_left()
+                continue
             if state == "complete":
                 if item is None or item["state"] != "complete":
                     self.intend(effect_id, etype, observed="complete")
@@ -2195,6 +2298,8 @@ class _Run:
     def _after_observed_complete(self, effect_id, etype):
         if etype == "publish-root":
             self.base = self.root
+        if etype == "bind-launcher":
+            self._remove_own_launcher_temp()
         if etype == "publish-legacy-file":
             staged = Path(self.legacy_file(effect_id.split(":", 1)[1])["staged"])
             if _same_identity(staged, (self.entry("stage-legacy-file:" + effect_id.split(":", 1)[1]) or {}).get(
@@ -2464,9 +2569,33 @@ class _Run:
             os.unlink(str(temp))
             pf_instance._fsync_directory(path.parent)
         if identity is None:
-            self.say(f"Note: launcher-left: {path} appeared while installing; another writer won and nothing was "
-                     f"replaced. Use {self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.LAUNCHER_NAME}.")
+            self._launcher_left()
         return identity
+
+    def _launcher_left(self):
+        self._remove_own_launcher_temp()
+        self.say(f"Note: launcher-left: {self.plan['launcher']['path']} appeared while installing; another writer "
+                 f"won and nothing was replaced. Use "
+                 f"{self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.LAUNCHER_NAME}.")
+
+    def _remove_own_launcher_temp(self):
+        """Remove ``.pf.tmp-<op8>`` left by a stop inside bind-launcher: it is this operation's when it is the
+        launcher's own inode (a stop between the link and the unlink) or holds exactly the rendered bytes."""
+        launcher = self.plan["launcher"]
+        if launcher is None or launcher["after_text"] is None:
+            return
+        path = Path(launcher["path"])
+        temp = path.parent / f".pf.tmp-{_op8(self.operation_id)}"
+        try:
+            info = os.lstat(str(temp))
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        same_inode = _same_identity(path, {"st_dev": info.st_dev, "st_ino": info.st_ino})
+        if same_inode or _read_optional_safe(temp) == launcher["after_text"].encode("utf-8"):
+            os.unlink(str(temp))
+            pf_instance._fsync_directory(path.parent)
 
     def _apply_register_instance(self, effect_id):
         instance = self.plan["instance"]
@@ -2489,7 +2618,12 @@ class _Run:
 
     def _apply_stage_legacy_file(self, effect_id):
         item = self.legacy_file(effect_id.split(":", 1)[1])
-        data = pf_instance.read_bytes_nofollow(item["source"])
+        try:
+            data = _read_regular(item["source"], single_link=True)
+        except OSError as exc:  # a FIFO, link or other file swapped in after the preflight (never blocks)
+            raise InstallError("install-plan-changed", f"{item['source']} changed after the summary was shown "
+                                                       f"({exc.strerror or exc}); nothing was changed. Run the "
+                                                       "command again to review a new plan.") from exc
         if _sha(data) != item["sha256"]:
             raise InstallError("install-plan-changed", f"{item['source']} changed after the summary was shown "
                                                        "(content hash); nothing was changed. Run the command again "
@@ -2571,7 +2705,9 @@ class _Run:
             binding = self.binding(effect_id)
             return binding["before_sha256"] or "absent", binding["after_sha256"]
         if etype in ("stage-legacy-file", "publish-legacy-file"):
-            return "absent", self.legacy_file(effect_id.split(":", 1)[1])["sha256"]
+            role = effect_id.split(":", 1)[1]
+            # Section 3.10: the .env hash stays in the private plan only.
+            return "absent", "the planned .env copy" if role == "env" else self.legacy_file(role)["sha256"]
         if etype == "bind-launcher":
             return "absent", _text_sha(self.plan["launcher"]["after_text"])
         return "absent", "the pinned identity"
@@ -2605,8 +2741,12 @@ class _Run:
             publish = self.entry("publish-release")
             if publish is not None and _same_identity(self.release_dir(),
                                                       (self.entry("stage-release") or {}).get("target_identity")):
-                pf_instance._remove_tree(self.release_dir())
+                # One rename takes it out of releases/ first, so an interrupted removal never leaves a partial
+                # release behind (a re-run would see release-id-collision); the remainder stays in the op dir.
+                aside = self.op_dir / "release.cancelled"
+                os.rename(str(self.release_dir()), str(aside))
                 pf_instance._fsync_directory(self.release_dir().parent)
+                pf_instance._remove_tree(aside)
             return
         if kind == "migrate-legacy":
             self._remove_legacy_copies()
@@ -2718,6 +2858,8 @@ class _Run:
             if os.path.lexists(str(staging)):
                 pf_instance._remove_tree(staging)
         else:
+            if self.plan["launcher"] is not None:
+                self._remove_own_launcher_temp()  # before the launcher: its identity names the temp as ours
             if self._own_launcher():
                 path = Path(self.plan["launcher"]["path"])
                 self._set_entry("remove-launcher", "remove-launcher", state="intended")
@@ -2785,6 +2927,15 @@ def _drive(run, action):
     try:
         action()
     except _NeedsOperator as exc:
+        if run.plan["kind"] == "init" and not run.committed():
+            # Before publication the journal lives in the private build: needs_operator there would name a
+            # resume that cannot reach it. Another writer owns the root; nothing of this init was published.
+            _cancel(run, reason_code="install-failed", message=f"{exc.target}: {exc.observed}")
+            raise InstallError("install-failed",
+                               f"Operation {run.operation_id} found {exc.target} created by another writer before it "
+                               f"published ({exc.observed}); it was cancelled and its private build directory "
+                               f"{run.build_dir} was removed. Nothing was published. Choose an absent root, then run "
+                               "'sudo sh ./deploy/synology/install-control.sh init' again.") from None
         raise run.enter_needs_operator(exc) from None
     except _VerifyFailed as exc:
         detail = str(exc)
@@ -2793,6 +2944,19 @@ def _drive(run, action):
                 run.rollback()
             except _NeedsOperator as inner:
                 raise run.enter_needs_operator(inner) from None
+            except (KeyboardInterrupt, OSError, pf_instance.ContextError) as inner:
+                try:
+                    run.save(last_error=f"rollback interrupted ({inner or type(inner).__name__})"[:500],
+                             next=["install resume"])
+                except BaseException:  # noqa: B902 - best effort only; the journal already says rolling_back
+                    pass
+                raise InstallError(
+                    "install-interrupted",
+                    f"Control release {run.plan['candidate']['release_id']} did not verify after binding ({detail}), "
+                    f"and restoring the previous binding was interrupted ({inner or type(inner).__name__}). Operation "
+                    f"{run.operation_id} stays open in phase {run.journal['phase']}; the bindings may be mixed and every "
+                    f"instance route is refused until it ends. Run '{launcher_prefix(run.root)} install resume' to "
+                    "finish the restore. The application was not touched.") from None
             old = run.plan["running_release"] or "none"
             raise InstallError("install-verify-failed",
                                f"Control release {run.plan['candidate']['release_id']} did not verify after binding "
@@ -2817,25 +2981,45 @@ def _drive(run, action):
                                f"Run '{launcher_prefix(run.root)} install resume' (or 'install resume --abandon' where "
                                "legal).") from None
         if isinstance(exc, _StagingLost):
-            run.cancel(reason_code="install-cancelled", message="staging lost")
+            _cancel(run, reason_code="install-cancelled", message="staging lost")
             raise InstallError("install-cancelled",
                                f"Operation {run.operation_id} stopped before its staged bytes were complete; they are "
                                "never rebuilt from the source. Its staging was removed and nothing else was changed "
                                "(cancelled). Run the original command again.") from None
         if isinstance(exc, KeyboardInterrupt):
-            run.cancel(reason_code="install-cancelled", message="interrupted")
+            _cancel(run, reason_code="install-cancelled", message="interrupted")
             raise Cancelled(phase, _cancel_copy(run, phase)) from None
         if isinstance(exc, _SmokeFailed):
-            run.cancel(reason_code="install-smoke-failed", message=str(exc))
+            _cancel(run, reason_code="install-smoke-failed", message=str(exc))
             raise InstallError("install-smoke-failed",
                                f"The control release {run.plan['candidate']['release_id'] if run.plan['candidate'] else ''} "
                                f"failed its smoke check ({exc}); it was not activated, its staging was removed and the "
                                "installed control is unchanged.") from None
-        run.cancel(reason_code=getattr(exc, "code", "install-failed"), message=str(exc))
+        _cancel(run, reason_code=getattr(exc, "code", "install-failed"), message=str(exc))
         if isinstance(exc, InstallError):
             raise
+        if run.plan["kind"] == "init":
+            raise InstallError("install-failed", f"Operation {run.operation_id} failed during {phase} ({exc}); it was "
+                                                 f"cancelled and its private build directory {run.build_dir} was "
+                                                 "removed. Nothing was published. Fix the cause, then run 'sudo sh "
+                                                 "./deploy/synology/install-control.sh init' again.") from None
         raise InstallError("install-failed", f"Operation {run.operation_id} failed during {phase} ({exc}); it was "
                                              "cancelled and its own staging removed. Nothing else was changed.") from None
+
+
+def _cancel(run, *, reason_code, message):
+    """``run.cancel`` whose own interruption is reported as it is: the journal already says ``cancelled`` (it is
+    written first), but some of this operation's own staging or copies may remain."""
+    try:
+        run.cancel(reason_code=reason_code, message=message)
+    except (KeyboardInterrupt, OSError) as exc:
+        if run.journal["phase"] != "cancelled":
+            raise
+        raise InstallError("install-interrupted",
+                           f"Operation {run.operation_id} is cancelled, but removing its own staging or copies was "
+                           f"interrupted ({exc or type(exc).__name__}); nothing else was changed. What remains stays "
+                           "inside its operation directory or is recognized by the next run of the same command; run "
+                           "it again when needed.") from None
 
 
 def _comparable(plan):
@@ -2907,6 +3091,14 @@ def execute(root, plan, *, runner, interaction, candidate=None, leftovers=(), ru
             if kind == "init" and run.build_fd is not None:
                 run.release()
                 run._remove_build()
+            elif kind != "init" and os.path.lexists(str(run.op_dir)):
+                # The intent rename happened (the stop came after it, e.g. in the directory fsync): an open
+                # operation in phase planned with no effect. It is cancelled, never reported as nothing written.
+                _cancel(run, reason_code="install-cancelled" if isinstance(exc, KeyboardInterrupt) else
+                        getattr(exc, "code", "install-failed"), message=str(exc) or type(exc).__name__)
+                if isinstance(exc, KeyboardInterrupt):
+                    raise Cancelled("planned", _cancel_copy(run, "planned")) from None
+                raise
             if isinstance(exc, KeyboardInterrupt):
                 raise Cancelled("locks", "Cancelled before the intent was written; nothing was changed.") from None
             raise
@@ -2947,7 +3139,16 @@ def _remove_own_leftover(path, root):
 def _select_operation(root, operation_id):
     if operation_id is not None:
         return operation_id
-    open_items = [item for item in operations(root) if item["phase"] in OPEN_PHASES]
+    items = operations(root)
+    open_items = [item for item in items if item["phase"] in OPEN_PHASES]
+    unreadable = [item for item in items if item["phase"] == "unreadable"]
+    if not open_items and unreadable:
+        # It gates every route (fail closed), so "nothing to do" would be a hidden dead end.
+        item = unreadable[0]
+        raise InstallError("install-operation-unreadable",
+                           f"{_operations_dir(root) / item['operation_id']} is not a readable install operation "
+                           f"({item['error']}); it refuses every route and resume cannot continue it. Next: "
+                           f"{unreadable_step(root, item)}.")
     if not open_items:
         raise InstallError("install-nothing-pending", "No open install operation; nothing to do.", exit_code=0)
     if len(open_items) > 1:
@@ -3127,7 +3328,7 @@ def _status(root, interaction):
         line = (f"INSTALL OPERATION {item['operation_id']} kind={item['kind'] or 'unknown'} phase={item['phase']}"
                 f" updated={item['updated'] or '-'}")
         if item["phase"] in OPEN_PHASES or item["phase"] == "unreadable":
-            line += f": next: {render_next(root, item['journal'] or {})}"
+            line += f": next: {_next_text(root, item)}"
         if item["error"]:
             line += f" ({item['error']})"
         interaction.say(line)
@@ -3196,11 +3397,17 @@ def run_installed(root, args, *, running_release, trusted_launch, interaction):
             values = {"legacy-home": args.legacy_home, "workspace": args.workspace, "slug": args.slug,
                       "launcher_path": args.launcher_path, "no_launcher": args.no_launcher}
         else:
-            values = {"candidate": args.source or args.release}
+            values = {"candidate": args.source if args.source is not None else args.release}
         request = _inputs(kind, values, interaction)
         if kind == "control":
             candidate = request.pop("candidate")
-            request["source" if candidate.startswith("/") else "release"] = candidate
+            # The flag the operator typed decides (section 4.1); only a prompted answer is classified.
+            if args.source is not None:
+                request["source"] = candidate
+            elif args.release is not None:
+                request["release"] = candidate
+            else:
+                request["source" if candidate.startswith("/") else "release"] = candidate
         if kind != "control":
             request["docker_endpoint"] = args.docker_endpoint or DEFAULT_DOCKER_ENDPOINT
         runner = _installed_runner(root, request.get("docker_endpoint"))

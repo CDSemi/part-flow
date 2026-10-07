@@ -272,6 +272,32 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > configuration creation (PF-A2.2); no permission change (PF-A2.3); no cleanup of old releases (PF-A5.1);
 > no durability claim beyond fsync and rename on the tested filesystem.
 
+> **PF-A2.1 audit addendum (2026-10-07, uncommitted over `964aefb`).** The implementation audit
+> (`becd72a..964aefb`, 18 confirmed findings, all minor after verification) is closed with regression tests
+> that fail on `964aefb` (16 of 16, run against its `pf_install.py`, `pf-admin.py` and schema) and pass after
+> (`test_install.AuditRegressions` AU-1…AU-16): (1) the init re-check under the locks scans leftovers again, so
+> a concurrently confirmed init is refused (`install-busy` → `install-plan-changed`); (2) a failed or
+> interrupted root rename is before the commit point (build removed, re-run `install-control.sh init`, never a
+> `resume` of a root that does not exist), and an empty root that is a mount point or another device is
+> `root-exists`; (3) an own build holding only an empty `install-operations/` is an own leftover; (4)
+> `--source`/`--release` keep the typed flag; (5) `control-unchanged` names a differing scheduler wrapper (a
+> wrapper-only change is installed with the next release change); (6) an interrupt after the intent rename
+> cancels the open operation; (7) the `.env` hash never reaches stderr, stdout or the journal; (8) a launcher
+> created by another writer before resume is left (`launcher-left`); (9) the hard-linked `.pf.tmp-<op8>` is
+> removed by resume and abandon; (10) an unreadable `install-operations/` entry gives
+> `install-operation-unreadable` and a manual next step; (11) legacy and editor-writable files are read
+> non-blocking, regular and bounded (a FIFO never stalls the installer); (12) an invalid admin config no longer
+> hides the launcher, free-space and v2.5 state checks (note `legacy-state-unchecked`); (13) an interrupted
+> automatic restore or cancel cleanup is `install-interrupted`, and a cancelled release leaves `releases/`
+> by one rename before its removal; (14) the unused `import signal` is gone from `pf-admin.py` (AU-16 checks
+> both entry modules). The SS-3/SS-3b allowlists gain the two reviewed write sites (`os.rename` in
+> `_Run.cancel`, `os.unlink` in `_Run._remove_own_launcher_temp`). The schema's top-level description now
+> states that its `description` markers are normative and enforced only by `pf_install.validate_document`.
+> Executed: the same discovery on `python:3.12` (CPython 3.12.15) and `python:3.9` (CPython 3.9.25), uid 0:
+> **479 tests OK, 0 skipped** on both (463 + 16); `sh -n` for the 4 scripts, `ast` (3, 9) for the 16 Python
+> files and the strict JSON load of the schema passed in both runs. Gate statuses are unchanged (A2-T01…T03
+> passed offline; A2-T04, the real global launcher and reboot/power loss not_run; A1-T11…T14, A1-T17 blocked).
+
 ## Executed checks
 
 | Check | Actual result |

@@ -386,7 +386,11 @@ khác) và không tới được root mới.
    Input còn thiếu sẽ được hỏi; `--interpreter`, `--tool <id>=<path>`, `--launcher-path <path>` và
    `--no-launcher` thay các giá trị mặc định đã phát hiện (hiển thị trong summary). Xác nhận bằng
    `INSTALL CONTROL <release-id>`. Mọi verb khác của `install-control.sh` bị từ chối với
-   `installer-verb-installed-only`.
+   `installer-verb-installed-only`. Root rỗng đã tồn tại phải nằm trên cùng filesystem với thư mục cha:
+   một mount point hoặc chính một DSM shared folder bị từ chối (`root-exists`), vì root được publish bằng
+   một lần rename nguyên tử của thư mục build bên cạnh; hãy chỉ định một đường dẫn chưa tồn tại bên dưới
+   nó. Nếu bước publish thất bại hoặc bị gián đoạn thì chưa có gì được publish: thư mục build bị xóa và bạn
+   chạy lại đúng lệnh `install-control.sh init` (không có `resume` cho một root chưa tồn tại).
 2. Tạo `<config>/pf-config.json` và `<config>/.env` bằng tay từ
    `<root>/releases/<id>/pf-config.example.json` và `nas.env.example` (owner, group và mode như mục 6).
    PF-A2.1 không tạo cấu hình nào; wizard của PF-A2.2 sẽ làm việc đó.
@@ -996,6 +1000,14 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   cách đó.
 - Operation bị gián đoạn được tiếp tục bằng `pf install resume` hoặc hủy bằng
   `pf install resume --abandon`; rollback bị gián đoạn luôn hoàn tất việc khôi phục.
+- `--source` luôn chỉ một source tree và `--release` luôn chỉ một release id đã giữ; giá trị sai loại bị từ
+  chối, không bao giờ được hiểu lại. Chỉ câu trả lời gõ tại prompt `candidate` mới được phân loại (bắt đầu
+  bằng `/` là source tree).
+- Candidate chỉ thay đổi một scheduler wrapper (`backup.sh`, `release-check.sh`) là `control-unchanged`
+  (exit 0): thông báo nêu wrapper khác nhau. Thay đổi chỉ-wrapper không được cài riêng; nó được cài cùng
+  control release kế tiếp có file thay đổi.
+- Gián đoạn trong lúc tự khôi phục sau khi verify thất bại là `install-interrupted`: operation ở lại
+  `rolling_back` và mọi route của instance bị từ chối cho tới khi `pf install resume` hoàn tất việc khôi phục.
 - Byte của launcher và verifier bị đóng băng: candidate thay đổi `pf.sh` hoặc `pf_bootstrap.py` bị từ chối
   với `bootstrap-change-unsupported` (launcher migration thuộc PF-A4.3).
 - Archive cũ `recovery/control-upgrades/` không còn áp dụng; release cũ nằm dưới `<root>/releases/`.
@@ -1058,8 +1070,10 @@ gì, hãy chạy lại.
 ### `install-needs-operator`, `bootstrap-change-unsupported` hoặc `install-busy`
 
 `install-needs-operator`: resume gặp một target ở trạng thái mà installer không ghi; thông báo nêu target,
-các hash kỳ vọng và thứ đã gặp, và journal ghi lại bằng chứng. Khôi phục target, rồi chạy
-`pf install resume` (hoặc `pf install resume --abandon` khi được đề xuất). `bootstrap-change-unsupported`:
+các hash kỳ vọng và thứ đã gặp, và journal ghi lại bằng chứng (với `.env` thông báo nêu bản copy dự kiến
+và thứ đã gặp, không bao giờ nêu hash của file). Khôi phục target, rồi chạy `pf install resume` (hoặc
+`pf install resume --abandon` khi được đề xuất). Global launcher do writer khác tạo trong lúc đó không bao giờ
+là lý do: resume để nguyên nó với note `launcher-left`. `bootstrap-change-unsupported`:
 candidate thay đổi launcher hoặc verifier; cài vào root mới hoặc giữ nguyên các byte đó. `install-busy`: một
 operation khác đang giữ lock cần dùng (registry, instance, v2.5 hoặc thư mục build của init); không thay đổi
 gì, thử lại khi nó xong.
@@ -1071,6 +1085,17 @@ không được kích hoạt và staging của nó đã bị xóa. `install-veri
 được khôi phục (`rolled_back`); với kind khác, operation ở lại `needs_operator` kèm bước tiếp theo.
 `abandon-not-possible`: một `init` đã publish root, hoặc một registration đã được dùng (đã đặt default, đã
 ghi operation, record đã đổi, lock đang bị giữ), không thể abandon; hoàn tất nó bằng `pf install resume`.
+
+### `install-operation-unreadable` hoặc `install-interrupted`
+
+`install-operation-unreadable`: một entry trong `<root>/install-operations/` không phải install operation
+đọc được (ví dụ một thư mục lạc). Nó từ chối mọi route (fail closed) và `resume` không thể tiếp tục nó. Kiểm
+tra nó bằng root và chuyển nó ra khỏi `install-operations/` (giữ một bản copy: journal của operation là bằng
+chứng), rồi chạy lại lệnh. `install status` và thông báo gate nêu cùng bước đó. `install-interrupted`:
+operation dừng sau commit point hoặc trong lúc tự khôi phục; nó vẫn mở ở phase mà thông báo nêu. Chạy
+`pf install resume`. Khi thông báo nói operation đã cancelled nhưng việc dọn dẹp bị gián đoạn thì không có
+gì khác bị thay đổi: phần còn lại nằm trong thư mục operation của nó hoặc được nhận ra ở lần chạy kế tiếp
+của cùng lệnh.
 
 ### `compose-route-removed`, `compose-override-refused`, `unknown-option` hoặc `unknown-command`
 
