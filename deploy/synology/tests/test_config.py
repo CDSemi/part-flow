@@ -624,8 +624,10 @@ class AdminWizard(ConfigBase):
         self.assertEqual(code, 0, out + err)
         self.assertIn(pf.BACKUP_GROUP_CONSEQUENCE, out)
         self.assertEqual(len([prompt for prompt in script.prompts if "group name" in prompt]), 1)
-        self.assertIn("backup_read_group change takes effect at the next backup or purge without a separate approval "
-                      "(revision-bound group approval: PF-A2.3).", out)
+        # PF-A2.3 (OD-A22-20 closed): the group is a proposal; the summary says so instead of the A2.2 limit.
+        self.assertIn("backup_read_group is a proposal: backups and recovery bundles keep the group of their folders "
+                      "until '", out)
+        self.assertNotIn("without a separate approval", out)
         self.assertEqual(pf_config.parse_admin_config(self.config_path.read_bytes(), label="x").values["backup_read_group"],
                          "users")
 
@@ -1999,6 +2001,24 @@ class Schema2Purge(unittest.TestCase):
         controller = tpa.FakeController(self.context)
         with contextlib.redirect_stdout(io.StringIO()):
             checkpoint = controller.snapshot("schema-2")
+        folder = controller.backups_dir / checkpoint["id"]
+        # PF-A2.3 (OD-A22-20): the schema 2 value is a proposal; the unapproved instance keeps the folder's group.
+        root_gid = controller.backups_root.stat().st_gid
+        self.assertNotEqual(root_gid, gid)
+        self.assertEqual(folder.stat().st_gid, root_gid)
+        self.assertTrue(all(item.stat().st_gid == root_gid for item in folder.iterdir()))
+        # Approving the proposal with `pf permissions apply` makes it the group of the next checkpoint.
+        stdout = io.StringIO()
+        answers = [""] * 7 + ["users", "", "users", ""] + ["APPLY PERMISSIONS staging"]
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stdout), \
+                mock.patch.object(pf, "unattended", return_value=False), \
+                mock.patch("builtins.input", Script(answers, stdout)):
+            code = pf.main(["--instance", "staging", "permissions", "apply"], installation_root=self.layout.root,
+                           running_release=self.layout.release_dir, trusted_launch=True)
+        self.assertEqual(code, 0, stdout.getvalue())
+        controller = tpa.FakeController(self.context)
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkpoint = controller.snapshot("schema-2-approved")
         folder = controller.backups_dir / checkpoint["id"]
         self.assertEqual(folder.stat().st_gid, gid)
         self.assertTrue(all(item.stat().st_gid == gid for item in folder.iterdir()))

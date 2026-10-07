@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A2.2 (trên commit `64dcce0`).
+> Baseline đồng bộ: package revision PF-A2.3 (trên commit `1244457`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -146,10 +146,12 @@
 > `pf ps`.
 > *Lệnh chạy không có terminal.* Lệnh khởi động không có terminal (scheduled task, script, `ssh`
 > không có `-t`) bị từ chối trước lock: lệnh có hỏi xác nhận gõ tay bị từ chối với
-> `terminal-required`; `backup`, `permissions` và `release-check` phải nêu rõ instance
+> `terminal-required`; `backup` và `release-check` phải nêu rõ instance
 > (`--instance <slug|uuid>`, nếu không thì `instance-required-unattended`) và sau đó cần một grant
 > trong protected policy cho loại thao tác đó, mà ở checkpoint này không policy nào cấp
-> (`policy-grant-required`, exit 20; grant có từ PF-A4.3). `release-check --apply` bị từ chối với
+> (`policy-grant-required`, exit 20; grant có từ PF-A4.3). PF-A2.3: `permissions check` và
+> `permissions plan` là read-only, chạy được không cần terminal và không cần grant; `permissions apply` chỉ chạy
+> với terminal (`terminal-required`). `release-check --apply` bị từ chối với
 > `auto-apply-not-permitted` (exit 20) dù có hay không có terminal; `auto_update` trong
 > `pf-config.json` chỉ là đề xuất. Wrapper `backup.sh` và `release-check.sh` của scheduler bắt
 > buộc `--instance` và chỉ thực thi launcher nằm cạnh nó (mục 13).
@@ -231,6 +233,26 @@
 > `install-control.sh init` nêu `config admin --configuration`.
 > Khối này **thay thế** các bước "tạo cấu hình bằng tay" trong khối PF-A2.1 và ở mục 5.
 
+> **Warning (PF-A2.3).** Checkpoint Deployment Admin PF-A2.3 (2026-10-07) — permission policy theo ngữ nghĩa,
+> `check`/`plan`/`apply`, scope floor và apply có thể resume; vẫn là **trạng thái phát triển, chưa phải bản phát
+> hành NAS**. Chỉ có bằng chứng offline: không có gì được chạy trên DSM host, SMB client hay Docker daemon thật.
+> *Lệnh.* `pf permissions check` (so sánh, read-only, exit 1 khi có khác biệt), `pf permissions plan` (xem trước
+> với thành viên group, số lượng và plan hash, read-only) và `pf permissions apply` (wizard đánh số, một lần xác
+> nhận gõ tay `APPLY PERMISSIONS <slug>`, sau đó apply có fence, có journal và được verify; chỉ chạy với
+> terminal). `pf permissions` không kèm verb không còn thay đổi gì: bị từ chối với `permissions-verb-required`
+> (exit 2). `check` và `plan` không lấy lock và không ghi gì ở bất kỳ đâu.
+> *Approval.* Một lần `apply` đã xác nhận ghi **permission policy revision** N vào
+> `<root>/instances/<uuid>/permission-policy.json` (root, `0600`, được `purge` giữ lại). Trước approval đầu tiên
+> instance dùng derived policy: backup và recovery bundle giữ group của thư mục chứa chúng, workspace và
+> configuration dùng `workspace_write_group`. `backup_read_group` là đề xuất cho mọi instance,
+> `workspace_write_group` là đề xuất khi đã có revision; chỉ sửa `pf-config.json` không còn thay đổi ai được đọc
+> backup hay recovery bundle.
+> *Flow.* Không lifecycle command nào còn duyệt một cây editable: `deploy --current` không đổi permission của
+> workspace, còn backup, recovery bundle, source được thay hoặc restore, `.env` được restore và state file được
+> restore là bản copy chỉ có nội dung, nhận target policy tường minh và được verify.
+> Khối này **thay thế** các bước `sudo pf permissions` ở mục 2 và 16 và ghi chú `backup_read_group` của khối
+> PF-A2.2 và mục 6.
+
 ## 1. Mục đích
 
 PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
@@ -264,32 +286,130 @@ repo **không phải** bản được chạy cho thao tác quản trị NAS thô
 
 ## 2. Quyền truy cập
 
-Mặc định dùng DSM group `users` cho quyền ghi repository/config và quyền đọc backup.
-Có thể đổi group trong `pf-config.json` nếu sau này muốn dùng một trusted group riêng.
+Từ PF-A2.3, permission của một instance đã đăng ký tuân theo một **permission policy theo ngữ nghĩa**. Không có
+gì hỏi hay chấp nhận mode octal, `+x-r` hay một dạng số thứ hai: mode là output, chỉ hiển thị khi yêu cầu. Các
+dòng v2.5 cho `control/` và `.pf-state-*` không còn áp dụng: control release nằm ở `<root>/releases/<id>/`, private
+state nằm ở `<root>/instances/<uuid>/`.
 
-| Path | Mode điển hình | Quyền |
+### Lựa chọn và scope
+
+Mỗi scope có group nhận một trong ba lựa chọn:
+
+| Lựa chọn | Giá trị JSON | Ý nghĩa với thành viên group |
 | --- | --- | --- |
-| directory trong `repo/` | `2770` | owner + `workspace_write_group` đọc/ghi/xóa; setgid giữ group |
-| file thường trong `repo/` | `0660` | owner + `workspace_write_group` đọc/ghi |
-| file executable sẵn có trong `repo/` | `0770` | chỉ là source/working-tree executable, không phải privileged control plane |
-| directory `control/` | `0750` | root sửa; `users` được browse/read |
-| `control/pf.sh`, `backup.sh`, `release-check.sh` | `0740` | root thực thi/sửa; `users` chỉ đọc |
-| file khác trong `control/` | `0640` | root sửa; `users` chỉ đọc |
-| directory `config/` | `2770` | trusted `users` có thể tạo/sửa/xóa config |
-| `config/.env`, `config/pf-config.json` | `0660` | trusted `users` đọc/ghi |
-| directory `backups/`, `recovery/` | `0750` | group được cấu hình chỉ browse/copy, không sửa/xóa |
-| file backup/recovery | `0640` | group được cấu hình đọc/copy, không ghi |
-| `.pf-state-*` | `0700` | chỉ root |
+| Xem và chỉnh sửa | `read_write` | đọc, tạo, sửa, đổi tên và xóa |
+| Xem và sao chép | `read_only` | đọc và copy |
+| Không truy cập qua group | `none` | không có quyền; chỉ owner |
 
-DSM Shared Folder ACL vẫn có hiệu lực. Muốn sửa `repo/` qua SMB thì DSM account/group đó
-cũng phải có **Read/Write** trên shared folder chứa PartFlow. POSIX permission không thể
-vượt qua một DSM ACL đang deny.
+| Scope | Path | Có thể chọn | Floor (không lựa chọn nào đổi được) |
+| --- | --- | --- | --- |
+| Workspace | `workspace` đã đăng ký | group, mọi lựa chọn, kế thừa group, chạy script `Owner only` hoặc `Owner and group` | giữ owner hiện có của người sửa; bit execute chỉ cho file mà manifest của source đã deploy đánh dấu executable |
+| Configuration | `configuration` đã đăng ký | group, mọi lựa chọn, kế thừa group | không có lựa chọn executable |
+| Control release | `<root>/releases/<id>/` | cố định: Không truy cập qua group | được kiểm tra, `apply` không bao giờ đổi: owner uid 0, không có group/other write, không có special bit |
+| Backups | `backups` đã đăng ký | group, Xem và sao chép hoặc Không truy cập qua group | owner uid 0, không group write, không owner được import |
+| Recovery bundles | `recovery` đã đăng ký | group, Xem và sao chép hoặc Không truy cập qua group | như backups |
+| Private state | `<root>/instances/<uuid>/` | cố định: chỉ owner | directory `0700`, file `0600`, không có group |
 
-Có thể chuẩn hóa lại permission bất cứ lúc nào:
+Bảng mode (chi tiết audit; owner luôn giữ đọc/ghi, `other` không bao giờ có bit nào, setgid chỉ có trên directory
+khi kế thừa group, setuid và sticky không bao giờ có):
+
+| Access | File | Directory | Directory kế thừa group |
+| --- | --- | --- | --- |
+| Không truy cập qua group | `0600` | `0700` | `2700` |
+| Xem và sao chép | `0640` | `0750` | `2750` |
+| Xem và chỉnh sửa | `0660` | `0770` | `2770` |
+
+File mà source manifest được bảo vệ đánh dấu executable nhận file mode cộng owner execute (`Owner only`) hoặc
+owner và group execute (`Owner and group`). Không quy tắc nào nhìn vào phần mở rộng file, và không gì dưới `.git`,
+`node_modules` hay tên bị loại trừ khác được chỉ định executable. "No script execution" không được đề nghị cho
+workspace: file được đánh dấu executable trong source đã deploy giữ bit owner execute để workspace vẫn khớp
+source manifest (`permission-policy-unsupported` nếu policy như vậy được gửi vào).
+
+### Permission policy revision, derived policy và đề xuất
+
+"Permission policy revision N" là permission policy đã được duyệt của một instance. Nó không liên quan tới
+"approved policy revision" của environment policy (`staging` revision 1), thứ mà không lệnh permission nào thay
+đổi.
+
+- **Đã duyệt.** Một lần `pf permissions apply` đã xác nhận và verify mọi scope được chọn ghi revision N+1 vào
+  `<root>/instances/<uuid>/permission-policy.json` (root, `0600`). Một bản copy từng byte nằm trong thư mục
+  operation của lần apply đó, nên chuỗi revision có thể lần ngược về revision 1. `purge` giữ record; instance
+  được đăng ký mới bắt đầu không có record (record không nằm trong recovery bundle).
+- **Derived (chưa duyệt).** Workspace và configuration: `workspace_write_group`, Xem và chỉnh sửa, kế thừa group,
+  chạy script `Owner and group` (các mode A1/A2.2 `2770`/`0660`/`0770`). Control: Không truy cập qua group.
+  Backups và recovery: Xem và sao chép cho group đang sở hữu thư mục backups và recovery. Chỉ root mới đổi được
+  group đó (`validate_context` yêu cầu các thư mục này thuộc root và không group-writable). Gid của thư mục không
+  có tên group sẽ dừng với `permission-group-missing` cho tới khi `apply` duyệt một group có tên.
+- **Đề xuất.** `backup_read_group` trong `pf-config.json` là đề xuất cho mọi instance: tự nó không bao giờ đổi
+  ai được đọc backup hay recovery bundle. `workspace_write_group` là đề xuất khi đã có revision; trước approval
+  đầu tiên nó vẫn đặt group cho file pf tạo trong workspace và configuration (giới hạn đã công bố). `doctor`,
+  `check`, `plan` và wizard `apply` hiển thị đề xuất khác biệt (`permission-group-proposal`); nó chỉ có hiệu lực
+  khi `apply` ghi một revision mới.
+- Cảnh báo về group backup được hiển thị ở mọi nơi chọn group đó: thành viên group đọc backup có thể đọc nội dung
+  database và mọi credential nằm trong backup hoặc recovery bundle.
+
+### `check`, `plan` và `apply`
 
 ```sh
-sudo pf permissions
+sudo pf --instance <slug> permissions check [--scope SCOPE]...
+sudo pf --instance <slug> permissions plan  [--scope SCOPE]... [--details]
+sudo pf --instance <slug> permissions apply [--scope SCOPE]... [--details]
+sudo pf --instance <slug> permissions apply --resume | --abandon
 ```
+
+`SCOPE` là `workspace`, `configuration`, `control`, `backups`, `recovery` hoặc `private_state` (lặp lại được;
+mặc định là tất cả).
+
+- `check` và `plan` là read-only: không lock, không thư mục operation, không ghi gì ở bất kỳ đâu. Chúng ánh xạ
+  các finding của protected context vào scope: finding nằm tại, phía trên hoặc phía dưới thư mục workspace,
+  configuration, backups hay recovery sẽ chặn scope đó (`scope-path-unsafe`) và các scope còn lại vẫn được báo;
+  mọi finding bị từ chối khác dừng với `permissions-context-refused` trước khi đọc bất kỳ thư mục nào. `check`
+  exit 1 khi có entry khác biệt hoặc control release vượt ceiling (`permissions-differ`).
+- `plan` in theo từng scope: policy, thành viên group (tối đa 20; thành viên primary-group và directory-service
+  không được liệt kê), số lượng (group, mode, special bit), có cần freeze không, các blocker và, với
+  `--details`, từng thay đổi dạng octal và symbolic. `Plan hash` là sha256 của danh sách thay đổi chính xác;
+  `apply` hiển thị cùng hash cho cùng policy trên một cây không đổi. Khi `pf-config.json` có đề xuất khác biệt,
+  một khối thứ hai hiển thị candidate áp dụng đề xuất đó.
+- `apply` lấy instance lock, hỏi wizard đánh số (group, access, kế thừa group và, với workspace, chạy script;
+  Enter giữ default đang hiển thị, `q` để hủy), lập plan, hiển thị thay đổi policy và plan hash, rồi hỏi một lần
+  xác nhận gõ tay `APPLY PERMISSIONS <slug>`. Sau đó nó revalidate context, record, các group và identity của thư
+  mục, ghi intent (`permission-plan.json`, `permission-changes.jsonl` và `state/pending.json`), apply và verify
+  mọi scope được chọn, và chỉ sau đó mới ghi revision mới. Policy đã duyệt không đổi trên cây đã đúng là
+  `permissions-current` (exit 0, không ghi gì).
+
+Apply không bao giờ đi theo link, không vượt mount, không đổi entry hard-link, special, có ACL hoặc `@docker`,
+không bao giờ chown một owner không tin cậy vào protected scope và không bao giờ đổi control release: mỗi trường
+hợp là một blocker được `plan` báo, và `apply` không đổi gì khi còn blocker.
+
+### Editor freeze
+
+Thay đổi phía dưới root của workspace hoặc configuration (bulk change) cần một editor freeze đã được verify.
+`apply` trước hết đặt root của mỗi scope như vậy thành owner-only (giữ bit setgid), nên người sửa không vào được
+thư mục nữa, rồi quét `/proc` tìm mọi process khác có working directory, root hoặc file đang mở nằm trong một
+thư mục đó. Có holder thì fence được gỡ lại và lệnh bị từ chối với `editor-freeze-refused` (không thay đổi gì).
+Phép quét cũng báo cả shell đã khởi động lệnh: **hãy chạy `apply` từ ngoài các thư mục scope, ví dụ `cd /`**.
+Freeze không khả dụng khi không đọc được `/proc` hoặc root của scope có ACL; khi đó `plan` báo
+`editor-freeze-unavailable` và bulk apply của scope đó bị chặn. Bỏ chọn scope bằng `--scope`, hoặc đổi bằng tay:
+dừng sửa thư mục qua SMB, áp dụng mode của bảng trên, rồi chạy `pf permissions check`. Thay đổi chỉ ở root không
+cần freeze. Lock userspace không bao giờ khóa được SMB client, và fence không chặn được root service hay file được
+memory-map (giới hạn đã công bố).
+
+### ACL và DSM
+
+`apply` không bao giờ ghi hay xóa ACL entry. Entry có access ACL, hoặc ACL mà control này không đọc được, là
+blocker (`scope-entry-acl`): đổi mode sẽ ghi lại ACL mask. Directory chỉ có default ACL được chấp nhận và được báo
+trong phần hành vi file tương lai. DSM Shared Folder permission vẫn có hiệu lực và POSIX mode không vượt qua một
+DSM deny: hãy kiểm tra Shared Folder permission cho từng SMB account từ share root (DSM Control Panel), không chỉ
+từ SSH shell. DSM share có ACL sẽ bị chặn bulk apply cho tới khi PF-A5.1 cung cấp DSM adapter.
+
+### Ba trạng thái
+
+`check` và `apply` in ba trạng thái cho mỗi scope và không bao giờ gộp thành một dòng xanh: `mode_applied`
+(`yes`, `partial (N differ)`, `no`, `not-selected` hoặc `check-only`), `effective_access_verified` và
+`future_file_behavior_verified`. Hai trạng thái sau luôn là `not verified` ở checkpoint này: chúng chỉ được tính từ
+mode bit. Setgid trên directory mang theo group, không mang quyền ghi; file tạo qua SMB theo umask của client hoặc
+create mask của share, và default ACL có thể thay đổi chúng. File do pf tạo có mode tường minh và được verify sau
+khi tạo.
 
 ### Hệ quả của trust policy
 
@@ -529,11 +649,15 @@ boolean, numeric value và DSM group trước khi sử dụng.
 - **Environment label.** `environment` phải bằng environment của approved policy của instance. Đó chỉ là
   label: đổi nó không bao giờ đổi policy (`admin-config-mismatch`); đổi policy là một approval riêng (PF-A4.3).
   `project` phải bằng Compose project đã đăng ký.
-- **Backup group.** Thay đổi `backup_read_group` có hiệu lực ở lần `backup` hoặc `purge` kế tiếp mà không cần
-  approval riêng, đúng như khi sửa bằng tay. Approval gắn với revision cho thay đổi đó thuộc PF-A2.3.
+- **Group là đề xuất (PF-A2.3).** `backup_read_group` luôn là đề xuất: backup và recovery bundle giữ group của
+  thư mục chứa chúng, hoặc group của permission policy revision N, cho tới khi `pf permissions apply` duyệt thay
+  đổi. `workspace_write_group` trở thành đề xuất khi đã có permission policy revision; trước đó nó vẫn đặt group
+  cho file pf tạo trong workspace và configuration. Summary của wizard nêu rõ trường hợp nào đang áp dụng.
 - **Ghi file.** File được thay qua một file tạm riêng `.pf-config.json.pf-config-<8 hex>` (với `.env`:
-  `.env.pf-config-<8 hex>`) trong cùng thư mục, giữ owner, group và mode của file bị thay; file mới là
-  `root:<workspace group>` `0660`. Nếu file đổi sau summary thì không ghi gì (`config-changed`). Các tên tạm này
+  `.env.pf-config-<8 hex>`) trong cùng thư mục, giữ owner, group và mode của file bị thay; file mới của instance
+  đã đăng ký nhận configuration target của permission policy đang hiệu lực (owner root, group của configuration,
+  `0660`, `0640` hoặc `0600`) và được kiểm tra sau khi tạo; trước registration nó là `root:<workspace group>`
+  `0660`. Nếu file đổi sau summary thì không ghi gì (`config-changed`). Các tên tạm này
   được dành riêng: phần còn sót của một lần chạy bị gián đoạn được lần chạy sau xóa, còn file trùng dạng tên đó
   mà không phải phần còn sót thì bị từ chối (`config-file-unsafe`), không bao giờ bị xóa.
 - **Downgrade.** Control release cũ hơn PF-A2.2 từ chối `schema_version`. Chọn release như vậy bằng
@@ -572,7 +696,9 @@ proxy cần đúng hostname nội bộ.
   hiện có được giữ kèm note còn giá trị thiếu bị từ chối (`zone-data-unavailable`). Backend kiểm tra giá trị
   bằng zone data của chính image khi khởi động; wizard không kiểm tra zone data đó.
 - **ACL.** `.env` hoặc `pf-config.json` có ACL entry bị từ chối trước câu hỏi đầu tiên (`config-file-acl`):
-  thay file sẽ làm mất ACL. Hãy sửa file như vậy bằng tay cho tới PF-A2.3.
+  thay file sẽ làm mất ACL. Hãy sửa file như vậy bằng tay; thay file mà vẫn giữ ACL thuộc PF-A5.1. `.env` được tạo
+  nhận configuration target của permission policy đang hiệu lực; khi lần `deploy` đầu tiên dùng lại `.env` có sẵn,
+  chỉ file đó nhận cùng target.
 - **Database URL.** Controller truyền `PARTFLOW_DATABASE_URL` với credential đã percent-encode; không có gì bị
   ghép thô. Giới hạn (cho tới khi bản sửa app-lane của `backend/alembic/env.py`, P16-S3 hoặc sau đó, được
   deploy): bước migration của backend đưa URL đó vào config parser của Alembic, vốn từ chối `%`. Vì vậy password
@@ -626,7 +752,7 @@ sudo pf deploy --release latest --channel prerelease
 Flow new deploy:
 
 1. Xác nhận Compose project chưa có managed deployment record/container/volume.
-2. Tạo hoặc reuse `config/.env`.
+2. Tạo hoặc reuse `config/.env` (với configuration permission target, PF-A2.3).
 3. Chỉ hỏi những field deployment-specific không thể suy luận an toàn.
 4. Resolve source thành exact commit SHA.
 5. Verify CI, trừ khi explicit dùng `--skip-ci` cho manual staging.
@@ -637,6 +763,10 @@ Flow new deploy:
 10. Start backend, check health/schema.
 11. Start frontend, check `/api/health` qua frontend proxy.
 12. Ghi deployed revision vào external `.pf-state-<project>/deployed.json`.
+
+Từ PF-A2.3, cây source mới được copy chỉ phần nội dung và chỉ các tên mà `deploy` đã copy nhận target của
+workspace; `deploy` không có selector (`--current`) không đổi permission nào của workspace và in
+`Workspace permissions were not changed; check them with '<pf> permissions check --scope workspace'.`
 
 Sau khi smoke test UI/workflow/firewall:
 
@@ -677,6 +807,9 @@ Nó hiển thị:
 Deployed source: <SHA>
 Workspace: provenance git_commit|unknown | manifest commit <SHA hoặc none> | differs from deployed: True/False | changes: ...
 ```
+
+Không lifecycle command nào đổi permission của file workspace có sẵn (PF-A2.3); `pf permissions check
+--scope workspace` báo chúng và `pf permissions apply` đổi chúng dưới một editor freeze.
 
 Từ PF-A1.2 dòng Workspace đến từ phép so sánh byte/mode an toàn theo fd giữa `repo/` và
 manifest bảo vệ mà công cụ ghi lại khi deploy một cây
@@ -762,6 +895,11 @@ manifest.sha256
 Active DB dump được restore thử vào temporary DB để verify. Normal revision `source.tar.gz`
 không còn chứa runtime `.env`; file đó nằm ngoài repo. Full purge-recovery bundle sẽ lưu
 `.env` riêng.
+
+Từ PF-A2.3, checkpoint mới nhận backups target của permission policy đang hiệu lực (group của thư mục backups,
+hoặc của revision đã duyệt; Xem và sao chép cho directory `0750` và file `0640`), được đặt tường minh và verify.
+Chỉ checkpoint mới bị thay đổi. Entry của checkpoint kế thừa ACL từ thư mục chứa nó sẽ dừng backup
+(`fresh-entry-acl`) trước khi được publish.
 
 Danh sách backup, mới nhất trước, 10 bản/trang:
 
@@ -898,6 +1036,11 @@ recoverable backup, purge refuse xóa volume đó.
 
 Recovery bundle nhằm dựng lại **functional PartFlow state**, không cố khôi phục Docker
 container ID/network ID giống từng byte.
+
+Từ PF-A2.3, file trong bundle là bản copy chỉ có nội dung (không copy mode, owner hay ACL) và bundle nhận recovery
+target của permission policy đang hiệu lực. Purge giữ permission policy record
+(`<root>/instances/<uuid>/permission-policy.json`); instance được deploy lại hoặc restore vẫn chịu record đó.
+Record không nằm trong bundle: instance được đăng ký mới bắt đầu với derived policy.
 
 ### Giữ/xóa revision backups khi purge
 
@@ -1133,6 +1276,13 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   release được giữ lại nhưng cũ hơn PF-A2.2 sẽ từ chối nó ở smoke check (`install-smoke-failed`, không bind
   gì); hãy khôi phục file schema 1 trước nếu thật sự cần quay lại.
 - Archive cũ `recovery/control-upgrades/` không còn áp dụng; release cũ nằm dưới `<root>/releases/`.
+- **PF-A2.2 → PF-A2.3.** Byte của bootstrap và install contract không đổi, nên `pf install control --source` hợp
+  lệ. Khi chưa có approval, derived policy giữ group và mode của A2.2, ngoại trừ: backup và recovery giữ group đã
+  có trên thư mục của chúng, `deploy --current` không còn đổi workspace, bản copy mới chỉ có nội dung và
+  `pf permissions` không kèm verb bị từ chối. **Downgrade** sau approval: control cũ hơn bỏ qua
+  `permission-policy.json` và quay lại group trong `pf-config.json`. Installer từ chối mọi lần đổi control,
+  upgrade hay downgrade, khi một lần permission apply đang mở (`instance-operation-pending`): hãy hoàn tất bằng
+  `--resume` hoặc `--abandon` trước.
 
 Bước install explicit này chính là security boundary cho phép `repo/` writable bởi users.
 Không cài tree chưa review/không rõ nguồn bằng `sudo`.
@@ -1141,13 +1291,52 @@ Không cài tree chưa review/không rõ nguồn bằng `sudo`.
 
 ### SMB thấy `repo/` nhưng không sửa được
 
-Trước tiên:
+So sánh trước, rồi apply permission policy (chạy từ ngoài các thư mục, ví dụ `cd /`):
 
 ```sh
-sudo pf permissions
+sudo pf --instance <slug> permissions check --scope workspace
+sudo pf --instance <slug> permissions apply --scope workspace
 ```
 
-Sau đó kiểm tra DSM Shared Folder permission phải cho account/group Read/Write.
+Sau đó kiểm tra từ share root rằng DSM Shared Folder permission cho account/group Read/Write.
+
+### Mã của `pf permissions`
+
+- `permissions-verb-required` (exit 2): `pf permissions` không kèm verb không còn thay đổi gì; dùng `check`, `plan`
+  hoặc `apply`.
+- `permission-policy-invalid`: policy (hoặc derived policy, ví dụ tên group có `/`) vi phạm một quy tắc; không thay
+  đổi gì.
+- `permission-group-missing`: một group của policy, hoặc gid trên thư mục backups/recovery, không có group trên host
+  này. Group không bao giờ được tạo; hãy chọn group có sẵn trong `pf permissions apply`.
+- `permission-policy-unsupported`: lựa chọn hợp lệ nhưng control này không kích hoạt (chạy script "none" cho
+  workspace).
+- `permission-approval-invalid`: `permission-policy.json` không phải file thuộc root, `0600`, một link, hoặc sai
+  schema hay chuỗi revision. Nó không bao giờ được thay tự động và không dùng derived policy: backup và các lệnh
+  permission dừng lại. Cách xử lý bằng tay: với quyền root, chuyển nó sang tên khác trong cùng thư mục, ví dụ
+  `permission-policy.invalid-<UTC>.json`; khi đó instance dùng derived policy (backup giữ group của thư mục chứa
+  chúng, nên không mở rộng quyền), và `pf permissions apply` ghi revision 1 mới.
+- `permissions-context-refused`: finding của protected context nằm ngoài các scope; `check`/`plan` không đọc scope
+  nào. Sửa các finding được hiển thị (`pf doctor`).
+- `scope-path-unsafe`, `scope-entry-link`, `scope-entry-special`, `scope-entry-hardlinked`,
+  `scope-mount-boundary`, `scope-contains-app-storage`, `scope-untrusted-owner`, `scope-entry-acl`,
+  `scope-too-large`: blocker; `apply` không đổi gì khi còn blocker. Gỡ link, special file, hard link hay ACL, chuyển
+  mount hoặc application storage ra khỏi thư mục, hoặc bỏ chọn scope bằng `--scope`.
+- `control-ceiling`: control release đã cài vượt ceiling; nó chỉ được đổi bởi `pf install control`.
+- `editor-freeze-unavailable` / `editor-freeze-refused`: xem mục 2 (Editor freeze).
+- `permissions-blocked`, `permissions-cancelled`, `permissions-current`, `permissions-changed-before-apply`: không
+  thay đổi gì; chạy lại lệnh để xem lại.
+- `permissions-apply-pending`: một lần apply bị gián đoạn đang mở; mọi lệnh mutating khác (kể cả `backup` theo
+  lịch) bị từ chối cho tới `pf permissions apply --resume` hoặc `--abandon`.
+- `permissions-entry-changed`, `permissions-verify-failed`, `permissions-interrupted`: apply **chưa hoàn tất**;
+  `--resume` lập lại plan cho các thay đổi còn lại với policy đã đóng băng, `--abandon` bù trừ các thay đổi đã ghi
+  theo thứ tự ngược.
+- `permissions-already-approved`: lần apply bị gián đoạn đã ghi revision của nó; chỉ `--resume` mới hoàn tất được.
+- `permissions-abandon-conflicts` (exit 1): object bị đổi sau khi gián đoạn được để nguyên và liệt kê.
+- `permissions-journal-invalid`: một dòng effect journal không đọc được; không thay đổi gì và journal vẫn mở. Hãy
+  xem `<root>/instances/<uuid>/operations/<op-id>/permission-effects.jsonl` bằng tay.
+- `fresh-entry-acl`: entry backup hoặc recovery mới kế thừa ACL từ thư mục chứa nó; thao tác dừng trước khi
+  publish. Hãy gỡ default ACL khỏi thư mục đó. Trong workspace hoặc configuration, entry mới giữ mode lúc được tạo
+  (một note).
 
 ### SMB không sửa/xóa được backup/recovery
 
@@ -1292,13 +1481,13 @@ Lệnh này hỏi xác nhận gõ tay nhưng được khởi động không có 
 
 ### `instance-required-unattended`
 
-`backup`, `permissions` hoặc `release-check` chạy không có terminal và instance được chọn qua
+`backup` hoặc `release-check` chạy không có terminal và instance được chọn qua
 default được bảo vệ hoặc vì là registration duy nhất. Lệnh không người trực phải nêu instance:
 `pf --instance <slug|uuid> <command>`. Không có gì bị thay đổi.
 
 ### `policy-grant-required` hoặc `auto-apply-not-permitted` (exit 20)
 
-`backup`, `permissions` hoặc `release-check` chạy không người trực, hoặc mọi `release-check --apply`,
+`backup` hoặc `release-check` chạy không người trực, hoặc mọi `release-check --apply`,
 cần một protected policy cho phép đúng loại thao tác đó. Ở checkpoint này không policy nào cấp
 (grant có từ PF-A4.3); `auto_update` trong `pf-config.json` không cấp được. Hãy chạy lệnh tương tác,
 và apply release bằng tay với `pf --instance <slug> update --release <tag>`. Không có gì bị thay
@@ -1402,7 +1591,10 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | Command | Mục đích |
 | --- | --- |
 | `sudo pf doctor` | Validate host tool, control security, Compose, env và capacity cơ bản |
-| `sudo pf permissions` | Chuẩn hóa repo/config writable và backup/recovery read-only |
+| `sudo pf permissions check [--scope S]…` | So sánh mọi scope với permission policy đang hiệu lực (read-only; exit 1 khi khác biệt) |
+| `sudo pf permissions plan [--scope S]… [--details]` | Xem trước group, thành viên, số lượng và plan hash (read-only) |
+| `sudo pf permissions apply [--scope S]… [--details]` | Wizard, `APPLY PERMISSIONS <slug>`, apply có fence và được verify; ghi permission policy revision tiếp theo |
+| `sudo pf permissions apply --resume \| --abandon` | Hoàn tất (`RESUME PERMISSIONS <slug>`) hoặc bù trừ (`ABANDON PERMISSIONS <slug>`) một lần apply bị gián đoạn |
 | `sudo pf status` | Deployed revision, workspace drift, DB revision, container, pending operation |
 | `sudo pf deploy --latest` | Brand-new staging từ latest configured branch SHA |
 | `sudo pf deploy --commit FULL_SHA` | Brand-new deploy từ exact commit |
@@ -1438,7 +1630,8 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 
 Lệnh khởi động không có terminal phải truyền `--instance <slug|uuid>`; cho tới khi có grant
 PF-A4.3, mọi lệnh có lock đều bị từ chối khi không có terminal (`terminal-required`,
-`policy-grant-required`).
+`policy-grant-required`). `pf permissions` không kèm verb bị từ chối (`permissions-verb-required`, exit 2); thao
+tác sửa trước đây của nó nay là `pf permissions apply`.
 
 ## 18. Giới hạn validation
 
@@ -1491,6 +1684,20 @@ Giới hạn của PF-A2.2:
   deploy;
 - thay đổi `backup_read_group` có hiệu lực mà không có approval gắn với revision (PF-A2.3).
 
+Giới hạn của PF-A2.3 (permission compiler và hành vi filesystem được test offline trên filesystem Linux thật với
+quyền root trong container dùng một lần; không có khẳng định nào về DSM hay SMB):
+
+- `effective_access_verified` và `future_file_behavior_verified` không bao giờ được verify: không quan sát test SMB
+  account, DSM Shared Folder permission, DSM ACL hay create mask của share nào (PF-A5.1);
+- scope có ACL không thể bulk apply, không bao giờ ghi ACL, và entry mới kế thừa ACL sẽ dừng các protected flow và
+  giữ mode lúc tạo trong editable scope;
+- editor freeze không chặn được root service hay file được memory-map; Docker data root tùy chỉnh trên cùng
+  device nằm trong một scope không được phát hiện offline;
+- trước approval đầu tiên `workspace_write_group` vẫn đặt group cho file pf tạo trong editable scope; chạy script
+  "none" cho workspace không kích hoạt được;
+- control release được kiểm tra, không bao giờ bị đổi, và cố định ở Không truy cập qua group;
+- file cấu hình có ACL vẫn bị config wizard từ chối (PF-A5.1);
+- permission policy record không hợp lệ chỉ có cách xử lý bằng tay (mục 16).
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;
 phạm vi an toàn của PF-A1 mới chỉ được chứng minh offline. A1-T11…T14 vẫn bị chặn vì cần Docker

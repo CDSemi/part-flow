@@ -1,0 +1,352 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin permission apply journal v1 (PF-A2.3)",
+  "description": "Private records of one 'pf permissions apply' journal under <private_state>/operations/<op-id>/: permission-plan.json ($defs.plan), permission-changes.jsonl (one $defs.changes_header line, then one change array [scope, path, dev, ino, type, before_mode, before_gid, after_mode, after_gid] per line, checked by pf_config.change_problems; plan_sha256 = sha256 of the exact file bytes), permission-effects.jsonl (one normalized $defs.effect line per changed object, appended and fsynced before the change runs; paths checked by pf_config.effect_problems) and permission-apply.json ($defs.outcome, one per apply, resume or abandon invocation). Strict UTF-8 JSON, normalized bytes, mode 0600. Normative markers as in install-operation.schema.json (\"null or <target>\", \"items <target>\"), enforced only by pf_install.validate_marked. effective_access_verified and future_file_behavior_verified are the constant 'not verified': no A2.3 code path performs an account test (PERMISSIONS section 5).",
+  "$defs": {
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "workspace",
+        "configuration",
+        "control",
+        "backups",
+        "recovery",
+        "private_state"
+      ]
+    },
+    "plan_root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "dev",
+        "ino",
+        "gid",
+        "fenced"
+      ],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "configuration",
+            "control",
+            "backups",
+            "recovery",
+            "private_state"
+          ]
+        },
+        "dev": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ino": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fenced": {
+          "type": "boolean"
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_id",
+        "instance_id",
+        "created",
+        "base_revision",
+        "base_sha256",
+        "policy_sha256",
+        "policy",
+        "scopes",
+        "freeze_scopes",
+        "roots",
+        "change_count",
+        "plan_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+        },
+        "instance_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "created": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "base_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "base_sha256": {
+          "description": "null or sha256"
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "policy": {
+          "type": "object"
+        },
+        "scopes": {
+          "type": "array",
+          "description": "items $defs.scope"
+        },
+        "freeze_scopes": {
+          "type": "array",
+          "description": "items $defs.scope"
+        },
+        "roots": {
+          "type": "array",
+          "description": "items $defs.plan_root"
+        },
+        "change_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "changes_header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy_sha256",
+        "scopes",
+        "change_count"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "scopes": {
+          "type": "array",
+          "description": "items $defs.scope"
+        },
+        "change_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "kind",
+        "scope",
+        "path",
+        "dev",
+        "ino",
+        "type",
+        "before_mode",
+        "after_mode",
+        "before_gid",
+        "after_gid",
+        "operation_id"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": [
+            "fence",
+            "entry"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "configuration",
+            "control",
+            "backups",
+            "recovery",
+            "private_state"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "dev": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ino": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "enum": [
+            "dir",
+            "file"
+          ]
+        },
+        "before_mode": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "after_mode": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "before_gid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "after_gid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_id",
+        "apply_operation_id",
+        "completed",
+        "action",
+        "result",
+        "plan_sha256",
+        "changed",
+        "unplanned",
+        "conflicts",
+        "approved_revision",
+        "scopes"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+        },
+        "apply_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+        },
+        "completed": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "action": {
+          "enum": [
+            "apply",
+            "resume",
+            "abandon"
+          ]
+        },
+        "result": {
+          "enum": [
+            "completed",
+            "current",
+            "interrupted",
+            "abandoned",
+            "abandoned-with-conflicts"
+          ]
+        },
+        "plan_sha256": {
+          "description": "null or sha256"
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unplanned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "approved_revision": {
+          "description": "null or $defs.revision"
+        },
+        "scopes": {
+          "type": "array",
+          "description": "items $defs.scope_status"
+        }
+      }
+    },
+    "scope_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "mode_applied",
+        "effective_access_verified",
+        "future_file_behavior_verified",
+        "notes"
+      ],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "configuration",
+            "control",
+            "backups",
+            "recovery",
+            "private_state"
+          ]
+        },
+        "mode_applied": {
+          "enum": [
+            "yes",
+            "partial",
+            "no",
+            "not-selected",
+            "check-only"
+          ]
+        },
+        "effective_access_verified": {
+          "const": "not verified"
+        },
+        "future_file_behavior_verified": {
+          "const": "not verified"
+        },
+        "notes": {
+          "type": "array",
+          "description": "items string"
+        }
+      }
+    }
+  }
+}

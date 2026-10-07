@@ -1,0 +1,32 @@
+{
+  "policy_version": 1,
+  "permissions": {
+    "workspace": {
+      "group": "users",
+      "access": "read_write",
+      "executables": "none",
+      "inherit_group": true
+    },
+    "configuration": {
+      "group": "users",
+      "access": "read_write",
+      "inherit_group": true
+    },
+    "control": {
+      "group": "users",
+      "access": "read_only",
+      "executables": "owner_only"
+    },
+    "backups": {
+      "group": "users",
+      "access": "read_only"
+    },
+    "recovery": {
+      "group": "users",
+      "access": "read_only"
+    },
+    "private_state": {
+      "access": "owner_only"
+    }
+  }
+}

@@ -1,0 +1,358 @@
+[
+  {
+    "file": "shared.json",
+    "expect": {
+      "valid": true,
+      "code": null,
+      "targets": {
+        "workspace": {
+          "group": "users",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": "0770",
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "configuration": {
+          "group": "users",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "control": {
+          "group": "users",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": "0740",
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "ceiling"
+        },
+        "backups": {
+          "group": "users",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "recovery": {
+          "group": "users",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "private_state": {
+          "group": null,
+          "access": "owner_only",
+          "dir": "0700",
+          "file": "0600",
+          "exec": null,
+          "gid_rule": "unmanaged",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        }
+      }
+    }
+  },
+  {
+    "file": "restricted.json",
+    "expect": {
+      "valid": true,
+      "code": null,
+      "targets": {
+        "workspace": {
+          "group": "deployers",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": "0770",
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "configuration": {
+          "group": "operators",
+          "access": "read_only",
+          "dir": "2750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "control": {
+          "group": "operators",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": "0740",
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "ceiling"
+        },
+        "backups": {
+          "group": "backup-readers",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "recovery": {
+          "group": "backup-readers",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "private_state": {
+          "group": null,
+          "access": "owner_only",
+          "dir": "0700",
+          "file": "0600",
+          "exec": null,
+          "gid_rule": "unmanaged",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        }
+      }
+    }
+  },
+  {
+    "file": "invalid-unknown-key.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.workspace: unknown keys mode"
+    }
+  },
+  {
+    "file": "invalid-group-exec-none.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.workspace: group execution needs group access (access none with executables owner_and_group)"
+    }
+  },
+  {
+    "file": "invalid-control-write.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.control.access: must be one of [\"none\", \"read_only\"]"
+    }
+  },
+  {
+    "file": "invalid-backup-write.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.backups.access: must be one of [\"none\", \"read_only\"]"
+    }
+  },
+  {
+    "file": "invalid-control-group-exec.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.control.executables: must equal \"owner_only\""
+    }
+  },
+  {
+    "file": "invalid-config-executables.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.configuration: unknown keys executables"
+    }
+  },
+  {
+    "file": "invalid-private-group.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.private_state: unknown keys group"
+    }
+  },
+  {
+    "file": "invalid-version.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.policy_version: must equal 1"
+    }
+  },
+  {
+    "file": "invalid-duplicate-key.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "Duplicate JSON object key: access"
+    }
+  },
+  {
+    "file": "invalid-group-name.json",
+    "expect": {
+      "valid": false,
+      "code": "permission-policy-invalid",
+      "problem": "$.permissions.workspace.group: does not match ^[^\\s\\u0000-\\u001F\\u007F/:](?:[^\\u0000-\\u001F\\u007F/:]*[^\\s\\u0000-\\u001F\\u007F/:])?$"
+    }
+  },
+  {
+    "file": "missing-group.json",
+    "expect": {
+      "valid": true,
+      "code": "permission-group-missing",
+      "targets": {
+        "workspace": {
+          "group": "nas-editors",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": "0770",
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "configuration": {
+          "group": "nas-editors",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "control": {
+          "group": "nas-editors",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": "0740",
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "ceiling"
+        },
+        "backups": {
+          "group": "nas-editors",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "recovery": {
+          "group": "nas-editors",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "private_state": {
+          "group": null,
+          "access": "owner_only",
+          "dir": "0700",
+          "file": "0600",
+          "exec": null,
+          "gid_rule": "unmanaged",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        }
+      }
+    }
+  },
+  {
+    "file": "unsupported-workspace-no-exec.json",
+    "expect": {
+      "valid": true,
+      "code": "permission-policy-unsupported",
+      "targets": {
+        "workspace": {
+          "group": "users",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": "0660",
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "configuration": {
+          "group": "users",
+          "access": "read_write",
+          "dir": "2770",
+          "file": "0660",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "preserve",
+          "apply_rule": "exact"
+        },
+        "control": {
+          "group": "users",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": "0740",
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "ceiling"
+        },
+        "backups": {
+          "group": "users",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "recovery": {
+          "group": "users",
+          "access": "read_only",
+          "dir": "0750",
+          "file": "0640",
+          "exec": null,
+          "gid_rule": "set",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        },
+        "private_state": {
+          "group": null,
+          "access": "owner_only",
+          "dir": "0700",
+          "file": "0600",
+          "exec": null,
+          "gid_rule": "unmanaged",
+          "owner_rule": "trusted",
+          "apply_rule": "exact"
+        }
+      }
+    }
+  }
+]

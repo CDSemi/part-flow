@@ -380,6 +380,65 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > scripts), `ast` (3, 9) (17 files) and the strict JSON load of the 3 contracts passed in both images;
 > `pf_bootstrap.py` and `pf.sh` hashes unchanged (BF-1). Gate statuses are unchanged.
 
+> **PF-A2.3 checkpoint addendum (2026-10-07) — semantic permission policy, check/plan/apply; PF-A2 offline gate.**
+> Wire schemas first: `contracts/permission-policy.schema.json` (byte copy of the r2 schema, sha256 `578b31a9…c8d4`),
+> `contracts/permission-approval.schema.json` and `contracts/permission-apply.schema.json`, each equal to its
+> embedded copy in `pf_config.py`; the r2 examples (byte copies) and the invalid corpus under
+> `contracts/examples/permission-policy/`, bound to their outcomes by `cases.json`. `pf_config` parses strictly (the
+> A1 subset of the inlined r2 schema, plus its removed `allOf` as a semantic rule), compiles the PERMISSIONS section 2
+> mode table and the section 3 scope floors, refuses to activate workspace `executables: none` (OD-A23-18), derives
+> the unapproved policy with the backups/recovery groups of their folder gids (OD-A23-02) and validates the approval
+> chain. `pf_instance` adds the fd-relative, no-follow, bounded scope inventory (links, special files, hard links,
+> mount boundaries, `@docker` and daemon roots, untrusted owners in protected scopes, access or unknown ACLs and the
+> entry limit are blockers), the descriptor ACL classifier (agrees with `inspect_posix_acl`), the metadata engine
+> (identity, link count, before state and ACL re-checked; fchown, then fchmod, then fstat) and the `/proc` open-handle
+> scan. `pf-admin.py`: `pf permissions check|plan` (read-only, no lock, refuse findings mapped onto scopes),
+> `pf permissions apply` (wizard, `APPLY PERMISSIONS <slug>`, revalidation, persisted intent, fence-first editor
+> freeze, write-ahead effect journal, authoritative inventory of fenced scopes, verification, then the record
+> `<private_state>/permission-policy.json`), `--resume`/`--abandon`, the `permissions apply` journal route, the doctor
+> line, the admin-wizard proposal lines, content-only copies (`copy_fresh`) and explicit targets (`publish_fresh`,
+> `apply_single`) in every lifecycle flow; `deploy --current` no longer changes the workspace; bare `pf permissions` is
+> `permissions-verb-required` (exit 2); `CHECKPOINT = "PF-A2.3"`. `pf_bootstrap.py`, `pf.sh`, `pf_install.py`,
+> `pf_source.py`, `pf_runner.py`, `pf_docker.py`, `compose.nas.yaml` and the four shell scripts are unchanged (BF-1:
+> `84a824c8…0281`, `aadc41db…3532`).
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (CPython 3.12.15,
+> git 2.47.3) and `python:3.9` (CPython 3.9.25, git 2.47.3) containers, uid 0, source mounted read-only and copied to
+> `/tmp/r`: **650 tests OK, 0 skipped** on both. Baseline: the 565 PF-A2.2 tests pass, updated without weakening per
+> SPEC section 6.2 (DT-1/2/3/5/5b/9, US-1/US-7, SS-3/SS-3c, SS-5/RW-6, the two `test_pf_admin` permission tests, the
+> `test_instance_context` mutation, diagnostic, hard-link and launcher tests, three `test_runner_config_source` tests,
+> AW-A9 and LC-1). New: 85 tests in `test_permissions.py` (Contracts 6, Compiler 11, Approval 11, Inventory 12,
+> ContextMapping 2, Acl 5, Freeze 8, FutureFiles 4, Partial 11, Routes 8, Flows 7; some test methods cover two case
+> IDs). No skip: the POSIX ACL xattr fixtures and the forked unprivileged identities (uid 4242/4343 with the image's
+> `users`/`staff` groups) ran. Evidence outside the suite: PERM-FS-1 (installed launcher check → plan --details →
+> apply → check with `stat` listings, unprivileged probes, an editor working directory refusing the freeze, an
+> interrupted apply blocking `backup`, abandon and resume, a symlinked workspace root reported as
+> `scope-path-unsafe`, purge keeping the record), PERMISSION_COMPILATION_RESULTS.json (every table row, executable
+> combination, scope and example; equal to `cases.json`), SECRET-SCAN (the PF-A2.2 cases plus FF/FL/PA/AR-10: 0 hits
+> outside `.env`), `sh -n` (4 scripts), `ast` (3, 9) (18 files) and strict JSON of the 7 contracts and the examples
+> (the duplicate-key example refused as intended) in both images. No daemon, NAS, `/usr/local/bin/pf`, running stack
+> or development database was contacted.
+> Gates: A2-T07 **passed** (offline); A2-T08 **passed** (filesystem) with declared limits (residual hard-link race
+> window; custom daemon roots on the same device not detected offline); A2-T09 **blocked** (host gate): filesystem
+> part passed, SMB/DSM part `not_run` (PF-A5.1); A2-T10 **passed** (filesystem); A1-T17 stays **blocked** (host gate),
+> offline part re-run passed; A2-T01…T03, T05, T06 and A1-T08 **passed** (re-run); A2-T04, the global launcher,
+> reboot/power loss, DSM ACL-bearing files, the SMB write race and container zone data stay `not_run`; A1-T11…T14 stay
+> **blocked**. Declared limits: no DSM/SMB effective-access or future-file claim; ACL'd scopes cannot be bulk-applied
+> and fresh entries that inherit an ACL stop protected flows; the freeze's residual window for root services and
+> memory maps; custom daemon roots on the same device; until the first approval `workspace_write_group` still sets the
+> group of files pf creates in the editable scopes; workspace `executables: none` is not activatable; the control
+> release is checked, never changed, fixed at No group access; ACL-bearing config files stay refused (OD-A23-06); an
+> invalid approval record has a manual route only.
+> **PF-A2 offline gate.** Present and green: the installer crash matrix, cancellation and restart (PF-A2.1,
+> A2-T01…T03); resource identities and config/secret preservation (PF-A2.1/A2.2: UP-1, SECRET-SCAN, A2-T06); schema
+> migration (PF-A2.2: CONFIG_MIGRATION_RESULTS.json, A2-T05); permission compilation and real-filesystem evidence
+> (PF-A2.3: PERMISSION_COMPILATION_RESULTS.json, PERM-FS-1, A2-T07/T08/T10, A2-T09 filesystem part); the English
+> operator guide and its Vietnamese translation (SYNOLOGY_ADMIN.md/.vi.md). No runtime or host-level success is inferred
+> from a schema pass. Recommended PF-A2 verdict: `PASS_WITH_DECLARED_LIMITS` (offline), releasing PF-A3.1 offline
+> development. Host-gated cases still open: A2-T04, the A2-T09 SMB/DSM part, the A1-T17 DSM ACL/mount part, the global
+> launcher, reboot/power loss, DSM ACL-bearing config files, the SMB write race and A1-T11…T14 (owners: PF-A2.1 re-run
+> on a host, PF-A3.4, PF-A5.1); container zone data stays unassigned (OD-A22-21). Not production-ready; F03, F08, F09,
+> F11, F12 and F14 are not closed overall.
+
 ## Executed checks
 
 | Check | Actual result |

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin approved permission policy record v1 (PF-A2.3)",
+  "description": "Protected record <private_state>/permission-policy.json (root, 0600, normalized JSON bytes). Written only by 'pf permissions apply' (or its --resume) when a confirmed apply completed; a byte copy is kept as operations/<op-id>/permission-approval.json of the approving invocation. Normative markers as in install-operation.schema.json (\"null or <target>\", \"items <target>\"), enforced only by pf_install.validate_marked. Cross-field rules (pf_config.permission_approval_problems): policy passes pf_config.permission_policy_problems and pf_config.permission_policy_unsupported; policy_sha256 = sha256(normalize_json(policy)); revision 1 has a null previous_sha256 and every later revision the sha256 of the previous record bytes; instance_id equals the selected instance; operation_id is the apply whose journal produced the approval (never a resume's id); confirmed_plans is non-empty, its first element names operation_id and every element names an apply or resume of that journal.",
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "instance_id",
+        "revision",
+        "approved",
+        "operation_id",
+        "policy_sha256",
+        "previous_sha256",
+        "confirmed_plans",
+        "policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "instance_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "approved": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "previous_sha256": {
+          "description": "null or sha256"
+        },
+        "confirmed_plans": {
+          "type": "array",
+          "description": "items $defs.confirmed_plan"
+        },
+        "policy": {
+          "type": "object"
+        }
+      }
+    },
+    "confirmed_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "plan_sha256"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

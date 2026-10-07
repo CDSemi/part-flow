@@ -1,0 +1,32 @@
+{
+  "policy_version": 1,
+  "permissions": {
+    "workspace": {
+      "group": "deployers",
+      "access": "read_write",
+      "executables": "owner_and_group",
+      "inherit_group": true
+    },
+    "configuration": {
+      "group": "operators",
+      "access": "read_only",
+      "inherit_group": true
+    },
+    "control": {
+      "group": "operators",
+      "access": "read_only",
+      "executables": "owner_only"
+    },
+    "backups": {
+      "group": "backup-readers",
+      "access": "read_only"
+    },
+    "recovery": {
+      "group": "backup-readers",
+      "access": "read_only"
+    },
+    "private_state": {
+      "access": "owner_only"
+    }
+  }
+}

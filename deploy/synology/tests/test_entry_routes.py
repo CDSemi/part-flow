@@ -120,7 +120,8 @@ def dotted(node):
 
 # ------------------------------------------------------------------ SS-3 mutation and write sites
 
-OS_WRITES = {"chmod", "chown", "mkdir", "replace", "rename"}
+# PF-A2.3: fchmod/fchown joined the tracked vocabulary (the permission engine changes metadata through descriptors).
+OS_WRITES = {"chmod", "chown", "mkdir", "replace", "rename", "fchmod", "fchown"}
 WRITER_NAMES = {"write_json", "write_private_json", "_write_private", "_write_private_file"}
 TEMP_WRITES = {"TemporaryDirectory", "mkdtemp", "mkstemp", "NamedTemporaryFile"}
 MODE_RE = re.compile(r"[rwxabt+]+(?::[a-z0-9]*)?\Z")
@@ -175,9 +176,9 @@ WRITE_SITE_ALLOWLIST = {
     "pf-admin.py": {
         (".mkdir", "Controller.create_purge_recovery"), (".mkdir", "Controller.ensure_backup_tree"),
         (".mkdir", "Controller.ensure_recovery_tree"), (".mkdir", "Controller.extract_tree_archive"),
-        (".mkdir", "Controller.lock"), (".mkdir", "Controller.publish_config_permissions"),
+        (".mkdir", "Controller.lock"),
         (".mkdir", "Controller.restore_revision_checkpoints"), (".mkdir", "Controller.restore_runtime_environment"),
-        (".mkdir", "Controller.snapshot"), (".mkdir", "copy_tree_entry"), (".mkdir", "extract_source"),
+        (".mkdir", "Controller.snapshot"), (".mkdir", "extract_source"),
         (".open", "Controller.create_purge_recovery"), (".open", "Controller.create_tree_archive"),
         (".open", "Controller.dump_database"), (".open", "Controller.extract_tree_archive"),
         (".open", "Controller.snapshot"), (".open", "create_source_archive"),
@@ -187,33 +188,41 @@ WRITE_SITE_ALLOWLIST = {
         (".unlink", "Controller.purge"), (".unlink", "Controller.replace_source"),
         (".unlink", "Controller.replace_source_for_recovery"), (".unlink", "Controller.reset_database"),
         (".unlink", "Controller.restore_instance"), (".unlink", "Controller.resume"), (".unlink", "Controller.rollback"),
-        (".unlink", "Controller.update"), (".unlink", "copy_tree_entry"),
+        (".unlink", "Controller.update"),
         (".write_bytes", "Controller.make_override"), (".write_text", "Controller.create_purge_recovery"),
         (".write_text", "Controller.snapshot"),
         ("_write_private", "Controller.write_deletion_plan"), ("_write_private", "Controller.write_private_json"),
-        ("os.chmod", "Controller.begin_operation"), ("os.chmod", "Controller.ensure_backup_tree"),
-        ("os.chmod", "Controller.ensure_recovery_tree"), ("os.chmod", "Controller.extract_tree_archive"),
+        ("os.chmod", "Controller.begin_operation"), ("os.chmod", "Controller.extract_tree_archive"),
         ("os.chmod", "Controller.freeze_app_config"), ("os.chmod", "Controller.lock"),
-        ("os.chmod", "Controller.prepare_new_env"), ("os.chmod", "Controller.publish_backup_permissions"),
-        ("os.chmod", "Controller.publish_config_permissions"), ("os.chmod", "Controller.publish_workspace_permissions"),
-        ("os.chmod", "Controller.restore_runtime_environment"), ("os.chmod", "extract_source"),
-        ("os.chown", "Controller.ensure_backup_tree"), ("os.chown", "Controller.ensure_recovery_tree"),
-        ("os.chown", "Controller.prepare_new_env"), ("os.chown", "Controller.publish_backup_permissions"),
-        ("os.chown", "Controller.publish_config_permissions"), ("os.chown", "Controller.publish_workspace_permissions"),
-        ("os.chown", "Controller.restore_runtime_environment"),
+        ("os.chmod", "extract_source"),
         ("os.mkdir", "Controller.begin_operation"), ("os.mkdir", "Controller.freeze_app_config"),
         ("os.replace", "Controller.make_override"),
         ("os.replace", "Controller.restore_runtime_environment"), ("os.replace", "write_json"),
         # PF-A2.2: the config wizard's compare-and-swap publish (replace mode) and its audit record.
         ("os.replace", "write_editable_file"), ("write_private_json", "Controller.write_config_change"),
-        ("shutil.copy2", "Controller.create_purge_recovery"), ("shutil.copy2", "Controller.replace_source"),
-        ("shutil.copy2", "Controller.restore_instance"), ("shutil.copy2", "Controller.restore_runtime_environment"),
-        ("shutil.copy2", "copy_tree_entry"), ("shutil.copyfileobj", "Controller.extract_tree_archive"),
-        ("shutil.copyfileobj", "extract_source"), ("shutil.copytree", "Controller.replace_source"),
-        ("shutil.copytree", "Controller.restore_revision_checkpoints"), ("shutil.copytree", "copy_tree_entry"),
+        ("shutil.copyfileobj", "Controller.extract_tree_archive"), ("shutil.copyfileobj", "extract_source"),
         ("shutil.rmtree", "Controller.finish_purge_cleanup"), ("shutil.rmtree", "Controller.replace_source"),
         ("shutil.rmtree", "Controller.replace_source_for_recovery"),
-        ("shutil.rmtree", "Controller.restore_revision_checkpoints"), ("shutil.rmtree", "copy_tree_entry"),
+        ("shutil.rmtree", "Controller.restore_revision_checkpoints"),
+        # PF-A2.3 (section 3.10): the content-only copy of every flow (no mode or xattr is copied): mkdir 0700 for a
+        # directory, copyfile into a private temporary sibling, then the rename that makes the copy a new inode.
+        ("os.mkdir", "copy_fresh"), ("shutil.copyfile", "copy_fresh"), ("os.replace", "copy_fresh"),
+        # PF-A2.3: the config writer's create path (fchown/fchmod of its own private temporary, then fstat check).
+        ("os.fchown", "write_editable_file"), ("os.fchmod", "write_editable_file"),
+        # PF-A2.3 `permissions apply` (sections 3.6/3.7), all inside the instance lock and the operation directory:
+        # the confirmed change list, the frozen plan, the approval's op-dir copy and the protected record
+        # (_write_private_file), the outcome, the resume's own change list; pending.json (open, phase, confirmed
+        # plans) and its removal at close or abandon; the fence and its restore on the held root descriptor; the
+        # compensation of --abandon (fchown, then fchmod, of an object re-opened no-follow and identity-checked).
+        ("_write_private_file", "Controller._write_permission_intent"),
+        ("_write_private_file", "Controller._permission_execute"),
+        ("_write_private_file", "Controller._write_permission_outcome"),
+        ("_write_private_file", "Controller._permissions_resume"),
+        ("write_json", "Controller.permissions_apply"), ("write_json", "Controller._permissions_resume"),
+        ("write_json", "Controller._mark_interrupted"),
+        (".unlink", "Controller._permission_execute"), (".unlink", "Controller._permissions_abandon"),
+        ("os.fchmod", "Controller._permission_execute"), ("os.fchmod", "Controller._restore_fences"),
+        ("os.fchown", "Controller._permissions_abandon"), ("os.fchmod", "Controller._permissions_abandon"),
         ("tempfile.TemporaryDirectory", "Controller.create_deployed_source_archive"),
         ("tempfile.TemporaryDirectory", "Controller.deploy"), ("tempfile.TemporaryDirectory", "Controller.prove_tree_commit"),
         ("tempfile.TemporaryDirectory", "Controller.restore_instance"), ("tempfile.TemporaryDirectory", "Controller.rollback"),
@@ -234,6 +243,9 @@ WRITE_SITE_ALLOWLIST = {
         ("os.chmod", "_create_lock_file"), ("os.chmod", "_create_private_dir"), ("os.chmod", "_write_private_file"),
         ("os.chmod", "initialize_installation_root"), ("os.mkdir", "_create_private_dir"),
         ("os.rename", "_publish_instance_dir"), ("os.replace", "_write_private_file"),
+        # PF-A2.3: the one metadata engine (section 3.9): fchown then fchmod of a descriptor opened no-follow relative
+        # to its parent, after the identity, link-count, before-state and ACL checks.
+        ("os.fchown", "apply_entry_target"), ("os.fchmod", "apply_entry_target"),
     },
     "pf_bootstrap.py": set(),
     "pf_runner.py": {("open", "ProcessRunner.run"), ("os.replace", "ProcessRunner._record_effect")},
@@ -254,6 +266,9 @@ WRITE_SITE_ALLOWLIST = {
         ("_write_private_file", "_Run._write_binding"), ("_write_private_file", "_Run.restore_bindings"),
         ("_write_private_file", "_journal_write"), ("os.rename", "_Run._apply_publish_release"),
         ("os.rename", "_Run._apply_publish_root"), ("os.rename", "_Run.cancel"), ("os.rename", "_Run.write_intent"),
+        # PF-A2.3 vocabulary only (fchmod/fchown now tracked): the launcher temp and the staged legacy copy (PF-A2.1).
+        ("os.fchmod", "_Run._apply_bind_launcher"), ("os.fchmod", "_Run._apply_stage_legacy_file"),
+        ("os.fchown", "_Run._apply_stage_legacy_file"),
     },
 }
 # PF-A2.1 (SS-3 for pf_install.py): every call that can change the filesystem, with the wider installer vocabulary
@@ -310,7 +325,7 @@ def install_write(call):
     return None
 # Read-only roots of SS-3 rule 2 (Controller methods by name or prefix, plus module functions).
 READ_ONLY_ROOTS = ("__init__", "status", "doctor", "snapshots", "recoveries", "verify_recovery", "compose_ps",
-                   "compose_logs", "policy_permits")
+                   "compose_logs", "policy_permits", "permissions_check", "permissions_plan")
 READ_ONLY_ROOT_PREFIXES = ("display_", "log_", "describe_")
 READ_ONLY_MODULE_ROOTS = ("classify_command", "unattended")
 # Write sites a read-only route can reach statically, each with the guard that keeps it inert there.
@@ -451,11 +466,17 @@ class DispatchTables(unittest.TestCase):
         return action.choices
 
     def test_dt1_dispatch_equals_the_parser_and_read_only_set(self):
-        self.assertEqual(set(pf.DISPATCH), set(self.subcommands()))
-        self.assertEqual(pf.KNOWN_COMMANDS, frozenset(pf.DISPATCH))
+        # PF-A2.3: `permissions` is one parser word whose verbs are three DISPATCH rows.
+        self.assertEqual({name.split(" ", 1)[0] for name in pf.DISPATCH}, set(self.subcommands()))
+        verbs = next(item for item in self.subcommands()["permissions"]._actions
+                     if isinstance(item, argparse._SubParsersAction)).choices
+        self.assertEqual({"permissions " + verb for verb in verbs},
+                         {name for name in pf.DISPATCH if name.startswith("permissions ")})
+        self.assertEqual(pf.KNOWN_COMMANDS, frozenset(name.split(" ", 1)[0] for name in pf.DISPATCH))
         self.assertEqual(pf.READ_ONLY_COMMANDS,
-                         {"instances", "status", "doctor", "backups", "recoveries", "ps", "logs"})
-        self.assertEqual(len(pf.DISPATCH), 20)
+                         {"instances", "status", "doctor", "backups", "recoveries", "ps", "logs", "permissions check",
+                          "permissions plan"})
+        self.assertEqual(len(pf.DISPATCH), 22)
         self.assertNotIn("install", pf.READ_ONLY_COMMANDS)
 
     def test_dt2_every_field_is_in_its_token_set(self):
@@ -468,7 +489,7 @@ class DispatchTables(unittest.TestCase):
                 self.assertIn(route.preflight, ("none", "owned", "empty-target", "plan", "restore", "apply"))
                 self.assertIn(route.fail_closed, ("never", "always", "unless-side-by-side", "if-apply"))
                 self.assertIn(route.unattended, ("allowed", "terminal", "policy"))
-                self.assertIn(route.policy_class, ("", "backup", "permissions", "release-check"))
+                self.assertIn(route.policy_class, ("", "backup", "release-check"))
                 if route.lock:
                     self.assertTrue(route.trusted_launch and route.trusted_context)
                     self.assertIn(route.unattended, ("terminal", "policy"))
@@ -483,9 +504,13 @@ class DispatchTables(unittest.TestCase):
                     self.assertEqual((route.pending, route.preflight, route.fail_closed, route.unattended),
                                      ("any", "none", "never", "allowed"))
                     self.assertIn(route.mutability, ("read-only", "registry-read"))
+                    if name.startswith("permissions "):
+                        # PF-A2.3: trusted launch (they read protected state as root), not trusted context (they
+                        # map the refuse findings onto scopes themselves).
+                        self.assertEqual((route.trusted_launch, route.trusted_context), (True, False))
                 self.assertEqual(bool(route.policy_class), route.unattended == "policy")
         self.assertEqual({name for name, route in pf.DISPATCH.items() if route.unattended == "policy"},
-                         {"backup", "permissions", "release-check"})
+                         {"backup", "release-check"})
 
     def test_dt3_pending_routes_agree_with_the_table(self):
         self.assertTrue(set(pf.PENDING_ROUTES) <= set(pf.DISPATCH))
@@ -502,6 +527,8 @@ class DispatchTables(unittest.TestCase):
             ("update", "backup-ready"): {"resume", "rollback"},
             ("purge", "deleting"): {"purge"},
             ("rollback", "activating"): {"rollback"},
+            ("permissions", "interrupted"): {"permissions apply"},
+            ("permissions", "applying"): {"permissions apply"},
         }
         own = {name for name in locked if pf.DISPATCH[name].pending == name}
         for (operation, phase), routes in expected.items():
@@ -531,12 +558,13 @@ class DispatchTables(unittest.TestCase):
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
         compared = []
         for node in ast.walk(main):
-            if isinstance(node, ast.Compare) and dotted(node.left) == "args.command":
+            # PF-A2.3: the `permissions` verbs are dispatched by their route name.
+            if isinstance(node, ast.Compare) and dotted(node.left) in ("args.command", "route.name") \
+                    and all(isinstance(value, ast.Constant) for value in node.comparators):
                 for operator, value in zip(node.ops, node.comparators):
                     self.assertIsInstance(operator, ast.Eq, ast.dump(node))
-                    self.assertIsInstance(value, ast.Constant)
                     compared.append(value.value)
-        self.assertEqual(sorted(compared), sorted(pf.KNOWN_COMMANDS))
+        self.assertEqual(sorted(compared), sorted(pf.DISPATCH))
         self.assertEqual(len(compared), len(set(compared)))
         self.assertNotIn("passthrough", ast.get_source_segment(source, main))
         membership = []
@@ -651,12 +679,13 @@ class DispatchTables(unittest.TestCase):
         self.assertIn('_confirm(interaction, f"{verb} {_op8(operation_id)}")', inspect.getsource(pf.pf_install.resume))
         self.assertEqual({route.name for route in terminal},
                          {"deploy", "abort-deploy", "purge", "restore-instance", "reset-db", "rollback", "resume",
-                          "update", "config"})
+                          "update", "config", "permissions apply"})
         for route in terminal:
             with self.subTest(route=route.name):
                 # PF-A2.2 (OD-A22-17): the config wizards edit proposal files and confirm with [y/N] (confirm_write);
-                # the typed phrases stay for protected-state changes.
-                word = "confirm_write" if route.name == "config" else "confirm"
+                # the typed phrases stay for protected-state changes. PF-A2.3: `permissions apply` (and its --resume
+                # and --abandon) confirms with its own typed phrase (permission_confirm: cancel copy on EOF/Ctrl-C).
+                word = {"config": "confirm_write", "permissions apply": "permission_confirm"}.get(route.name, "confirm")
                 self.assertTrue(confirms(route.handler.split(".", 1)[1], word), route.handler)
 
     def test_dt5b_only_the_config_route_skips_the_configuration_load_and_the_freeze(self):
@@ -671,8 +700,10 @@ class DispatchTables(unittest.TestCase):
                     for item in call.keywords:
                         if item.arg == keyword:
                             calls.setdefault(name, []).append((where, ast.get_source_segment(source, item.value)))
-        self.assertEqual(calls["require_trusted_context"], [("main", 'route.name != "config"')])
-        self.assertEqual(calls["lock"], [("main", 'route.name != "config"')])
+        # PF-A2.3: `permissions apply` joins `config` (NO_CONFIG_ROUTES); the read-only verbs never reach either call.
+        self.assertEqual(calls["require_trusted_context"], [("main", "route.name not in NO_CONFIG_ROUTES")])
+        self.assertEqual(calls["lock"], [("main", "route.name not in NO_CONFIG_ROUTES")])
+        self.assertEqual(pf.NO_CONFIG_ROUTES, frozenset({"config", "permissions apply"}))
         self.assertEqual(calls["begin_operation"], [("Controller.lock", "freeze")])
         route = pf.DISPATCH["config"]
         self.assertEqual((route.lock, route.trusted_launch, route.trusted_context, route.pending, route.preflight,
@@ -967,7 +998,7 @@ class UnattendedGate(Base):
         for selected_by in ("single registration", "protected default"):
             if selected_by == "protected default":
                 pf_instance.set_default_instance(self.layout.root, self.context.instance_id)
-            for command in ("backup", "permissions", "release-check"):
+            for command in ("backup", "release-check"):
                 with self.subTest(selected_by=selected_by, command=command):
                     code, out, err = self.run_main([command], terminal=False)
                     self.assertEqual(code, 1, err)
@@ -1053,7 +1084,20 @@ class UnattendedGate(Base):
                     self.context.journal_path.unlink()
 
     def test_us7_policy_routes_need_a_protected_grant_without_a_terminal(self):
-        for command in ("backup", "permissions", "release-check"):
+        # PF-A2.3: `permissions` left the policy-grant list (OD-A23-11): check/plan are read-only, apply is terminal.
+        code, out, err = self.run_main(["--instance", "staging", "permissions", "apply"], terminal=False)
+        self.assertEqual(code, 1, err)
+        self.assertIn("ERROR: terminal-required: 'permissions apply' asks for a typed confirmation and cannot run "
+                      "without a terminal (scheduled task, script, or ssh without -t). Run it interactively: sudo pf "
+                      "--instance staging permissions apply. Nothing was changed.", err)
+        self.assert_nothing_started()
+        for verb in ("check", "plan"):
+            code, out, err = self.run_main(["permissions", verb], terminal=False)
+            for gate in GATE_CODES:
+                self.assertNotIn(gate, err)
+            self.assertIn("Permission " + verb + " for instance staging", out)
+            self.assert_nothing_started()
+        for command in ("backup", "release-check"):
             with self.subTest(command=command), \
                     mock.patch.object(pf.Controller, "policy_permits", autospec=True,
                                       side_effect=pf.Controller.policy_permits) as permits:
@@ -1765,11 +1809,14 @@ class StaticScan(unittest.TestCase):
         wider = {(name, where) for call, where in qualified_calls(tree) for name in [install_write(call)] if name}
         self.assertEqual(wider - write_sites(tree), {
             ("os.open(O_CREAT)", "write_editable_file"), ("os.write", "write_editable_file"),
-            ("os.fchown", "write_editable_file"), ("os.fchmod", "write_editable_file"),
             ("os.link", "write_editable_file"), ("os.unlink", "write_editable_file"),
             ("os.unlink", "remove_editable_leftovers"),
             # Pre-existing (PF-A1.3): the envelope render's private file inside the current operation directory.
             ("os.open(O_CREAT)", "Controller.render_compose"),
+            # PF-A2.3: the write-ahead effect journal appender (O_APPEND, 0600, fsync) inside the operation directory,
+            # and copy_fresh's removal of its own private temporary when the copy fails.
+            ("os.open(O_CREAT)", "Controller._append_effects"), ("os.write", "Controller._append_effects"),
+            ("os.unlink", "copy_fresh"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")
@@ -1890,7 +1937,7 @@ class StaticScan(unittest.TestCase):
         admin = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
         self.assertEqual(admin.count("sys.stdin.isatty("), 0)
         self.assertEqual(admin.count("stream.isatty()"), 1)
-        self.assertEqual(pf.CHECKPOINT, "PF-A2.2")
+        self.assertEqual(pf.CHECKPOINT, "PF-A2.3")
         self.assertEqual(pf.VERSION, "2.5.0")
 
     def test_ss6_every_parser_refuses_abbreviations(self):

@@ -152,10 +152,12 @@
 > create no operation. `pf` without a command is `pf ps`.
 > *Commands without a terminal.* A command started without a terminal (a scheduled task, a script,
 > `ssh` without `-t`) is refused before the lock: a command that asks for a typed confirmation with
-> `terminal-required`; `backup`, `permissions` and `release-check` must name the instance
+> `terminal-required`; `backup` and `release-check` must name the instance
 > (`--instance <slug|uuid>`, else `instance-required-unattended`) and then need a protected policy
 > grant for their class of operation, which no policy grants in this checkpoint
-> (`policy-grant-required`, exit 20; grants arrive with PF-A4.3). `release-check --apply` is refused
+> (`policy-grant-required`, exit 20; grants arrive with PF-A4.3). PF-A2.3: `permissions check` and
+> `permissions plan` are read-only and run without a terminal and without a grant; `permissions apply` is
+> terminal-only (`terminal-required`). `release-check --apply` is refused
 > with `auto-apply-not-permitted` (exit 20) with or without a terminal; `auto_update` in
 > `pf-config.json` is a proposal only. The scheduler wrappers `backup.sh` and `release-check.sh`
 > require `--instance` and execute only their sibling launcher (section 13).
@@ -238,6 +240,26 @@
 > `install-control.sh init` completion names `config admin --configuration`.
 > This block **supersedes** the "create the configuration by hand" steps of the PF-A2.1 block and of section 5.
 
+> **Warning (PF-A2.3).** Deployment Admin checkpoint PF-A2.3 (2026-10-07) — semantic permission policy,
+> `check`/`plan`/`apply`, scope floors and a resumable apply; still a **development state, not a NAS release**.
+> Offline evidence only: nothing was run against a real DSM host, SMB client or Docker daemon.
+> *Commands.* `pf permissions check` (compare, read-only, exit 1 on any difference), `pf permissions plan`
+> (preview with group members, counts and a plan hash, read-only) and `pf permissions apply` (numbered wizard,
+> one typed confirmation `APPLY PERMISSIONS <slug>`, then a fenced, journaled and verified apply; terminal
+> only). Bare `pf permissions` no longer changes anything: it is refused with `permissions-verb-required`
+> (exit 2). `check` and `plan` take no lock and write nothing anywhere.
+> *Approval.* A confirmed `apply` writes the **permission policy revision** N to
+> `<root>/instances/<uuid>/permission-policy.json` (root, `0600`, kept by `purge`). Until the first approval
+> the instance uses a derived policy: backups and recovery bundles keep the group of their folders, and the
+> workspace and configuration use `workspace_write_group`. `backup_read_group` is a proposal for every
+> instance, `workspace_write_group` once a revision exists; editing `pf-config.json` alone no longer changes
+> who can read backups or recovery bundles.
+> *Flows.* No lifecycle command walks an editable tree any more: `deploy --current` leaves workspace
+> permissions unchanged, and backups, recovery bundles, replaced or restored source, a restored `.env` and
+> restored state files are content-only copies that get explicit policy targets and are verified.
+> This block **supersedes** the `sudo pf permissions` steps of sections 2 and 16 and the `backup_read_group`
+> note of the PF-A2.2 block and section 6.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -271,32 +293,134 @@ repository copies are **not** used for normal NAS administration after installat
 
 ## 2. Permission model
 
-Default DSM groups are `users` for repository/config access and backup reading.
-`pf-config.json` can change these group names if a dedicated trusted group is preferred.
+Since PF-A2.3 the permissions of a registered instance follow one **semantic permission policy**. Nothing
+asks for or accepts an octal mode, `+x-r` or a second numeric representation: modes are outputs shown on
+request. The v2.5 rows for `control/` and `.pf-state-*` no longer apply: the control release lives in
+`<root>/releases/<id>/` and private state in `<root>/instances/<uuid>/`.
 
-| Path | Typical mode | Access policy |
+### Choices and scopes
+
+Each scope with a group gets one of three choices:
+
+| Choice | JSON value | Meaning for members of the group |
 | --- | --- | --- |
-| `repo/` directories | `2770` | owner + `workspace_write_group` full read/write/delete; setgid preserves group |
-| `repo/` regular files | `0660` | owner + `workspace_write_group` read/write |
-| `repo/` existing executable files | `0770` | source/working-tree executability only; not the privileged control plane |
-| `control/` directories | `0750` | root modifies; `users` can browse/read |
-| `control/pf.sh`, `backup.sh`, `release-check.sh` | `0740` | root executes/modifies; `users` read only |
-| other `control/` files | `0640` | root modifies; `users` read only |
-| `config/` directory | `2770` | trusted `users` may create/edit/delete host config |
-| `config/.env`, `config/pf-config.json` | `0660` | trusted `users` read/write |
-| `backups/`, `recovery/` directories | `0750` | configured read group can browse/copy, not modify/delete |
-| backup/recovery files | `0640` | configured read group can read/copy, not write |
-| `.pf-state-*` | `0700` | root only |
+| Read and edit | `read_write` | read, create, edit, rename and delete |
+| View and copy | `read_only` | read and copy |
+| No group access | `none` | nothing; only the owner |
 
-DSM Shared Folder ACLs still apply. The DSM account must also have **Read/Write** access
-to the shared folder containing `repo/` if SMB editing is expected. POSIX mode bits do
-not override a DSM ACL deny.
+| Scope | Path | What can be chosen | Floor (never changed by a choice) |
+| --- | --- | --- | --- |
+| Workspace | registered `workspace` | group, any choice, inheritance, script execution `Owner only` or `Owner and group` | existing editor owners are kept; execute bits only for files the deployed-source manifest marks executable |
+| Configuration | registered `configuration` | group, any choice, inheritance | no executable option |
+| Control release | `<root>/releases/<id>/` | fixed: No group access | checked, never changed by `apply`: owner uid 0, no group/other write, no special bits |
+| Backups | registered `backups` | group, View and copy or No group access | owner uid 0, no group write, no imported owner |
+| Recovery bundles | registered `recovery` | group, View and copy or No group access | as backups |
+| Private state | `<root>/instances/<uuid>/` | fixed: owner only | directories `0700`, files `0600`, no group |
 
-Run the managed permission repair at any time:
+Mode table (audit detail; the owner always keeps read/write, `other` never gets a bit, setgid only on
+directories with inheritance, setuid and sticky never):
+
+| Access | File | Directory | Directory with inheritance |
+| --- | --- | --- | --- |
+| No group access | `0600` | `0700` | `2700` |
+| View and copy | `0640` | `0750` | `2750` |
+| Read and edit | `0660` | `0770` | `2770` |
+
+A file the protected source manifest marks executable gets the file mode plus owner execute (`Owner only`)
+or owner and group execute (`Owner and group`). No rule looks at a file extension, and nothing under `.git`,
+`node_modules` or another excluded name is ever designated. "No script execution" is not offered for the
+workspace: files marked executable in the deployed source keep an owner execute bit so the workspace still
+matches its source manifest (`permission-policy-unsupported` if such a policy is ever submitted).
+
+### Permission policy revision, derived policy and proposals
+
+"Permission policy revision N" is the approved permission policy of one instance. It is unrelated to the
+"approved policy revision" of the environment policy (`staging` revision 1), which no permission command
+changes.
+
+- **Approved.** A confirmed `pf permissions apply` that verified every selected scope writes revision N+1 to
+  `<root>/instances/<uuid>/permission-policy.json` (root, `0600`). A byte copy stays in that apply's operation
+  directory, so the chain of revisions can be walked back to revision 1. `purge` keeps the record; an instance
+  registered anew starts without one (it is not part of recovery bundles).
+- **Derived (not approved yet).** Workspace and configuration: `workspace_write_group`, Read and edit,
+  inheritance, `Owner and group` script execution (the A1/A2.2 modes `2770`/`0660`/`0770`). Control: No group
+  access. Backups and recovery: View and copy for the group that currently owns the backups and recovery
+  folders. Only root can change that group (`validate_context` requires the folders to be owned by root and
+  not group-writable). A folder gid without a group name stops with `permission-group-missing` until `apply`
+  approves a named group.
+- **Proposals.** `backup_read_group` in `pf-config.json` is a proposal for every instance: it never changes
+  who can read backups or recovery bundles by itself. `workspace_write_group` is a proposal once a revision
+  exists; before the first approval it still sets the group of files pf creates in the workspace and the
+  configuration (declared limit). `doctor`, `check`, `plan` and the `apply` wizard show a differing proposal
+  (`permission-group-proposal`); it takes effect only when `apply` writes a new revision.
+- A members-of-the-backup-group warning is shown wherever that group is chosen:
+  members of the backup read group can read database contents and any credentials included in a backup or
+  recovery bundle.
+
+### `check`, `plan` and `apply`
 
 ```sh
-sudo pf permissions
+sudo pf --instance <slug> permissions check [--scope SCOPE]...
+sudo pf --instance <slug> permissions plan  [--scope SCOPE]... [--details]
+sudo pf --instance <slug> permissions apply [--scope SCOPE]... [--details]
+sudo pf --instance <slug> permissions apply --resume | --abandon
 ```
+
+`SCOPE` is `workspace`, `configuration`, `control`, `backups`, `recovery` or `private_state` (repeatable;
+default all).
+
+- `check` and `plan` are read-only: no lock, no operation directory, nothing written anywhere. They map the
+  protected-context findings onto scopes: a finding at, above or below a workspace, configuration, backups or
+  recovery folder blocks that scope (`scope-path-unsafe`) and the others are still reported; any other refused
+  finding stops with `permissions-context-refused` before any folder is read. `check` exits 1 when an entry
+  differs or the control release breaks its ceiling (`permissions-differ`).
+- `plan` prints, per scope, the policy, the group members (at most 20; primary-group and directory-service
+  members are not listed), the counts (group, mode, special bits), whether a freeze is needed, the blockers
+  and, with `--details`, each change in octal and symbolic form. `Plan hash` is the sha256 of the exact change
+  list; `apply` shows the same hash for the same policy on an unchanged tree. With a differing
+  `pf-config.json` proposal, a second block shows the candidate that applies it.
+- `apply` takes the instance lock, asks the numbered wizard (group, access, inheritance and, for the workspace,
+  script execution; Enter keeps the shown default, `q` cancels), plans, shows the policy changes and the plan
+  hash, and asks one typed confirmation `APPLY PERMISSIONS <slug>`. It then revalidates the context, the
+  record, the groups and the folder identities, records its intent (`permission-plan.json`,
+  `permission-changes.jsonl` and `state/pending.json`), applies and verifies every selected scope, and only
+  then writes the new revision. An unchanged approved policy on a compliant tree is `permissions-current`
+  (exit 0, nothing written).
+
+The apply never follows a link, never crosses a mount, never changes a hard-linked, special, ACL-bearing or
+`@docker` entry, never chowns an untrusted owner into a protected scope and never changes the control release:
+each of these is a blocker reported by `plan`, and `apply` changes nothing while one exists.
+
+### Editor freeze
+
+A change below the root of the workspace or the configuration (a bulk change) needs a verified editor freeze.
+`apply` first sets every such scope root to owner-only (keeping its setgid bit), so editors can no longer enter
+the folder, then scans `/proc` for any other process whose working directory, root or open file is inside one
+of the folders. A holder lifts the fence again and refuses with `editor-freeze-refused` (nothing changed). The
+scan also reports the shell that started the command: **start `apply` from outside the scope folders, for
+example `cd /`**. The freeze is unavailable when `/proc` cannot be read or the scope root carries an ACL;
+`plan` then reports `editor-freeze-unavailable` and bulk apply of that scope is blocked. Deselect the scope
+with `--scope`, or change it by hand: stop SMB editing of the folder, apply the modes of the table above,
+then run `pf permissions check`. A root-only change needs no freeze. A userspace lock never locks SMB
+clients, and the fence does not stop a root service or a memory-mapped file (declared limit).
+
+### ACLs and DSM
+
+`apply` never writes or removes an ACL entry. An entry with an access ACL, or an ACL this control cannot
+read, is a blocker (`scope-entry-acl`): changing its mode would rewrite the ACL mask. A directory with only a
+default ACL is allowed and reported under future-file behaviour. DSM Shared Folder permissions still apply
+and POSIX modes do not override a DSM deny: verify the Shared Folder permissions for each SMB account from the
+share root (DSM Control Panel), not only from an SSH shell. DSM shares with ACLs block bulk apply until
+PF-A5.1 supplies a DSM adapter.
+
+### Three statuses
+
+`check` and `apply` print three statuses per scope and never one green line: `mode_applied`
+(`yes`, `partial (N differ)`, `no`, `not-selected` or `check-only`), `effective_access_verified` and
+`future_file_behavior_verified`. The last two are always `not verified` in this checkpoint: they are computed
+from mode bits only. Setgid on a directory carries the group, not write access; files created over SMB take
+the client's umask or the share's create mask, and default ACLs can change them. Files created by pf get
+explicit modes and are verified after creation.
 
 ### Trust consequence
 
@@ -544,11 +668,16 @@ project naming, booleans, positive numeric values, and configured DSM groups bef
 - **Environment label.** `environment` must equal the approved policy environment of the instance. It is a
   label: changing it never changes the policy (`admin-config-mismatch`); a policy change is a separate approval
   (PF-A4.3). `project` must equal the registered Compose project.
-- **Backup group.** A changed `backup_read_group` takes effect at the next `backup` or `purge` without a
-  separate approval, exactly as a hand edit does. Revision-bound approval of that change belongs to PF-A2.3.
+- **Groups are proposals (PF-A2.3).** `backup_read_group` is always a proposal: backups and recovery
+  bundles keep the group of their folders, or the group of permission policy revision N, until
+  `pf permissions apply` approves a change. `workspace_write_group` becomes a proposal once a permission policy
+  revision exists; before that it still sets the group of files pf creates in the workspace and the
+  configuration. The wizard summary states which case applies.
 - **Writes.** The file is replaced through a private temporary `.pf-config.json.pf-config-<8 hex>` (for `.env`:
   `.env.pf-config-<8 hex>`) in the same directory, keeping the owner, group and mode of the file it replaces; a
-  new file is `root:<workspace group>` `0660`. If the file changed after the summary, nothing is written
+  new file of a registered instance gets the configuration target of the permission policy in force (owner root,
+  the configuration group, `0660`, `0640` or `0600`) and is checked after creation; before registration it is
+  `root:<workspace group>` `0660`. If the file changed after the summary, nothing is written
   (`config-changed`). These temporary names are reserved: a leftover of an interrupted run is removed by the
   next run, and a file with such a name that is not a leftover is refused (`config-file-unsafe`), never removed.
 - **Downgrade.** A control release older than PF-A2.2 refuses `schema_version`. Selecting such a release with
@@ -588,7 +717,9 @@ exact internal hostname.
   existing value is kept with a note and a missing one is refused (`zone-data-unavailable`). The backend
   checks the value with its own image's zone data at startup; that data is not checked by the wizard.
 - **ACLs.** A `.env` or `pf-config.json` that carries ACL entries is refused before the first question
-  (`config-file-acl`): replacing it would drop the ACL. Edit such a file by hand until PF-A2.3.
+  (`config-file-acl`): replacing it would drop the ACL. Edit such a file by hand; an ACL-preserving replacement
+  belongs to PF-A5.1. A created `.env` gets the configuration target of the permission policy in force; the
+  reuse of an existing `.env` by the first `deploy` sets the same target on that file only.
 - **Database URL.** The controller passes `PARTFLOW_DATABASE_URL` with percent-encoded credentials; nothing
   is spliced raw. Limit (until the app-lane fix of `backend/alembic/env.py`, P16-S3 or later, is deployed): the
   backend migration step hands that URL to Alembic's configuration parser, which rejects `%`. A password
@@ -642,7 +773,7 @@ sudo pf deploy --release latest --channel prerelease
 The new-deploy flow:
 
 1. Verifies this Compose project has no managed deployment record, containers, or volumes.
-2. Creates/reuses `config/.env`.
+2. Creates/reuses `config/.env` (with the configuration permission target, PF-A2.3).
 3. Prompts only for deployment-specific values that cannot be safely inferred.
 4. Resolves the chosen source to an exact commit SHA.
 5. Verifies CI unless `--skip-ci` is explicitly used for manual staging.
@@ -653,6 +784,10 @@ The new-deploy flow:
 10. Starts backend and verifies health/schema.
 11. Starts frontend and verifies `/api/health` through the frontend proxy.
 12. Writes the deployed revision to external `.pf-state-<project>/deployed.json`.
+
+Since PF-A2.3 the new source tree is copied content-only and only the names `deploy` copied get the workspace
+targets; `deploy` without a selector (`--current`) changes no workspace permission and prints
+`Workspace permissions were not changed; check them with '<pf> permissions check --scope workspace'.`
 
 After UI/workflow/firewall smoke testing, create the first rollback baseline:
 
@@ -693,6 +828,9 @@ It reports:
 Deployed source: <SHA>
 Workspace: provenance git_commit|unknown | manifest commit <SHA or none> | differs from deployed: True/False | changes: ...
 ```
+
+No lifecycle command changes the permissions of existing workspace files (PF-A2.3); `pf permissions check
+--scope workspace` reports them and `pf permissions apply` changes them under an editor freeze.
 
 This distinction prevents a local edit from being mistaken for deployed code. Since
 PF-A1.2 the workspace line comes from an fd-safe byte/mode comparison of `repo/` against
@@ -780,6 +918,11 @@ manifest.sha256
 The active database dump is restored into a temporary database as part of verification.
 The runtime `.env` is no longer stored in the normal revision `source.tar.gz`; it is host
 configuration outside the repository. A full purge-recovery bundle preserves it separately.
+
+Since PF-A2.3 a new checkpoint gets the backups target of the permission policy in force (the group of the
+backups folder, or of the approved revision; View and copy gives directories `0750` and files `0640`), set
+explicitly and verified. Only the new checkpoint is changed. A checkpoint entry that inherits an ACL from its
+folder stops the backup (`fresh-entry-acl`) before it is published.
 
 List checkpoints, newest first, ten per page:
 
@@ -919,6 +1062,11 @@ backup cannot be produced, purge refuses to delete that volume.
 
 The recovery bundle is intended to reconstruct **functional PartFlow state**, not Docker
 container IDs/network IDs bit-for-bit.
+
+Since PF-A2.3 the bundle files are content-only copies (no mode, owner or ACL is copied) and the bundle gets
+the recovery target of the permission policy in force. Purge keeps the permission policy record
+(`<root>/instances/<uuid>/permission-policy.json`); the redeployed or restored instance stays under it. The
+record is not part of a bundle: an instance registered anew starts with the derived policy.
 
 ### Backup retention during purge
 
@@ -1167,6 +1315,13 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   bound); restore the schema 1 file first if you really need to go back.
 - The legacy `recovery/control-upgrades/` archive no longer applies; old releases stay under
   `<root>/releases/`.
+- **PF-A2.2 → PF-A2.3.** The bootstrap bytes and the install contract are unchanged, so `pf install control
+  --source` is legal. Without an approval the derived policy keeps the A2.2 groups and modes, except that
+  backups and recovery keep the group already on their folders, `deploy --current` no longer changes the
+  workspace, fresh copies are content-only and bare `pf permissions` is refused. **Downgrade** after an
+  approval: an older control ignores `permission-policy.json` and goes back to the `pf-config.json` groups.
+  The installer refuses any control switch, upgrade or downgrade, while a permission apply is open
+  (`instance-operation-pending`): finish it with `--resume` or `--abandon` first.
 
 This explicit step is the security boundary that permits `repo/` to remain users-writable.
 Do not install an unreviewed or unknown tree with `sudo`.
@@ -1175,13 +1330,55 @@ Do not install an unreviewed or unknown tree with `sudo`.
 
 ### SMB can see `repo/` but cannot edit
 
-First normalize POSIX permissions:
+Compare first, then apply the permission policy (start from outside the folders, for example `cd /`):
 
 ```sh
-sudo pf permissions
+sudo pf --instance <slug> permissions check --scope workspace
+sudo pf --instance <slug> permissions apply --scope workspace
 ```
 
-Then verify DSM Shared Folder permissions grant the account/group Read/Write access.
+Then verify DSM Shared Folder permissions grant the account/group Read/Write access from the share root.
+
+### `pf permissions` codes
+
+- `permissions-verb-required` (exit 2): bare `pf permissions` no longer changes anything; use `check`, `plan` or
+  `apply`.
+- `permission-policy-invalid`: the policy (or the derived one, for example a group name with `/`) breaks a rule;
+  nothing was changed.
+- `permission-group-missing`: a group of the policy, or the gid on the backups/recovery folder, has no group on
+  this host. Groups are never created; choose an existing group in `pf permissions apply`.
+- `permission-policy-unsupported`: a valid choice this control does not activate (workspace script execution
+  "none").
+- `permission-approval-invalid`: `permission-policy.json` is not a root-owned `0600` single-link file or fails its
+  schema or chain. It is never replaced automatically and no derived policy is used: backups and the permission
+  commands stop. Manual route: as root, move it aside in the same directory under a name such as
+  `permission-policy.invalid-<UTC>.json`; the instance then uses the derived policy (backups keep the group of
+  their folders, so nothing widens), and `pf permissions apply` writes a new revision 1.
+- `permissions-context-refused`: a protected-context finding outside the scopes; `check`/`plan` read no scope.
+  Fix the findings shown (`pf doctor`).
+- `scope-path-unsafe`, `scope-entry-link`, `scope-entry-special`, `scope-entry-hardlinked`,
+  `scope-mount-boundary`, `scope-contains-app-storage`, `scope-untrusted-owner`, `scope-entry-acl`,
+  `scope-too-large`: blockers; `apply` changes nothing while one exists. Remove the link, special file, hard
+  link or ACL, move the mount or application storage out of the folder, or deselect the scope with `--scope`.
+- `control-ceiling`: the installed control release breaks its ceiling; it is changed only by
+  `pf install control`.
+- `editor-freeze-unavailable` / `editor-freeze-refused`: see section 2 (Editor freeze).
+- `permissions-blocked`, `permissions-cancelled`, `permissions-current`, `permissions-changed-before-apply`:
+  nothing was changed; run the command again to review.
+- `permissions-apply-pending`: an interrupted apply is open; every other mutating command (scheduled `backup`
+  included) is refused until `pf permissions apply --resume` or `--abandon`.
+- `permissions-entry-changed`, `permissions-verify-failed`, `permissions-interrupted`: the apply is **not
+  complete**; `--resume` re-plans the remaining changes with the frozen policy, `--abandon` compensates the
+  recorded changes in reverse order.
+- `permissions-already-approved`: the interrupted apply already wrote its revision; only `--resume` can finish
+  it.
+- `permissions-abandon-conflicts` (exit 1): objects changed after the interruption are left as they are and
+  listed.
+- `permissions-journal-invalid`: an effect journal line cannot be read; nothing was changed and the journal
+  stays open. Review `<root>/instances/<uuid>/operations/<op-id>/permission-effects.jsonl` by hand.
+- `fresh-entry-acl`: a new backup or recovery entry inherited an ACL from its folder; the operation stopped
+  before publishing it. Remove the default ACL from that folder. In the workspace or the configuration the new
+  entry keeps the mode it was created with (a note).
 
 ### SMB cannot modify backups/recovery
 
@@ -1326,13 +1523,13 @@ Nothing was changed.
 
 ### `instance-required-unattended`
 
-`backup`, `permissions` or `release-check` ran without a terminal and the instance was selected
+`backup` or `release-check` ran without a terminal and the instance was selected
 by the protected default or as the only registration. An unattended command must name its
 instance: `pf --instance <slug|uuid> <command>`. Nothing was changed.
 
 ### `policy-grant-required` or `auto-apply-not-permitted` (exit 20)
 
-An unattended `backup`, `permissions` or `release-check`, or any `release-check --apply`, needs a
+An unattended `backup` or `release-check`, or any `release-check --apply`, needs a
 protected policy that permits that class of operation. No policy grants one in this checkpoint
 (grants arrive with PF-A4.3); `auto_update` in `pf-config.json` does not. Run the command
 interactively, and apply a release manually with `pf --instance <slug> update --release <tag>`.
@@ -1432,7 +1629,10 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 | Command | Purpose |
 | --- | --- |
 | `sudo pf doctor` | Validate host tools, control security, Compose config, env, and basic capacity |
-| `sudo pf permissions` | Normalize repo/config writable and backup/recovery read-only permissions |
+| `sudo pf permissions check [--scope S]…` | Compare every scope with the permission policy in force (read-only; exit 1 on a difference) |
+| `sudo pf permissions plan [--scope S]… [--details]` | Preview groups, members, counts and the plan hash (read-only) |
+| `sudo pf permissions apply [--scope S]… [--details]` | Wizard, `APPLY PERMISSIONS <slug>`, fenced and verified apply; writes the next permission policy revision |
+| `sudo pf permissions apply --resume \| --abandon` | Finish (`RESUME PERMISSIONS <slug>`) or compensate (`ABANDON PERMISSIONS <slug>`) an interrupted apply |
 | `sudo pf status` | Show deployed revision, workspace drift, DB revision, containers, pending operation |
 | `sudo pf deploy --latest` | Brand-new staging deployment from latest configured branch SHA |
 | `sudo pf deploy --commit FULL_SHA` | Brand-new deployment from an explicit commit |
@@ -1468,7 +1668,8 @@ Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `p
 
 Commands started without a terminal must pass `--instance <slug|uuid>`; until PF-A4.3 policy
 grants exist every locked command is refused without a terminal (`terminal-required`,
-`policy-grant-required`).
+`policy-grant-required`). Bare `pf permissions` is refused (`permissions-verb-required`, exit 2); its
+former repair is `pf permissions apply`.
 
 ## 18. Validation boundary
 
@@ -1521,6 +1722,20 @@ PF-A2.2 limits:
   deployed;
 - a `backup_read_group` change takes effect without revision-bound approval (PF-A2.3).
 
+PF-A2.3 limits (the permission compiler and the filesystem behaviour are tested offline on a real Linux
+filesystem as root in a throwaway container; no DSM or SMB claim):
+
+- `effective_access_verified` and `future_file_behavior_verified` are never verified: no SMB account test, DSM
+  Shared Folder permission, DSM ACL or share create mask was observed (PF-A5.1);
+- ACL-bearing scopes cannot be bulk-applied, no ACL is ever written, and fresh entries that inherit an ACL stop
+  protected flows and keep their creation mode in editable scopes;
+- the editor freeze does not stop root services or memory-mapped files; a custom Docker data root on the same
+  device inside a scope is not detected offline;
+- until the first approval `workspace_write_group` still sets the group of files pf creates in the editable
+  scopes; workspace script execution "none" is not activatable;
+- the control release is checked, never changed, and fixed at No group access;
+- ACL-bearing configuration files stay refused by the config wizards (PF-A5.1);
+- an invalid permission policy record has a manual recovery route only (section 16).
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
 instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose
 route remains; the PF-A1 safety scope is proven offline only. A1-T11…T14 stay blocked on a real

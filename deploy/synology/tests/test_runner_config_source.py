@@ -569,8 +569,9 @@ class WritableGitMetadata(Base):
             calls.append(list(map(str, argv)))
             return original(controller, argv, **kwargs)
 
-        with mock.patch.object(pf.Controller, "command", recorded):
-            code, out, err = run_main(["--instance", "staging", "permissions"], self.layout, interactive=True)
+        with mock.patch.object(pf.Controller, "command", recorded), \
+                mock.patch("builtins.input", side_effect=[""] * 11 + ["APPLY PERMISSIONS staging"]):
+            code, out, err = run_main(["--instance", "staging", "permissions", "apply"], self.layout, interactive=True)
         self.assertEqual(code, 0, err)
         self.assertEqual(calls, [])
         self.assertFalse(self.marker.exists())
@@ -1631,8 +1632,11 @@ class FrozenAuthority(Base):
 
     def test_installed_cli_mutation_freezes_the_proposal_and_stops_on_unsupported_values(self):
         original = self.env_path.read_bytes()
-        result = launcher_run(self.layout, ["--instance", "staging", "permissions"], interactive=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # PF-A2.3: `permissions apply` takes no app-config snapshot (RT-11); `backup` is the mutating route that
+        # freezes the proposal here. It freezes inside the lock, then stops at the fixture daemon probe (exit 1).
+        result = launcher_run(self.layout, ["--instance", "staging", "backup"], interactive=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("migration-issue", result.stderr)
         operations = sorted(os.listdir(self.context.operations_dir))
         self.assertEqual(len(operations), 1)
         snapshot = self.context.operations_dir / operations[0] / "app.env"
@@ -1640,27 +1644,41 @@ class FrozenAuthority(Base):
         self.assertEqual(pf_config.parse_app_env(snapshot.read_bytes(), label="s"),
                          pf_config.parse_app_env(original, label="e"))
         record = json.loads((self.context.operations_dir / operations[0] / "operation.json").read_text())
-        self.assertEqual(record["command"], "permissions")
+        self.assertEqual(record["command"], "backup")
         self.assertEqual(record["record_sha256"], self.context.record_sha256)
         # A value that cannot round-trip: explicit migration issue, nothing regenerated or written.
         self.env_path.write_bytes(original.replace(b"abc123", b"\"it's-not-quotable\""))
         edited = self.env_path.read_bytes()
-        result = launcher_run(self.layout, ["--instance", "staging", "permissions"], interactive=True)
+        result = launcher_run(self.layout, ["--instance", "staging", "backup"], interactive=True)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("migration-issue", result.stderr)
         self.assertNotIn("it's-not-quotable", result.stderr + result.stdout)
         self.assertEqual(self.env_path.read_bytes(), edited)
         newer = set(os.listdir(self.context.operations_dir)) - set(operations)
+        newer_operations = set(newer)
         self.assertEqual(len(newer), 1)
         self.assertFalse((self.context.operations_dir / newer.pop() / "app.env").exists())
         # A hand-edited policy is refused, never applied silently.
         self.env_path.write_bytes(original)
         policy = self.layout.policy_path
         policy.write_bytes(pfx.policy_document(revision=2))
-        result = launcher_run(self.layout, ["--instance", "staging", "permissions"], interactive=True)
+        result = launcher_run(self.layout, ["--instance", "staging", "permissions", "apply"], interactive=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("policy-invalid", result.stderr)
         self.assertEqual(len(os.listdir(self.context.operations_dir)), 2)
+        # The permissions launcher runs and records its command; it freezes no app-config snapshot (RT-11).
+        policy.write_bytes(pfx.policy_document())
+        with pfx.typed_terminal([""] * 11 + ["APPLY PERMISSIONS staging"]) as stdin:
+            result = subprocess.run([str(self.layout.launcher), "--instance", "staging", "permissions", "apply"],
+                                    env={"PATH": "/usr/bin:/bin", "TERM": "dumb"}, cwd="/", stdin=stdin,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+                                    timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        newest = sorted(set(os.listdir(self.context.operations_dir)) - set(operations) - newer_operations)
+        self.assertEqual(len(newest), 1)
+        record = json.loads((self.context.operations_dir / newest[0] / "operation.json").read_text())
+        self.assertEqual(record["command"], "permissions apply")
+        self.assertFalse((self.context.operations_dir / newest[0] / "app.env").exists())
 
 
 # ===================================================== A1-T03 / A1-T17 repeats after extraction
@@ -1746,7 +1764,7 @@ class ProtectedRuntimeDirectories(Base):
                 validation = self.validation()
                 self.assertFalse(validation.mutation_allowed)
                 self.assertIn(code, validation.refused_codes())
-                result = run_main(["--instance", "staging", "permissions"], self.layout)
+                result = run_main(["--instance", "staging", "permissions", "apply"], self.layout)
                 self.assertEqual(result[0], 1)
                 self.assertIn(code, result[2])
                 if path.is_symlink():

@@ -62,7 +62,7 @@ pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A2.2"
+CHECKPOINT = "PF-A2.3"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -419,22 +419,6 @@ def prompt_yes_no(label, default=True):
         log("Enter y or n.")
 
 
-def copy_tree_entry(source, destination):
-    source, destination = Path(source), Path(destination)
-    if destination.exists() or destination.is_symlink():
-        if destination.is_dir() and not destination.is_symlink():
-            shutil.rmtree(destination)
-        else:
-            destination.unlink()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir() and not source.is_symlink():
-        shutil.copytree(source, destination, symlinks=False)
-    elif source.is_file() and not source.is_symlink():
-        shutil.copy2(source, destination)
-    else:
-        raise Failure(f"Unsupported local deployment path: {source}")
-
-
 def create_source_archive(root, destination):
     root = Path(root)
     def select(info):
@@ -668,9 +652,10 @@ def inspect_editable_target(path, *, keys=None):
     return EditableTarget(path, fd is not None, data, identity, uid, gid, mode, nlink, tuple(removable))
 
 
-def write_editable_file(path, data, *, expected, expected_identity, create_gid, op8, keys=None):
+def write_editable_file(path, data, *, expected, expected_identity, create_gid, op8, keys=None, create_mode=0o660):
     """Section 3.7 steps 1-5: refuse unless the target still equals the reviewed observation, remove classified
-    leftovers, write a private temp, take the target's ownership and mode (or root:<create_gid> 0660 for a new file),
+    leftovers, write a private temp, take the target's ownership and mode (or root:<create_gid> ``create_mode`` for a
+    new file: the configuration target of the permission policy in force, PF-A2.3, verified with fstat),
     compare-and-swap, publish by rename (replace) or link (create, never clobbers), fsync and re-read."""
     path = Path(path)
     current = inspect_editable_target(path, keys=keys)
@@ -696,7 +681,13 @@ def write_editable_file(path, data, *, expected, expected_identity, create_gid, 
                 os.fchmod(fd, current.mode)
             else:
                 os.fchown(fd, pf_instance.TRUSTED_UID, create_gid)
-                os.fchmod(fd, 0o660)
+                os.fchmod(fd, create_mode)
+                created = os.fstat(fd)
+                if (created.st_uid, created.st_gid, stat.S_IMODE(created.st_mode)) != (pf_instance.TRUSTED_UID,
+                                                                                       create_gid, create_mode):
+                    raise Failure(f"permissions-verify-failed: configuration: {path.name} does not hold its target "
+                                  f"after the change (mode {stat.S_IMODE(created.st_mode):04o} gid {created.st_gid}); "
+                                  "nothing was written.")
         finally:
             os.close(fd)
         check = inspect_editable_target(path, keys=keys)
@@ -730,12 +721,13 @@ def write_editable_file(path, data, *, expected, expected_identity, create_gid, 
         raise _config_changed(path, "after the write it holds other bytes", written=True)
 
 
-def write_reviewed(path, data, target, *, create_gid, op8, keys, secret=False):
+def write_reviewed(path, data, target, *, create_gid, op8, keys, secret=False, create_mode=0o660):
     """write_editable_file against the reviewed observation ``target``. An interrupt is reported from an observation
     of the target (old or new bytes), never assumed."""
     try:
         write_editable_file(path, data, expected=target.data if target.present else None,
-                            expected_identity=target.identity, create_gid=create_gid, op8=op8, keys=keys)
+                            expected_identity=target.identity, create_gid=create_gid, op8=op8, keys=keys,
+                            create_mode=create_mode)
     except KeyboardInterrupt as exc:
         try:
             observed = pf_install.read_regular_file(path)
@@ -901,8 +893,9 @@ def admin_group_questions(values, *, mode, locations):
     return asked
 
 
-def admin_summary(path, *, mode, before, document, asked, instance_line, environment_line, app_hint):
-    """Section 4.6 admin summary (no confirmation)."""
+def admin_summary(path, *, mode, before, document, asked, instance_line, environment_line, app_hint,
+                  permission_lines=()):
+    """Section 4.6 admin summary (no confirmation). ``permission_lines``: the PF-A2.3 proposal lines (registered)."""
     title = {"create": "create", "migrate": "migrate schema 1 -> 2", "complete": "complete"}[mode]
     log(f"Admin configuration {path} ({title})")
     log(instance_line)
@@ -923,9 +916,8 @@ def admin_summary(path, *, mode, before, document, asked, instance_line, environ
             log(f"  {key}: {value} (kept)")
     log("Not asked here (edit the file by hand to change): " + ", ".join(ADMIN_NOT_ASKED) + ".")
     log(environment_line)
-    if before is not None and "backup_read_group" in asked:
-        log("backup_read_group change takes effect at the next backup or purge without a separate approval "
-            "(revision-bound group approval: PF-A2.3).")
+    for line in permission_lines:
+        log(line)
     log(app_hint)
 
 
@@ -963,6 +955,176 @@ def app_canonical_value(kind, value):
     return canonical if canonical != value else None
 
 
+# ------------------------------------------------------------ permission policy (PF-A2.3)
+# `pf permissions check|plan|apply`: the semantic permission policy, its revision-bound approval in private state and
+# the fd-safe apply engine (pf_instance). Lifecycle flows give fresh artifacts explicit policy targets
+# (Controller.publish_fresh/apply_single); no flow walks an existing editable tree.
+
+PERMISSION_RECORD_NAME = "permission-policy.json"
+PERMISSION_PLAN_NAME = "permission-plan.json"
+PERMISSION_CHANGES_NAME = "permission-changes.jsonl"
+PERMISSION_EFFECTS_NAME = "permission-effects.jsonl"
+PERMISSION_OUTCOME_NAME = "permission-apply.json"
+PERMISSION_APPROVAL_COPY = "permission-approval.json"
+PERMISSION_SCOPES = pf_config.PERMISSION_SCOPES
+EDITABLE_SCOPES = ("workspace", "configuration")
+PROTECTED_SCOPES = ("backups", "recovery", "private_state")
+# `pf permissions` verbs (classify_command); bare `pf permissions` no longer changes anything (OD-A23-08).
+PERMISSIONS_VERBS = ("check", "plan", "apply", "-h", "--help")
+# Routes whose trusted-context check skips the app-config load and whose lock takes no app-config snapshot.
+NO_CONFIG_ROUTES = frozenset({"config", "permissions apply"})
+SCOPE_LABELS = {"workspace": "Workspace", "configuration": "Configuration", "control": "Control release",
+                "backups": "Backups", "recovery": "Recovery bundles", "private_state": "Private state"}
+PERMISSION_DETAIL_LIMIT = 50
+PERMISSION_BLOCKER_LIMIT = 10
+GROUP_MEMBER_LIMIT = 20
+PERMISSION_HOOKS = ("after-plan", "after-fence", "between-chown-chmod", "after-verify", "after-approval-copy",
+                    "after-approval")
+PERMISSIONS_CANCELLED = "permissions-cancelled: Cancelled; no permission was changed and no policy was approved."
+
+
+class PermissionFault(Exception):
+    """Test seam only (Controller.permission_fault): an interruption after K applied operations."""
+
+
+class _EffectFree(Failure):
+    """A step 9 refusal after the fences were restored: the run changed nothing (section 3.6)."""
+
+
+class _VerifyFailed(Failure):
+    """permissions-verify-failed after the re-inventory (section 3.6 step 11): the journal stays interrupted."""
+
+
+def copy_fresh(source, destination):
+    """Content-only copy (section 3.10): directories are created 0700 and regular files are copied into new inodes;
+    no mode, owner or extended attribute (ACL) is copied. A link or special file raises Failure. A file is copied to
+    a private temporary sibling and renamed over ``destination``, so the result is always a new inode."""
+    source, destination = Path(source), Path(destination)
+    info = os.lstat(str(source))
+    if stat.S_ISDIR(info.st_mode):
+        os.mkdir(str(destination), 0o700)  # content-only: the copy's mode comes from its scope target
+        for name in sorted(os.listdir(str(source))):
+            copy_fresh(source / name, destination / name)
+    elif stat.S_ISREG(info.st_mode):
+        temporary = destination.with_name("." + destination.name + ".fresh-" + uuid.uuid4().hex[:8])
+        try:
+            shutil.copyfile(str(source), str(temporary), follow_symlinks=False)  # bytes only: no mode, no xattr
+            os.replace(str(temporary), str(destination))
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(temporary))
+            raise
+    else:
+        raise Failure(f"Unsupported local deployment path: {source} (links and special files are never copied)")
+
+
+def permission_confirm(phrase, summary):
+    """The one typed confirmation of `pf permissions apply` (and --resume/--abandon): a mismatch, end of input or
+    Ctrl-C is permissions-cancelled (the shared confirm() would give a generic mismatch copy)."""
+    log(summary)
+    if unattended():
+        raise Failure("This operation requires an interactive terminal; no --yes bypass exists.")
+    try:
+        answer = input_line(f"Type exactly '{phrase}': ").strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise Failure(PERMISSIONS_CANCELLED) from exc
+    if answer != phrase:
+        raise Failure(PERMISSIONS_CANCELLED)
+
+
+@dataclasses.dataclass(frozen=True)
+class EffectivePolicy:
+    """The permission policy in force (section 3.3): an approved record, or the derived policy (revision 0)."""
+
+    policy: dict
+    revision: int
+    kind: str                 # "approved" | "derived"
+    record_sha256: object     # sha256 of the record bytes, None when derived
+    record: object
+    record_bytes: object
+
+    @property
+    def label(self):
+        if self.kind == "approved":
+            return f"permission policy revision {self.revision} (permission policy {self.record['policy_sha256'][:12]})"
+        return "permission policy not approved (derived)"
+
+
+@dataclasses.dataclass
+class ScopePlan:
+    """One scope of a permission plan (section 3.5): inventory, differences, ceiling, freeze and blockers."""
+
+    scope: str
+    root: Path
+    target: object
+    gid: object
+    inventory: object = None
+    executables: frozenset = frozenset()
+    changes: list = dataclasses.field(default_factory=list)
+    categories: dict = dataclasses.field(default_factory=lambda: {"group": 0, "mode": 0, "special-bits": 0})
+    differs: int = 0
+    violations: list = dataclasses.field(default_factory=list)
+    freeze: str = "not needed"
+    blockers: list = dataclasses.field(default_factory=list)
+    notes: list = dataclasses.field(default_factory=list)
+
+    @property
+    def entries(self):
+        return self.inventory.entries if self.inventory is not None else ()
+
+    @property
+    def total(self):
+        return len(self.entries)
+
+
+@dataclasses.dataclass
+class PermissionPlan:
+    policy: dict
+    policy_sha256: str
+    scopes: tuple
+    scope_plans: dict
+    changes: list
+    changes_bytes: bytes
+    plan_sha256: str
+    gids: dict
+
+    @property
+    def freeze_scopes(self):
+        return [scope for scope in self.scopes if self.scope_plans[scope].freeze == "needed"]
+
+    @property
+    def blockers(self):
+        return [(scope, *item) for scope in self.scopes for item in self.scope_plans[scope].blockers]
+
+
+def permission_entry_target(target, gid, entry, executables):
+    """(mode, gid) target of one inventoried entry (sections 3.2/3.4). Executables come from approved metadata
+    (``executables``: scope-relative paths), never from a file extension."""
+    if entry.type == "dir":
+        mode = target.dir_mode
+    elif target.exec_mode is not None and entry.relative in executables:
+        mode = target.exec_mode
+    else:
+        mode = target.file_mode
+    return mode, (gid if target.gid_rule == "set" else entry.gid)
+
+
+def access_reading(mode):
+    """A friendly reading of a folder mode for the wizard's 'Now' line (never an input)."""
+    group = (mode >> 3) & 7
+    text = ACCESS_LEVELS.get(group & 6, "group access " + pf_config.symbolic_mode(mode, "dir"))
+    return text + ("; keeps the folder's group on new files" if mode & 0o2000 else "")
+
+
+ACCESS_LEVELS = {6: pf_config.ACCESS_LABELS["read_write"], 4: pf_config.ACCESS_LABELS["read_only"],
+                 0: pf_config.ACCESS_LABELS["none"]}
+
+
+def depth_order(relative):
+    """Reverse depth order of the apply (section 3.6 step 10): deepest first, the scope root last."""
+    return (-(relative.count("/") + 1) if relative else 0, relative)
+
+
 # Explicit routes into a pending journal (LIFECYCLE.md section 1, step 2). A
 # command absent from this table is refused while a journal exists. Each
 # handler still validates the exact journal state it accepts; the table only
@@ -983,6 +1145,12 @@ PENDING_ROUTES = {
     "purge": (
         lambda journal: journal.get("operation") == "purge" and journal.get("phase") == "deleting",
         "resume the recorded purge deletion plan with the already verified recovery bundle",
+    ),
+    # PF-A2.3: the open permission apply journal (section 3.7).
+    "permissions apply": (
+        lambda journal: journal.get("operation") == "permissions",
+        "resume (--resume) or compensate (--abandon) the interrupted permission apply; once its permission policy "
+        "revision is written only --resume is legal",
     ),
 }
 # Journal keys shown by diagnostics. Anything else is reported by name only.
@@ -1020,8 +1188,6 @@ class Controller:
         self.cli = None
         self._config = None
         self.config_schema_version = None
-        self._backup_gid = None
-        self._workspace_gid = None
         # PF-A1.2: one runner, one frozen configuration per locked operation, one source store.
         self.redactor = pf_runner.Redactor()
         self._runner = None
@@ -1044,6 +1210,13 @@ class Controller:
         self._approved_envelopes = {}
         self._envelope_sequence = 0
         self.created_image_refs = []
+        # PF-A2.3: the permission targets in force (read once per operation) and the apply's counters. The two
+        # test seams (section 3.9) are None in production and never settable from the CLI.
+        self._permission_targets = None
+        self._effect_seq = self._effect_count = self._changed_count = 0
+        self._current_scope = None
+        self.permission_fault = None
+        self.permission_hook = None
 
     def ensure_config(self):
         """Load the runtime configuration once (read-only); return the cached values."""
@@ -1058,16 +1231,6 @@ class Controller:
     @config.setter
     def config(self, value):
         self._config = value
-
-    @property
-    def backup_gid(self):
-        self.ensure_config()
-        return self._backup_gid
-
-    @property
-    def workspace_gid(self):
-        self.ensure_config()
-        return self._workspace_gid
 
     def load_app_config(self):
         """Read-only strict load of config/pf-config.json against the installed app schema.
@@ -1103,8 +1266,8 @@ class Controller:
                 f"{self.context.approved_environment!r}; editable configuration cannot change policy."
             )
         try:
-            self._backup_gid = grp.getgrnam(config["backup_read_group"]).gr_gid
-            self._workspace_gid = grp.getgrnam(config["workspace_write_group"]).gr_gid
+            grp.getgrnam(config["backup_read_group"])
+            grp.getgrnam(config["workspace_write_group"])
         except KeyError as exc:
             raise Failure(
                 "Configured DSM group does not exist. Check backup_read_group and workspace_write_group in "
@@ -1919,6 +2082,7 @@ class Controller:
         os.mkdir(directory, 0o700)
         os.chmod(directory, 0o700)
         self.operation_id, self.operation_dir, self._snapshots, self.frozen = operation_id, directory, 0, None
+        self._permission_targets = None
         self.reset_operation_scope(str(command))
         self.runner.effects_path = directory / "unresolved-effects.json"
         context = self.context
@@ -2117,95 +2281,1255 @@ class Controller:
             raise Failure(str(exc)) from exc
         return False
 
-    def publish_backup_permissions(self, root):
-        """Make backup artifacts read-only to the configured trusted DSM group.
+    # ------------------------------------------------------------ permission policy (PF-A2.3)
 
-        The controller runs with a restrictive umask so state and temporary files
-        stay private. Backups are the exception: the configured DSM read group needs to inspect
-        and copy them over SMB, but must not gain write access to recovery
-        artifacts. Directories are 0750 and regular files are 0640.
-        """
-        root = Path(root)
-        if not root.exists():
-            return
-        if root.is_symlink() or not root.is_dir():
-            raise Failure(f"Backup path is not a safe directory: {root}")
-        self.refuse_multiply_linked(root)
+    def scope_root(self, scope):
+        """The root of one permission scope: registered paths, the bound control release and private state."""
+        paths = self.context.paths
+        return {"workspace": paths.workspace, "configuration": paths.configuration,
+                "control": self.context.control.path, "backups": paths.backups, "recovery": paths.recovery,
+                "private_state": paths.private_state}[scope]
 
-        for current, directories, files in os.walk(root, followlinks=False):
-            current_path = Path(current)
-            os.chown(current_path, -1, self.backup_gid)
-            os.chmod(current_path, 0o750)
+    @property
+    def permission_record_path(self):
+        return self.context.paths.private_state / PERMISSION_RECORD_NAME
 
-            for name in directories:
-                path = current_path / name
-                if path.is_symlink():
-                    raise Failure(f"Backup tree contains a symbolic link: {path}")
+    def _hook(self, name):
+        """Test seam (section 3.9): None in production and never settable from the CLI."""
+        if self.permission_hook is not None:
+            self.permission_hook(name)
 
-            for name in files:
-                path = current_path / name
-                if path.is_symlink() or not path.is_file():
-                    raise Failure(f"Backup tree contains an unsupported file type: {path}")
-                os.chown(path, -1, self.backup_gid)
-                os.chmod(path, 0o640)
+    def approval_invalid(self, reason):
+        return Failure(f"permission-approval-invalid: The approved permission policy record {self.permission_record_path} "
+                       f"cannot be used ({reason}); it is not replaced automatically and no derived policy is used. See "
+                       "SYNOLOGY_ADMIN §16.")
 
-    def refuse_multiply_linked(self, root):
-        """Pre-scan before any mode/owner change: a hard-linked file would change an inode outside the tree."""
-        for current, _, files in os.walk(root, followlinks=False):
-            for name in files:
-                path = Path(current) / name
-                info = os.lstat(path)
-                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-                    raise Failure(
-                        f"Permission change refused: {path} has {info.st_nlink} hard links, so another name "
-                        "outside the managed tree would change. Nothing was modified."
-                    )
+    def read_permission_record(self):
+        """The approved permission policy record (section 3.3 step 1): None when absent, else (record, bytes).
+        Anything else is permission-approval-invalid; there is never a fallback to the derived policy."""
+        path = self.permission_record_path
+        try:
+            info = os.lstat(str(path))
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise self.approval_invalid(exc.strerror or str(exc)) from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise self.approval_invalid("not a regular file")
+        if info.st_uid != pf_instance.TRUSTED_UID:
+            raise self.approval_invalid(f"owner uid {info.st_uid}; the trusted owner is uid 0")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise self.approval_invalid(f"mode {stat.S_IMODE(info.st_mode):04o} grants group or other access")
+        if info.st_nlink != 1:
+            raise self.approval_invalid(f"{info.st_nlink} hard links")
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+            record = pf_instance.parse_strict_json(data, label=str(path))
+        except (OSError, pf_instance.ContextError) as exc:
+            raise self.approval_invalid(str(exc)) from exc
+        defs = pf_config.PERMISSION_APPROVAL_SCHEMA["$defs"]
+        errors = pf_install.validate_marked(record, defs["record"], defs=defs)
+        if not errors:
+            errors = pf_config.permission_approval_problems(record, instance_id=self.context.instance_id)
+        if errors:
+            raise self.approval_invalid(errors[0])
+        return record, data
 
-    def publish_config_permissions(self):
-        """Allow the configured workspace group to manage host configuration."""
-        self.config_dir.mkdir(mode=0o2770, parents=True, exist_ok=True)
-        self.refuse_multiply_linked(self.config_dir)
-        os.chown(self.config_dir, -1, self.workspace_gid)
-        os.chmod(self.config_dir, 0o2770)
-        for path in self.config_dir.iterdir():
-            if path.is_symlink():
-                raise Failure(f"Configuration directory contains a symbolic link: {path}")
-            if path.is_file():
-                os.chown(path, -1, self.workspace_gid)
-                os.chmod(path, 0o660)
+    def admin_values_for_permissions(self):
+        """(pf-config.json values, None) or (None, problem): the permission verbs read it only for
+        workspace_write_group and the proposals (section 4.2); never raises."""
+        try:
+            return self.ensure_config(), None
+        except Failure as exc:
+            return None, str(exc).splitlines()[0]
 
-    def publish_workspace_permissions(self):
-        """Make the repository fully writable to the configured DSM workspace group.
+    def group_missing(self, scope, group):
+        return Failure(f"permission-group-missing: Group {group} for {scope} does not exist on this host; groups are "
+                       f"never created. Choose an existing group in '{self.pf_command()} permissions apply'. Nothing "
+                       "was changed.")
 
-        The executable control plane is outside this tree. Regular source files
-        become 0660 (0770 when already executable), directories become 2770 so
-        newly created SMB files inherit the shared group.
-        """
-        if not self.root.is_dir():
-            raise Failure("Repository root does not exist: " + str(self.root))
-        self.refuse_multiply_linked(self.root)
-        for current, directories, files in os.walk(self.root, followlinks=False):
-            current_path = Path(current)
-            if current_path.is_symlink():
+    def root_group(self, scope):
+        """The group name of the gid on a protected storage root (only root can have set it, section 3.3)."""
+        root = self.scope_root(scope)
+        try:
+            gid = os.lstat(str(root)).st_gid
+        except OSError as exc:
+            raise Failure(f"{root}: {exc.strerror or exc}") from exc
+        try:
+            return grp.getgrgid(gid).gr_name
+        except KeyError as exc:
+            raise Failure(f"permission-group-missing: Group gid {gid} on {root} has no group name for {scope}; groups "
+                          f"are never created. Choose an existing group in '{self.pf_command()} permissions apply'. "
+                          "Nothing was changed.") from exc
+
+    def permission_policy(self, admin=None):
+        """The effective permission policy (section 3.3): the approved record, else the derived policy."""
+        found = self.read_permission_record()
+        if found is not None:
+            record, data = found
+            return EffectivePolicy(record["policy"], record["revision"], "approved", pf_instance.sha256_bytes(data),
+                                   record, data)
+        values, problem = admin if admin is not None else self.admin_values_for_permissions()
+        if values is None:
+            raise Failure(f"permission-policy-invalid: The permission policy is invalid: workspace_write_group is "
+                          f"unavailable ({problem}).")
+        policy = pf_config.derive_permission_policy(values, backups_group=self.root_group("backups"),
+                                                    recovery_group=self.root_group("recovery"))
+        problems = pf_config.permission_policy_problems(policy)
+        if problems:
+            raise Failure(f"permission-policy-invalid: The permission policy is invalid: {problems[0]}.")
+        return EffectivePolicy(policy, 0, "derived", None, None, None)
+
+    def resolve_policy_gids(self, policy):
+        """{scope: gid or None}; a missing group is permission-group-missing (groups are never created)."""
+        gids = {}
+        for scope in PERMISSION_SCOPES:
+            group = policy["permissions"][scope].get("group")
+            if group is None:
+                gids[scope] = None
                 continue
-            os.chown(current_path, -1, self.workspace_gid)
-            os.chmod(current_path, 0o2770)
-            for name in directories:
-                path = current_path / name
-                if path.is_symlink():
+            try:
+                gids[scope] = grp.getgrnam(group).gr_gid
+            except KeyError as exc:
+                raise self.group_missing(scope, group) from exc
+        return gids
+
+    def permission_targets(self):
+        """(EffectivePolicy, {scope: ScopeTarget}, {scope: gid}) of the policy in force, read once per operation."""
+        if self._permission_targets is None:
+            effective = self.permission_policy()
+            compiled = pf_config.compile_permission_policy(effective.policy)
+            self._permission_targets = (effective, compiled, self.resolve_policy_gids(effective.policy))
+        return self._permission_targets
+
+    def workspace_executables(self):
+        """Designated workspace executables from the protected source manifest (section 3.4); None without one."""
+        manifest = self.load_source_manifest()
+        if manifest is None:
+            return None
+        return frozenset(entry["path"] for entry in manifest["entries"]
+                         if entry["kind"] == "file" and entry.get("executable"))
+
+    def permission_findings(self):
+        """Section 3.5: (context-level refuse findings, {scope: [rendered scope-attributable findings]})."""
+        roots = {scope: self.scope_root(scope) for scope in ("workspace", "configuration", "backups", "recovery")}
+        context, unsafe = [], {}
+        for finding in self.ensure_validation().findings:
+            if finding.severity != "refuse":
+                continue
+            path = Path(finding.path)
+            hit = [scope for scope, root in roots.items() if path == root or path in root.parents or root in path.parents]
+            for scope in hit:
+                unsafe.setdefault(scope, []).append(finding.render())
+            if not hit:
+                context.append(finding)
+        return context, unsafe
+
+    def _scope_plan(self, scope, target, gid, *, unsafe=None, fenced=False):
+        """Inventory and differences of one scope (section 3.5); read-only."""
+        plan = ScopePlan(scope, self.scope_root(scope), target, gid)
+        if unsafe:
+            plan.blockers = [("scope-path-unsafe", "", text) for text in unsafe]
+            return plan
+        inventory = pf_instance.inventory_scope(scope, plan.root, owner_rule=target.owner_rule,
+                                                limit=pf_source.MANIFEST_ENTRY_LIMIT)
+        plan.inventory = inventory
+        plan.blockers = list(inventory.blockers)
+        if scope == "workspace":
+            designated = self.workspace_executables()
+            if designated is None:
+                plan.notes.append("workspace-no-source-manifest: no protected source manifest exists, so no workspace "
+                                  "file is designated executable")
+            plan.executables = designated or frozenset()
+        if scope == "control":
+            for entry in inventory.entries:
+                for text in pf_config.ceiling_violations(target, mode=entry.mode, uid=entry.uid, gid=entry.gid,
+                                                         kind=entry.type, policy_gid=gid):
+                    plan.violations.append((entry.relative, text))
+            plan.differs = len({relative for relative, _ in plan.violations})
+            return plan
+        root_entry = None
+        for entry in inventory.entries:
+            if entry.relative == "":
+                root_entry = entry
+            mode, new_gid = permission_entry_target(target, gid, entry, plan.executables)
+            if (entry.mode, entry.gid) == (mode, new_gid):
+                continue
+            plan.differs += 1
+            plan.categories["group"] += entry.gid != new_gid
+            plan.categories["mode"] += entry.mode != mode
+            plan.categories["special-bits"] += bool(entry.mode & (0o7000 if entry.type == "file" else 0o5000))
+            plan.changes.append([scope, entry.relative, entry.dev, entry.ino, entry.type, entry.mode, entry.gid, mode,
+                                 new_gid])
+        if scope in EDITABLE_SCOPES and not plan.blockers and (fenced or any(item[1] for item in plan.changes)):
+            reason = None
+            if not pf_instance.proc_scan_available():
+                reason = f"{pf_instance.PROC_ROOT}/self/fd is not a readable directory, so open handles cannot be scanned"
+            elif "" in inventory.default_acl_dirs:
+                reason = "the scope root carries an ACL, which could grant traversal regardless of its mode"
+            elif root_entry is None or root_entry.uid != pf_instance.TRUSTED_UID:
+                reason = "the scope root is not owned by uid 0"
+            if reason is not None:
+                plan.freeze = "unavailable"
+                plan.blockers.append(("editor-freeze-unavailable", "", reason))
+            else:
+                plan.freeze = "needed"
+                if not any(item[1] == "" for item in plan.changes):
+                    # The fence is lifted by an explicit root operation, even when the root already complies.
+                    mode, new_gid = permission_entry_target(target, gid, root_entry, plan.executables)
+                    plan.changes.append([scope, "", root_entry.dev, root_entry.ino, "dir", root_entry.mode,
+                                         root_entry.gid, mode, new_gid])
+        plan.changes.sort(key=lambda item: item[1])
+        return plan
+
+    def _permission_plan(self, policy, scopes, *, unsafe=None, fenced=frozenset()):
+        """The plan of ``policy`` over ``scopes`` (section 3.5): per-scope plans, the change list bytes and hash."""
+        try:
+            compiled = pf_config.compile_permission_policy(policy)
+        except pf_config.ConfigError as exc:
+            raise Failure(f"permission-policy-invalid: The permission policy is invalid: {str(exc).split(': ', 1)[-1]}.") \
+                from exc
+        gids = self.resolve_policy_gids(policy)
+        plans = {scope: self._scope_plan(scope, compiled[scope], gids[scope], unsafe=(unsafe or {}).get(scope),
+                                         fenced=scope in fenced) for scope in scopes}
+        changes = [change for scope in scopes for change in plans[scope].changes]
+        policy_sha256 = pf_instance.sha256_bytes(pf_instance.normalize_json(policy))
+        header = {"schema_version": 1, "policy_sha256": policy_sha256, "scopes": list(scopes),
+                  "change_count": len(changes)}
+        try:
+            data = pf_config.changes_bytes(header, changes)
+        except pf_config.ConfigError as exc:
+            raise Failure(f"Internal error: {exc}; nothing was changed.") from exc
+        return PermissionPlan(policy, policy_sha256, tuple(scopes), plans, changes, data,
+                              pf_instance.sha256_bytes(data), gids)
+
+    def permission_proposals(self, effective, admin):
+        """[(scope, proposed group, group in force)] where pf-config.json proposes another group (section 3.3)."""
+        if admin is None:
+            return []
+        rows = []
+        scopes = ("backups", "recovery") + (EDITABLE_SCOPES if effective.kind == "approved" else ())
+        for scope in PERMISSION_SCOPES:
+            if scope not in scopes:
+                continue
+            proposed = admin["backup_read_group" if scope in ("backups", "recovery") else "workspace_write_group"]
+            current = effective.policy["permissions"][scope]["group"]
+            if proposed != current:
+                rows.append((scope, proposed, current))
+        return rows
+
+    def log_permission_notes(self, effective, proposals):
+        if effective.kind == "derived":
+            log(f"permission-policy-unapproved: Permission policy not approved yet: backups/recovery groups come from "
+                f"their folders, workspace/configuration groups from pf-config.json; '{self.pf_command()} permissions "
+                "apply' approves a permission policy.")
+        in_force = f"permission policy revision {effective.revision}" if effective.kind == "approved" \
+            else "the unapproved derived policy"
+        for scope, proposed, current in proposals:
+            log(f"permission-group-proposal: pf-config.json proposes group {proposed} for {scope}; {in_force} uses "
+                f"{current} until '{self.pf_command()} permissions apply' approves the change.")
+
+    def _log_scope_block(self, plan, *, details):
+        target = plan.target
+        log(f"{plan.scope} — {plan.root}")
+        if plan.scope == "private_state":
+            log("  Policy: owner only (directories 0700, files 0600; no group)")
+        else:
+            parts = [f"group {target.group} (gid {plan.gid})", pf_config.ACCESS_LABELS[target.access]]
+            if plan.scope in EDITABLE_SCOPES:
+                parts.append("inheritance " + ("yes" if target.inherit else "no"))
+            if plan.scope == "workspace":
+                parts.append("scripts " + pf_config.EXECUTABLE_LABELS[target.executables])
+            if plan.scope == "control":
+                parts.append("scripts Owner only; installed by 'pf install', checked, not changed")
+            log("  Policy: " + " | ".join(parts))
+            try:
+                members = list(grp.getgrnam(target.group).gr_mem)
+            except KeyError:
+                members = []
+            shown = ", ".join(members[:GROUP_MEMBER_LIMIT]) or "(none listed)"
+            log(f"  Members of {target.group}: {shown}{' …' if len(members) > GROUP_MEMBER_LIMIT else ''} (at most "
+                f"{GROUP_MEMBER_LIMIT}; primary-group and directory-service members are not listed)")
+            if plan.scope in ("backups", "recovery"):
+                log("  " + BACKUP_GROUP_CONSEQUENCE)
+        if plan.scope == "control":
+            log(f"  Changes: control: ceiling violations {len(plan.violations)} (of {plan.total} entries)")
+        else:
+            counts = plan.categories
+            log(f"  Changes: group {counts['group']}, mode {counts['mode']}, special-bits {counts['special-bits']} "
+                f"(total {len(plan.changes)} of {plan.total} entries)")
+        unavailable = [message for code, _, message in plan.blockers if code == "editor-freeze-unavailable"]
+        log("  Freeze: " + ("needed (bulk change below the root)" if plan.freeze == "needed"
+                            else f"unavailable ({unavailable[0]})" if unavailable else "not needed"))
+        if plan.blockers:
+            log("  Blockers:")
+            by_code = {}
+            for code, relative, message in plan.blockers:
+                by_code.setdefault(code, []).append((relative, message))
+            for code, items in by_code.items():
+                for relative, message in items[:PERMISSION_BLOCKER_LIMIT]:
+                    if code == "editor-freeze-unavailable":
+                        log(f"    {code}: Bulk change of {plan.scope} needs a verified editor freeze, which is unavailable "
+                            f"here ({message}). Deselect it with --scope or follow SYNOLOGY_ADMIN §2.")
+                    else:
+                        log(f"    {code}: {plan.scope}: {relative or '.'}: {message}")
+                if len(items) > PERMISSION_BLOCKER_LIMIT:
+                    log(f"    … and {len(items) - PERMISSION_BLOCKER_LIMIT} more")
+        for relative, violation in plan.violations[:PERMISSION_BLOCKER_LIMIT]:
+            log(f"    control-ceiling: control: {relative or '.'}: {violation}; the installed control is changed only "
+                "by 'pf install control'.")
+        if len(plan.violations) > PERMISSION_BLOCKER_LIMIT:
+            log(f"    … and {len(plan.violations) - PERMISSION_BLOCKER_LIMIT} more")
+        for note in plan.notes:
+            log("  Note: " + note)
+        if details:
+            for _, relative, _, _, kind, before_mode, before_gid, after_mode, after_gid in \
+                    plan.changes[:PERMISSION_DETAIL_LIMIT]:
+                log(f"    {relative or '.'}: {before_mode:04o} {pf_config.symbolic_mode(before_mode, kind)} gid "
+                    f"{before_gid} -> {after_mode:04o} {pf_config.symbolic_mode(after_mode, kind)} gid {after_gid}")
+            if len(plan.changes) > PERMISSION_DETAIL_LIMIT:
+                log(f"    … and {len(plan.changes) - PERMISSION_DETAIL_LIMIT} more")
+
+    def log_permission_plan(self, plan, *, details):
+        for scope in plan.scopes:
+            self._log_scope_block(plan.scope_plans[scope], details=details)
+        log(f"Plan hash: {plan.plan_sha256[:12]} ({len(plan.changes)} changes)")
+
+    @staticmethod
+    def plan_mode_applied(plan):
+        if plan.scope == "control":
+            return "check-only" + (f" ({plan.differs} ceiling violation(s))" if plan.differs else "")
+        if plan.inventory is None or (plan.total and plan.differs >= plan.total):
+            return "no"
+        return "yes" if not plan.differs else f"partial ({plan.differs} differ)"
+
+    def log_permission_status(self, rows):
+        """Section 4.8: three statuses per scope; never one green line. ``rows``: (scope, mode_applied, ScopePlan)."""
+        for scope, mode_applied, plan in rows:
+            log(f"{scope}: mode_applied: {mode_applied}")
+            acl = plan is not None and any(code == "scope-entry-acl" for code, _, _ in plan.blockers)
+            log("         effective_access_verified: not verified — computed from mode bits"
+                + ("; ACL entries present: not computed" if acl else "")
+                + "; SMB share permissions and DSM ACLs are not observable by this control (PF-A5.1)")
+            text = "         future_file_behavior_verified: not verified — "
+            if plan is not None and scope in EDITABLE_SCOPES and plan.target.inherit:
+                text += f"setgid on directories carries group {plan.target.group}, not write access; "
+            text += "new-file modes depend on the creating client's umask or SMB create mask; "
+            defaults = len(plan.inventory.default_acl_dirs) if plan is not None and plan.inventory is not None else 0
+            if defaults:
+                text += f"default ACL present on {defaults} dirs; "
+            log(text + "files created by pf get explicit modes and are verified after creation")
+
+    @staticmethod
+    def selected_scopes(args):
+        chosen = set(getattr(args, "scopes", None) or PERMISSION_SCOPES)
+        return tuple(scope for scope in PERMISSION_SCOPES if scope in chosen)
+
+    def _permissions_report(self, args, *, verb):
+        """`pf permissions check|plan` (section 4.9): read-only, no lock, nothing written anywhere."""
+        context_findings, unsafe = self.permission_findings()
+        if context_findings:
+            for finding in self.ensure_validation().findings:
+                if finding.severity == "refuse":
+                    log("  " + finding.render())
+            raise Failure("permissions-context-refused: The protected context is refused (see the findings above), so "
+                          "the permission policy cannot be read safely; no scope was inspected.")
+        admin, problem = self.admin_values_for_permissions()
+        if admin is None:
+            log(f"Note: pf-config.json is unavailable ({problem}); its proposals are not shown.")
+        effective = self.permission_policy(admin=(admin, problem))
+        scopes = self.selected_scopes(args)
+        plan = self._permission_plan(effective.policy, scopes, unsafe=unsafe)
+        title = "Permission plan" if verb == "plan" else "Permission check"
+        log(f"{title} for instance {self.context.slug} — {effective.label}")
+        journal = self.read_journal()
+        if journal is not None and journal.get("operation") == "permissions":
+            log(f"an apply is in progress: {journal.get('operation_id')} (counts are a point-in-time observation)")
+        proposals = self.permission_proposals(effective, admin)
+        self.log_permission_notes(effective, proposals)
+        log("")
+        log("== Effective policy ==")
+        self.log_permission_plan(plan, details=verb == "plan" and bool(getattr(args, "details", False)))
+        if verb == "plan" and proposals:
+            candidate = json.loads(json.dumps(effective.policy))
+            for scope, proposed, _ in proposals:
+                candidate["permissions"][scope]["group"] = proposed
+            log("")
+            log(f"== With pf-config.json proposals == candidate (not approved; '{self.pf_command()} permissions apply' "
+                "would ask for it)")
+            self.log_permission_plan(self._permission_plan(candidate, scopes, unsafe=unsafe),
+                                     details=bool(getattr(args, "details", False)))
+        log("")
+        self.log_permission_status([(scope, self.plan_mode_applied(plan.scope_plans[scope]), plan.scope_plans[scope])
+                                    for scope in scopes])
+        blockers = plan.blockers
+        if blockers:
+            raise Failure(f"permissions-blocked: The plan has {len(blockers)} blocker(s); see above.")
+        if verb == "check":
+            differ = sum(plan.scope_plans[scope].differs for scope in scopes)
+            if differ:
+                raise Failure(f"permissions-differ: {differ} {'entry differs' if differ == 1 else 'entries differ'} from "
+                              f"{effective.label}; see above.")
+            log(f"Permissions match {effective.label}.")
+        return 0
+
+    def permissions_check(self, args):
+        return self._permissions_report(args, verb="check")
+
+    def permissions_plan(self, args):
+        return self._permissions_report(args, verb="plan")
+
+    def _ask_choice(self, stage, question, options, default):
+        """One numbered choice; ``options``: [(value, label)]. Returns the chosen value."""
+        line = "  ".join(f"{number}. {label}" for number, (_, label) in enumerate(options, 1))
+        values = [value for value, _ in options]
+        default_number = str(values.index(default) + 1) if default in values else None
+
+        def validate(answer):
+            if answer.isdigit() and 1 <= int(answer) <= len(options):
+                return values[int(answer) - 1]
+            raise Failure("Choose one of the listed numbers.")
+
+        return ask_answer(stage, f"{question}: {line}", default=default_number, validate=validate)
+
+    def _ask_policy_group(self, scope, default, proposal):
+        listed = list(host_groups()[:GROUP_LIST_LIMIT])
+        names = [name for name, _ in listed]
+        for extra in (default, proposal):
+            if extra and extra not in names and group_exists(extra):
+                listed.append((extra, grp.getgrnam(extra).gr_gid))
+                names.append(extra)
+        rendered = []
+        for number, (name, gid) in enumerate(listed, 1):
+            mark = " (proposed by pf-config.json)" if name == proposal and proposal != default else ""
+            rendered.append(f"{number}. {name} (gid {gid}){mark}")
+        log("  Group:  " + ("  ".join(rendered) or "(no group detected)") + "  [or type a name]")
+
+        def validate(answer):
+            if answer.isdigit() and 1 <= int(answer) <= len(listed):
+                return listed[int(answer) - 1][0]
+            if pf_instance._anchored_fullmatch(pf_config._POLICY_GROUP_PATTERN, answer) and group_exists(answer):
+                return answer
+            raise Failure(f"{answer!r} is not a listed number or an existing group on this host; groups are never "
+                          "created.")
+
+        default_number = str(names.index(default) + 1) if default in names else None
+        return ask_answer(f"{scope}.group", "  Group: choose a number or type a group name", default=default_number,
+                          validate=validate)
+
+    def permission_wizard(self, base, admin):
+        """Section 4.6: numbered questions for workspace, configuration, backups and recovery; control and private
+        state are shown, not asked. Returns the candidate policy. No octal or symbolic input is ever accepted."""
+        candidate = json.loads(json.dumps(base.policy))
+        permissions = candidate["permissions"]
+        log("Permission policy wizard: answer with a number; Enter keeps the shown default; q cancels (nothing is "
+            "changed).")
+        try:
+            for scope in ("workspace", "configuration", "backups", "recovery"):
+                item = permissions[scope]
+                root = self.scope_root(scope)
+                info = os.lstat(str(root))
+                try:
+                    now_group = grp.getgrgid(info.st_gid).gr_name
+                except KeyError:
+                    now_group = f"gid {info.st_gid}"
+                log("")
+                log(f"{SCOPE_LABELS[scope]} — {root}")
+                log(f"  Now: group {now_group} | {access_reading(stat.S_IMODE(info.st_mode))}")
+                storage = scope in ("backups", "recovery")
+                if storage:
+                    log("  " + BACKUP_GROUP_CONSEQUENCE)
+                proposal = admin.get("backup_read_group" if storage else "workspace_write_group") if admin else None
+                item["group"] = self._ask_policy_group(scope, item["group"], proposal)
+                choices = ("read_only", "none") if storage else ("read_write", "read_only", "none")
+                item["access"] = self._ask_choice(f"{scope}.access", "  Access",
+                                                  [(value, pf_config.ACCESS_LABELS[value]) for value in choices],
+                                                  item["access"])
+                if not storage:
+                    item["inherit_group"] = self._ask_choice(
+                        f"{scope}.inherit_group", "  Keep the folder's group on new files and folders?",
+                        [(True, "Yes"), (False, "No")], item["inherit_group"])
+                if scope == "workspace":
+                    log("  Files marked executable in the deployed source keep an owner execute bit so the workspace "
+                        "still matches its source manifest.")
+                    options = [("owner_only", "Owner only")]
+                    if item["access"] != "none":
+                        options.append(("owner_and_group", "Owner and group"))
+                    current = item["executables"] if item["executables"] in dict(options) else "owner_only"
+                    item["executables"] = self._ask_choice(
+                        "workspace.executables", "  Script execution for files marked executable in the deployed "
+                        "source", options, current)
+        except ConfigCancelled as exc:
+            raise Failure(PERMISSIONS_CANCELLED) from exc
+        permissions["control"] = {"group": permissions["workspace"]["group"], "access": "none",
+                                  "executables": "owner_only"}
+        permissions["private_state"] = {"access": "owner_only"}
+        log("")
+        log("Control release: No group access (installed by 'pf install'; checked, not changed)")
+        log("Private state: owner only (fixed)")
+        return candidate
+
+    def _permission_changed(self, what):
+        return Failure(f"permissions-changed-before-apply: {what} changed after the plan was confirmed; run the "
+                       "command again to review it. Nothing was changed.")
+
+    def _check_permission_policy(self, candidate):
+        problems = pf_config.permission_policy_problems(candidate)
+        if problems:
+            raise Failure(f"permission-policy-invalid: The permission policy is invalid: {problems[0]}.")
+        unsupported = pf_config.permission_policy_unsupported(candidate)
+        if unsupported:
+            raise Failure(f"permission-policy-unsupported: The permission policy choice {unsupported[0]}. Nothing was "
+                          "changed.")
+
+    def _permission_summary(self, title, base, policy, plan):
+        lines = [title]
+        rows = pf_config.policy_diff(base.policy, policy)
+        if rows:
+            lines += [f"  {scope}.{field}: {json.dumps(old)} -> {json.dumps(new)}" for scope, field, old, new in rows]
+        else:
+            lines.append("  no policy change")
+        lines.append(f"Plan hash: {plan.plan_sha256[:12]} ({len(plan.changes)} changes)")
+        if plan.freeze_scopes:
+            lines.append("Editor freeze: " + ", ".join(plan.freeze_scopes) + " (start the command from outside these "
+                                                                            "folders, for example 'cd /')")
+        return "\n".join(lines)
+
+    def permissions_apply(self, args):
+        """`pf permissions apply [--resume|--abandon]` inside the instance lock (sections 3.6, 3.7)."""
+        journal = self.read_journal()
+        is_open = journal is not None and journal.get("operation") == "permissions"
+        if getattr(args, "resume", False) or getattr(args, "abandon", False):
+            if not is_open:
+                raise Failure("permissions-nothing-pending: No interrupted permission apply is open. Nothing was "
+                              "changed.")
+            return self._permissions_resume(journal) if args.resume else self._permissions_abandon(journal)
+        if is_open:
+            raise Failure(f"permissions-apply-pending: An interrupted permission apply {journal.get('operation_id')} is "
+                          f"open; run '{self.pf_command()} permissions apply --resume' or '--abandon' first. Nothing "
+                          "was changed.")
+        admin, problem = self.admin_values_for_permissions()
+        base = self.permission_policy(admin=(admin, problem))
+        scopes = self.selected_scopes(args)
+        log(f"Permission apply for instance {self.context.slug} — {base.label}")
+        self.log_permission_notes(base, self.permission_proposals(base, admin))
+        candidate = self.permission_wizard(base, admin)
+        self._check_permission_policy(candidate)
+        plan = self._permission_plan(candidate, scopes)
+        log("")
+        self.log_permission_plan(plan, details=bool(getattr(args, "details", False)))
+        if plan.blockers:
+            raise Failure(f"permissions-blocked: The plan has {len(plan.blockers)} blocker(s); see above. Nothing was "
+                          "changed.")
+        if base.kind == "approved" and candidate == base.policy and not plan.changes:
+            log(f"permissions-current: Permissions already match permission policy revision {base.revision}; nothing to "
+                "change.")
+            return 0
+        permission_confirm("APPLY PERMISSIONS " + self.context.slug, self._permission_summary(
+            f"Permission policy for instance {self.context.slug}: {base.label} -> candidate", base, candidate, plan))
+        self._hook("after-plan")
+        # Step 7: revalidate after the confirmation (the SS-2 site: ensure_validation, cache cleared first).
+        self.validation = None
+        if not self.ensure_validation().mutation_allowed:
+            raise self._permission_changed("The protected context")
+        current = self.read_permission_record()
+        if (current[1] if current is not None else None) != base.record_bytes:
+            raise self._permission_changed("The approved permission policy record")
+        try:
+            gids = self.resolve_policy_gids(candidate)
+        except Failure as exc:
+            raise self._permission_changed("A group") from exc
+        if gids != plan.gids:
+            raise self._permission_changed("A group")
+        for scope in scopes:
+            try:
+                identity = pf_instance.path_identity(self.scope_root(scope))
+            except pf_instance.ContextError as exc:
+                raise self._permission_changed(f"The {scope} folder") from exc
+            if identity != plan.scope_plans[scope].inventory.root_identity:
+                raise self._permission_changed(f"The {scope} folder")
+        # Step 8: persist the intent.
+        confirmed = [{"operation_id": self.operation_id, "plan_sha256": plan.plan_sha256}]
+        self._write_permission_intent(plan, base)
+        write_json(self.pending, {"operation": "permissions", "phase": "applying", "started": utc(),
+                                  "operation_id": self.operation_id, "plan_sha256": plan.plan_sha256,
+                                  "confirmed_plans": confirmed})
+        return self._permission_execute(
+            plan, action="apply", apply_op=self.operation_id, apply_dir=self.operation_dir, base_revision=base.revision,
+            base_sha256=base.record_sha256, base_policy_sha256=base.record["policy_sha256"] if base.record else None,
+            already_approved=False, fenced_now=frozenset(), confirmed_plans=confirmed, start_seq=0)
+
+    def _write_permission_intent(self, plan, base):
+        """Step 8: the confirmed change list, then the frozen plan (validated before it is written)."""
+        pf_instance._write_private_file(self.operation_dir / PERMISSION_CHANGES_NAME, plan.changes_bytes, 0o600)
+        roots = []
+        for scope in plan.scopes:
+            scope_plan = plan.scope_plans[scope]
+            dev, ino = scope_plan.inventory.root_identity
+            root_entry = next(entry for entry in scope_plan.entries if entry.relative == "")
+            roots.append({"scope": scope, "dev": dev, "ino": ino,
+                          "gid": plan.gids[scope] if scope_plan.target.gid_rule == "set" else root_entry.gid,
+                          "fenced": scope_plan.freeze == "needed"})
+        document = {"schema_version": 1, "operation_id": self.operation_id, "instance_id": self.context.instance_id,
+                    "created": utc(), "base_revision": base.revision, "base_sha256": base.record_sha256,
+                    "policy_sha256": plan.policy_sha256, "policy": plan.policy, "scopes": list(plan.scopes),
+                    "freeze_scopes": plan.freeze_scopes, "roots": roots, "change_count": len(plan.changes),
+                    "plan_sha256": plan.plan_sha256}
+        self._check_permission_record(document, "plan")
+        pf_instance._write_private_file(self.operation_dir / PERMISSION_PLAN_NAME,
+                                        pf_instance.normalize_json(document), 0o600)
+
+    @staticmethod
+    def _check_permission_record(document, name):
+        defs = pf_config.PERMISSION_APPLY_SCHEMA["$defs"]
+        errors = pf_install.validate_marked(document, defs[name], defs=defs)
+        if name == "effect" and not errors:
+            errors = pf_config.effect_problems(document)
+        if errors:
+            raise Failure(f"Internal error: a permission {name} record failed its schema ({errors[0]}); nothing more "
+                          "was written.")
+
+    def _effect_line(self, kind, scope, relative, entry_type, dev, ino, before_mode, after_mode, before_gid,
+                     after_gid):
+        self._effect_seq += 1
+        return {"seq": self._effect_seq, "kind": kind, "scope": scope, "path": relative, "dev": dev, "ino": ino,
+                "type": entry_type, "before_mode": before_mode, "after_mode": after_mode, "before_gid": before_gid,
+                "after_gid": after_gid, "operation_id": self.operation_id}
+
+    def _append_effects(self, path, lines):
+        """Write-ahead: validated, normalized lines appended and fsynced before their operations run."""
+        for line in lines:
+            self._check_permission_record(line, "effect")
+        data = b"".join(pf_instance.normalize_json(line) + b"\n" for line in lines)
+        created = not os.path.lexists(str(path))
+        fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if created:
+            pf_instance._fsync_directory(Path(path).parent)
+        self._effect_count += len(lines)
+
+    def _journal_invalid(self, path, number):
+        return Failure(f"permissions-journal-invalid: The permission effect journal {path} is unreadable at line "
+                       f"{number}; review it manually (SYNOLOGY_ADMIN §16). Nothing was changed.")
+
+    def _read_effects(self, path):
+        """(effect lines, valid byte length). Every line is newline-terminated normalized JSON valid against
+        $defs.effect with strictly increasing seq; a final line without a newline is a torn write (ignored)."""
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except FileNotFoundError:
+            return [], 0
+        except OSError as exc:
+            raise self._journal_invalid(path, 0) from exc
+        lines, offset, number, last = [], 0, 0, 0
+        defs = pf_config.PERMISSION_APPLY_SCHEMA["$defs"]
+        while offset < len(data):
+            end = data.find(b"\n", offset)
+            number += 1
+            if end < 0:
+                break
+            raw = data[offset:end]
+            try:
+                line = pf_instance.parse_strict_json(raw, label=str(path))
+            except pf_instance.ContextError as exc:
+                raise self._journal_invalid(path, number) from exc
+            if (pf_instance.normalize_json(line) != raw or pf_install.validate_marked(line, defs["effect"], defs=defs)
+                    or pf_config.effect_problems(line) or line["seq"] <= last):
+                raise self._journal_invalid(path, number)
+            last = line["seq"]
+            lines.append(line)
+            offset = end + 1
+        return lines, offset
+
+    def _mark_interrupted(self):
+        """Best effort: pending.json phase ``interrupted``. A failure here leaves ``applying``, which every route
+        treats identically (section 3.6), so it is deliberately not raised over the original error."""
+        try:
+            journal = self.read_journal()
+            if journal is not None and journal.get("operation") == "permissions":
+                journal["phase"] = "interrupted"
+                write_json(self.pending, journal)
+        except (OSError, ValueError):
+            pass
+
+    def _write_permission_outcome(self, *, apply_op, action, result, plan_sha256, unplanned, conflicts,
+                                  approved_revision, statuses):
+        scopes = []
+        for scope in PERMISSION_SCOPES:
+            mode_applied, notes = statuses.get(scope, ("not-selected", []))
+            scopes.append({"scope": scope, "mode_applied": mode_applied, "effective_access_verified": "not verified",
+                           "future_file_behavior_verified": "not verified", "notes": list(notes)})
+        outcome = {"schema_version": 1, "operation_id": self.operation_id, "apply_operation_id": apply_op,
+                   "completed": utc(), "action": action, "result": result, "plan_sha256": plan_sha256,
+                   "changed": self._changed_count, "unplanned": unplanned, "conflicts": conflicts,
+                   "approved_revision": approved_revision, "scopes": scopes}
+        self._check_permission_record(outcome, "outcome")
+        pf_instance._write_private_file(self.operation_dir / PERMISSION_OUTCOME_NAME,
+                                        pf_instance.normalize_json(outcome), 0o600)
+
+    def _restore_fences(self, fences, root_fds, effects_path):
+        for scope in reversed(list(fences)):
+            original = fences[scope]
+            fd = root_fds[scope]
+            info = os.fstat(fd)
+            self._append_effects(effects_path, [self._effect_line(
+                "fence", scope, "", "dir", info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), original,
+                info.st_gid, info.st_gid)])
+            os.fchmod(fd, original)
+        fences.clear()
+
+    def _apply_operations(self, scope, operations, root_fd, directories, effects_path):
+        """Section 3.6 step 10 for one scope: batches of write-ahead effect lines, then the engine per entry."""
+        between = lambda: self._hook("between-chown-chmod")  # noqa: E731 - the test seam of section 3.9
+        for start in range(0, len(operations), pf_instance.EFFECT_BATCH):
+            batch = operations[start:start + pf_instance.EFFECT_BATCH]
+            self._append_effects(effects_path, [self._effect_line(
+                "entry", scope, entry.relative, entry.type, entry.dev, entry.ino, entry.mode, mode, entry.gid, gid)
+                for entry, mode, gid in batch])
+            parent = (None, None)
+            try:
+                for entry, mode, gid in batch:
+                    self._current_scope = scope
+                    if entry.relative == "":
+                        pf_instance.apply_entry_target(root_fd, None, entry, mode=mode, gid=gid, between=between)
+                    else:
+                        folder, _, name = entry.relative.rpartition("/")
+                        if parent[0] != folder:
+                            if parent[1] is not None:
+                                os.close(parent[1])
+                            parent = (None, None)
+                            fd, name = pf_instance.open_entry_parent(root_fd, entry.relative, directories)
+                            parent = (folder, fd)
+                        pf_instance.apply_entry_target(parent[1], name, entry, mode=mode, gid=gid, between=between)
+                    self._changed_count += 1
+                    if self.permission_fault is not None and self._changed_count >= self.permission_fault:
+                        raise PermissionFault(f"test fault after {self._changed_count} operation(s)")
+            finally:
+                if parent[1] is not None:
+                    os.close(parent[1])
+
+    def _verify_scope(self, scope_plan, excluded):
+        """Step 11: re-inventory; every applied identity must hold its target. Returns (differing paths, notes)."""
+        inventory = pf_instance.inventory_scope(scope_plan.scope, scope_plan.root,
+                                                owner_rule=scope_plan.target.owner_rule,
+                                                limit=pf_source.MANIFEST_ENTRY_LIMIT)
+        by_identity = {(entry.dev, entry.ino): entry for entry in inventory.entries}
+        applied = {(entry.dev, entry.ino) for entry in scope_plan.entries}
+        differing, notes = [], []
+
+        def excluded_path(relative):
+            # This journal's own files (its operation directories and pending.json) change while it runs.
+            return any(relative == prefix or relative.startswith(prefix + "/") for prefix in excluded)
+
+        for entry in scope_plan.entries:
+            now = by_identity.get((entry.dev, entry.ino))
+            if now is None:
+                if not excluded_path(entry.relative):
+                    notes.append(f"permission-entry-gone: {scope_plan.scope}: {entry.relative or '.'} disappeared "
+                                 "after the plan")
+                continue
+            if (now.mode, now.gid) != permission_entry_target(scope_plan.target, scope_plan.gid, now,
+                                                              scope_plan.executables):
+                differing.append(now.relative or ".")
+
+        for entry in inventory.entries:
+            if (entry.dev, entry.ino) not in applied and not excluded_path(entry.relative):
+                notes.append(f"permission-entry-unplanned: {scope_plan.scope}: {entry.relative} appeared after the plan; "
+                             f"'{self.pf_command()} permissions check' reports it")
+        for code, relative, message in inventory.blockers:
+            if not excluded_path(relative):
+                notes.append(f"permission-entry-unplanned: {scope_plan.scope}: {relative or '.'}: {code}: {message}")
+        return differing, notes
+
+    def _permission_execute(self, plan, *, action, apply_op, apply_dir, base_revision, base_sha256,
+                            base_policy_sha256, already_approved, fenced_now, confirmed_plans, start_seq):
+        """Steps 9-13 (section 3.6) of an apply or a resume; the intent is already persisted."""
+        pf = self.pf_command()
+        effects_path = apply_dir / PERMISSION_EFFECTS_NAME
+        self._effect_seq, self._effect_count, self._changed_count, self._current_scope = start_seq, 0, 0, None
+        selected = [scope for scope in plan.scopes if scope != "control"]
+        freeze = plan.freeze_scopes
+        root_fds, fences = {}, {}
+        statuses = {"control": ("check-only", [])} if "control" in plan.scopes else {}
+        unplanned = 0
+        try:
+            for scope in selected:
+                scope_plan = plan.scope_plans[scope]
+                root_fds[scope] = pf_instance.open_scope_root(scope_plan.root, scope_plan.inventory.root_identity)
+            # Step 9: fence every freeze scope before any entry of any scope changes, then one scan.
+            for scope in freeze:
+                if scope in fenced_now:
                     continue
-                os.chown(path, -1, self.workspace_gid)
-                os.chmod(path, 0o2770)
-            for name in files:
-                path = current_path / name
-                if path.is_symlink() or not path.is_file():
+                info = os.fstat(root_fds[scope])
+                before = stat.S_IMODE(info.st_mode)
+                fenced = (before & 0o2000) | 0o700
+                self._append_effects(effects_path, [self._effect_line("fence", scope, "", "dir", info.st_dev,
+                                                                      info.st_ino, before, fenced, info.st_gid,
+                                                                      info.st_gid)])
+                os.fchmod(root_fds[scope], fenced)
+                fences[scope] = before
+            operations = {}
+            if freeze:
+                self._hook("after-fence")
+                identities = frozenset((entry.dev, entry.ino) for scope in freeze
+                                       for entry in plan.scope_plans[scope].entries)
+                try:
+                    holders = pf_instance.open_handles(identities)
+                except pf_instance.ContextError as exc:
+                    raise _EffectFree(f"editor-freeze-unavailable: Bulk change of {', '.join(freeze)} needs a verified "
+                                      f"editor freeze, which is unavailable here ({exc}). Deselect it with --scope or "
+                                      "follow SYNOLOGY_ADMIN §2.") from exc
+                if holders:
+                    shown = ", ".join(f"{pid} {comm} uid {uid} {holder}" for pid, comm, uid, holder in holders[:10])
+                    raise _EffectFree(f"editor-freeze-refused: {', '.join(freeze)} is still in use by {len(holders)} "
+                                      f"process(es) ({shown}); the fence was removed. A shell or sudo whose working "
+                                      "directory is inside the folder counts too: start the command from outside it "
+                                      "(for example 'cd /'). Nothing was changed.")
+                confirmed = {tuple(change[:4]) for change in plan.changes}
+                for scope in freeze:
+                    scope_plan = plan.scope_plans[scope]
+                    fresh = self._scope_plan(scope, scope_plan.target, scope_plan.gid, fenced=True)
+                    if fresh.blockers:
+                        self._log_scope_block(fresh, details=False)
+                        raise _EffectFree(f"permissions-blocked: The plan has {len(fresh.blockers)} blocker(s); see "
+                                          "above. Nothing was changed.")
+                    extra = [change for change in fresh.changes if tuple(change[:4]) not in confirmed]
+                    unplanned += len(extra)
+                    if unplanned > pf_instance.UNPLANNED_LIMIT:
+                        raise _EffectFree(self._permission_changed(
+                            f"{scope} (more than {pf_instance.UNPLANNED_LIMIT} entries)").args[0])
+                    now = {tuple(change[:4]) for change in fresh.changes}
+                    skipped = [change[1] or "." for change in scope_plan.changes if tuple(change[:4]) not in now]
+                    if skipped:
+                        fresh.notes.append(f"{len(skipped)} confirmed change(s) skipped: the entry now complies or is "
+                                           "gone: " + ", ".join(skipped[:10]))
+                    operations[scope] = fresh
+            # Step 10: apply scope by scope in the fixed order; entries deepest first, the root last.
+            for scope in selected:
+                scope_plan = operations.get(scope, plan.scope_plans[scope])
+                by_path = {entry.relative: entry for entry in scope_plan.entries}
+                directories = {entry.relative: (entry.dev, entry.ino) for entry in scope_plan.entries
+                               if entry.type == "dir"}
+                work = sorted(((by_path[change[1]], change[7], change[8]) for change in scope_plan.changes),
+                              key=lambda item: depth_order(item[0].relative))
+                self._apply_operations(scope, work, root_fds[scope], directories, effects_path)
+                fences.pop(scope, None)
+            # Step 11: verify each selected scope by re-inventory.
+            excluded = {"operations/" + apply_op, "operations/" + self.operation_id, "state/pending.json"}
+            failed = []
+            for scope in selected:
+                scope_plan = operations.get(scope, plan.scope_plans[scope])
+                differing, notes = self._verify_scope(scope_plan, excluded if scope == "private_state" else set())
+                statuses[scope] = ("partial" if differing else "yes", list(scope_plan.notes) + notes)
+                if differing:
+                    failed.append((scope, differing))
+            if failed:
+                scope, differing = failed[0]
+                self._write_permission_outcome(apply_op=apply_op, action=action, result="interrupted",
+                                               plan_sha256=plan.plan_sha256, unplanned=unplanned, conflicts=0,
+                                               approved_revision=None, statuses=statuses)
+                raise _VerifyFailed(f"permissions-verify-failed: {scope}: {', '.join(differing[:10])} does not hold its "
+                                    f"target after the change (re-inventory); the apply is not complete. Run "
+                                    f"'{pf} permissions apply --resume' or '--abandon'.")
+            self._hook("after-verify")
+            # Step 12: approve (only after every selected scope verified).
+            approved_revision = base_revision + 1 if already_approved else None
+            if not already_approved and (base_revision == 0 or plan.policy_sha256 != base_policy_sha256):
+                record = {"schema_version": 1, "instance_id": self.context.instance_id, "revision": base_revision + 1,
+                          "approved": utc(), "operation_id": apply_op, "policy_sha256": plan.policy_sha256,
+                          "previous_sha256": base_sha256, "confirmed_plans": list(confirmed_plans),
+                          "policy": plan.policy}
+                defs = pf_config.PERMISSION_APPROVAL_SCHEMA["$defs"]
+                errors = pf_install.validate_marked(record, defs["record"], defs=defs) \
+                    or pf_config.permission_approval_problems(record, instance_id=self.context.instance_id)
+                if errors:
+                    raise Failure(f"Internal error: the approval record failed its schema ({errors[0]}).")
+                data = pf_instance.normalize_json(record)
+                pf_instance._write_private_file(self.operation_dir / PERMISSION_APPROVAL_COPY, data, 0o600)
+                self._hook("after-approval-copy")
+                pf_instance._write_private_file(self.permission_record_path, data, 0o600)
+                self._hook("after-approval")
+                approved_revision = record["revision"]
+            # Step 13: close.
+            self._write_permission_outcome(apply_op=apply_op, action=action, result="completed",
+                                           plan_sha256=plan.plan_sha256, unplanned=unplanned, conflicts=0,
+                                           approved_revision=approved_revision, statuses=statuses)
+            self.pending.unlink()
+        except _EffectFree as exc:
+            try:
+                self._restore_fences(fences, root_fds, effects_path)
+            except BaseException as restore_exc:
+                self._mark_interrupted()
+                raise Failure(f"permissions-interrupted: The permission apply was interrupted after "
+                              f"{self._effect_count} recorded change(s) while its fence was removed; it is NOT "
+                              f"complete. Run '{pf} permissions apply --resume' or '--abandon'.") from restore_exc
+            if action == "apply":
+                self._write_permission_outcome(apply_op=apply_op, action=action, result="abandoned",
+                                               plan_sha256=plan.plan_sha256, unplanned=0, conflicts=0,
+                                               approved_revision=None, statuses={})
+                self.pending.unlink()
+            else:
+                # A resume keeps the original apply's journal open: its earlier effects stay compensable.
+                self._write_permission_outcome(apply_op=apply_op, action=action, result="interrupted",
+                                               plan_sha256=plan.plan_sha256, unplanned=0, conflicts=0,
+                                               approved_revision=None, statuses={})
+                self._mark_interrupted()
+            raise
+        except _VerifyFailed:
+            self._mark_interrupted()
+            raise
+        except pf_instance.PermissionEntryChanged as exc:
+            self._mark_interrupted()
+            raise Failure(f"permissions-entry-changed: {self._current_scope}: {exc.relative or '.'} changed during the "
+                          f"apply ({exc.detail}); it was not touched. {self._changed_count} object(s) were changed "
+                          f"before; run '{pf} permissions apply --resume' or '--abandon'.") from exc
+        except pf_instance.PermissionVerifyFailed as exc:
+            self._mark_interrupted()
+            raise Failure(f"permissions-verify-failed: {self._current_scope}: {exc.relative or '.'} does not hold its "
+                          f"target after the change ({exc.observed}); the apply is not complete. Run '{pf} permissions "
+                          "apply --resume' or '--abandon'.") from exc
+        except BaseException as exc:
+            self._mark_interrupted()
+            raise Failure(f"permissions-interrupted: The permission apply was interrupted after {self._effect_count} "
+                          f"recorded change(s); it is NOT complete. Run '{pf} permissions apply --resume' or "
+                          "'--abandon'.") from exc
+        finally:
+            for fd in root_fds.values():
+                os.close(fd)
+            self._permission_targets = None
+        revision = approved_revision or base_revision
+        log("")
+        self.log_permission_status([(scope, statuses[scope][0] if scope in statuses else "not-selected",
+                                     plan.scope_plans.get(scope)) for scope in PERMISSION_SCOPES])
+        for scope in selected:
+            for note in statuses[scope][1]:
+                log("  Note: " + note)
+        log(f"permissions-applied: Permission policy revision {revision} applied.")
+        return 0
+
+    def _load_permission_journal(self, journal):
+        """The open apply journal: (apply op id, its directory, the frozen plan, effect lines, valid byte length)."""
+        apply_op = journal.get("operation_id")
+        if not isinstance(apply_op, str) or not re.fullmatch(pf_config._OPERATION_ID[1:-1], apply_op):
+            raise self._journal_invalid(self.pending, 1)
+        apply_dir = self.context.operations_dir / apply_op
+        path = apply_dir / PERMISSION_PLAN_NAME
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+            document = pf_instance.parse_strict_json(data, label=str(path))
+        except (OSError, pf_instance.ContextError) as exc:
+            raise self._journal_invalid(path, 1) from exc
+        defs = pf_config.PERMISSION_APPLY_SCHEMA["$defs"]
+        if (pf_install.validate_marked(document, defs["plan"], defs=defs) or document["operation_id"] != apply_op
+                or document["instance_id"] != self.context.instance_id
+                or pf_config.permission_policy_problems(document["policy"])
+                or pf_instance.sha256_bytes(pf_instance.normalize_json(document["policy"]))
+                != document["policy_sha256"]):
+            raise self._journal_invalid(path, 1)
+        effects, valid = self._read_effects(apply_dir / PERMISSION_EFFECTS_NAME)
+        return apply_op, apply_dir, document, effects, valid
+
+    def _fenced_scopes(self, effects, document):
+        """Scopes whose root is still at the fence mode an earlier invocation of this journal set (section 3.7)."""
+        fenced = set()
+        for scope in document["freeze_scopes"]:
+            lines = [line for line in effects if line["kind"] == "fence" and line["scope"] == scope]
+            if not lines:
+                continue
+            last = lines[-1]
+            if last["after_mode"] != (last["before_mode"] & 0o2000) | 0o700 or last["after_mode"] == last["before_mode"]:
+                continue
+            try:
+                info = os.lstat(str(self.scope_root(scope)))
+            except OSError:
+                continue
+            if (info.st_dev, info.st_ino) == (last["dev"], last["ino"]) \
+                    and stat.S_IMODE(info.st_mode) == last["after_mode"]:
+                fenced.add(scope)
+        return frozenset(fenced)
+
+    def _permissions_resume(self, journal):
+        """`pf permissions apply --resume` (section 3.7): revalidate, re-plan with the frozen policy, confirm once,
+        then steps 9-13; effect lines continue the original journal."""
+        apply_op, apply_dir, document, effects, valid = self._load_permission_journal(journal)
+        policy = document["policy"]
+        self.validation = None
+        if not self.ensure_validation().mutation_allowed:
+            raise self._permission_changed("The protected context")
+        compiled = pf_config.compile_permission_policy(policy)
+        for root in document["roots"]:
+            scope, target = root["scope"], compiled[root["scope"]]
+            if target.gid_rule == "set":
+                try:
+                    gid = grp.getgrnam(target.group).gr_gid
+                except KeyError as exc:
+                    raise self._permission_changed(f"Group {target.group}") from exc
+                if gid != root["gid"]:
+                    raise self._permission_changed(f"Group {target.group}")
+            try:
+                identity = pf_instance.path_identity(self.scope_root(scope))
+            except pf_instance.ContextError as exc:
+                raise self._permission_changed(f"The {scope} folder") from exc
+            if identity != (root["dev"], root["ino"]):
+                raise self._permission_changed(f"The {scope} folder")
+        current = self.read_permission_record()
+        already, base_policy_sha256 = False, None
+        if current is None:
+            if document["base_sha256"] is not None:
+                raise self._permission_changed("The approved permission policy record")
+        elif pf_instance.sha256_bytes(current[1]) == document["base_sha256"]:
+            base_policy_sha256 = current[0]["policy_sha256"]
+        elif pf_config.approval_matches_journal(current[0], document):
+            already = True
+        else:
+            raise self._permission_changed("The approved permission policy record")
+        fenced_now = self._fenced_scopes(effects, document)
+        plan = self._permission_plan(policy, document["scopes"], fenced=fenced_now)
+        log(f"Resume of permission apply {apply_op} for instance {self.context.slug} (frozen permission policy "
+            f"{document['policy_sha256'][:12]}{'; its revision is already written' if already else ''})")
+        self.log_permission_plan(plan, details=False)
+        if plan.blockers:
+            raise Failure(f"permissions-blocked: The plan has {len(plan.blockers)} blocker(s); see above. The "
+                          "interrupted apply stays open; nothing more was changed.")
+        base = EffectivePolicy(policy, document["base_revision"], "approved", None, None, None)
+        permission_confirm("RESUME PERMISSIONS " + self.context.slug, self._permission_summary(
+            f"Resume: the remaining changes of permission apply {apply_op}", base, policy, plan))
+        self._hook("after-plan")
+        pf_instance._write_private_file(self.operation_dir / PERMISSION_CHANGES_NAME, plan.changes_bytes, 0o600)
+        effects_path = apply_dir / PERMISSION_EFFECTS_NAME
+        if os.path.lexists(str(effects_path)) and os.lstat(str(effects_path)).st_size > valid:
+            # A torn final line was never executed (write-ahead); cut it before the journal continues.
+            fd = os.open(str(effects_path), os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.ftruncate(fd, valid)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        confirmed = list(journal.get("confirmed_plans") or [{"operation_id": apply_op,
+                                                             "plan_sha256": document["plan_sha256"]}])
+        confirmed.append({"operation_id": self.operation_id, "plan_sha256": plan.plan_sha256})
+        write_json(self.pending, dict(journal, phase="applying", confirmed_plans=confirmed))
+        return self._permission_execute(
+            plan, action="resume", apply_op=apply_op, apply_dir=apply_dir, base_revision=document["base_revision"],
+            base_sha256=document["base_sha256"], base_policy_sha256=base_policy_sha256, already_approved=already,
+            fenced_now=fenced_now, confirmed_plans=confirmed, start_seq=effects[-1]["seq"] if effects else 0)
+
+    def _permissions_abandon(self, journal):
+        """`pf permissions apply --abandon` (section 3.7): compensate from the effect journal in reverse order."""
+        apply_op, apply_dir, document, effects, _ = self._load_permission_journal(journal)
+        current = self.read_permission_record()
+        if current is not None and pf_config.approval_matches_journal(current[0], document):
+            raise Failure(f"permissions-already-approved: Permission policy revision {current[0]['revision']} was "
+                          f"already written by this apply; only '{self.pf_command()} permissions apply --resume' can "
+                          "finish it.")
+        permission_confirm("ABANDON PERMISSIONS " + self.context.slug,
+                           f"Abandon permission apply {apply_op}: {len(effects)} recorded change(s) are compensated in "
+                           "reverse order; an object changed since the interruption is left as it is and listed.")
+        self._changed_count = 0
+        conflicts = []
+        root_fds = {}
+        try:
+            for line in reversed(effects):
+                scope, relative = line["scope"], line["path"]
+                where = f"{scope}:{relative or '.'}"
+                if scope not in root_fds:
+                    root = self.scope_root(scope)
+                    try:
+                        root_fds[scope] = pf_instance.open_scope_root(root, pf_instance.path_identity(root))
+                    except pf_instance.ContextError:
+                        root_fds[scope] = None
+                if root_fds[scope] is None:
+                    conflicts.append(where)
                     continue
-                executable = bool(path.stat().st_mode & 0o111)
-                os.chown(path, -1, self.workspace_gid)
-                os.chmod(path, 0o770 if executable else 0o660)
-        # PF-A1.2: privileged Git never runs against the writable checkout, so the former
-        # ``git config core.sharedRepository group`` call is gone; ``.git`` metadata is
-        # editor data and is only chmod'ed like every other workspace file above.
+                try:
+                    fd = self._open_effect_object(root_fds[scope], line)
+                except (OSError, pf_instance.ContextError):
+                    conflicts.append(where)
+                    continue
+                try:
+                    info = os.fstat(fd)
+                    kind = "dir" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "other"
+                    acl = pf_instance.inspect_acl_fd(fd)
+                    if (info.st_dev, info.st_ino, kind) != (line["dev"], line["ino"], line["type"]) \
+                            or acl.state.kind == "unknown" or pf_instance.POSIX_ACL_ACCESS in acl.names:
+                        conflicts.append(where)
+                        continue
+                    mode, gid = stat.S_IMODE(info.st_mode), info.st_gid
+                    before, after = (line["before_mode"], line["before_gid"]), (line["after_mode"], line["after_gid"])
+                    if (mode, gid) == before:
+                        continue
+                    half = gid in (before[1], after[1]) and mode in (before[0], before[0] & ~0o6000, after[0])
+                    if (mode, gid) != after and not half:
+                        conflicts.append(where)
+                        continue
+                    if gid != before[1]:
+                        os.fchown(fd, -1, before[1])
+                    os.fchmod(fd, before[0])
+                    self._changed_count += 1
+                finally:
+                    os.close(fd)
+        finally:
+            for fd in root_fds.values():
+                if fd is not None:
+                    os.close(fd)
+        result = "abandoned-with-conflicts" if conflicts else "abandoned"
+        statuses = {scope: ("no", [f"conflict: {item}" for item in conflicts if item.startswith(scope + ":")])
+                    for scope in document["scopes"]}
+        self._write_permission_outcome(apply_op=apply_op, action="abandon", result=result, plan_sha256=None,
+                                       unplanned=0, conflicts=len(conflicts), approved_revision=None,
+                                       statuses=statuses)
+        self.pending.unlink()
+        log(f"Permission apply {apply_op} abandoned: {self._changed_count} object(s) restored; the permission policy "
+            "record was not touched.")
+        if conflicts:
+            raise Failure(f"permissions-abandon-conflicts: {len(conflicts)} object(s) changed after the interruption and "
+                          f"were left as they are: {', '.join(conflicts[:10])}.")
+        return 0
+
+    @staticmethod
+    def _open_effect_object(root_fd, line):
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC \
+            | (os.O_DIRECTORY if line["type"] == "dir" else 0)
+        if line["path"] == "":
+            return os.dup(root_fd)
+        parent, name = pf_instance.open_entry_parent(root_fd, line["path"], {})
+        try:
+            return os.open(name, flags, dir_fd=parent)
+        finally:
+            os.close(parent)
+
+    def _scope_relative(self, scope, path):
+        root, path = self.scope_root(scope), Path(path)
+        if path == root:
+            return ""
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise Failure(f"Internal error: {path} is not inside the {scope} scope {root}.") from exc
+
+    def _publish(self, scope, inventory, *, executables=frozenset()):
+        """Explicit targets for a fresh or single entry set (section 3.10), then verification by the engine."""
+        effective, compiled, gids = self.permission_targets()
+        target, gid = compiled[scope], gids[scope]
+        acl = set()
+        for code, relative, message in inventory.blockers:
+            if code == "scope-entry-acl":
+                if scope in PROTECTED_SCOPES:
+                    raise Failure(f"fresh-entry-acl: {scope}: new entry {relative or '.'} inherited an ACL from its "
+                                  "folder; the policy cannot describe it, so the operation stopped. Remove the default "
+                                  f"ACL from {self.scope_root(scope)} (SYNOLOGY_ADMIN §16).")
+                acl.add(relative)
+                continue
+            raise Failure(f"{code}: {scope}: {relative or '.'}: {message}; nothing was published over it.")
+        work = []
+        for entry in inventory.entries:
+            if entry.relative in acl:
+                log(f"fresh-entry-acl: {scope}: new entry {entry.relative or '.'} has an ACL; its mode was left as "
+                    "created.")
+                continue
+            if scope == "workspace" and entry.uid != pf_instance.TRUSTED_UID:
+                log(f"workspace-concurrent-entry: {scope}: {entry.relative} was created by an editor (uid {entry.uid}) "
+                    "during this operation; it was left untouched.")
+                continue
+            mode, new_gid = permission_entry_target(target, gid, entry, executables)
+            if (entry.mode, entry.gid) != (mode, new_gid):
+                work.append((entry, mode, new_gid))
+        if not work:
+            return
+        work.sort(key=lambda item: depth_order(item[0].relative))
+        directories = {entry.relative: (entry.dev, entry.ino) for entry in inventory.entries if entry.type == "dir"}
+        root_fd = pf_instance.open_scope_root(inventory.root, inventory.root_identity)
+        try:
+            for entry, mode, new_gid in work:
+                if entry.relative == "":
+                    pf_instance.apply_entry_target(root_fd, None, entry, mode=mode, gid=new_gid)
+                    continue
+                parent, name = pf_instance.open_entry_parent(root_fd, entry.relative, directories)
+                try:
+                    pf_instance.apply_entry_target(parent, name, entry, mode=mode, gid=new_gid)
+                finally:
+                    os.close(parent)
+        except pf_instance.PermissionEntryChanged as exc:
+            raise Failure(f"permissions-entry-changed: {scope}: {exc.relative or '.'} changed while its permission "
+                          f"target was set ({exc.detail}); it was not touched.") from exc
+        except pf_instance.PermissionVerifyFailed as exc:
+            raise Failure(f"permissions-verify-failed: {scope}: {exc.relative or '.'} does not hold its target after "
+                          f"the change ({exc.observed}).") from exc
+        finally:
+            os.close(root_fd)
+
+    def publish_fresh(self, scope, path, *, executables=frozenset()):
+        """Exact policy targets for the subtree this operation just created (no freeze, no effect journal)."""
+        _, compiled, _ = self.permission_targets()
+        inventory = pf_instance.inventory_scope(scope, self.scope_root(scope), owner_rule=compiled[scope].owner_rule,
+                                                limit=pf_source.MANIFEST_ENTRY_LIMIT,
+                                                subtree=self._scope_relative(scope, path) or None)
+        self._publish(scope, inventory, executables=executables)
+
+    def apply_single(self, scope, path, kind):
+        """The policy target for one existing entry (a registered directory, .env), with the engine checks."""
+        _, compiled, _ = self.permission_targets()
+        inventory = pf_instance.inventory_scope(scope, self.scope_root(scope), owner_rule=compiled[scope].owner_rule,
+                                                limit=pf_source.MANIFEST_ENTRY_LIMIT,
+                                                subtree=self._scope_relative(scope, path) or None, recurse=False)
+        if not inventory.blockers and (len(inventory.entries) != 1 or inventory.entries[0].type != kind):
+            raise Failure(f"{scope}: {path} is not one existing {kind}; nothing was changed.")
+        self._publish(scope, inventory)
+
+    def permission_proposal_lines(self):
+        """The admin wizard's summary lines (section 4.5): both pf-config.json groups are proposals."""
+        found = self.read_permission_record()
+        pf_command = self.pf_command()
+        if found is not None:
+            return [f"backup_read_group and workspace_write_group are proposals: permission policy revision "
+                    f"{found[0]['revision']} stays in force until '{pf_command} permissions apply' approves a change."]
+        return [f"backup_read_group is a proposal: backups and recovery bundles keep the group of their folders until "
+                f"'{pf_command} permissions apply' approves a change. workspace_write_group applies to files pf "
+                f"creates in the workspace and configuration until the first '{pf_command} permissions apply' "
+                "approves a permission policy."]
+
+    def configuration_create_target(self, workspace_group):
+        """(gid, mode) of a file the config writer creates (OD-A22-11): the configuration target of the approved
+        permission policy, else the derived one (``workspace_group``, read and edit)."""
+        found = self.read_permission_record()
+        if found is not None:
+            target = pf_config.compile_permission_policy(found[0]["policy"])["configuration"]
+            return self.resolve_policy_gids(found[0]["policy"])["configuration"], target.file_mode
+        try:
+            return grp.getgrnam(workspace_group).gr_gid, 0o660
+        except KeyError as exc:
+            raise self.group_missing("configuration", workspace_group) from exc
+
+    def describe_permissions(self):
+        """The doctor line (section 4.5): no scope walk."""
+        try:
+            admin, _ = self.admin_values_for_permissions()
+            found = self.read_permission_record()
+            if found is not None:
+                effective = EffectivePolicy(found[0]["policy"], found[0]["revision"], "approved", None, found[0], found[1])
+                text = effective.label
+            else:
+                text = (f"permission policy not approved; derived (backups/recovery groups from their folders, "
+                        f"workspace/configuration from pf-config.json); run '{self.pf_command()} permissions plan', then "
+                        "'apply'")
+                effective = self.permission_policy(admin=(admin, None)) if admin is not None else None
+            if effective is not None:
+                proposals = self.permission_proposals(effective, admin)
+                if proposals:
+                    text += " | proposals: " + ", ".join(f"{scope} {current} -> {proposed}"
+                                                         for scope, proposed, current in proposals)
+            journal = self.read_journal()
+            if journal is not None and journal.get("operation") == "permissions":
+                text += f" | interrupted apply {journal.get('operation_id')}"
+        except Failure as exc:
+            text = "unavailable: " + str(exc).splitlines()[0]
+        return text
 
     def validate_deploy_env(self, values, *, require_strong_password=False):
         missing = [key for key in REQUIRED_NAS_ENV_KEYS if not values.get(key)]
@@ -2287,14 +3611,15 @@ class Controller:
             log(self.environment_summary(values))
             if not prompt_yes_no("Reuse this existing .env for the new deployment", default=True):
                 raise Failure("Existing .env was left unchanged. Move or edit it explicitly, then rerun deploy.")
-            os.chown(env_path, -1, self.workspace_gid)
-            os.chmod(env_path, 0o660)
+            # OD-A22-16 / PF-A2.3: the configuration file target of the permission policy in force.
+            self.apply_single("configuration", env_path, "file")
             self.freeze_app_config()
             return values
 
         # PF-A2.2: the missing-.env branch is the app-variable wizard (the record's profile declaration).
         values = self.app_wizard(inside_deploy=True)
-        log("Created " + str(env_path) + " with group-write access for " + self.config["workspace_write_group"] + ". It remains outside the repository.")
+        log("Created " + str(env_path) + " with the configuration permission target. It remains outside the "
+            "repository.")
         # The operation consumes the file it just wrote, frozen once, never the editable copy later.
         self.freeze_app_config(explicit=True)
         return values
@@ -2389,7 +3714,8 @@ class Controller:
                            f"profile {context.profile.id} {context.profile.version}"),
             environment_line=(f"Environment label: {values['environment']} (approved policy "
                               f"{context.approved_environment} revision {context.approved_policy.revision}; unchanged)"),
-            app_hint=f"Application variables are not in this file; use '{pf_command} config app'.")
+            app_hint=f"Application variables are not in this file; use '{pf_command} config app'.",
+            permission_lines=self.permission_proposal_lines())
         record = {"schema_version": 1, "operation_id": self.operation_id, "completed": utc(), "file": "pf-config.json",
                   "mode": mode, "profile_id": None, "schema_before": None if before is None else before.schema_version,
                   "schema_after": pf_config.ADMIN_CONFIG_SCHEMA_VERSION,
@@ -2398,8 +3724,9 @@ class Controller:
         self.check_config_change(record)
         confirm_write(path)
         changed = [row["key"] for row in rows if row["action"] != "kept"]
-        write_reviewed(path, data, target, create_gid=grp.getgrnam(values["workspace_write_group"]).gr_gid,
-                       op8=self.operation_id[-8:], keys=changed)
+        create_gid, create_mode = self.configuration_create_target(values["workspace_write_group"])
+        write_reviewed(path, data, target, create_gid=create_gid, op8=self.operation_id[-8:], keys=changed,
+                       create_mode=create_mode)
         record["completed"] = utc()
         self.record_config_change(record, path, data)
         log(f"Wrote {path} (admin configuration schema 2; {mode}).")
@@ -2691,8 +4018,9 @@ class Controller:
         elif not prompt_yes_no("Write .env with these settings and continue", default=True):
             raise Failure("Cancelled before .env was created.")
         changed = [row["key"] for row in rows if row["action"] != "kept" and row["action"] != "unchanged"]
-        write_reviewed(path, data, target, create_gid=self.workspace_gid, op8=self.operation_id[-8:], keys=changed,
-                       secret=generated)
+        create_gid, create_mode = self.configuration_create_target(self.config["workspace_write_group"])
+        write_reviewed(path, data, target, create_gid=create_gid, op8=self.operation_id[-8:], keys=changed,
+                       secret=generated, create_mode=create_mode)
         if record is not None:
             record["completed"] = utc()
             self.record_config_change(record, path, data)
@@ -3240,24 +4568,24 @@ class Controller:
         })
         write_json(folder / "manifest.json", metadata)
         (folder / "manifest.sha256").write_text(digest(folder / "manifest.json") + "\n")
-        self.publish_backup_permissions(folder)
+        # PF-A2.3: explicit backups targets for the fresh checkpoint only, verified after the change.
+        self.publish_fresh("backups", folder)
         log("Checkpoint verified: " + str(folder))
         return metadata
 
     def ensure_backup_tree(self):
-        """Create the checkpoint tree inside an explicit mutation; construction never does this."""
+        """Create the checkpoint tree inside an explicit mutation; construction never does this. PF-A2.3: each
+        directory gets the backups directory target of the permission policy in force (apply_single)."""
         for directory in (self.backups_root, self.revisions_root, self.backups_dir):
             if not directory.is_dir():
                 directory.mkdir(mode=0o750)
-            os.chown(directory, -1, self.backup_gid)
-            os.chmod(directory, 0o750)
+            self.apply_single("backups", directory, "dir")
 
     def ensure_recovery_tree(self):
         for directory in (self.recovery_root.parent, self.recovery_root):
             if not directory.is_dir():
                 directory.mkdir(mode=0o750)
-            os.chown(directory, -1, self.backup_gid)
-            os.chmod(directory, 0o750)
+            self.apply_single("recovery", directory, "dir")
 
     def snapshots(self):
         result = []
@@ -3424,20 +4752,24 @@ class Controller:
                 shutil.rmtree(item)
             else:
                 item.unlink()
-        for item in candidate.iterdir():
-            destination = self.root / item.name
-            if item.is_dir() and not item.is_symlink():
-                shutil.copytree(item, destination, symlinks=False)
-            elif item.is_file() and not item.is_symlink():
-                shutil.copy2(item, destination)
-            else:
-                raise Failure("Downloaded source contains an unsupported link/special file.")
-        self.publish_workspace_permissions()
+        self.publish_source_tree(candidate, manifest)
         try:
             pf_source.write_manifest(self.context.source_manifest_path, manifest)
         except pf_source.SourceError as exc:
             raise Failure(str(exc)) from exc
         self.phase("source-replaced")
+
+    def publish_source_tree(self, candidate, manifest):
+        """PF-A2.3: content-only copies of the candidate's top-level names into the emptied workspace, then the
+        workspace root target and explicit targets for exactly the names copied (executables from ``manifest``)."""
+        names = sorted(item.name for item in Path(candidate).iterdir())
+        for name in names:
+            copy_fresh(Path(candidate) / name, self.root / name)
+        designated = frozenset(entry["path"] for entry in manifest["entries"]
+                               if entry["kind"] == "file" and entry.get("executable"))
+        self.apply_single("workspace", self.root, "dir")
+        for name in names:
+            self.publish_fresh("workspace", self.root / name, executables=designated)
 
     def github(self, path, missing=False):
         # Unauthenticated GitHub API only: no credential is taken from the inherited environment
@@ -3612,7 +4944,9 @@ class Controller:
             })
 
             if use_current:
-                self.publish_workspace_permissions()
+                # PF-A2.3: no bulk change of the editable workspace without a verified editor freeze.
+                log(f"Workspace permissions were not changed; check them with '{self.pf_command()} permissions check "
+                    "--scope workspace'.")
                 self.record_source_manifest(source, target["sha"], verified=True)
                 self.phase("source-ready")
             else:
@@ -3878,11 +5212,12 @@ class Controller:
         log("Creating full purge recovery bundle: " + recovery_id)
 
         checkpoint_folder = self.backups_dir / checkpoint["id"]
-        shutil.copy2(checkpoint_folder / "source.tar.gz", folder / "source.tar.gz")
+        # PF-A2.3: content-only copies (no mode, owner or ACL xattr); publish_fresh sets the recovery targets.
+        copy_fresh(checkpoint_folder / "source.tar.gz", folder / "source.tar.gz")
         if checkpoint.get("workspace_archive"):
-            shutil.copy2(checkpoint_folder / checkpoint["workspace_archive"], folder / "workspace.tar.gz")
-        shutil.copy2(checkpoint_folder / "database.dump", db_dir / "active.dump")
-        shutil.copy2(checkpoint_folder / "database.list", db_dir / "active.list")
+            copy_fresh(checkpoint_folder / checkpoint["workspace_archive"], folder / "workspace.tar.gz")
+        copy_fresh(checkpoint_folder / "database.dump", db_dir / "active.dump")
+        copy_fresh(checkpoint_folder / "database.list", db_dir / "active.list")
 
         # The bundle preserves the configuration this operation consumed: the frozen
         # snapshot rendering (literal values), not whatever the editable file holds now.
@@ -3896,7 +5231,7 @@ class Controller:
             handle.write(frozen_bytes)
         admin_config = self.config_dir / "pf-config.json"
         if admin_config.is_file():
-            shutil.copy2(admin_config, saved_config_dir / "pf-config.json")
+            copy_fresh(admin_config, saved_config_dir / "pf-config.json")
 
         inventory = self.database_inventory()
         active = self.env()["POSTGRES_DB"]
@@ -3947,7 +5282,7 @@ class Controller:
         for name in ("deployed.json", "last-reset.json", "observed-tags.json"):
             source = self.state / name
             if source.is_file():
-                shutil.copy2(source, state_dir / name)
+                copy_fresh(source, state_dir / name)
                 state_files.append(name)
 
         image_refs, missing_history_images = self.available_snapshot_image_refs()
@@ -4037,7 +5372,7 @@ class Controller:
         manifest["checksums"] = {name: digest(folder / name) for name in files}
         write_json(folder / "manifest.json", manifest)
         (folder / "manifest.sha256").write_text(digest(folder / "manifest.json") + "\n", encoding="utf-8")
-        self.publish_backup_permissions(folder)
+        self.publish_fresh("recovery", folder)
         log("Recovery bundle verified: " + str(folder))
         if missing_history_images:
             log("WARNING: Some old rollback image tags were already missing before purge. Their checkpoint files are preserved, but those old image layers cannot be reconstructed automatically.")
@@ -4312,9 +5647,7 @@ class Controller:
                 shutil.rmtree(item)
             else:
                 item.unlink()
-        for item in candidate.iterdir():
-            copy_tree_entry(item, self.root / item.name)
-        self.publish_workspace_permissions()
+        self.publish_source_tree(candidate, manifest)
         try:
             pf_source.write_manifest(self.context.source_manifest_path, manifest)
         except pf_source.SourceError as exc:
@@ -4329,13 +5662,16 @@ class Controller:
                 source = legacy
         if not source.is_file():
             raise Failure("Recovery bundle does not contain a runtime .env; exact restore is refused.")
+        existed = real_directory(self.config_dir)
         self.config_dir.mkdir(mode=0o2770, parents=True, exist_ok=True)
+        if not existed:
+            self.apply_single("configuration", self.config_dir, "dir")
+        # PF-A2.3: a content-only copy whose temporary gets the configuration file target before the rename; no other
+        # configuration file is touched.
         temporary = self.config_dir / (".env.restore-" + uuid.uuid4().hex[:8])
-        shutil.copy2(source, temporary)
-        os.chown(temporary, -1, self.workspace_gid)
-        os.chmod(temporary, 0o660)
+        copy_fresh(source, temporary)
+        self.apply_single("configuration", temporary, "file")
         os.replace(temporary, self.config_dir / ".env")
-        self.publish_config_permissions()
 
     def restore_revision_checkpoints(self, recovery):
         archive = Path(recovery["_folder"]) / "revision-checkpoints.tar.gz"
@@ -4347,8 +5683,8 @@ class Controller:
                 if self.backups_dir.exists():
                     shutil.rmtree(self.backups_dir)
                 self.backups_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(source, self.backups_dir)
-                self.publish_backup_permissions(self.backups_dir)
+                copy_fresh(source, self.backups_dir)
+                self.publish_fresh("backups", self.backups_dir)
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
 
@@ -4450,13 +5786,15 @@ class Controller:
         for name in recovery.get("state_files", []):
             source = folder / "state" / name
             if source.is_file() and name != "deployed.json":
-                shutil.copy2(source, self.state / name)
+                copy_fresh(source, self.state / name)
+                self.publish_fresh("private_state", self.state / name)
 
         self.phase("activating")
         self.activate(recovery["active_images"], recovery["database_heads"])
         deployed_source = folder / "state/deployed.json"
         if deployed_source.is_file():
-            shutil.copy2(deployed_source, self.state / "deployed.json")
+            copy_fresh(deployed_source, self.state / "deployed.json")
+            self.publish_fresh("private_state", self.state / "deployed.json")
         else:
             write_json(self.state / "deployed.json", {
                 "sha": recovery["source_revision"], "ref": "restore:" + recovery["id"],
@@ -4632,24 +5970,6 @@ class Controller:
         self.activate(images, contract["heads"])
         self.pending.unlink()
 
-    def permissions(self):
-        self.require_trusted_context()
-        # Refuse every unsafe target before the first effect on any tree.
-        for tree in (self.root, self.config_dir, self.backups_dir, self.recovery_root):
-            if tree.is_dir():
-                self.refuse_multiply_linked(tree)
-        self.ensure_backup_tree()
-        self.ensure_recovery_tree()
-        self.publish_workspace_permissions()
-        self.publish_config_permissions()
-        self.publish_backup_permissions(self.backups_dir)
-        self.publish_backup_permissions(self.recovery_root)
-        log("Permissions normalized.")
-        log("  repo/: group=" + self.config["workspace_write_group"] + " full read/write/delete via directory group-write")
-        log("  config/: group=" + self.config["workspace_write_group"] + " read/write")
-        log("  backups/, recovery/: group=" + self.config["backup_read_group"] + " read/copy only")
-        log("  control/: users read-only, root-owned/root-modifiable; .pf-state-*: root only")
-
     def live_sections(self, sections):
         """Run read-only probes one by one; report each unavailable section instead of stopping."""
         unavailable = []
@@ -4719,6 +6039,7 @@ class Controller:
         self.log_effects()
         log("Python: " + sys.version.split()[0])
         self.log_registered_tools()
+        log("Permissions: " + self.describe_permissions())
         if not validation.mutation_allowed:
             self.refuse_live_checks("protected context refused (" + ", ".join(validation.refused_codes()) + ")")
         try:
@@ -4889,8 +6210,25 @@ def parser():
     def add(name, **kwargs):
         return subs.add_parser(name, allow_abbrev=False, **kwargs)
 
-    for name in ("doctor", "status", "permissions", "backup", "reset-db", "resume", "abort-deploy"):
+    for name in ("doctor", "status", "backup", "reset-db", "resume", "abort-deploy"):
         add(name)
+
+    # PF-A2.3: `pf permissions check|plan|apply`; bare `pf permissions` is refused by classify_command.
+    permissions = add("permissions", help="Check, preview or apply the semantic permission policy")
+    permission_verbs = permissions.add_subparsers(dest="permissions_verb", required=True)
+    for verb, text in (("check", "Compare every scope with the permission policy in force (read-only)"),
+                       ("plan", "Preview the changes, groups and plan hash (read-only)"),
+                       ("apply", "Wizard, one typed confirmation, then apply and verify (terminal only)")):
+        command = permission_verbs.add_parser(verb, allow_abbrev=False, help=text)
+        command.add_argument("--scope", action="append", dest="scopes", choices=PERMISSION_SCOPES,
+                             help="Limit to one scope (repeatable; default: all)")
+        if verb != "check":
+            command.add_argument("--details", action="store_true", help="Show octal and symbolic targets per entry")
+        if verb == "apply":
+            journal = command.add_mutually_exclusive_group()
+            journal.add_argument("--resume", action="store_true", help="Finish the interrupted permission apply")
+            journal.add_argument("--abandon", action="store_true",
+                                 help="Compensate the interrupted permission apply from its effect journal")
 
     add("instances", help="List registered instances from the protected registry (no Docker access)")
     pf_install.add_parser(subs)
@@ -4989,7 +6327,7 @@ class Route:
     preflight: str       # "none" | "owned" | "empty-target" | "plan" | "restore" | "apply" (where the topology check runs)
     fail_closed: str     # "never" | "always" | "unless-side-by-side" | "if-apply"
     unattended: str      # "allowed" | "terminal" | "policy"
-    policy_class: str    # "" | "backup" | "permissions" | "release-check"
+    policy_class: str    # "" | "backup" | "release-check" (PF-A2.3: "permissions" retired, OD-A23-11)
     handler: str         # dotted name; DT-4 proves it resolves
 
 
@@ -5014,7 +6352,14 @@ DISPATCH = {route.name: route for route in (
     # and a trusted launch for every verb except `install status`.
     Route("install", "installation", False, True, False, "any", "none", "never", "terminal", "",
           "pf_install.run_installed"),
-    _locked("permissions", "mutating", "refuse", "none", "never", "policy", "permissions", "Controller.permissions"),
+    # PF-A2.3: the read-only verbs keep a trusted launch (they read protected state) but not a trusted context: they
+    # map refuse findings onto scopes themselves (section 3.5). apply is terminal-only with its own journal route.
+    Route("permissions check", "read-only", False, True, False, "any", "none", "never", "allowed", "",
+          "Controller.permissions_check"),
+    Route("permissions plan", "read-only", False, True, False, "any", "none", "never", "allowed", "",
+          "Controller.permissions_plan"),
+    _locked("permissions apply", "mutating", "permissions apply", "none", "never", "terminal", "",
+            "Controller.permissions_apply"),
     _locked("deploy", "mutating", "refuse", "empty-target", "always", "terminal", "", "Controller.deploy"),
     _locked("abort-deploy", "mutating", "abort-deploy", "plan", "always", "terminal", "", "Controller.abort_deploy"),
     _locked("purge", "mutating", "purge", "plan", "never", "terminal", "", "Controller.purge"),
@@ -5031,7 +6376,8 @@ DISPATCH = {route.name: route for route in (
     # of the instance path (config_admin_unregistered).
     _locked("config", "mutating", "refuse", "none", "never", "terminal", "", "Controller.configure"),
 )}
-KNOWN_COMMANDS = frozenset(DISPATCH)
+# First command words (PF-A2.3: "permissions <verb>" rows share the word "permissions").
+KNOWN_COMMANDS = frozenset(name.split(" ", 1)[0] for name in DISPATCH)
 # Commands that never take the instance lock and never mutate managed state.
 READ_ONLY_COMMANDS = frozenset(name for name, route in DISPATCH.items() if route.mutability in ("read-only",
                                                                                               "registry-read"))
@@ -5135,6 +6481,12 @@ def classify_command(rest):
         raise Failure("compose-route-removed: 'pf config' without 'admin' or 'app' no longer forwards to Docker "
                       f"Compose. {REMOVED_ROUTE_GUIDANCE['config']} Use 'pf config admin' or 'pf config app'. Nothing "
                       "was read or changed.")
+    if word == "permissions":
+        if rest[1:2] and rest[1] in PERMISSIONS_VERBS:
+            return "route", word
+        raise OptionRefused("permissions-verb-required: 'pf permissions' no longer changes anything by itself. Use "
+                            "'pf permissions check' (compare), 'pf permissions plan' (preview) or 'pf permissions "
+                            "apply' (wizard, one confirmation, then apply). Nothing was read or changed.")
     if word in DISPATCH:
         return "route", word
     if word in REMOVED_COMPOSE_ROUTES:
@@ -5150,6 +6502,21 @@ def classify_command(rest):
                       "abbreviations are refused. Nothing was read or changed.")
     raise Failure(f"unknown-command: Unknown command '{word}'. Managed commands: {', '.join(sorted(KNOWN_COMMANDS))}. "
                   "Read-only Compose views: ps, logs. Nothing was read or changed.")
+
+
+def route_key(args):
+    """The DISPATCH key of parsed arguments: the command word, plus the verb for `permissions` (PF-A2.3)."""
+    if args.command == "permissions":
+        return "permissions " + args.permissions_verb
+    return args.command
+
+
+def check_permission_options(args):
+    """PF-A2.3: --resume/--abandon act on the frozen plan; --scope is refused with them (exit 2), before any
+    registry read."""
+    if getattr(args, "permissions_verb", None) == "apply" and (args.resume or args.abandon) and args.scopes:
+        raise OptionRefused("permissions-option-invalid: --resume and --abandon act on the frozen plan of the "
+                            "interrupted apply; --scope cannot be combined with them. Nothing was read or changed.")
 
 
 def route_preflight(route, args):
@@ -5495,7 +6862,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         # are answered by argparse (exit 0/2), also before any state is read.
         _, name = classify_command(rest)
         args = parser().parse_args(rest if rest else [name])
-        route = DISPATCH[args.command]
+        route = DISPATCH[route_key(args)]
         if args.command == "install":
             # PF-A2.1: the installer reads the registry and takes its locks itself (registry lock first).
             return pf_install.run_installed(root, args, running_release=running_release, trusted_launch=trusted_launch,
@@ -5503,6 +6870,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         # PF-A2.2: config option combinations are refused before any registry read; --configuration selects the
         # pre-registration mode of `config admin`, which takes only the registry lock (never an instance lock).
         check_config_options(args, explicit_instance=options.instance is not None)
+        check_permission_options(args)
         if getattr(args, "configuration", None) is not None:
             return config_admin_unregistered(root, args, running_release=running_release,
                                              trusted_launch=trusted_launch)
@@ -5530,8 +6898,9 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                           f"(project {context.compose_project}). Use --instance alone. Nothing was changed.")
         if route.trusted_context:
             # PF-A2.2: the config wizards read pf-config.json themselves (absent, refused or mismatched files reach
-            # their own outcome); the protected-context refusal still runs for every trusted route.
-            controller.require_trusted_context(load_config=route.name != "config")
+            # their own outcome); the protected-context refusal still runs for every trusted route. PF-A2.3:
+            # `permissions apply` reads it only for workspace_write_group and the proposals.
+            controller.require_trusted_context(load_config=route.name not in NO_CONFIG_ROUTES)
         if route.trusted_launch and not trusted_launch:
             raise Failure(
                 ("Mutating commands" if route.lock else "Compose views (ps, logs)")
@@ -5551,6 +6920,10 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 controller.compose_ps(args)
             elif args.command == "logs":
                 controller.compose_logs(args)
+            elif route.name == "permissions check":
+                return controller.permissions_check(args)
+            elif route.name == "permissions plan":
+                return controller.permissions_plan(args)
             return 0
 
         # Every locked route: validated context and sanitized launch (above), then the unattended and
@@ -5566,13 +6939,13 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 f"revision {revision} of instance {slug} does not (automatic apply is off in this checkpoint). The "
                 f"editable auto_update setting is a proposal only. Nothing was changed. Check with 'pf --instance "
                 f"{slug} release-check' and apply manually with 'pf --instance {slug} update --release <tag>'.")
-        held_lock.enter_context(controller.lock(pending_route=route.name, freeze=route.name != "config"))
+        held_lock.enter_context(controller.lock(pending_route=route.name, freeze=route.name not in NO_CONFIG_ROUTES))
         if route_preflight(route, args) == "owned":
             controller.require_topology_owned(route.name)
         managed_started = route_fail_closed(route, args)
 
-        if args.command == "permissions":
-            controller.permissions()
+        if route.name == "permissions apply":
+            controller.permissions_apply(args)
         elif args.command == "deploy":
             use_current = args.current or not (args.latest or args.commit or args.release)
             target = None if use_current else controller.resolve(

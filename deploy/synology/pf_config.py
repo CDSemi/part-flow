@@ -918,3 +918,505 @@ def verify_frozen(frozen):
     if parse_app_env(data, label=str(frozen.env_file)) != dict(frozen.values):
         raise ConfigError(f"frozen snapshot no longer parses to the approved values: {frozen.env_file}")
     return frozen
+
+
+# ------------------------------------------------------------ permission policy (PF-A2.3)
+# The semantic permission policy (design r2 schema, PERMISSIONS.md): strict parsing, the exact compiler of the mode
+# table and scope floors, and the frozen approval/apply records. Pure: nothing here reads the host or writes a file.
+
+PERMISSION_POLICY_VERSION = 1
+PERMISSION_SCOPES = ("workspace", "configuration", "control", "backups", "recovery", "private_state")
+ACCESS_LABELS = {"read_write": "Read and edit", "read_only": "View and copy", "none": "No group access"}
+EXECUTABLE_LABELS = {"none": "No script execution", "owner_only": "Owner only", "owner_and_group": "Owner and group"}
+_POLICY_GROUP_PATTERN = ("^[^\\s\\u0000-\\u001F\\u007F/:](?:[^\\u0000-\\u001F\\u007F/:]*"
+                         "[^\\s\\u0000-\\u001F\\u007F/:])?$")
+# Embedded copy of contracts/permission-policy.schema.json (the r2 schema, byte copy of the design package); a test
+# asserts json.loads(file) == this value and the file's sha256.
+PERMISSION_POLICY_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Deployment Admin readable permission policy (design r2)",
+    "description": ("Standalone design fragment, not accepted by the v2.5 runtime. Host groups, effective ACLs, "
+                    "protected paths and operator approval require runtime checks."),
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["policy_version", "permissions"],
+    "properties": {
+        "policy_version": {"const": 1},
+        "permissions": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["workspace", "configuration", "control", "backups", "recovery", "private_state"],
+            "properties": {
+                "workspace": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["group", "access", "executables", "inherit_group"],
+                    "properties": {
+                        "group": {"$ref": "#/$defs/groupName"},
+                        "access": {"type": "string", "enum": ["none", "read_only", "read_write"]},
+                        "executables": {"type": "string", "enum": ["none", "owner_only", "owner_and_group"]},
+                        "inherit_group": {"type": "boolean"},
+                    },
+                    "allOf": [{
+                        "if": {"properties": {"access": {"const": "none"}}, "required": ["access"]},
+                        "then": {"properties": {"executables": {"enum": ["none", "owner_only"]}}},
+                    }],
+                },
+                "configuration": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["group", "access", "inherit_group"],
+                    "properties": {
+                        "group": {"$ref": "#/$defs/groupName"},
+                        "access": {"type": "string", "enum": ["none", "read_only", "read_write"]},
+                        "inherit_group": {"type": "boolean"},
+                    },
+                },
+                "control": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["group", "access", "executables"],
+                    "properties": {
+                        "group": {"$ref": "#/$defs/groupName"},
+                        "access": {"type": "string", "enum": ["none", "read_only"]},
+                        "executables": {"const": "owner_only"},
+                    },
+                },
+                "backups": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["group", "access"],
+                    "properties": {
+                        "group": {"$ref": "#/$defs/groupName"},
+                        "access": {"type": "string", "enum": ["none", "read_only"]},
+                    },
+                },
+                "recovery": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["group", "access"],
+                    "properties": {
+                        "group": {"$ref": "#/$defs/groupName"},
+                        "access": {"type": "string", "enum": ["none", "read_only"]},
+                    },
+                },
+                "private_state": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["access"],
+                    "properties": {"access": {"const": "owner_only"}},
+                },
+            },
+        },
+    },
+    "$defs": {
+        "groupName": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": _POLICY_GROUP_PATTERN},
+    },
+}
+
+
+def _inline_policy_schema(schema):
+    """The A1-subset form of the r2 schema (section 2.3): every ``{"$ref": "#/$defs/<name>"}`` replaced by that
+    definition, the top-level ``$defs`` and the one ``allOf`` removed. permission_policy_problems enforces the
+    removed allOf (access none => executables not owner_and_group) as a semantic rule. Pure."""
+    definitions = schema["$defs"]
+
+    def inline(node):
+        if isinstance(node, dict):
+            if set(node) == {"$ref"}:
+                return inline(definitions[node["$ref"][len("#/$defs/"):]])
+            return {key: inline(value) for key, value in node.items() if key != "allOf"}
+        if isinstance(node, list):
+            return [inline(item) for item in node]
+        return node
+
+    return inline({key: value for key, value in schema.items() if key != "$defs"})
+
+
+PERMISSION_POLICY_SUBSET = _inline_policy_schema(PERMISSION_POLICY_SCHEMA)
+
+_OPERATION_ID = "^[0-9]{8}T[0-9]{6}Z-permissions-apply-[0-9a-f]{8}$"
+_UTC = "^[0-9]{8}T[0-9]{6}Z$"
+_UUID = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_MARKERS = ("Normative markers as in install-operation.schema.json (\"null or <target>\", \"items <target>\"), enforced "
+            "only by pf_install.validate_marked.")
+# Embedded copy of contracts/permission-approval.schema.json (section 2.5); a test asserts the two stay identical.
+PERMISSION_APPROVAL_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Deployment Admin approved permission policy record v1 (PF-A2.3)",
+    "description": ("Protected record <private_state>/permission-policy.json (root, 0600, normalized JSON bytes). "
+                    "Written only by 'pf permissions apply' (or its --resume) when a confirmed apply completed; a byte "
+                    "copy is kept as operations/<op-id>/permission-approval.json of the approving invocation. "
+                    + _MARKERS + " Cross-field rules (pf_config.permission_approval_problems): policy passes "
+                    "pf_config.permission_policy_problems and pf_config.permission_policy_unsupported; policy_sha256 = "
+                    "sha256(normalize_json(policy)); revision 1 has a null previous_sha256 and every later revision "
+                    "the sha256 of the previous record bytes; instance_id equals the selected instance; operation_id "
+                    "is the apply whose journal produced the approval (never a resume's id); confirmed_plans is "
+                    "non-empty, its first element names operation_id and every element names an apply or resume of "
+                    "that journal."),
+    "$defs": {
+        "record": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["schema_version", "instance_id", "revision", "approved", "operation_id", "policy_sha256",
+                         "previous_sha256", "confirmed_plans", "policy"],
+            "properties": {
+                "schema_version": {"const": 1},
+                "instance_id": {"type": "string", "pattern": _UUID},
+                "revision": {"type": "integer", "minimum": 1},
+                "approved": {"type": "string", "pattern": _UTC},
+                "operation_id": {"type": "string", "pattern": _OPERATION_ID},
+                "policy_sha256": {"type": "string", "pattern": _SHA256},
+                "previous_sha256": {"description": "null or sha256"},
+                "confirmed_plans": {"type": "array", "description": "items $defs.confirmed_plan"},
+                "policy": {"type": "object"},
+            },
+        },
+        "confirmed_plan": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["operation_id", "plan_sha256"],
+            "properties": {
+                "operation_id": {"type": "string", "pattern": _OPERATION_ID},
+                "plan_sha256": {"type": "string", "pattern": _SHA256},
+            },
+        },
+    },
+}
+
+
+def _scope_enum():
+    return {"type": "string", "enum": list(PERMISSION_SCOPES)}
+
+
+def _record(properties):
+    return {"type": "object", "additionalProperties": False, "required": list(properties), "properties": properties}
+
+
+# Embedded copy of contracts/permission-apply.schema.json (section 2.6); a test asserts the two stay identical.
+PERMISSION_APPLY_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Deployment Admin permission apply journal v1 (PF-A2.3)",
+    "description": ("Private records of one 'pf permissions apply' journal under <private_state>/operations/<op-id>/: "
+                    "permission-plan.json ($defs.plan), permission-changes.jsonl (one $defs.changes_header line, then "
+                    "one change array [scope, path, dev, ino, type, before_mode, before_gid, after_mode, after_gid] "
+                    "per line, checked by pf_config.change_problems; plan_sha256 = sha256 of the exact file bytes), "
+                    "permission-effects.jsonl (one normalized $defs.effect line per changed object, appended and "
+                    "fsynced before the change runs; paths checked by pf_config.effect_problems) and "
+                    "permission-apply.json ($defs.outcome, one per apply, resume or abandon invocation). Strict UTF-8 "
+                    "JSON, normalized bytes, mode 0600. " + _MARKERS + " effective_access_verified and "
+                    "future_file_behavior_verified are the constant 'not verified': no A2.3 code path performs an "
+                    "account test (PERMISSIONS section 5)."),
+    "$defs": {
+        "revision": {"type": "integer", "minimum": 1},
+        "scope": _scope_enum(),
+        "plan_root": _record({
+            "scope": _scope_enum(),
+            "dev": {"type": "integer", "minimum": 0},
+            "ino": {"type": "integer", "minimum": 0},
+            "gid": {"type": "integer", "minimum": 0},
+            "fenced": {"type": "boolean"},
+        }),
+        "plan": _record({
+            "schema_version": {"const": 1},
+            "operation_id": {"type": "string", "pattern": _OPERATION_ID},
+            "instance_id": {"type": "string", "pattern": _UUID},
+            "created": {"type": "string", "pattern": _UTC},
+            "base_revision": {"type": "integer", "minimum": 0},
+            "base_sha256": {"description": "null or sha256"},
+            "policy_sha256": {"type": "string", "pattern": _SHA256},
+            "policy": {"type": "object"},
+            "scopes": {"type": "array", "description": "items $defs.scope"},
+            "freeze_scopes": {"type": "array", "description": "items $defs.scope"},
+            "roots": {"type": "array", "description": "items $defs.plan_root"},
+            "change_count": {"type": "integer", "minimum": 0},
+            "plan_sha256": {"type": "string", "pattern": _SHA256},
+        }),
+        "changes_header": _record({
+            "schema_version": {"const": 1},
+            "policy_sha256": {"type": "string", "pattern": _SHA256},
+            "scopes": {"type": "array", "description": "items $defs.scope"},
+            "change_count": {"type": "integer", "minimum": 0},
+        }),
+        "effect": _record({
+            "seq": {"type": "integer", "minimum": 1},
+            "kind": {"enum": ["fence", "entry"]},
+            "scope": _scope_enum(),
+            "path": {"type": "string"},
+            "dev": {"type": "integer", "minimum": 0},
+            "ino": {"type": "integer", "minimum": 0},
+            "type": {"enum": ["dir", "file"]},
+            "before_mode": {"type": "integer", "minimum": 0},
+            "after_mode": {"type": "integer", "minimum": 0},
+            "before_gid": {"type": "integer", "minimum": 0},
+            "after_gid": {"type": "integer", "minimum": 0},
+            "operation_id": {"type": "string", "pattern": _OPERATION_ID},
+        }),
+        "outcome": _record({
+            "schema_version": {"const": 1},
+            "operation_id": {"type": "string", "pattern": _OPERATION_ID},
+            "apply_operation_id": {"type": "string", "pattern": _OPERATION_ID},
+            "completed": {"type": "string", "pattern": _UTC},
+            "action": {"enum": ["apply", "resume", "abandon"]},
+            "result": {"enum": ["completed", "current", "interrupted", "abandoned", "abandoned-with-conflicts"]},
+            "plan_sha256": {"description": "null or sha256"},
+            "changed": {"type": "integer", "minimum": 0},
+            "unplanned": {"type": "integer", "minimum": 0},
+            "conflicts": {"type": "integer", "minimum": 0},
+            "approved_revision": {"description": "null or $defs.revision"},
+            "scopes": {"type": "array", "description": "items $defs.scope_status"},
+        }),
+        "scope_status": _record({
+            "scope": _scope_enum(),
+            "mode_applied": {"enum": ["yes", "partial", "no", "not-selected", "check-only"]},
+            "effective_access_verified": {"const": "not verified"},
+            "future_file_behavior_verified": {"const": "not verified"},
+            "notes": {"type": "array", "description": "items string"},
+        }),
+    },
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class ScopeTarget:
+    """The compiled target of one scope (section 3.2). Modes are outputs, never inputs (PERMISSIONS section 2)."""
+
+    scope: str
+    group: Optional[str]
+    access: str
+    inherit: bool
+    executables: str
+    dir_mode: int
+    file_mode: int
+    exec_mode: Optional[int]
+    gid_rule: str        # "set" | "unmanaged"
+    owner_rule: str      # "preserve" | "trusted"
+    apply_rule: str      # "exact" | "ceiling"
+
+
+_FILE_MODES = {"none": 0o600, "read_only": 0o640, "read_write": 0o660}
+_DIR_MODES = {"none": 0o700, "read_only": 0o750, "read_write": 0o770}
+_EXECUTE_BITS = {"none": 0, "owner_only": 0o100, "owner_and_group": 0o110}
+
+
+def parse_permission_policy(data, *, label):
+    """Strict parse of permission policy bytes -> (document or None, problems). Pure."""
+    try:
+        document = pf_bootstrap.parse_strict_json(data, label=label)
+    except pf_bootstrap.BootstrapError as exc:
+        return None, [str(exc)]
+    problems = permission_policy_problems(document)
+    return (None if problems else document), problems
+
+
+def permission_policy_problems(document):
+    """Schema (A1 subset of the r2 schema) and semantic problems of a parsed policy; [] when valid. No key outside
+    the schema is ever read; there is no numeric mode field and no second representation."""
+    problems = pf_instance.validate_against_schema(document, PERMISSION_POLICY_SUBSET, "$")
+    if problems:
+        return problems
+    workspace = document["permissions"]["workspace"]
+    if workspace["access"] == "none" and workspace["executables"] == "owner_and_group":
+        return ["$.permissions.workspace: group execution needs group access (access none with executables "
+                "owner_and_group)"]
+    return []
+
+
+def permission_policy_unsupported(document):
+    """Valid choices this control refuses to activate (OD-A23-18), as operator copy fragments; [] when none."""
+    if permission_policy_problems(document):
+        return []
+    if document["permissions"]["workspace"]["executables"] == "none":
+        return ["workspace.executables = none is valid but not supported by this control (script execution none "
+                "would make the workspace differ from the deployed-source manifest; choose Owner only)"]
+    return []
+
+
+def derive_permission_policy(admin_values, *, backups_group, recovery_group):
+    """The derived policy of an instance without an approval (section 3.3): the A1/A2.2 modes, the editable scopes'
+    group from ``workspace_write_group`` and the backups/recovery groups passed in (the gid on their roots)."""
+    group = admin_values["workspace_write_group"]
+    return {"policy_version": PERMISSION_POLICY_VERSION, "permissions": {
+        "workspace": {"group": group, "access": "read_write", "executables": "owner_and_group", "inherit_group": True},
+        "configuration": {"group": group, "access": "read_write", "inherit_group": True},
+        "control": {"group": group, "access": "none", "executables": "owner_only"},
+        "backups": {"group": backups_group, "access": "read_only"},
+        "recovery": {"group": recovery_group, "access": "read_only"},
+        "private_state": {"access": "owner_only"},
+    }}
+
+
+def compile_permission_policy(document):
+    """{scope: ScopeTarget} for a valid policy (section 3.2); pure, total and deterministic. ConfigError on an
+    invalid document. Workspace ``executables: none`` compiles (its exec mode is the file mode); activation is
+    refused separately (permission_policy_unsupported)."""
+    problems = permission_policy_problems(document)
+    if problems:
+        raise ConfigError("permission-policy-invalid: " + problems[0])
+    permissions = document["permissions"]
+    targets = {}
+    for scope in ("workspace", "configuration"):
+        item = permissions[scope]
+        access, inherit = item["access"], item["inherit_group"]
+        executables = item.get("executables", "none")
+        file_mode = _FILE_MODES[access]
+        targets[scope] = ScopeTarget(
+            scope, item["group"], access, inherit, executables, _DIR_MODES[access] | (0o2000 if inherit else 0),
+            file_mode, file_mode | _EXECUTE_BITS[executables] if scope == "workspace" else None,
+            "set", "preserve", "exact")
+    control = permissions["control"]
+    targets["control"] = ScopeTarget(
+        "control", control["group"], control["access"], False, "owner_only", _DIR_MODES[control["access"]],
+        _FILE_MODES[control["access"]], _FILE_MODES[control["access"]] | 0o100,
+        "set" if control["access"] == "read_only" else "unmanaged", "trusted", "ceiling")
+    for scope in ("backups", "recovery"):
+        item = permissions[scope]
+        targets[scope] = ScopeTarget(scope, item["group"], item["access"], False, "none", _DIR_MODES[item["access"]],
+                                     _FILE_MODES[item["access"]], None, "set", "trusted", "exact")
+    targets["private_state"] = ScopeTarget("private_state", None, "owner_only", False, "none", 0o700, 0o600, None,
+                                           "unmanaged", "trusted", "exact")
+    return {scope: targets[scope] for scope in PERMISSION_SCOPES}
+
+
+def ceiling_violations(target, *, mode, uid, gid, kind, policy_gid):
+    """The control ceiling (section 3.2): every violation of one entry as copy; [] when it complies."""
+    violations = []
+    if uid != 0:
+        violations.append(f"owner uid {uid}; the trusted owner is uid 0")
+    if mode & 0o7000:
+        violations.append(f"mode {mode:04o} carries a setuid, setgid or sticky bit")
+    if mode & 0o022:
+        violations.append(f"mode {mode:04o} grants group or other write")
+    if mode & 0o007:
+        violations.append(f"mode {mode:04o} grants other access")
+    group_read = target.access == "read_only" and policy_gid is not None and gid == policy_gid
+    if mode & 0o040 and not group_read:
+        violations.append(f"mode {mode:04o} grants group read, which the permission policy does not")
+    if mode & 0o010 and (kind == "file" or not group_read):
+        violations.append(f"mode {mode:04o} grants group execute, which the permission policy does not")
+    return violations
+
+
+def symbolic_mode(mode, kind):
+    """Absolute symbolic form of a mode (``u=rw,g=rw,o=``), with ``, setgid`` (and any other special bit)."""
+    def part(bits):
+        return "".join(letter for letter, bit in (("r", 4), ("w", 2), ("x", 1)) if bits & bit)
+
+    text = f"u={part(mode >> 6 & 7)},g={part(mode >> 3 & 7)},o={part(mode & 7)}"
+    for bit, name in ((0o4000, "setuid"), (0o2000, "setgid"), (0o1000, "sticky")):
+        if mode & bit:
+            text += ", " + name
+    return text
+
+
+def policy_diff(before, after):
+    """[(scope, field, old, new)] for every field that differs, in scope order; ``before`` None lists everything."""
+    rows = []
+    for scope in PERMISSION_SCOPES:
+        old = {} if before is None else before["permissions"][scope]
+        new = after["permissions"][scope]
+        for field in list(new) + [name for name in old if name not in new]:
+            if before is None or old.get(field) != new.get(field):
+                rows.append((scope, field, old.get(field), new.get(field)))
+    return rows
+
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def permission_approval_problems(record, *, instance_id, previous_bytes=None):
+    """The cross-field rules of an approval record (section 2.5); [] when valid. Run after validate_marked."""
+    if not isinstance(record, dict):
+        return ["record: not an object"]
+    problems = []
+    policy = record.get("policy")
+    policy_problems = permission_policy_problems(policy)
+    problems += ["policy: " + item for item in policy_problems]
+    if not policy_problems:
+        problems += ["policy: " + item for item in permission_policy_unsupported(policy)]
+        if record.get("policy_sha256") != _sha256(pf_instance.normalize_json(policy)):
+            problems.append("policy_sha256 is not the sha256 of the normalized policy")
+    revision, previous = record.get("revision"), record.get("previous_sha256")
+    if revision == 1 and previous is not None:
+        problems.append("revision 1 has a null previous_sha256")
+    if type(revision) is int and revision > 1 and previous is None:
+        problems.append(f"revision {revision} names the sha256 of the previous record")
+    if previous_bytes is not None and previous != _sha256(previous_bytes):
+        problems.append("previous_sha256 is not the sha256 of the previous record bytes")
+    if record.get("instance_id") != instance_id:
+        problems.append(f"instance_id {record.get('instance_id')!r} is not the selected instance {instance_id}")
+    plans = record.get("confirmed_plans")
+    if isinstance(plans, list):
+        if not plans:
+            problems.append("confirmed_plans is empty")
+        elif not isinstance(plans[0], dict) or plans[0].get("operation_id") != record.get("operation_id"):
+            problems.append("the first confirmed plan does not name operation_id")
+    return problems
+
+
+def approval_matches_journal(record, plan):
+    """Whether the approval record is the one this apply journal writes (section 3.7 rule)."""
+    return (isinstance(record, dict) and isinstance(plan, dict) and type(plan.get("base_revision")) is int
+            and record.get("revision") == plan["base_revision"] + 1
+            and record.get("policy_sha256") == plan.get("policy_sha256")
+            and record.get("previous_sha256") == plan.get("base_sha256")
+            and record.get("operation_id") == plan.get("operation_id"))
+
+
+def _relative_problem(path):
+    """Why ``path`` is not a scope-relative POSIX path ("" = the scope root), or None."""
+    if not isinstance(path, str):
+        return "path is not a string"
+    if path == "":
+        return None
+    if path.startswith("/") or "\x00" in path or any(part in ("", ".", "..") for part in path.split("/")):
+        return f"path {path!r} is not a scope-relative path without '..' or a leading '/'"
+    return None
+
+
+def change_problems(line):
+    """Problems of one permission-changes.jsonl change array; [] when valid."""
+    if not isinstance(line, list) or len(line) != 9:
+        return ["change: expected [scope, path, dev, ino, type, before_mode, before_gid, after_mode, after_gid]"]
+    scope, path, dev, ino, kind, before_mode, before_gid, after_mode, after_gid = line
+    problems = []
+    if scope not in PERMISSION_SCOPES:
+        problems.append(f"change: {scope!r} is not a scope")
+    problem = _relative_problem(path)
+    if problem is not None:
+        problems.append("change: " + problem)
+    for name, value in (("dev", dev), ("ino", ino), ("before_mode", before_mode), ("before_gid", before_gid),
+                        ("after_mode", after_mode), ("after_gid", after_gid)):
+        if type(value) is not int or value < 0:
+            problems.append(f"change: {name} is not a non-negative integer")
+        elif name.endswith("_mode") and value > 0o7777:
+            problems.append(f"change: {name} {value} is not a permission mode")
+    if kind not in ("dir", "file"):
+        problems.append(f"change: type {kind!r} is not dir or file")
+    return problems
+
+
+def changes_bytes(header, changes):
+    """The exact bytes of permission-changes.jsonl (section 3.5); plan_sha256 is their sha256. ConfigError when
+    the header or a change is invalid (a programming error: nothing is written)."""
+    problems = pf_instance.validate_against_schema(header, PERMISSION_APPLY_SCHEMA["$defs"]["changes_header"], "$")
+    if not problems:
+        problems += [f"$.scopes: {scope!r} is not a scope" for scope in header["scopes"]
+                     if scope not in PERMISSION_SCOPES]
+        if header["change_count"] != len(changes):
+            problems.append(f"$.change_count {header['change_count']} != {len(changes)} change lines")
+    for index, change in enumerate(changes):
+        problems += [f"line {index + 2}: {item}" for item in change_problems(list(change))]
+    if problems:
+        raise ConfigError("permission-changes-invalid: " + problems[0])
+    return b"".join([pf_instance.normalize_json(header) + b"\n"]
+                    + [pf_instance.normalize_json(list(change)) + b"\n" for change in changes])
+
+
+def effect_problems(line):
+    """The cross-field rules of one effect line (section 2.6): the path is scope-relative; [] when valid."""
+    if not isinstance(line, dict):
+        return ["effect: not an object"]
+    problem = _relative_problem(line.get("path"))
+    return [] if problem is None else ["effect: " + problem]

@@ -2120,7 +2120,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A2.2")
+        self.assertEqual(pf.CHECKPOINT, "PF-A2.3")
 
 
 if __name__ == "__main__":

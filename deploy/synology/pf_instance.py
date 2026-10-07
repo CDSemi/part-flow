@@ -15,6 +15,7 @@ registry, the records and the registered paths against that anchor. It does
 not claim to authenticate itself after import.
 """
 import dataclasses
+import errno
 import importlib.util
 import fcntl
 import json
@@ -1796,3 +1797,427 @@ def discard_unused_registration(root, instance_id, expected_record_bytes, retain
     finally:
         if handle is not None:
             handle.release()
+
+
+# ------------------------------------------------------------ permission scopes (PF-A2.3)
+# Read-only, fd-safe scope inventory and the one metadata engine of `pf permissions apply` and of the lifecycle
+# flows' fresh artifacts. Every entry is reached relative to its parent directory descriptor without following a
+# link; no path string is re-resolved by the kernel below a scope root. No ACL entry is ever written or removed.
+
+DAEMON_STORAGE_CANDIDATES = ("/var/lib/docker", "/var/lib/containerd", "/var/packages/ContainerManager",
+                             "/var/packages/Docker")          # plus every existing /volume<N>/@docker (computed)
+APP_STORAGE_NAMES = ("@docker",)
+EFFECT_BATCH = 256
+UNPLANNED_LIMIT = 1000
+# The procfs root the open-handle scan reads; a module constant so a test can make it unusable (FZ-4).
+PROC_ROOT = "/proc"
+POSIX_ACL_ACCESS = "system.posix_acl_access"
+POSIX_ACL_DEFAULT = "system.posix_acl_default"
+_ENTRY_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+
+
+@dataclasses.dataclass(frozen=True)
+class ScopeEntry:
+    relative: str        # scope-relative POSIX path; "" is the scope root
+    type: str            # "dir" | "file"
+    dev: int
+    ino: int
+    uid: int
+    gid: int
+    mode: int            # st_mode & 0o7777
+    nlink: int
+
+
+@dataclasses.dataclass(frozen=True)
+class ScopeInventory:
+    scope: str
+    root: Path
+    root_identity: object      # (st_dev, st_ino) or None when the root could not be opened safely
+    entries: tuple             # ScopeEntry, walk order
+    blockers: tuple            # (code, relative, message)
+    default_acl_dirs: tuple    # relative paths of directories that carry only a default ACL
+
+
+@dataclasses.dataclass(frozen=True)
+class AclInfo:
+    state: object              # pf_bootstrap.AclState
+    names: frozenset           # the POSIX ACL xattr names present on the inode
+
+
+class PermissionEntryChanged(ContextError):
+    """permissions-entry-changed: the object no longer is the planned one (or its planned before state)."""
+
+    def __init__(self, relative, detail):
+        super().__init__(f"{relative or '.'}: {detail}")
+        self.relative = relative
+        self.detail = detail
+
+
+class PermissionVerifyFailed(ContextError):
+    """permissions-verify-failed: the object does not hold its target after the change."""
+
+    def __init__(self, relative, observed):
+        super().__init__(f"{relative or '.'}: {observed}")
+        self.relative = relative
+        self.observed = observed
+
+
+def inspect_acl_fd(fd):
+    """The ACL classification of an open inode (never a path string). Agreement reference: pf_bootstrap.
+    inspect_posix_acl, whose rules this repeats on the descriptor: ``unknown`` when the query fails, an ACL blob is
+    unreadable or an unknown ACL-named attribute is present (AC-4). ``names``: the POSIX ACL xattrs present."""
+    if not hasattr(os, "listxattr"):
+        return AclInfo(AclState("unknown", (), "extended attribute API unavailable; ACL state cannot be verified"),
+                       frozenset())
+    try:
+        names = os.listxattr(fd)
+    except OSError as exc:
+        return AclInfo(AclState("unknown", (), f"ACL query failed ({errno.errorcode.get(exc.errno, exc.errno)}): "
+                                               "additional ACL authority cannot be excluded"), frozenset())
+    present = frozenset(name for name in names if name in pf_bootstrap.POSIX_ACL_NAMES)
+    grants = []
+    kind = "none"
+    for name in names:
+        if name in pf_bootstrap.POSIX_ACL_NAMES:
+            try:
+                entries = parse_posix_acl(os.getxattr(fd, name))
+            except (OSError, ValueError) as exc:
+                return AclInfo(AclState("unknown", tuple(grants), f"{name} present but unreadable: {exc}"), present)
+            kind = "posix"
+            mask = None
+            for tag, perm, _ in entries:
+                if tag == pf_bootstrap.ACL_MASK:
+                    mask = perm
+            for tag, perm, identifier in entries:
+                effective = perm if mask is None or tag in (pf_bootstrap.ACL_USER_OBJ, pf_bootstrap.ACL_OTHER) \
+                    else perm & mask
+                if tag in (pf_bootstrap.ACL_USER, pf_bootstrap.ACL_GROUP, pf_bootstrap.ACL_GROUP_OBJ,
+                           pf_bootstrap.ACL_OTHER) and effective & pf_bootstrap.ACL_WRITE:
+                    who = {pf_bootstrap.ACL_USER: f"user {identifier}", pf_bootstrap.ACL_GROUP: f"group {identifier}",
+                           pf_bootstrap.ACL_GROUP_OBJ: "owning group", pf_bootstrap.ACL_OTHER: "others"}[tag]
+                    grants.append(f"{name} grants write to {who}")
+        elif "acl" in name.lower():
+            return AclInfo(AclState("unknown", tuple(grants), f"unknown ACL attribute {name}; mutation limited"),
+                           present)
+    return AclInfo(AclState(kind, tuple(grants)), present)
+
+
+def _app_storage_roots():
+    roots = list(DAEMON_STORAGE_CANDIDATES)
+    try:
+        names = sorted(os.listdir("/"))
+    except OSError:
+        names = []
+    for name in names:
+        if re.fullmatch(r"volume[0-9]+", name) and os.path.lexists("/" + name + "/@docker"):
+            roots.append("/" + name + "/@docker")
+    return roots
+
+
+def _breadth_problem(root):
+    """Static breadth rule (section 3.5 step 1): None, or why ``root`` may never be a scope."""
+    text = str(root)
+    if text == "/" or re.fullmatch(r"/volume[0-9]+", text):
+        return f"{text} is a filesystem or volume root"
+    for candidate in _app_storage_roots():
+        if text == candidate or candidate.startswith(text + "/") or text.startswith(candidate + "/"):
+            return f"{text} is or contains Docker/application storage ({candidate})"
+    return None
+
+
+def open_scope_root(root, expected_identity):
+    """Open a scope root component by component from ``/`` with O_NOFOLLOW (no link is ever followed); its
+    (st_dev, st_ino) must equal ``expected_identity``. Returns the directory descriptor (the caller closes it)."""
+    root = canonical_path(root, label=str(root))
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in root.parts[1:]:
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except OSError as exc:
+                detail = "symbolic link or not a directory" if exc.errno in (errno.ELOOP, errno.ENOTDIR) \
+                    else exc.strerror or str(exc)
+                raise ContextError(f"{root}: component {part}: {detail}") from exc
+            os.close(fd)
+            fd = child
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != tuple(expected_identity):
+            raise ContextError(f"{root}: the directory identity changed while it was opened")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _kind(mode):
+    return "dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "other"
+
+
+class _Walk:
+    """One bounded inventory (section 3.5 step 3); collects entries, blockers and default-ACL directories."""
+
+    def __init__(self, root_dev, owner_rule, limit):
+        self.root_dev, self.owner_rule, self.limit = root_dev, owner_rule, limit
+        self.entries, self.blockers, self.defaults = [], [], []
+        self.count = 0
+        self.stopped = False
+
+    def record(self, fd, info, relative, name):
+        """Classify an opened inode; returns True when it is a directory the walk may enter."""
+        kind = _kind(info.st_mode)
+        if self.owner_rule == "trusted" and info.st_uid != TRUSTED_UID:
+            self.blockers.append(("scope-untrusted-owner", relative, f"owner uid {info.st_uid}; this scope needs the "
+                                                                     "trusted owner uid 0 (never chowned into place)"))
+            return False
+        acl = inspect_acl_fd(fd)
+        if acl.state.kind == "unknown":
+            self.blockers.append(("scope-entry-acl", relative, acl.state.detail or "ACL state not understood"))
+        elif POSIX_ACL_ACCESS in acl.names:
+            self.blockers.append(("scope-entry-acl", relative, "carries an access ACL; a mode change would rewrite "
+                                                               "its mask, so it is never changed"))
+        elif kind == "dir" and acl.names == frozenset({POSIX_ACL_DEFAULT}):
+            self.defaults.append(relative)
+        self.entries.append(ScopeEntry(relative, kind, info.st_dev, info.st_ino, info.st_uid, info.st_gid,
+                                       stat.S_IMODE(info.st_mode), info.st_nlink))
+        self.count += 1
+        if self.count > self.limit:
+            self.blockers.append(("scope-too-large", relative, f"more than {self.limit} entries; the inventory "
+                                                               "stopped"))
+            self.stopped = True
+            return False
+        return kind == "dir" and (name is None or name not in APP_STORAGE_NAMES)
+
+    def examine(self, parent_fd, name, relative):
+        """lstat ``name`` relative to ``parent_fd``, classify it, open it (no-follow) and record it. Returns an open
+        directory descriptor to descend into, or None."""
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        kind = _kind(info.st_mode)
+        if stat.S_ISLNK(info.st_mode):
+            self.blockers.append(("scope-entry-link", relative, "symbolic link (never followed or changed)"))
+            return None
+        if kind == "other":
+            self.blockers.append(("scope-entry-special", relative, "not a regular file or directory"))
+            return None
+        if kind == "file" and info.st_nlink != 1:
+            self.blockers.append(("scope-entry-hardlinked", relative, f"{info.st_nlink} hard links; a name outside the "
+                                                                      "scope would change too"))
+            return None
+        if info.st_dev != self.root_dev:
+            self.blockers.append(("scope-mount-boundary", relative, "another filesystem is mounted here; it is never "
+                                                                    "entered"))
+            return None
+        if kind == "dir" and name in APP_STORAGE_NAMES:
+            self.blockers.append(("scope-contains-app-storage", relative, "application storage is never entered"))
+            return None
+        try:
+            fd = os.open(name, _ENTRY_FLAGS | (os.O_DIRECTORY if kind == "dir" else 0), dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                self.blockers.append(("scope-entry-link", relative, "replaced by a symbolic link (never followed)"))
+            else:
+                self.blockers.append(("scope-path-unsafe", relative, f"cannot be opened ({exc.strerror or exc})"))
+            return None
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or _kind(opened.st_mode) != kind:
+                self.blockers.append(("scope-path-unsafe", relative, "replaced while it was inventoried"))
+                descend = False
+            else:
+                descend = self.record(fd, opened, relative, name)
+        except BaseException:
+            os.close(fd)
+            raise
+        if descend:
+            return fd
+        os.close(fd)
+        return None
+
+    def walk(self, fd, relative):
+        """Iterative walk below the open directory ``fd``, which it owns and closes. Open descriptors are bounded by
+        the depth of the tree."""
+        stack = [[fd, relative, None]]
+        try:
+            stack[0][2] = iter(sorted(os.listdir(fd)))
+            while stack and not self.stopped:
+                current, base, names = stack[-1]
+                name = next(names, None)
+                if name is None:
+                    stack.pop()
+                    os.close(current)
+                    continue
+                child_relative = name if not base else base + "/" + name
+                child = self.examine(current, name, child_relative)
+                if child is not None:
+                    stack.append([child, child_relative, None])
+                    stack[-1][2] = iter(sorted(os.listdir(child)))
+        finally:
+            for item in stack:
+                os.close(item[0])
+
+
+def inventory_scope(scope, root, *, owner_rule, limit, subtree=None, recurse=True):
+    """Read-only bounded inventory of one scope (section 3.5). ``limit``: pf_source.MANIFEST_ENTRY_LIMIT, passed by
+    the caller (this module never loads pf_source). ``subtree``: a scope-relative path; only that entry (and, with
+    ``recurse``, everything below it) is inventoried, reached component by component from the root descriptor."""
+    root = Path(root)
+    problem = _breadth_problem(root)
+    if problem is not None:
+        return ScopeInventory(scope, root, None, (), (("scope-contains-app-storage", "", problem),), ())
+    try:
+        identity = path_identity(root)
+        fd = open_scope_root(root, identity)
+    except ContextError as exc:
+        return ScopeInventory(scope, root, None, (), (("scope-path-unsafe", "", str(exc)),), ())
+    walk = _Walk(identity[0], owner_rule, limit)
+    try:
+        if not subtree:
+            if walk.record(fd, os.fstat(fd), "", None) and recurse:
+                owned, fd = fd, None
+                walk.walk(owned, "")
+            return ScopeInventory(scope, root, identity, tuple(walk.entries), tuple(walk.blockers),
+                                  tuple(walk.defaults))
+        parts = subtree.split("/")
+        relative = ""
+        for part in parts[:-1]:
+            relative = part if not relative else relative + "/" + part
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except OSError as exc:
+                walk.blockers.append(("scope-path-unsafe", relative, f"cannot be opened as a directory without "
+                                                                     f"following a link ({exc.strerror or exc})"))
+                return ScopeInventory(scope, root, identity, (), tuple(walk.blockers), ())
+            os.close(fd)
+            fd = child
+        child = walk.examine(fd, parts[-1], subtree)
+        if child is not None:
+            if recurse:
+                walk.walk(child, subtree)
+            else:
+                os.close(child)
+        return ScopeInventory(scope, root, identity, tuple(walk.entries), tuple(walk.blockers), tuple(walk.defaults))
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def open_entry_parent(root_fd, relative, directories):
+    """Open the parent directory of ``relative`` component by component from ``root_fd`` (O_NOFOLLOW). Every
+    intermediate directory must still be the inventoried one: ``directories`` maps relative path -> (dev, ino).
+    Returns (descriptor or None for the root itself, leaf name or None). PermissionEntryChanged otherwise."""
+    if relative == "":
+        return None, None
+    parts = relative.split("/")
+    fd = os.dup(root_fd)
+    current = ""
+    try:
+        for part in parts[:-1]:
+            current = part if not current else current + "/" + part
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except OSError as exc:
+                raise PermissionEntryChanged(relative, f"parent {current} cannot be opened without following a link "
+                                                       f"({exc.strerror or exc})") from exc
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            expected = directories.get(current)
+            if expected is not None and (info.st_dev, info.st_ino) != tuple(expected):
+                raise PermissionEntryChanged(relative, f"parent {current} was replaced")
+        return fd, parts[-1]
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def apply_entry_target(parent_fd, name, entry, *, mode, gid, between=None):
+    """Section 3.9 steps 1-5 for one entry: open no-follow relative to ``parent_fd`` (``name`` None: ``parent_fd``
+    is the entry itself), require the planned identity, type, owner, link count and before state (``entry.mode``,
+    ``entry.gid``), re-check the ACL rule on the descriptor, fchown (when the gid differs) then fchmod, and verify.
+    ``between`` (a test seam) runs between the two calls."""
+    own = name is not None
+    if own:
+        try:
+            fd = os.open(name, _ENTRY_FLAGS | (os.O_DIRECTORY if entry.type == "dir" else 0), dir_fd=parent_fd)
+        except OSError as exc:
+            raise PermissionEntryChanged(entry.relative, "symbolic link" if exc.errno == errno.ELOOP
+                                         else f"cannot be opened ({exc.strerror or exc})") from exc
+    else:
+        fd = parent_fd
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino, _kind(info.st_mode), info.st_uid) != (entry.dev, entry.ino, entry.type,
+                                                                              entry.uid):
+            raise PermissionEntryChanged(entry.relative, "identity, type or owner differs from the plan")
+        if entry.type == "file" and info.st_nlink != 1:
+            raise PermissionEntryChanged(entry.relative, f"{info.st_nlink} hard links")
+        if stat.S_IMODE(info.st_mode) != entry.mode or info.st_gid != entry.gid:
+            raise PermissionEntryChanged(entry.relative, f"mode {stat.S_IMODE(info.st_mode):04o} gid {info.st_gid}, "
+                                                         f"planned before mode {entry.mode:04o} gid {entry.gid}")
+        acl = inspect_acl_fd(fd)
+        if acl.state.kind == "unknown" or POSIX_ACL_ACCESS in acl.names:
+            raise PermissionEntryChanged(entry.relative, "an access or unknown ACL appeared")
+        if info.st_gid != gid:
+            os.fchown(fd, -1, gid)
+        if between is not None:
+            between()
+        os.fchmod(fd, mode)
+        after = os.fstat(fd)
+        if stat.S_IMODE(after.st_mode) != mode or after.st_gid != gid:
+            raise PermissionVerifyFailed(entry.relative, f"mode {stat.S_IMODE(after.st_mode):04o} gid {after.st_gid}")
+    finally:
+        if own:
+            os.close(fd)
+
+
+def open_handles(identities):
+    """Every other process's working directory, root and open descriptors whose (st_dev, st_ino) is in
+    ``identities``: [(pid, comm, uid, "cwd" | "root" | "fd")]. Only this process is excluded. A process that ended
+    is skipped; any other unreadable entry (for example hidepid) raises ContextError: the scan is unverifiable."""
+    try:
+        pids = sorted((name for name in os.listdir(PROC_ROOT) if name.isdigit()), key=int)
+    except OSError as exc:
+        raise ContextError(f"{PROC_ROOT} cannot be listed ({exc.strerror or exc})") from exc
+    me = os.getpid()
+    found = []
+    gone = (errno.ENOENT, errno.ESRCH)
+    for pid in pids:
+        if int(pid) == me:
+            continue
+        base = PROC_ROOT + "/" + pid
+        try:
+            uid = os.stat(base).st_uid
+            holders = [("cwd", base + "/cwd"), ("root", base + "/root")]
+            holders += [("fd", base + "/fd/" + name) for name in sorted(os.listdir(base + "/fd"), key=int)]
+        except OSError as exc:
+            if exc.errno in gone:
+                continue
+            raise ContextError(f"{base}: {exc.strerror or exc}; open handles cannot be verified") from exc
+        for holder, path in holders:
+            try:
+                info = os.stat(path)
+            except OSError as exc:
+                if exc.errno in gone:
+                    continue
+                raise ContextError(f"{path}: {exc.strerror or exc}; open handles cannot be verified") from exc
+            if (info.st_dev, info.st_ino) in identities:
+                try:
+                    with open(base + "/comm", "rb") as stream:
+                        comm = stream.read(64).decode("utf-8", "replace").strip()
+                except OSError:
+                    comm = "?"
+                found.append((int(pid), comm, uid, holder))
+    return found
+
+
+def proc_scan_available():
+    """The freeze precondition (section 3.8): this process's descriptor directory is a readable directory."""
+    try:
+        os.listdir(PROC_ROOT + "/self/fd")
+    except OSError:
+        return False
+    return True

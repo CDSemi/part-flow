@@ -343,7 +343,7 @@ class ReadOnlyDiagnostics(Base):
     def test_missing_config_is_a_diagnostic_and_is_never_created(self):
         (self.paths["configuration"] / "pf-config.json").unlink()
         before = pfx.snapshot_tree(self.base)
-        results = self.run_all_read_only([["status"], ["doctor"], ["update", "--latest"], ["permissions"]])
+        results = self.run_all_read_only([["status"], ["doctor"], ["update", "--latest"], ["permissions", "check"]])
         self.assertEqual(pfx.snapshot_tree(self.base), before)
         self.assertFalse((self.paths["configuration"] / "pf-config.json").exists())
         status = results[0]
@@ -460,7 +460,8 @@ class StableLocks(Base):
     def test_pending_journal_routes_are_explicit_not_blanket(self):
         controller = pf.Controller(self.alpha)
         pf.write_json(self.alpha.journal_path, {"operation": "update", "phase": "migrating-live"})
-        for command in ("deploy", "update", "backup", "reset-db", "permissions", "restore-instance", "release-check", None):
+        for command in ("deploy", "update", "backup", "reset-db", "permissions apply", "restore-instance", "release-check",
+                        None):
             with self.subTest(command=command):
                 with self.assertRaisesRegex(pf.Failure, "previous operation is incomplete"):
                     with controller.lock(pending_route=command):
@@ -654,11 +655,17 @@ class ProtectedPathChecks(Base):
         self.assertIn(expected_code, self.codes(validation))
         before = pfx.snapshot_tree(self.base)
         with mock.patch.object(pf, "Controller", RecordingController):
-            code, out, err = run_main(["permissions"], self.layout)
+            code, out, err = run_main(["permissions", "apply"], self.layout)
             self.assertEqual(code, 1)
             self.assertIn(expected_code, err)
             code, out, err = run_main(["status"], self.layout)
             self.assertIn("Instance: staging", out)
+            # PF-A2.3: the read-only check maps the findings (section 3.5) and writes nothing either way.
+            code, out, err = run_main(["permissions", "check"], self.layout)
+            self.assertEqual(code, 1)
+            self.assertTrue("permissions-context-refused" in err
+                            or ("scope-path-unsafe" in out and "permissions-blocked" in err), out + err)
+            self.assertIn(expected_code, out)
         self.assertEqual(pfx.snapshot_tree(self.base), before)
 
     def test_clean_fixture_validates(self):
@@ -704,8 +711,16 @@ class ProtectedPathChecks(Base):
         os.chmod(source, 0o600)
         before = pfx.snapshot_tree(self.paths["workspace"], self.paths["configuration"])
         controller = pf.Controller(self.context, running_release=self.layout.release_dir)
-        with self.assertRaisesRegex(pf.Failure, "hard links"):
-            controller.permissions()
+        # PF-A2.3: the engine's inventory blocks the scope; apply changes nothing while a blocker exists.
+        plan = controller._permission_plan(controller.permission_policy().policy, ("workspace", "configuration"))
+        self.assertIn(("scope-entry-hardlinked", "hardlinked-source"), [item[:2] for item in
+                                                                      plan.scope_plans["workspace"].blockers])
+        with mock.patch("builtins.input", side_effect=[""] * 11 + ["APPLY PERMISSIONS staging"]):
+            code, out, err = run_main(["--instance", "staging", "permissions", "apply"], self.layout,
+                                      interactive=True)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("hard links", out)
+        self.assertIn("permissions-blocked", err)
         self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o600)
         self.assertEqual(pfx.snapshot_tree(self.paths["workspace"], self.paths["configuration"]), before)
@@ -770,11 +785,14 @@ class ProtectedPathChecks(Base):
         self.assertIn("control-file-unlisted", self.codes(self.validation()))
 
 
-def launcher_run(layout, arguments, env=None, cwd=None, *, interactive=False):
-    """The installed launcher; stdin is /dev/null (a scheduler) unless ``interactive`` gives it a pty."""
+def launcher_run(layout, arguments, env=None, cwd=None, *, interactive=False, answers=None):
+    """The installed launcher; stdin is /dev/null (a scheduler) unless ``interactive`` gives it a pty, or
+    ``answers`` gives it a pty with those answers typed in advance (PF-A2.3)."""
     environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
     environment.update(env or {})
-    with (pfx.interactive_stdin() if interactive else contextlib.nullcontext(subprocess.DEVNULL)) as stdin:
+    terminal = pfx.typed_terminal(answers) if answers is not None else \
+        pfx.interactive_stdin() if interactive else contextlib.nullcontext(subprocess.DEVNULL)
+    with terminal as stdin:
         return subprocess.run([str(layout.launcher), *arguments], env=environment,
                               cwd=str(cwd or layout.root.parent), stdin=stdin, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True, check=False, timeout=120)
@@ -1102,7 +1120,7 @@ class ManagedPathInventory(Base):
         before = pfx.snapshot_tree(self.base / "alpha")
         validation = pf_instance.validate_context(beta, running_release=self.layout.release_dir, interpreter=sys.executable)
         self.assertIn("path-duplicate", validation.refused_codes())
-        result = launcher_run(self.layout, ["--instance", "beta", "permissions"])
+        result = launcher_run(self.layout, ["--instance", "beta", "permissions", "apply"])
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("path-duplicate", result.stderr)
         self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
@@ -1121,7 +1139,8 @@ class ManagedPathInventory(Base):
                               env={"PF_HOME": str(self.base / "alpha"), "PF_CONFIG_DIR": str(self.alpha_paths["configuration"])})
         self.assertIn("Instance: beta", status.stdout)
         self.assertIn(str(beta.paths.workspace), status.stdout)
-        permissions = launcher_run(self.layout, ["--instance", "beta", "permissions"], interactive=True)
+        permissions = launcher_run(self.layout, ["--instance", "beta", "permissions", "apply"],
+                                   answers=[""] * 11 + ["APPLY PERMISSIONS beta"])
         self.assertEqual(permissions.returncode, 0, permissions.stdout + permissions.stderr)
         self.assertEqual(stat.S_IMODE((beta.paths.configuration / ".env").stat().st_mode), 0o660)
         self.assertEqual(pfx.snapshot_tree(self.base / "alpha"), before)
@@ -1509,7 +1528,7 @@ class CanonicalPathSpelling(Base):
         self.assertIn("record=INVALID", listing.stdout)
         self.assertIn("path-noncanonical", listing.stdout)
         for arguments, expected in ((["--instance", "beta", "status"], "path-noncanonical"),
-                                    (["--instance", "alpha", "permissions"], "registry-record-invalid")):
+                                    (["--instance", "alpha", "permissions", "apply"], "registry-record-invalid")):
             result = launcher_run(self.layout, arguments)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn(expected, result.stderr)
@@ -1674,7 +1693,7 @@ class RegistrySemanticInvariants(Base):
         os.chmod(self.alpha_paths["configuration"] / ".env", 0o600)
         before = pfx.snapshot_tree(self.base / "alpha", self.base / "beta")
         for slug in ("alpha", "beta"):
-            result = launcher_run(self.layout, ["--instance", slug, "permissions"])
+            result = launcher_run(self.layout, ["--instance", slug, "permissions", "apply"])
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("daemon-project-duplicate", result.stderr)
         self.assertEqual(pfx.snapshot_tree(self.base / "alpha", self.base / "beta"), before)

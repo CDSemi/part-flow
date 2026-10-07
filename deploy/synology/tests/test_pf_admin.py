@@ -574,6 +574,14 @@ class AdminTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--env-file") + 1], str(controller.frozen.env_file))
             self.assertEqual(controller.frozen.env_file.parent, controller.operation_dir)
 
+    def apply_permissions(self):
+        """PF-A2.3: the former bare `permissions` repair is `permissions apply` with the derived policy (every
+        wizard default kept, one typed confirmation); it approves permission policy revision 1."""
+        with mock.patch("builtins.input", side_effect=[""] * 11 + ["APPLY PERMISSIONS staging"]):
+            self.assertEqual(self.invoke(["--instance", "staging", "permissions", "apply"]), 0, self.errors_text())
+        record = json.loads((self.context.paths.private_state / "permission-policy.json").read_text())
+        self.assertEqual(record["revision"], 1)
+
     def test_permissions_make_repo_and_config_writable_but_backups_read_only(self):
         source = self.root / "frontend/app.txt"
         os.chmod(source, 0o600)
@@ -584,7 +592,7 @@ class AdminTests(unittest.TestCase):
         config = self.c.config_dir / "pf-config.json"
         os.chmod(config, 0o600)
 
-        self.c.permissions()
+        self.apply_permissions()
 
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o2770)
         self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o660)
@@ -615,7 +623,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
 
         # The explicit, locked permissions command does.
-        self.c.permissions()
+        self.apply_permissions()
         self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o750)
         self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o640)
         self.assertEqual(folder.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)

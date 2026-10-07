@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin readable permission policy (design r2)",
+  "description": "Standalone design fragment, not accepted by the v2.5 runtime. Host groups, effective ACLs, protected paths and operator approval require runtime checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "policy_version",
+    "permissions"
+  ],
+  "properties": {
+    "policy_version": {
+      "const": 1
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace",
+        "configuration",
+        "control",
+        "backups",
+        "recovery",
+        "private_state"
+      ],
+      "properties": {
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "group",
+            "access",
+            "executables",
+            "inherit_group"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/groupName"
+            },
+            "access": {
+              "type": "string",
+              "enum": [
+                "none",
+                "read_only",
+                "read_write"
+              ]
+            },
+            "executables": {
+              "type": "string",
+              "enum": [
+                "none",
+                "owner_only",
+                "owner_and_group"
+              ]
+            },
+            "inherit_group": {
+              "type": "boolean"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "access": {
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "access"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "executables": {
+                    "enum": [
+                      "none",
+                      "owner_only"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "group",
+            "access",
+            "inherit_group"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/groupName"
+            },
+            "access": {
+              "type": "string",
+              "enum": [
+                "none",
+                "read_only",
+                "read_write"
+              ]
+            },
+            "inherit_group": {
+              "type": "boolean"
+            }
+          }
+        },
+        "control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "group",
+            "access",
+            "executables"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/groupName"
+            },
+            "access": {
+              "type": "string",
+              "enum": [
+                "none",
+                "read_only"
+              ]
+            },
+            "executables": {
+              "const": "owner_only"
+            }
+          }
+        },
+        "backups": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "group",
+            "access"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/groupName"
+            },
+            "access": {
+              "type": "string",
+              "enum": [
+                "none",
+                "read_only"
+              ]
+            }
+          }
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "group",
+            "access"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/groupName"
+            },
+            "access": {
+              "type": "string",
+              "enum": [
+                "none",
+                "read_only"
+              ]
+            }
+          }
+        },
+        "private_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "access"
+          ],
+          "properties": {
+            "access": {
+              "const": "owner_only"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "groupName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\s\\u0000-\\u001F\\u007F/:](?:[^\\u0000-\\u001F\\u007F/:]*[^\\s\\u0000-\\u001F\\u007F/:])?$"
+    }
+  }
+}
