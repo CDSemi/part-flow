@@ -1,5 +1,6 @@
 // Application policies API (Administration → Worker sessions,
-// Correction permissions and Settings, Phase 13).
+// Correction permissions, Settings and History archival & purge,
+// Phase 13).
 //
 // The global policy singleton the server seeds and audits. It holds the
 // default sliding inactivity timeout of scanned Worker Sessions in whole
@@ -14,10 +15,13 @@
 // global switch, default off), read and written through its own section
 // endpoint, and the Settings section's Due Soon warning policy — the
 // window behind every derived due countdown (GUI_DESIGN §3.12 / §9),
-// replaced as a whole (its fields share a cross-field rule). The server
-// validates and stays authoritative; this module only maps the wire
-// shape, and refuses a Due Soon answer outside the server's ranges
-// rather than letting it degrade the countdowns silently.
+// replaced as a whole (its fields share a cross-field rule). It also
+// holds the Movement-history retention period of History archival &
+// purge, stored for later archival maintenance only — nothing reads it
+// to archive or purge. The server validates and stays authoritative;
+// this module only maps the wire shape, and refuses a Due Soon answer
+// outside the server's ranges rather than letting it degrade the
+// countdowns silently.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -190,4 +194,45 @@ export async function updateDueSoonPolicy(
     },
   });
   return toDueSoonPolicy(wire);
+}
+
+export interface RetentionPolicy {
+  /** The Movement-history retention period in whole months; null = no
+   * retention period. */
+  retentionPeriodMonths: number | null;
+  /** The policy singleton's timestamp (shared by every section). */
+  updatedAt: string;
+}
+
+interface RetentionPolicyWire {
+  retention_period_months: number | null;
+  updated_at: string;
+}
+
+const RETENTION_POLICY_PATH = '/api/policies/data-retention';
+
+function toRetentionPolicy(wire: RetentionPolicyWire): RetentionPolicy {
+  return {
+    retentionPeriodMonths: wire.retention_period_months,
+    updatedAt: wire.updated_at,
+  };
+}
+
+/** The Movement-history retention period (Administration → History
+ * archival & purge). */
+export async function getRetentionPolicy(): Promise<RetentionPolicy> {
+  const wire = await apiRequest<RetentionPolicyWire>(RETENTION_POLICY_PATH);
+  return toRetentionPolicy(wire);
+}
+
+/** Set the retention period in whole months, or clear it with null; an
+ * unchanged value is a server no-op. */
+export async function updateRetentionPolicy(
+  retentionPeriodMonths: number | null,
+): Promise<RetentionPolicy> {
+  const wire = await apiRequest<RetentionPolicyWire>(RETENTION_POLICY_PATH, {
+    method: 'PUT',
+    body: { retention_period_months: retentionPeriodMonths },
+  });
+  return toRetentionPolicy(wire);
 }

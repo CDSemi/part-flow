@@ -21,7 +21,13 @@ maximum) and the whole lead-time warning percentage (1-100), audited
 under its own ``entity_id`` ``due-soon`` and written as a full replace
 of the three fields (one form with a cross-field rule). It is display
 configuration behind every derived due countdown; no production command
-reads it.
+reads it. History archival & purge (slice 11): the Movement-history
+retention period — whole months 12-1200 or none — stored as configuration
+for the Phase 16 archival maintenance; nothing in Phase 13 reads it,
+archives or purges (PROJECT_PROFILE §28 "retention settings live in
+Administration/configuration, not in production workflow logic").
+Audited under its own ``entity_id`` ``data-retention``; clearing the
+period (NULL) is a valid, audited change.
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -54,6 +60,8 @@ from app.infrastructure.models import (
     DUE_SOON_DAYS_MIN,
     DUE_SOON_PERCENT_MAX,
     DUE_SOON_PERCENT_MIN,
+    RETENTION_PERIOD_MONTHS_MAX,
+    RETENTION_PERIOD_MONTHS_MIN,
     WORKER_SESSION_TIMEOUT_MAX,
     WORKER_SESSION_TIMEOUT_MIN,
     ApplicationPolicy,
@@ -67,6 +75,9 @@ CORRECTION_PERMISSIONS_SECTION: Final = "correction-permissions"
 # The audit entity_id and API path segment of the Due Soon warning panel
 # (Administration → Settings; CD3, S9-OD1).
 DUE_SOON_SECTION: Final = "due-soon"
+# The audit entity_id and API path segment of Administration →
+# History archival & purge (CD3: the sidebar section id, S11-OD2).
+DATA_RETENTION_SECTION: Final = "data-retention"
 # Lock-first mode of a policy write: the FOR NO KEY UPDATE its own UPDATE takes.
 _EDIT_LOCK: Final = {"key_share": True}
 
@@ -251,6 +262,59 @@ def update_due_soon_policy(
         entity_id=DUE_SOON_SECTION,
         before_data=before,
         after_data=_due_soon_snapshot(policy),
+    )
+    commit(session, {})
+    return policy
+
+
+def is_retention_period_months(value: object) -> TypeGuard[int]:
+    """A whole number of months from 12 to 1200 (a bool is never a number)."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and RETENTION_PERIOD_MONTHS_MIN <= value <= RETENTION_PERIOD_MONTHS_MAX
+    )
+
+
+def _retention_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {"retention_period_months": policy.retention_period_months}
+
+
+def update_retention_policy(
+    session: Session, *, retention_period_months: object
+) -> ApplicationPolicy:
+    """Set or clear the Movement-history retention period; a no-op writes and audits nothing.
+
+    ``None`` clears the period (no retention period). Saving it never
+    archives, deletes, schedules or previews anything.
+    """
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    period: int | None
+    if retention_period_months is None:
+        period = None
+    elif is_retention_period_months(retention_period_months):
+        period = retention_period_months
+    else:
+        raise InvalidInputError(
+            "The retention period must be a whole number of months from 12 to 1200,"
+            " or no retention period."
+        )
+    if policy.retention_period_months == period:
+        return policy
+    before = _retention_snapshot(policy)
+    policy.retention_period_months = period
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=DATA_RETENTION_SECTION,
+        before_data=before,
+        after_data=_retention_snapshot(policy),
     )
     commit(session, {})
     return policy

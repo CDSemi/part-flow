@@ -104,7 +104,15 @@ OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
   `LIGHT` (NULL passes), repeated verbatim from the model; the upgrade
   leaves every existing station without a preference (never
   backfilled); the downgrade restores the 0025 boundary and refuses
-  while any station holds a saved preference.
+  while any station holds a saved preference;
+- the retention period (0027): `application_policy.retention_period_months`
+  (integer, nullable, no default) with the CHECK
+  `ck_application_policy_retention_period_range` (NULL or 12-1200),
+  repeated verbatim from the model; the upgrade leaves the singleton
+  without a retention period and keeps every earlier policy value; the
+  downgrade restores the 0026 boundary (no doubly-prefixed CHECK left)
+  and refuses while a period is stored or a `data-retention` audit row
+  exists.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -149,7 +157,8 @@ _UNDO_REASON_POLICY_REVISION = "0022_phase13_undo_reason_policy"
 _PART_NUMBER_MASTER_REVISION = "0023_phase13_part_number_master"
 _PLANNED_ROUTES_REVISION = "0024_phase13_planned_routes"
 _DISPLAY_SETTINGS_REVISION = "0025_phase13_display_settings"
-_HEAD_REVISION = "0026_phase13_station_theme"
+_STATION_THEME_REVISION = "0026_phase13_station_theme"
+_HEAD_REVISION = "0027_phase13_retention_period"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -164,6 +173,7 @@ _PART_NUMBER_MASTER_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0023_phase13_part
 _PLANNED_ROUTES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0024_phase13_planned_routes.py"
 _DISPLAY_SETTINGS_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0025_phase13_display_settings.py"
 _STATION_THEME_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0026_phase13_station_theme.py"
+_RETENTION_PERIOD_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0027_phase13_retention_period.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -1276,6 +1286,8 @@ _POLICY_CHECKS = {
     "ck_application_policy_due_soon_max_days_range",
     "ck_application_policy_due_soon_lead_time_percent_range",
     "ck_application_policy_due_soon_window_order",
+    # 0027
+    "ck_application_policy_retention_period_range",
 }
 _SESSION_FK = "fk_part_movements_scan_session_worker_sessions"
 # What 0020 adds outside its own tables: (table, constraint).
@@ -1346,6 +1358,7 @@ def test_worker_sessions_table_shape(migrated_engine: Engine) -> None:
         "due_soon_min_days",  # 0025
         "due_soon_lead_time_percent",  # 0025
         "due_soon_max_days",  # 0025
+        "retention_period_months",  # 0027
     }
     undo_reason = policy["undo_reason_required"]
     assert isinstance(undo_reason["type"], sa.Boolean) and undo_reason["nullable"] is False
@@ -3309,6 +3322,209 @@ def test_upgrade_keeps_existing_stations_without_preference(admin_engine: Engine
                 assert _station_rows(connection) == [
                     {**row, "theme_preference": None} for row in stations
                 ]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# Movement-history retention period (0027)
+# ---------------------------------------------------------------------------
+
+_RETENTION_CHECK = "ck_application_policy_retention_period_range"
+
+
+def _retention_period(connection: Connection) -> object:
+    return connection.execute(
+        sa.text("SELECT retention_period_months FROM application_policy")
+    ).scalar_one()
+
+
+def _policy_check_names(connection: Connection, fragment: str) -> list[str]:
+    """Every CHECK on application_policy whose name contains ``fragment``."""
+    return [
+        str(name)
+        for name in connection.execute(
+            sa.text(
+                "SELECT conname FROM pg_constraint"
+                " WHERE conrelid = 'application_policy'::regclass AND contype = 'c'"
+                " AND conname LIKE :pattern ORDER BY conname"
+            ),
+            {"pattern": f"%{fragment}%"},
+        ).scalars()
+    ]
+
+
+def test_retention_period_column_shape(migrated_engine: Engine) -> None:
+    columns = {
+        str(column["name"]): column
+        for column in inspect(migrated_engine).get_columns("application_policy")
+    }
+    column = columns["retention_period_months"]
+    assert isinstance(column["type"], sa.Integer)
+    assert column["nullable"] is True
+    # PROJECT_PROFILE §28: no hard-coded retention number, so no default.
+    assert column["default"] is None
+
+
+def test_retention_period_check_has_exact_name_and_literal(migrated_engine: Engine) -> None:
+    with migrated_engine.connect() as connection:
+        assert _policy_check_names(connection, "retention_period_range") == [_RETENTION_CHECK]
+        definition = str(
+            connection.execute(
+                sa.text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"
+                ),
+                {"name": _RETENTION_CHECK},
+            ).scalar_one()
+        )
+    assert "retention_period_months IS NULL" in definition
+    assert re.search(r">= 12\b", definition) and re.search(r"<= 1200\b", definition)
+    model_checks = {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in cast(sa.Table, models.ApplicationPolicy.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    assert model_checks[_RETENTION_CHECK] == models.POLICY_RETENTION_PERIOD_SQL
+
+
+def test_retention_period_migration_repeats_the_model_literals() -> None:
+    migration = _load_migration(_RETENTION_PERIOD_MIGRATION_FILE)
+    assert migration.down_revision == _STATION_THEME_REVISION
+    assert migration._CHECK == _RETENTION_CHECK
+    assert migration._COLUMN == "retention_period_months"
+    assert (migration._RETENTION_MIN, migration._RETENTION_MAX) == (
+        models.RETENTION_PERIOD_MONTHS_MIN,
+        models.RETENTION_PERIOD_MONTHS_MAX,
+    )
+    assert migration._RETENTION_SQL == models.POLICY_RETENTION_PERIOD_SQL
+    assert migration._SECTION == policies.DATA_RETENTION_SECTION
+
+
+def test_retention_period_is_seeded_absent(connection: Connection) -> None:
+    assert _retention_period(connection) is None
+
+
+@pytest.mark.parametrize("months", [11, 1201, 0, -12])
+def test_database_refuses_an_out_of_range_retention_period(
+    connection: Connection, months: int
+) -> None:
+    _refused_by(
+        connection,
+        _RETENTION_CHECK,
+        lambda: _execute(
+            connection, "UPDATE application_policy SET retention_period_months = :m", m=months
+        ),
+    )
+
+
+def test_database_admits_the_retention_period_boundaries(connection: Connection) -> None:
+    for months in (12, 1200, None):
+        _execute(connection, "UPDATE application_policy SET retention_period_months = :m", m=months)
+        assert _retention_period(connection) == months
+
+
+def test_downgrade_to_station_theme_revision_drops_the_retention_period(
+    admin_engine: Engine,
+) -> None:
+    """No period and no section audit row never block the downgrade; the
+    re-upgrade restores the exactly named CHECK and an absent period."""
+    name = "partflow_test_phase13_downgrade_s11"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _execute(
+                    connection, "UPDATE application_policy SET worker_session_timeout_minutes = 30"
+                )
+                # Another section's history never blocks it.
+                _insert_policy_audit(connection, "due-soon", {"due_soon_min_days": 2})
+            command.downgrade(config, _STATION_THEME_REVISION)
+            assert "retention_period_months" not in {
+                str(column["name"]) for column in inspect(engine).get_columns("application_policy")
+            }
+            with engine.connect() as connection:
+                assert _version(connection) == _STATION_THEME_REVISION
+                # Catches a doubly-prefixed name left behind by the drop.
+                assert _policy_check_names(connection, "retention_period_range") == []
+                assert _policy_row(connection) == (1, 30, True, True, True)
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _retention_period(connection) is None
+                assert _policy_check_names(connection, "retention_period_range") == [
+                    _RETENTION_CHECK
+                ]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def _refused_retention_downgrade(url: URL) -> None:
+    with pytest.raises(ProgrammingError, match="Retention period configuration exists"):
+        command.downgrade(_alembic_config(url), _STATION_THEME_REVISION)
+
+
+def test_downgrade_refuses_while_a_retention_period_is_stored(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _execute(connection, "UPDATE application_policy SET retention_period_months = 120")
+        _refused_retention_downgrade(refused_database)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert _retention_period(connection) == 120
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_data_retention_audit_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_policy_audit(connection, "data-retention", {"retention_period_months": None})
+            audits = _rows(connection, "audit_events")
+        _refused_retention_downgrade(refused_database)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert _retention_period(connection) is None
+            assert _rows(connection, "audit_events") == audits
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_leaves_the_policy_without_a_retention_period(admin_engine: Engine) -> None:
+    """0026 → head: the singleton keeps every earlier value and has no period."""
+    name = "partflow_test_phase13_retention_period_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _STATION_THEME_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _execute(
+                    connection,
+                    "UPDATE application_policy SET worker_session_timeout_minutes = 30,"
+                    " undo_reason_required = true, due_soon_max_days = 9",
+                )
+                _insert_policy_audit(connection, "due-soon", {"due_soon_max_days": 9})
+                policy = _rows(connection, "application_policy")
+                audits = _rows(connection, "audit_events")
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _rows(connection, "application_policy") == [
+                    {**row, "retention_period_months": None} for row in policy
+                ]
+                assert _rows(connection, "audit_events") == audits
         finally:
             engine.dispose()
     finally:

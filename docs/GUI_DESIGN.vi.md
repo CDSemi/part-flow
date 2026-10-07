@@ -750,13 +750,13 @@ cấu hình được (Phase 13 Users và roles thêm vào section này; enforcem
 display settings được cấu hình **theo Department, không bao giờ global (quyết định post-v18)** — bảng Department với editor cho Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; default 3 và 6). Panel **Due Soon warning** của **Settings** sở hữu cấu hình đứng sau mọi due countdown derive (§3.12): **Minimum warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ dưới minimum) — giá trị ban đầu 2 ngày, 15 % và 7 ngày; một policy toàn cục; phần còn lại của Settings chưa khả dụng.
 
 Không có Machine, RouteTemplate hay PartNumber registry trong Admin; chúng ở
-Management. Barcode configuration có persisted Asset Tag format prefix + 1–8 digit
+Management. Mục Machine assignment dưới Policies vẫn là một policy statement (hai mode ownership của Area), không phải Machine registry — từ Phase 13 là section chỉ-đọc: statement hai hàng (không Machine → `Direct processing (no Machines)`; một Machine trở lên → `Queue → assign (one-shot)`, không bao giờ tự động), không có entry action, trỏ tới Management → Machines và bảng Areas. Barcode configuration có persisted Asset Tag format prefix + 1–8 digit
 minimum width, live Next Tag/scanned barcode; whitespace/colon prefix invalid, không
 trim/clamp; format change không rename old tag hay reset never-reuse sequence.
 
 Phase 3.5 Departments/Areas/Operations/Stations/barcode là real API-backed UI với
-loading/error/retry/offline gate. Từ Phase 13, Workers cũng là section thật, cùng Department display settings và panel Due Soon warning của section Settings (Phase 13); các Admin section
-sau (và phần còn lại của general settings) vẫn honest unavailable. Workers
+loading/error/retry/offline gate. Từ Phase 13, Workers cũng là section thật, cùng Department display settings, panel Due Soon warning của section Settings, History archival & purge cho retention period và statement Machine assignment (Phase 13); các Admin section
+sau vẫn honest unavailable. Các run History archival & purge — archive export, verification, purge, scope/impact preview, reason, cùng data-size threshold và manual trigger — đến ở IMPLEMENTATION_ROADMAP Phase 16; cho đến lúc đó section nêu rằng chúng chưa khả dụng. **Scan behavior** và phần còn lại của general setting chưa có nội dung được định nghĩa (IMPLEMENTATION_ROADMAP `Deferred`): Scan behavior nêu rằng nó chưa khả dụng và setting của nó chưa được định nghĩa, entry action bị disable; section Settings nêu rằng các application setting khác chưa khả dụng. Cả hai không hứa phase nào. Workers
 profile tách Users. Ghi chú triển khai (Phase 13): editor Workers lưu badge bằng chữ
 in hoa và hiện preview `Saved as:` khi khác với giá trị đã gõ hoặc scan, upload avatar
 (PNG, JPEG hoặc WebP; ảnh lớn được resize trước khi upload) hoặc xóa avatar, hiện
@@ -765,7 +765,7 @@ Machines, Worker mode, terminal/active. Active-quantity Area deactivation bị b
 
 History maintenance: lossless export → verify → purge exactly archived rows qua
 privileged Admin path, preserve related Movement chains, preview scope, reason và
-audit; không purge-first.
+audit; không purge-first. Từ Phase 13 section lưu **retention period** — **No retention period** (trạng thái ban đầu) hoặc một số tháng nguyên từ 12 đến 1200, đồng thời hiện period theo năm và tháng — như cấu hình có audit mà không production workflow nào đọc; lưu nó không archive hay xóa gì. Run archival và purge, data-size threshold và manual request đến ở IMPLEMENTATION_ROADMAP Phase 16; cho đến lúc đó section nêu rằng chúng chưa khả dụng và toàn bộ Movement history vẫn nằm trong database.
 
 ---
 
@@ -1142,6 +1142,7 @@ session không còn shift end.
   action khi không tải được policy và chỉ giữ lại phán đoán `soon` sau một thông báo
   tường minh. Các default frontend `DEFAULT_DUE_SOON_POLICY`, `ROTATE_MS_PER_ROW` và
   `ROTATE_MS_MIN` đã bị gỡ.
+27. **Setting retention period, statement Machine assignment và các section chưa định nghĩa trung thực** (§9; PROJECT_PROFILE §8.4, §12, §28; IMPLEMENTATION_ROADMAP Phase 13; owner default OD-1 và OD-18 — status text cộng một settings form, không tăng version): Administration → History archival & purge lưu retention period của Movement history (`No retention period`, hoặc `Keep a set period of history` với số tháng nguyên 12–1200 và một dòng quy đổi trung tính `Retention period: 10 years.`), lưu không cần xác nhận vì nó không thực thi gì, và nêu rằng run archival và purge chưa khả dụng và không có gì bị archive hay purge; Administration → Machine assignment trở thành statement chỉ-đọc hai hàng về các mode ownership của Area, không có entry action, và subtitle của nó được làm rõ — mode theo việc Area có Machine nào hay không (một Machine hoạt động như nhiều Machine), không bao giờ là setting theo Area; Scan behavior nêu rằng nó chưa khả dụng và setting của nó chưa được định nghĩa, không hứa phase, entry action vẫn bị disable.
 
 ## 15.2 Từ GUI Design v16
 

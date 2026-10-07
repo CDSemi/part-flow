@@ -34,6 +34,15 @@ handlers in ``app.api.errors`` translate typed failures.
   ``null`` or an extra field is 422); the ranges and the minimum ≤
   maximum rule are the Application's 422; answers with the stored
   policy, also when nothing changed.
+- ``GET /policies/data-retention`` — the Movement-history retention
+  period of Administration → History archival & purge (Phase 13 slice
+  11), in whole months or ``null`` (no retention period) — stored only;
+  archival and purge are Phase 16.
+- ``PUT /policies/data-retention`` — exactly
+  ``{"retention_period_months": int | null}``: the key is required and
+  ``null`` clears the period (a missing key, a string, float or bool, or
+  an extra field is 422); the 12-1200 range is the Application's 422;
+  answers with the stored policy, also when nothing changed.
 """
 
 import datetime
@@ -126,6 +135,25 @@ def _due_soon_response(policy: ApplicationPolicy) -> DueSoonPolicyResponse:
     )
 
 
+class RetentionPolicyResponse(BaseModel):
+    retention_period_months: int | None
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class RetentionPolicyPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Required key; null clears the retention period.
+    retention_period_months: StrictInt | None
+
+
+def _retention_response(policy: ApplicationPolicy) -> RetentionPolicyResponse:
+    return RetentionPolicyResponse(
+        retention_period_months=policy.retention_period_months, updated_at=policy.updated_at
+    )
+
+
 @router.get("/policies/worker-sessions")
 def get_worker_session_policy(session: SessionDep) -> WorkerSessionPolicyResponse:
     return _response(policies.get_policy(session))
@@ -173,3 +201,18 @@ def put_due_soon_policy(
         max_days=body.due_soon_max_days,
     )
     return _due_soon_response(policy)
+
+
+@router.get("/policies/data-retention")
+def get_retention_policy(session: SessionDep) -> RetentionPolicyResponse:
+    return _retention_response(policies.get_policy(session))
+
+
+@router.put("/policies/data-retention")
+def put_retention_policy(
+    body: RetentionPolicyPutRequest, session: SessionDep
+) -> RetentionPolicyResponse:
+    policy = policies.update_retention_policy(
+        session, retention_period_months=body.retention_period_months
+    )
+    return _retention_response(policy)

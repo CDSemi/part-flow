@@ -349,6 +349,16 @@ POLICY_DUE_SOON_MAX_DAYS_SQL = "due_soon_max_days BETWEEN 0 AND 365"
 POLICY_DUE_SOON_PERCENT_SQL = "due_soon_lead_time_percent BETWEEN 1 AND 100"
 POLICY_DUE_SOON_ORDER_SQL = "due_soon_min_days <= due_soon_max_days"
 
+# Movement-history retention period (Phase 13 slice 11; PROJECT_PROFILE
+# §28): whole months, NULL = no retention period; stored for the Phase 16
+# archival maintenance only — no Phase 13 code path reads it. Repeated
+# verbatim by migration `0027_phase13_retention_period`.
+RETENTION_PERIOD_MONTHS_MIN = 12
+RETENTION_PERIOD_MONTHS_MAX = 1200
+POLICY_RETENTION_PERIOD_SQL = (
+    "retention_period_months IS NULL OR retention_period_months BETWEEN 12 AND 1200"
+)
+
 # Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
 # closed end-reason vocabulary, an end time exactly with an end reason,
 # an expiry after the start, an end inside the session's window, and an
@@ -925,8 +935,10 @@ class ApplicationPolicy(Base):
 
     One row (CHECK id = 1), seeded by migration
     `0020_phase13_worker_sessions` with the approved defaults, so it
-    always exists. Each global policy is a typed column with a server
-    default — a later slice adds its policy the same way; there is no
+    always exists. Each global policy is a typed column — with a server
+    default where a canonical default exists, nullable without a default
+    where none may be implied (the Movement-history retention period,
+    PROJECT_PROFILE §28: NULL = no retention period); there is no
     key/value store. Per-record overrides live on their owner (the
     Area's `worker_session_timeout_minutes`).
 
@@ -943,6 +955,10 @@ class ApplicationPolicy(Base):
     GUI_DESIGN §3 rule 12, §9; owner default OD-5) behind every derived
     due countdown: the minimum and maximum warning days and the lead-time
     warning percentage. No production command reads it.
+
+    Slice 11 adds the Movement-history retention period of
+    Administration → History archival & purge (stored only; executed in
+    Phase 16).
     """
 
     __tablename__ = "application_policy"
@@ -972,6 +988,10 @@ class ApplicationPolicy(Base):
     due_soon_max_days: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("7")
     )
+    # The Movement-history retention period (PROJECT_PROFILE §28), whole
+    # months; NULL = no retention period. Configuration for the Phase 16
+    # archival maintenance — never read by production workflow logic.
+    retention_period_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1000,6 +1020,10 @@ class ApplicationPolicy(Base):
         CheckConstraint(
             POLICY_DUE_SOON_ORDER_SQL,
             name=conv("ck_application_policy_due_soon_window_order"),
+        ),
+        CheckConstraint(
+            POLICY_RETENTION_PERIOD_SQL,
+            name=conv("ck_application_policy_retention_period_range"),
         ),
     )
 
@@ -1780,7 +1804,8 @@ class AuditEvent(Base):
     Operation/Machine/RouteTemplate, the canonical PN string for PartNumber, the
     stable Station ID for ScanStation, `"1"` for the singleton
     MachineAssetTagConfig and the Administration section
-    (`worker-sessions`) for ApplicationPolicy;
+    (`worker-sessions`, `correction-permissions`, `due-soon`,
+    `data-retention`) for ApplicationPolicy;
     integrity is guaranteed by writing the audit row in
     the same transaction as the audited change (an Application-layer
     transaction protocol, Phase 4 workflows). `actor_reference` stays a

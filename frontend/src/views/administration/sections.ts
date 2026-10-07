@@ -18,9 +18,11 @@ export interface AdminSection {
    * When this configuration becomes real (IMPLEMENTATION_ROADMAP):
    * `minimum` — part of the Minimum Environment Setup prerequisite
    * (Phase 3.5), configured before the real production workflows run;
-   * `full` — part of the later full Administration phase (Phase 13).
+   * `full` — part of the later full Administration phase (Phase 13);
+   * `deferred` — no content is defined yet (IMPLEMENTATION_ROADMAP
+   * `Deferred`); presented as not available, with no promised phase.
    */
-  phase: 'minimum' | 'full';
+  phase: 'minimum' | 'full' | 'deferred';
 }
 
 export const ADMIN_SECTIONS: AdminSection[] = [
@@ -75,7 +77,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'scan-behavior',
-    phase: 'full',
+    phase: 'deferred',
     group: 'Production setup',
     label: 'Scan behavior',
     subtitle: 'Station scan-resolution policies',
@@ -108,7 +110,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     group: 'Policies',
     label: 'Machine assignment',
     subtitle:
-      'Two Area modes only: no Machines → direct processing; Machines → queue and one-shot assign (never inferred from Machine count)',
+      "Two Area modes that follow from the Area's Machines: no Machines → direct processing; one or more Machines → queue and one-shot assignment (one Machine behaves like several) — never a per-Area setting",
   },
   {
     id: 'correction-permissions',
