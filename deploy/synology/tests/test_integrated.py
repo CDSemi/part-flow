@@ -1280,6 +1280,86 @@ class IsolatedTopology(Plane):
             if container["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project:
                 self.assertEqual(container["status"], "running", container["name"])
 
+    FV7_SEAMS = ("topology", "data", "store", "payloads", "runtime", "before-teardown", "teardown", "teardown-item")
+
+    def test_fv7_a_crash_at_every_verification_step_leaves_no_record_and_resumes_by_teardown(self):
+        """FV-7: a crash at every step of the functional verification (``inside:<step>``) leaves no functional record
+        and the topology recorded (topology.json); ``pf resume`` tears it down by its exact (frozen when present)
+        plan, reopens the unchanged application and closes the instance purge cancelled (section 3.12)."""
+        rows = []
+        for label in self.FV7_SEAMS:
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                with self.crashing((label, "inside")):
+                    with self.assertRaises(pf.SimulatedCrash):
+                        self.main("purge", "--keep-backups")
+                op, plan, journal = self.operation("purge")
+                self.assertEqual(journal["phase"], "verifying")
+                bundle = self.purged_bundle()["name"]
+                functional = [item for item in self.records(bundle) if item["level"] == "functional_recovery_verified"]
+                self.assertEqual(functional, [])
+                verification = next(e for e in plan["effects"] if e["target"] == "bundle:purge")
+                project = verification["preconditions"][0].split(":", 1)[1]
+                directory = self.context.operations_dir / op / "isolated" / project
+                record = json.loads((directory / "topology.json").read_bytes())
+                self.assertEqual(record["project"], project)
+                code, out, err, _ = self.main("resume")
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(self.operation("purge")[2]["phase"], "cancelled")
+                self.assertEqual(self.isolated_resources(project), {"containers": [], "volumes": [], "networks": []})
+                self.assertEqual(json.loads((directory / "topology.json").read_bytes())["state"], "removed")
+                self.assertEqual(self.topology_files(op), [])
+                self.assertEqual([item for item in self.records(bundle)
+                                  if item["level"] == "functional_recovery_verified"], [])
+                running = sorted(item["labels"][pf_docker.COMPOSE_SERVICE_LABEL] for item in self.state()["containers"]
+                                 if item["status"] == "running"
+                                 and item["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project)
+                self.assertEqual(running, ["backend", "db", "frontend"])
+                self.assertEqual(json.loads(self.context.record_path.read_bytes())["state"], "registered")
+                rows.append({"kind": "purge", "effect": "verification bundle:purge", "injection": "inside:" + label,
+                             "state_left": {"phase": "verifying", "topology": record["state"],
+                                            "teardowns": [entry["state"] for entry in record["teardowns"]]},
+                             "action": "resume", "outcome": "cancelled"})
+        evidence("FUNCTIONAL-1-FV-7", {"rows": rows})
+
+    def test_fv8_stores_in_manifest_order_and_the_non_connectable_flag_after_its_checks(self):
+        """FV-8: every store is restored into the isolated server in manifest order; a non-connectable store gets
+        ALLOW_CONNECTIONS false in the isolated server right after its own checks, before the next store."""
+        state = self.state()
+        state["plane"]["databases"]["partflow_archive"] = {
+            "heads": [], "rows": {"public.archived": 2}, "allow": False, "owner": "partflow_staging",
+            "locale": ["UTF8", "C.UTF-8", "C.UTF-8"]}
+        self.fake.write_state(state)
+        observed = []
+        harness = self
+
+        def seam(label, when):
+            if when == "inside" and label == pf.INSIDE_PREFIX + "store":
+                isolated = harness.state().get("isolated") or {}
+                plane = next(value for key, value in isolated.items() if key.startswith("pfverify-"))
+                observed.append({name: item["allow"] for name, item in plane["databases"].items()})
+
+        with self.crashing(seam):
+            code, out, err, _ = self.main("purge", "--keep-backups")
+        self.assertEqual(code, 0, out + err)
+        bundle = self.purged_bundle()["name"]
+        manifest = json.loads((self.context.paths.recovery / self.project / bundle / "manifest.json").read_bytes())
+        names = [store["database"] for store in manifest["stores"]]
+        self.assertEqual(sorted(names), ["partflow_archive", "partflow_staging"])
+        restores = [argv[argv.index("-d") + 1] for argv in self.fake.argvs() if "pg_restore" in argv
+                    and "--list" not in argv and "-p" in argv and argv[argv.index("-p") + 1].startswith("pfverify-")]
+        self.assertEqual(restores, names)
+        self.assertEqual(len(observed), len(names))
+        position = names.index("partflow_archive")
+        self.assertIs(observed[position]["partflow_archive"], False)  # closed right after its own checks
+        for earlier in observed[:position]:
+            self.assertNotIn("partflow_archive", earlier)  # not restored before its turn
+        record = [item for item in self.records(bundle) if item["level"] == "functional_recovery_verified"][0]
+        order = [check["name"].split(":", 1)[1] for check in record["checks"] if check["name"].startswith("restore:")]
+        self.assertEqual(order, ["postgresql:" + name for name in names])
+        self.assertEqual(record["result"], "passed")
+
     def test_pz10_resume_in_deleting_runs_the_gate_without_a_new_verification(self):
         with self.crashing(("deletion-plan", "after-intent")):
             with self.assertRaises(pf.SimulatedCrash):
@@ -1292,6 +1372,47 @@ class IsolatedTopology(Plane):
         self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["compose"] and "-p" in argv
                           and argv[argv.index("-p") + 1].startswith("pfverify-")])
         self.assertEqual(json.loads(self.context.record_path.read_bytes())["state"], "purged")
+
+    def test_pz6_a_replaced_volume_drifts_the_frozen_deletion_on_resume(self):
+        """PZ-6 (A3-T07): the instance purge stops in deleting; meanwhile the planned data volume is replaced (another
+        CreatedAt). ``pf resume`` refuses plan-drift before any removal: no item is added or removed, the bundle,
+        the frozen plan and the lock file are unchanged, and the operation stays open in deleting."""
+        with self.crashing(("deletion-plan", "after-intent")):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("purge", "--keep-backups")
+        op, plan, journal = self.operation("purge")
+        self.assertEqual(journal["phase"], "deleting")
+        directory = self.context.operations_dir / op
+        frozen = (directory / "deletion-plan.json").read_bytes()
+        progress = directory / "deletion-progress.json"
+        progress_before = progress.read_bytes() if progress.exists() else None
+        bundle = self.purged_bundle()["name"]
+        bundle_before = pfx.snapshot_tree(self.context.paths.recovery / self.project / bundle)
+        lock = self.context.lock_path
+        lock_inode = os.stat(str(lock)).st_ino
+        state = self.state()
+        for volume in state["volumes"]:
+            if volume["name"] == self.project + "_postgres_data":
+                volume["created_at"] = "2026-10-08T09:09:09Z"
+        self.fake.write_state(state)
+        volumes = sorted(item["name"] for item in state["volumes"])
+        containers = sorted(item["id"] for item in state["containers"])
+        self.fake.clear_calls()
+        code, out, err, _ = self.main("resume")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("plan-drift: Planned volume " + self.project + "_postgres_data changed after the plan was frozen",
+                      out + err)
+        state = self.state()
+        self.assertEqual(sorted(item["name"] for item in state["volumes"]), volumes)
+        self.assertEqual(sorted(item["id"] for item in state["containers"]), containers)
+        self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["rm"]
+                          or argv[:2] in (["volume", "rm"], ["network", "rm"], ["image", "rm"])])
+        self.assertEqual((directory / "deletion-plan.json").read_bytes(), frozen)
+        self.assertEqual(progress.read_bytes() if progress.exists() else None, progress_before)
+        self.assertEqual(pfx.snapshot_tree(self.context.paths.recovery / self.project / bundle), bundle_before)
+        self.assertEqual(os.stat(str(lock)).st_ino, lock_inode)
+        self.assertEqual(self.operation("purge")[2]["phase"], "deleting")
+        evidence("PURGE-GATE-1-PZ-6", {"refusal": (out + err).strip().splitlines()[-1]})
 
     def test_rq8_reports_reach_the_parser_and_never_leave_it(self):
         self.update_state(reconcile={"*": {"report": "mismatch:c=2"}})
@@ -1393,9 +1514,272 @@ class RestoreTarget(Plane):
         tagged = [image for image in self.state()["images"] if pf_docker.DB_IMAGE in image["repo_tags"]]
         self.assertEqual([image["id"] for image in tagged], [pfx.DB_IMAGE_ID])
 
+    def test_rx9_a_legacy_bundle_without_a_db_image_uses_the_local_postgres_with_the_major_check(self):
+        """RX-9: a legacy bundle records no database image: no image-tag effect, the note db-image-unrecorded names the
+        local postgres:16, and the PostgreSQL major is checked after the db service starts (logical restore)."""
+        self.purged()
+        state = self.state()
+        contract = {"files": {"alembic.ini": "0" * 64}, "heads": ["r1"]}
+        state.setdefault("saved_contracts", {})[pfx.image_id("old-backend")] = contract  # loaded with images.tar
+        self.fake.write_state(state)
+        bundle = legacy_bundle(self)
+        self.fake.clear_calls()
+        code, out, err, phrases = self.main("restore-instance", bundle)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("note: db-image-unrecorded: the legacy bundle recorded no database image; local postgres:16 "
+                      + pfx.DB_IMAGE_ID[7:19] + " is used (logical restore)", out)
+        op, plan, journal = self.operation("restore-instance")
+        self.assertEqual(journal["phase"], "completed")
+        self.assertNotIn("image-tag", [effect["type"] for effect in plan["effects"]])
+        self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["image", "tag"] or argv[:1] == ["tag"]])
+        calls = self.fake.argvs()
+        db_up = next(index for index, argv in enumerate(calls) if argv[:1] == ["compose"] and "up" in argv
+                     and argv[-1] == "db")
+        majors = [index for index, argv in enumerate(calls) if "SHOW server_version_num;" in argv]
+        self.assertTrue([index for index in majors if index > db_up], (db_up, majors))
+        tagged = [image["id"] for image in self.state()["images"] if pf_docker.DB_IMAGE in image["repo_tags"]]
+        self.assertEqual(tagged, [pfx.DB_IMAGE_ID])
+
+    def test_rx4_an_occupied_target_is_refused_before_any_confirmation(self):
+        """RX-4: an owned volume of the instance, or an existing deployment record, refuses before any confirmation;
+        no operation is opened and nothing is loaded or written."""
+        bundle = self.purged()
+        labels = dict(pfx.labels_for(self.context), **{pf_docker.COMPOSE_VOLUME_LABEL: "postgres_data"})
+        for label, prepare, wanted in (
+                ("owned volume", lambda: self.update_state(volumes=self.state()["volumes"] + [
+                    pfx.volume(self.project + "_postgres_data", labels)]),
+                 f"resource-target-not-empty: restore-instance requires an empty target: volume "
+                 f"{self.project}_postgres_data"),
+                ("deployment record", lambda: pf.write_json(self.context.state_dir / "deployed.json",
+                                                            {"sha": pfx.OLD}),
+                 "A managed deployment record already exists. Exact restore refuses to overwrite it.")):
+            with self.subTest(label):
+                saved = self.state()
+                self.context.state_dir.mkdir(mode=0o700, exist_ok=True)
+                prepare()
+                before = pfx.operations_bytes(self.context)
+                env_path = self.paths["configuration"] / ".env"
+                env = env_path.read_bytes() if env_path.exists() else None
+                self.fake.clear_calls()
+                code, out, err, phrases = self.main("restore-instance", bundle)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(wanted, err)
+                self.assertEqual(phrases, [])
+                self.assertEqual(pfx.operations_bytes(self.context), before)
+                self.assertEqual(env_path.read_bytes() if env_path.exists() else None, env)
+                self.assertFalse([argv for argv in self.fake.argvs() if pf.unclassified_mutation("docker", argv)])
+                self.fake.write_state(saved)
+                pointer = self.context.state_dir / "deployed.json"
+                if label == "deployment record":
+                    pointer.unlink()
+
+    def restore_with(self, bundle, script, *, crash=None):
+        self.update_state(reconcile={self.project: script})
+        if crash is None:
+            return self.main("restore-instance", bundle)
+        with self.crashing(crash):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("restore-instance", bundle)
+        return None
+
+    def test_rx6_the_activated_invariants_are_evidence_inside_the_frontend_effect(self):
+        """RX-6: the restore runs the application invariant check once inside the frontend effect; every outcome is
+        an evidence line and the frontend starts. A crash after app-check-activated.json is written never re-runs it;
+        a crash before it re-runs it once."""
+        cases = (("clean", {}, "clean", None),
+                 ("mismatch equal", {"report": "mismatch:c=2"}, "mismatch equal to the bundle's verification",
+                  {"*": {"report": "mismatch:c=2"}}),
+                 ("mismatch", {"report": "mismatch:c=2"}, "mismatch (an incident, RUNBOOK §8)", None),
+                 ("could not run", {"report": "garbage"}, "could not run", None),
+                 ("unavailable", {"probe": 3}, "unavailable", None))
+        for label, script, line, purge_script in cases:
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                if purge_script is not None:
+                    self.update_state(reconcile=purge_script)
+                bundle = self.purged()
+                code, out, err, _ = self.restore_with(bundle, script)
+                self.assertEqual(code, 0, out + err)
+                self.assertIn("Application invariants: " + line, out)
+                op, plan, journal = self.operation("restore-instance")
+                self.assertEqual(journal["phase"], "completed")
+                check = json.loads((self.context.operations_dir / op / "app-check-activated.json").read_bytes())
+                self.assertEqual(check["label"], "activated")
+                self.assertNotIn("PN-SECRET-4711", json.dumps(check))
+                running = sorted(item["labels"][pf_docker.COMPOSE_SERVICE_LABEL] for item in self.state()["containers"]
+                                 if item["status"] == "running"
+                                 and item["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project)
+                self.assertEqual(running, ["backend", "db", "frontend"])
+        for when, runs in (("after", 0), ("before", 1)):
+            with self.subTest(crash=when):
+                self.tearDown()
+                self.setUp()
+                bundle = self.purged()
+                if when == "before":
+                    def crash(effect_id, point):
+                        found = pfx.operations_of(self.context, "restore-instance")
+                        effect = next((item for item in found[-1][1]["effects"] if item["effect_id"] == effect_id),
+                                      None) if found else None
+                        if point == "after-intent" and effect is not None \
+                                and effect["target"].startswith("service:frontend:start"):
+                            raise pf.SimulatedCrash("after-intent " + effect_id)
+
+                    self.restore_with(bundle, {}, crash=crash)
+                else:
+                    def dying(controller, images):
+                        raise pf.SimulatedCrash("after app-check-activated.json")
+
+                    with mock.patch.object(pf.Controller, "activate_frontend", dying):
+                        with self.assertRaises(pf.SimulatedCrash):
+                            self.main("restore-instance", bundle)
+                op = self.operation("restore-instance")[0]
+                self.assertEqual((self.context.operations_dir / op / "app-check-activated.json").exists(),
+                                 when == "after")
+                self.fake.clear_calls()
+                code, out, err, _ = self.main("resume")
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(self.operation("restore-instance")[2]["phase"], "completed")
+                self.assertEqual(len([argv for argv in self.fake.argvs() if "app.cli" in argv]), runs)
+                self.assertTrue((self.context.operations_dir / op / "app-check-activated.json").exists())
+
+    def test_rx7_the_docker_root_need_counts_the_image_archive_when_an_image_is_absent(self):
+        """RX-7: with a bundle image absent, images.tar is part of the preparing-target Docker-root need, summed with
+        the workspace, private-state and artifact needs when they share one device (one floor)."""
+        bundle = self.purged()
+        controller = self.controller()
+        controller.staging()
+        view = controller.verify_recovery(self.context.paths.recovery / self.project / bundle)
+        size = view.payload("images.tar")["size"]
+        self.assertGreater(size, 0)
+        without = controller.capacity_needs("restore-instance", view=view, load=False)
+        loaded = controller.capacity_needs("restore-instance", view=view, load=True)
+        self.assertEqual({(phase, role) for phase, role, _, _ in loaded},
+                         {("preparing-target", "docker-root"), ("preparing-target", "private-state"),
+                          ("preparing-target", "artifacts"), ("preparing-target", "workspace")})
+        self.assertEqual(sum(item[3] for item in loaded) - sum(item[3] for item in without), size)
+        floor = 1024 * 1024  # minimum_free_mb 1
+        free = sum(item[3] for item in without) + floor + size // 2  # fits without the archive, not with it
+        state = self.state()  # every bundle image present (the fake daemon's own load of images.tar)
+        self.assertEqual(pfx.FAKE_DOCKER.plane_load(state, str(view.folder / "images.tar")).code, 0)
+        self.fake.write_state(state)
+        backend = pfx.topology_image_id("a", "backend")
+        present = copy.deepcopy(self.state()["images"])
+        for absent in (False, True):
+            with self.subTest(absent=absent):
+                state = self.state()
+                state["images"] = [image for image in present if not absent or image["id"] != backend]
+                self.fake.write_state(state)
+                before = pfx.operations_bytes(self.context)
+
+                def decline(phrase):
+                    raise pf.Failure("declined at the confirmation")
+
+                self.fake.clear_calls()
+                with mock.patch.object(pf.Controller, "measure", lambda c, path, role: (7, free)):
+                    code, out, err, phrases = self.main("restore-instance", bundle, confirm=decline)
+                self.assertEqual(code, 1, out + err)
+                self.assertEqual(phrases, [] if absent else phrases[:1])
+                if absent:
+                    self.assertIn("capacity-insufficient: preparing-target needs", err)
+                    line = err.split("capacity-insufficient:", 1)[1].split("\n", 1)[0]
+                    self.assertEqual(line.count(" on device "), 1, line)
+                    for role in ("docker-root", "workspace", "private-state", "artifacts"):
+                        self.assertIn(role, line)
+                else:
+                    self.assertIn("declined at the confirmation", err)  # the capacity preflight passed
+                self.assertEqual(pfx.operations_bytes(self.context), before)
+                self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["image", "load"]])
+
+
+def legacy_images_tar(project, services=("backend", "frontend")):
+    """The bytes of a legacy purge bundle's images.tar (pfx.legacy_purge_bundle's ``-backup-legacy`` references of
+    the ``old-<service>`` fixture images) written by the fake daemon's own ``image save`` with real config and layer
+    hashes, so its archive proof and its load are real."""
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "images.tar"
+        entries = []
+        for service in services:
+            image_id = pfx.image_id("old-" + service)
+            config, layer = pfx.IMAGE_CONFIGS[image_id]
+            entries.append((f"{project}-{service}:backup-legacy", {"id": image_id, "config": config, "layer": layer}))
+        pfx.FAKE_DOCKER.write_image_archive({}, str(path), entries)
+        return path.read_bytes()
+
+
+def legacy_bundle(case, *, fmt=2, extra=None, name=None):
+    """A legacy (format 1/2) purge bundle of ``case``'s instance in its recovery folder, with a real images.tar."""
+    tree = case.base / ("legacy-tree-%d" % fmt)
+    if not tree.exists():
+        pfx.source_fixture(tree)
+    bundle = name or "purge-20261006T000000Z-" + pfx.OLD[:12] + "-abcd%02d" % fmt
+    pfx.legacy_purge_bundle(case.context.paths.recovery / case.project / bundle, project=case.project,
+                            root=case.paths["workspace"], tree=tree, fmt=fmt, extra=extra,
+                            files={"images.tar": legacy_images_tar(case.project)})
+    return bundle
+
 
 class SideBySide(Plane):
     """SB-1..SB-11: the side-by-side recovery target beside the running instance."""
+
+    def test_sb8_legacy_bundles_follow_the_legacy_rules(self):
+        """SB-8: a legacy purge bundle (format 2 with config_env; format 1 with its config_env exclusion) records no
+        database image: the db runs as the local postgres:16 ID resolved at plan time (precondition db-image:<id>),
+        images:archive proves backend/frontend and names the excluded db image, config:bundle passes (format 2) or is
+        not_run 'unavailable: legacy format 1 excludes config_env' with the instance's values (format 1),
+        deployment:record is not_run 'excluded:', heads:runtime compares the recorded live heads. A legacy bundle
+        without a backend image is refused before the confirmation (by the strict reader's rule 4, which precedes the
+        section 3.6 verification-isolation-unsupported rule)."""
+        rows = []
+        for fmt in (2, 1):
+            with self.subTest(fmt=fmt):
+                self.tearDown()
+                self.setUp()
+                bundle = legacy_bundle(self, fmt=fmt)
+                code, out, err, phrases = self.main("restore-instance", bundle, "--side-by-side")
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(phrases, ["RESTORE COPY " + bundle])
+                op, plan, journal = self.operation("restore-side-by-side")
+                self.assertEqual(journal["phase"], "completed")
+                restore = next(e for e in plan["effects"] if e["type"] == "database-restore")
+                self.assertIn("db-image:" + pfx.DB_IMAGE_ID, restore["preconditions"])
+                self.assertIn("image-load", [e["type"] for e in plan["effects"]])  # the old images were absent
+                record = [item for item in self.records(bundle) if item["operation_id"] == op][0]
+                self.assertEqual((record["level"], record["result"]), ("functional_recovery_verified", "passed"))
+                checks = {check["name"]: check for check in record["checks"]}
+                self.assertEqual(checks["images:archive"]["result"], "passed")
+                self.assertIn("db image not recorded", checks["images:archive"]["detail"])
+                if fmt == 2:
+                    self.assertEqual(checks["config:bundle"]["result"], "passed")
+                else:
+                    self.assertEqual(checks["config:bundle"]["result"], "not_run")
+                    self.assertTrue(checks["config:bundle"]["detail"].startswith(
+                        "unavailable: legacy format 1 excludes config_env"), checks["config:bundle"])
+                self.assertEqual(checks["deployment:record"]["result"], "not_run")
+                self.assertTrue(checks["deployment:record"]["detail"].startswith("excluded:"))
+                self.assertEqual(checks["heads:runtime"]["result"], "passed")
+                running = [item for item in self.state()["containers"]
+                           if item["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL, "").startswith("pfrecover-")
+                           and item["labels"].get(pf_docker.COMPOSE_SERVICE_LABEL) == "db"]
+                self.assertEqual([item["image"] for item in running], [pfx.DB_IMAGE_ID])
+                rows.append({"format": fmt, "checks": {name: [check["result"], check["detail"]]
+                                                       for name, check in checks.items()
+                                                       if name in ("images:archive", "config:bundle",
+                                                                   "deployment:record", "heads:runtime")}})
+        self.tearDown()
+        self.setUp()
+        frontend = {"reference": f"{self.project}-frontend:backup-legacy", "id": pfx.image_id("old-frontend")}
+        bundle = legacy_bundle(self, extra={"active_images": {"frontend": frontend},
+                                            "saved_image_refs": [frontend["reference"]]})
+        code, out, err, phrases = self.main("restore-instance", bundle, "--side-by-side")
+        self.assertEqual(code, 1, out + err)
+        # The strict reader already refuses a legacy purge bundle without a backend image (its rule 4), before the
+        # side-by-side rule (verification-isolation-unsupported) could be reached: refused, nothing asked or written.
+        self.assertIn(f"manifest-schema-unsupported: {bundle}: legacy manifest cannot be migrated (healthy_checkpoint: "
+                      "images.backend and images.frontend are required (rule 4)). Nothing was changed.", err)
+        self.assertEqual(phrases, [])
+        self.assertEqual(pfx.operations_of(self.context, "restore-side-by-side"), [])
+        evidence("FUNCTIONAL-1-SB-8", {"rows": rows})
 
     def bundle(self):
         code, out, err, _ = self.main("purge", "--keep-backups")
@@ -1558,6 +1942,94 @@ class SideBySide(Plane):
     def image_present(self, image_id):
         return any(image["id"] == image_id for image in self.state()["images"])
 
+    def test_sb5_no_recovery_database_and_an_existing_one_is_only_reported(self):
+        """SB-5: the former mode (pf_recovery_* restored into the live server) is gone: a side-by-side restore creates
+        no such database; an existing one is reported by status and cleanup and never dropped, also when the
+        recovery target is removed."""
+        bundle = self.bundle()
+        legacy = "pf_recovery_20261001t000000z_abcdef"
+        state = self.state()
+        state["plane"]["databases"][legacy] = {"heads": ["r1"], "rows": {"public.part": 1}, "allow": True,
+                                               "owner": "partflow_staging", "locale": ["UTF8", "C.UTF-8", "C.UTF-8"]}
+        self.fake.write_state(state)
+        code, out, err, _ = self.main("restore-instance", bundle, "--side-by-side")
+        self.assertEqual(code, 0, out + err)
+        project = next(item["name"] for item in self.operation("restore-side-by-side")[2]["retained_artifacts"]
+                       if item["kind"] == "recovery-target")
+        databases = self.state()["plane"]["databases"]
+        self.assertEqual([name for name in databases if name.startswith("pf_recovery_")], [legacy])
+        touching = [argv for argv in self.fake.argvs() if any("pf_recovery_" in str(word) for word in argv)
+                    and not any(word.startswith("SELECT ") for word in argv)]
+        self.assertEqual(touching, [])  # never created, restored into, dropped or altered
+        code, out, err, _ = self.main("status")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"note: legacy-recovery-database: {legacy} (pf_recovery_*) is kept; it is user data.", out)
+        code, out, err, _ = self.main("cleanup")
+        self.assertIn(f"report-only (never removed): legacy-recovery-database {legacy}", out)
+        code, out, err, phrases = self.main("cleanup", "--apply", "--recovery-target", project)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(legacy, self.state()["plane"]["databases"])
+        self.assertFalse([argv for argv in self.fake.argvs() if "dropdb" in argv and legacy in argv])
+
+    def test_sb7_a_mismatch_passes_only_when_equal_to_the_bundle_oracle(self):
+        """SB-7: no live source: clean passes; a mismatch passes only when it equals the app-invariants summary of a
+        passed functional record of the same manifest (the bundle's instance purge oracle), else it fails."""
+        self.update_state(reconcile={"*": {"report": "mismatch:c=2"}})
+        bundle = self.bundle()  # the instance purge recorded the oracle c:mismatch:2
+        code, out, err, _ = self.main("restore-instance", bundle, "--side-by-side")
+        self.assertEqual(code, 0, out + err)
+        op, plan, journal = self.operation("restore-side-by-side")
+        record = [item for item in self.records(bundle) if item["operation_id"] == op][0]
+        app = next(check for check in record["checks"] if check["name"] == "app-invariants")
+        self.assertEqual(app["result"], "passed")
+        self.assertIn("c:mismatch:2", app["detail"])
+        project = next(item["name"] for item in journal["retained_artifacts"] if item["kind"] == "recovery-target")
+        code, out, err, _ = self.main("cleanup", "--apply", "--recovery-target", project)
+        self.assertEqual(code, 0, out + err)
+        # Another mismatch than the recorded oracle fails the target (failed_preserved, kept for inspection).
+        self.update_state(reconcile={"*": {"report": "mismatch:c=3"}})
+        first = op
+        code, out, err, _ = self.main("restore-instance", bundle, "--side-by-side")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("functional-verification-failed:", err)
+        self.assertIn("app-invariants", err)
+        # Two operations may share their creation second: select the new one by ID, never by sort order.
+        op, plan, journal = next(item for item in pfx.operations_of(self.context, "restore-side-by-side")
+                                 if item[0] != first)
+        self.assertEqual(journal["phase"], "failed_preserved")
+        record = [item for item in self.records(bundle) if item["operation_id"] == op][0]
+        app = next(check for check in record["checks"] if check["name"] == "app-invariants")
+        self.assertEqual(app["result"], "failed")
+        self.assertNotIn("PN-SECRET-4711", out + err)
+
+    def test_sb9_a_foreign_bundle_is_refused_and_nothing_is_loaded(self):
+        """SB-9: another instance's bundle (other UUID) and a legacy bundle of another project are refused
+        (restore-target-mismatch) before any confirmation; no image is loaded and no operation is opened."""
+        bundle = self.bundle()
+        state = self.state()
+        backend = pfx.topology_image_id("a", "backend")
+        state["images"] = [image for image in state["images"] if image["id"] != backend]  # a load would be needed
+        self.fake.write_state(state)
+        RestoreTarget.rewrite(self, bundle, lambda m: m["source_instance"].update(
+            instance_id="00000000-0000-4000-8000-0000000000aa"))
+        tree = self.base / "legacy-tree"
+        pfx.source_fixture(tree)
+        legacy = "purge-20261006T000000Z-" + pfx.OLD[:12] + "-abcdef"
+        pfx.legacy_purge_bundle(self.context.paths.recovery / self.project / legacy, project="partflow-other",
+                                root=self.paths["workspace"], tree=tree)
+        before = pfx.operations_bytes(self.context)
+        for selected, owner in ((bundle, "instance 00000000"), (legacy, "project partflow-other")):
+            with self.subTest(selected):
+                code, out, err, phrases = self.main("restore-instance", selected, "--side-by-side")
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"restore-target-mismatch: bundle {selected} belongs to {owner}", err)
+                self.assertIn("Nothing was changed.", err)
+                self.assertEqual(phrases, [])
+        self.assertEqual(pfx.operations_bytes(self.context), before)
+        self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["image", "load"]])
+        self.assertFalse(self.image_present(backend))
+        self.assertEqual(self.isolated_resources("pfrecover-"), {"containers": [], "volumes": [], "networks": []})
+
     def test_sb10_a_load_that_would_retag_is_refused(self):
         bundle = self.bundle()
         state = self.state()
@@ -1715,6 +2187,208 @@ class Cleanup(Plane):
                     self.assertIn("cleanup-abandoned: not removed: ", journal["last_error"]["message"])
                     self.assertIn(name, journal["last_error"]["message"])
                     self.assertIn(name, self.state()["plane"]["databases"])
+
+    def test_cu13_plan_drift_and_a_refused_image_rm_keep_the_item_and_continue(self):
+        """CU-13 (remaining rows): a foreign container that joins a kept topology's network after the approval makes
+        its frozen plan drift (plan-drift: the topology is kept, the next item is still removed); ``docker image rm``
+        refused by the daemon (a failing child, not an unreachable daemon) keeps the tag and the next item is still
+        removed; both close failed_preserved and change nothing outside their items."""
+        self.update_state(isolated_faults={"host_port": True})
+        code, out, err, _ = self.main("purge", "--keep-backups")
+        self.assertEqual(code, 1, out + err)
+        self.update_state(isolated_faults={})
+        name, attempt = self.closed_backup_with_leftover()
+        network = next(item for item in self.state()["networks"] if item["name"].startswith("pfverify-"))
+        harness = self
+
+        def join(effect_id, point):
+            if point != "after-intent":
+                return
+            found = pfx.operations_of(harness.context, "cleanup")
+            effect = next((item for item in found[-1][1]["effects"] if item["effect_id"] == effect_id), None) \
+                if found else None
+            if effect is not None and effect["target"].startswith("deletion-plan:pfverify-"):
+                state = harness.state()
+                state["containers"].append(pfx.container("e" * 64, "foreign-joiner", {"other": "x"},
+                                                         networks=((network["name"], network["id"]),)))
+                harness.fake.write_state(state)
+
+        with self.crashing(join):
+            code, out, err, _ = self.main("cleanup", "--apply")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("cleanup-item-failed: deletion-plan:pfverify-", out)
+        self.assertIn(": plan-drift: ", out)
+        self.assertTrue(self.isolated_resources(network["name"][:-len("_default")])["networks"])
+        self.assertNotIn(name, self.state()["plane"]["databases"])
+        self.assertFalse(attempt.exists())  # the next item was still processed
+        op, plan, journal = self.operation("cleanup")
+        self.assertEqual(journal["phase"], "failed_preserved")
+        rows = [{"row": "plan-drift (a foreign container joins a topology network)", "outcome": journal["phase"]}]
+
+        self.tearDown()
+        self.setUp()
+        name, attempt = self.closed_backup_with_leftover()
+        tags = [f"{self.project}-{service}:backup-{pfx.CHECKPOINT_ID.lower()}" for service in ("backend", "frontend")]
+        state = self.state()
+        state["images"].append(pfx.image(pfx.image_id("attempt-image"), tags,
+                                         {pf_docker.INSTANCE_LABEL: self.context.instance_id}))
+        self.fake.write_state(state)
+        original = pf.Controller.docker
+
+        def refusing(controller, *args, **kwargs):
+            if args[:2] == ("image", "rm") and args[2] == tags[0]:
+                raise pf.Failure("docker image rm: Error response from daemon: conflict: unable to remove repository "
+                                 "reference (simulated)")
+            return original(controller, *args, **kwargs)
+
+        with mock.patch.object(pf.Controller, "docker", refusing):
+            code, out, err, _ = self.main("cleanup", "--apply")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("cleanup-item-failed: deletion-plan:image-tags: ", out)
+        remaining = [tag for image in self.state()["images"] for tag in image["repo_tags"]]
+        self.assertIn(tags[0], remaining)
+        self.assertFalse(attempt.exists())  # the next item was still processed
+        self.assertNotIn(name, self.state()["plane"]["databases"])
+        self.assertEqual(self.operation("cleanup")[2]["phase"], "failed_preserved")
+        rows.append({"row": "image rm refused by the daemon", "outcome": "failed_preserved"})
+        evidence("CLEANUP-1-CU-13", {"rows": rows})
+
+    def test_cu4_a_bundle_attempt_that_reads_sealed_is_kept(self):
+        """CU-4: a bundle-attempt artifact whose folder now strictly reads as a sealed checkpoint is report-only
+        (bundle-attempt-sealed): never in the default set, never removed, its tags kept."""
+        code, out, err, _ = self.main("backup")
+        self.assertEqual(code, 0, out + err)
+        active = self.context.paths.backups / "revisions" / self.project
+        checkpoint = next(path.name for path in active.iterdir() if pf.BACKUP_RE.fullmatch(path.name))
+        plan = pfx.lifecycle_plan(self.context, "backup", [
+            pfx.effect("capturing", "capture", "checkpoint:scheduled-or-manual-backup",
+                       preconditions=["bundle:" + checkpoint, "verify:pf_verify_" + "d" * 20]),
+            pfx.effect("verifying", "verification", "bundle:scheduled-or-manual-backup")],
+            op=pfx.operation_id("backup", "0badcafe", -60))
+        journal = pfx.lifecycle_journal(plan, phase="failed_preserved",
+                                        states={"e0001": "complete", "e0002": "unknown"},
+                                        retained=[{"kind": "bundle-attempt", "name": checkpoint, "sha256": None}],
+                                        result={"outcome": "failed_preserved", "deployment_id": None})
+        pfx.write_operation(self.context, plan, journal)
+        before = pfx.snapshot_tree(self.context.paths.backups)
+        tags = sorted(tag for image in self.state()["images"] for tag in image["repo_tags"])
+        code, out, err, _ = self.main("cleanup")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"report-only (never removed): bundle-attempt-sealed {checkpoint}", out)
+        code, out, err, phrases = self.main("cleanup", "--apply")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("cleanup-nothing:", err)
+        self.assertEqual(phrases, [])
+        self.assertEqual(pfx.snapshot_tree(self.context.paths.backups), before)
+        self.assertEqual(sorted(tag for image in self.state()["images"] for tag in image["repo_tags"]), tags)
+
+    def test_cu5_a_crash_at_every_seam_resumes_the_frozen_list(self):
+        """CU-5: a crash at every seam of every cleanup effect; ``pf resume`` continues the frozen list (the plan bytes
+        are unchanged) and never adds an item: a leftover recorded after the approval stays."""
+        rows = []
+        index = 1
+        while index < 12:
+            effect_id = f"e{index:04d}"
+            done = False
+            for point in ("before-intent", "after-intent", "after-effect"):
+                with self.subTest(effect=effect_id, point=point):
+                    self.tearDown()
+                    self.setUp()
+                    name, attempt = self.closed_backup_with_leftover()
+                    generation, container = self.retained_generation()
+                    with self.crashing((effect_id, point)):
+                        try:
+                            self.main("cleanup", "--apply", "--generation", generation)
+                            crashed = False
+                        except pf.SimulatedCrash:
+                            crashed = True
+                    op, plan, journal = self.operation("cleanup")
+                    if not any(effect["effect_id"] == effect_id for effect in plan["effects"]):
+                        done = True
+                        break
+                    self.assertTrue(crashed, (effect_id, point))
+                    plan_bytes = (self.context.operations_dir / op / "plan.json").read_bytes()
+                    late = "pf_verify_" + "f" * 20  # recorded by a closed operation after the approval
+                    state = self.state()
+                    state["plane"]["databases"][late] = {"heads": [], "rows": {}, "allow": True,
+                                                         "owner": "partflow_staging",
+                                                         "locale": ["UTF8", "C.UTF-8", "C.UTF-8"]}
+                    self.fake.write_state(state)
+                    late_plan = pfx.lifecycle_plan(self.context, "backup", [
+                        pfx.effect("capturing", "capture", "checkpoint:scheduled-or-manual-backup",
+                                   preconditions=["bundle:" + pfx.CHECKPOINT_ID, "verify:" + late]),
+                        pfx.effect("verifying", "verification", "bundle:scheduled-or-manual-backup")],
+                        op=pfx.operation_id("backup", "1a7e1a7e", -30))
+                    pfx.write_operation(self.context, late_plan, pfx.lifecycle_journal(
+                        late_plan, phase="failed_preserved", states={"e0001": "complete", "e0002": "unknown"},
+                        result={"outcome": "failed_preserved", "deployment_id": None}))
+                    started = any(item["state"] != "not_started" for item in journal["effects"])
+                    code, out, err, _ = self.main("resume")
+                    self.assertEqual(code, 0, out + err)
+                    journal = self.operation("cleanup")[2]
+                    self.assertEqual((self.context.operations_dir / op / "plan.json").read_bytes(), plan_bytes)
+                    databases = self.state()["plane"]["databases"]
+                    self.assertIn(late, databases)  # never added to the frozen list
+                    if not started:  # nothing of the list started: the A3.2 row closes it cancelled, unchanged
+                        self.assertEqual(journal["phase"], "cancelled")
+                        self.assertIn(name, databases)
+                        self.assertTrue(attempt.exists())
+                    else:
+                        self.assertEqual(journal["phase"], "completed")
+                        self.assertNotIn(name, databases)
+                        self.assertFalse(attempt.exists())
+                        self.assertFalse((container / generation).exists())
+                    rows.append({"kind": "cleanup", "effect": effect_id, "injection": point,
+                                 "target": next(e["target"] for e in plan["effects"] if e["effect_id"] == effect_id),
+                                 "action": "resume", "outcome": journal["phase"]})
+            if done:
+                break
+            index += 1
+        self.assertGreaterEqual(len(rows), 9)
+        evidence("CLEANUP-1-CU-5", {"rows": rows})
+
+    def test_cu8_a_recovery_target_only_with_its_selector_and_phrase(self):
+        """CU-8: a side-by-side recovery target is never in the default set; only ``--recovery-target`` with its typed
+        phrase removes it, by the deletion plan frozen before the cleanup plan (exactly its own containers, network
+        and volume); the live instance is untouched."""
+        bundle = SideBySide.bundle(self)
+        code, out, err, _ = self.main("restore-instance", bundle, "--side-by-side")
+        self.assertEqual(code, 0, out + err)
+        project = next(item["name"] for item in self.operation("restore-side-by-side")[2]["retained_artifacts"]
+                       if item["kind"] == "recovery-target")
+        live = SideBySide.live_hashes(self)
+        code, out, err, phrases = self.main("cleanup")
+        self.assertIn(f"recovery-target {project} (operation ", out)
+        self.assertIn(f"only with --recovery-target {project}", out)
+        code, out, err, phrases = self.main("cleanup", "--apply")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("cleanup-nothing:", err)
+        code, out, err, phrases = self.main("cleanup", "--apply", "--recovery-target", "pfrecover-ffffffffffff")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("cleanup-target-unknown: --recovery-target pfrecover-ffffffffffff", err)
+        self.assertTrue(self.isolated_resources(project)["containers"])
+        declined = []
+
+        def decline(phrase):
+            declined.append(phrase)
+            if phrase.startswith("REMOVE RECOVERY TARGET"):
+                raise pf.Failure("declined")
+
+        code, out, err, phrases = self.main("cleanup", "--apply", "--recovery-target", project, confirm=decline)
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(self.isolated_resources(project)["containers"])  # no phrase, no removal
+        code, out, err, phrases = self.main("cleanup", "--apply", "--recovery-target", project)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(phrases[1:], ["REMOVE RECOVERY TARGET " + project])
+        op, plan, journal = self.operation("cleanup")
+        effect = next(e for e in plan["effects"] if e["target"] == "deletion-plan:" + project)
+        frozen = self.context.operations_dir / op / f"deletion-plan-{project}.json"
+        self.assertIn("plan-sha256:" + hashlib.sha256(frozen.read_bytes()).hexdigest(), effect["preconditions"])
+        candidates = json.loads(frozen.read_bytes())["candidates"]
+        self.assertEqual(sorted(item["kind"] for item in candidates), ["container"] * 3 + ["network", "volume"])
+        self.assertTrue(all(project in json.dumps(item) for item in candidates))
+        self.assertEqual(self.isolated_resources(project), {"containers": [], "volumes": [], "networks": []})
+        self.assertEqual(SideBySide.live_hashes(self), live)
 
     def test_cu9_an_open_cleanup_is_re_entered_only_with_equal_selectors(self):
         name, attempt = self.closed_backup_with_leftover()
@@ -2173,10 +2847,235 @@ class ResetRollback(Plane):
         self.assertFalse([name for name in self.state()["plane"]["databases"] if name.startswith("pf_reset_")
                           or name.startswith("pf_clean_")])
         self.assertEqual(self.state()["plane"]["databases"]["partflow_staging"]["heads"], ["r0"])
+        # NF-1: the mismatched database cannot be reopened; the copy names the abandon, which closes it.
+        self.assertIn(f"resume --operation {op} --abandon' closes it", out + err)
+        code, out, err, _ = self.main("resume", "--abandon")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.operation("reset-db")[2]["phase"], "cancelled")
+        self.assertEqual(self.state()["plane"]["databases"]["partflow_staging"]["heads"], ["r0"])
 
     @staticmethod
     def precondition(effect, key):
         return next((item.split(":", 1)[1] for item in effect["preconditions"] if item.startswith(key + ":")), None)
+
+    def mismatched(self):
+        state = self.state()
+        state["plane"]["databases"]["partflow_staging"]["heads"] = ["r0"]  # schema/image mismatch: emergency first
+        self.fake.write_state(state)
+
+    def running_services(self):
+        return sorted(item["labels"][pf_docker.COMPOSE_SERVICE_LABEL] for item in self.state()["containers"]
+                      if item["status"] == "running"
+                      and item["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project)
+
+    NF1_SEAMS = (("e0001", "after-intent"), ("e0001", "after-effect"), ("e0002", "before-intent"),
+                 ("e0002", "after-intent"), ("e0002", "after-effect"), ("e0003", "before-intent"))
+
+    def test_nf1_a_mismatch_reset_interrupted_in_preserving_has_a_legal_route(self):
+        """NF-1 (audit, completion run; RO-13 no dead end): a reset-db planned on a schema/image mismatch and
+        interrupted in ``preserving`` cannot reopen the unchanged deployment (its database is not at the running
+        image's heads). ``resume`` goes forward: it re-observes (or re-runs) the emergency preservation and completes
+        the reset. ``resume --abandon`` closes it cancelled without a reopen: candidates dropped, the services left as
+        the reset left them, the next commands named; a new ``pf reset-db`` then completes (a legal route exists)."""
+        rows = []
+        for effect_id, point in self.NF1_SEAMS:
+            for action in ("resume", "abandon"):
+                with self.subTest(effect=effect_id, point=point, action=action):
+                    self.tearDown()
+                    self.setUp()
+                    self.mismatched()
+                    with self.crashing((effect_id, point)):
+                        with self.assertRaises(pf.SimulatedCrash):
+                            self.reset()
+                    op, plan, journal = self.operation("reset-db")
+                    self.assertEqual(journal["phase"], "preserving")
+                    capture = next(e for e in plan["effects"] if e["target"] == "checkpoint:before-reset")
+                    self.assertIn(pf_config.RESET_MISMATCH_PRECONDITION, capture["preconditions"])
+                    legal = journal["legal_next"]
+                    self.assertIn(f"pf --instance staging resume --operation {op}", legal)
+                    self.assertIn(f"pf --instance staging resume --operation {op} --abandon", legal)
+                    before = self.running_services()
+                    if action == "resume":
+                        code, out, err, phrases = self.main("resume")
+                        self.assertEqual(code, 0, out + err)
+                        self.assertEqual(phrases, ["RESUME " + op[-8:]])
+                        op, plan, journal = self.operation("reset-db")
+                        self.assertEqual(journal["phase"], "completed")
+                        databases = self.state()["plane"]["databases"]
+                        self.assertEqual(databases["partflow_staging"]["heads"], ["r1"])
+                        retained = [name for name in databases if name.startswith("pf_keep_")]
+                        self.assertEqual([databases[name]["heads"] for name in retained], [["r0"]])
+                        checkpoints = [item["name"] for item in journal["retained_artifacts"]
+                                       if item["kind"] == "checkpoint"]
+                        self.assertTrue(checkpoints)
+                        self.assertTrue((self.context.paths.backups / "revisions" / self.project
+                                         / checkpoints[-1]).exists())
+                        self.assertEqual(self.running_services(), ["backend", "db", "frontend"])
+                        rows.append({"effect": effect_id, "injection": point, "action": "resume", "exit": code,
+                                     "outcome": journal["phase"]})
+                        continue
+                    code, out, err, phrases = self.main("resume", "--abandon")
+                    self.assertEqual(code, 0, out + err)
+                    self.assertEqual(phrases, ["ABANDON " + op[-8:]])
+                    journal = self.operation("reset-db")[2]
+                    self.assertEqual(journal["phase"], "cancelled")
+                    databases = self.state()["plane"]["databases"]
+                    self.assertEqual(databases["partflow_staging"]["heads"], ["r0"])  # unchanged, never reset
+                    self.assertFalse([name for name in databases if name.startswith(("pf_clean_", "pf_keep_"))])
+                    self.assertEqual(self.running_services(), before)  # never reopened, never started
+                    self.assertIn("the unchanged deployment cannot be reopened", out)
+                    self.assertIn("--instance staging reset-db' (preserves the current data again", out)
+                    self.fake.clear_calls()
+                    code, out, err, phrases = self.reset()  # the named route works
+                    self.assertEqual(code, 0, out + err)
+                    later = [item for item in pfx.operations_of(self.context, "reset-db") if item[0] != op]
+                    self.assertEqual([item[2]["phase"] for item in later], ["completed"])
+                    self.assertEqual(self.state()["plane"]["databases"]["partflow_staging"]["heads"], ["r1"])
+                    rows.append({"effect": effect_id, "injection": point, "action": "abandon", "exit": 0,
+                                 "outcome": "cancelled", "then": "pf reset-db completed"})
+        evidence("NF-1", {"rows": rows})
+
+    def renames(self):
+        return [argv for argv in self.fake.argvs() if any(str(word).startswith("BEGIN;") and "RENAME TO" in str(word)
+                                                          for word in argv)]
+
+    def test_rp3_a_failed_preservation_creates_no_candidate_and_no_switch(self):
+        """RP-3: neither the healthy nor the emergency capture completes: preservation-failed; no clean candidate, no
+        switch, the live database unchanged (consistent and mismatched instances alike)."""
+        def failing(controller, reason, **kwargs):
+            raise pf.Failure("simulated: the capture cannot complete")
+
+        for mismatched in (False, True):
+            with self.subTest(mismatched=mismatched):
+                self.tearDown()
+                self.setUp()
+                if mismatched:
+                    self.mismatched()
+                heads = self.state()["plane"]["databases"]["partflow_staging"]["heads"]
+                with mock.patch.object(pf.Controller, "_capture", failing):
+                    code, out, err, _ = self.reset()
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("preservation-failed: the current database partflow_staging could not be preserved",
+                              out + err)
+                databases = self.state()["plane"]["databases"]
+                self.assertFalse([name for name in databases if name.startswith(("pf_clean_", "pf_keep_"))])
+                self.assertEqual(databases["partflow_staging"]["heads"], heads)
+                self.assertEqual(self.renames(), [])
+                op, plan, journal = self.operation("reset-db")
+                for effect in plan["effects"]:
+                    if effect["phase"] not in ("preserving",):
+                        self.assertEqual(pf_config.effect_state(journal, effect["effect_id"]), "not_started", effect)
+                if mismatched:  # NF-1: the copy names the routes that exist; the abandon closes it
+                    self.assertIn("resume --abandon' closes it (the database does not match the running image",
+                                  out + err)
+                    code, out, err, _ = self.main("resume", "--abandon")
+                    self.assertEqual(code, 0, out + err)
+                    self.assertEqual(self.operation("reset-db")[2]["phase"], "cancelled")
+                else:
+                    self.assertIn("'pf --instance staging resume' reopens the unchanged deployment.", out + err)
+
+    def test_rp5_a_failure_after_the_switch_goes_forward_without_a_second_rename(self):
+        """RP-5: the database switch completed, then the activation fails (backend health) or the process dies right
+        after the switch: resume observes the switch complete and continues forward; the rename transaction appears
+        exactly once in the call log."""
+        for case in ("health", "crash"):
+            with self.subTest(case):
+                self.tearDown()
+                self.setUp()
+                if case == "health":
+                    original = pf.Controller.wait_health
+                    failures = {"n": 0}
+
+                    def unhealthy(controller, service):
+                        if service == "backend" and controller.plan is not None \
+                                and controller.plan["kind"] == "reset-db" and failures["n"] == 0:
+                            failures["n"] += 1
+                            raise pf.Failure("backend did not become healthy within the configured timeout.")
+                        return original(controller, service)
+
+                    with mock.patch.object(pf.Controller, "wait_health", unhealthy):
+                        code, out, err, _ = self.reset()
+                    self.assertEqual(code, 1, out + err)
+                else:
+                    def crash(effect_id, point):
+                        found = pfx.operations_of(self.context, "reset-db")
+                        effect = next((item for item in found[-1][1]["effects"] if item["effect_id"] == effect_id),
+                                      None) if found else None
+                        if point == "after-effect" and effect is not None and effect["type"] == "database-switch":
+                            raise pf.SimulatedCrash("after-effect " + effect_id)
+
+                    with self.crashing(crash):
+                        with self.assertRaises(pf.SimulatedCrash):
+                            self.reset()
+                op, plan, journal = self.operation("reset-db")
+                switch = next(e for e in plan["effects"] if e["type"] == "database-switch")
+                self.assertNotIn(journal["phase"], pf_config.CLOSED_PHASES)
+                self.assertEqual(len(self.renames()), 1)
+                code, out, err, _ = self.main("resume")
+                self.assertEqual(code, 0, out + err)
+                op, plan, journal = self.operation("reset-db")
+                self.assertEqual(journal["phase"], "completed")
+                self.assertEqual(pf_config.effect_state(journal, switch["effect_id"]), "complete")
+                self.assertEqual(len(self.renames()), 1)
+                if case == "crash":
+                    self.assertIn(f"observed: {switch['effect_id']} database-switch", out)
+                databases = self.state()["plane"]["databases"]
+                self.assertEqual(databases["partflow_staging"]["heads"], ["r1"])
+                self.assertEqual(len([name for name in databases if name.startswith("pf_keep_")]), 1)
+
+    def test_rp9_a_deployment_image_mismatch_is_refused_before_the_confirmation(self):
+        """RP-9: the running backend image is not the deployment record's: reset-db refuses
+        reset-deployment-image-mismatch before the confirmation, both with matching heads (deployment-image-mismatch)
+        and with a schema mismatch (it would activate an image the record does not name)."""
+        SideBySide.bundle(self)  # an instance purge, then the exact restore writes a deployment record
+        controller = self.controller()
+        view = controller.current_deployment()
+        self.assertIsNotNone(view)
+        self.assertIsNone(view.mismatch)
+        recorded = view.record["images"]["backend"]["id"]
+        other = pfx.image_id("rp9-backend")
+        state = self.state()
+        image = pfx.image(other, [], {pf_docker.INSTANCE_LABEL: self.context.instance_id})
+        image["contract"] = {"files": {"alembic.ini": "0" * 64}, "heads": ["r1"]}
+        state["images"].append(image)
+        for container in state["containers"]:
+            if container["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project \
+                    and container["labels"].get(pf_docker.COMPOSE_SERVICE_LABEL) == "backend":
+                container["image"] = other
+        self.fake.write_state(state)
+        for label, heads in (("deployment-image-mismatch", None), ("schema mismatch", ["r0"])):
+            with self.subTest(label):
+                if heads is not None:
+                    state = self.state()
+                    state["plane"]["databases"]["partflow_staging"]["heads"] = heads
+                    self.fake.write_state(state)
+                databases = json.dumps(self.state()["plane"]["databases"], sort_keys=True)
+                code, out, err, phrases = self.reset()
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"reset-deployment-image-mismatch: the running backend image {other[7:19]} is not "
+                              f"deployment {view.deployment_id}'s {recorded[7:19]}", err)
+                self.assertIn("Nothing was changed.", err)
+                self.assertEqual(phrases, [])
+                self.assertEqual(pfx.operations_of(self.context, "reset-db"), [])
+                self.assertEqual(json.dumps(self.state()["plane"]["databases"], sort_keys=True), databases)
+
+    def test_nf1_a_consistent_reset_interrupted_in_preserving_still_reopens(self):
+        """NF-1 counterpart: without a mismatch the A3.2 row is unchanged (resume and abandon reopen, cancelled)."""
+        for action in ("resume", "abandon"):
+            with self.subTest(action):
+                self.tearDown()
+                self.setUp()
+                with self.crashing(("e0002", "after-effect")):
+                    with self.assertRaises(pf.SimulatedCrash):
+                        self.reset()
+                op, plan, journal = self.operation("reset-db")
+                capture = next(e for e in plan["effects"] if e["target"] == "checkpoint:before-reset")
+                self.assertNotIn(pf_config.RESET_MISMATCH_PRECONDITION, capture["preconditions"])
+                code, out, err, _ = self.main(*(("resume",) if action == "resume" else ("resume", "--abandon")))
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(self.operation("reset-db")[2]["phase"], "cancelled")
+                self.assertEqual(self.running_services(), ["backend", "db", "frontend"])
+                self.assertEqual(self.state()["plane"]["databases"]["partflow_staging"]["heads"], ["r1"])
 
     def test_rp7_an_unreadable_contract_is_refused_before_the_confirmation(self):
         state = self.state()
@@ -2303,6 +3202,135 @@ class CapacityIntegrated(Plane):
         self.fake.write_state(state)
         self.assertGreaterEqual(controller.purge_image_bytes() - small, 3 << 20)  # backend, frontend, db at least
 
+    CP2_TABLE = {
+        "backup": {("capturing", "backups"), ("verifying", "docker-root")},
+        "update": {("preserving", "backups"), ("preserving", "docker-root"), ("migrating", "docker-root")},
+        "rollback": {("preserving-current", "backups"), ("preserving-current", "docker-root")},
+        "reset-db": {("preserving", "backups"), ("preserving", "docker-root"), ("initializing", "docker-root")},
+        "purge": {("preserving", "backups"), ("preserving", "docker-root"), ("capturing", "recovery"),
+                  ("capturing", "docker-root"), ("verifying", "docker-root"), ("verifying", "private-state")},
+        "abort-deploy": {("preserving", "backups"), ("preserving", "docker-root")},
+        "deploy": {("preparing", "docker-root")}}
+
+    def test_cp2_each_kind_names_its_roles_phases_and_devices(self):
+        """CP-2: the section 3.8 table per kind: every preserving capture (backup, update, rollback, reset, instance
+        purge, abort-deploy) has its Docker-root verification need (2 x the live size) next to its backups need; the
+        Docker root is the daemon's DockerRootDir. Through the CLI a short Docker root alone refuses each kind's
+        preflight naming docker-root, before any confirmation, with nothing changed."""
+        controller = self.controller()
+        controller.staging()
+        live = controller.database_sizes()["partflow_staging"]
+        for kind, rows in self.CP2_TABLE.items():
+            with self.subTest(kind):
+                needs = controller.capacity_needs(kind)
+                self.assertEqual({(phase, role) for phase, role, _, _ in needs}, rows)
+                for phase, role, path, size in needs:
+                    if role == "docker-root":
+                        self.assertEqual(str(path), "/")  # the fake daemon's DockerRootDir
+                    if role == "backups":
+                        self.assertEqual(Path(path), controller.backups_root)
+                    if role == "docker-root" and phase in ("preserving", "preserving-current", "verifying") \
+                            and kind != "purge":
+                        self.assertEqual(size, pf_config.restored_estimate(live_bytes=live))
+        rows = []
+
+        def measure(controller, path, role):
+            return (2, 1) if role == "docker-root" else (1, 1 << 50)  # only the Docker root is short
+
+        for label, arguments in (("backup", ("backup",)), ("reset-db", ("reset-db",)),
+                                 ("purge", ("purge", "--keep-backups"))):
+            with self.subTest(cli=label):
+                before = pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"])
+                with mock.patch.object(pf.Controller, "measure", measure):
+                    code, out, err, phrases = self.main(*arguments)
+                self.assertEqual(code, 1, out + err)
+                line = err.split("capacity-insufficient:", 1)[1].split("\n", 1)[0]
+                self.assertIn("on device 2 (docker-root: /)", line)
+                self.assertNotIn("backups", line)
+                self.assertTrue(line.rstrip().endswith("Nothing was changed."), line)
+                self.assertEqual(phrases, [])
+                self.assertEqual(pfx.operations_of(self.context, label), [])
+                self.assertEqual(pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"]), before)
+                rows.append({"kind": label, "refusal": "capacity-insufficient:" + line})
+        evidence("CAPACITY-1-CP-2", {"table": {kind: sorted(map(list, value))
+                                               for kind, value in self.CP2_TABLE.items()}, "refusals": rows})
+
+    def test_cp4_cp6_in_operation_re_checks_stop_before_the_phase(self):
+        """CP-4 (backup) / CP-6: the preflight passes, the Docker root is short at the verifying re-check: the backup
+        closes failed_preserved before its verification ('The operation stopped before verifying.'); nothing was
+        deleted (no deletion child) and every file that existed before is unchanged."""
+        def measure(controller, path, role):
+            short = role == "docker-root" and controller.plan is not None
+            return (2, 1) if short else (1, 1 << 50)
+
+        before = pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"], self.context.artifacts_dir)
+        with mock.patch.object(pf.Controller, "measure", measure):
+            code, out, err, _ = self.main("backup")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("capacity-insufficient: verifying needs", out + err)
+        self.assertIn("The operation stopped before verifying.", out + err)
+        op, plan, journal = self.operation("backup")
+        self.assertEqual(journal["phase"], "failed_preserved")
+        verification = next(e for e in plan["effects"] if e["type"] == "verification")
+        self.assertEqual(pf_config.effect_state(journal, verification["effect_id"]), "not_started")
+        self.assert_nothing_deleted(before)
+        decisions = json.loads((self.context.operations_dir / op / "capacity.json").read_bytes())
+        self.assertEqual([item["phase"] for item in decisions if item["result"] == "short"], ["verifying"])
+
+    def assert_nothing_deleted(self, before):
+        """CP-6: no deletion child, and every file of the backups/recovery/artifacts trees from before is unchanged."""
+        deletions = [argv for argv in self.fake.argvs() if argv[:1] == ["rm"] or argv[:2] in (
+            ["volume", "rm"], ["network", "rm"], ["image", "rm"]) or "dropdb" in argv]
+        self.assertEqual(deletions, [])
+        after = pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"], self.context.artifacts_dir)
+        for path, value in before.items():
+            self.assertIn(path, after)
+            if value[-1] is not None:  # a file: same inode and bytes (a directory may gain entries)
+                self.assertEqual(after[path], value, path)
+
+    def test_cp5_capacity_json_holds_the_decisions_only(self):
+        """CP-5: capacity.json of a completed backup: 0600, one decision per device per check (preflight, capturing,
+        verifying) with the closed key set; no value, password or secret."""
+        code, out, err, _ = self.main("backup")
+        self.assertEqual(code, 0, out + err)
+        op = self.operation("backup")[0]
+        path = self.context.operations_dir / op / "capacity.json"
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        decisions = json.loads(path.read_bytes())
+        self.assertEqual({item["phase"] for item in decisions}, {"preflight", "capturing", "verifying"})
+        for item in decisions:
+            self.assertEqual(set(item), {"phase", "device", "roles", "paths", "need_bytes", "free_bytes",
+                                         "floor_bytes", "result"})
+            self.assertEqual(item["result"], "ok")
+            self.assertEqual(item["floor_bytes"], 1024 * 1024)
+        text = path.read_text()
+        for secret in (SECRET, "POSTGRES_PASSWORD", "partflow_staging:"):
+            self.assertNotIn(secret, text)
+        code, out, err, _ = self.main("status", "--operation", op)
+        self.assertIn("capacity: verifying device", out)
+
+    def test_cp6_preflight_refusals_change_nothing(self):
+        """CP-6: after a capacity refusal of every kind's preflight (backup, reset-db, instance purge, cleanup with a
+        generation): zero deletion children; the backups/recovery/artifacts trees are
+        byte-identical; no plan was written."""
+        generation, _ = Cleanup.retained_generation(self)
+        config = self.paths["configuration"] / "pf-config.json"
+        config.write_text(json.dumps(dict(json.loads(config.read_text()), minimum_free_mb=1 << 30)) + "\n")
+        for arguments in (("backup",), ("reset-db",), ("purge", "--keep-backups"),
+                          ("cleanup", "--apply", "--generation", generation)):
+            with self.subTest(arguments[0]):
+                operations = len(pfx.operations_of(self.context))
+                before = pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"], self.context.artifacts_dir)
+                self.fake.clear_calls()
+                code, out, err, phrases = self.main(*arguments)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("capacity-insufficient:", err)
+                self.assertEqual(phrases, [])
+                self.assertEqual(len(pfx.operations_of(self.context)), operations)
+                self.assertEqual(pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"],
+                                                   self.context.artifacts_dir), before)
+                self.assert_nothing_deleted(before)
+
     def test_cp3_an_unknown_docker_root_refuses_the_backup_with_the_emergency_route(self):
         state = self.state()
         state["info"] = dict(state["info"])
@@ -2424,9 +3452,165 @@ class InstalledCli(tops.CliLifecycle):
         evidence("XC-6", {"transcripts": self.transcripts})
 
 
+    def launch_scripted(self, arguments, *, timeout=300):
+        """``pf --instance staging <arguments>`` through the installed launcher at a scripted terminal: every typed
+        confirmation the program asks ("Type exactly '<phrase>'") is answered with that exact phrase once it is
+        printed (the instance purge's random ERASE challenge included)."""
+        import pty
+        environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
+        out_path, err_path = self.base / "cli-out.txt", self.base / "cli-err.txt"
+        try:
+            master, slave = pty.openpty()
+        except OSError as exc:
+            raise unittest.SkipTest("pty unavailable: " + str(exc))
+        answered = []
+        try:
+            with open(str(out_path), "wb") as out, open(str(err_path), "wb") as err:
+                process = subprocess.Popen([str(self.layout.launcher), "--instance", "staging", *arguments],
+                                           env=environment, cwd=str(self.layout.root.parent), stdin=slave,
+                                           stdout=out, stderr=err)
+                deadline = __import__("time").monotonic() + timeout
+                try:
+                    while process.poll() is None and __import__("time").monotonic() < deadline:
+                        asked = re.findall(r"Type exactly '([^']+)': ", out_path.read_text(errors="replace"))
+                        for phrase in asked[len(answered):]:
+                            os.write(master, (phrase + "\n").encode("utf-8"))
+                            answered.append(phrase)
+                        __import__("time").sleep(0.05)
+                    code = process.wait(timeout=5)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+        finally:
+            os.close(slave)
+            os.close(master)
+        result = types.SimpleNamespace(returncode=code, stdout=out_path.read_text(), stderr=err_path.read_text(),
+                                       phrases=answered)
+        self.transcripts.append({"argv": ["pf", *arguments], "exit": code, "typed": answered,
+                                 "stdout": result.stdout, "stderr": result.stderr})
+        return result
+
+    def test_xc1_an_instance_purge_end_to_end_and_the_tombstone_line(self):
+        """XC-1: ``pf purge --keep-backups`` through the installed launcher to completion (PURGE and the random ERASE
+        challenge typed at the scripted terminal), then ``pf status`` prints the tombstone line."""
+        result = self.launch_scripted(["purge", "--keep-backups"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((result.phrases[0], result.phrases[-1].split()[:2]), ("PURGE " + self.project,
+                                                                              ["ERASE", self.project]))
+        op, plan, journal = pfx.operations_of(self.context, "purge")[-1]
+        self.assertEqual(journal["phase"], "completed")
+        bundle = next(item["name"] for item in journal["retained_artifacts"] if item["kind"] == "purge-bundle")
+        self.assertIn(f"Final bundle {bundle}: functional recovery verified in isolated topology pfverify-",
+                      result.stdout)
+        state = self.fake.state()
+        self.assertFalse([item for item in state["containers"] + state["volumes"] + state["networks"]
+                          if "pfverify-" in json.dumps(item) or self.project in json.dumps(item.get("labels"))])
+        self.assertEqual(json.loads(self.context.record_path.read_bytes())["state"], "purged")
+        status, _ = self.launch(["status"])  # partial (exit 1): the purged instance has no .env or database
+        self.assertIn(f"Lifecycle: purged by instance purge {op}", status.stdout)
+        self.assertIn(f"recovery bundle {bundle} [functional]", status.stdout)
+        evidence("XC-1", {"transcripts": self.transcripts})
+
+    def test_xc3_side_by_side_status_and_cleanup_through_the_launcher(self):
+        """XC-3: ``pf restore-instance <id> --side-by-side``, ``pf status`` and ``pf cleanup --apply
+        --recovery-target <p>`` through the installed launcher (after an instance purge and an exact restore)."""
+        result = self.launch_scripted(["purge", "--keep-backups"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        journal = pfx.operations_of(self.context, "purge")[-1][2]
+        bundle = next(item["name"] for item in journal["retained_artifacts"] if item["kind"] == "purge-bundle")
+        result = self.launch_scripted(["restore-instance", bundle])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.launch_scripted(["restore-instance", bundle, "--side-by-side"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.phrases, ["RESTORE COPY " + bundle])
+        op, plan, journal = pfx.operations_of(self.context, "restore-side-by-side")[-1]
+        self.assertEqual(journal["phase"], "completed")
+        project = next(item["name"] for item in journal["retained_artifacts"] if item["kind"] == "recovery-target")
+        status, _ = self.launch(["status"])
+        self.assertIn(f"Recovery targets: {project} from bundle {bundle} (operation {op}", status.stdout)
+        result = self.launch_scripted(["cleanup", "--apply", "--recovery-target", project])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.phrases[1:], ["REMOVE RECOVERY TARGET " + project])
+        state = self.fake.state()
+        self.assertFalse([item for item in state["containers"] + state["volumes"] + state["networks"]
+                          if project in json.dumps(item)])
+        self.assertEqual(sorted(item["labels"][pf_docker.COMPOSE_SERVICE_LABEL] for item in state["containers"]
+                                if item["status"] == "running"), ["backend", "db", "frontend"])
+        evidence("XC-3", {"transcripts": self.transcripts})
+
+    def test_xc7_abort_deploy_after_the_frontend_opened_through_the_launcher(self):
+        """XC-7: ``pf abort-deploy`` of a first deployment whose frontend effect started, through the installed
+        launcher: the current database is preserved first (checkpoint before-abort), then the deployment's
+        containers and volume are deleted."""
+        (self.context.state_dir / "deployed.json").unlink()
+        pfx.interrupted_deploy(self.context, phase="activating", unknown="e0006")
+        result = self.launch_scripted(["abort-deploy"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.phrases, ["ABORT DEPLOY " + self.project])
+        op, plan, journal = pfx.operations_of(self.context, "abort-deploy")[-1]
+        self.assertEqual(journal["phase"], "completed")
+        self.assertEqual(plan["effects"][1]["target"], "checkpoint:before-abort")
+        checkpoint = next(item["name"] for item in journal["retained_artifacts"] if item["kind"] == "checkpoint")
+        self.assertTrue((self.context.paths.backups / "revisions" / self.project / checkpoint).exists())
+        calls = [call["argv"] for call in self.fake.calls()]
+        dumps = [index for index, argv in enumerate(calls) if "pg_dump" in argv]
+        removals = [index for index, argv in enumerate(calls) if argv[:2] == ["volume", "rm"]]
+        self.assertTrue(dumps and removals and max(dumps) < min(removals), (dumps, removals))
+        self.assertFalse([item for item in self.fake.state()["volumes"]
+                          if item["name"] == self.project + "_postgres_data"])
+        evidence("XC-7", {"transcripts": self.transcripts})
+
+
 for _name in dir(tops.CliLifecycle):
     if _name.startswith("test"):
         setattr(InstalledCli, _name, None)  # not collected: the CL-* cases run in test_operations
+
+
+class CapacityUpdate(tops.Restartable):
+    """CP-4 (update): the preflight passes and the Docker root is short at the ``migrating`` re-check: the update
+    stops before migrating (fail-closed, nothing migrated); ``pf resume`` reopens the unchanged deployment."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack = contextlib.ExitStack()
+        self.controller_patches = []
+        self.history = []
+
+    def tearDown(self):
+        self.stack.close()
+        super().tearDown()
+
+    def test_cp4_an_update_short_before_migrating_fails_closed_and_resume_reopens_unchanged(self):
+        self.c.new_migration = True
+        controller_class = pf.Controller  # invoke() replaces pf.Controller by a factory mock
+        original = controller_class.capacity_decide
+
+        def decide(controller, needs, *, phase=None, tail="Nothing was changed."):
+            if phase == "migrating":
+                with mock.patch.object(controller_class, "measure", lambda c, path, role: (9, 0)):
+                    return original(controller, needs, phase=phase, tail=tail)
+            return original(controller, needs, phase=phase, tail=tail)
+
+        with mock.patch.object(pf.Controller, "capacity_decide", decide):
+            self.assertEqual(self.invoke(["update", "--latest", "--allow-migrations"]), 1)
+        self.assertIn("capacity-insufficient: migrating needs", self.last_error)
+        self.assertIn("The operation stopped before migrating.", self.last_error)
+        op, plan, journal = tops.tpa.latest_operation(self.c, "update")
+        self.assertNotIn(journal["phase"], pf_config.CLOSED_PHASES)
+        for effect in plan["effects"]:
+            if effect["phase"] not in ("preparing", "preserving"):
+                self.assertEqual(pf_config.effect_state(journal, effect["effect_id"]), "not_started", effect)
+        self.assertEqual(self.alembic_calls(), [])
+        self.assertFalse(self.c.running["backend"] or self.c.running["frontend"])  # failed closed
+        self.assertEqual(self.c.dbs["partflow_staging"]["heads"], ["r1"])
+        self.restart()
+        self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+        op, plan, journal = tops.tpa.latest_operation(self.c, "update")
+        self.assertEqual(journal["phase"], "cancelled")
+        self.assertTrue(all(self.c.running.values()))
+        self.assertEqual(self.c.dbs["partflow_staging"]["heads"], ["r1"])
+        self.assertEqual(self.pointer()["sha"], pfx.OLD)
 
 
 if __name__ == "__main__":

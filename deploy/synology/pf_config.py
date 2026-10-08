@@ -2491,6 +2491,9 @@ CLOSED_PHASES = frozenset({"completed", "cancelled", "failed_preserved"})
 CANDIDATE_RE = re.compile(r"pf_(?:migrate|restore|clean)_[0-9a-f]{20}\Z")
 SWITCH_KINDS = ("deploy", "update", "rollback", "restore-instance")
 EMERGENCY_KINDS = ("deploy", "update", "rollback", "reset-db")
+# PF-A3.3 NF-1: the precondition a reset-db plan's before-reset capture carries when the reset was planned on a
+# schema/image mismatch (emergency preservation). Such a reset can never reopen the unchanged deployment.
+RESET_MISMATCH_PRECONDITION = "contract:schema-image-mismatch"
 # DISPATCH fail_closed column per operation kind (pf-admin.py DISPATCH; section 3.9): the route that creates the kind.
 KIND_FAIL_CLOSED = {"deploy": "always", "update": "always", "rollback": "always", "reset-db": "always",
                     "abort-deploy": "always", "restore-instance": "unless-side-by-side", "purge": "never",
@@ -2852,6 +2855,14 @@ def _effect_evidence(journal, effect_id):
     return None
 
 
+def reset_never_reopens(plan):
+    """PF-A3.3 NF-1: a reset-db planned on a schema/image mismatch (its capture carries RESET_MISMATCH_PRECONDITION).
+    Its database is not at the running image's heads, so the unchanged deployment can never be reopened: resume goes
+    forward (the preservation is re-observed or re-run) and abandon closes without a reopen."""
+    return plan["kind"] == "reset-db" and any(RESET_MISMATCH_PRECONDITION in effect["preconditions"]
+                                              for effect in plan["effects"])
+
+
 def _stop_started(plan, journal):
     return any(effect_role(effect) == "stop" and effect_state(journal, effect["effect_id"]) != "not_started"
                for effect in plan["effects"])
@@ -2929,6 +2940,9 @@ def operation_routes(plan, journal, *, slug):
                     "cleanup": "close it, keeping every item not yet removed",
                     "abort-deploy": "close it; the incomplete deploy is blocking again"}.get(
                 kind, "close it without a further effect")
+            if reset_never_reopens(plan) and decision.action == "forward":
+                what = ("drop its clean candidate and close it; application services stay as the reset left them, "
+                        "because the database does not match the running image")
             routes.append(("resume abandon", resume + " --abandon", "cancel the operation (" + what + ")"))
         if decision.keep_legal:
             routes.append(("resume keep-workspace", resume + " --keep-workspace",
@@ -3027,6 +3041,10 @@ def resume_decision(plan, journal, observation=None):
         return ResumeDecision("forward", "completed", not data_started, False,
                               "data restore started" if data_started else "preparing the target")
     pre_data = {"staging", "stop", "capture", "verification"}
+    if roles <= pre_data and reset_never_reopens(plan):
+        # NF-1: no reopen is possible; forward re-observes the preservation, abandon closes with services as left.
+        return ResumeDecision("forward", "completed", True, False,
+                              "emergency preservation of a mismatched database (no reopen is possible)")
     if roles <= pre_data:
         return ResumeDecision(restore_back, "cancelled", True, False, "no database effect started")
     if roles <= pre_data | {"candidate"}:

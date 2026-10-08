@@ -689,6 +689,33 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > refuse on the head mismatch); see `IMPLEMENTATION_REPORT.md` §8. Acceptance stays conditional on the owner approving
 > OD-A33-06, OD-A33-07 and OD-A33-09.
 
+> **PF-A3.3 completion addendum (2026-10-08) — NF-1 and the remaining SPEC §6.1 risky-path tests.** Uncommitted on
+> top of `1b44831` (OPS paths only). *NF-1 fixed:* a `reset-db` planned on a schema/image mismatch now carries the
+> precondition `contract:schema-image-mismatch` on its `checkpoint:before-reset` capture; before any live database
+> effect `pf resume` goes forward (the emergency preservation is re-observed or re-run, then the reset completes) and
+> `pf resume --abandon` drops the owned clean candidate and closes `cancelled` without a reopen (services as the reset
+> left them; the message names `pf reset-db` and `pf rollback <checkpoint> --restore-db`); a consistent instance keeps
+> the A3.2 reopen. The `preservation-failed` and `reset-images-unidentified` copies name the abandon for such a reset.
+> *Defects found by the new tests and fixed:* `restore-instance` capacity now counts `images.tar` when a bundle image is
+> absent (preflight and the `preparing-target` re-check); `status` reports `pf_recovery_*` databases with the
+> `legacy-recovery-database` note; a preflight `capacity-insufficient` names its phases ("<phase> needs"). *New tests*
+> in `tests/test_integrated.py` (85 → 113): NF-1 (2), SB-5, SB-7, SB-8, SB-9, FV-7, FV-8, PZ-6, RX-4, RX-6, RX-7, RX-9,
+> RP-3, RP-5, RP-9, CP-2, CP-4 (backup; update in `CapacityUpdate`), CP-5, CP-6, CU-4, CU-5, CU-8, CU-13 (plan-drift,
+> refused `image rm`), XC-1, XC-3, XC-7 (the installed launcher at a scripted pty terminal that types every asked
+> phrase, the random `ERASE` challenge included); RP-8 extended. The regression tests fail with the `1b44831` product
+> modules (`_claude_outputs/ops/PF-A3.3/evidence/completion-regression-before-fix-python3.12.log`). Executed with the
+> canonical command: **1056 tests OK, 1 skipped (RO-14)** on `python:3.12` (2033.061 s) and `python:3.9` (2026.765 s),
+> `evidence/completion-suite-python3.*.log` (a first run failed one test on `python:3.12` only, SB-7 selecting an
+> operation by sort order within one second; fixed in the test, both images re-run). RO-14 with `docs/deployment`
+> copied passes on both; `ast.parse(..., feature_version=(3, 9))` and pyflakes are clean on the changed files.
+> `CRASH_MATRIX.json` regenerated (234 in-process rows; every `resume` row ends `completed` or `cancelled`; the NF-1
+> rows now end `completed`/`cancelled`). Declared interpretations: a legacy bundle without a backend image is refused by
+> the strict reader (`manifest-schema-unsupported`) before the side-by-side rule; the CU-13 "DaemonFailure on `image
+> rm`" row is a daemon refusal of the command (an unreachable daemon stops the cleanup open, earlier test); a cleanup
+> crashed before its first effect closes `cancelled`. Acceptance: every offline part of A3-T06/T07/T08/T14/T15/T16 is
+> `passed`; all stay `blocked` at their real Docker/PostgreSQL levels (PF-A3.4). Not production-ready; no NAS, DSM,
+> Docker daemon, running stack or development database was contacted.
+
 ## Executed checks
 
 | Check | Actual result |

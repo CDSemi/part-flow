@@ -1291,6 +1291,14 @@ before the database switch drops the candidate and reopens the unchanged deploym
 names prove it did not start is redone; one that left the names half renamed stops in `needs_operator`
 (`database-switch-unknown`) and is recovered with `rollback <before-reset checkpoint> --restore-db`.
 
+A `reset-db` started on a **schema/image mismatch** can never reopen the unchanged deployment, because its database
+is not at the running image's heads. When it is interrupted before the database switch, `pf resume` goes **forward**:
+it re-observes the emergency preservation (or captures it again) and completes the reset. `pf resume --abandon` drops
+the `pf_clean_*` candidate and closes the operation `cancelled` **without a reopen**: application services stay as the
+reset left them (normally stopped), and the message names the routes that remain: a new `pf reset-db` (it preserves
+the current data again) or `pf rollback <checkpoint> --restore-db` to a healthy checkpoint. The same applies after
+`reset-images-unidentified` on such a reset: its message names `resume --operation <op> --abandon`.
+
 ## 12. Full purge, recovery, and clean redeploy
 
 ### List/select instances

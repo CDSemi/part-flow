@@ -1256,6 +1256,14 @@ database switch thì drop candidate và mở lại deployment không đổi. Dat
 database chứng minh là chưa bắt đầu sẽ được làm lại; switch để lại tên đổi nửa chừng sẽ dừng ở `needs_operator`
 (`database-switch-unknown`) và được khôi phục bằng `rollback <before-reset checkpoint> --restore-db`.
 
+Một `reset-db` bắt đầu trên **schema/image mismatch** không bao giờ mở lại được deployment không đổi, vì database của
+nó không ở head của image đang chạy. Khi nó bị gián đoạn trước database switch, `pf resume` đi **tiếp (forward)**: quan
+sát lại emergency preservation (hoặc capture lại) rồi hoàn tất reset. `pf resume --abandon` drop candidate
+`pf_clean_*` và đóng operation `cancelled` **không mở lại**: application service giữ nguyên như reset đã để lại
+(thường là đã dừng), và thông báo nêu các route còn lại: một `pf reset-db` mới (preserve dữ liệu hiện tại lần nữa) hoặc
+`pf rollback <checkpoint> --restore-db` về một healthy checkpoint. Điều tương tự áp dụng sau
+`reset-images-unidentified` của một reset như vậy: thông báo của nó nêu `resume --operation <op> --abandon`.
+
 ## 12. Full purge, recovery và clean redeploy
 
 ### Liệt kê/chọn instance

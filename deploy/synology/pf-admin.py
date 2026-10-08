@@ -6678,12 +6678,16 @@ class Controller:
         slug = self.context.slug
         kind = self.plan["kind"] if self.plan is not None else "rollback"
         label = {"reset-db": "the reset", "abort-deploy": "the abort"}.get(kind, "the rollback")
+        # NF-1: a reset planned on a mismatched database never reopens; resume retries, abandon closes it.
+        route = (f"'pf --instance {slug} resume' retries the preservation and continues the reset, or 'pf --instance "
+                 f"{slug} resume --abandon' closes it (the database does not match the running image, so the unchanged "
+                 "deployment cannot be reopened)." if self.plan is not None and pf_config.reset_never_reopens(self.plan)
+                 else f"'pf --instance {slug} resume' reopens the unchanged deployment.")
         return Failure(
             f"preservation-failed: the current database {database} could not be preserved ({detail}); {label} did "
             "not restore or switch anything and the current data is unchanged. Application services stay stopped. "
             f"Preserve it manually (a pg_dump of {database} to a protected location) or fix the cause and run "
-            f"'pf --instance {slug} backup --emergency', then retry; 'pf --instance {slug} resume' reopens the "
-            "unchanged deployment.")
+            f"'pf --instance {slug} backup --emergency', then retry; " + route)
 
     def preserve_current(self, reason, *, stores, bundle_id=None, verify_name=None, step=None):
         """INV-09 before an overwrite: a healthy checkpoint when the contract holds, else emergency preservation; the
@@ -9667,7 +9671,7 @@ class Controller:
         else:
             deletion_plan = None
         confirm(self.resume_phrase(action), self.resume_summary(action, decision, body=body))
-        if deferred and (action not in ("abandon", "keep-workspace") or body in ("reopen", "withdraw")):
+        if deferred and (action not in ("abandon", "keep-workspace") or body in ("reopen", "withdraw", "stopped")):
             # Section 3.5 part (c): only the db service, after the confirmation and before any operation file
             # changes; a failing start leaves the operation unchanged (database-unavailable, no fail-closed).
             self.start_db_for_observation()
@@ -9705,6 +9709,8 @@ class Controller:
             return self.close_abandoned()
         if action == "withdraw":
             return self.withdraw_superseding()
+        if action == "stopped":
+            return self.close_stopped()
         if action == "reopen":
             return self.reopen_and_cancel()
         return self.run_plan({})
@@ -9718,6 +9724,8 @@ class Controller:
             return None
         if self.plan["kind"] == "backup" or decision.action == "close":
             return "close"
+        if pf_config.reset_never_reopens(self.plan):
+            return "stopped"  # NF-1: a mismatched database never reopens; candidates dropped, services as left
         if decision.action in ("reopen", "withdraw"):
             return decision.action
         # The forward rows where abandon is legal (a reset-db or rollback candidate): drop it, then reopen/withdraw.
@@ -9751,6 +9759,10 @@ class Controller:
         if action == "abandon" and body == "withdraw":
             return (f"Abandon operation {op}: owned candidates are dropped, its own staging is removed, application "
                     "services stay as they are and the superseded operation's routes apply again.")
+        if action == "abandon" and body == "stopped":
+            return (f"Abandon operation {op}: owned candidates are dropped and the operation is cancelled. The "
+                    "database is not at the running image's Alembic heads, so the unchanged deployment cannot be "
+                    "reopened: application services stay as the reset left them.")
         text = {"forward": f"Continue operation {op} forward from its journal ({decision.reason}).",
                 "reopen": f"Reopen the unchanged deployment and cancel operation {op} (no data or source effect "
                           "started; owned candidates are dropped).",
@@ -9779,10 +9791,7 @@ class Controller:
         """Section 3.6: a superseding operation never reopens; it drops its owned candidates (a rollback abandoned in
         its candidate restore), removes its own staging, closes cancelled and leaves the application services as they
         are. The superseded operation's routes apply again."""
-        if any(pf_config.effect_role(effect) == "candidate" and self.effect_state(effect["effect_id"]) != "not_started"
-               for effect in self.plan["effects"]):
-            self.database_ready()
-            self.drop_owned(self.owned_candidates())
+        self.drop_started_candidates()
         self.close_operation("cancelled")
         superseded = self.operation_index().entry(self.plan["supersedes"])
         log(f"Operation {self.operation_id} withdrawn (cancelled); application services were left as they are.")
@@ -9790,6 +9799,26 @@ class Controller:
             routes = pf_config.operation_routes(superseded.plan, superseded.journal, slug=self.context.slug)
             log(f"Operation {superseded.operation_id} ({superseded.kind}) is blocking again. Legal next: "
                 + ("; ".join(f"{command}: {description}" for _, command, description in routes) or "none"))
+        return 0
+
+    def drop_started_candidates(self):
+        if any(pf_config.effect_role(effect) == "candidate" and self.effect_state(effect["effect_id"]) != "not_started"
+               for effect in self.plan["effects"]):
+            self.database_ready()
+            self.drop_owned(self.owned_candidates())
+
+    def close_stopped(self):
+        """PF-A3.3 NF-1: ``--abandon`` of a reset-db planned on a schema/image mismatch. A reopen would start the
+        running image on a database that is not at its heads, so none is attempted: the owned clean candidate is
+        dropped, the operation closes cancelled, application services stay as the reset left them, and the routes
+        that remain are named (RO-13: never a state without a legal route)."""
+        self.drop_started_candidates()
+        self.close_operation("cancelled")
+        prefix = self.pf_command()
+        log(f"Operation {self.operation_id} cancelled; the database is not at the running image's Alembic heads, so "
+            "the unchanged deployment cannot be reopened and application services were left as they are. Next: "
+            f"'{prefix} reset-db' (preserves the current data again, then resets), or '{prefix} rollback <checkpoint> "
+            f"--restore-db' to a healthy checkpoint ('{prefix} backups' lists them).")
         return 0
 
     def reopen_unchanged(self):
@@ -10193,11 +10222,15 @@ class Controller:
         if kind == "reset-db":
             missing = [service for service in pf_docker.BUILT_SERVICES if view.image(service) is None]
             if missing:
+                # NF-1: a reset planned on a mismatched database never reopens; its abandon is the route.
+                route = (f"'{self.pf_command()} resume --operation {self.operation_id} --abandon' closes it (the "
+                         "database does not match the running image, so the unchanged deployment cannot be reopened)"
+                         if pf_config.reset_never_reopens(self.plan)
+                         else f"'{self.pf_command()} resume' reopens the unchanged deployment")
                 exc = Failure(f"reset-images-unidentified: the current data were preserved as "
                               f"{CLASS_NAMES[view.capture_class]} {view.bundle_id}, but its {missing[0]} image could not be "
                               f"identified, so no clean database is activated. The preservation was kept; operation "
-                              f"{self.operation_id} failed closed and '{self.pf_command()} resume' reopens the unchanged "
-                              "deployment.")
+                              f"{self.operation_id} failed closed and {route}.")
                 exc.code = "reset-images-unidentified"
                 raise exc
 
@@ -10874,6 +10907,12 @@ class Controller:
                               self.tree_bytes(pf_instance.generation_container(self.context) / gen)))
         return needs
 
+    def bundle_images_absent(self, view):
+        """Section 3.8 restore-instance row: whether an image the bundle records is absent locally, so the restore
+        loads images.tar into the Docker root (read-only)."""
+        return any(view.image(service) is not None and not self.image_present(view.image(service)["id"])
+                   for service in pf_docker.SERVICES)
+
     def purge_image_bytes(self):
         """Section 3.8 purge ``capturing``/``recovery`` row: the sum of ``docker image inspect`` Size of the distinct
         images ``images.tar`` holds (the retained tags of every readable checkpoint, the running backend/frontend
@@ -10971,7 +11010,9 @@ class Controller:
             parts = [f"{item.need // mib} MiB on device {item.device} ({', '.join(item.roles)}: {', '.join(item.paths)}), "
                      f"{item.free // mib} MiB free including the {item.floor // mib} MiB safety floor"
                      for item in shortfalls]
-            exc = Failure(f"capacity-insufficient: {phase or 'the operation'} needs " + "; ".join(parts) + ". " + tail)
+            # Section 4.8 copy: "<phase> needs ..."; a preflight names the phases of the short devices' needs.
+            label = phase or "/".join(dict.fromkeys(name for item in shortfalls for name in item.phase.split("/")))
+            exc = Failure(f"capacity-insufficient: {label} needs " + "; ".join(parts) + ". " + tail)
             exc.code = "capacity-insufficient"
             raise exc
 
@@ -10990,6 +11031,8 @@ class Controller:
             extra["view"] = self.op_recovery() if kind != "rollback" else self.op_selected()
         if kind == "restore-side-by-side":
             extra["load"] = bool(self.effects_of(type="image-load"))
+        if kind == "restore-instance" and extra.get("view") is not None:
+            extra["load"] = self.bundle_images_absent(extra["view"])
         if kind == "cleanup":
             extra["sizes"] = {"generations": pf_config.cleanup_selectors(self.plan)["generations"]}
         try:
@@ -13136,7 +13179,7 @@ class Controller:
             # OD-A33-08: the purged record holds no claim; restoring it claims (daemon, project) again.
             self.require_project_claim()
         db_tag, db_lines = self.restore_db_image(recovery)
-        self.capacity_preflight("restore-instance", view=recovery)
+        self.capacity_preflight("restore-instance", view=recovery, load=self.bundle_images_absent(recovery))
 
         log("Restore target summary:")
         log("  Project: " + recovery.compose_project)
@@ -13654,7 +13697,9 @@ class Controller:
             {"phase": "preserving", "type": "capture", "target": "checkpoint:before-reset",
              "postcondition": "sealed and data_restore_verified",
              "preconditions": ["bundle:" + checkpoint_id, "verify:pf_verify_" + uuid.uuid4().hex[:20],
-                               "writers stopped"]},
+                               "writers stopped"]
+             # NF-1: a mismatched database can never reopen the unchanged deployment (resume/abandon rows).
+             + ([] if observation["matches"] else [pf_config.RESET_MISMATCH_PRECONDITION])},
             {"phase": "initializing", "type": "database-create", "target": "database:" + prepared,
              "postcondition": "exists", "preconditions": ["checkpoint sealed"], "preservation_refs": [checkpoint_id]},
             {"phase": "initializing", "type": "database-migrate", "target": f"database:{prepared}:heads={','.join(heads)}",
@@ -13845,10 +13890,13 @@ class Controller:
         ))
         try:
             # PF-A3.3 (section 3.14): the live part, only when there is something to clean up.
-            items = [item for item in pf_config.cleanup_candidates(index, self.cleanup_observations(index))
-                     if item.cls != "report-only"]
+            observations = self.cleanup_observations(index)
+            items = [item for item in pf_config.cleanup_candidates(index, observations) if item.cls != "report-only"]
             if items:
                 log(f"Cleanup candidates: {len(items)} ({self.pf_command()} cleanup)")
+            # Section 3.6: the former side-by-side mode's databases are reported, never touched (user data).
+            for name in sorted(observations["pf_recovery"]):
+                log(f"note: legacy-recovery-database: {name} (pf_recovery_*) is kept; it is user data.")
         except DaemonFailure:
             pass
         except (Failure, OSError, ValueError, KeyError) as exc:
