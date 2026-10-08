@@ -797,7 +797,8 @@ def route_fixtures():
 # Section 3.3 per fixture: the routes that are not refused, with their decision (everything else: operation-open).
 ROUTE_EXPECTATIONS = {
     "deploy/initializing": {"resume": "reenter", "abort-deploy": "supersede", "backup emergency": "new"},
-    "deploy/activating frontend": {"resume": "reenter", "backup emergency": "new"},
+    # PF-A3.3 (section 3.7a): after the frontend opened, abort-deploy supersedes (preserve-then-abort).
+    "deploy/activating frontend": {"resume": "reenter", "abort-deploy": "supersede", "backup emergency": "new"},
     "update/preparing": {"resume": "reenter", "backup emergency": "new"},
     "update/preserving": {"resume": "reenter", "rollback": "supersede", "backup emergency": "new"},
     "update/migrating": {"resume": "reenter", "rollback": "supersede", "backup emergency": "new"},
@@ -1557,14 +1558,14 @@ class Resume(Restartable):
         self.assertEqual(self.invoke(["deploy", "--latest"]), 0, self.last_error)
         self.assertEqual(self.pointer()["sha"], NEW)
 
-    def test_rs12_after_the_frontend_intent_abort_deploy_is_refused_and_resume_completes(self):
+    def test_rs12_after_the_frontend_intent_abort_deploy_supersedes_and_resume_completes(self):
+        # PF-A3.3 (section 3.7a; SPEC section 6.3 -> AD-1): after the frontend intent `abort-deploy` is no longer
+        # refused: it supersedes the deploy and preserves the current database first (the preserve-then-abort runs in
+        # test_integrated.AbortDeploy on the fake plane). Here the open deploy still completes by resume.
         self.crash(deploy_setup(self), "e0005", "after-intent")
-        op, _, _ = tpa.latest_operation(self.c, "deploy")
-        before = pfx.operations_bytes(self.context)
-        self.assertEqual(self.invoke(["abort-deploy"]), 1)
-        self.assertIn(f"operation-open: operation {op} (deploy, phase activating) is incomplete; 'abort-deploy' is not "
-                      "a legal next action for it.", self.last_error)
-        self.assertEqual(pfx.operations_bytes(self.context), before)
+        op, plan, journal = tpa.latest_operation(self.c, "deploy")
+        decision = gate(single_index(plan, journal), "abort-deploy")
+        self.assertEqual((decision.action, decision.entry.operation_id), ("supersede", op))
         self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
         self.assertTrue(all(self.c.running.values()))
 

@@ -32,8 +32,13 @@ DELETION_ORDER = ("container", "network", "volume", "image")
 DAEMON_PROBE_ARGV = ("docker", "info", "--format", "{{json .}}")
 RENDER_LIMIT = 4 * 1024 * 1024
 PLAN_SCHEMA_VERSION = 1
-PLAN_KINDS = ("purge", "abort-deploy")
+# PF-A3.3: the teardown of an isolated topology and the cleanup of selected instance image tags.
+PLAN_KINDS = ("purge", "abort-deploy", "isolated-topology", "image-tags")
 IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+\Z")
+# PF-A3.3 (SPEC section 2.2): the generated Compose projects of isolated topologies and image IDs by digest.
+VERIFY_PROJECT_RE = re.compile(r"pfverify-[0-9a-f]{12}\Z")
+RECOVER_PROJECT_RE = re.compile(r"pfrecover-[0-9a-f]{12}\Z")
+IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 # Go templates for `docker <kind> inspect --format`: one JSON object per line with only the
 # fields the inventory needs. A container's Config.Env is never requested (foreign secrets).
@@ -155,6 +160,7 @@ class DaemonObservation:
     server_version: str
     operating_system: str
     rootless: bool
+    root_dir: object = None     # PF-A3.3: DockerRootDir (an absolute path string) or None; never recorded
 
 
 def parse_daemon_info(text, *, endpoint):
@@ -186,10 +192,12 @@ def parse_daemon_info(text, *, endpoint):
     rootless = any("name=rootless" in item.split(",") for item in options)
     version = info.get("ServerVersion")
     system = info.get("OperatingSystem")
+    root = info.get("DockerRootDir")
+    root = root if isinstance(root, str) and root.startswith("/") and "\x00" not in root else None
     return DaemonObservation(endpoint=str(endpoint), engine_id=engine_id,
                              server_version=version if isinstance(version, str) else "",
                              operating_system=system if isinstance(system, str) else "",
-                             rootless=rootless)
+                             rootless=rootless, root_dir=root)
 
 
 def check_daemon(observation, binding):
@@ -495,6 +503,258 @@ def _db_volume_ok(mount):
     if mount.get("volume", {}) not in ({}, {"nocopy": False}):
         return False
     return mount.get("read_only", False) is False
+
+
+# --------------------------------------------------------- isolated topology (PF-A3.3)
+# A verification/recovery Compose project rendered from the installed file (validated by validate_envelope with the
+# topology's own project, UUID and generated values), transformed by one closed function and validated again by an
+# allowlist that is independent of the transformation (SPEC section 3.1 steps 3-4). Isolation itself is observed from
+# the daemon after the start (isolation_findings).
+
+ISOLATED_NETWORK_KEYS = frozenset({"name", "labels", "driver", "internal"})
+
+
+def isolate_model(model, *, images):
+    """Section 3.1 step 3 (pure; a new dict): no published port, no build, images by ID, restart "no", an internal
+    default network and the doubled db healthcheck. Nothing else changes. ``images``: {service: "sha256:<64 hex>"}."""
+    result = json.loads(json.dumps(model))
+    services = result["services"]
+    services["frontend"].pop("ports", None)
+    for service in BUILT_SERVICES:
+        services[service].pop("build", None)
+    for service in SERVICES:
+        services[service]["image"] = images[service]
+        services[service]["restart"] = "no"
+    result["networks"]["default"]["internal"] = True
+    services["db"]["healthcheck"]["test"] = list(HEALTHCHECK_DOUBLED)
+    return result
+
+
+def _dollar_paths(value, path="$"):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _dollar_paths(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _dollar_paths(item, f"{path}[{index}]")
+    elif isinstance(value, str) and "$" in value:
+        yield path
+
+
+def validate_isolated_model(model, expectation, images):
+    """Section 3.1 step 4: the closed allowlist of an isolated model (independent of isolate_model). Raises
+    DockerScopeError(isolated-*) with every finding; returns EnvelopeResult("doubled", names)."""
+    findings = []
+
+    def add(code, path, message):
+        findings.append(Finding(code, path, message))
+
+    project = expectation.project
+    label = {INSTANCE_LABEL: expectation.instance_id}
+    if not isinstance(model, dict):
+        _raise("isolated-project", [Finding("isolated-project", "$", "the model is not a JSON object")])
+    for key in sorted(set(model) - TOP_LEVEL_KEYS):
+        add("isolated-project", f"$.{key}", "top-level key outside the PartFlow topology")
+    if model.get("name") != project:
+        add("isolated-project", "$.name", "project name differs from the generated topology project")
+    services = model.get("services")
+    if not isinstance(services, dict) or set(services) != set(SERVICES):
+        add("isolated-project", "$.services", "the service set must be exactly db, backend, frontend")
+        services = services if isinstance(services, dict) else {}
+    for service in SERVICES:
+        if service in services:
+            _validate_isolated_service(service, services[service], expectation, images, label, add)
+    db = services.get("db") if isinstance(services.get("db"), dict) else {}
+    healthcheck = db.get("healthcheck") if isinstance(db.get("healthcheck"), dict) else {}
+    if healthcheck.get("test") != HEALTHCHECK_DOUBLED:
+        add("isolated-escape", "$.services.db.healthcheck.test", "the db healthcheck is not the doubled form")
+    for path in _dollar_paths(model):
+        if not path.startswith("$.services.db.healthcheck.test["):
+            add("isolated-escape", path, "a '$' outside the db healthcheck")
+    names = topology_names(project)
+    volumes = model.get("volumes")
+    if not isinstance(volumes, dict) or set(volumes) != {"postgres_data"} or not isinstance(volumes["postgres_data"],
+                                                                                              dict):
+        add("isolated-mount", "$.volumes", "top-level volumes must be exactly postgres_data")
+    else:
+        body = volumes["postgres_data"]
+        for key in sorted(set(body) - TOP_VOLUME_KEYS):
+            add("isolated-mount", f"$.volumes.postgres_data.{key}", "volume option outside the allowlist")
+        if body.get("name") != names["volume"]["postgres_data"] or body.get("driver", "local") != "local":
+            add("isolated-mount", "$.volumes.postgres_data", "the volume is not the local <project>_postgres_data")
+        if body.get("labels") != label:
+            add("isolated-label", "$.volumes.postgres_data.labels", "topology label missing or wrong")
+    networks = model.get("networks")
+    if not isinstance(networks, dict) or set(networks) != {"default"} or not isinstance(networks["default"], dict):
+        add("isolated-network", "$.networks", "top-level networks must be exactly default")
+    else:
+        body = networks["default"]
+        for key in sorted(set(body) - ISOLATED_NETWORK_KEYS):
+            if key in BENIGN_NETWORK_KEYS and body[key] == {}:
+                continue
+            add("isolated-network", f"$.networks.default.{key}", "network option outside the allowlist")
+        if body.get("name") != names["network"]["default"] or body.get("driver", "bridge") != "bridge" \
+                or body.get("internal") is not True:
+            add("isolated-network", "$.networks.default", "the network is not the internal bridge <project>_default")
+        if body.get("labels") != label:
+            add("isolated-label", "$.networks.default.labels", "topology label missing or wrong")
+    if findings:
+        ordered = sorted(findings, key=lambda finding: (finding.path, finding.code, finding.message))
+        _raise(ordered[0].code, ordered)
+    return EnvelopeResult(escape_mode="doubled", names=names)
+
+
+def _validate_isolated_service(service, body, expectation, images, label, add):
+    base = f"$.services.{service}"
+    if not isinstance(body, dict):
+        add("isolated-project", base, "service is not an object")
+        return
+    for key in sorted(body):
+        if key in FORBIDDEN_SERVICE_KEYS:
+            add("envelope-forbidden", f"{base}.{key}", "host-privilege option is forbidden")
+        elif key == "ports":
+            add("isolated-port", f"{base}.ports", "an isolated service publishes no port (loopback included)")
+        elif key == "build":
+            add("isolated-image", f"{base}.build", "an isolated service is never built")
+        elif key not in SERVICE_KEYS:
+            add("envelope-unknown-key", f"{base}.{key}", "service key outside the allowlist")
+    image = body.get("image")
+    if not isinstance(image, str) or not IMAGE_ID_RE.fullmatch(image) or image != images.get(service):
+        add("isolated-image", f"{base}.image", "image is not the topology's image ID")
+    volumes = body.get("volumes", [])
+    if not isinstance(volumes, list):
+        add("isolated-mount", f"{base}.volumes", "not a list")
+        volumes = []
+    for index, mount in enumerate(volumes):
+        if not isinstance(mount, dict) or mount.get("type") == "bind" or "docker.sock" in str(mount.get("source")) \
+                or service != "db" or len(volumes) != 1 or not _db_volume_ok(mount):
+            add("isolated-mount", f"{base}.volumes[{index}]", "only db mounts postgres_data at " + DB_VOLUME_TARGET)
+    if service == "db" and not volumes:
+        add("isolated-mount", f"{base}.volumes", "db must mount postgres_data")
+    environment = body.get("environment")
+    expected_keys = SERVICE_ENVIRONMENT[service]
+    values = expectation.values
+    if service == "db":
+        expected = {key: values[key] for key in expected_keys}
+    elif service == "backend":
+        expected = {"DATABASE_URL": expectation.database_url, "SITE_TIMEZONE": values["SITE_TIMEZONE"]}
+    else:
+        expected = {"BACKEND_PROXY_TARGET": BACKEND_PROXY_TARGET,
+                    "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS": values["PARTFLOW_ALLOWED_HOST"]}
+    if not isinstance(environment, dict) or environment != expected:
+        add("envelope-environment", f"{base}.environment", "environment differs from the topology values")
+    if body.get("labels") != label:
+        add("isolated-label", f"{base}.labels", "topology label missing or wrong")
+    if body.get("restart") != "no":
+        add("isolated-restart", f"{base}.restart", 'restart must be "no"')
+    logging = body.get("logging")
+    if not isinstance(logging, dict) or logging.get("driver") != "json-file":
+        add("envelope-service-option", f"{base}.logging", "logging driver must be json-file")
+    depends = body.get("depends_on", {})
+    if not isinstance(depends, dict) or any(
+            name not in SERVICES or name == service or not isinstance(condition, dict)
+            or set(condition) - DEPENDS_ON_KEYS or condition.get("condition") != "service_healthy"
+            for name, condition in depends.items()):
+        add("envelope-service-option", f"{base}.depends_on", "dependency must be a healthy topology service")
+    if body.get("networks") not in ({"default": None}, {"default": {}}):
+        add("isolated-network", f"{base}.networks", "service must join only the default network")
+    for key in ("command", "entrypoint"):
+        if body.get(key) is not None:
+            add("envelope-service-option", f"{base}.{key}", key + " overrides are not part of the topology")
+    if not isinstance(body.get("healthcheck"), dict):
+        add("envelope-service-option", f"{base}.healthcheck", "healthcheck must be an object")
+
+
+ISOLATION_CONTAINER_FIELDS = (
+    '{"id":{{json .Id}},"labels":{{json .Config.Labels}},"image":{{json .Image}},"mounts":{{json .Mounts}},'
+    '"port_bindings":{{json .HostConfig.PortBindings}},"ports":{{json .NetworkSettings.Ports}},'
+    '"restart":{{json .HostConfig.RestartPolicy.Name}},"networks":{{json .NetworkSettings.Networks}},'
+    '"running":{{json .State.Running}}}'
+)
+ISOLATION_NETWORK_FIELDS = ('{"id":{{json .Id}},"name":{{json .Name}},"driver":{{json .Driver}},'
+                            '"internal":{{json .Internal}},"labels":{{json .Labels}}}')
+ISOLATION_KEYS = {"container": ("id", "labels", "image", "mounts", "port_bindings", "ports", "restart", "networks",
+                                "running"),
+                  "network": ("id", "name", "driver", "internal", "labels")}
+
+
+def parse_isolation_lines(text, *, kind):
+    """Strict parse of ``inspect --format ISOLATION_<KIND>_FIELDS`` output (one JSON object per line, exact keys)."""
+    keys = ISOLATION_KEYS[kind]
+    result = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        where = f"{kind}[{number}]"
+        item = strict_json(line, code="inventory-invalid", path=where)
+        if not isinstance(item, dict) or set(item) != set(keys):
+            raise DockerScopeError("inventory-invalid", [Finding("inventory-invalid", where, "unexpected fields")])
+        item["labels"] = _labels(item["labels"], where=where)
+        result.append(item)
+    return result
+
+
+def _host_bindings(value):
+    """Every host binding of a PortBindings / NetworkSettings.Ports map ({port: [{"HostIp", "HostPort"}] | null})."""
+    found = []
+    if not value:
+        return found
+    if not isinstance(value, dict):
+        return [("?", "malformed")]
+    for port, bindings in sorted(value.items()):
+        for binding in bindings or ():
+            host = binding.get("HostIp", "") if isinstance(binding, dict) else "?"
+            found.append((str(port), str(host) or "0.0.0.0"))
+    return found
+
+
+def isolation_findings(containers, network, *, project, topology_uuid):
+    """Section 2.5 ``isolation:*`` from the daemon's answers (pure): {check: failure detail} (empty when isolated).
+    Any host binding counts: a binding to 127.0.0.1 or ::1 fails like any other ("loopback alone is not isolation")."""
+    failures = {}
+    names = topology_names(project)
+    network_name = names["network"]["default"]
+    services = {}
+    for item in containers:
+        services[item["labels"].get(COMPOSE_SERVICE_LABEL)] = item
+    if network is None or network.get("name") != network_name or network.get("internal") is not True \
+            or network.get("driver") != "bridge" or network.get("labels", {}).get(INSTANCE_LABEL) != topology_uuid:
+        failures["isolation:network"] = (f"network {network_name} is not an internal bridge network labelled for "
+                                         f"topology {topology_uuid[:8]}")
+    else:
+        for item in containers:
+            if set((item.get("networks") or {})) != {network_name}:
+                failures["isolation:network"] = f"container {item['id'][:12]} is not attached to exactly {network_name}"
+                break
+    missing = [service for service in SERVICES if service not in services]
+    if missing:
+        failures.setdefault("isolation:network", "service(s) " + ", ".join(missing) + " not running in the topology")
+    for item in containers:
+        bindings = _host_bindings(item.get("port_bindings")) + _host_bindings(item.get("ports"))
+        if bindings:
+            port, host = bindings[0]
+            failures["isolation:listener"] = f"container {item['id'][:12]} publishes {port} on host address {host}"
+            break
+    for item in containers:
+        service = item["labels"].get(COMPOSE_SERVICE_LABEL)
+        mounts = item.get("mounts") or []
+        if any(isinstance(mount, dict) and mount.get("Type") == "bind" for mount in mounts):
+            failures["isolation:mounts"] = f"container {item['id'][:12]} has a bind mount"
+            break
+        if service == "db":
+            ok = len(mounts) == 1 and isinstance(mounts[0], dict) and mounts[0].get("Type") == "volume" \
+                and mounts[0].get("Name") == names["volume"]["postgres_data"] \
+                and mounts[0].get("Destination") == DB_VOLUME_TARGET
+        else:
+            ok = not mounts
+        if not ok:
+            failures["isolation:mounts"] = f"container {item['id'][:12]} ({service}) has unexpected mounts"
+            break
+    for item in containers:
+        if item.get("restart") != "no":
+            failures["isolation:restart"] = f"container {item['id'][:12]} restart policy {item.get('restart')!r}"
+            break
+    return failures
 
 
 # ----------------------------------------------------------------------- inventory
@@ -833,21 +1093,37 @@ def _candidate(item):
     return entry
 
 
-def plan_deletion(inventory, *, kind, operation_id, daemon, recovery_id=None, covered_image_refs=None):
-    """The closed deletion plan of ``kind`` built from one inventory. Blockers refuse."""
+def plan_deletion(inventory, *, kind, operation_id, daemon, recovery_id=None, covered_image_refs=None, select=None):
+    """The closed deletion plan of ``kind`` built from one inventory. Blockers refuse. PF-A3.3: ``isolated-topology``
+    (an inventory scoped to a topology project and UUID) plans its containers, network and volume and never an image;
+    ``image-tags`` plans only the owned instance image tags in ``select`` ({("image", reference)})."""
     if inventory.blockers:
         _raise("resource-blocked", [Finding(item.cls, f"{item.kind}:{item.key}", item.reason)
                                     for item in inventory.blockers])
     if kind not in PLAN_KINDS:
         _raise("plan-invalid", [Finding("plan-invalid", "$.kind", "unknown plan kind")])
+    owned_images = [item for item in inventory.owned if item.kind == "image"]
+    if kind == "image-tags":
+        selected = set(select or ())
+        candidates = [_candidate(item) for item in owned_images if (item.kind, item.key) in selected]
+        return {
+            "schema_version": PLAN_SCHEMA_VERSION, "kind": kind, "operation_id": operation_id,
+            "instance_id": inventory.instance_id, "slug": None, "compose_project": inventory.project,
+            "daemon": _daemon_entry(daemon), "created": _utc(), "label_key": INSTANCE_LABEL, "recovery_id": None,
+            "image_coverage": "none", "order": list(DELETION_ORDER), "candidates": candidates, "pending_images": [],
+            "exclusions": [], "bind_paths": [],
+        }
     candidates = [_candidate(item) for item in inventory.owned if item.kind == "container"]
     candidates += [_candidate(item) for item in inventory.owned if item.kind == "network"]
     candidates += [_candidate(item) for item in inventory.owned
                    if item.kind == "volume" and item.key == topology_names(inventory.project)["volume"]["postgres_data"]]
     exclusions = [item.as_entry() for item in inventory.excluded]
     pending = []
-    owned_images = [item for item in inventory.owned if item.kind == "image"]
-    if kind == "abort-deploy":
+    if kind == "isolated-topology":
+        # The topology's images carry the instance label, never the topology UUID: they are never candidates.
+        coverage = "none"
+        exclusions = [entry for entry in exclusions if entry["kind"] != "image"]
+    elif kind == "abort-deploy":
         coverage = "none"
         exclusions += [{"kind": "image", "key": item.key, "class": "retained", "reason": "abort-retains-images"}
                        for item in owned_images]
@@ -942,7 +1218,7 @@ def load_plan(data, *, expected_sha256, instance_id, kind, operation_id):
         refuse("plan kind is not " + kind)
     if plan.get("operation_id") != operation_id:
         refuse("operation differs from the journal reference")
-    expected_coverage = "bound" if kind == "purge" else "none"
+    expected_coverage = "bound" if kind == "purge" else "none"  # abort-deploy, isolated-topology, image-tags
     if plan.get("image_coverage") != expected_coverage:
         refuse("image coverage is not " + expected_coverage)
     candidates = plan.get("candidates")

@@ -1,4 +1,4 @@
-# Lifecycle record examples (PF-A3.1, PF-A3.2)
+# Lifecycle record examples (PF-A3.1, PF-A3.2, PF-A3.3)
 
 These files are the executable acceptance corpus of `contracts/lifecycle-records.schema.json`
 (A3-T01). They are not host state, they are not shipped in a control release, and nothing reads
@@ -27,6 +27,14 @@ operation consumes (`env_file_sha256` of its `frozen-config.json` record) and `b
 the snapshot record (which embeds `created_at` and `operation_id`) and never the hash of the editable `.env`.
 `example-app.env` holds the synthetic rendered bytes every PF-A3.2 example plan references (no real secret).
 
+PF-A3.3 (SPEC section 2.4, amendments AM-11..AM-18, `schema_version` still 1): two operation kinds
+(`restore-side-by-side`, `cleanup`) with their phases and per-kind effect types (AM-15), the `preserving` phase of
+`abort-deploy` (AM-18: its capture follows a writer stop and names the bundle in `preservation_refs`), the
+`functional_recovery_verified` record rules for a purge bundle (AM-13: every functional check present, isolation and
+health checks run, `not_run` only with `unavailable:`/`excluded:`), and two new records: `runner_acknowledgement`
+(the attended acknowledgement of runner records in a directory without a journal) and `generation_seal` (a retired
+workspace generation). New retained-artifact kinds: `isolated-topology`, `recovery-target`, `generation-seal`.
+
 Legacy rows also carry `bundle_kind`, `payload_sizes` (the verified payload sizes the reader
 passes to the migration) and `migrated` (the expected migrated manifest). The test reads the input
 bytes, migrates them with `pf_config.migrate_legacy_manifest` (legacy hash = SHA-256 of the input
@@ -42,7 +50,14 @@ then checked as a `recovery_manifest` row of its own.
 | `purge-bundle.json` | Valid purge bundle: two stores in one writers-stopped group, row counts, db image archived. |
 | `deployment-record.json` | Valid DeploymentRecord of an update. |
 | `verification-record.json` | Valid `data_restore_verified` record (rows `not_run`: writers were running). |
-| `verification-functional-schema-valid.json` | Valid by schema; no PF-A3.1 writer produces `functional_recovery_verified` (SC-6). |
+| `verification-functional-schema-valid.json` | Valid by schema: a checkpoint's functional record (the AM-13 functional rules bind purge bundles only). |
+| `verification-record-functional.json` | Valid PF-A3.3 `functional_recovery_verified` record of a purge bundle: every functional check, one `topology:` check, the topology removed. |
+| `verification-record-functional-unavailable-app-check.json` | Valid: `app-invariants` `not_run` with `unavailable:` (an image without the reconcile command). |
+| `verification-record-functional-legacy.json` | Valid: a legacy bundle (`config:bundle` and `deployment:record` `not_run` with `unavailable:`/`excluded:`). |
+| `operation-plan-restore-side-by-side.json` | Valid side-by-side recovery target: input bundle, topology effects, workspace untouched. |
+| `operation-plan-cleanup.json`, `operation-journal-cleanup-deleting.json` | Valid cleanup (no input bundle, cleanup effect types only) interrupted in `deleting`. |
+| `operation-plan-abort-deploy-preserving.json` | Valid abort-deploy after the frontend opened: writer stop and `checkpoint:before-abort` before the deletion. |
+| `runner-acknowledgement.json`, `generation-seal.json` | Valid PF-A3.3 records. |
 | `operation-plan.json`, `operation-journal.json` | Valid OperationPlan/OperationJournal of an update without a schema change (rewritten to the PF-A3.2 amended shape: effect phases, `supersedes`, `admin_config`, `workspace`, `input_bundle`, `deletion`; exact command lines in `recovery_route`/`legal_next`). |
 | `operation-plan-update.json`, `operation-journal-update-migrating.json` | Valid update with a rehearsal; the live migration is `unknown` after an interrupt (pre-heads recorded as evidence). |
 | `operation-plan-purge.json`, `operation-journal-purge-deleting.json` | Valid purge: no deletion hash in the plan; the binding deletion plan and backup/admin-config choices in `journal.deletion`. |

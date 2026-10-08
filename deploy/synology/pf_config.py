@@ -1449,8 +1449,10 @@ _PLATFORM_RE = re.compile(r"[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9]+)?\Z")
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 LIFECYCLE_RECORDS = ("operation_plan", "operation_journal", "deployment_record", "recovery_manifest",
-                     "verification_record")
-OPERATION_KINDS = ("deploy", "update", "backup", "rollback", "reset-db", "purge", "restore-instance", "abort-deploy")
+                     "verification_record", "runner_acknowledgement", "generation_seal")
+# PF-A3.3 AM-11: the side-by-side recovery and the cleanup are journaled operations of their own.
+OPERATION_KINDS = ("deploy", "update", "backup", "rollback", "reset-db", "purge", "restore-instance", "abort-deploy",
+                   "restore-side-by-side", "cleanup")
 JOURNAL_PHASE_NAMES = ("planned", "preparing", "initializing", "activating", "preserving", "migrating",
                        "syncing-workspace", "workspace_sync_pending", "capturing", "verifying", "preserving-current",
                        "restoring-candidate", "switching", "deleting", "finalizing", "preparing-target",
@@ -1476,7 +1478,12 @@ JOURNAL_PHASES = {
                         "finalizing"}) | TERMINAL_PHASES,
     "restore-instance": frozenset({"planned", "preparing-target", "restoring-data", "activating",
                                    "syncing-workspace", "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
-    "abort-deploy": frozenset({"planned", "deleting", "finalizing"}) | TERMINAL_PHASES,
+    # PF-A3.3 AM-18: preserve-then-abort after the frontend opened.
+    "abort-deploy": frozenset({"planned", "preserving", "deleting", "finalizing"}) | TERMINAL_PHASES,
+    # PF-A3.3 AM-11.
+    "restore-side-by-side": frozenset({"planned", "preparing-target", "restoring-data", "activating", "verifying",
+                                       "finalizing"}) | TERMINAL_PHASES,
+    "cleanup": frozenset({"planned", "capturing", "deleting", "finalizing"}) | TERMINAL_PHASES,
 }
 # PF-A3.2 (SPEC section 2.4, normative): the order of the non-terminal phases of each kind; terminal phases follow any
 # phase. Effect phases of a plan are non-decreasing in this order (AM-1).
@@ -1492,20 +1499,47 @@ PHASE_ORDER = {
     "purge": ("planned", "preparing", "preserving", "capturing", "verifying", "deleting", "finalizing"),
     "restore-instance": ("planned", "preparing-target", "restoring-data", "activating", "syncing-workspace",
                          "workspace_sync_pending", "finalizing"),
-    "abort-deploy": ("planned", "deleting", "finalizing"),
+    "abort-deploy": ("planned", "preserving", "deleting", "finalizing"),
+    "restore-side-by-side": ("planned", "preparing-target", "restoring-data", "activating", "verifying", "finalizing"),
+    "cleanup": ("planned", "capturing", "deleting", "finalizing"),
 }
 # AM-1: the phase of an effect is a non-terminal phase with a live effect (never planned, never the pending state).
 EFFECT_PHASES = tuple(name for name in JOURNAL_PHASE_NAMES
                       if name not in TERMINAL_PHASES and name not in ("planned", "workspace_sync_pending"))
 WORKSPACE_MODES = ("switch", "keep", "pending", "record-current", "untouched")
 GENERATION_PATTERN = "^wsg-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
-WORKSPACE_UNTOUCHED_KINDS = ("backup", "reset-db", "purge", "abort-deploy")
+WORKSPACE_UNTOUCHED_KINDS = ("backup", "reset-db", "purge", "abort-deploy", "restore-side-by-side", "cleanup")
 EVIDENCE_LIMIT = 2000
+# PF-A3.3 AM-15: the closed effect vocabulary of the two new kinds.
+KIND_EFFECT_TYPES = {"cleanup": ("database-drop", "resource-delete", "capture", "file-write"),
+                     "restore-side-by-side": ("image-load", "database-restore", "service-change", "verification")}
+# PF-A3.3 (SPEC section 2.5, AM-13): the functional verification checks besides the per-store data checks. An entry
+# ending in ":" matches exactly one check by prefix (topology:<project>).
+FUNCTIONAL_CHECKS = ("topology:", "isolation:network", "isolation:listener", "isolation:mounts", "isolation:restart",
+                     "images:archive", "images:running", "source:archive", "workspace:archive", "history:archive",
+                     "state:files", "config:bundle", "deployment:record", "health:backend", "health:frontend",
+                     "heads:runtime", "app-invariants")
+FUNCTIONAL_MUST_PASS = ("topology:", "isolation:network", "isolation:listener", "isolation:mounts",
+                        "isolation:restart", "images:running", "health:backend", "health:frontend", "heads:runtime")
+FUNCTIONAL_EXCLUDABLE = ("config:bundle", "deployment:record", "workspace:archive", "history:archive", "state:files")
+# PF-A3.3 section 3.9: the candidate databases a cleanup may drop (a name a closed operation recorded).
+CLEANUP_CANDIDATE_RE = re.compile(r"pf_(?:verify|migrate|restore|clean)_[0-9a-f]{20}\Z")
+VERIFY_PROJECT_PATTERN = "^pfverify-[0-9a-f]{12}$"
+RECOVER_PROJECT_PATTERN = "^pfrecover-[0-9a-f]{12}$"
+# PF-A3.3 section 3.3: the application invariant command and its capability probe (identical argv everywhere).
+RECONCILE_ARGV = ("uv", "run", "--no-sync", "python", "-m", "app.cli", "reconcile", "--max-findings", "1")
+RECONCILE_PROBE_CODE = ("import importlib.util,sys; sys.exit(0 if importlib.util.find_spec("
+                        "'app.application.reconciliation') else 3)")
+RECONCILE_PROBE_ARGV = ("uv", "run", "--no-sync", "python", "-c", RECONCILE_PROBE_CODE)
+RECONCILE_CHECK_IDS = tuple("abcdefghij")
 EFFECT_TYPES = ("source-stage", "source-switch", "image-build", "image-tag", "image-load", "service-change",
                 "database-create", "database-migrate", "database-restore", "database-switch", "database-drop",
                 "database-alter", "resource-delete", "artifact-seal", "capture", "verification", "file-write")
+# PF-A3.3 (additive, recorded as a deviation): the preserve-then-abort capture of section 3.7a.
 MANIFEST_REASONS = ("scheduled-or-manual-backup", "emergency-manual", "before-update", "before-rollback",
-                    "before-reset", "before-purge", "legacy")
+                    "before-reset", "before-purge", "legacy", "before-abort")
+# Rule 5: the reasons of an emergency preservation (PF-A3.3: reset-db and abort-deploy preserve like a rollback).
+EMERGENCY_REASONS = ("emergency-manual", "before-rollback", "before-reset", "before-abort")
 CAPTURE_CLASSES = ("healthy_checkpoint", "emergency_preservation", "partial")
 SOURCE_ORIGINS = ("deployment-artifact", "protected-store", "workspace-proven", "workspace-unverified",
                   "legacy-claim", "none")
@@ -1583,14 +1617,18 @@ _L_WORKSPACE_PLAN = _record({"mode": {"enum": list(WORKSPACE_MODES)}, "generatio
 # Embedded copy of contracts/lifecycle-records.schema.json (section 2.4); a test asserts the two stay equal.
 LIFECYCLE_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "Deployment Admin lifecycle records v1 (PF-A3.1, PF-A3.2 amendments AM-1..AM-10)",
+    "title": "Deployment Admin lifecycle records v1 (PF-A3.1, PF-A3.2 amendments AM-1..AM-10, PF-A3.3 amendments "
+             "AM-11..AM-18)",
     "description": (
         "Frozen wire schemas of the lifecycle records: $defs.operation_plan and $defs.operation_journal (v1 with the "
-        "PF-A3.2 amendments AM-1..AM-10; written as <private_state>/operations/<operation-id>/plan.json and "
+        "PF-A3.2 amendments AM-1..AM-10 and the PF-A3.3 amendments AM-11..AM-18; written as "
+        "<private_state>/operations/<operation-id>/plan.json and "
         "journal.json; frozen_config is the SHA-256 and length of the rendered app.env bytes the operation consumes), "
         "$defs.deployment_record (<private_state>/artifacts/deployments/<id>/"
-        "deployment-record.json), $defs.recovery_manifest (manifest.json of a checkpoint or purge bundle) and "
-        "$defs.verification_record (<private_state>/artifacts/verifications/<bundle-id>/<verification-id>.json). "
+        "deployment-record.json), $defs.recovery_manifest (manifest.json of a checkpoint or purge bundle), "
+        "$defs.verification_record (<private_state>/artifacts/verifications/<bundle-id>/<verification-id>.json), "
+        "$defs.runner_acknowledgement (<private_state>/operations/<operation-id>/acknowledgement-<sha12>.json, AM-16) "
+        "and $defs.generation_seal (<backups>/generations/<project>/<generation-id>/seal.json, AM-17). "
         "Strict UTF-8 JSON written as exactly pf_instance.normalize_json(value) (sorted keys, no whitespace, no "
         "trailing newline); duplicate keys, non-finite numbers and unknown keys are rejected; booleans are not "
         "integers. Normative markers: a nullable value, an array item rule and a map value rule are written as the "
@@ -1651,7 +1689,8 @@ LIFECYCLE_SCHEMA = {
                              "method": {"enum": ["typed-phrase", "policy-grant"]}}),
         "retained_artifact": _record({"kind": {"enum": ["checkpoint", "purge-bundle", "deployment", "database",
                                                         "image-tag", "staging", "workspace-generation",
-                                                        "bundle-attempt", "checkpoint-history"]},
+                                                        "bundle-attempt", "checkpoint-history", "isolated-topology",
+                                                        "recovery-target", "generation-seal"]},
                                       "name": _l_str(None, 1, 300), "sha256": _l_null("sha256")}),
         "policy_ref": _record({"revision": _l_int(1), "sha256": _l_str(_L_SHA)}),
         "config_ref": _record({"sha256": _l_str(_L_SHA), "bytes": _l_int()}),
@@ -1782,6 +1821,20 @@ LIFECYCLE_SCHEMA = {
             "environment": _record({"server_version_num": _l_null("scalar"), "engine_id": _l_str(None, 1, 256),
                                     "compose_version": _l_null("string")}),
             "operation_id": _l_str(_L_OPERATION), "started_at": _l_str(_L_STAMP), "finished_at": _l_str(_L_STAMP)}),
+        # PF-A3.3 AM-16: the attended acknowledgement of the runner records of a no-journal operation directory.
+        "runner_acknowledgement": _record({
+            "schema_version": {"const": 1}, "operation_id": _l_str(_L_OPERATION), "records_sha256": _l_str(_L_SHA),
+            "record_count": _l_int(1), "observations": _l_items("string"), "acknowledged_at": _l_str(_L_STAMP),
+            "release_id": _l_str(None, 1, 128), "attempt_pid": _l_int(1)}),
+        # PF-A3.3 AM-17: the seal of a retained workspace generation before its retirement.
+        "generation_seal": _record({
+            "schema_version": {"const": 1}, "generation_id": _l_str(GENERATION_PATTERN),
+            "instance_id": _l_str(_UUID), "retained_by_operation": _l_null("$defs.operation_id"),
+            "sealed_by_operation": _l_str(_L_OPERATION), "entries_sha256": _l_str(_L_SHA),
+            "archive": _record({"path": {"const": "workspace.tar.gz"}, "size": _l_int(1), "sha256": _l_str(_L_SHA),
+                                "members": _l_int(), "expanded_bytes": _l_int(), "members_sha256": _l_str(_L_SHA)}),
+            "handles": _record({"checked_at": _l_str(_L_STAMP), "result": {"const": "none-open"}}),
+            "sealed_at": _l_str(_L_STAMP)}),
     },
 }
 
@@ -2000,7 +2053,7 @@ def _manifest_problems(m):
             add("emergency_preservation: only a checkpoint (rule 5)")
         if any(store["list"] is None for store in stores):
             add("emergency_preservation: every store needs a dump and a list (rule 5)")
-        if not is_legacy and reason not in ("emergency-manual", "before-rollback"):
+        if not is_legacy and reason not in EMERGENCY_REASONS:
             add("emergency_preservation: reason must be emergency-manual or before-rollback (rule 5)")
     # Rule 6: partial.
     if cls == "partial":
@@ -2150,20 +2203,26 @@ def _verification_problems(record):
     level = record["level"]
     if level == "captured" and target["kind"] != "none":
         add("captured: target kind none")
-    if level == "data_restore_verified":
+    # PF-A3.3 AM-13: a functional record of a purge bundle is derived from recorded evidence (the per-store data rules
+    # and every FUNCTIONAL_CHECKS entry). A checkpoint is never functionally verified (OD-A33-22); the reserved A3.1
+    # corpus example of that shape keeps its expectation (SA3-3).
+    functional = level == "functional_recovery_verified" and record["bundle_kind"] == "purge-bundle"
+    if level == "data_restore_verified" or functional:
         if target["kind"] != "isolated-database" or not target["names"]:
-            add("data_restore_verified: an isolated-database target with at least one name")
+            add(f"{level}: an isolated-database target with at least one name")
         stores = [name[len("restore:"):] for name in names if name.startswith("restore:")]
         if not stores:
-            add("data_restore_verified: at least one restore:<store_id> check")
+            add(f"{level}: at least one restore:<store_id> check")
         by_name = {check["name"]: check for check in checks}
         for store in stores:
             for prefix in ("restore", "heads", "locale", "rows"):
                 check = by_name.get(f"{prefix}:{store}")
                 if check is None:
-                    add(f"data_restore_verified: check {prefix}:{store} is missing")
+                    add(f"{level}: check {prefix}:{store} is missing")
                 elif prefix in ("restore", "heads") and check["result"] == "not_run":
-                    add(f"data_restore_verified: check {prefix}:{store} must run")
+                    add(f"{level}: check {prefix}:{store} must run")
+    if functional:
+        problems += _functional_problems(checks)
     passed = all(check["result"] in ("passed", "not_run") for check in checks) \
         and any(check["result"] == "passed" for check in checks)
     if (record["result"] == "passed") != passed:
@@ -2173,6 +2232,61 @@ def _verification_problems(record):
         add("environment.server_version_num: not a non-negative integer")
     if record["finished_at"] < record["started_at"]:
         add("finished_at precedes started_at")
+    return problems
+
+
+def _functional_problems(checks):
+    """AM-13: every FUNCTIONAL_CHECKS entry present (``topology:`` exactly once, by prefix); only the excludable
+    payload checks and the application invariants may be not_run, each with its reason prefix."""
+    problems = []
+    add = problems.append
+    by_name = {check["name"]: check for check in checks}
+    for entry in FUNCTIONAL_CHECKS:
+        if entry.endswith(":"):
+            matched = [name for name in by_name if name.startswith(entry) and len(name) > len(entry)]
+            if len(matched) != 1:
+                add(f"functional_recovery_verified: exactly one {entry}<project> check is required")
+            continue
+        if entry not in by_name:
+            add(f"functional_recovery_verified: check {entry} is missing")
+    for name, check in by_name.items():
+        if check["result"] != "not_run":
+            continue
+        detail = check["detail"]
+        if name == "app-invariants":
+            if not detail.startswith("unavailable:"):
+                add("functional_recovery_verified: app-invariants may be not_run only as unavailable:")
+        elif name in FUNCTIONAL_EXCLUDABLE:
+            if not detail.startswith(("unavailable:", "excluded:")):
+                add(f"functional_recovery_verified: {name} may be not_run only as unavailable: or excluded:")
+        elif name.startswith("topology:") or name in FUNCTIONAL_CHECKS:
+            add(f"functional_recovery_verified: check {name} must run")
+    return problems
+
+
+def _acknowledgement_problems(record):
+    """AM-16 (the record_count consumer check needs the records bytes and runs where they are read)."""
+    problems = []
+    if not record["observations"] and record["record_count"] < 1:
+        problems.append("record_count: at least one record")
+    if len(record["observations"]) > 64:
+        problems.append("observations: more than 64 entries")
+    for index, item in enumerate(record["observations"]):
+        if not isinstance(item, str) or len(item) > 300 or _CONTROL_RE.search(item):
+            problems.append(f"observations[{index}]: more than 300 characters or a control character")
+    return problems
+
+
+def _seal_problems(record):
+    """AM-17 (the entries digest is a consumer check against the sealed tree)."""
+    problems = []
+    archive = record["archive"]
+    if archive["members"] < 0 or archive["expanded_bytes"] < 0:
+        problems.append("archive: negative counts")
+    if record["retained_by_operation"] is not None and record["retained_by_operation"] == record["sealed_by_operation"]:
+        problems.append("retained_by_operation: the sealing operation never retained the generation")
+    if record["sealed_at"] < record["handles"]["checked_at"]:
+        problems.append("sealed_at precedes handles.checked_at")
     return problems
 
 
@@ -2236,9 +2350,35 @@ def _plan_problems(plan):
         add("supersedes: required for abort-deploy (it supersedes the incomplete deploy)")
     if supersedes is not None and supersedes == plan["operation_id"]:
         add("supersedes: an operation cannot supersede itself")
-    # AM-5
-    if (kind in ("rollback", "restore-instance")) != (plan["input_bundle"] is not None):
+    # AM-5, extended by AM-11 for the two PF-A3.3 kinds.
+    if kind == "restore-side-by-side":
+        if plan["input_bundle"] is None:
+            add("input_bundle: required for restore-side-by-side (AM-11)")
+    elif kind == "cleanup":
+        if plan["input_bundle"] is not None:
+            add("input_bundle: null for cleanup (AM-11)")
+    elif (kind in ("rollback", "restore-instance")) != (plan["input_bundle"] is not None):
         add("input_bundle: set exactly for rollback and restore-instance")
+    # AM-15: the closed per-kind effect vocabulary of the PF-A3.3 kinds.
+    allowed = KIND_EFFECT_TYPES.get(kind)
+    if allowed is not None:
+        for effect in effects:
+            if effect["type"] not in allowed:
+                add(f"effects.{effect['effect_id']}.type: {effect['type']} is not an effect of {kind} (AM-15)")
+    # AM-18: preserve-then-abort captures only after its stop, and the capture's bundle is a preservation reference.
+    if kind == "abort-deploy":
+        stopped = False
+        for effect in effects:
+            if effect["type"] == "service-change" and effect["target"].startswith("services:stop:"):
+                stopped = True
+            if effect["type"] == "capture":
+                if not stopped:
+                    add(f"effects.{effect['effect_id']}: an abort-deploy capture needs a preceding stop effect (AM-18)")
+                bundle = next((item[len("bundle:"):] for item in effect["preconditions"]
+                               if item.startswith("bundle:")), None)
+                if bundle is None or bundle not in effect["preservation_refs"]:
+                    add(f"effects.{effect['effect_id']}: the abort-deploy capture's preservation_refs name its "
+                        "bundle (AM-18)")
     # AM-4: the workspace decision.
     workspace = plan["workspace"]
     mode, generation, container, reason = (workspace["mode"], workspace["generation_id"], workspace["container"],
@@ -2323,7 +2463,8 @@ def _journal_problems(journal, plan=None):
 
 _LIFECYCLE_RULES = {"recovery_manifest": _manifest_problems, "deployment_record": _deployment_problems,
                     "verification_record": _verification_problems, "operation_plan": _plan_problems,
-                    "operation_journal": _journal_problems}
+                    "operation_journal": _journal_problems, "runner_acknowledgement": _acknowledgement_problems,
+                    "generation_seal": _seal_problems}
 
 
 def lifecycle_problems(value, name, *, plan=None):
@@ -2353,8 +2494,9 @@ EMERGENCY_KINDS = ("deploy", "update", "rollback", "reset-db")
 # DISPATCH fail_closed column per operation kind (pf-admin.py DISPATCH; section 3.9): the route that creates the kind.
 KIND_FAIL_CLOSED = {"deploy": "always", "update": "always", "rollback": "always", "reset-db": "always",
                     "abort-deploy": "always", "restore-instance": "unless-side-by-side", "purge": "never",
-                    "backup": "never"}
-ROUTE_COMMANDS = {"backup emergency": "backup --emergency"}
+                    "backup": "never", "restore-side-by-side": "never", "cleanup": "never"}
+ROUTE_COMMANDS = {"backup emergency": "backup --emergency", "cleanup report": "cleanup",
+                  "cleanup apply": "cleanup --apply", "resume acknowledge": "resume --acknowledge"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2369,6 +2511,10 @@ class OperationEntry:
     journal: object = None
     error: object = None
     superseded_by: object = None
+    # PF-A3.3 (section 3.10): the SHA-256 of the directory's unresolved-effects.json bytes (None when absent) and the
+    # records hashes its valid runner_acknowledgement files bind.
+    records_sha256: object = None
+    acknowledged: frozenset = frozenset()
 
     @property
     def kind(self):
@@ -2430,6 +2576,11 @@ def effect_role(effect):
     if target.startswith("workspace:") or (kind == "file-write" and target == "source-manifest"
                                            and effect["phase"] == "syncing-workspace"):
         return "workspace"
+    # PF-A3.3: the effects of an isolated topology (side-by-side) and the registry state write (OD-A33-08).
+    if target.startswith("topology:"):
+        return "topology"
+    if kind == "file-write" and target.startswith("registry:"):
+        return "registry"
     if (kind == "source-stage" and target.startswith("deployment:")) or (
             kind == "file-write" and target == "source-manifest"):
         return "staging"
@@ -2480,7 +2631,10 @@ def _validated(files, validate):
                 plan = pf_instance.parse_strict_json(files.plan_bytes, label="plan.json")
             except pf_instance.ContextError:
                 plan = None
-        return OperationEntry(operation_id, "no-journal", plan=plan if isinstance(plan, dict) else None)
+        records = getattr(files, "records_sha256", None)
+        return OperationEntry(operation_id, "no-journal", plan=plan if isinstance(plan, dict) else None,
+                              records_sha256=records,
+                              acknowledged=_acknowledged(files, validate) if records is not None else frozenset())
     if files.plan_bytes is None:
         return OperationEntry(operation_id, "invalid", error="journal.json without plan.json")
     records = {}
@@ -2507,6 +2661,26 @@ def _validated(files, validate):
     closed = journal["phase"] in CLOSED_PHASES
     return OperationEntry(operation_id, "closed" if closed else "blocking", plan=plan, plan_sha256=plan_sha256,
                           journal=journal)
+
+
+def _acknowledged(files, validate):
+    """Section 3.10: the records hashes the directory's valid acknowledgement files bind (schema, file name, operation
+    and, for the current records, the record count)."""
+    found = set()
+    for name, data in getattr(files, "acknowledgements", ()) or ():
+        try:
+            value = pf_instance.parse_strict_json(data, label=name)
+        except pf_instance.ContextError:
+            continue
+        if not isinstance(value, dict) or data != pf_instance.normalize_json(value) \
+                or validate(value, "runner_acknowledgement"):
+            continue
+        if value["operation_id"] != files.operation_id or name != f"acknowledgement-{value['records_sha256'][:12]}.json":
+            continue
+        if value["records_sha256"] == files.records_sha256 and value["record_count"] != files.records_count:
+            continue
+        found.add(value["records_sha256"])
+    return frozenset(found)
 
 
 def _default_validate(value, name, *, plan=None):
@@ -2617,7 +2791,12 @@ def superseded_and_closed(index, entry):
 
 def runner_records_state(entry, index):
     """Section 3.11a: ("open", None) or ("reconciled", sequence) for the runner records of one operation directory.
-    A superseded operation is reconciled by the closing sequence of the last operation of its supersession chain."""
+    A superseded operation is reconciled by the closing sequence of the last operation of its supersession chain.
+    PF-A3.3 (section 3.10): ("acknowledged", sha12) for a no-journal directory whose current records bytes an attended
+    acknowledgement binds; records appended later change the hash and are open again."""
+    if entry is not None and entry.cls == "no-journal" and entry.records_sha256 is not None \
+            and entry.records_sha256 in entry.acknowledged:
+        return "acknowledged", entry.records_sha256[:12]
     if entry is None or entry.cls in ("blocking", "invalid", "no-journal"):
         return "open", None
     if entry.cls == "closed":
@@ -2641,10 +2820,18 @@ def _capture_bundle(plan, reason):
     return None
 
 
+def retained_checkpoint(journal):
+    """PF-A3.3 (section 3.7): the checkpoint a capture of this journal actually sealed (its retained ``checkpoint``
+    artifact; a preserve_current fallback ID differs from the plan's pre-assigned one), or None."""
+    found = [item["name"] for item in journal["retained_artifacts"] if item["kind"] == "checkpoint"]
+    return found[-1] if found else None
+
+
 def rollback_target(plan, journal):
     """The healthy checkpoint a superseding ``rollback --restore-db`` names for a blocking update/rollback/reset-db:
     the operation's own completed before-update/before-reset capture, the rollback's selected checkpoint, else a
-    placeholder."""
+    placeholder. PF-A3.3: the retained checkpoint artifact first (the actual ID); an emergency before-reset is never a
+    rollback target, so a reset whose capture fell back to emergency preservation names the placeholder."""
     if plan["kind"] == "rollback" and plan["input_bundle"] is not None:
         return plan["input_bundle"]["bundle_id"]
     reason = {"update": "before-update", "reset-db": "before-reset"}.get(plan["kind"])
@@ -2652,8 +2839,17 @@ def rollback_target(plan, journal):
         for effect in plan["effects"]:
             if effect["type"] == "capture" and effect["target"] == "checkpoint:" + reason \
                     and effect_state(journal, effect["effect_id"]) == "complete":
-                return _capture_bundle(plan, reason)
+                if plan["kind"] == "reset-db" and "emergency" in str(_effect_evidence(journal, effect["effect_id"])):
+                    return "<checkpoint>"
+                return retained_checkpoint(journal) or _capture_bundle(plan, reason)
     return "<checkpoint>"
+
+
+def _effect_evidence(journal, effect_id):
+    for effect in journal["effects"]:
+        if effect["effect_id"] == effect_id:
+            return effect["evidence"]
+    return None
 
 
 def _stop_started(plan, journal):
@@ -2664,6 +2860,42 @@ def _stop_started(plan, journal):
 def _frontend_started(plan, journal):
     return any(effect_role(effect) == "frontend" and effect_state(journal, effect["effect_id"]) != "not_started"
                for effect in plan["effects"])
+
+
+def _pointer_started(plan, journal):
+    """The deployment pointer effect started: a first deployment is then recorded and no longer abortable."""
+    return any(effect_role(effect) == "pointer" and effect_state(journal, effect["effect_id"]) != "not_started"
+               for effect in plan["effects"])
+
+
+def cleanup_selector_words(plan):
+    """PF-A3.3 (section 3.11): the explicit selectors a cleanup plan was approved with, as command-line words, derived
+    from its effect targets (generation seals, history removals, recovery-target deletion plans)."""
+    selectors = cleanup_selectors(plan)
+    words = ""
+    for gen in selectors["generations"]:
+        words += " --generation " + gen
+    for name in selectors["histories"]:
+        words += " --checkpoint-history " + name
+    for project in selectors["targets"]:
+        words += " --recovery-target " + project
+    return words
+
+
+def cleanup_selectors(plan):
+    """{"generations", "histories", "targets"} (sorted tuples) of a cleanup plan's explicit selectors."""
+    generations, histories, targets = set(), set(), set()
+    for effect in plan["effects"]:
+        target = effect["target"]
+        if effect["type"] == "capture" and target.startswith("generation:"):
+            generations.add(target.split(":", 1)[1])
+        elif effect["type"] == "file-write" and target.startswith("remove:checkpoint-history:"):
+            histories.add(target.split(":", 2)[2])
+        elif effect["type"] == "resource-delete" and target.startswith("deletion-plan:") \
+                and _match(RECOVER_PROJECT_PATTERN, target.split(":", 1)[1]):
+            targets.add(target.split(":", 1)[1])
+    return {"generations": tuple(sorted(generations)), "histories": tuple(sorted(histories)),
+            "targets": tuple(sorted(targets))}
 
 
 def operation_routes(plan, journal, *, slug):
@@ -2692,9 +2924,12 @@ def operation_routes(plan, journal, *, slug):
             "close": "close the operation (nothing outside its private files was changed)",
         }.get(decision.action, "continue the recorded operation")))
         if decision.abandon_legal:
-            routes.append(("resume abandon", resume + " --abandon",
-                           "cancel the operation (" + ("remove what this restore created" if kind == "restore-instance"
-                                                       else "close it without a further effect") + ")"))
+            what = {"restore-instance": "remove what this restore created",
+                    "restore-side-by-side": "remove the recovery target it created",
+                    "cleanup": "close it, keeping every item not yet removed",
+                    "abort-deploy": "close it; the incomplete deploy is blocking again"}.get(
+                kind, "close it without a further effect")
+            routes.append(("resume abandon", resume + " --abandon", "cancel the operation (" + what + ")"))
         if decision.keep_legal:
             routes.append(("resume keep-workspace", resume + " --keep-workspace",
                            "keep the current workspace; the application stays activated and recorded"))
@@ -2702,9 +2937,25 @@ def operation_routes(plan, journal, *, slug):
         routes.append(("rollback", f"{prefix} rollback {rollback_target(plan, journal)} --restore-db",
                        "roll back to a healthy checkpoint, restoring its database (the current data is preserved "
                        "first)"))
-    if kind == "deploy" and not _frontend_started(plan, journal):
+    if kind == "reset-db":
+        switch = [effect for effect in plan["effects"] if effect["type"] == "database-switch"]
+        capture = [effect for effect in plan["effects"] if effect["type"] == "capture"]
+        if switch and capture and effect_state(journal, switch[0]["effect_id"]) != "not_started" \
+                and "emergency" in str(_effect_evidence(journal, capture[0]["effect_id"])):
+            retained = switch[0]["target"].split(":")[3]
+            routes.append(("manual", f"restore the retained database {retained} manually",
+                           "the before-reset capture is emergency preservation, never a rollback target "
+                           "(SYNOLOGY_ADMIN §11)"))
+    if kind == "deploy" and not _pointer_started(plan, journal):
         routes.append(("abort-deploy", f"{prefix} abort-deploy",
-                       "remove the incomplete first deployment before frontend access opened"))
+                       "remove the incomplete first deployment (after frontend access opened, the current database is "
+                       "preserved first)"))
+    if kind == "restore-side-by-side" and plan["input_bundle"] is not None:
+        routes.append(("restore-instance", f"{prefix} restore-instance {plan['input_bundle']['bundle_id']} "
+                       "--side-by-side", "resume the side-by-side recovery of the same bundle (aliases pf resume)"))
+    if kind == "cleanup":
+        routes.append(("cleanup", f"{prefix} cleanup --apply" + cleanup_selector_words(plan),
+                       "resume the interrupted cleanup (pf cleanup --apply with the same selectors aliases pf resume)"))
     if kind in EMERGENCY_KINDS:
         routes.append(("backup emergency", f"{prefix} backup --emergency",
                        "capture the current data as emergency preservation (does not change this operation)"))
@@ -2752,8 +3003,19 @@ def resume_decision(plan, journal, observation=None):
     if roles <= {"staging"}:
         return ResumeDecision("close", "cancelled", True, False, "only private effects started")
     restore_back = "withdraw" if superseding else "reopen"
-    if kind == "deploy" or kind == "abort-deploy":
+    if kind == "abort-deploy":
+        # AM-18: abandon is legal while every deleting effect is not_started (the preservation only).
+        deleting = any(effect["phase"] in ("deleting", "finalizing") for effect in reached)
+        return ResumeDecision("forward", "completed", not deleting, False,
+                              "frozen deletion" if deleting else "preserve-then-abort")
+    if kind == "deploy":
         return ResumeDecision("forward", "completed", False, False, "forward")
+    if kind == "restore-side-by-side":
+        # Section 3.6: the live instance is never touched; --abandon (final teardown) is legal in every phase.
+        return ResumeDecision("forward", "completed", True, False, "recovery target")
+    if kind == "cleanup":
+        # Section 3.12: forward continues the frozen list; --abandon is legal before and after the deletions.
+        return ResumeDecision("forward", "completed", True, False, "frozen cleanup list")
     if kind == "backup":
         return ResumeDecision("forward", "completed", True, False, "new attempt or verification")
     if kind == "purge":
@@ -2821,6 +3083,10 @@ def gate_decision(index, route, *, slug, request=None, private_state="<private_s
     request = request or {}
     prefix = _prefix(slug)
     wanted = request.get("operation")
+    if route == "cleanup report":
+        # PF-A3.3 section 3.11: the observe-only report runs next to any operation (it lists nothing else when the
+        # index is overflowing or invalid; the handler prints the diagnostic line).
+        return GateDecision("observe")
     if index.overflow:
         return GateDecision("refuse", code="operation-index-overflow", message=(
             f"operation-index-overflow: {private_state}/operations holds more than {OPERATION_SCAN_LIMIT} entries, so "
@@ -2847,6 +3113,14 @@ def gate_decision(index, route, *, slug, request=None, private_state="<private_s
             f"operation-conflict: {len(listed)} operations of instance {slug} are open ({'; '.join(listed)}); every "
             f"mutating route is refused until an administrator reviews them with '{prefix} status --operation "
             f"{first}'. Nothing was changed."))
+    if route == "resume acknowledge":
+        # PF-A3.3 section 3.10: observe-only next to any operation, except the A3.2 workspace-interval row; the gate
+        # never re-enters the acknowledged directory.
+        for item in index.blocking:
+            if item.cls == "blocking" and in_workspace_switch(item.plan, item.journal):
+                return GateDecision("refuse", entry=item, code="operation-open", message=operation_open_message(
+                    item, route, slug))
+        return GateDecision("observe")
     if index.permissions is not None:
         if route == "permissions apply":
             return GateDecision("new")
@@ -2909,7 +3183,8 @@ def gate_decision(index, route, *, slug, request=None, private_state="<private_s
     if route == "rollback" and kind in ("update", "rollback", "reset-db") \
             and (_stop_started(plan, journal) or phase == "needs_operator"):
         return GateDecision("supersede", entry=entry)
-    if route == "abort-deploy" and kind == "deploy" and not _frontend_started(plan, journal):
+    if route == "abort-deploy" and kind == "deploy" and not _pointer_started(plan, journal):
+        # PF-A3.3 section 3.7a: after the frontend opened the abort preserves the current database first.
         return GateDecision("supersede", entry=entry)
     if route == "abort-deploy" and kind == "abort-deploy" and phase != "needs_operator":
         return GateDecision("reenter", entry=entry, alias=route)
@@ -2934,6 +3209,24 @@ def gate_decision(index, route, *, slug, request=None, private_state="<private_s
                 f"purge operation {entry.operation_id} was approved with {recorded}. Run '{prefix} resume --operation "
                 f"{entry.operation_id}' or finish it first. Nothing was changed."))
         return GateDecision("reenter", entry=entry, alias=route)
+    if route == "restore-instance" and kind == "restore-side-by-side" and request.get("side_by_side"):
+        recorded = plan["input_bundle"]["bundle_id"]
+        if request.get("bundle_id") == recorded:
+            return GateDecision("reenter", entry=entry, alias=route)
+        asked = request.get("bundle_id") or "an interactively chosen bundle"
+        return GateDecision("refuse", entry=entry, code="plan-inputs-conflict", message=(
+            f"plan-inputs-conflict: 'restore-instance {asked} --side-by-side' asks for {asked}, but the open "
+            f"restore-side-by-side operation {entry.operation_id} was approved with {recorded}. Run '{prefix} resume "
+            f"--operation {entry.operation_id}' or finish it first. Nothing was changed."))
+    if route == "cleanup apply" and kind == "cleanup":
+        recorded = cleanup_selectors(plan)
+        asked = {key: tuple(sorted(request.get(key) or ())) for key in ("generations", "histories", "targets")}
+        if asked == recorded:
+            return GateDecision("reenter", entry=entry, alias=route)
+        return GateDecision("refuse", entry=entry, code="plan-inputs-conflict", message=(
+            f"plan-inputs-conflict: 'cleanup --apply' asks for other selectors than the open cleanup operation "
+            f"{entry.operation_id} was approved with ('{prefix} cleanup --apply{cleanup_selector_words(plan)}'). Run "
+            f"'{prefix} resume --operation {entry.operation_id}' or finish it first. Nothing was changed."))
     if route == "restore-instance" and kind == "restore-instance":
         recorded = plan["input_bundle"]["bundle_id"]
         if request.get("bundle_id") == recorded and not request.get("side_by_side"):
@@ -2968,6 +3261,297 @@ def workspace_reconcile(evidence, observed):
     if w is not None and new is not None and w == new and cg == old and s is None:
         return "bind-done"
     return "foreign"
+
+
+# ------------------------------------------------------------ integrated operations (PF-A3.3, pure)
+# The application-invariant oracle (section 3.3), the capacity model (section 3.8), the instance purge coverage
+# (section 3.4 gate step 5) and the cleanup candidate discovery (section 3.9). No clock, daemon or filesystem.
+
+RECONCILE_RESULT_EXIT = {"clean": 0, "mismatch": 1, "error": 2}
+RECONCILE_SUMMARY_LIMIT = 500
+
+
+@dataclasses.dataclass(frozen=True)
+class ReconcileResult:
+    """One ``app.cli reconcile`` run (section 3.3): ``outcome`` clean | mismatch | error | incomplete | unavailable;
+    ``summary`` the identity-only check summary (never findings, PNs, entity IDs or output text)."""
+
+    outcome: str
+    exit_code: object
+    summary: str
+
+
+def _reconcile_object(pairs):
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError("duplicate key")
+        seen[key] = value
+    return seen
+
+
+def _reject_constant(name):
+    raise ValueError("non-finite number " + name)
+
+
+def parse_reconcile_report(stdout, exit_code, *, truncated=False):
+    """Section 3.3 (pure): exactly one strict JSON report object consistent with the exit code, else ``incomplete``
+    ("could not run", RUNBOOK §7). The summary is ``result=<result>;<id>:<status>:<count>,...`` in check order."""
+    incomplete = ReconcileResult("incomplete", exit_code, "")
+    if truncated or not isinstance(stdout, str) or not stdout.strip():
+        return incomplete
+    try:
+        value = json.loads(stdout, object_pairs_hook=_reconcile_object, parse_constant=_reject_constant)
+    except ValueError:
+        return incomplete
+    if not isinstance(value, dict) or value.get("report_version") != 1 or value.get("command") != "reconcile":
+        return incomplete
+    result, code = value.get("result"), value.get("exit_code")
+    if type(code) is not int or code != exit_code or result not in RECONCILE_RESULT_EXIT \
+            or RECONCILE_RESULT_EXIT[result] != exit_code:
+        return incomplete
+    checks = value.get("checks")
+    if not isinstance(checks, list):
+        return incomplete
+    parts, seen = [], set()
+    for check in checks:
+        if not isinstance(check, dict):
+            return incomplete
+        check_id, status, count = check.get("id"), check.get("status"), check.get("finding_count")
+        if check_id not in RECONCILE_CHECK_IDS or check_id in seen or not isinstance(status, str) \
+                or not re.fullmatch(r"[a-z_-]{1,32}", status) or type(count) is not int or count < 0:
+            return incomplete
+        seen.add(check_id)
+        parts.append(f"{check_id}:{status}:{count}")
+    summary = (f"result={result};" + ",".join(parts))[:RECONCILE_SUMMARY_LIMIT]
+    return ReconcileResult(result, exit_code, summary)
+
+
+APP_CHECK_UNAVAILABLE = ("unavailable: the application image predates app.cli reconcile (P16-S1); r3 read-backs only "
+                         "(heads, row counts, health)")
+
+
+def app_invariants_check(source, restored, *, mode, recorded_summary=None):
+    """The ``app-invariants`` check dict of section 2.5 (pure). ``mode``: purge (equality oracle of the quiesced source
+    and the restored copy) or side-by-side (no live source: clean, or a mismatch equal to the bundle's recorded purge
+    oracle summary ``recorded_summary``). ``source``/``restored``: ReconcileResult."""
+    def check(result, detail):
+        return {"name": "app-invariants", "result": result, "detail": detail[:500]}
+
+    if restored.outcome == "unavailable" and (mode != "purge" or source.outcome == "unavailable"):
+        return check("not_run", APP_CHECK_UNAVAILABLE)
+    if mode == "purge" and (source.outcome == "unavailable") != (restored.outcome == "unavailable"):
+        return check("failed", "the source and restored capability probes disagree for the same image IDs")
+    if mode == "purge":
+        if source.outcome in ("clean", "mismatch") and restored.outcome in ("clean", "mismatch") \
+                and source.summary == restored.summary:
+            return check("passed", "source and restored equal: " + restored.summary)
+        return check("failed", f"source {source.outcome} ({source.summary or '-'}) vs restored {restored.outcome} "
+                               f"({restored.summary or '-'})")
+    if restored.outcome == "clean":
+        return check("passed", "clean: " + restored.summary)
+    if restored.outcome == "mismatch" and recorded_summary is not None and restored.summary == recorded_summary:
+        return check("passed", "mismatch equal to the bundle's verification: " + restored.summary)
+    return check("failed", f"restored {restored.outcome} ({restored.summary or '-'})")
+
+
+@dataclasses.dataclass(frozen=True)
+class Shortfall:
+    """One device that cannot hold the phase's needs plus the safety floor (section 3.8)."""
+
+    phase: str
+    device: int
+    roles: tuple
+    paths: tuple
+    need: int
+    free: int
+    floor: int
+
+
+def restored_estimate(*, dump_bytes=None, live_bytes=None):
+    """Section 3.8: ``restored(dump)`` = max(4 x dump, dump + 256 MiB); ``restored(live)`` = 2 x pg_database_size."""
+    if dump_bytes is not None:
+        return max(4 * int(dump_bytes), int(dump_bytes) + 256 * 1024 * 1024)
+    return 2 * int(live_bytes or 0)
+
+
+def capacity_shortfalls(needs, frees, floor_bytes, *, phase=None):
+    """Section 3.8 (pure). ``needs``: [(phase, role, path, st_dev, bytes)]; ``frees``: {st_dev: free bytes}. Needs on
+    one device are summed across roles (all phases, or ``phase`` only); the floor is added once per device. Returns
+    [Shortfall] for every device whose need + floor exceeds its free bytes, in device order."""
+    grouped = {}
+    for item_phase, role, path, device, size in needs:
+        if phase is not None and item_phase != phase:
+            continue
+        entry = grouped.setdefault(device, {"need": 0, "roles": [], "paths": [], "phases": []})
+        entry["need"] += int(size)
+        if role not in entry["roles"]:
+            entry["roles"].append(role)
+        if str(path) not in entry["paths"]:
+            entry["paths"].append(str(path))
+        if item_phase not in entry["phases"]:
+            entry["phases"].append(item_phase)
+    shortfalls = []
+    for device in sorted(grouped):
+        entry = grouped[device]
+        free = int(frees[device])
+        if entry["need"] + int(floor_bytes) > free:
+            shortfalls.append(Shortfall(phase or "/".join(entry["phases"]), device, tuple(entry["roles"]),
+                                        tuple(entry["paths"]), entry["need"], free, int(floor_bytes)))
+    return shortfalls
+
+
+def purge_coverage(manifest, binding, rows):
+    """Section 3.4 gate step 5 (pure): [(item, reason)] of what the final bundle does not cover; [] when covered.
+    Every database of the db service is a captured postgresql-logical store; the only deletable persistent store is
+    ``<project>_postgres_data``; no candidate is external or shared; bind paths are recorded exclusions."""
+    problems = []
+    stores = {store["database"]: store for store in manifest["stores"]}
+    for name in sorted(rows):
+        store = stores.get(name)
+        if store is None:
+            problems.append((f"database {name}", "not a store of the final bundle"))
+        elif store["kind"] != "postgresql_logical" or store["strategy"].get("id") != "postgresql-logical":
+            problems.append((f"database {name}", "not captured with the postgresql-logical strategy"))
+    project = binding["compose_project"]
+    volumes = [item["key"] for item in binding["candidates"] if item["kind"] == "volume"]
+    if any(volume != project + "_postgres_data" for volume in volumes):
+        problems.append(("volumes", "a deletion candidate other than " + project + "_postgres_data"))
+    for item in binding["candidates"]:
+        if item["kind"] in ("volume", "network") and set(item.get("users") or ()) - {
+                entry["key"] for entry in binding["candidates"] if entry["kind"] == "container"}:
+            problems.append((f"{item['kind']} {item['key']}", "shared with a container outside the plan"))
+        if item["kind"] == "volume" and (item["identity"].get("driver") not in (None, "local")
+                                         or item["identity"].get("scope") not in (None, "local")):
+            problems.append((f"volume {item['key']}", "external or non-local"))
+    excluded = {entry["item"]: entry["reason"] for entry in manifest["exclusions"]}
+    for path in binding.get("bind_paths") or ():
+        if "bind-mounts" not in excluded or path not in excluded["bind-mounts"]:
+            problems.append((f"bind {path}", "not recorded as a bind-retained exclusion of the final bundle"))
+    return problems
+
+
+@dataclasses.dataclass(frozen=True)
+class CleanupItem:
+    """One cleanup candidate (section 3.9): ``cls`` candidate-database | isolated-topology | bundle-attempt |
+    workspace-stage | generation | checkpoint-history | recovery-target | report-only; ``identity`` the recorded identity
+    the effect re-observes (database name, project/UUID, folder dev:ino, ...)."""
+
+    cls: str
+    name: str
+    operation_id: str
+    identity: object = None
+    detail: str = ""
+
+
+def operation_closed(index, entry):
+    """Section 3.9: closed, or superseded with a closed, non-cancelled final superseder. Blocking, invalid,
+    needs_operator and pair entries are never closed."""
+    if entry.cls == "closed":
+        return True
+    return entry.cls == "superseded" and superseded_and_closed(index, entry)
+
+
+def _recorded_names(plan, journal):
+    texts = []
+    for effect in plan["effects"]:
+        texts.append(effect["target"])
+        texts += effect["preconditions"]
+    texts += [item["evidence"] or "" for item in journal["effects"]]
+    found = []
+    for text in texts:
+        for name in re.findall(r"pf_(?:verify|migrate|restore|clean)_[0-9a-f]{20}", text):
+            if name not in found:
+                found.append(name)
+    return found
+
+
+def cleanup_candidates(index, observations):
+    """Section 3.9 candidate discovery (pure). ``observations``: {"databases": set of names, "current_database",
+    "topologies": {project: uuid with resources observed}, "attempts": {bundle_id: "sealed" | "unsealed" | None},
+    "stages": set of generation ids with a stage, "generations": set, "workspace_generation": id or None,
+    "histories": {name: "duplicated" | "unique" | None}, "pf_recovery": set, "pf_keep": set,
+    "unsealed_active_staging": dep or None, "abandoned_tags": [(tag, operation_id)]}. Returns [CleanupItem]; a prefix is
+    never authority (only names a closed operation recorded)."""
+    items = []
+    databases = set(observations.get("databases") or ())
+    current = observations.get("current_database")
+    open_names, pending_switch = set(), set()
+    for entry in index.entries:
+        if entry.plan is None or entry.journal is None:
+            continue
+        if not operation_closed(index, entry):
+            open_names.update(_recorded_names(entry.plan, entry.journal))
+        for effect in entry.plan["effects"]:
+            if effect["type"] == "database-switch" and effect_state(entry.journal, effect["effect_id"]) != "complete":
+                pending_switch.add(effect["target"].split(":")[2])
+    seen = set()
+    topologies = observations.get("topologies") or {}
+    for entry in index.entries:
+        if entry.plan is None or entry.journal is None or not operation_closed(index, entry):
+            continue
+        plan, journal, op = entry.plan, entry.journal, entry.operation_id
+        for name in _recorded_names(plan, journal):
+            if name in databases and name != current and name not in open_names and name not in pending_switch \
+                    and ("db", name) not in seen:
+                seen.add(("db", name))
+                items.append(CleanupItem("candidate-database", name, op, name))
+        projects = {}
+        for effect in plan["effects"]:
+            project = next((item.split(":", 1)[1] for item in effect["preconditions"]
+                            if item.startswith("topology:")), None)
+            uuid_value = next((item.split(":", 1)[1] for item in effect["preconditions"]
+                               if item.startswith("topology-uuid:")), None)
+            if project and uuid_value:
+                projects[project] = uuid_value
+        retained = {item["name"] for item in journal["retained_artifacts"] if item["kind"] == "isolated-topology"}
+        for project, uuid_value in sorted(projects.items()):
+            recover = _match(RECOVER_PROJECT_PATTERN, project)
+            if topologies.get(project) != uuid_value or ("topology", project) in seen:
+                continue
+            if recover and plan["kind"] == "restore-side-by-side" \
+                    and journal["phase"] in ("completed", "failed_preserved"):
+                seen.add(("topology", project))
+                items.append(CleanupItem("recovery-target", project, op, uuid_value))
+            elif not recover and (plan["kind"] == "purge" or project in retained):
+                seen.add(("topology", project))
+                items.append(CleanupItem("isolated-topology", project, op, uuid_value))
+        attempts = observations.get("attempts") or {}
+        for artifact in journal["retained_artifacts"]:
+            if artifact["kind"] == "bundle-attempt" and ("attempt", artifact["name"]) not in seen:
+                state = attempts.get(artifact["name"])
+                if state is None:
+                    continue
+                seen.add(("attempt", artifact["name"]))
+                items.append(CleanupItem("bundle-attempt" if state == "unsealed" else "report-only",
+                                         artifact["name"], op, artifact["name"],
+                                         "" if state == "unsealed" else "bundle-attempt-sealed"))
+            if artifact["kind"] == "workspace-generation" and artifact["name"] in (observations.get("generations")
+                                                                                   or ()) \
+                    and artifact["name"] != observations.get("workspace_generation") \
+                    and ("generation", artifact["name"]) not in seen:
+                seen.add(("generation", artifact["name"]))
+                items.append(CleanupItem("generation", artifact["name"], op, artifact["name"]))
+            if artifact["kind"] == "checkpoint-history" and plan["kind"] == "restore-instance" \
+                    and ("history", artifact["name"]) not in seen \
+                    and (observations.get("histories") or {}).get(artifact["name"]) is not None:
+                seen.add(("history", artifact["name"]))
+                items.append(CleanupItem("checkpoint-history", artifact["name"], op, artifact["name"],
+                                         (observations.get("histories") or {})[artifact["name"]]))
+        generation = plan["workspace"]["generation_id"]
+        if generation and generation in (observations.get("stages") or ()) and ("stage", generation) not in seen:
+            seen.add(("stage", generation))
+            items.append(CleanupItem("workspace-stage", generation, op, generation))
+    for name in sorted(observations.get("pf_recovery") or ()):
+        items.append(CleanupItem("report-only", name, "", name, "legacy-recovery-database"))
+    for name in sorted(observations.get("pf_keep") or ()):
+        items.append(CleanupItem("report-only", name, "", name, "retained-database"))
+    if observations.get("unsealed_active_staging"):
+        items.append(CleanupItem("report-only", observations["unsealed_active_staging"], "", None,
+                                 "unsealed-active-staging"))
+    for tag, operation in observations.get("abandoned_tags") or ():
+        items.append(CleanupItem("report-only", tag, operation, tag, "abandoned-restore-tag"))
+    return items
 
 
 def load_frozen_app_config(operation_dir, expected_sha256, expected_bytes=None):

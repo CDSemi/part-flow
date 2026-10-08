@@ -148,6 +148,19 @@ def violation(state, text):
     return Result(70, "", "fake docker: test violation: " + text + "\n")
 
 
+ISOLATION_KEYS = ("port_bindings", "ports", "restart", "running", "env")
+
+
+def project_container(container, template):
+    """The fields one inspect template asks for: the PF-A1.3 inventory fields, or the PF-A3.3 isolation fields."""
+    if '"port_bindings":' in template:
+        return {"id": container["id"], "labels": container.get("labels"), "image": container.get("image", ""),
+                "mounts": container.get("mounts") or [], "port_bindings": container.get("port_bindings") or {},
+                "ports": container.get("ports") or {}, "restart": container.get("restart", "unless-stopped"),
+                "networks": container.get("networks") or {}, "running": container.get("status") == "running"}
+    return {key: value for key, value in container.items() if key != "status_only" and key not in ISOLATION_KEYS}
+
+
 def find_image(state, reference):
     for image in state.get("images", []):
         if reference in image["repo_tags"] or reference == image["id"]:
@@ -190,8 +203,7 @@ def dispatch(state, argv, env):
             found = [c for c in state.get("containers", []) if c["id"] == wanted]
             if not found:
                 return Result(1, "", f"Error: No such container: {wanted}\n")
-            data = {key: value for key, value in found[0].items() if key != "status_only"}
-            lines.append(json.dumps(data))
+            lines.append(json.dumps(project_container(found[0], template)))
         return Result(0, "\n".join(lines) + "\n")
     if verb in ("volume", "network") and argv[1:2] == ["ls"]:
         filters = label_filter(argv)
@@ -209,12 +221,19 @@ def dispatch(state, argv, env):
     if verb in ("volume", "network") and argv[1:2] == ["inspect"]:
         if "--format" not in argv:
             return violation(state, verb + " inspect without --format")
+        template = argv[argv.index("--format") + 1]
         lines = []
         for wanted in positional_after(argv, 2):
             found = [item for item in state.get(verb + "s", []) if item["name"] == wanted or item.get("id") == wanted]
             if len(found) != 1:
                 return Result(1, "", f"Error: No such {verb}: {wanted}\n")
-            lines.append(json.dumps(found[0]))
+            item = dict(found[0])
+            if '"internal":' in template:  # PF-A3.3 isolation observation of a network
+                item = {"id": item.get("id", ""), "name": item["name"], "driver": item.get("driver", "bridge"),
+                        "internal": bool(item.get("internal", False)), "labels": item.get("labels")}
+            else:
+                item.pop("internal", None)
+            lines.append(json.dumps(item))
         return Result(0, "\n".join(lines) + "\n")
     if verb in ("volume", "network") and argv[1:2] == ["rm"]:
         if any(word.startswith("-") for word in argv[2:]):
@@ -234,6 +253,9 @@ def dispatch(state, argv, env):
             items.remove(found[0])
             if verb == "volume" and "plane" in state and name == state["plane"].get("data_volume"):
                 state["plane"]["databases"] = {}  # the cluster's data lived in this volume
+            if verb == "volume" and name.endswith("_postgres_data") \
+                    and name[:-len("_postgres_data")] in (state.get("isolated") or {}):
+                state["isolated"][name[:-len("_postgres_data")]]["databases"] = {}
         return Result(0, "".join(word + "\n" for word in argv[2:]))
     if verb == "image" and argv[1:2] == ["ls"]:
         filters = label_filter(argv)
@@ -285,22 +307,16 @@ def dispatch(state, argv, env):
     if verb == "image" and argv[1:2] == ["save"]:
         output = argv[argv.index("-o") + 1]
         references = positional_after(argv, 2)
-        manifest = []
+        images = []
         for reference in references:
             image = find_image(state, reference)
             if image is None:
                 return Result(1, "", f"Error: No such image: {reference}\n")
-            manifest.append({"RepoTags": [reference], "Config": image["id"]})
-        data = json.dumps(manifest).encode("utf-8")
-        with tarfile.open(output, "w") as archive:
-            info = tarfile.TarInfo("manifest.json")
-            info.size = len(data)
-            archive.addfile(info, io.BytesIO(data))
+            images.append((reference, image))
+        write_image_archive(state, output, images)
         return Result(0)
     if verb == "image" and argv[1:2] == ["load"]:
-        if "plane" in state:
-            return plane_load(state, argv[argv.index("-i") + 1])
-        return Result(0, "Loaded image\n")
+        return plane_load(state, argv[argv.index("-i") + 1])
     if verb == "rm":
         if "-f" not in argv:
             return Result(64, "", "fake docker: rm without -f\n")
@@ -342,6 +358,9 @@ def compose(state, argv, env):
         index += 2
     rest = argv[index:]
     verb = rest[0] if rest else ""
+    if files and files[0].endswith("/compose.json"):
+        # PF-A3.3: an isolated topology executed from its validated model (no env-file, no instance value).
+        return topology_compose(state, verb, rest[1:], project=project, files=files, env=env)
     if "plane" in state and verb in ("stop", "up", "build", "run", "exec") or "plane" in state and verb == "ps" \
             and "-q" in rest:
         return plane_compose(state, verb, rest[1:], project=project, directory=directory, files=files, env=env)
@@ -376,6 +395,48 @@ def compose(state, argv, env):
             return Result(0, settings.get("psql", {}).get(statement, "") + "\n")
         return Result(0, settings.get("exec_output", ""))
     return Result(0)
+
+
+STDIN = None  # PF-A3.3: the in-process runner's stdin bytes (None: the process's own stdin)
+
+
+def read_stdin():
+    if STDIN is not None:
+        return STDIN
+    return sys.stdin.buffer.read()
+
+
+def invoke(argv, env, stdin=None):
+    """PF-A3.3: one invocation in-process (tests' InProcessRunner): the same dispatch, state, call log and hooks as
+    ``main`` without a process, a sleep or a block. Returns the Result."""
+    global STDIN
+    state = load_state()
+    calls_path = Path(STATE_DIR) / "calls.jsonl"
+    entry = {"argv": argv, "DOCKER_HOST": env.get("DOCKER_HOST"), "DOCKER_CONFIG": env.get("DOCKER_CONFIG"),
+             "has_DOCKER_CONTEXT": "DOCKER_CONTEXT" in env, "env_keys": sorted(env)}
+    if argv[:1] == ["compose"]:
+        entry["POSTGRES_DB"] = env.get("POSTGRES_DB")
+        entry["database_url_sha256"] = hashlib.sha256(env.get("PARTFLOW_DATABASE_URL", "").encode("utf-8")).hexdigest()
+    with calls_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry) + "\n")
+    number = sum(1 for _ in calls_path.open(encoding="utf-8"))
+    STDIN = stdin if stdin is not None else b""
+    try:
+        result = dispatch(state, argv, env)
+    finally:
+        STDIN = None
+    for hook in state.get("hooks", []):
+        prefix = hook.get("after_argv_prefix")
+        fired = hook.get("after_call_n") == number
+        if prefix is not None and argv[:len(prefix)] == prefix and not hook.get("fired"):
+            hook["seen"] = hook.get("seen", 0) + 1
+            fired = hook["seen"] == hook.get("nth", 1)
+        if fired:
+            hook["fired"] = True
+            for patch in hook["mutate"]:
+                apply_state_patch(state, patch)
+    save_state(state)
+    return result
 
 
 def main(argv):
@@ -446,13 +507,14 @@ def plane_containers(state, project, service):
 
 def plane_inspect(state, ids):
     """``docker inspect <id>`` (the controller's inspect()): Image, State and, for the db service only, Config.Env."""
-    plane = state["plane"]
     objects = []
     for wanted in ids:
         found = [item for item in state.get("containers", []) if item["id"] == wanted]
         if not found:
             return Result(1, "", f"Error: No such container: {wanted}\n")
         container = found[0]
+        project = (container.get("labels") or {}).get(PROJECT_LABEL)
+        plane = (state.get("isolated") or {}).get(project) or state.get("plane") or {}
         service = service_of(container)
         running = container.get("status") == "running"
         health = "healthy"
@@ -460,19 +522,234 @@ def plane_inspect(state, ids):
         if running and sequence:
             health = sequence.pop(0) if len(sequence) > 1 else sequence[0]
         objects.append({"Image": container["image"], "State": {"Running": running, "Health": {"Status": health}},
-                        "Config": {"Env": list(plane.get("db_env", [])) if service == "db" else []}})
+                        "Config": {"Env": list(container.get("env") or plane.get("db_env", []))
+                                   if service == "db" else []}})
     return Result(0, json.dumps(objects) + "\n")
+
+
+# ------------------------------------------------------------------------- PF-A3.3 isolated topologies
+
+TOPOLOGY_FAULTS = ("internal_false", "host_port", "loopback_port", "loopback6_port", "restart_always", "extra_mount",
+                   "config_mutation", "missing_frontend")
+
+
+def topology_plane(state, project):
+    """The isolated plane of ``project``; ``state["isolated_plane_defaults"]`` seeds a new one (e.g. a
+    ``restore_override`` applied to every database it restores: a FV-2 data-check fault)."""
+    if project not in state.setdefault("isolated", {}):
+        plane = {"databases": {}, "server_version_num": "160099", "health": {}}
+        plane.update(json.loads(json.dumps(state.get("isolated_plane_defaults") or {})))
+        state["isolated"][project] = plane
+    return state["isolated"][project]
+
+
+def topology_compose(state, verb, words, *, project, files, env):
+    """``compose -p <p> -f <dir>/compose.json --project-directory <dir> <verb>``: the model is read from the file the
+    controller wrote; containers, the volume and the internal network are created from it (with the configured
+    faults); the database programs run against the topology's own simulated server."""
+    model = json.loads(Path(files[0]).read_text(encoding="utf-8"))
+    plane = topology_plane(state, project)
+    faults = dict(state.get("isolated_faults") or {}, **(plane.get("faults") or {}))
+    if verb == "config":
+        if faults.get("config_mutation"):
+            model["services"]["frontend"]["environment"]["BACKEND_PROXY_TARGET"] = "http://mutated:8000"
+        return Result(0, json.dumps(model))
+    if verb == "ps":
+        services = [word for word in words if not word.startswith("-")]
+        ids = [item["id"] for item in state.get("containers", [])
+               if (item.get("labels") or {}).get(PROJECT_LABEL) == project
+               and (item.get("labels") or {}).get("com.docker.compose.oneoff", "False") == "False"
+               and (not services or service_of(item) in services)
+               and ("-a" in words or item.get("status") == "running")]
+        return Result(0, "".join(item + "\n" for item in ids))
+    if verb == "stop":
+        services = [word for word in words if not word.startswith("-")]
+        for item in state.get("containers", []):
+            if (item.get("labels") or {}).get(PROJECT_LABEL) == project and (not services or service_of(item)
+                                                                              in services):
+                item["status"] = "exited"
+        return Result(0)
+    if verb == "up":
+        service = words[-1]
+        if faults.get("missing_frontend") and service == "frontend":
+            return Result(0)
+        body = model["services"][service]
+        if find_image(state, body["image"]) is None:
+            return Result(1, "", f"Error: No such image: {body['image']}\n")
+        volume_name, network_name = project + "_postgres_data", project + "_default"
+        if not [item for item in state.setdefault("volumes", []) if item["name"] == volume_name]:
+            labels = dict(model["volumes"]["postgres_data"].get("labels") or {})
+            labels.update({PROJECT_LABEL: project, "com.docker.compose.volume": "postgres_data"})
+            state["volumes"].append({"name": volume_name, "driver": "local", "scope": "local",
+                                     "created_at": plane.get("volume_created_at", "2026-10-07T01:00:00Z"),
+                                     "mountpoint": "/var/lib/docker/volumes/" + volume_name + "/_data",
+                                     "labels": labels, "options": None})
+            plane["databases"] = {}
+        network = [item for item in state.setdefault("networks", []) if item["name"] == network_name]
+        if not network:
+            labels = dict(model["networks"]["default"].get("labels") or {})
+            labels.update({PROJECT_LABEL: project, "com.docker.compose.network": "default"})
+            network = [{"id": hashlib.sha256(network_name.encode()).hexdigest(), "name": network_name,
+                        "driver": "bridge", "scope": "local", "created": "2026-10-07T01:00:00.000000000Z",
+                        "labels": labels,
+                        "internal": bool(model["networks"]["default"].get("internal")) and not faults.get(
+                            "internal_false")}]
+            state["networks"].append(network[0])
+        found = [item for item in state.setdefault("containers", []) if service_of(item) == service
+                 and (item.get("labels") or {}).get(PROJECT_LABEL) == project]
+        if not found:
+            labels = dict(body.get("labels") or {})
+            labels.update({PROJECT_LABEL: project, SERVICE_LABEL: service, "com.docker.compose.oneoff": "False",
+                           "com.docker.compose.container-number": "1"})
+            mounts = []
+            if service == "db":
+                mounts.append({"Type": "volume", "Name": volume_name, "Source": "/var/lib/docker/volumes/"
+                               + volume_name + "/_data", "Destination": "/var/lib/postgresql/data", "RW": True})
+            if faults.get("extra_mount") and service == "backend":
+                mounts.append({"Type": "bind", "Source": "/srv/shared", "Destination": "/shared", "RW": True})
+            ports, bindings = {}, {}
+            if service == "frontend":
+                ports = {"5173/tcp": None}
+                for fault, host in (("host_port", "0.0.0.0"), ("loopback_port", "127.0.0.1"),
+                                    ("loopback6_port", "::1")):
+                    if faults.get(fault):
+                        ports = {"5173/tcp": [{"HostIp": host, "HostPort": "15173"}]}
+                        bindings = {"5173/tcp": [{"HostIp": host, "HostPort": "15173"}]}
+            container = {"id": hashlib.sha256((project + service).encode()).hexdigest(),
+                         "name": "/" + project + "-" + service + "-1", "labels": labels, "image": body["image"],
+                         "config_image": body["image"], "created": "2026-10-07T01:00:00Z", "status": "running",
+                         "mounts": mounts, "networks": {network_name: {"NetworkID": network[0]["id"]}},
+                         "port_bindings": bindings, "ports": ports,
+                         "restart": "always" if faults.get("restart_always") else body.get("restart", "no"),
+                         "env": [f"{key}={value}" for key, value in sorted((body.get("environment") or {}).items())
+                                 if key in ("POSTGRES_DB", "POSTGRES_USER")]}
+            state["containers"].append(container)
+            found = [container]
+        found[0]["status"] = "running"
+        if service == "db" and not plane.get("databases"):
+            environment = body.get("environment") or {}
+            plane["databases"] = {environment.get("POSTGRES_DB"): new_database(
+                plane, environment.get("POSTGRES_USER"))}
+        return Result(0)
+    if verb in ("exec", "run"):
+        return plane_compose(state, verb, words, project=project, directory=None, files=files, env=env, plane=plane)
+    return Result(0)
+
+
+RECONCILE_CHECKS = "abcdefghij"
+
+
+def reconcile_answer(state, project, command):
+    """The scripted ``app.cli reconcile`` of a project (``state["reconcile"][project or "*"]``: probe 0/3/other,
+    report clean | mismatch:<check>=<n> | error | garbage | absent); stdout carries synthetic findings (a PN and an
+    entity ID) and stderr a traceback line, which must never leave the controller's parser."""
+    script = dict((state.get("reconcile") or {}).get("*") or {}, **((state.get("reconcile") or {}).get(project) or {}))
+    if "-c" in command:
+        code = int(script.get("probe", 0))
+        return Result(code, "", "probe\n" if code else "")
+    report = script.get("report", "clean")
+    if report == "absent":
+        return Result(127, "", "No module named app.cli\n")
+    if report == "garbage":
+        return Result(0, "not json at all\n", "")
+    result, code, counts = "clean", 0, {}
+    if report.startswith("mismatch"):
+        result, code = "mismatch", 1
+        for part in report.split(":", 1)[1].split(","):
+            check, _, count = part.partition("=")
+            counts[check] = int(count)
+    elif report == "error":
+        result, code = "error", 2
+    document = {"report_version": 1, "command": "reconcile", "exit_code": code, "result": result,
+                "checks": [{"id": check, "status": "mismatch" if counts.get(check) else "ok",
+                            "finding_count": counts.get(check, 0), "duration_ms": 3} for check in RECONCILE_CHECKS],
+                "findings": [{"check": check, "part_number": "PN-SECRET-4711", "entity_id": "ENTITY-0042"}
+                             for check in counts]}
+    return Result(code, json.dumps(document) + "\n",
+                  "Traceback (most recent call last): reconcile PN-SECRET-4711\n" if code else "")
+
+
+def fake_config(name):
+    """(config bytes, layer bytes) of a synthetic image named ``name``: the config's SHA-256 is the image ID and its
+    rootfs.diff_ids name the layer's SHA-256 (PF-A3.3 image archive proofs). protected_fixture.image_id uses it."""
+    layer = ("fixture layer " + name + "\n").encode("utf-8")
+    config = json.dumps({"architecture": "amd64", "os": "linux", "config": {"Labels": {"pf.fixture": name}},
+                         "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(layer).hexdigest()]}},
+                        sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return config, layer
+
+
+def image_parts(state, image):
+    """(config bytes, layer bytes) of a state image: its own, the state's known configs, else a placeholder whose
+    hash is not the image ID (an archive proof of it fails)."""
+    if image.get("config") is not None:
+        return image["config"].encode("utf-8"), image.get("layer", "").encode("utf-8")
+    known = (state.get("image_configs") or {}).get(image["id"])
+    if known is not None:
+        return known[0].encode("utf-8"), known[1].encode("utf-8")
+    return fake_config("unknown " + image["id"])
+
+
+def write_image_archive(state, output, images):
+    """``docker image save``: an OCI-layout tar (blobs/sha256/<hex>, manifest.json) with real config and layer hashes
+    (``state["save_layout"] == "legacy"``: <hex>.json and <dir>/layer.tar)."""
+    legacy = state.get("save_layout") == "legacy"
+    entries, blobs = {}, {}
+    for reference, image in images:
+        config, layer = image_parts(state, image)
+        if "contract" in image:  # the image content travels with the archive (the backend contract files)
+            state.setdefault("saved_contracts", {})[image["id"]] = image["contract"]
+        config_hex, layer_hex = hashlib.sha256(config).hexdigest(), hashlib.sha256(layer).hexdigest()
+        config_name = config_hex + ".json" if legacy else "blobs/sha256/" + config_hex
+        layer_name = layer_hex + "/layer.tar" if legacy else "blobs/sha256/" + layer_hex
+        blobs[config_name], blobs[layer_name] = config, layer
+        entry = entries.setdefault(config_name, {"Config": config_name, "RepoTags": [], "Layers": [layer_name]})
+        if not reference.startswith("sha256:") and reference not in entry["RepoTags"]:
+            entry["RepoTags"].append(reference)
+    manifest = json.dumps(list(entries.values())).encode("utf-8")
+    with tarfile.open(output, "w") as archive:
+        directories = set()
+        for name, data in sorted(blobs.items()) + [("manifest.json", manifest)]:
+            parts = name.split("/")
+            for index in range(1, len(parts)):
+                directory = "/".join(parts[:index])
+                if directory not in directories:
+                    directories.add(directory)
+                    info = tarfile.TarInfo(directory)
+                    info.type = tarfile.DIRTYPE
+                    info.mode = 0o755
+                    archive.addfile(info)
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
 
 def plane_load(state, path):
     """``docker image load -i <tar>``: every manifest entry's image ID with its tags (an image save of this fake)."""
     import tarfile
-    with tarfile.open(path) as archive:
-        manifest = json.load(archive.extractfile("manifest.json"))
+    try:
+        with tarfile.open(path) as archive:
+            manifest = json.load(archive.extractfile("manifest.json"))
+            configs = {}
+            for entry in manifest:
+                configs[entry["Config"]] = archive.extractfile(entry["Config"]).read() \
+                    if entry["Config"] in archive.getnames() else None
+    except (tarfile.TarError, KeyError, ValueError, OSError) as exc:
+        if "plane" not in state and "isolated" not in state:
+            return Result(0, "Loaded image\n")  # the PF-A1.3 tests' placeholder archives
+        return Result(1, "", f"Error: unrecognized image archive ({exc})\n")
+    if state.get("load_fail"):
+        return Result(1, "", "Error: simulated load failure\n")
     for entry in manifest:
-        image = find_image(state, entry["Config"])
+        data = configs.get(entry["Config"])
+        image_id = "sha256:" + hashlib.sha256(data).hexdigest() if data is not None else entry["Config"]
+        image = find_image(state, image_id)
         if image is None:
-            image = {"id": entry["Config"], "repo_tags": [], "labels": entry.get("Labels") or {}}
+            image = {"id": image_id, "repo_tags": [], "labels": entry.get("Labels") or {}}
+            if data is not None:
+                image["config"] = data.decode("utf-8")
+            if image_id in state.get("saved_contracts", {}):
+                image["contract"] = state["saved_contracts"][image_id]
             state.setdefault("images", []).append(image)
         for tag in entry.get("RepoTags") or []:
             for other in state["images"]:
@@ -518,8 +795,8 @@ def new_database(plane, owner, locale=None):
             "locale": list(locale or plane.get("locale", ["UTF8", "C.UTF-8", "C.UTF-8"]))}
 
 
-def plane_compose(state, verb, words, *, project, directory, files, env):
-    plane = state["plane"]
+def plane_compose(state, verb, words, *, project, directory, files, env, plane=None):
+    plane = plane if plane is not None else state["plane"]
     if verb == "ps":
         services = [word for word in words if not word.startswith("-")]
         ids = [item["id"] for service in services for item in plane_containers(state, project, service)
@@ -556,8 +833,10 @@ def plane_compose(state, verb, words, *, project, directory, files, env):
         reference = override_images(files)[service]
         image = find_image(state, reference)
         if image is None:
-            image_id = "sha256:" + hashlib.sha256((reference + "\0" + str(directory)).encode("utf-8")).hexdigest()
-            image = {"id": image_id, "repo_tags": [reference], "labels": dict(plane.get("build_labels", {}))}
+            config, layer = fake_config(reference + "\0" + str(directory))
+            image_id = "sha256:" + hashlib.sha256(config).hexdigest()
+            image = {"id": image_id, "repo_tags": [reference], "labels": dict(plane.get("build_labels", {})),
+                     "config": config.decode("utf-8"), "layer": layer.decode("utf-8")}
             state.setdefault("images", []).append(image)
         if service == "backend":
             image["contract"] = contract_of(directory)
@@ -567,6 +846,8 @@ def plane_compose(state, verb, words, *, project, directory, files, env):
         while index < len(words) and words[index].startswith("-"):
             index += 2 if words[index] == "--label" else 1
         service, command = words[index], words[index + 1:]
+        if "app.cli" in command or ("-c" in command and "find_spec" in " ".join(command)):
+            return reconcile_answer(state, project, command)
         reference = override_images(files).get(service)
         if reference is not None:
             image = find_image(state, reference)
@@ -598,14 +879,14 @@ def plane_compose(state, verb, words, *, project, directory, files, env):
         statement = option("-c")
         if statement in settings:
             return Result(0, settings[statement] + "\n")
-        return plane_sql(state, option("-d"), statement)
+        return plane_sql(state, option("-d"), statement, plane=plane)
     if program == "pg_dump":
         database = databases.get(option("-d"))
         if database is None:
             return Result(1, "", "pg_dump: error: database does not exist\n")
         return Result(0, DUMP_MAGIC + json.dumps({"heads": database["heads"], "rows": database["rows"]}) + "\n")
     if program == "pg_restore":
-        data = sys.stdin.buffer.read().decode("utf-8", "replace")
+        data = read_stdin().decode("utf-8", "replace")
         if "--list" in arguments:
             return Result(0, "; fake archive list\n")
         database = databases.get(option("-d"))
@@ -616,6 +897,7 @@ def plane_compose(state, verb, words, *, project, directory, files, env):
         else:  # a dump this plane did not write (an in-process fixture's): the configured default model
             dump = plane.get("foreign_dump", {"heads": ["r1"], "rows": {}})
         database.update(heads=list(dump["heads"]), rows=dict(dump["rows"]))
+        database.update(json.loads(json.dumps(plane.get("restore_override") or {})))
         return Result(0)
     if program == "createdb":
         name = arguments[-1]
@@ -635,10 +917,13 @@ def plane_compose(state, verb, words, *, project, directory, files, env):
     return Result(0, state.get("compose", {}).get("exec_output", ""))
 
 
-def plane_sql(state, name, statement):
+def plane_sql(state, name, statement, plane=None):
     """One psql statement of the controller (the fixed set it issues) against the plane's databases."""
-    plane = state["plane"]
+    plane = plane if plane is not None else state["plane"]
     databases = plane["databases"]
+    if statement.startswith("SELECT datname, pg_database_size(datname)"):
+        return Result(0, "".join(f"{key}|{item.get('size', 8 * 1024 * 1024)}\n" for key, item in
+                                 sorted(databases.items())))
     if name != "postgres" and name not in databases:
         return Result(2, "", f'psql: error: FATAL:  database "{name}" does not exist\n')
     database = databases.get(name)

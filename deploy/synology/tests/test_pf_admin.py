@@ -1,5 +1,6 @@
 """Offline tests. Docker/PostgreSQL are simulated; archive and filesystem work is real."""
 import contextlib
+import dataclasses
 import grp
 import io
 import json
@@ -170,7 +171,10 @@ class FakeController(pf.Controller):
         # The daemon binding is exercised by test_docker_scope.py; here it is a verified fixture.
         return self._daemon
 
-    def docker_inventory(self):
+    def docker_inventory(self, *, scope=None):
+        if scope is not None:
+            # PF-A3.3: no isolated topology exists on this simulated plane (the stack double replaces it).
+            return fake_inventory(types.SimpleNamespace(compose_project=scope[0], instance_id=scope[1]), {})
         return fake_inventory(self.context, self.resources)
 
     def workspace_status(self, root=None):
@@ -300,6 +304,8 @@ class FakeController(pf.Controller):
             return "\n".join(self.dbs[database]["heads"])
         if "pg_stat_activity" in sql:
             return str(self.connected_sessions)
+        if sql.startswith("SELECT datname, pg_database_size(datname)"):
+            return "\n".join(f"{name}|1048576" for name in sorted(self.dbs))  # PF-A3.3 capacity estimates
         # PF-A3.1 section 3.8 read-only inventory statements and the journaled connection window.
         if sql == pf.FACTS_SQL:
             return "\n".join(f"{name}|partflow_staging|UTF8|en_US.utf8|en_US.utf8|"
@@ -461,6 +467,12 @@ class FakeController(pf.Controller):
         return self.target
 
 
+# PF-A3.3: this simulated plane has no isolated topology; the isolated verification stack is a documented test double
+# here (protected_fixture.isolated_stack_double). test_integrated.py runs the real stack on the fake daemon.
+for _patch in pfx.isolated_stack_double(FakeController):
+    _patch.start()
+
+
 class AdminTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -539,7 +551,9 @@ class AdminTests(unittest.TestCase):
         self.assertFalse(any(self.c.running.values()))
         self.assertTrue((self.c.config_dir / ".env").exists())
 
-    def test_abort_deploy_refuses_cleanup_after_frontend_may_have_opened(self):
+    def test_abort_deploy_after_frontend_may_have_opened_preserves_the_database_first(self):
+        # PF-A3.3 (section 3.7a; SPEC section 6.3 -> AD-1): after the frontend intent the abort is no longer refused;
+        # it stops the writers and preserves the current database (checkpoint:before-abort) before any deletion.
         write_deploy_env(self.root)
         (self.c.state / "deployed.json").unlink()
         plan = pfx.lifecycle_plan(self.context, "deploy")
@@ -547,13 +561,15 @@ class AdminTests(unittest.TestCase):
             plan, phase="activating", unresolved="e0005",
             states={"e0001": "complete", "e0002": "complete", "e0003": "complete", "e0004": "complete",
                     "e0005": "unknown"}))
-        before = pfx.operation_files(self.context, plan["operation_id"])
-        self.assertEqual(self.invoke(["abort-deploy"]), 1)
-        self.assertIn("operation-open: operation " + plan["operation_id"] + " (deploy, phase activating)",
-                      self.errors_text())
-        self.assertEqual(pfx.operation_files(self.context, plan["operation_id"]), before)
-        self.assertEqual(open_operations(self.c), [("deploy", "activating")])
-        self.assertIn("partflow_staging", self.c.dbs)
+        self.assertEqual(self.invoke(["abort-deploy"]), 0, self.errors_text())
+        op, abort_plan, journal = latest_operation(self.c, "abort-deploy")
+        self.assertEqual(journal["phase"], "completed")
+        self.assertEqual(abort_plan["supersedes"], plan["operation_id"])
+        self.assertEqual([(effect["phase"], effect["target"]) for effect in abort_plan["effects"][:3]],
+                         [("preserving", "services:stop:frontend,backend"), ("preserving", "checkpoint:before-abort"),
+                          ("deleting", "deletion-plan")])
+        self.assertIn("before-abort", [getattr(snapshot, "reason", None) for snapshot in self.c.snapshots()])
+        self.assertEqual(open_operations(self.c), [])
 
     def test_deploy_refuses_existing_project_resources_without_touching_database(self):
         write_deploy_env(self.root)
@@ -1620,8 +1636,14 @@ class PurgeRecoveryTests(unittest.TestCase):
     @contextlib.contextmanager
     def purge_mocks(self, recovery, checkpoint, plan):
         """PF-A3.2: the purge's effect bodies are mocked at their own seams (snapshot, the bundle capture and its
-        verification, the deletion and each cleanup); the plan, journal and gate run for real."""
-        with mock.patch.object(self.c, "instance_summary", return_value=dict(self.PURGE_SUMMARY, root=str(self.root))), \
+        verification, the deletion and each cleanup); the plan, journal and gate run for real. PF-A3.3: the functional
+        verification is the module's isolated-stack double, and the deletion gate runs its real steps 1-2 (the exact
+        bundle re-read and its exact record of this operation); steps 3-6 (writers, source, coverage, inventory) need
+        a simulated plane and run in test_integrated.PurgeIntegrated (PZ-2..PZ-5)."""
+        real_gate = self.c.purge_deletion_gate
+        with mock.patch.object(self.c, "purge_deletion_gate",
+                               side_effect=lambda binding, live=True: real_gate(binding, live=False)), \
+                mock.patch.object(self.c, "instance_summary", return_value=dict(self.PURGE_SUMMARY, root=str(self.root))), \
                 mock.patch.object(self.c, "log_instance_summary"), \
                 mock.patch.object(self.c, "database_ready", return_value=16), \
                 mock.patch.object(self.c, "ensure_local_contract", return_value={"heads": ["r1"]}), \
@@ -1667,13 +1689,18 @@ class PurgeRecoveryTests(unittest.TestCase):
         mocks.gate.assert_called_once_with(recovery.folder)
 
     def purge_views(self, level="data_restore_verified"):
-        """Stand-ins for the purge bundle and its before-purge checkpoint (the BundleView accessors purge reads)."""
+        """Stand-ins for the purge bundle and its before-purge checkpoint (the BundleView accessors purge reads).
+        PF-A3.3: the bundle stand-in is a dataclass (the verification effect records its new level with
+        dataclasses.replace, as for a BundleView)."""
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
-        recovery = types.SimpleNamespace(
-            bundle_id=recovery_id, folder=self.c.recovery_root / recovery_id, manifest_sha256="b" * 64,
+        values = dict(
+            bundle_id=recovery_id, bundle_kind="purge-bundle", folder=self.c.recovery_root / recovery_id,
+            manifest_sha256="b" * 64,
             derived_from="20260910T115900Z-" + OLD[:12] + "-aaaaaa", database="partflow_staging",
             stores=[{"database": "partflow_staging"}], level=level,
-            purge={"saved_image_refs": [PROJECT + "-backend:test", PROJECT + "-frontend:test"]})
+            purge={"saved_image_refs": [PROJECT + "-backend:test", PROJECT + "-frontend:test"]},
+            latest_verification_id=None)
+        recovery = dataclasses.make_dataclass("PurgeView", list(values), frozen=True)(**values)
         checkpoint = types.SimpleNamespace(bundle_id=recovery.derived_from, manifest_sha256="a" * 64,
                                            database_heads=["r1"], images={
                                                "backend": {"reference": PROJECT + "-backend:old", "id": OLD_BACKEND},
@@ -1689,13 +1716,18 @@ class PurgeRecoveryTests(unittest.TestCase):
                 recovery, checkpoint = self.purge_views(level=level)
                 with contextlib.redirect_stdout(io.StringIO()) as out, self.c.lock():
                     plan = self.binding_plan(recovery.bundle_id)
+                    # PF-A3.3 (SPEC section 4.8): the verification returns without a passed functional record of this
+                    # operation (none is written), so the gate refuses with the functional copy.
                     with self.purge_mocks(recovery, checkpoint, plan) as mocks, \
+                            mock.patch.object(self.c, "functional_verification", return_value={
+                                "verification_id": "ver-20260910T120100Z-0badf00d", "level": level}), \
                             mock.patch.object(self.c, "write_deletion_plan") as write_plan, \
                             mock.patch.object(pf, "confirm"):
                         with self.assertRaisesRegex(pf.Failure, "^purge-bundle-unverified: " + recovery.bundle_id
-                                                    + ": no passed data_restore_verified record for this bundle's "
-                                                    "manifest; deletion is blocked. The purge stops before deletion; "
-                                                    "the application is reopened."):
+                                                    + ": no passed functional_recovery_verified record of operation "
+                                                    + ".* for manifest bbbbbbbbbbbb; deletion is blocked. The "
+                                                    "instance purge stops before deletion; the application is "
+                                                    "reopened."):
                             self.c.purge(delete_backups=False)
                     journal = self.c.journal
                 write_plan.assert_not_called()
@@ -1726,8 +1758,13 @@ class PurgeRecoveryTests(unittest.TestCase):
         self.assertIn("DELETE BACKUPS partflow-staging", confirmations)
         self.assertTrue(journal["deletion"]["delete_backups"])
 
+    # PF-A3.3 (section 3.4 steps 1-2): the sealed final bundle the deleting purge names, and its functional record.
+    FINAL_SHA256 = "f" * 64
+    FINAL_RECORD = "ver-20261007T040400Z-0badf00d"
+
     def deleting_purge(self, *, delete_backups=True):
-        """PF-A3.2: an interrupted purge in deleting (the frozen binding plan and the deletion approval)."""
+        """PF-A3.2: an interrupted purge in deleting (the frozen binding plan and the deletion approval). PF-A3.3: the
+        journal also names the final bundle (retained artifact) and the verification effect's record."""
         plan = pfx.lifecycle_plan(self.context, "purge")
         directory = pfx.write_operation(self.context, plan)
         self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
@@ -1738,10 +1775,18 @@ class PurgeRecoveryTests(unittest.TestCase):
             plan, phase="deleting", unresolved="e0005",
             states={"e0001": "complete", "e0002": "complete", "e0003": "complete", "e0004": "complete",
                     "e0005": "unknown"},
+            evidence={"e0004": "record:" + self.FINAL_RECORD},
+            retained=[{"kind": "purge-bundle", "name": pfx.BUNDLE_ID, "sha256": self.FINAL_SHA256}],
             deletion={"plan_sha256": pf_instance.sha256_bytes(data), "delete_backups": delete_backups,
                       "reset_admin_config": False, "confirmed_at": "20261007T040500Z"})
         pf_instance.write_journal_generation(directory, pf_instance.normalize_json(journal))
         return plan, binding
+
+    def final_records(self, plan):
+        """The passed functional record of ``plan``'s final bundle (verification_records of the deletion gate)."""
+        return mock.patch.object(self.c, "verification_records", return_value=[{
+            "level": "functional_recovery_verified", "result": "passed", "operation_id": plan["operation_id"],
+            "verification_id": self.FINAL_RECORD}])
 
     def run_cli(self, arguments, *, confirm=None):
         errors = io.StringIO()
@@ -1755,9 +1800,10 @@ class PurgeRecoveryTests(unittest.TestCase):
 
     def test_interrupted_deleting_purge_can_resume_from_verified_bundle(self):
         plan, binding = self.deleting_purge()
-        item = pf.InvalidBundle(self.c.recovery_root / pfx.BUNDLE_ID, "", "")
+        item = types.SimpleNamespace(folder=self.c.recovery_root / pfx.BUNDLE_ID, bundle_id=pfx.BUNDLE_ID,
+                                     manifest_sha256=self.FINAL_SHA256)
         confirmation = mock.Mock()
-        with mock.patch.object(self.c, "verify_recovery", return_value=item) as reread, \
+        with mock.patch.object(self.c, "verify_recovery", return_value=item) as reread, self.final_records(plan), \
                 mock.patch.object(self.c, "execute_deletion_plan", return_value=[]) as delete, \
                 mock.patch.object(self.c, "purge_cleanup", return_value="absent") as cleanup:
             code, errors = self.run_cli(["purge"], confirm=confirmation)
@@ -1791,30 +1837,29 @@ class PurgeRecoveryTests(unittest.TestCase):
         cleanup.assert_not_called()
 
     def test_side_by_side_restore_never_replaces_active_database(self):
+        # PF-A3.3 (SPEC section 6.3, SB-5): the former pf_recovery_* mode is gone. A side-by-side restore of the
+        # instance's own bundle dispatches to the isolated recovery target and never restores into the live server.
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
-        folder = self.c.recovery_root / "side-by-side-fixture"
-        folder.mkdir(parents=True)
-        dump = folder / "databases/active.dump"
-        dump.parent.mkdir()
-        dump.write_bytes(b"dump")
-        recovery = types.SimpleNamespace(bundle_id=recovery_id, folder=folder, compose_project="partflow-staging",
-                                         postgres_major=16, database="partflow_staging",
-                                         active_store={"dump": "databases/active.dump"})
+        recovery = types.SimpleNamespace(bundle_id=recovery_id, folder=self.c.recovery_root / recovery_id,
+                                         compose_project="partflow-staging", postgres_major=16,
+                                         database="partflow_staging",
+                                         manifest={"source_instance": {"instance_id": None,
+                                                                       "compose_project": "partflow-staging"}})
         with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
              mock.patch.object(self.c, "database_ready", return_value=16), \
-             mock.patch.object(self.c, "restore_into") as restore, \
-             mock.patch.object(pf, "confirm"):
-            self.c.restore_instance(recovery, side_by_side=True)
-        target_name = restore.call_args.args[0]
-        self.assertTrue(target_name.startswith("pf_recovery_"))
-        self.assertNotEqual(target_name, "partflow_staging")
-        self.assertEqual(restore.call_args.args[1], dump)
+             mock.patch.object(self.c, "restore_into", side_effect=AssertionError("no live-server restore")), \
+             mock.patch.object(self.c, "restore_side_by_side", return_value=0) as side_by_side, \
+             mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation outside the target")):
+            self.assertEqual(self.c.restore_instance(recovery, side_by_side=True), 0)
+        self.assertEqual(side_by_side.call_args.args[0], recovery)
 
     def test_exact_restore_refuses_nonempty_project(self):
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
         recovery = types.SimpleNamespace(bundle_id=recovery_id, folder=Path(self.temp.name),
                                          compose_project="partflow-staging", workspace_root=str(self.root),
-                                         postgres_major=16, database="partflow_staging")
+                                         postgres_major=16, database="partflow_staging",
+                                         manifest={"source_instance": {"instance_id": None,
+                                                                       "compose_project": "partflow-staging"}})
         self.c.resources = {"containers": ["c"], "volumes": []}
         (self.c.state / "deployed.json").unlink()
         with mock.patch.object(self.c, "verify_recovery", return_value=recovery), \

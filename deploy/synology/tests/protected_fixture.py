@@ -304,10 +304,20 @@ def deployed_record(context, revision=OLD):
     pf.write_json(context.state_dir / "deployed.json", {"sha": revision})
 
 
+FAKE_DOCKER = load_module("fake_docker", PACKAGE / "tests" / "fake_docker.py")
+# PF-A3.3: image ID -> (config text, layer text) of every fixture image name (an image archive proof needs a config
+# whose SHA-256 is the ID); the fake daemon's `image save` reads it from its state ("image_configs").
+IMAGE_CONFIGS = {}
+
+
 def image_id(name):
-    """A realistic image ID (sha256:<64 hex>) for a fixture image name (PF-A3.1 records require the form)."""
+    """A realistic image ID (sha256:<64 hex>) for a fixture image name (PF-A3.1 records require the form). PF-A3.3:
+    the SHA-256 of a synthetic image config (fake_docker.fake_config), so `docker image save` archives prove it."""
     import hashlib
-    return "sha256:" + hashlib.sha256(name.encode("utf-8")).hexdigest()
+    config, layer = FAKE_DOCKER.fake_config(name)
+    value = "sha256:" + hashlib.sha256(config).hexdigest()
+    IMAGE_CONFIGS[value] = (config.decode("utf-8"), layer.decode("utf-8"))
+    return value
 
 
 def tar_gz_bytes(tree, *, arcnames=None):
@@ -449,14 +459,14 @@ def daemon_info(engine_id=ENGINE_ID, *, rootless=False, security_options=None):
     if rootless:
         options = list(options or []) + ["name=rootless"]
     return {"ID": engine_id, "ServerVersion": "28.0.0", "OperatingSystem": "Fixture Linux",
-            "SecurityOptions": options, "ServerErrors": None}
+            "SecurityOptions": options, "ServerErrors": None, "DockerRootDir": "/"}
 
 
-def trust_daemon(controller, engine_id=None):
+def trust_daemon(controller, engine_id=None, root_dir="/"):
     """Test-only: mark the daemon binding verified for tests that exercise the runner, not the daemon."""
     controller._daemon = pf.pf_docker.DaemonObservation(
         endpoint=controller.context.daemon.endpoint, engine_id=engine_id or controller.context.daemon.engine_id,
-        server_version="28.0.0", operating_system="Fixture Linux", rootless=False)
+        server_version="28.0.0", operating_system="Fixture Linux", rootless=False, root_dir=root_dir)
     return controller
 
 
@@ -479,6 +489,10 @@ class FakeDocker:
         return self.state_path.read_bytes()
 
     def write_state(self, state):
+        # PF-A3.3: the configs of every fixture image name, so `docker image save` writes provable archives.
+        known = dict(state.get("image_configs") or {})
+        known.update({key: list(value) for key, value in IMAGE_CONFIGS.items() if key not in known})
+        state = dict(state, image_configs=known)
         self.state_path.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
 
     def update(self, **fields):
@@ -522,6 +536,119 @@ def install_fake_docker(layout, state=None):
     tools["docker"] = str(tool)
     pf_instance._write_private_file(layout.tools_conf, pf_bootstrap.render_tools_conf(tools), 0o600)
     return handle
+
+
+class InProcessRunner(pf.pf_runner.ProcessRunner):
+    """PF-A3.3 test runner: every ``docker`` child is answered in-process by the installed fake daemon (the same
+    dispatch, state file, call log and hooks as the program; no process, no sleep, no block). The controller code
+    above the runner (argv building, effect descriptors, envelopes, redaction, journaling) is the production code.
+    Other tools are refused."""
+
+    def __init__(self, controller, fake):
+        context = controller.context
+        super().__init__(controller.registered_tools(), home=context.home_dir, docker_config=context.docker_config_dir,
+                         docker_host=context.daemon.endpoint, redactor=controller.redactor)
+        self.fake = fake
+
+    def run(self, spec):
+        if spec.tool != "docker":
+            raise AssertionError("the in-process runner answers docker only: " + spec.tool)
+        stdin = spec.stdin
+        if hasattr(stdin, "read"):
+            data = stdin.read()
+        elif isinstance(stdin, (bytes, bytearray)):
+            data = bytes(stdin)
+        elif stdin is not None:
+            data = Path(stdin).read_bytes()
+        else:
+            data = b""
+        module = FAKE_DOCKER
+        module.STATE_DIR = str(self.fake.directory)
+        started = __import__("time").monotonic()
+        result = module.invoke(list(spec.argv), dict(spec.env), stdin=data)
+        out = result.out.encode("utf-8") if isinstance(result.out, str) else result.out
+        captured = ""
+        if spec.stdout == "stream":
+            sys.stdout.write(self.redactor.text(out.decode("utf-8", "replace")))
+        elif hasattr(spec.stdout, "write"):
+            spec.stdout.write(out)
+        elif spec.stdout is not None:
+            Path(spec.stdout).write_bytes(out)
+        else:
+            captured = self.redactor.text(out.decode("utf-8", "replace"))
+        if self.spawn_callback is not None and spec.effect is not None:
+            pass  # no process group exists in-process (children.json records real children only)
+        record = pf.pf_runner.ProcessResult(
+            tool=spec.tool, executable="fake-docker", argv=tuple(self.redactor.text(str(word)) for word in spec.argv),
+            returncode=result.code, stdout=captured, stderr=self.redactor.text(result.err),
+            stdout_truncated=len(captured) > spec.capture_limit, stderr_truncated=False, timed_out=False,
+            interrupted=False, duration=__import__("time").monotonic() - started)
+        self.history.append(record)
+        return record
+
+
+def in_process(controller, fake):
+    """Bind ``controller`` to the in-process fake daemon (PF-A3.3 integration tests)."""
+    controller._runner = InProcessRunner(controller, fake)
+    return controller
+
+
+def write_functional_record(controller, view, project="pfverify-0123456789ab", *, started_at=None):
+    """PF-A3.3 test double of the isolated functional verification: a complete, passed functional_recovery_verified
+    record of the exact bundle (every FUNCTIONAL_CHECKS entry) for ``controller.operation_id``."""
+    checks = [{"name": "topology:" + project, "result": "passed", "detail": "double"}]
+    for store in view.stores:
+        store_id = store.get("store_id") or "postgresql:" + store["database"]
+        checks += [{"name": f"{name}:{store_id}", "result": "passed", "detail": "double"}
+                   for name in ("restore", "heads", "locale", "rows")]
+    checks += [{"name": name, "result": "passed", "detail": "double"} for name in pf.pf_config.FUNCTIONAL_CHECKS
+               if not name.endswith(":")]
+    return controller.write_verification(
+        view, level="functional_recovery_verified", result="passed",
+        target={"kind": "isolated-database", "names": [store["database"] for store in view.stores], "removed": True},
+        checks=checks, started_at=started_at or pf.utc(),
+        environment={"server_version_num": 160099, "engine_id": controller.context.daemon.engine_id,
+                     "compose_version": None})
+
+
+def isolated_stack_double(test_case_controller_cls=None):
+    """PF-A3.3: patches replacing the isolated verification stack by a test double for the earlier suites whose
+    simulated planes have no isolated topology (FakeController, PurgeHarness). The functional record it writes is a
+    complete, passed functional_recovery_verified record of the exact bundle (every FUNCTIONAL_CHECKS entry). The real
+    stack is exercised by test_integrated.py on the fake daemon's isolated planes."""
+    from unittest import mock
+
+    def new_topology(controller, prefix):
+        return prefix + "0123456789ab"[:12], "00000000-0000-4000-8000-000000000000"
+
+    def isolated_topology(controller, view, *, project, topology_uuid, purpose, images):
+        return pf.IsolatedTopology(project, topology_uuid, purpose, controller.operation_dir, {}, dict(images),
+                                   "0" * 64)
+
+    def functional_verification(controller, view, topology, *, mode, step=None, started_at=None):
+        record = write_functional_record(controller, view, topology.project, started_at=started_at)
+        if step is not None:
+            step.evidence = (step.evidence + " " if step.evidence else "") + "record:" + record["verification_id"]
+        return record
+
+    def app_invariants(controller, label, *, topology=None):
+        result = pf.pf_config.ReconcileResult("unavailable", 3, "")
+        controller.write_private_json(f"app-check-{label}.json", {
+            "schema_version": 1, "label": label, "started_at": pf.utc(), "finished_at": pf.utc(),
+            "capability": "unavailable", "exit_code": 3, "outcome": "unavailable", "summary": ""})
+        return result
+
+    cls = test_case_controller_cls or pf.Controller
+    return [mock.patch.object(cls, "require_no_isolated_topology", lambda controller: None),
+            mock.patch.object(cls, "isolation_preflight", lambda controller, view, images, values=None: None),
+            mock.patch.object(cls, "new_topology", new_topology),
+            mock.patch.object(cls, "topology_images", lambda controller, view, effect=None: {
+                service: "sha256:" + "0" * 64 for service in pf.pf_docker.SERVICES}),
+            mock.patch.object(cls, "isolated_topology", isolated_topology),
+            mock.patch.object(cls, "functional_verification", functional_verification),
+            mock.patch.object(cls, "teardown_operation_topologies", lambda controller: []),
+            mock.patch.object(cls, "app_invariants", app_invariants),
+            mock.patch.object(cls, "kept_topologies", lambda controller, index=None: [])]
 
 
 def labels_for(context, service=None, *, project=None, oneoff="False", markers=True):

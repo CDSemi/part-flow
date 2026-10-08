@@ -276,6 +276,22 @@ WRITE_SITE_ALLOWLIST = {
         ("write_private_json", "Controller.act_seal"), ("write_json", "Controller.act_pointer"),
         ("write_json", "Controller.act_file"), ("_write_private_file", "Controller.act_file"),
         (".unlink", "Controller.purge_cleanup"), ("shutil.rmtree", "Controller.purge_cleanup"),
+        # PF-A3.3 (sections 3.1-3.17), all inside the instance lock and an operation the gate admitted: the isolated
+        # topology's private directory (operations/<op>/isolated/<project>, mkdir 0700 + chmod), its topology.json
+        # (write_topology_record; set to removed by a cleanup's teardown) and data-checks.json (0600); the preflight's
+        # private temporary render directory and its app.env, and the verification's private temporary source tree,
+        # both inside the operation directory; the app-check-<label>.json summaries (counts only); and the
+        # generation seal (its folder under backups/generations, seal.json 0600 and the archive's atomic rename).
+        ("os.mkdir", "Controller.topology_directory"), ("os.chmod", "Controller.topology_directory"),
+        ("_write_private_file", "Controller.write_topology_record"),
+        ("_write_private_file", "Controller.cleanup_delete"),
+        ("_write_private_file", "Controller.act_topology_stores"),
+        ("tempfile.mkdtemp", "Controller.isolation_preflight"),
+        ("_write_private_file", "Controller.isolation_preflight"),
+        ("tempfile.mkdtemp", "Controller.payload_checks"),
+        ("write_private_json", "Controller.app_invariants"),
+        (".mkdir", "Controller.seal_generation"), ("_write_private_file", "Controller.seal_generation"),
+        ("os.replace", "Controller.seal_generation"),
     },
     "pf_instance.py": {
         ("_write_private_file", "_stage_instance_dir"), ("_write_private_file", "_write_registry"),
@@ -294,6 +310,11 @@ WRITE_SITE_ALLOWLIST = {
         ("_write_private_file", "write_journal_generation"), ("_write_private_file", "rewrite_private_list"),
         ("os.mkdir", "create_generation_container"), ("os.fchmod", "create_generation_container"),
         ("os.rename", "rename_noreplace_at"),
+        # PF-A3.3: the write-once private files of an operation (exclusive create, then fchmod of the held descriptor:
+        # the topology app.env/compose.json, a write-once deletion plan, confirmation-summary.txt and
+        # acknowledgement-<hash12>.json) and the registry tombstone/claim (write_record_state: the record through
+        # the one private-file writer, under the registry lock, OD-A33-08).
+        ("os.fchmod", "write_once"), ("_write_private_file", "write_record_state"),
     },
     "pf_bootstrap.py": set(),
     "pf_runner.py": {("open", "ProcessRunner.run"), ("os.replace", "ProcessRunner._record_effect")},
@@ -545,7 +566,7 @@ class DispatchTables(unittest.TestCase):
         self.assertEqual(pf.READ_ONLY_COMMANDS,
                          {"instances", "status", "doctor", "backups", "recoveries", "ps", "logs", "permissions check",
                           "permissions plan"})
-        self.assertEqual(len(pf.DISPATCH), 23)  # PF-A3.1: "backup emergency"
+        self.assertEqual(len(pf.DISPATCH), 24)  # PF-A3.1: "backup emergency"; PF-A3.3: "cleanup"
         self.assertNotIn("install", pf.READ_ONLY_COMMANDS)
 
     def test_dt2_every_field_is_in_its_token_set(self):
@@ -770,7 +791,7 @@ class DispatchTables(unittest.TestCase):
         self.assertIn('_confirm(interaction, f"{verb} {_op8(operation_id)}")', inspect.getsource(pf.pf_install.resume))
         self.assertEqual({route.name for route in terminal},
                          {"deploy", "abort-deploy", "purge", "restore-instance", "reset-db", "rollback", "resume",
-                          "update", "config", "permissions apply", "backup emergency"})
+                          "update", "config", "permissions apply", "backup emergency", "cleanup"})
         for route in terminal:
             with self.subTest(route=route.name):
                 # PF-A2.2 (OD-A22-17): the config wizards edit proposal files and confirm with [y/N] (confirm_write);
@@ -1724,12 +1745,16 @@ class CrossInstance(Base):
         self.assertFalse(self.context.journal_path.exists())
 
     def test_ci5_a_bundle_of_another_project_or_root_is_refused_before_confirmation(self):
+        # PF-A3.3 (SPEC section 6.3 -> RX-1/RX-3): a legacy bundle of another project is refused by identity
+        # (restore-target-mismatch) before any confirmation; another recorded root is provenance only (a note): the
+        # restore goes on with the selected instance's paths (here to the empty-target refusal of this running
+        # instance) and never writes under the recorded root.
         (self.context.state_dir / "deployed.json").unlink()
+        other = self.base / "other" / "repo"
         for label, kwargs, message in (
                 ("project", {"project": "partflow-other"},
-                 "Exact restore must be run from the bootstrap root/config for the same project."),
-                ("root", {"root": self.base / "other" / "repo"},
-                 "Exact restore must run from the original repository root recorded in the recovery bundle.")):
+                 f"restore-target-mismatch: bundle {RECOVERY_ID} belongs to project partflow-other"),
+                ("root", {"root": other}, "resource-target-not-empty:")):
             with self.subTest(label=label):
                 folder = self.own(**kwargs)
                 before = pfx.snapshot_tree(self.base / "staging")
@@ -1738,6 +1763,9 @@ class CrossInstance(Base):
                                                    interactive=True)
                 self.assertEqual(code, 1, err)
                 self.assertIn(message, err)
+                if label == "root":
+                    self.assertIn(f"note: bundle-workspace-differs: the bundle recorded workspace {other}", out + err)
+                    self.assertFalse(other.exists())
                 self.assertEqual(pfx.snapshot_tree(self.base / "staging"), before)
                 self.assertFalse(self.context.journal_path.exists())
                 shutil.rmtree(folder)
@@ -1858,7 +1886,13 @@ class StaticScan(unittest.TestCase):
             # PF-A2.2: the pre-registration wizard reloads the registry under the registry lock.
             "pf_instance.load_registry": {"main", "config_admin_unregistered.conflict_checks",
                                           # PF-A3.2 section 3.7a: the registry's capacity reading for a switch.
-                                          "Controller.workspace_preflight"},
+                                          "Controller.workspace_preflight",
+                                          # PF-A3.3 (read-only registry reads): the generated topology name against
+                                          # registered projects (section 2.2), the other instances named in the
+                                          # daemon-wide postgres:16 tag summary (section 3.5) and the project claim
+                                          # of a purged record (OD-A33-08).
+                                          "Controller.new_topology", "Controller.other_instances_on_daemon",
+                                          "Controller.require_project_claim"},
             "pf_instance.resolve_instance": {"main.select"},
             # PF-A3.2 section 3.7: the re-validation after W3 (the bound workspace is the new generation).
             "pf_instance.validate_context": {"main.select", "Controller.ensure_validation",
@@ -1943,6 +1977,12 @@ class StaticScan(unittest.TestCase):
             # PF-A3.2: the restore abandon removes the .env its own file-write effect wrote (hash-matched), and the
             # abort-deploy file-write effect removes the active-images override (section 3.6).
             ("os.unlink", "Controller.abandon_restore_instance"), ("os.unlink", "Controller.act_file"),
+            # PF-A3.3: the isolated topology's own files: an app.env left by a crash before compose.json was written
+            # (removed before new values are written once), compose.json and app.env after the final teardown, and
+            # the same two files of a kept topology removed by `cleanup --apply` (descriptor-relative), all inside the
+            # operation's lock.
+            ("os.unlink", "Controller.isolated_topology"), ("os.unlink", "Controller.teardown_topology"),
+            ("os.unlink", "Controller.cleanup_delete"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")
@@ -2063,7 +2103,7 @@ class StaticScan(unittest.TestCase):
         admin = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
         self.assertEqual(admin.count("sys.stdin.isatty("), 0)
         self.assertEqual(admin.count("stream.isatty()"), 1)
-        self.assertEqual(pf.CHECKPOINT, "PF-A3.2")
+        self.assertEqual(pf.CHECKPOINT, "PF-A3.3")
         self.assertEqual(pf.VERSION, "2.5.0")
 
     def test_ss6_every_parser_refuses_abbreviations(self):

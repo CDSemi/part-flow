@@ -2279,7 +2279,13 @@ def proc_scan_available():
 # 3.7). Every write happens inside the held instance lock; scan_operations is read-only and never creates or repairs.
 
 OPERATION_FILES = ("plan.json", "journal.json", "attempts.json", "children.json", "deletion-progress.json",
-                   "admin-config.json")
+                   "admin-config.json",
+                   # PF-A3.3 (SPEC section 2.2): evidence of the application-invariant oracle, the capacity decisions
+                   # and the exact confirmation summary text.
+                   "app-check-source.json", "app-check-restored.json", "app-check-activated.json", "capacity.json",
+                   "confirmation-summary.txt")
+ACKNOWLEDGEMENT_RE = re.compile(r"acknowledgement-[0-9a-f]{12}\.json\Z")
+ACKNOWLEDGEMENT_LIMIT = 16
 GENERATION_CONTAINER_PREFIX = ".pf-generations-"
 OPERATION_SCAN_LIMIT = 20000
 OPERATION_FILE_LIMIT = 4 * 1024 * 1024
@@ -2293,6 +2299,11 @@ class OperationFiles:
     plan_bytes: object      # bytes or None (absent)
     journal_bytes: object   # bytes or None (absent)
     error: object           # None, or why the directory or one of its two records cannot be read safely
+    # PF-A3.3 (section 3.10): the SHA-256 and record count of unresolved-effects.json (None when absent or unreadable)
+    # and the bytes of its acknowledgement-<sha12>.json files ((name, bytes), ...).
+    records_sha256: object = None
+    records_count: object = None
+    acknowledgements: tuple = ()
 
 
 def _read_bounded_at(dir_fd, name, limit):
@@ -2353,14 +2364,115 @@ def _scan_operation(parent_fd, name):
     except OSError as exc:
         return OperationFiles(name, None, None, "not a directory that can be opened without following a link "
                                                 f"({exc.strerror or exc})")
+    records_sha256 = records_count = None
+    acknowledgements = []
     try:
         plan = _read_bounded_at(fd, "plan.json", OPERATION_FILE_LIMIT)
         journal = _read_bounded_at(fd, "journal.json", OPERATION_FILE_LIMIT)
+        if journal is None:
+            # PF-A3.3: only a directory without a journal can carry an acknowledgement of its runner records.
+            try:
+                records = _read_bounded_at(fd, "unresolved-effects.json", OPERATION_FILE_LIMIT)
+            except (OSError, ContextError):
+                records = None
+            if records is not None:
+                records_sha256 = sha256_bytes(records)
+                try:
+                    parsed = parse_strict_json(records, label="unresolved-effects.json")
+                    records_count = len(parsed) if isinstance(parsed, list) else None
+                except ContextError:
+                    records_count = None
+                names = sorted(item for item in os.listdir(fd) if ACKNOWLEDGEMENT_RE.fullmatch(item))
+                for item in names[:ACKNOWLEDGEMENT_LIMIT]:
+                    try:
+                        data = _read_bounded_at(fd, item, 64 * 1024)
+                    except (OSError, ContextError):
+                        continue
+                    if data is not None:
+                        acknowledgements.append((item, data))
     except (OSError, ContextError) as exc:
         return OperationFiles(name, None, None, str(getattr(exc, "strerror", None) or exc))
     finally:
         os.close(fd)
-    return OperationFiles(name, plan, journal, None)
+    return OperationFiles(name, plan, journal, None, records_sha256, records_count, tuple(acknowledgements))
+
+
+def write_once(directory, name, data, mode=0o600):
+    """PF-A3.3: create ``directory/name`` exactly once (O_CREAT|O_EXCL|O_NOFOLLOW), fsync it and the directory.
+    FileExistsError when it exists (never replaced)."""
+    path = Path(directory) / name
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_directory(directory)
+    return path
+
+
+def tree_identities(dir_fd, name, *, limit):
+    """PF-A3.3: frozenset of (st_dev, st_ino) of ``name`` below ``dir_fd`` and every entry beneath it (no-follow,
+    descriptor-relative, bounded by ``limit`` entries; ContextError beyond it)."""
+    found = set()
+    info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    found.add((info.st_dev, info.st_ino))
+    if not stat.S_ISDIR(info.st_mode):
+        return frozenset(found)
+    stack = [os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)]
+    try:
+        while stack:
+            fd = stack.pop()
+            try:
+                with os.scandir(fd) as listing:
+                    entries = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in listing]
+                for child, is_dir in entries:
+                    child_info = os.stat(child, dir_fd=fd, follow_symlinks=False)
+                    found.add((child_info.st_dev, child_info.st_ino))
+                    if len(found) > limit:
+                        raise ContextError(f"{name} holds more than {limit} entries")
+                    if is_dir:
+                        stack.append(os.open(child, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                             dir_fd=fd))
+            finally:
+                os.close(fd)
+    finally:
+        for fd in stack:
+            os.close(fd)
+    return frozenset(found)
+
+
+def write_record_state(context, state, *, allowed_from, check=None):
+    """PF-A3.3 (OD-A33-08, LIFECYCLE section 8 step 7): the registry transaction that changes the protected record's
+    ``state`` (purged, or registered again by a restore or deploy). The caller holds the instance lock; the registry
+    lock is taken non-blocking here (LockBusy refuses, never waits: the normal order is registry -> instance). The
+    record must still be the selected bytes (``context.record_sha256``) or already carry ``state``. Returns (new
+    record bytes, previous record bytes or None when the state already holds). ``check()`` runs under the registry lock
+    before the write (the claim re-check of a restore)."""
+    root = context.installation_root
+    handle = acquire_lock(root / REGISTRY_LOCK_RELATIVE,
+                          busy_message="registry-busy: another installation transaction holds the registry lock")
+    try:
+        if check is not None:
+            check()
+        current = read_bytes_nofollow(context.record_path)
+        record = parse_strict_json(current, label=str(context.record_path))
+        validate_instance_record(record)
+        if record["state"] == state:
+            return current, None
+        if sha256_bytes(current) != context.record_sha256 or record["state"] not in allowed_from:
+            raise ContextError(f"record-changed: the record of instance {context.slug} changed after selection or is "
+                               f"in state {record['state']}; its state was not changed")
+        record = dict(record, state=state, record_revision=record["record_revision"] + 1)
+        data = normalize_json(record)
+        _write_private_file(context.record_path, data, 0o600)
+        return data, current
+    finally:
+        handle.release()
 
 
 def write_plan_once(operation_dir, data):

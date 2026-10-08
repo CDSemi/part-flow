@@ -162,7 +162,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(json.loads((CONTRACTS / "lifecycle-records.schema.json").read_text(encoding="utf-8")),
                          pf_config.LIFECYCLE_SCHEMA)
         self.assertEqual(pf_config.LIFECYCLE_RECORDS, ("operation_plan", "operation_journal", "deployment_record",
-                                                       "recovery_manifest", "verification_record"))
+                                                       "recovery_manifest", "verification_record",
+                                                       "runner_acknowledgement", "generation_seal"))
         for name in pf_config.LIFECYCLE_RECORDS:
             self.assertIn(name, DEFS)
         for kind, phases in pf_config.JOURNAL_PHASES.items():
@@ -278,6 +279,9 @@ class Contracts(unittest.TestCase):
                          ["not normalized"])
 
     def test_sc6_reserved_levels_are_schema_valid_and_produced_by_no_writer(self):
+        # PF-A3.3 (SPEC section 6.3): `captured` stays reserved (no writer); `functional_recovery_verified` now has
+        # its writers (the isolated functional verification), and every write_verification call names a literal
+        # level of the two that are written.
         self.assertEqual(record_problems((EXAMPLES / "verification-functional-schema-valid.json").read_bytes(),
                                          "verification_record"), [])
         captured = dict(example("verification-record.json"), level="captured",
@@ -288,17 +292,17 @@ class Contracts(unittest.TestCase):
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Attribute) and node.func.attr == "write_verification"]
         self.assertTrue(calls)
+        levels = set()
         for call in calls:
             level = next(keyword.value for keyword in call.keywords if keyword.arg == "level")
             self.assertIsInstance(level, ast.Constant)
-            self.assertEqual(level.value, "data_restore_verified")
+            levels.add(level.value)
+        self.assertEqual(levels, {"data_restore_verified", "functional_recovery_verified"})
         view = types.SimpleNamespace(bundle_id="x", bundle_kind="checkpoint", manifest_sha256="0" * 64)
         controller = pf.Controller.__new__(pf.Controller)
-        for level in ("captured", "functional_recovery_verified"):
-            with self.subTest(level=level):
-                with self.assertRaisesRegex(pf.Failure, "writes data_restore_verified verification records only"):
-                    pf.Controller.write_verification(controller, view, level=level, result="passed",
-                                                     target={}, checks=[], started_at="20261007T000000Z")
+        with self.assertRaisesRegex(pf.Failure, "never written with level captured"):
+            pf.Controller.write_verification(controller, view, level="captured", result="passed",
+                                             target={}, checks=[], started_at="20261007T000000Z")
 
 
 @ROOT_FS
@@ -2040,16 +2044,16 @@ class PurgeBundle(Base):
         self.assertEqual(pfx.operations_of(self.context, "restore-instance"), [])
 
     def test_pb5_side_by_side_reads_strictly_first(self):
+        # PF-A3.3 (SPEC section 6.3, SB-5): the side-by-side restore still reads the bundle strictly before any
+        # confirmation; the former pf_recovery_* database mode is gone (the recovery target is an isolated topology,
+        # test_integrated.SideBySide).
         view = PurgeBundle.build(self)
-        self.assertEqual(self.invoke(["restore-instance", view.bundle_id, "--side-by-side"]), 0, self.last_error)
-        copies = [name for name in self.c.dbs if name.startswith("pf_recovery_")]
-        self.assertEqual(len(copies), 1)
-        self.assertEqual(self.c.dbs[copies[0]]["rows"], ["old-record"])
         (view.folder / "databases" / "active.dump").write_bytes(b"{}")
         confirm = mock.Mock()
         self.assertEqual(self.invoke(["restore-instance", view.bundle_id, "--side-by-side"], confirm=confirm), 1)
         self.assertIn(f"bundle-payload-mismatch: {view.bundle_id}: databases/active.dump", self.last_error)
         confirm.assert_not_called()
+        self.assertFalse([name for name in self.c.dbs if name.startswith("pf_recovery_")])
 
     def test_pb6_seal_then_restore_from_the_bundles_own_payloads(self):
         seen = []
@@ -2069,24 +2073,26 @@ class PurgeBundle(Base):
                          hashlib.sha256((view.folder / "manifest.json").read_bytes()).hexdigest())
 
     def test_pb7_a_bundle_without_a_passed_record_stops_the_purge_before_deletion(self):
-        real = self.c.verify_purge_bundle
+        # PF-A3.3 (SPEC sections 4.8, 6.3): the gate requires the passed functional record of this bundle and
+        # operation (the isolated verification is the documented test double on this plane).
+        real = self.c.functional_verification
 
-        def without_record(view, names):
-            verified = real(view, names)
+        def without_record(view, topology, **kwargs):
+            record = real(view, topology, **kwargs)
             shutil.rmtree(str(self.c.verifications_dir / view.bundle_id))
-            return verified
+            return record
 
         self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
         with PurgeBundle.fake_command(self), \
                 mock.patch.object(self.c, "available_snapshot_image_refs", return_value=([], [])), \
-                mock.patch.object(self.c, "verify_purge_bundle", side_effect=without_record), \
+                mock.patch.object(self.c, "functional_verification", side_effect=without_record), \
                 mock.patch.object(self.c, "write_deletion_plan") as write_plan, \
                 mock.patch.object(pf, "confirm"), mock.patch.object(pf, "prompt_yes_no", return_value=False), \
                 self.c.lock():
             with self.assertRaisesRegex(pf.Failure, r"^purge-bundle-unverified: purge-.*: no passed "
-                                                    r"data_restore_verified record for this bundle's manifest; "
-                                                    r"deletion is blocked\. The purge stops before deletion; the "
-                                                    r"application is reopened\.$"):
+                                                    r"functional_recovery_verified record of operation .* for "
+                                                    r"manifest [0-9a-f]{12}; deletion is blocked\. The instance purge "
+                                                    r"stops before deletion; the application is reopened\.$"):
                 self.c.purge()
             journal = self.c.journal
         write_plan.assert_not_called()
@@ -2108,9 +2114,18 @@ class PurgeBundle(Base):
         binding["slug"] = self.c.context.slug
         data = pf.pf_docker.plan_bytes(binding)
         pf_instance._write_private_file(directory / "deletion-plan.json", data, 0o600)
+        # PF-A3.3 (section 3.4 steps 1-2, SPEC section 6.3): the journal names the sealed final bundle (retained
+        # artifact with its manifest hash) and the verification effect names its functional record of this operation.
+        saved, self.c.operation_id = self.c.operation_id, plan["operation_id"]
+        try:
+            record = pfx.write_functional_record(self.c, view)
+        finally:
+            self.c.operation_id = saved
         pf_instance.write_journal_generation(directory, pf_instance.normalize_json(pfx.lifecycle_journal(
             plan, phase="deleting", states={"e0001": "complete", "e0002": "complete", "e0003": "complete",
                                             "e0004": "complete"},
+            evidence={"e0004": "record:" + record["verification_id"]},
+            retained=[{"kind": "purge-bundle", "name": view.bundle_id, "sha256": view.manifest_sha256}],
             deletion={"plan_sha256": pf_instance.sha256_bytes(data), "delete_backups": False,
                       "reset_admin_config": False, "confirmed_at": "20261007T040500Z"})))
         before = self.records(view.bundle_id)
@@ -2120,6 +2135,44 @@ class PurgeBundle(Base):
         self.assertIn("read_bundle", events.order)
         self.assertEqual(len(cleanup.call_args_list), 4)
         self.assertEqual(self.records(view.bundle_id), before)
+
+    def test_pz13_an_a32_opened_purge_resumes_in_deleting_with_its_data_restore_record(self):
+        # PF-A3.3 section 3.18 (SPEC PZ-13): a purge plan opened by the PF-A3.2 control (its verification effect's
+        # A3.2 postcondition) keeps its frozen semantics: resumed in deleting under PF-A3.3, the gate accepts the
+        # passed data_restore_verified record of that operation; no functional verification runs.
+        view = PurgeBundle.build(self)
+        effects = pfx.default_effects("purge")
+        effects[2] = dict(effects[2], preconditions=["bundle:" + view.bundle_id, "checkpoint:" + view.derived_from])
+        effects[3] = dict(effects[3], postcondition=pf.A32_PURGE_POSTCONDITION)
+        plan = pfx.lifecycle_plan(self.context, "purge", effects)
+        directory = pfx.write_operation(self.context, plan)
+        binding = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge",
+                                             operation_id=plan["operation_id"], daemon=self.c.verify_daemon(),
+                                             recovery_id=view.bundle_id, covered_image_refs=set())
+        binding["slug"] = self.c.context.slug
+        data = pf.pf_docker.plan_bytes(binding)
+        pf_instance._write_private_file(directory / "deletion-plan.json", data, 0o600)
+        # The A3.2 run's record of this operation (the bundle's own data_restore_verified record, bound to it).
+        folder = self.c.verifications_dir / view.bundle_id
+        source = next(json.loads(path.read_bytes()) for path in sorted(folder.iterdir())
+                      if json.loads(path.read_bytes())["level"] == "data_restore_verified")
+        record = dict(source, operation_id=plan["operation_id"], verification_id="ver-20261007T040300Z-a32a32a3")
+        pf_instance._write_private_file(folder / (record["verification_id"] + ".json"),
+                                        pf_instance.normalize_json(record), 0o600)
+        pf_instance.write_journal_generation(directory, pf_instance.normalize_json(pfx.lifecycle_journal(
+            plan, phase="deleting", states={"e0001": "complete", "e0002": "complete", "e0003": "complete",
+                                            "e0004": "complete"},
+            retained=[{"kind": "purge-bundle", "name": view.bundle_id, "sha256": view.manifest_sha256}],
+            deletion={"plan_sha256": pf_instance.sha256_bytes(data), "delete_backups": False,
+                      "reset_admin_config": False, "confirmed_at": "20261007T040500Z"})))
+        before = self.records(view.bundle_id)
+        with mock.patch.object(self.c, "purge_cleanup", return_value="absent") as cleanup, \
+                mock.patch.object(self.c, "functional_verification",
+                                  side_effect=AssertionError("no functional verification on resume")):
+            self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+        self.assertEqual(len(cleanup.call_args_list), 4)
+        self.assertEqual(self.records(view.bundle_id), before)
+        self.assertEqual(pfx.operation(self.context, plan["operation_id"])[1]["phase"], "completed")
 
     def test_pb9_a_copy_altered_before_the_seal_stops_the_purge(self):
         real = pf.copy_fresh
@@ -2198,7 +2251,9 @@ class Routes(Base):
         self.assertEqual(pf.DISPATCH["backup emergency"], pf._locked(
             "backup emergency", "mutating", "backup emergency", "owned", "never", "terminal", "",
             "Controller.capture_emergency"))
-        self.assertEqual(pf.PENDING_ROUTE_COMMANDS, {"backup emergency": "backup --emergency"})
+        self.assertEqual(pf.PENDING_ROUTE_COMMANDS, {"backup emergency": "backup --emergency",
+                                                     "cleanup report": "cleanup", "cleanup apply": "cleanup --apply",
+                                                     "resume acknowledge": "resume --acknowledge"})
         self.assertIn("backup", pf.KNOWN_COMMANDS)
 
     def test_rt2_the_pending_route(self):

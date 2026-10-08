@@ -606,6 +606,61 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > (`evidence/audit-*.log`). `CRASH_MATRIX.json` and the CLI evidence were not regenerated (no row changed). No NAS,
 > DSM, Docker daemon, running stack or development database was contacted.
 
+> **PF-A3.3 checkpoint addendum (2026-10-08) — integrated operations, exact-bundle functional verification,
+> side-by-side recovery, capacity, cleanup, acknowledgement.** Contracts first: AM-11..AM-18 in
+> `contracts/lifecycle-records.schema.json` (byte-equal to `pf_config.LIFECYCLE_SCHEMA`, `schema_version` stays 1, all
+> additive), 9 new valid examples and 10 new invalid files, `cases.json` 70 → 89 rows. `pf_config` gains the pure
+> reconcile-report parser and application-invariant oracle, the capacity model, the cleanup candidates and the
+> acknowledged runner-record state; `pf_docker` the isolated-topology model, its validator and the isolation findings;
+> `pf_source` the image-archive proof; `pf_instance` the write-once file helper, the tree identities and the
+> registry state transaction `write_record_state`; `pf-admin.py` the isolated topology and the exact-bundle functional
+> verification (instance purge gate, `restore-instance` identity/database-image rules, `restore-instance --side-by-side`
+> as the journaled `restore-side-by-side` operation), the current-data protection of `reset-db`, `rollback` and
+> `abort-deploy`, the capacity preflight, `pf cleanup`, generation sealing and `resume --acknowledge`. `pf.sh`,
+> `compose.nas.yaml`, `pf_bootstrap.py`, `pf_runner.py`, `pf_install.py` and the shell wrappers are unchanged.
+> *Registry tombstone (owner decision OD-A33-08, applied).* The instance purge writes `state: purged` through a
+> registry transaction (the registry lock is taken non-blocking while the instance lock is held; `check_authority`
+> admits only the instance purge's own state write), releases the Compose project claim, and `restore-instance` and
+> `deploy` re-check the claim under the registry lock before they write `registered` again; `abort-deploy` of such a
+> deployment and `resume --abandon` of such a restore return the record to `purged`. Tests TB-1..TB-4 cover the restore
+> into a purged record, a second instance claiming the released project (`instance-claim-taken`), and a crash before and
+> after the registry write (`test_tb3`, resume ends in exactly one tombstone). OD-A33-06/07/09 keep the spec defaults
+> (recorded deviations awaiting owner approval): a recovery target has no listener and is not a registered instance, and
+> another instance's bundle is refused (`restore-target-mismatch`).
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (CPython 3.12.15) and
+> `python:3.9` (CPython 3.9.25) containers, uid 0, source mounted read-only and copied to `/tmp/r` (the canonical
+> command): **1016 tests OK, 1 skipped** on both (2059.229 s and 2058.761 s;
+> `_claude_outputs/ops/PF-A3.3/evidence/gates-2-python3.*.log`). Baseline: the 942 PF-A3.2 tests all pass, updated
+> without weakening where an A3.3 rule replaced an A3.2 sentence (the purge gate now requires the passed
+> `functional_recovery_verified` record of the operation; the registry record is `purged` after the instance purge;
+> `restore-instance` mismatches are decided by identity; the former `pf_recovery_*` mode is gone; the SS-3 allowlist of
+> write sites gained the A3.3 writers; `PENDING_ROUTE_COMMANDS` and the `DISPATCH` count follow the new routes;
+> `pf.CHECKPOINT` is `PF-A3.3`). New: **74 tests** — 73 in the new `tests/test_integrated.py` (IsolatedModel, ReconcileReport,
+> ImageArchive, CapacityPure, SchemaA33, PurgeIntegrated with TB-1..TB-4, IsolatedTopology, RestoreTarget, SideBySide,
+> Cleanup, Acknowledge, ResetRollback, AbortDeploy, CapacityIntegrated, InstalledCli; 73 OK on both images in 124.133 s
+> and 125.082 s, `evidence/integrated-v-python3.*.log`) and PZ-13 in `test_artifacts.py` (an A3.2-opened purge plan resumes
+> in `deleting` under A3.3 with its `data_restore_verified` record). `fake_docker.py` gained the reconcile one-off and
+> `protected_fixture.py` the isolated-stack double and `DockerRootDir`; no behaviour changes without the new state keys. The one skip is RO-14 (it reads `docs/deployment`, which the canonical command does not copy); with
+> `docs/deployment` copied it passes on both images, after the documentation edits of this checkpoint
+> (`evidence/ro14-docs-python3.*.log`). Static checks: all 21 `.py` files under `deploy/synology` parse with
+> `ast.parse(..., feature_version=(3, 9))`; every contract JSON file loads; pyflakes reports nothing in the changed
+> files (two warnings remain in the untouched `tests/test_install.py`, `evidence/static-checks.log`).
+> Acceptance statuses are in `_claude_outputs/ops/PF-A3.3/ACCEPTANCE_RESULTS.json`. Offline, with the fake daemon:
+> A3-T15 (isolation of the `pfverify-*`/`pfrecover-*` topologies from the daemon's reported configuration, incl. the
+> loopback-port case) is `passed` for its offline part; A3-T06, A3-T07, A3-T08, A3-T14 (filesystem part, real
+> `statvfs`) and A3-T16 are **`partial`** because some planned case IDs have no dedicated test (listed per case in the
+> JSON: for example XC-1/XC-3/XC-7 through the launcher, PZ-5, RX-3/RX-4/RX-6/RX-7/RX-9, SB-5..SB-9, CU-4/CU-5/CU-8/CU-13,
+> RP-3/RP-5/RP-8/RP-9, CP-2/CP-4..CP-6, FV-3/FV-7/FV-8); where an earlier test already exercises the behaviour it is named
+> as such, not as a new pass. All six are overall **`blocked`** at their required real Docker/PostgreSQL level
+> (PF-A3.4). Evidence JSON written by the suite is in `evidence/offline/` (`PURGE-GATE-1`, `FUNCTIONAL-1`,
+> `ISOLATION-1`, `RESTORE-TARGET-1`, `CAPACITY-1`, `CLEANUP-1`, `ACK-1`, `XC-2`, `XC-4`, `XC-5`, `XC-6`); no
+> `CRASH_MATRIX.json` was generated for the new effects. Declared limits: nothing was run against a NAS, DSM, SMB, a
+> real Docker daemon, real PostgreSQL, the live Compose stack or a development database; isolation is proven from the
+> daemon's reported configuration only; the application invariant oracle is `app.cli reconcile` of the deployed image
+> and its output is never stored; the Docker root is shared by every instance (no reservation); the reconcile child
+> shares the runner's ten-minute limit. Proposed verdict for the PF-A3.3 audit: `PASS_WITH_DECLARED_LIMITS` only if the
+> audit accepts the `partial` offline parts; not production-ready, no finding is closed overall.
+
 ## Executed checks
 
 | Check | Actual result |

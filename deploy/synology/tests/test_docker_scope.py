@@ -1191,6 +1191,9 @@ class PurgeHarness(ScopeBase):
             mock.patch.object(pf.Controller, "create_deployed_source_archive", create_deployed_source_archive),
             mock.patch.object(pf.Controller, "deployed_source_origin", lambda controller, revision: "protected-store"),
             mock.patch.object(pf.Controller, "activate", activate),
+            # PF-A3.3: no isolated topology on this simulated plane; the isolated verification stack is the documented
+            # test double (test_integrated.py exercises the real one).
+            *pfx.isolated_stack_double(),
         )
         with contextlib.ExitStack() as stack:
             for patch in patches:
@@ -1253,9 +1256,14 @@ class ResourceInventory(PurgeHarness):
             self.assertFalse(argv[:2] == ["image", "rm"] and ("-f" in argv or "--force" in argv))
         # The sealed manifest holds exactly the binding plan's candidates (v2 shape) and verifies.
         recovery = sorted((self.context.paths.recovery / PROJECT).iterdir())[-1]
-        controller = self.controller()
+        # PF-A3.3 (OD-A33-08): the instance purge marked the registry record purged (a new record revision); the
+        # bundle is read through the reloaded record, and its level is the functional verification.
+        context = pf_instance.resolve_instance(pf_instance.load_registry(self.layout.root), instance="staging")
+        self.assertEqual(context.state, "purged")
+        controller = pf.Controller(context, validation=pf_instance.validate_context(
+            context, running_release=self.layout.release_dir), running_release=self.layout.release_dir)
         verified = controller.verify_recovery({"_folder": str(recovery), "id": recovery.name})
-        self.assertEqual(verified.level, "data_restore_verified")
+        self.assertEqual(verified.level, "functional_recovery_verified")
         sealed = verified.purge
         operation = sorted(self.context.operations_dir.iterdir())[-1]
         plan = json.loads((operation / "deletion-plan.json").read_text())
@@ -2152,7 +2160,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A3.2")
+        self.assertEqual(pf.CHECKPOINT, "PF-A3.3")
 
 
 if __name__ == "__main__":

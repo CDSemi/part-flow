@@ -1009,6 +1009,173 @@ def extract_archive(fd, parent_fd, name, inventory, *, limits):
     return {"schema_version": MANIFEST_SCHEMA, "source": {"kind": "unknown"}, "entries": entries}
 
 
+# ---------------------------------------------------------------- image archive proof (PF-A3.3)
+
+
+@dataclasses.dataclass(frozen=True)
+class ImageArchiveLimits:
+    members: int
+    manifest_bytes: int
+    config_bytes: int
+    layer_bytes: int
+
+
+IMAGE_ARCHIVE_LIMITS = ImageArchiveLimits(200000, 1024 * 1024, 4 * 1024 * 1024, 64 * 1024 ** 3)
+_IMAGE_NAME_LIMITS = ArchiveLimits(200000, 0, 0, 1024, 255, 64)
+
+
+@dataclasses.dataclass(frozen=True)
+class ImageArchiveProof:
+    """``image_ids`` the archive proved; ``repo_tags`` ((tag, image_id), ...) exactly as ``manifest.json`` names them."""
+    image_ids: tuple
+    repo_tags: tuple
+    layers_checked: int
+    bytes_read: int
+
+
+def _config_candidate(name, wanted):
+    """The hex image ID a member name stands for in the OCI (``blobs/sha256/<hex>``) or legacy (``<hex>.json``)
+    ``docker save`` layout, when it is one of ``wanted``; else None."""
+    match = re.fullmatch(r"(?:blobs/sha256/([0-9a-f]{64})|([0-9a-f]{64})\.json)", name)
+    if match is None:
+        return None
+    value = match.group(1) or match.group(2)
+    return value if value in wanted else None
+
+
+def image_archive_proof(fd, required_ids, *, limits=IMAGE_ARCHIVE_LIMITS):
+    """Section 2.5 ``images:archive``: one sequential pass over an uncompressed ``docker save`` tar (OCI or legacy
+    layout) proving every ``required_ids`` image: its config member's SHA-256 is the ID and the config's
+    ``rootfs.diff_ids`` are the SHA-256 of its ``Layers`` members in order. Links, special files, absolute, traversal
+    and duplicate names and oversize members are refused before any of their bytes is hashed. Raises
+    ArchiveRefused(image-archive-missing | image-archive-config-mismatch | image-archive-layer-mismatch |
+    image-archive-manifest-invalid | archive-member-refused | archive-limit)."""
+    wanted = {}
+    for image_id in required_ids:
+        if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise ArchiveRefused("image-archive-manifest-invalid", str(image_id)[:80], "not an image ID")
+        wanted[image_id.split(":", 1)[1]] = image_id
+    digests, buffered, seen, count, read = {}, {}, set(), 0, 0
+    with _archive_stream(fd) as handle:
+        try:
+            archive = tarfile.open(fileobj=handle, mode="r|", encoding="utf-8", errors="surrogateescape",
+                                   tarinfo=_BoundedTarInfo)
+        except _UNREADABLE as exc:
+            raise ArchiveRefused("archive-member-refused", "", str(exc) or type(exc).__name__) from exc
+        with archive:
+            while True:
+                try:
+                    member = archive.next()
+                except _UNREADABLE as exc:
+                    raise ArchiveRefused("archive-member-refused", "", str(exc) or type(exc).__name__) from exc
+                if member is None:
+                    break
+                archive.members = []
+                count += 1
+                if count > limits.members:
+                    raise ArchiveRefused("archive-limit", member.name, "member-count")
+                name, problem = member_name_problem(member.name, _IMAGE_NAME_LIMITS)
+                if problem is not None:
+                    raise ArchiveRefused("archive-member-refused", member.name, problem)
+                if member.type not in ARCHIVE_TYPES:
+                    raise ArchiveRefused("archive-member-refused", member.name, "type")
+                if name in seen:
+                    raise ArchiveRefused("archive-member-refused", member.name, "duplicate")
+                seen.add(name)
+                if member.type == tarfile.DIRTYPE:
+                    continue
+                candidate = _config_candidate(name, wanted)
+                limit = limits.manifest_bytes if name == "manifest.json" else \
+                    limits.config_bytes if candidate is not None else limits.layer_bytes
+                if member.size > limit:
+                    raise ArchiveRefused("archive-limit", member.name, "member-size")
+                keep = name == "manifest.json" or candidate is not None
+                digest, chunks, counted = hashlib.sha256(), [], 0
+                try:
+                    source = archive.extractfile(member)
+                    while True:
+                        block = source.read(COPY_BLOCK)
+                        if not block:
+                            break
+                        counted += len(block)
+                        digest.update(block)
+                        if keep:
+                            chunks.append(block)
+                except _UNREADABLE as exc:
+                    raise ArchiveRefused("archive-member-refused", member.name,
+                                         str(exc) or type(exc).__name__) from exc
+                if counted != member.size:
+                    raise ArchiveRefused("archive-member-refused", member.name, "truncated member data")
+                read += counted
+                digests[name] = digest.hexdigest()
+                if keep:
+                    buffered[name] = b"".join(chunks)
+    if "manifest.json" not in buffered:
+        raise ArchiveRefused("image-archive-manifest-invalid", "manifest.json", "absent")
+    try:
+        manifest = json.loads(buffered["manifest.json"].decode("utf-8"), object_pairs_hook=_strict_pairs,
+                              parse_constant=_no_constant)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ArchiveRefused("image-archive-manifest-invalid", "manifest.json", str(exc)[:200]) from exc
+    if not isinstance(manifest, list) or not all(
+            isinstance(entry, dict) and isinstance(entry.get("Config"), str) and isinstance(entry.get("Layers"), list)
+            and all(isinstance(layer, str) for layer in entry["Layers"])
+            and isinstance(entry.get("RepoTags") or [], list) for entry in manifest):
+        raise ArchiveRefused("image-archive-manifest-invalid", "manifest.json", "not a docker save manifest")
+    by_config = {}
+    for entry in manifest:
+        config_name, _ = member_name_problem(entry["Config"], _IMAGE_NAME_LIMITS)
+        if config_name in digests:
+            by_config.setdefault(digests[config_name], (config_name, entry))
+    proven, tags, layers_checked = [], [], 0
+    for value, image_id in wanted.items():
+        found = by_config.get(value)
+        if found is None:
+            named = [entry for entry in manifest if _config_candidate(entry["Config"], {value: image_id})]
+            raise ArchiveRefused("image-archive-config-mismatch" if named else "image-archive-missing", image_id[:19],
+                                 "the config member does not hash to the image ID" if named
+                                 else "no manifest entry carries this image")
+        config_name, entry = found
+        if config_name not in buffered:
+            raise ArchiveRefused("image-archive-manifest-invalid", config_name, "config member outside the layout")
+        try:
+            config = json.loads(buffered[config_name].decode("utf-8"), object_pairs_hook=_strict_pairs,
+                                parse_constant=_no_constant)
+            diff_ids = config["rootfs"]["diff_ids"]
+        except (ValueError, UnicodeDecodeError, KeyError, TypeError) as exc:
+            raise ArchiveRefused("image-archive-config-mismatch", image_id[:19], "config is not an image config") \
+                from exc
+        layers = []
+        for layer in entry["Layers"]:
+            layer_name, _ = member_name_problem(layer, _IMAGE_NAME_LIMITS)
+            if layer_name not in digests:
+                raise ArchiveRefused("image-archive-layer-mismatch", image_id[:19], f"layer {layer[:80]} is absent")
+            layers.append("sha256:" + digests[layer_name])
+        if not isinstance(diff_ids, list) or layers != diff_ids:
+            raise ArchiveRefused("image-archive-layer-mismatch", image_id[:19],
+                                 "the layer members do not hash to rootfs.diff_ids in order")
+        layers_checked += len(layers)
+        proven.append(image_id)
+    for config_hash, (config_name, entry) in sorted(by_config.items()):
+        for tag in entry.get("RepoTags") or []:
+            if isinstance(tag, str):
+                tags.append((tag, "sha256:" + config_hash))
+    return ImageArchiveProof(tuple(proven), tuple(sorted(tags)), layers_checked, read)
+
+
+def _strict_pairs(pairs):
+    found = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError("duplicate key " + json.dumps(key))
+        found[key] = value
+    return found
+
+
+def _no_constant(name):
+    raise ValueError("non-finite number " + name)
+
+
 def validate_manifest(value, label="manifest"):
     if not isinstance(value, dict) or set(value) != {"schema_version", "source", "entries"}:
         raise SourceError(f"{label}: keys must be exactly schema_version, source, entries")

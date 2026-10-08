@@ -612,5 +612,159 @@
       "problem": "carries a deletion approval only for an abandon in preparing-target"
     },
     "plan": "operation-plan-restore-instance.json"
+  },
+  {
+    "file": "operation-plan-restore-side-by-side.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-plan-side-by-side-without-bundle.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "input_bundle: required for restore-side-by-side (AM-11)"
+    }
+  },
+  {
+    "file": "operation-plan-cleanup.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-plan-cleanup-with-bundle.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "input_bundle: null for cleanup (AM-11)"
+    }
+  },
+  {
+    "file": "invalid-plan-cleanup-effect-type.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "is not an effect of cleanup (AM-15)"
+    }
+  },
+  {
+    "file": "operation-journal-cleanup-deleting.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "plan": "operation-plan-cleanup.json"
+  },
+  {
+    "file": "invalid-journal-cleanup-deletion.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": false,
+      "problem": "a cleanup journal never carries a deletion approval"
+    },
+    "plan": "operation-plan-cleanup.json"
+  },
+  {
+    "file": "operation-plan-abort-deploy-preserving.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-plan-abort-deploy-capture-without-stop.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "an abort-deploy capture needs a preceding stop effect (AM-18)"
+    }
+  },
+  {
+    "file": "verification-record-functional.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "verification-record-functional-unavailable-app-check.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "verification-record-functional-legacy.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-verification-functional-missing-isolation.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": false,
+      "problem": "check isolation:listener is missing"
+    }
+  },
+  {
+    "file": "invalid-verification-functional-app-check-not-run.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": false,
+      "problem": "app-invariants may be not_run only as unavailable:"
+    }
+  },
+  {
+    "file": "invalid-verification-functional-health-not-run.json",
+    "record": "verification_record",
+    "expect": {
+      "valid": false,
+      "problem": "check health:frontend must run"
+    }
+  },
+  {
+    "file": "runner-acknowledgement.json",
+    "record": "runner_acknowledgement",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-runner-acknowledgement-control-char.json",
+    "record": "runner_acknowledgement",
+    "expect": {
+      "valid": false,
+      "problem": "a control character"
+    }
+  },
+  {
+    "file": "generation-seal.json",
+    "record": "generation_seal",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-generation-seal-handles.json",
+    "record": "generation_seal",
+    "expect": {
+      "valid": false,
+      "problem": "$.handles.result"
+    }
   }
 ]

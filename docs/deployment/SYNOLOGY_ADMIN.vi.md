@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A3.2 (trên commit `c939141`).
+> Baseline đồng bộ: package revision PF-A3.3 (trên commit `e13574f`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -302,6 +302,21 @@
 > *Downgrade.* Chỉ có thể quay về control PF-A3.1 khi không có operation nào đang mở; khi đó mất phần hiển thị journal
 > và generation switch, và runner record đã được journal reconcile lại bị coi là chưa giải quyết.
 > Khối này **thay thế** câu "PF-A3.2 dọn nó" của A3.1 (mục 7) và việc thay workspace tại chỗ ở mục 8 và 9.
+
+> **Warning (PF-A3.3).** Checkpoint Deployment Admin PF-A3.3 (2026-10-08) — integrated operations: functional
+> verification đúng bundle trong một isolated topology, side-by-side recovery target, bảo vệ dữ liệu hiện tại trong
+> `reset-db`/`rollback`/`abort-deploy`, mô hình capacity, `pf cleanup` và acknowledgement runner record; vẫn là
+> **trạng thái phát triển, chưa phải bản phát hành NAS**. Functional verification và isolated topology chỉ được chứng
+> minh **offline với Docker daemon giả**: chưa quan sát network, port, egress Docker hay PostgreSQL thật, và tính cách
+> ly chỉ được chứng minh từ cấu hình daemon báo về (PF-A3.4).
+> *Instance purge.* Trước mọi thao tác xóa, đúng purge bundle được restore vào một Compose project tạm
+> `pfverify-<12 hex>` (volume riêng, internal network, không publish port, database password sinh mới) và được kiểm tra
+> functional; deletion gate yêu cầu record `functional_recovery_verified` đó. Sau khi xóa, registry record được đánh dấu
+> `state: purged` và nhả project claim (mục 12).
+> *Recovery.* `restore-instance` chỉ nhận bundle của chính instance (`restore-target-mismatch`), và `--side-by-side` giờ
+> tạo một recovery target `pfrecover-<12 hex>` được giữ lại và cách ly, thay cho database `pf_recovery_*`.
+> `pf cleanup` báo cáo và xóa các phần thừa đã được ghi nhận; `pf resume --operation <op> --acknowledge` đóng các runner
+> record của operation không có journal (mục 15 và 16).
 
 ## 1. Mục đích
 
@@ -1076,7 +1091,8 @@ ghi:
 `<root>/instances/<uuid>/artifacts/verifications/<bundle-id>/` (chỉ root); bundle không bao giờ bị sửa sau đó. Level
 mà `backup`, `backups` và `recoveries` hiển thị được tính từ các record này: `captured` (đã seal, chưa có record),
 `failed` (restore test gần nhất lỗi), `data-restore` (mọi store được restore từ chính dump của bundle, có kiểm tra
-head, locale và row count) và `functional` (dành cho PF-A3.3; chưa có writer). Record hỏng được báo là
+head, locale và row count) và `functional` (từ PF-A3.3: đúng purge bundle hoặc một side-by-side target được restore
+và kiểm tra trong một isolated topology, mục 12). Record hỏng được báo là
 `note: verification-record-invalid: …; ignored.` và không nâng level. `pf backup` giờ in:
 
 ```text
@@ -1186,6 +1202,18 @@ cùng checkpoint; checkpoint đã thay đổi trong lúc đó bị từ chối v
 rollback trước database switch drop candidate `pf_restore_*` của chính nó, rồi mở lại deployment không đổi (hoặc, với
 rollback superseding, withdraw và để service ở trạng thái dừng).
 
+**Lựa chọn dữ liệu và capacity (PF-A3.3).** Xác nhận của `rollback ... --restore-db` giờ kết thúc bằng một dòng lựa
+chọn dữ liệu: database đang hoạt động quay về checkpoint đã chọn (kèm thời điểm tạo); dữ liệu ghi sau thời điểm đó vẫn
+nằm trong database giữ lại `pf_keep_*` và trong preservation `before-rollback`, và không có gì được merge. Đúng bản tóm
+tắt operator đã xác nhận được giữ ở `operations/<op>/confirmation-summary.txt` (0600; SHA-256 của nó là
+`confirmation.summary_sha256` của plan) và `pf status --operation <op>` in nó ra. Trước xác nhận, mọi lifecycle command
+đo dung lượng trống cần trên từng device (`statvfs`): backups, recovery, workspace, artifacts, private state và Docker
+root (`DockerRootDir` của daemon). Nhu cầu của các role trên cùng một device được cộng dồn và floor `minimum_free_mb`
+chỉ tính một lần cho mỗi device; thiếu thì từ chối với `capacity-insufficient` và không thay đổi gì, kết quả đo được ghi
+vào `operations/<op>/capacity.json`. Mọi `pf backup` cần chỗ trên Docker root cho restore test; khi không đo được Docker
+root, lệnh từ chối với `capacity-unmeasurable` và chỉ ra `pf backup --emergency`, lệnh này bảo toàn database mà không
+cần kiểm tra đó. Nhu cầu được kiểm tra lại trước mỗi effect; pf không bao giờ xóa gì để lấy chỗ.
+
 ## 11. Reset staging data
 
 Muốn giữ application/version hiện tại nhưng dùng database sạch:
@@ -1208,8 +1236,20 @@ về trạng thái có thể new deploy lại từ đầu.
 
 Từ PF-A3.1, checkpoint `before-reset` là healthy checkpoint schema 1 có verification record, và `reset-db` trước hết
 chạy cùng kiểm tra gắn image với deployment như `pf backup` (`deployment-image-mismatch` trước mọi thay đổi).
-Emergency preservation bên trong `reset-db` thuộc PF-A3.3: khi healthy checkpoint bị từ chối, chạy
-`pf backup --emergency` và xử lý mismatch trước.
+
+Từ PF-A3.3, `reset-db` quyết định theo contract quan sát được, trước xác nhận:
+
+- live head bằng head của image đang chạy: healthy checkpoint `before-reset`, như trước;
+- **schema/image mismatch** (live head khác head của backend image đang chạy, và image đang chạy đúng là image mà
+  deployment record ghi): database hiện tại được capture thành **emergency preservation** trước (là dữ liệu và bằng
+  chứng, không bao giờ là rollback target), sau đó database sạch được migrate tới **head của image đang chạy**;
+- **deployment-image mismatch** (backend image đang chạy không phải image deployment record ghi) bị từ chối với
+  `reset-deployment-image-mismatch`; hãy đưa deployment về đúng trước (`update` hoặc `rollback`);
+- image contract không đọc được bị từ chối với `reset-contract-unknown`.
+
+Bản tóm tắt xác nhận nêu preservation và database giữ lại (`pf_keep_*`, database đang hoạt động trước đó, không bao
+giờ bị drop) và được giữ thành `confirmation-summary.txt`. Lỗi preservation dừng với `preservation-failed` trước mọi
+candidate hay switch. Không bao giờ chạy `alembic downgrade`.
 
 Từ PF-A3.2, `reset-db` bị gián đoạn drop candidate `pf_clean_*` của chính nó và làm lại; `pf resume --abandon` trước
 database switch thì drop candidate và mở lại deployment không đổi. Database switch mà tên
@@ -1309,13 +1349,15 @@ deployment/deployment-record.json    deployment record hiện tại (khi đã se
 deployment/compose-resolved.json     Compose model đã resolve (nhạy cảm)
 ```
 
-`images.tar` giờ chứa cả layer của database image, được save theo image ID (chưa được dùng khi restore; PF-A3.3).
+`images.tar` giờ chứa cả layer của database image, được save theo image ID (từ PF-A3.3 được `restore-instance` dùng khi
+không có `postgres:16`, mục "Restore nguyên functional instance đã purge").
 Mọi payload copy từ checkpoint `before-purge` hay từ deployment record đều được hash lại (`bundle-payload-mismatch`
 dừng purge trước khi xóa và mở lại application). Database `pf_keep_*` được giữ lại được dump với head thật (chỉ cho
 phép connection trong lúc dump rồi đóng lại); `postgres-globals.sql` và danh sách role chỉ là bằng chứng và không bao
 giờ được thực thi. Sau khi bundle được seal, mọi store được restore **từ chính payload của bundle** vào database tạm
 và được kiểm tra; record `data_restore_verified` thu được, gắn với hash manifest của bundle này, là bắt buộc trước lần
-xóa đầu tiên (nếu không: `purge-bundle-unverified`, purge dừng trước khi xóa và application được mở lại). Dòng của
+xóa đầu tiên (nếu không: `purge-bundle-unverified`, purge dừng trước khi xóa và application được mở lại). Từ PF-A3.3
+kiểm tra đó được thay bằng functional verification của mục con tiếp theo. Dòng của
 `pf recoveries` là:
 
 ```text
@@ -1329,6 +1371,47 @@ Từ PF-A2.3, file trong bundle là bản copy chỉ có nội dung (không copy
 target của permission policy đang hiệu lực. Purge giữ permission policy record
 (`<root>/instances/<uuid>/permission-policy.json`); instance được deploy lại hoặc restore vẫn chịu record đó.
 Record không nằm trong bundle: instance được đăng ký mới bắt đầu với derived policy.
+
+### Instance purge: kiểm tra final bundle trong isolated topology
+
+Từ PF-A3.3, instance purge kiểm tra functional **đúng final bundle** trước khi xóa bất cứ thứ gì. Application vẫn dừng
+(backend và frontend) từ lúc dừng writer cho đến khi purge kết thúc hoặc bị hủy; không có gì khởi động chúng ở giữa.
+
+1. Preview từ chối trước `PURGE <project>` khi một isolated topology được giữ lại của instance này vẫn còn
+   (`isolated-topology-present`: nó chạy image của instance, nên không thể phân loại tag của các image đó; xóa bằng
+   `pf cleanup --apply`, thêm `--recovery-target <project>` nếu là side-by-side target), khi isolated model của
+   deployment hiện tại không render được trên host này (`verification-isolation-unsupported`), khi tên project sinh ra
+   đã được dùng (`topology-name-collision`) hoặc khi thiếu dung lượng (`capacity-insufficient`).
+2. Sau khi bundle được seal, database nguồn được kiểm tra bằng lệnh invariant của chính application (`app.cli reconcile`
+   trong backend image đang chạy). Image không có lệnh đó được ghi là `unavailable:`; lỗi hoặc report không đọc được
+   sẽ dừng instance purge (`app-check-failed`) và mở lại application.
+3. Bundle được restore vào một Compose project tạm `pfverify-<12 hex>`: data volume và internal network riêng, **không
+   publish port** (kể cả loopback), `restart: "no"`, image theo ID từ bundle, và một **database password sinh mới** chỉ
+   tồn tại trong `operations/<op>/isolated/<project>/app.env` và `compose.json` cho đến lần teardown cuối. Password
+   của bundle không bao giờ được ghi vào file operation nào.
+4. Các kiểm tra (đều ghi trong record `functional_recovery_verified`): cách ly theo những gì daemon báo (internal
+   network, không có host port binding, volume riêng, restart policy), mọi store (head, locale, owner, extension, row
+   count), health của backend và frontend, image ID đang chạy, bằng chứng image archive, source digest, cấu hình và
+   deployment record, và application invariant: database đã restore phải cho cùng kết quả reconcile như nguồn
+   (`clean`/`clean`, hoặc cùng số mismatch); `unavailable` ở cả hai phía được ghi là `not_run unavailable:`.
+5. Topology được teardown bằng deletion plan đóng băng của chính nó (chỉ resource mang project và topology UUID của
+   nó); teardown không hoàn tất được thì giữ stack, ghi nó là retained `isolated-topology` và vẫn hủy purge.
+6. Deletion gate (sau `ERASE ...`) yêu cầu functional record đã passed của **đúng bundle này, đúng manifest hash này và
+   đúng operation này**, writer đã dừng và nguồn không đổi (database, row count, head); nếu không thì
+   `purge-bundle-unverified`, `purge-writers-running` hoặc `purge-source-changed`, và application được mở lại.
+
+Kiểm tra thất bại sẽ đóng instance purge ở `cancelled` với `functional-verification-failed` nêu tên kiểm tra, mở lại
+application và giữ topology đã dừng để xem xét; `pf cleanup --apply` xóa nó. Nếu bị gián đoạn ở `verifying`,
+`pf resume` teardown topology theo plan của nó và mở lại application.
+
+Sau khi xóa, instance purge đánh dấu registry record `state: purged` qua một registry transaction (quyết định của owner
+OD-A33-08): record giữ UUID và lịch sử, và nhả Compose project claim, nên instance khác có thể đăng ký project đó.
+`pf status` in `Lifecycle: purged by instance purge <op>` và `instances` hiển thị `state=purged`. `restore-instance` một
+bundle của chính instance này sẽ claim lại project (bị từ chối với `instance-claim-taken` khi instance khác đang giữ). Một `deploy` mới của purged record cũng làm vậy
+(kiểm tra lại claim dưới registry lock trước lần ghi đầu tiên); `pf abort-deploy` của lần deploy dang dở đó, và
+`pf resume --abandon` của một restore đã đăng ký lại record, đưa nó về `state: purged`. Việc ghi state cần registry
+lock; khi một installation transaction đang giữ lock, operation dừng với `registry-busy` (không đổi gì) và `pf resume`
+tiếp tục nó.
 
 ### Giữ/xóa revision backups khi purge
 
@@ -1431,20 +1514,69 @@ thì chỉ còn tiếp tục về phía trước. `config/.env` có sẵn với 
 thành `backups/revisions/<project>.pre-restore-<op8>` (không bao giờ xóa, không được `backups` liệt kê); history giống hệt
 thì để nguyên.
 
-### Khôi phục old data side-by-side
+Từ PF-A3.3, restore target được quyết định theo **danh tính**, trước mọi xác nhận:
 
-Nếu instance mới đã chạy nhưng cần xem/export data cũ:
+- một bundle chỉ restore vào instance có UUID mà bundle ghi; bundle của instance khác (kể cả bundle mang từ một host
+  đã mất) bị từ chối với `restore-target-mismatch` cho cả exact restore lẫn side-by-side, và `pf` không restore được
+  nó trong checkpoint này (quyết định của owner OD-A33-09). Legacy bundle không có UUID chỉ được nhận khi cùng Compose
+  project;
+- đường dẫn workspace, repository và home ghi trong bundle **chỉ là provenance**: restore luôn ghi vào đường dẫn của
+  instance đã chọn và in `note: bundle-workspace-differs` khi chúng khác; không ghi gì dưới đường dẫn đã ghi trong
+  bundle;
+- **database image**: khi daemon không có tag `postgres:16`, database image của bundle được nạp từ `images.tar` (sau
+  khi chứng minh hash config và layer của archive) và được tag `postgres:16` (`note: db-image-tagged`). Tag này có hiệu
+  lực trên toàn daemon: bản tóm tắt liệt kê các instance đã đăng ký khác trên cùng daemon đang dùng nó. Tag có sẵn trỏ
+  tới image ID khác được giữ nguyên (`note: db-image-changed`); legacy bundle không ghi database image thì dùng tag cục
+  bộ (`note: db-image-unrecorded`);
+- sau khi frontend khởi động, application invariant của database đã restore được so với oracle của bundle và in ra
+  `Application invariants: <clean|mismatch …|could not run|unavailable>`; dòng này là bằng chứng và không dừng restore;
+- registry record đã purged được claim lại (effect `registry:state=registered`) trừ khi instance khác đang giữ project
+  (`instance-claim-taken`).
+
+### Side-by-side recovery
+
+Nếu instance đang chạy nhưng cần xem hoặc export dữ liệu của một bundle **của chính nó**:
 
 ```sh
 sudo pf restore-instance RECOVERY_ID --side-by-side
 ```
 
-Old active DB được restore dưới tên `pf_recovery_*`. Current app/database không bị thay.
+Từ PF-A3.3 lệnh này tạo một **recovery target** được giữ lại: một Compose project riêng `pfrecover-<12 hex>` với data
+volume và internal network riêng, **không có listener (kể cả loopback)**, không scheduler và database password sinh
+mới. Đúng bundle được restore vào đó và được kiểm tra functional như trong instance purge (record giữ
+`removed: false`). Instance đang chạy, dữ liệu, listener, image override (`active-images.yaml`), image tag, workspace và
+deployment pointer của nó không thay đổi. Xác nhận bằng `RESTORE COPY <bundle-id>`; lệnh được ghi journal thành operation
+`restore-side-by-side`, `pf resume` tiếp tục nó, cùng lệnh với cùng bundle sẽ vào lại nó, và `pf resume --abandon`
+(`ABANDON RECOVERY TARGET <project>`) teardown target. Target có data volume hoặc data check bị thay đổi trong lúc
+operation bị gián đoạn sẽ bị xóa và báo `recovery-target-lost`. Chế độ database `pf_recovery_*` cũ không còn; database
+`pf_recovery_*` có sẵn chỉ được báo cáo (`status`, `cleanup`), không bao giờ bị drop.
+
+`pf status` liệt kê `Recovery targets: <project> from bundle <id> (operation <op> …)`. Xem target với quyền root theo
+project label, ví dụ:
+
+```sh
+sudo docker ps --filter label=com.docker.compose.project=pfrecover-0123456789ab
+sudo docker exec -it <db container> psql -U <user> -d <database>
+```
+
+Xóa nó bằng `sudo pf cleanup --apply --recovery-target <project>` (`REMOVE RECOVERY TARGET <project>`); target đang
+chạy cũng chặn instance purge (`isolated-topology-present`).
 
 PartFlow **không** generic auto-merge recovered DB vào active DB mới. `PartMovement`, quantity
 lineage, allocation, reversal và derived current state có domain invariant không thể merge
 an toàn bằng generic SQL `INSERT`. Hãy restore side-by-side rồi xây explicit domain-aware
 import/reconciliation cho đúng loại data thật sự cần mang qua.
+
+### Hủy lần deploy đầu tiên sau khi frontend đã mở truy cập
+
+Từ PF-A3.3, `pf abort-deploy` cũng được phép sau khi lần deploy đầu tiên chưa hoàn tất đã mở truy cập frontend (và
+trước khi deployment pointer được ghi). Người dùng có thể đã ghi dữ liệu, nên abort **bảo toàn database hiện tại trước**:
+nó dừng backend và frontend, capture một checkpoint `before-abort` (emergency preservation khi contract không đúng)
+trong `backups/revisions/<project>/`, rồi mới xóa các resource đã đóng băng của lần deploy chưa hoàn tất. Checkpoint
+còn lại sau khi abort. Database phải truy cập được, nếu không abort bị từ chối trước xác nhận (`preservation-failed`);
+lỗi capture để abort mở ở `preserving` mà không xóa gì (`pf resume` thử lại việc bảo toàn, `pf resume --abandon` đóng
+nó và deploy lại chặn như trước). Bản tóm tắt xác nhận được giữ thành `confirmation-summary.txt`. Trước khi frontend mở,
+abort không thay đổi.
 
 ## 13. Release check và scheduled task
 
@@ -1615,8 +1747,18 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   restore, operation trước A3.2, và từ bất kỳ lệnh lifecycle nào có child process
   bị ngắt hoặc hết thời gian trước khi xác nhận, khi chưa có plan (ví dụ Ctrl-C trong lúc `compose build` candidate,
   các kiểm tra contract `compose run` của `deploy`, `update` và `rollback`, hoặc `ensure_local_contract`): kiểm tra
-  bằng `pf status`, xác nhận không còn gì của chúng đang chạy và giữ nguyên thư mục; route xác nhận (acknowledgement)
-  thuộc PF-A3.3.
+  bằng `pf status`, xác nhận không còn gì của chúng đang chạy và giữ nguyên thư mục. Từ PF-A3.3 hãy acknowledge chúng
+  bằng `sudo pf resume --operation <op> --acknowledge` (`ACKNOWLEDGE <op8>`): pf trước hết từ chối khi một process group
+  đã ghi nhận hoặc một one-off container của instance vẫn chạy (`effect-still-running`), in ra những gì nó quan sát được
+  (chỉ danh tính), và ghi `operations/<op>/acknowledgement-<hash12>.json` (0600, tạo độc quyền) gắn với hash của các
+  record hiện tại. Khi đó các record không còn chặn `pf install`; `pf status` đếm chúng là đã acknowledge. Record được
+  thêm vào sau đó sẽ mở lại. Operation có journal, thư mục không có record hoặc đã được acknowledge bị từ chối với
+  `acknowledge-not-legal`.
+- **PF-A3.2 → PF-A3.3.** Byte của bootstrap không đổi; `pf install control` bị từ chối khi bất kỳ instance operation
+  nào đang mở. **Downgrade** về control PF-A3.2 chỉ khi không có operation nào đang mở (kể cả `restore-side-by-side`
+  hay `cleanup`): control cũ không biết các operation kind mới, recovery target hay file acknowledgement (record đã
+  acknowledge lại bị coi là chưa giải quyết ở đó), và nó không tự ghi registry state `purged` (record đã được đánh dấu
+  `purged` vẫn giữ nguyên).
 
 Bước install explicit này chính là security boundary cho phép `repo/` writable bởi users.
 Không cài tree chưa review/không rõ nguồn bằng `sudo`.
@@ -2047,6 +2189,72 @@ Các code:
   chạy `resume`.
 - Trong khoảng workspace switch chỉ `resume` và `resume --keep-workspace` được chạy (mục 8).
 
+### Mã của integrated operation (PF-A3.3)
+
+- `isolated-topology-present` — một stack `pfverify-*` được giữ lại hoặc một recovery target `pfrecover-*` của instance
+  này vẫn còn; chạy `pf cleanup --apply` (thêm `--recovery-target <project>` cho recovery target), rồi chạy lại instance
+  purge.
+- `verification-isolation-unsupported` — isolated model không render hoặc validate được trên host này (hoặc legacy
+  bundle không có image dùng được); không có gì bị xóa. `topology-name-collision` — chạy lại lệnh.
+- `functional-verification-failed` — một kiểm tra của isolated verification thất bại (thông báo nêu tên kiểm tra);
+  instance purge bị hủy và application được mở lại, hoặc side-by-side restore đóng ở `failed_preserved`. Topology đã
+  dừng được giữ để xem xét; xóa bằng `pf cleanup --apply`.
+- `app-check-failed` — lệnh application invariant lỗi hoặc cho report không đọc được trên database nguồn; không có gì
+  bị xóa. Output của lệnh không bao giờ được lưu hay in ra (chỉ số lượng theo từng kiểm tra). Lệnh chạy trong giới hạn
+  mười phút của runner cho mỗi child; database cần lâu hơn sẽ dừng instance purge theo cùng cách.
+- `purge-bundle-unverified`, `purge-writers-running`, `purge-source-changed` — deletion gate từ chối sau `ERASE`;
+  application được mở lại (hoặc, khi chính việc mở lại không thể tiến hành, purge vẫn mở để `resume`/`--abandon`).
+- `restore-target-mismatch` — bundle thuộc instance khác (mục 12). `instance-claim-taken` — một instance đã đăng ký
+  khác đang giữ project của record đã purged này. `registry-busy` — một installation transaction đang giữ registry lock;
+  chạy `resume` sau khi nó kết thúc.
+- `image-load-would-retag` — nạp `images.tar` của bundle sẽ dời một tag đang trỏ tới image khác ở đây; không nạp gì.
+  Hãy xóa hoặc đổi tên tag đó trước.
+- `recovery-target-lost` — một side-by-side target bị thay đổi trong lúc operation của nó bị gián đoạn; nó đã bị xóa.
+  Chạy lại side-by-side restore.
+- `reset-contract-unknown`, `reset-deployment-image-mismatch`, `preservation-failed` — mục 11 và "Hủy lần deploy đầu
+  tiên sau khi frontend đã mở truy cập".
+- `effect-still-running`, `acknowledge-not-legal` — mục 15.
+
+### Từ chối vì capacity
+
+`capacity-insufficient: <phase> needs <n> MiB on device <d> (<roles>: <paths>), <m> MiB free including the <f> MiB
+safety floor` nêu mọi role dùng chung device bị thiếu. Giải phóng chỗ trên device đó (history `.pre-restore-*` cũ, file
+đã export, hoặc phần thừa của `pf cleanup --apply`); không bao giờ xóa healthy checkpoint cuối cùng hay purge bundle để
+lấy chỗ. Docker root được dùng chung bởi mọi instance trên daemon, nên image và volume của instance khác cũng tính ở đó.
+`capacity-unmeasurable` nghĩa là daemon không báo `DockerRootDir` dùng được hoặc không đo được nó; `pf backup
+--emergency` vẫn bảo toàn database. Hạ `minimum_free_mb` là thay đổi admin configuration, không phải route được khuyến
+nghị.
+
+### Dọn phần thừa
+
+`sudo pf cleanup` chỉ đọc (lock observe-only, không tạo thư mục operation): nó liệt kê phần thừa mà các operation **đã
+đóng** ghi nhận: candidate `pf_verify_*`, `pf_migrate_*`, `pf_restore_*` và `pf_clean_*`, topology `pfverify-*` được giữ
+lại, thư mục bundle-attempt và image tag của chúng, stage bị supersede, và các mục chỉ xóa theo selector. Một tên chỉ
+khớp prefix không bao giờ là căn cứ: database không operation nào ghi nhận thì không được liệt kê và không bị động tới.
+`sudo pf cleanup --apply` xóa tập mặc định sau `CLEANUP <project> <op8>` dưới dạng một operation `cleanup` có journal;
+mỗi mục được quan sát lại ngay trước khi xóa và được giữ khi đã thay đổi (`cleanup-item-changed`) hoặc đang bận
+(`cleanup-item-busy`); cleanup sau đó tiếp tục và đóng ở `failed_preserved` (`cleanup-items-kept`). Các mục chỉ xóa theo
+selector cần selector và câu xác nhận riêng:
+
+- `--recovery-target <project>` (`REMOVE RECOVERY TARGET <project>`);
+- `--checkpoint-history <name>` (`DELETE CHECKPOINT HISTORY <name>`): một history `.pre-restore-*` bị dời chỗ, chỉ khi
+  mọi checkpoint trong đó cũng có trong active history (nếu không: `cleanup-history-unique-checkpoint`);
+- `--generation <wsg-…>`: một retained workspace generation (mục con tiếp theo).
+
+Không bao giờ dọn: database giữ lại `pf_keep_*`, database `pf_recovery_*` của chế độ side-by-side cũ, database đang
+hoạt động, tên thuộc operation đang mở, checkpoint đã seal, purge bundle, deployment đã seal, `unsealed-active-staging`
+và image tag được nạp bởi một restore bị abandon. `cleanup-nothing` và `cleanup-target-unknown` không thay đổi gì.
+
+### Gỡ một retained workspace generation
+
+`sudo pf cleanup --apply --generation wsg-<…>` seal generation trước khi xóa: trước hết đóng mọi editor hay SMB session
+đang mở file trong đó (handle đang mở bị từ chối với `generation-in-use`; `/proc` không đọc được thì
+`generation-handles-unverifiable`). Cây được archive vào `backups/generations/<project>/<generation>/workspace.tar.gz`
+kèm `seal.json` (hash của cây và của archive); link hoặc file đặc biệt bên trong bị từ chối với
+`generation-unsupported-entry`, cây thay đổi trong lúc seal thì `generation-unstable`, và ghi sau khi seal thì giữ cây
+(`cleanup-item-changed`). Để lấy lại một file, giải nén nó từ archive với quyền root ra một vị trí ngoài `repo/`, ví
+dụ `sudo tar -xzf <archive> -C /tmp/restore-<generation> <path>`.
+
 ## 17. Command reference
 
 | Command | Mục đích |
@@ -2060,7 +2268,7 @@ Các code:
 | `sudo pf deploy --latest` | Brand-new staging từ latest configured branch SHA |
 | `sudo pf deploy --commit FULL_SHA` | Brand-new deploy từ exact commit |
 | `sudo pf deploy --release TAG` | Brand-new deploy từ published release |
-| `sudo pf abort-deploy` | Xóa incomplete first deploy trước khi frontend mở (xác nhận `ABORT DEPLOY <project>`; abort bị gián đoạn tiếp tục bằng `RESUME ABORT DEPLOY <project>`) |
+| `sudo pf abort-deploy` | Xóa incomplete first deploy (xác nhận `ABORT DEPLOY <project>`; sau khi frontend đã mở, database hiện tại được bảo toàn trước; abort bị gián đoạn tiếp tục bằng `RESUME ABORT DEPLOY <project>`) |
 | `sudo pf update --latest` | Managed staging update theo latest branch SHA |
 | `sudo pf update --commit FULL_SHA` | Update tới exact commit |
 | `sudo pf update --release TAG` | Update tới release |
@@ -2074,13 +2282,17 @@ Các code:
 | `sudo pf purge [--project NAME]` | Full recoverable purge một staging instance |
 | `sudo pf recoveries` | List purge recovery bundles: `[level]`, project, active database, source provenance, `derived_from` |
 | `sudo pf restore-instance RECOVERY_ID` | Dựng lại functional instance đã purge |
-| `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB bên cạnh current instance |
+| `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore một bundle của chính instance vào một recovery target `pfrecover-*` cách ly, được giữ lại bên cạnh nó (`RESTORE COPY <bundle-id>`) |
 | `sudo pf release-check` | Check eligible release, không apply |
 | `sudo pf release-check --apply` | Bị từ chối ở checkpoint này (exit 20): cần grant trong protected policy (PF-A4.3) |
 | `sudo pf resume [--operation ID]` | Vào lại operation đang mở theo journal: mở lại không đổi, tiếp tục về phía trước hoặc dừng ở `needs_operator` (`RESUME <op8>`) |
 | `sudo pf resume --abandon` | Hủy operation khi hợp lệ (trước data effect: drop candidate của operation, mở lại deployment không đổi, `ABANDON <op8>`; restore khi target đang được chuẩn bị: `ABANDON RESTORE <project> <op8>`) |
 | `sudo pf resume --keep-workspace` | Hoàn tất operation mà không refresh `repo/` (`KEEP WORKSPACE <op8>`) |
 | `sudo pf status --operation ID` | Chi tiết một operation: effect, evidence, attempt, child |
+| `sudo pf resume --operation ID --acknowledge` | Acknowledge runner record của thư mục operation không có journal (`ACKNOWLEDGE <op8>`; mục 15) |
+| `sudo pf cleanup` | Báo cáo phần thừa đã ghi nhận của các operation đã đóng (chỉ đọc) |
+| `sudo pf cleanup --apply` | Xóa tập phần thừa mặc định (`CLEANUP <project> <op8>`; mục 16) |
+| `sudo pf cleanup --apply --recovery-target P \| --checkpoint-history NAME \| --generation WSG` | Xóa thêm một mục chỉ xóa theo selector (câu xác nhận riêng) |
 | `... deploy\|update\|rollback\|restore-instance --keep-workspace` | Chạy không có workspace generation switch |
 | `sudo pf ps [options] [SERVICE...]` | View container Compose read-only của instance (mục 14) |
 | `sudo pf logs [options] [SERVICE...]` | Log service có giới hạn và được redact (mục 14) |
@@ -2169,13 +2381,14 @@ Giới hạn PF-A3.1 (chỉ có bằng chứng offline và filesystem; Docker v�
 
 - không khẳng định hành vi Docker, Compose hay PostgreSQL thật nào; case emergency preservation A3-T03 bị blocked ở
   mức Docker/PostgreSQL thật mà nó yêu cầu (PF-A3.4);
-- chưa có functional recovery verification: việc xóa của purge được gate bằng record `data_restore_verified` từ chính
-  payload của purge bundle; invariant query của application và việc dựng lại runtime/image/config chưa được verify
-  (PF-A3.3);
-- emergency preservation chỉ được nối vào `rollback` và `backup --emergency`; `reset-db`, `purge` và
-  `restore-instance` vẫn gate bằng healthy checkpoint (PF-A3.3);
+- *(đã được PF-A3.3 thay thế, xem giới hạn của nó bên dưới)* instance purge từng được gate bằng record
+  `data_restore_verified` từ chính payload của purge bundle; từ PF-A3.3 nó được gate bằng record
+  `functional_recovery_verified` từ một isolated topology (chỉ có bằng chứng từ daemon giả);
+- *(đã được PF-A3.3 thay thế)* emergency preservation từng chỉ được nối vào `rollback` và `backup --emergency`; từ
+  PF-A3.3 nó còn bao phủ `reset-db` và `abort-deploy`; instance purge vẫn gate bằng healthy checkpoint và
+  `restore-instance` không có dữ liệu hiện tại để bảo toàn;
 - staging chưa seal và deployment bị thay thế không bao giờ được dọn (PF-A3.2/PF-A5.1); việc thay workspace vẫn làm tại
-  chỗ (PF-A3.2); layer database image đã archive chưa được dùng khi restore (PF-A3.3);
+  chỗ (PF-A3.2); layer database image đã archive được dùng khi restore từ PF-A3.3;
 - downgrade về control PF-A2.3 không được hỗ trợ khi còn bất kỳ bundle schema 1 nào;
 - checksum chứng minh tính toàn vẹn, không chứng minh tác giả: bundle không có trust anchor nào ngoài các thư mục
   được bảo vệ, thuộc root.
@@ -2193,15 +2406,33 @@ btrfs, SMB, Docker daemon hay PostgreSQL thật):
 - độ bền của workspace staging dựa vào `os.sync()` trước các lần rename; chưa chứng minh trường hợp mất điện (PF-A3.4);
 - workspace root có ACL, workspace là mount point hoặc container không an toàn sẽ kết thúc update ở
   `workspace_sync_pending` cho tới khi dùng `--keep-workspace` hoặc sửa nguyên nhân;
-- `abort-deploy` sau khi frontend đã mở vẫn bị từ chối; `restore-instance` không có abandon khi data restore đã bắt đầu;
-  `backup --emergency` và side-by-side restore vẫn không có journal;
-- thư mục capture dang dở, `pf_verify_*` còn lại sau verification thất bại, stage bị supersede, image tag do restore bị
-  abandon nạp vào, checkpoint history bị dời chỗ và retained workspace generation chỉ được báo cáo, không bao giờ bị
-  dọn (PF-A3.3/PF-A5.1);
-- runner record của operation không có journal vẫn chặn `pf install` (acknowledgement thuộc PF-A3.3); ngoài
-  `backup --emergency` và side-by-side restore, chúng gồm mọi child lifecycle bị ngắt hoặc hết thời gian trước khi xác
+- `restore-instance` không có abandon khi data restore đã bắt đầu; `backup --emergency` vẫn không có journal
+  (*đã được PF-A3.3 thay thế*: `abort-deploy` sau khi frontend đã mở bảo toàn dữ liệu trước rồi được phép; side-by-side
+  restore là operation `restore-side-by-side` có journal);
+- *(đã được PF-A3.3 thay thế bằng `pf cleanup`, mục 16)* thư mục capture dang dở, `pf_verify_*` còn lại sau
+  verification thất bại, stage bị supersede, checkpoint history bị dời chỗ và retained workspace generation nay được dọn
+  khi có yêu cầu; image tag do restore bị abandon nạp vào vẫn chỉ được báo cáo, không bao giờ bị dọn;
+- runner record của operation không có journal chặn `pf install` cho tới PF-A3.3, bản này thêm đường acknowledgement
+  (mục 15); ngoài `backup --emergency`, chúng gồm mọi child lifecycle bị ngắt hoặc hết thời gian trước khi xác
   nhận (`compose build` candidate, kiểm tra contract `compose run`, `ensure_local_contract`);
 - hơn 20000 entry trong `operations/` từ chối mọi route thay đổi cho tới khi các operation đã đóng được lưu trữ.
+
+Giới hạn PF-A3.3 (bằng chứng offline, filesystem và installed CLI với Docker daemon giả; không chạy gì trên DSM,
+Docker daemon hay PostgreSQL thật):
+
+- A3-T06, A3-T07, A3-T08, A3-T15, A3-T16 và phần Docker storage của A3-T14 bị chặn ở mức Docker/PostgreSQL thật cho tới
+  PF-A3.4; phần filesystem của A3-T14 dùng `statvfs` thật;
+- tính cách ly của topology `pfverify-*`/`pfrecover-*` chỉ được chứng minh từ cấu hình daemon báo về (internal network,
+  port binding, restart policy, mount); hành vi network, port và egress thật chưa được quan sát;
+- oracle application invariant là `app.cli reconcile` của image đã deploy; image không có lệnh này được ghi là
+  `unavailable`, và output của reconcile không bao giờ được lưu;
+- quyết định của owner: recovery target không có listener và không phải instance đã đăng ký (OD-A33-06/07); instance
+  purge ghi registry tombstone `state: purged` và nhả project claim (OD-A33-08, đã áp dụng); bundle của instance khác,
+  kể cả từ một host đã mất, bị từ chối (`restore-target-mismatch`, OD-A33-09);
+- các quyết định này thay thế ba giới hạn PF-A3.2 ở trên: `abort-deploy` sau khi frontend đã mở sẽ bảo toàn trước,
+  emergency preservation bao gồm `reset-db` và `abort-deploy` (instance purge vẫn gate bằng healthy checkpoint vì final
+  bundle của nó phải kiểm tra functional được; `restore-instance` không có dữ liệu hiện tại cần bảo toàn, target của nó
+  trống), và runner record không có journal đã có route acknowledgement.
 
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;
