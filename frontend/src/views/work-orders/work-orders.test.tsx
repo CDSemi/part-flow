@@ -1181,7 +1181,8 @@ test('a complete save flow (number + due entered) commits ONE POST and reloads f
   // resolution is a real server lookup, so the line arrives async).
   scanBarcode('PF:PN:78-04-0031');
   const qty = await screen.findByLabelText('Quantity for 78-04-0031');
-  expect(document.activeElement).toBe(qty);
+  // The focus comes from an effect that may flush after the find resolves.
+  await waitFor(() => expect(document.activeElement).toBe(qty));
   fireEvent.change(qty, { target: { value: '5' } });
   fireEvent.keyDown(qty, { key: 'Enter' });
   expect(document.activeElement).toBe(screen.getByLabelText('Scan PN barcode'));

@@ -13,13 +13,16 @@ and Admin Maintenance** in `IMPLEMENTATION_ROADMAP.md`. Phase 16 covers backups,
 migrations, HTTPS/internal access, observability, rollback, reconciliation,
 pilot deployment, and administrative archive/purge maintenance.
 
-At source commit `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`, the repository has
-Phases 1–10 implemented end to end, plus Phase 10.5 — Scan Station Receive
-Quantity and the Phase 11 Production Board, Area Board, and PN Tracking
-read models and real frontend views, and Priority Management (Phase 12) is
-implemented. Full Administration (Phase 13) remains a development-only
-preview or honest unavailable state. Authentication and role enforcement are Phase 14.
-Production hardening and production deployment artifacts are Phase 16.
+The repository has Phases 1–13 implemented end to end, including Phase 10.5 —
+Scan Station Receive Quantity, the Phase 11 monitoring views, Priority
+Management (Phase 12) and Full Administration (Phase 13). Phase 14 —
+Authentication, Role Enforcement, and Authorized Management Corrections has
+every planned slice (1–8) implemented: sign-in for application Users,
+server-side permission enforcement on every Administration and Management read
+and write, and Scan Station routes that require a station device enrolled by an
+administrator (§2). Phase 16 still owns TLS, the `Secure` session cookie by
+default, network rate limiting, and the production deployment artifacts and
+gates; it is in progress (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
 
@@ -27,8 +30,8 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Wait for Phase 14 authorization and the Phase 16 production artifacts and gates in §5. |
-| Internet exposure | Prohibited now | The current application has no production authentication boundary and the current Compose stack exposes development services. |
+| Pilot or production use | Not ready | Wait for the Phase 16 production artifacts and gates in §5. |
+| Internet exposure | Prohibited now | No TLS, reverse proxy, rate limiting or production hardening exists yet (Phase 16), and the current Compose stack exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
 

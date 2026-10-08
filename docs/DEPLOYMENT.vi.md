@@ -14,13 +14,16 @@ and Admin Maintenance** trong `IMPLEMENTATION_ROADMAP.md`. Phase 16 bao gồm
 backup, migration, HTTPS/truy cập nội bộ, observability, rollback,
 reconciliation, pilot deployment và bảo trì archive/purge dành cho Admin.
 
-Tại source commit `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`, repo đã triển khai
-end to end từ Phase 1 đến Phase 10, cùng Phase 10.5 — Scan Station Receive
-Quantity và các read model cùng frontend view thật của Production Board,
-Area Board và PN Tracking thuộc Phase 11, và Priority Management (Phase 12) đã
-được triển khai. Administration đầy đủ (Phase 13) vẫn là preview chỉ có ở
-development hoặc trạng thái unavailable được ghi rõ. Authentication và role enforcement thuộc
-Phase 14. Production hardening và artifact triển khai production thuộc Phase 16.
+Repo đã triển khai end to end từ Phase 1 đến Phase 13, gồm cả Phase 10.5 —
+Scan Station Receive Quantity, các view giám sát của Phase 11, Priority
+Management (Phase 12) và Administration đầy đủ (Phase 13). Phase 14 —
+Authentication, Role Enforcement, and Authorized Management Corrections đã
+triển khai mọi slice đã lập kế hoạch (1–8): sign-in cho application User,
+permission enforcement phía server trên mọi đọc và write Administration và
+Management, và các route Scan Station yêu cầu thiết bị station do administrator
+enroll (§2). Phase 16 vẫn sở hữu TLS, session cookie `Secure` mặc định, network
+rate limiting, cùng artifact và gate triển khai production; phase này đang được
+thực hiện (§5 và `IMPLEMENTATION_ROADMAP.md`).
 
 Vì vậy:
 
@@ -28,8 +31,8 @@ Vì vậy:
 | --- | --- | --- |
 | Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
 | Synology staging/test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong LAN, dùng dữ liệu giả/không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot hoặc production | Chưa sẵn sàng | Chờ authorization Phase 14 cùng artifact và gate Phase 16 ở §5. |
-| Mở ra Internet | Hiện tại bị cấm | Ứng dụng chưa có ranh giới authentication production và Compose hiện tại đang expose các service development. |
+| Pilot hoặc production | Chưa sẵn sàng | Chờ artifact và gate production của Phase 16 ở §5. |
+| Mở ra Internet | Hiện tại bị cấm | Chưa có TLS, reverse proxy, rate limiting hay production hardening (Phase 16), và Compose hiện tại đang expose các service development (§2). |
 
 Triển khai staging nội bộ không có nghĩa Phase 16 đã hoàn thành.
 

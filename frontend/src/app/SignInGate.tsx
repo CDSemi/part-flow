@@ -23,7 +23,10 @@ import type { SessionValue } from './session-context';
 // ended, the area stays mounted with its open editors and drafts
 // (presented as the user and with the permissions it was rendered with)
 // while the Sign-in dialog — or, after an administrator set the
-// password, the Choose a new password dialog — is open. When the same
+// password, the Choose a new password dialog — is open, and also while
+// an ended sign-in is recorded without a dialog (a theme save never
+// prompts, GUI_DESIGN §2.1; the area's next refused request opens the
+// Sign-in dialog). When the same
 // user's sign-in is usable again, every load that failed in the
 // meantime runs again. The area belongs to the user it was rendered
 // for: a different user signing in remounts it, dropping the drafts; an

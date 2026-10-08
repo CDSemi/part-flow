@@ -526,9 +526,15 @@ test('FS-4: a browser without a device sees the enrollment panel under the stati
   expect(header.textContent).toContain('Finishing');
   expect(header.textContent).toContain(STATION);
   expect(header.textContent).toContain('Deburr');
-  // The code field owns focus; production mode keeps a way out.
-  expect(document.activeElement).toBe(
-    within(panel).getByLabelText('Enrollment code'),
+  // The code field owns focus; production mode keeps a way out. The
+  // focus comes from a mount effect that may flush after findByRole
+  // resolves, so wait for it (re-querying the field each time).
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(
+        screen.getByRole('region', { name: 'Enroll this device' }),
+      ).getByLabelText('Enrollment code'),
+    ),
   );
   const field = within(panel).getByLabelText('Enrollment code');
   expect(field).toHaveAttribute('placeholder', 'XXXXX-XXXXX');
