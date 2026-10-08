@@ -12,23 +12,38 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
 import { PERMISSIONS } from '../../api/roles';
+import type { Permission } from '../../api/roles';
 
-// Import Work Orders dialog (Phase 15 slice 1 — GUI_DESIGN §11.7),
+// Import Work Orders dialog (Phase 15 slices 1–2 — GUI_DESIGN §11.7),
 // driven through the real Work Orders view against an in-memory fake of
 // the import routes that answers the exact wire contract: the preview
-// returns the SHA-256 check token of the bytes it received, and the
-// Import refuses a missing token (422) or a token of other bytes (409)
-// exactly like the server. Covered: the whole flow and the list reload,
-// the same-bytes rule, every reason Import is disabled, the in-flight
-// state (no close, navigation and unload guarded), the lost-outcome
-// state, sign-in and permission refusals, file-level refusals, focus
-// after a failed step and the report presentation.
+// returns the SHA-256 check token of the bytes it received, the
+// `update_token` of its change list and the permissions its content
+// needs; the Import refuses a missing token (422) or a token of other
+// bytes (409), a malformed confirmation (422 C5) and a missing content
+// permission (403), and changes an existing Work Order only when the
+// confirmation equals its own change list's token — otherwise every
+// change is refused per Work Order (U4) while creates proceed, exactly
+// like the server. Covered: the whole flow and the list reload, the
+// same-bytes rule, every reason Import is disabled, the in-flight state
+// (no close, navigation and unload guarded), the lost-outcome state,
+// sign-in and permission refusals, file-level refusals, focus after a
+// failed step, the report presentation, and the typed confirmation of
+// changes to existing Work Orders.
 
 const C3 = 'Check the file before importing it.';
 const C4 =
   'This is not the file that was checked. Check the file again before importing.';
 const UNKNOWN_COPY =
-  'The import may be partly saved. Check the file again: Work Orders already in PartFlow are never duplicated.';
+  'The import may be partly saved. Check the file again: Work Orders already in PartFlow are never duplicated, and changes already saved are not listed again.';
+const C5 =
+  'The import confirmation is not valid. Check the file again and confirm the changes.';
+const U3 =
+  'This Work Order changed after the file was checked, so nothing was changed on it. Check the file again.';
+const U4 =
+  'Work Orders in this file changed after the changes were confirmed, so this Work Order was not changed. Check the file again and confirm the new changes.';
+const STALE_LINE =
+  'Some Work Orders were not changed because they changed after the check. Check the file again to see and confirm the current changes.';
 const A1 =
   'You are not signed in, or your sign-in has ended. Sign in to continue.';
 const A3 = 'You do not have permission to do this.';
@@ -41,6 +56,7 @@ interface Upload {
   url: string;
   contentType: string;
   checkHeader: string | null;
+  confirmHeader: string | null;
   text: string;
 }
 
@@ -60,6 +76,10 @@ let nextPreviewFailure: Response | 'network' | null;
 let nextCommitFailure: Response | 'network' | null;
 let holdCommit: Promise<void> | null;
 let nextWorkOrderId: number;
+let sessionPermissions: readonly Permission[];
+/** Work Order Numbers whose update the commit refuses as changed after
+ * the check (U3), as a concurrent edit would. */
+let changedAfterCheck: Set<string>;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -110,12 +130,77 @@ function entryWire(number: string, outcome: string, extra?: Wire): Wire {
     lines: [],
     new_part_numbers: [],
     lines_without_due_date: 0,
+    changes: null,
+    completes_work_order: null,
+    lines_not_in_file: null,
     work_order_id: null,
     existing_status: null,
     differs_from_file: null,
     errors: [],
     ...extra,
   };
+}
+
+function editWire(
+  row: number,
+  partNumber: string,
+  demandId: number,
+  extra?: Wire,
+): Wire {
+  return {
+    kind: 'EDIT_LINE',
+    row,
+    part_number: partNumber,
+    demand_id: demandId,
+    new_part_number: false,
+    requested_quantity: null,
+    due_date: null,
+    job_numbers: null,
+    leaves_hot_list: false,
+    ...extra,
+  };
+}
+
+function addWire(
+  row: number,
+  partNumber: string,
+  quantity: number,
+  extra?: Wire,
+): Wire {
+  return {
+    kind: 'ADD_LINE',
+    row,
+    part_number: partNumber,
+    demand_id: null,
+    new_part_number: false,
+    requested_quantity: { before: null, after: quantity },
+    due_date: { before: null, after: null },
+    job_numbers: { before: [], after: [] },
+    leaves_hot_list: false,
+    ...extra,
+  };
+}
+
+/** A WILL_UPDATE entry of an existing active Work Order. */
+function updateEntry(
+  number: string,
+  id: number,
+  status: 'OPEN' | 'RELEASED',
+  changes: Wire[],
+  extra?: Wire,
+): Wire {
+  return entryWire(number, 'WILL_UPDATE', {
+    rows: changes.map((c) => c.row as number),
+    lines: changes.map((c) =>
+      lineWire(c.row as number, c.part_number as string, 1),
+    ),
+    changes,
+    completes_work_order: false,
+    lines_not_in_file: [],
+    work_order_id: id,
+    existing_status: status,
+    ...extra,
+  });
 }
 
 function defaultScenario(): Scenario {
@@ -140,7 +225,28 @@ function count(entries: Wire[], outcome: string): number {
   return entries.filter((e) => e.outcome === outcome).length;
 }
 
-function reportWire(dryRun: boolean, token: string, entries: Wire[]): Wire {
+/** The digest of the change list (what the typed confirmation binds). */
+function updateToken(entries: Wire[]): string | null {
+  const updates = entries.filter((e) => e.outcome === 'WILL_UPDATE');
+  if (updates.length === 0) return null;
+  return sha256(new TextEncoder().encode(JSON.stringify(updates)));
+}
+
+/** Create → Create and edit Work Orders; change → Edit Work Order
+ * Demand (sorted keys). */
+function requiredPermissions(entries: Wire[]): string[] {
+  const keys: string[] = [];
+  if (count(entries, 'WILL_UPDATE') > 0) keys.push('EDIT_WORK_ORDER_DEMAND');
+  if (count(entries, 'WILL_CREATE') > 0) keys.push('MANAGE_WORK_ORDERS');
+  return keys;
+}
+
+function reportWire(
+  dryRun: boolean,
+  token: string,
+  entries: Wire[],
+  required: string[] = requiredPermissions(entries),
+): Wire {
   return {
     dry_run: dryRun,
     file_format: 'CSV',
@@ -154,16 +260,20 @@ function reportWire(dryRun: boolean, token: string, entries: Wire[]): Wire {
       (sum, e) => sum + (e.lines_without_due_date as number),
       0,
     ),
+    update_token: dryRun ? updateToken(entries) : null,
+    required_permissions: required,
     work_orders: entries,
     unassigned_rows: [],
     summary: dryRun
       ? {
           will_create: count(entries, 'WILL_CREATE'),
+          will_update: count(entries, 'WILL_UPDATE'),
           existing: count(entries, 'EXISTS'),
           refused: count(entries, 'REFUSED'),
         }
       : {
           created: count(entries, 'CREATED'),
+          updated: count(entries, 'UPDATED'),
           existing: count(entries, 'EXISTS'),
           refused: count(entries, 'REFUSED'),
         },
@@ -196,7 +306,7 @@ function sessionResponse(): Response {
       role_id: 2,
       role_name: 'Manager',
       avatar_updated_at: null,
-      permissions: PERMISSIONS,
+      permissions: sessionPermissions,
       must_change_password: false,
       session_expires_at: null,
       theme_preference: null,
@@ -216,6 +326,7 @@ async function importRoute(
     url,
     contentType: headers['Content-Type'],
     checkHeader: headers['X-PartFlow-Import-Check'] ?? null,
+    confirmHeader: headers['X-PartFlow-Import-Confirm'] ?? null,
     text: new TextDecoder().decode(bytes),
   });
   const token = sha256(bytes);
@@ -236,13 +347,52 @@ async function importRoute(
     return detail(C3, 422);
   }
   if (sent !== token) return detail(C4, 409);
+  const confirm = headers['X-PartFlow-Import-Confirm'];
+  if (confirm !== undefined && !/^[0-9a-f]{64}$/.test(confirm)) {
+    return detail(C5, 422);
+  }
+  // The commit plans the file again over the current data.
+  const required = requiredPermissions(scenario.entries);
+  const missing = required.filter(
+    (key) => !sessionPermissions.includes(key as Permission),
+  );
+  if (missing.length > 0) {
+    return json(
+      {
+        detail: A3,
+        permission_denied: true,
+        required_permissions: required,
+      },
+      403,
+    );
+  }
+  const planned = updateToken(scenario.entries);
+  const confirmed = planned === null || confirm === planned;
+  const refused = (e: Wire, message: string): Wire => ({
+    ...e,
+    outcome: 'REFUSED',
+    lines: [],
+    changes: null,
+    completes_work_order: null,
+    lines_not_in_file: null,
+    lines_without_due_date: 0,
+    new_part_numbers: [],
+    errors: [{ row: null, column: null, message }],
+  });
   const committed = scenario.entries.map((e) => {
+    if (e.outcome === 'WILL_UPDATE') {
+      if (!confirmed) return refused(e, U4);
+      if (changedAfterCheck.has(e.work_order_number as string)) {
+        return refused(e, U3);
+      }
+      return { ...e, outcome: 'UPDATED' };
+    }
     if (e.outcome !== 'WILL_CREATE') return e;
     const id = nextWorkOrderId++;
     listRows.push(summaryWire(id, e.work_order_number as string));
     return { ...e, outcome: 'CREATED', work_order_id: id };
   });
-  return json(reportWire(false, token, committed));
+  return json(reportWire(false, token, committed, required));
 }
 
 async function handle(url: string, init?: RequestInit): Promise<Response> {
@@ -281,6 +431,8 @@ beforeEach(() => {
   nextCommitFailure = null;
   holdCommit = null;
   nextWorkOrderId = 50;
+  sessionPermissions = PERMISSIONS;
+  changedAfterCheck = new Set();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -347,7 +499,9 @@ async function checkFile(dialog: HTMLElement) {
 }
 
 function importButton(dialog: HTMLElement) {
-  return within(dialog).getByRole('button', { name: /^Import .*Work Order/ });
+  return within(dialog).getByRole('button', {
+    name: /^(Import|Change|Create) .*Work Order/,
+  });
 }
 
 function uploadsTo(url: string): Upload[] {
@@ -381,7 +535,7 @@ test('FV-1: choose → Check file → report → Import N → result → Close r
   expect(uploadsTo(PREVIEW)[0].text).toBe(CSV_TEXT);
   expect(
     within(dialog).getByText(
-      'Will create 2 · Already in PartFlow 0 · Not imported 0',
+      'Will create 2 · Will change 0 · Already in PartFlow 0 · Not imported 0',
     ),
   ).toBeInTheDocument();
   expect(within(dialog).getByText('2 rows read')).toBeInTheDocument();
@@ -399,7 +553,7 @@ test('FV-1: choose → Check file → report → Import N → result → Close r
   expect(document.activeElement).toBe(result);
   expect(
     within(dialog).getByText(
-      'Created 2 · Already in PartFlow 0 · Not imported 0',
+      'Created 2 · Changed 0 · Already in PartFlow 0 · Not imported 0',
     ),
   ).toBeInTheDocument();
   expect(within(dialog).getAllByText('Created')).toHaveLength(2);
@@ -407,8 +561,12 @@ test('FV-1: choose → Check file → report → Import N → result → Close r
   expect(uploadsTo(COMMIT)[0].checkHeader).toBe(
     sha256(new TextEncoder().encode(CSV_TEXT)),
   );
+  // A create-only file needs no typed confirmation and sends none.
+  expect(uploadsTo(COMMIT)[0].confirmHeader).toBeNull();
   expect(
-    within(dialog).queryByRole('button', { name: /^Import .*Work Order/ }),
+    within(dialog).queryByRole('button', {
+      name: /^(Import|Change|Create) .*Work Order/,
+    }),
   ).toBeNull();
 
   const callsBefore = listCalls;
@@ -508,12 +666,13 @@ test('FV-3: disconnected disables Check file and Import, with the reason', async
   ).toHaveAttribute('title', 'Reconnect to import Work Orders.');
 });
 
-test('FV-3: nothing new to import keeps Import disabled', async () => {
+test('FV-3: nothing to create or change keeps Import disabled', async () => {
   scenario.entries = [
     entryWire('007201', 'EXISTS', {
       work_order_id: 1,
       existing_status: 'OPEN',
       differs_from_file: false,
+      lines_not_in_file: [],
       lines: [lineWire(2, 'A-100', 25)],
     }),
   ];
@@ -523,7 +682,7 @@ test('FV-3: nothing new to import keeps Import disabled', async () => {
   expect(importButton(dialog)).toBeDisabled();
   expect(importButton(dialog)).toHaveTextContent('Import Work Orders');
   expect(
-    within(dialog).getByText('Nothing new to import.'),
+    within(dialog).getByText('Nothing to create or change.'),
   ).toBeInTheDocument();
 });
 
@@ -884,6 +1043,7 @@ test('FV-7: the report lists refused first, explains existing numbers and disclo
       work_order_id: 3,
       existing_status: 'OPEN',
       differs_from_file: true,
+      lines_not_in_file: ['K-900'],
       lines: [lineWire(2, 'D-400', 9)],
     }),
     entryWire('WO-NEW', 'WILL_CREATE', {
@@ -921,7 +1081,6 @@ test('FV-7: the report lists refused first, explains existing numbers and disclo
     worksheet: 'Orders',
     empty_rows_ignored: 1,
     ignored_columns: ['Revision', 'Column F (no header)'],
-    lines_without_due_date: 99,
   };
   const dialog = await openImport();
   pick(dialog, importFile('orders.xlsx', 'PK').file);
@@ -941,7 +1100,7 @@ test('FV-7: the report lists refused first, explains existing numbers and disclo
       'Imported Work Orders get no Work Order due date — they stay unscheduled.',
     ),
   ).toBeInTheDocument();
-  // Only the lines this import creates are counted.
+  // The server's total: only the lines this import writes.
   expect(
     within(dialog).getByText(
       '2 lines have no due date and sort after dated demand.',
@@ -987,10 +1146,12 @@ test('FV-7: the report lists refused first, explains existing numbers and disclo
   expect(within(undatedRow).getAllByText('—')).toHaveLength(2);
 
   expect(
-    within(rows[2]).getByText(
-      'Differs from this file — open the Work Order to apply changes.',
-    ),
+    within(rows[2]).getByText('Already in PartFlow — nothing to change'),
   ).toBeInTheDocument();
+  expect(
+    within(rows[2]).getByText('Kept, not in this file: K-900'),
+  ).toBeInTheDocument();
+  expect(within(rows[2]).queryByText(/open the Work Order/)).toBeNull();
   expect(
     within(rows[3]).getByText(
       'Differs from this file — this Work Order is completed and is never changed.',
@@ -1002,7 +1163,9 @@ test('FV-7: the report lists refused first, explains existing numbers and disclo
     ),
   ).toBeInTheDocument();
   expect(
-    within(dialog).getAllByText('Due dates and Job Numbers are not compared.'),
+    within(dialog).getAllByText(
+      'For completed Work Orders, due dates and Job Numbers are not compared.',
+    ),
   ).toHaveLength(1);
   // Status is never color alone: each label carries its icon.
   expect(within(refused).getByText('✕')).toBeInTheDocument();
@@ -1030,4 +1193,534 @@ test('FV-7: a CSV report names no worksheet, and dated lines need no undated sen
   expect(within(dialog).queryByText(/no due date and sort/)).toBeNull();
   expect(within(dialog).queryByText(/not compared/)).toBeNull();
   expect(within(dialog).getByText('1 row read')).toBeInTheDocument();
+});
+
+/* ============ FV-9 – FV-12 — changes to existing Work Orders ============ */
+
+/** Two Open/Released Work Orders the file changes (3 changes). */
+function updateScenario(): Wire[] {
+  return [
+    updateEntry(
+      '007201',
+      1,
+      'OPEN',
+      [
+        editWire(2, 'A-100', 101, {
+          requested_quantity: { before: 10, after: 6 },
+          leaves_hot_list: true,
+        }),
+        addWire(3, 'N-1', 4, {
+          new_part_number: true,
+          due_date: { before: null, after: '2026-07-24' },
+          job_numbers: { before: [], after: ['18112'] },
+        }),
+      ],
+      {
+        new_part_numbers: ['N-1'],
+        lines_not_in_file: ['K-9'],
+      },
+    ),
+    updateEntry(
+      '007300',
+      3,
+      'RELEASED',
+      [
+        editWire(4, 'C-300', 301, {
+          due_date: { before: '2026-07-01', after: '2026-08-03' },
+          job_numbers: { before: ['J1'], after: ['J1', 'J2'] },
+        }),
+      ],
+      { completes_work_order: true },
+    ),
+  ];
+}
+
+const CHANGE_TEXTS = [
+  'Row 2 · A-100 · Qty 10 → 6 · leaves the Hot list',
+  'Row 3 · Add N-1 · Qty 4 · Due Jul 24, 2026 · Job 18112 · new Part Number',
+  'Row 4 · C-300 · Due Jul 01, 2026 → Aug 03, 2026 · Job Numbers J1 → J1, J2',
+];
+const COMPLETES =
+  'Completes the Work Order — every line becomes fully allocated.';
+
+function typedDialog(name: string) {
+  return screen.getByRole('dialog', { name });
+}
+
+function typeConfirmation(typed: HTMLElement, value: string) {
+  fireEvent.change(within(typed).getByRole('textbox'), {
+    target: { value },
+  });
+}
+
+test('FV-9: an update file lists the changes, Import asks for the typed confirmation of every change and sends both tokens', async () => {
+  scenario.entries = updateScenario();
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+
+  expect(
+    within(dialog).getByText(
+      'Will create 0 · Will change 2 · Already in PartFlow 0 · Not imported 0',
+    ),
+  ).toBeInTheDocument();
+  const rows = Array.from(
+    dialog.querySelectorAll<HTMLElement>('tr.wo-import-entry'),
+  );
+  expect(
+    within(rows[0]).getByText('Will change — 2 changes'),
+  ).toBeInTheDocument();
+  expect(within(rows[0]).getByText('1 new Part Number')).toBeInTheDocument();
+  expect(within(rows[0]).getByText('✓')).toBeInTheDocument();
+  expect(
+    within(rows[1]).getByText('Will change — 1 change'),
+  ).toBeInTheDocument();
+
+  // Show changes discloses the change list of one Work Order.
+  const toggle = within(rows[0]).getByRole('button', {
+    name: 'Show changes of 007201',
+  });
+  expect(toggle).toHaveTextContent('Show changes');
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  const list = dialog.querySelector<HTMLElement>('ul.wo-import-changes')!;
+  expect(within(list).getByText(CHANGE_TEXTS[0])).toBeInTheDocument();
+  expect(within(list).getByText(CHANGE_TEXTS[1])).toBeInTheDocument();
+  expect(
+    within(list).getByText('Kept, not in this file: K-9'),
+  ).toBeInTheDocument();
+
+  const importIt = importButton(dialog);
+  expect(importIt).toHaveTextContent('Change 2 Work Orders…');
+  expect(importIt).toBeEnabled();
+  importIt.focus();
+  fireEvent.click(importIt);
+  // Nothing is sent before the confirmation.
+  expect(uploadsTo(COMMIT)).toHaveLength(0);
+
+  const typed = typedDialog('Change 2 existing Work Orders?');
+  expect(
+    within(typed).getByText(
+      /These Work Orders are already in PartFlow\. Import applies every change below; each Work Order is saved on its own\./,
+    ),
+  ).toBeInTheDocument();
+  expect(within(typed).queryByText(/It also creates/)).toBeNull();
+  const region = within(typed).getByRole('region', {
+    name: 'Changes to existing Work Orders',
+  });
+  expect(region).toHaveAttribute('tabindex', '0');
+  expect(
+    within(region).getByRole('heading', { name: 'WO 007201 · Open' }),
+  ).toBeInTheDocument();
+  expect(
+    within(region).getByRole('heading', { name: 'WO 007300 · Released' }),
+  ).toBeInTheDocument();
+  for (const text of CHANGE_TEXTS) {
+    expect(within(region).getByText(text)).toBeInTheDocument();
+  }
+  expect(within(region).getByText(COMPLETES)).toBeInTheDocument();
+  expect(
+    within(region).getByText('Kept, not in this file: K-9'),
+  ).toBeInTheDocument();
+  expect(within(typed).getByText('CHANGE 2')).toBeInTheDocument();
+  expect(
+    within(typed).getByText('(Work Orders to change)'),
+  ).toBeInTheDocument();
+
+  const confirm = within(typed).getByRole('button', {
+    name: 'Import and change 2 Work Orders',
+  });
+  expect(confirm).toBeDisabled();
+  typeConfirmation(typed, 'change 1');
+  expect(confirm).toBeDisabled();
+  typeConfirmation(typed, '  change 2 ');
+  expect(confirm).toBeEnabled();
+  fireEvent.click(confirm);
+
+  const result = await within(dialog).findByRole('heading', {
+    name: 'Import result',
+  });
+  expect(result).toBeInTheDocument();
+  expect(
+    screen.queryByRole('dialog', { name: 'Change 2 existing Work Orders?' }),
+  ).toBeNull();
+  const [commit] = uploadsTo(COMMIT);
+  expect(commit.checkHeader).toBe(sha256(new TextEncoder().encode(CSV_TEXT)));
+  expect(commit.confirmHeader).toBe(updateToken(scenario.entries));
+  expect(commit.confirmHeader).toMatch(/^[0-9a-f]{64}$/);
+  expect(
+    within(dialog).getByText(
+      'Created 0 · Changed 2 · Already in PartFlow 0 · Not imported 0',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByText('Changed — 2 changes')).toBeInTheDocument();
+  expect(within(dialog).getByText('Changed — 1 change')).toBeInTheDocument();
+
+  // A change was saved: closing reloads the list.
+  const callsBefore = listCalls;
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+  await waitFor(() => expect(listCalls).toBeGreaterThan(callsBefore));
+});
+
+test('FV-9: one Work Order to change, plus Work Orders to create — singular labels and the create sentence', async () => {
+  scenario.entries = [
+    updateScenario()[1],
+    entryWire('WO-NEW', 'WILL_CREATE', {
+      rows: [5],
+      lines: [lineWire(5, 'A-100', 2, '2026-07-24')],
+    }),
+  ];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(importButton(dialog)).toHaveTextContent(
+    'Create 1 Work Order, change 1 Work Order…',
+  );
+  fireEvent.click(importButton(dialog));
+
+  const typed = typedDialog('Change 1 existing Work Order?');
+  expect(
+    within(typed).getByText(/It also creates 1 new Work Order\./),
+  ).toBeInTheDocument();
+  expect(within(typed).getByText('CHANGE 1')).toBeInTheDocument();
+  typeConfirmation(typed, 'CHANGE 1');
+  fireEvent.click(
+    within(typed).getByRole('button', {
+      name: 'Import and change 1 Work Order',
+    }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Import result' });
+  expect(
+    within(dialog).getByText(
+      'Created 1 · Changed 1 · Already in PartFlow 0 · Not imported 0',
+    ),
+  ).toBeInTheDocument();
+});
+
+test('FV-10: Cancel and Esc in the typed confirmation send nothing and return to the check result', async () => {
+  scenario.entries = updateScenario();
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  const importIt = importButton(dialog);
+  importIt.focus();
+
+  fireEvent.click(importIt);
+  let typed = typedDialog('Change 2 existing Work Orders?');
+  typeConfirmation(typed, 'CHANGE 2');
+  fireEvent.click(within(typed).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Change 2 existing Work Orders?' }),
+  ).toBeNull();
+  expect(document.activeElement).toBe(importIt);
+
+  // Esc closes only the topmost dialog.
+  fireEvent.click(importIt);
+  typed = typedDialog('Change 2 existing Work Orders?');
+  // The typed value is not kept: a new confirmation starts empty.
+  expect(within(typed).getByRole('textbox')).toHaveValue('');
+  fireEvent.keyDown(within(typed).getByRole('textbox'), { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', { name: 'Change 2 existing Work Orders?' }),
+  ).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'Import Work Orders' }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('heading', { name: 'Check result' }),
+  ).toBeInTheDocument();
+  expect(uploadsTo(COMMIT)).toHaveLength(0);
+});
+
+test('FV-10: disconnected disables the typed confirmation even when the value is typed', async () => {
+  scenario.entries = updateScenario();
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  fireEvent.click(importButton(dialog));
+  const typed = typedDialog('Change 2 existing Work Orders?');
+  typeConfirmation(typed, 'CHANGE 2');
+  const confirm = within(typed).getByRole('button', {
+    name: 'Import and change 2 Work Orders',
+  });
+  expect(confirm).toBeEnabled();
+
+  healthDown = true;
+  await waitFor(() => expect(confirm).toBeDisabled(), { timeout: 8000 });
+  fireEvent.click(confirm);
+  expect(uploadsTo(COMMIT)).toHaveLength(0);
+  // Cancel is never affected.
+  expect(
+    within(typed).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeEnabled();
+});
+
+test('FV-11: confirmed changes that no longer match are refused per Work Order while creates commit; Check file again needs a new typed confirmation', async () => {
+  scenario.entries = [
+    ...updateScenario(),
+    entryWire('WO-NEW', 'WILL_CREATE', {
+      rows: [6],
+      lines: [lineWire(6, 'A-100', 2, '2026-07-24')],
+    }),
+  ];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  const firstToken = updateToken(scenario.entries);
+
+  // Someone changes a planned line after the check: the commit's own
+  // change list differs from the confirmed one.
+  scenario.entries = [
+    updateEntry('007201', 1, 'OPEN', [
+      editWire(2, 'A-100', 101, {
+        requested_quantity: { before: 12, after: 6 },
+      }),
+    ]),
+    updateScenario()[1],
+    scenario.entries[2],
+  ];
+
+  fireEvent.click(importButton(dialog));
+  let typed = typedDialog('Change 2 existing Work Orders?');
+  typeConfirmation(typed, 'CHANGE 2');
+  fireEvent.click(
+    within(typed).getByRole('button', {
+      name: 'Import and change 2 Work Orders',
+    }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Import result' });
+  expect(uploadsTo(COMMIT)[0].confirmHeader).toBe(firstToken);
+  expect(
+    within(dialog).getByText(
+      'Created 1 · Changed 0 · Already in PartFlow 0 · Not imported 2',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByText(STALE_LINE)).toBeInTheDocument();
+  expect(within(dialog).getAllByText(U4)).toHaveLength(2);
+
+  // Check file again (WO-NEW was created and is left out here): the
+  // current changes, a new token, a new typed confirmation.
+  scenario.entries = scenario.entries.slice(0, 2);
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Check file again' }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Check result' });
+  expect(uploadsTo(PREVIEW)).toHaveLength(2);
+  expect(within(dialog).queryByText(STALE_LINE)).toBeNull();
+  fireEvent.click(importButton(dialog));
+  typed = typedDialog('Change 2 existing Work Orders?');
+  expect(within(typed).getByRole('textbox')).toHaveValue('');
+  expect(
+    within(typed).getByRole('button', {
+      name: 'Import and change 2 Work Orders',
+    }),
+  ).toBeDisabled();
+  expect(
+    within(typed).getByText('Row 2 · A-100 · Qty 12 → 6'),
+  ).toBeInTheDocument();
+  typeConfirmation(typed, 'change 2');
+  fireEvent.click(
+    within(typed).getByRole('button', {
+      name: 'Import and change 2 Work Orders',
+    }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Import result' });
+  const commits = uploadsTo(COMMIT);
+  expect(commits).toHaveLength(2);
+  expect(commits[1].confirmHeader).toBe(updateToken(scenario.entries));
+  expect(commits[1].confirmHeader).not.toBe(firstToken);
+  expect(
+    within(dialog).getByText(
+      'Created 0 · Changed 2 · Already in PartFlow 0 · Not imported 0',
+    ),
+  ).toBeInTheDocument();
+});
+
+test('FV-11: a Work Order changed after the check is listed with its reason and the stale line', async () => {
+  scenario.entries = updateScenario();
+  changedAfterCheck.add('007300');
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  fireEvent.click(importButton(dialog));
+  const typed = typedDialog('Change 2 existing Work Orders?');
+  typeConfirmation(typed, 'CHANGE 2');
+  fireEvent.click(
+    within(typed).getByRole('button', {
+      name: 'Import and change 2 Work Orders',
+    }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Import result' });
+
+  const rows = Array.from(
+    dialog.querySelectorAll<HTMLElement>('tr.wo-import-entry'),
+  );
+  // Refused first, then the changed one.
+  expect(
+    within(rows[0]).getByText('Not imported — fix the rows listed'),
+  ).toBeInTheDocument();
+  expect(within(rows[0]).getByText('007300')).toBeInTheDocument();
+  expect(within(rows[0]).getByText(U3)).toBeInTheDocument();
+  expect(within(rows[1]).getByText('Changed — 2 changes')).toBeInTheDocument();
+  expect(within(dialog).getByText(STALE_LINE)).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('button', { name: 'Check file again' }),
+  ).toBeEnabled();
+});
+
+test('FV-11: a 422 refused confirmation shows the message and Check file again', async () => {
+  scenario.entries = updateScenario();
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  nextCommitFailure = detail(C5, 422);
+  fireEvent.click(importButton(dialog));
+  const typed = typedDialog('Change 2 existing Work Orders?');
+  typeConfirmation(typed, 'CHANGE 2');
+  fireEvent.click(
+    within(typed).getByRole('button', {
+      name: 'Import and change 2 Work Orders',
+    }),
+  );
+
+  const alert = await within(dialog).findByRole('alert');
+  expect(alert).toHaveTextContent(C5);
+  await waitFor(() => expect(alert).toHaveFocus());
+  expect(
+    within(dialog).queryByRole('heading', { name: 'Check result' }),
+  ).toBeNull();
+  expect(importButton(dialog)).toBeDisabled();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Check file again' }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Check result' });
+  expect(importButton(dialog)).toBeEnabled();
+});
+
+test('FV-12: Import is disabled with one line per missing permission', async () => {
+  scenario.entries = [
+    ...updateScenario(),
+    entryWire('WO-NEW', 'WILL_CREATE', {
+      lines: [lineWire(6, 'A-100', 2, '2026-07-24')],
+    }),
+  ];
+  sessionPermissions = ['EDIT_WORK_ORDER_DEMAND'];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(importButton(dialog)).toHaveTextContent(
+    'Create 1 Work Order, change 2 Work Orders…',
+  );
+  expect(importButton(dialog)).toBeDisabled();
+  expect(
+    within(dialog).getByText(
+      'Creating Work Orders needs the "Create and edit Work Orders" permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).queryByText(/^Changing existing Work Orders/),
+  ).toBeNull();
+  fireEvent.click(importButton(dialog));
+  expect(
+    screen.queryByRole('dialog', { name: /existing Work Order/ }),
+  ).toBeNull();
+  expect(uploadsTo(COMMIT)).toHaveLength(0);
+});
+
+test('FV-12: without Edit Work Order Demand a file that changes Work Orders cannot be imported', async () => {
+  scenario.entries = updateScenario();
+  sessionPermissions = ['MANAGE_WORK_ORDERS'];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(importButton(dialog)).toBeDisabled();
+  expect(
+    within(dialog).getByText(
+      'Changing existing Work Orders needs the "Edit Work Order Demand" permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText(/^Creating Work Orders/)).toBeNull();
+});
+
+test('FV-12: existing Work Orders — kept lines, the completed copy and its note only with a completed differing row', async () => {
+  scenario.entries = [
+    entryWire('007201', 'EXISTS', {
+      work_order_id: 1,
+      existing_status: 'OPEN',
+      differs_from_file: true,
+      lines_not_in_file: ['K-1', 'K-2'],
+      lines: [lineWire(2, 'A-100', 25)],
+    }),
+    entryWire('007300', 'EXISTS', {
+      rows: [3],
+      work_order_id: 3,
+      existing_status: 'RELEASED',
+      differs_from_file: false,
+      lines_not_in_file: [],
+      lines: [lineWire(3, 'C-300', 5)],
+    }),
+  ];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(
+    within(dialog).getAllByText('Already in PartFlow — nothing to change'),
+  ).toHaveLength(2);
+  expect(
+    within(dialog).getByText('Kept, not in this file: K-1, K-2'),
+  ).toBeInTheDocument();
+  // Only active rows: no "not compared" note.
+  expect(within(dialog).queryByText(/not compared/)).toBeNull();
+  expect(
+    within(dialog).getByText('Nothing to create or change.'),
+  ).toBeInTheDocument();
+
+  // A completed Work Order equal to the file: still no note.
+  scenario.entries = [
+    entryWire('006996', 'EXISTS', {
+      work_order_id: 4,
+      existing_status: 'COMPLETED',
+      differs_from_file: false,
+      lines: [lineWire(2, 'E-500', 2)],
+    }),
+  ];
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Check file again' }),
+  );
+  await waitFor(() => expect(uploadsTo(PREVIEW)).toHaveLength(2));
+  await within(dialog).findByRole('heading', { name: 'Check result' });
+  expect(
+    within(dialog).getByText(
+      'Already in PartFlow — not changed by this import',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText(/not compared/)).toBeNull();
+});
+
+test('FV-12: an update-only preview states the undated added lines, never the Work Order due date line', async () => {
+  scenario.entries = [
+    updateEntry(
+      '007201',
+      1,
+      'OPEN',
+      [
+        addWire(2, 'N-1', 4),
+        addWire(3, 'N-2', 1),
+        editWire(4, 'A-100', 101, {
+          requested_quantity: { before: 10, after: 12 },
+        }),
+      ],
+      { lines_without_due_date: 2 },
+    ),
+  ];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(
+    within(dialog).getByText(
+      '2 lines have no due date and sort after dated demand.',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText(/get no Work Order due date/)).toBeNull();
+  expect(importButton(dialog)).toHaveTextContent('Change 1 Work Order…');
 });

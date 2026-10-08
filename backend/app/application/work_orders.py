@@ -93,8 +93,10 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
 
 import base64
 import datetime
+import hashlib
 import json
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final, Literal, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -410,6 +412,132 @@ def get_work_order(session: Session, work_order_id: int) -> WorkOrderDetail:
     return _build_detail(session, work_order, demands)
 
 
+# ---------------------------------------------------------------------------
+# The saved state a file import's change list is planned on (Phase 15 slice 2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DemandState:
+    """One saved demand line as plain values."""
+
+    id: int
+    part_number: str
+    requested_quantity: int
+    due_date: datetime.date | None
+    job_numbers: tuple[str, ...]
+    allocated_quantity: int
+    released_quantity: int
+    ranked: bool
+
+
+@dataclass(frozen=True)
+class WorkOrderState:
+    """A Work Order and its demand lines (ordered by id) as plain values."""
+
+    work_order_id: int
+    work_order_number: str | None
+    #: The derived status (OPEN / RELEASED / COMPLETED).
+    status: str
+    completed: bool
+    lines: tuple[DemandState, ...]
+
+
+#: U3: the import's planned update no longer matches the saved Work Order.
+STALE_STATE_MESSAGE: Final = (
+    "This Work Order changed after the file was checked, so nothing was changed on it."
+    " Check the file again."
+)
+
+
+def read_work_order_state(session: Session, work_order_id: int) -> WorkOrderState:
+    """The Work Order's saved state, read with Core selects only.
+
+    Never through ORM entities: under READ COMMITTED every value is the
+    latest committed one whatever the session's identity map holds —
+    which is what lets ``update_work_order`` re-read it under its locks
+    and compare it with the state an import planned on.
+    """
+    header = session.execute(
+        select(WorkOrder.work_order_number, WorkOrder.completed_at, WorkOrder.status).where(
+            WorkOrder.id == work_order_id
+        )
+    ).one_or_none()
+    if header is None:
+        raise NotFoundError(f"Work Order {work_order_id} does not exist.")
+    rows = session.execute(
+        select(
+            WorkOrderDemand.id,
+            WorkOrderDemand.part_number,
+            WorkOrderDemand.requested_quantity,
+            WorkOrderDemand.due_date,
+            WorkOrderDemand.job_numbers,
+            WorkOrderDemand.allocated_quantity,
+            WorkOrderDemand.priority_rank.is_not(None),
+        )
+        .where(WorkOrderDemand.work_order_id == work_order_id)
+        .order_by(WorkOrderDemand.id)
+    ).all()
+    released = production_release.released_quantities(session, [row[0] for row in rows])
+    lines = tuple(
+        DemandState(
+            id=demand_id,
+            part_number=part_number,
+            requested_quantity=requested,
+            due_date=due_date,
+            job_numbers=tuple(job_numbers),
+            allocated_quantity=allocated,
+            released_quantity=released.get(demand_id, 0),
+            ranked=bool(ranked),
+        )
+        for demand_id, part_number, requested, due_date, job_numbers, allocated, ranked in rows
+    )
+    number, completed_at, stored_status = header
+    return WorkOrderState(
+        work_order_id=work_order_id,
+        work_order_number=number,
+        status=derived_status(
+            completed_at,
+            stored_status,
+            [(line.id, line.requested_quantity) for line in lines],
+            released,
+        ),
+        completed=completed_at is not None,
+        lines=lines,
+    )
+
+
+def work_order_state_token(state: WorkOrderState, quantity_edited_ids: Collection[int]) -> str:
+    """Lowercase hex SHA-256 of the saved values an import update relies on.
+
+    Hashed: the Work Order Number, the derived status, and per line its
+    id, PN, requested quantity, due date, Job Numbers, allocated
+    quantity, and — for a line whose quantity the update edits — whether
+    it is ranked. Not hashed: the released quantity (the floor is judged
+    again under the demand lock; hashing it would refuse every partial
+    release), the rank of a line whose quantity is not edited (no
+    consequence depends on it) and ``updated_at``.
+    """
+    edited = frozenset(quantity_edited_ids)
+    payload = [
+        state.work_order_number,
+        state.status,
+        [
+            [
+                line.id,
+                line.part_number,
+                line.requested_quantity,
+                _iso(line.due_date),
+                list(line.job_numbers),
+                line.allocated_quantity,
+                line.ranked if line.id in edited else None,
+            ]
+            for line in state.lines
+        ],
+    ]
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
 def _reject_duplicate_work_order_number(
     session: Session, number: str, exclude_id: int | None = None
 ) -> None:
@@ -622,20 +750,44 @@ def _guard_released_line_edit(
         )
     if "requested_quantity" not in edit:
         return
-    quantity = validated_quantity(edit["requested_quantity"])
-    if quantity == demand.requested_quantity:
+    check_quantity_floor(
+        demand.part_number,
+        validated_quantity(edit["requested_quantity"]),
+        demand.requested_quantity,
+        released_quantity,
+        demand.allocated_quantity,
+    )
+
+
+def check_quantity_floor(
+    part_number: str,
+    quantity: int,
+    requested_quantity: int,
+    released_quantity: int,
+    allocated_quantity: int,
+) -> None:
+    """The quantity floor of one demand line, on plain values.
+
+    ``quantity`` (already validated) may not fall below what is
+    committed, ``max(released_quantity, allocated_quantity)``; the
+    unchanged quantity (``== requested_quantity``) is never judged
+    (Phase 14 slice 5). The one source of the rule: the restricted edit
+    (``_guard_released_line_edit``, under the demand row lock) and the
+    file import's change list (Phase 15 slice 2) both call it.
+    """
+    if quantity == requested_quantity:
         return
-    committed = max(released_quantity, demand.allocated_quantity)
+    committed = max(released_quantity, allocated_quantity)
     if quantity < committed:
         reason = (
             f"{released_quantity} pcs are already released"
-            if released_quantity >= demand.allocated_quantity
-            else f"{demand.allocated_quantity} pcs are already allocated"
+            if released_quantity >= allocated_quantity
+            else f"{allocated_quantity} pcs are already allocated"
         )
-        verb = "lower" if quantity < demand.requested_quantity else "set"
+        verb = "lower" if quantity < requested_quantity else "set"
         raise ConflictError(
             f"Cannot {verb} Qty to {quantity} pcs for Part Number"
-            f" '{demand.part_number}': {reason}. Enter {committed} pcs or more."
+            f" '{part_number}': {reason}. Enter {committed} pcs or more."
         )
 
 
@@ -737,6 +889,8 @@ def update_work_order(
     new_lines: Sequence[Mapping[str, Any]] = (),
     line_edits: Sequence[Mapping[str, Any]] = (),
     actor_user_id: int,
+    audit_metadata: Mapping[str, Any] | None = None,
+    expected_state_token: str | None = None,
 ) -> WorkOrderDetail:
     """Save the Work Order Details draft as ONE transaction.
 
@@ -789,6 +943,21 @@ def update_work_order(
     own timestamp, audited with the save as its cause
     (``allocations.complete_after_demand_change``) — and a ranked line
     it filled leaves the Hot list as ``WORK_ORDER_COMPLETED``.
+
+    Two keywords serve the file import's update (Phase 15 slice 2); the
+    manual Save passes neither and is unchanged:
+
+    - ``audit_metadata`` goes onto every WorkOrderDemand ``UPDATED`` and
+      ``CREATED`` row this save appends (the intake channel) — never
+      onto the Work Order header row, PN ``CREATED``, Hot-rank or
+      completion rows;
+    - ``expected_state_token`` is the ``work_order_state_token`` the
+      import planned its change list on. It is compared under this
+      save's locks, right after the completed-Work-Order guard and
+      before anything is mutated: any difference refuses the save with
+      ``ConflictError`` (U3), writing nothing. A save under a token that
+      then changes nothing contradicts its own plan and raises
+      ``RuntimeError`` after rolling back.
     """
     detail = get_work_order(session, work_order_id)
     work_order = detail.work_order
@@ -897,6 +1066,20 @@ def update_work_order(
     # or commits first and the allocation judges the saved quantities.
     session.refresh(work_order, with_for_update=True)
     _require_active(work_order, "Nothing was saved.")
+
+    # The import's stale check (Phase 15 slice 2): every value the token
+    # hashes is now either held by this save's locks or harmlessly
+    # racing (the derived status against a release of an unedited line).
+    # Core reads only, before any mutation — nothing can autoflush.
+    if expected_state_token is not None:
+        quantity_edited = {
+            edit["id"]
+            for edit in line_edits
+            if "requested_quantity" in edit and isinstance(edit.get("id"), int)
+        }
+        current = read_work_order_state(session, work_order.id)
+        if work_order_state_token(current, quantity_edited) != expected_state_token:
+            raise ConflictError(STALE_STATE_MESSAGE)
 
     # Adding demand lines re-reads the authoritative PN set under that
     # Work Order lock — never the `detail.demands` snapshot taken before
@@ -1018,6 +1201,7 @@ def update_work_order(
             before_data=before,
             after_data=demand_snapshot(demand),
             actor_user_id=actor_user_id,
+            metadata=dict(audit_metadata) if audit_metadata is not None else None,
         )
     for demand in created:
         audit.append_audit_event(
@@ -1028,10 +1212,16 @@ def update_work_order(
             before_data=None,
             after_data=demand_snapshot(demand),
             actor_user_id=actor_user_id,
+            metadata=dict(audit_metadata) if audit_metadata is not None else None,
         )
 
     if header_changed or audited or created or hot_changes:
         commit(session, _WORK_ORDER_CONFLICTS)
+    elif expected_state_token is not None:
+        # Unreachable by construction: the planned edits differ from the
+        # values the token just proved current. Never a false "updated".
+        session.rollback()
+        raise RuntimeError("Import update planned changes but the save changed nothing.")
     else:
         # A save that turns out to change nothing still took row locks
         # above. Ending the transaction here releases them immediately

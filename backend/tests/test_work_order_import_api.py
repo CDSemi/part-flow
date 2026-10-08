@@ -8,8 +8,9 @@ CR, EV, IV, AU, RC, TK, TR, TP, AZ, QB):
 - Check file writes nothing and takes no lock; Import re-validates the
   checked bytes (``X-PartFlow-Import-Check``) and creates each new Work
   Order in its own transaction through the manual write path;
-- an existing number — completed history included — is reported
-  ``EXISTS`` and never duplicated or changed; importing the same file
+- an existing number — completed history included — is never
+  duplicated (changes to existing Work Orders: slice 2,
+  ``test_work_order_import_update_api``); importing the same file
   again writes nothing, which is also the recovery after a crash;
 - a Work Order with any invalid row is refused whole, and a row without
   a usable number blocks the whole import;
@@ -329,7 +330,7 @@ def test_check_then_import_then_import_again(
     assert preview["dry_run"] is True
     assert preview["check_token"] == _token(body)
     assert (preview["file_format"], preview["worksheet"]) == ("CSV", None)
-    assert preview["summary"] == {"will_create": 2, "existing": 0, "refused": 0}
+    assert preview["summary"] == {"will_create": 2, "will_update": 0, "existing": 0, "refused": 0}
     assert (preview["rows_read"], preview["empty_rows_ignored"]) == (6, 0)
     assert preview["commit_blocked"] is False
     assert preview["lines_without_due_date"] == 3
@@ -352,7 +353,7 @@ def test_check_then_import_then_import_again(
 
     result = _ok(_commit(mwo, body, token=preview["check_token"]))
     assert result["dry_run"] is False
-    assert result["summary"] == {"created": 2, "existing": 0, "refused": 0}
+    assert result["summary"] == {"created": 2, "updated": 0, "existing": 0, "refused": 0}
     assert _outcomes(result) == {first: "CREATED", second: "CREATED"}
     created = _write_counts(db_engine)
     assert created["work_orders"] == before["work_orders"] + 2
@@ -362,7 +363,7 @@ def test_check_then_import_then_import_again(
     assert _entry(result, first)["work_order_id"] == _work_order_ids(db_engine, [first])[0]
 
     again = _checked_import(mwo, body)
-    assert again["summary"] == {"created": 0, "existing": 2, "refused": 0}
+    assert again["summary"] == {"created": 0, "updated": 0, "existing": 2, "refused": 0}
     for number in (first, second):
         assert _entry(again, number)["differs_from_file"] is False
         assert _entry(again, number)["existing_status"] == "OPEN"
@@ -455,22 +456,33 @@ def test_a_completed_work_order_is_reported_never_duplicated(
     assert _number_count(db_engine, number) == 1
 
 
-def test_an_existing_open_work_order_is_not_changed(
+def test_the_check_of_an_existing_open_work_order_lists_its_changes(
     client: TestClient, mwo: IdentityClient, db_engine: Engine
 ) -> None:
-    """ID-5."""
+    """ID-5 (rewritten by Phase 15 slice 2, SPEC §6.1 R8): an identical
+    file is ``EXISTS`` with nothing to change; a changed quantity or an
+    added line is ``WILL_UPDATE``; the check writes nothing."""
     number, pn = _unique("OPEN"), _unique("PN")
     _manual_work_order(client, number, (pn, 2))
     before = _write_counts(db_engine)
-    changed_quantity = _checked_import(mwo, _csv((number, pn, "3", "", "")))
-    added_line = _checked_import(
-        mwo, _csv((number, pn, "2", "", ""), (number, _unique("PN"), "1", "", ""))
+    changed_quantity = _ok(_preview(mwo, _csv((number, pn, "3", "", ""))))
+    added_line = _ok(
+        _preview(mwo, _csv((number, pn, "2", "", ""), (number, _unique("PN"), "1", "", "")))
     )
-    same = _checked_import(mwo, _csv((number, pn.lower(), "2", "J-9", "2026-10-10")))
-    for report, differs in ((changed_quantity, True), (added_line, True), (same, False)):
+    same = _ok(_preview(mwo, _csv((number, pn.lower(), "2", "", ""))))
+    for report, outcome in (
+        (changed_quantity, "WILL_UPDATE"),
+        (added_line, "WILL_UPDATE"),
+        (same, "EXISTS"),
+    ):
         entry = _entry(report, number)
-        assert (entry["outcome"], entry["existing_status"]) == ("EXISTS", "OPEN")
-        assert entry["differs_from_file"] is differs
+        assert (entry["outcome"], entry["existing_status"]) == (outcome, "OPEN")
+    assert _entry(same, number)["differs_from_file"] is False
+    assert _entry(same, number)["changes"] is None
+    assert same["update_token"] is None
+    assert changed_quantity["update_token"] is not None
+    assert changed_quantity["required_permissions"] == ["EDIT_WORK_ORDER_DEMAND"]
+    assert [change["kind"] for change in _entry(added_line, number)["changes"]] == ["ADD_LINE"]
     assert _write_counts(db_engine) == before
 
 
@@ -850,7 +862,7 @@ def test_text_guards_answer_without_database_errors(mwo: IdentityClient, db_engi
         "Part Number is longer than 200 characters.",
     ]
     result = _ok(_commit(mwo, body, token=preview["check_token"]))
-    assert result["summary"] == {"created": 0, "existing": 0, "refused": 2}
+    assert result["summary"] == {"created": 0, "updated": 0, "existing": 0, "refused": 2}
     assert _write_counts(db_engine) == before
 
     # openpyxl may or may not decode the OOXML escape _x0000_ in a shared
@@ -1144,10 +1156,11 @@ def test_templates(mwo: IdentityClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_only_work_order_managers_may_import(
-    client: TestClient, mwo: IdentityClient, db_engine: Engine
-) -> None:
-    """AZ-1: authentication is judged before the media type, size and body."""
+def test_who_may_import(client: TestClient, mwo: IdentityClient, db_engine: Engine) -> None:
+    """AZ-1 (rewritten by Phase 15 slice 2, SPEC §6.1 R8): authentication
+    is judged before the media type, size and body; Edit Work Order
+    Demand opens the check and the templates but a file that creates
+    needs Create and edit Work Orders."""
     anonymous = anonymous_client(client)
     body = _csv((_unique("WO"), _unique("PN"), "1", "", ""))
     before = _write_counts(db_engine)
@@ -1168,13 +1181,18 @@ def test_only_work_order_managers_may_import(
     ewod = client_as(client, Permission.EDIT_WORK_ORDER_DEMAND)
     for response in (
         _preview(ewod, body),
-        _commit(ewod, body),
         ewod.get("/api/work-orders/import/template.csv"),
         ewod.get("/api/work-orders/import/template.xlsx"),
     ):
-        assert response.status_code == 403, response.text
-        assert response.json()["permission_denied"] is True
-        assert response.json()["required_permissions"] == ["MANAGE_WORK_ORDERS"]
+        assert response.status_code == 200, response.text
+    assert _ok(_preview(ewod, body))["required_permissions"] == ["MANAGE_WORK_ORDERS"]
+    refused = _commit(ewod, body)
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == {
+        "detail": "Your account does not have permission to do this.",
+        "permission_denied": True,
+        "required_permissions": ["MANAGE_WORK_ORDERS"],
+    }
 
     no_csrf = TestClient(client.app, headers=_identity_headers(mwo))
     del no_csrf.headers["X-PartFlow-CSRF"]

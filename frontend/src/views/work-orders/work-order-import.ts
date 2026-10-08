@@ -1,15 +1,19 @@
 // Presentation logic of the Import Work Orders dialog (GUI_DESIGN
-// §11.7): the client-side file pre-check, labels, row lists, report
-// order and when Import may be pressed. Every import rule itself is the
-// server's — nothing here decides what a file creates.
+// §11.7): the client-side file pre-check, labels, row lists, change
+// lists, report order and when Import may be pressed. Every import rule
+// itself is the server's — nothing here decides what a file creates or
+// changes, or which permission it needs.
 
 import { IMPORT_MAX_BYTES, importFileKind } from '../../api/work-order-import';
 import type {
+  ImportChange,
   ImportOutcome,
   ImportRowError,
   WorkOrderImportEntry,
   WorkOrderImportReport,
 } from '../../api/work-order-import';
+import type { Permission } from '../../api/roles';
+import { PERMISSION_LABELS } from '../administration/permissions';
 
 /** Why a chosen file cannot be checked at all (nothing is sent), or
  * null. Same copy as the server's refusals. */
@@ -25,12 +29,32 @@ export function fileProblem(file: {
   return null;
 }
 
-/** The Import button: `Import 1 Work Order` / `Import {n} Work Orders`;
- * plain `Import Work Orders` while nothing would be created. */
-export function importButtonLabel(n: number): string {
-  if (n === 1) return 'Import 1 Work Order';
-  if (n > 1) return `Import ${n} Work Orders`;
+/** `Work Order` / `Work Orders`. */
+export function workOrderNoun(n: number): string {
+  return n === 1 ? 'Work Order' : 'Work Orders';
+}
+
+/** `change` / `changes`. */
+export function changeNoun(k: number): string {
+  return k === 1 ? 'change' : 'changes';
+}
+
+/** The Import button over the Work Orders a Check file answer creates
+ * and changes: `Import 1 Work Order`, `Change 2 Work Orders…`,
+ * `Create 1 Work Order, change 1 Work Order…` (the ellipsis: a typed
+ * confirmation follows); plain `Import Work Orders` while neither. */
+export function importButtonLabel(create: number, update: number): string {
+  if (update > 0 && create > 0) {
+    return `Create ${create} ${workOrderNoun(create)}, change ${update} ${workOrderNoun(update)}…`;
+  }
+  if (update > 0) return `Change ${update} ${workOrderNoun(update)}…`;
+  if (create > 0) return `Import ${create} ${workOrderNoun(create)}`;
   return 'Import Work Orders';
+}
+
+/** The value typed to confirm changing `m` existing Work Orders. */
+export function typedConfirmValue(m: number): string {
+  return `CHANGE ${m}`;
 }
 
 /** Spreadsheet rows as ranges: `[2, 3, 4, 9]` → `2–4, 9`. */
@@ -52,18 +76,22 @@ function outcomeRank(outcome: ImportOutcome): number {
   switch (outcome) {
     case 'REFUSED':
       return 0;
+    case 'WILL_UPDATE':
+    case 'UPDATED':
+      return 1;
     case 'WILL_CREATE':
     case 'CREATED':
-      return 1;
-    case 'EXISTS':
       return 2;
+    case 'EXISTS':
+      return 3;
     default:
       return assertNever(outcome);
   }
 }
 
 /** Report order: refused Work Orders first (they need action), then the
- * ones created, then the ones already in PartFlow; file order within. */
+ * ones changed, then the ones created, then the ones already in
+ * PartFlow; file order within. */
 export function orderEntries(
   entries: readonly WorkOrderImportEntry[],
 ): WorkOrderImportEntry[] {
@@ -77,15 +105,27 @@ export function orderEntries(
     .map(({ entry }) => entry);
 }
 
-/** The result label of one Work Order. */
+function changeCount(entry: WorkOrderImportEntry): string {
+  const k = entry.changes?.length ?? 0;
+  return `${k} ${changeNoun(k)}`;
+}
+
+/** The result label of one Work Order (the only place the number of
+ * changes appears). */
 export function outcomeLabel(entry: WorkOrderImportEntry): string {
   switch (entry.outcome) {
     case 'WILL_CREATE':
       return 'Will be created';
+    case 'WILL_UPDATE':
+      return `Will change — ${changeCount(entry)}`;
     case 'CREATED':
       return 'Created';
+    case 'UPDATED':
+      return `Changed — ${changeCount(entry)}`;
     case 'EXISTS':
-      return 'Already in PartFlow — not changed by this import';
+      return entry.existingStatus === 'COMPLETED'
+        ? 'Already in PartFlow — not changed by this import'
+        : 'Already in PartFlow — nothing to change';
     case 'REFUSED':
       return 'Not imported — fix the rows listed';
     default:
@@ -97,7 +137,9 @@ export function outcomeLabel(entry: WorkOrderImportEntry): string {
 export function outcomeIcon(outcome: ImportOutcome): string {
   switch (outcome) {
     case 'WILL_CREATE':
+    case 'WILL_UPDATE':
     case 'CREATED':
+    case 'UPDATED':
       return '✓';
     case 'EXISTS':
       return '•';
@@ -108,47 +150,142 @@ export function outcomeIcon(outcome: ImportOutcome): string {
   }
 }
 
+/** `Kept, not in this file: {PNs}` for saved lines the file does not
+ * list, or null when it lists them all. */
+export function keptLinesText(entry: WorkOrderImportEntry): string | null {
+  const kept = entry.linesNotInFile ?? [];
+  return kept.length > 0 ? `Kept, not in this file: ${kept.join(', ')}` : null;
+}
+
 /** The quiet notes under a result label. */
 export function outcomeNotes(entry: WorkOrderImportEntry): string[] {
   const notes: string[] = [];
   const newPns = entry.newPartNumbers.length;
-  if (entry.outcome === 'WILL_CREATE' && newPns > 0) {
+  if (
+    (entry.outcome === 'WILL_CREATE' || entry.outcome === 'WILL_UPDATE') &&
+    newPns > 0
+  ) {
     notes.push(
       newPns === 1 ? '1 new Part Number' : `${newPns} new Part Numbers`,
     );
   }
-  if (entry.outcome === 'EXISTS' && entry.differsFromFile === true) {
-    notes.push(
-      entry.existingStatus === 'COMPLETED'
-        ? 'Differs from this file — this Work Order is completed and is never changed.'
-        : 'Differs from this file — open the Work Order to apply changes.',
-    );
+  if (entry.outcome === 'EXISTS') {
+    if (entry.existingStatus === 'COMPLETED') {
+      if (entry.differsFromFile === true) {
+        notes.push(
+          'Differs from this file — this Work Order is completed and is never changed.',
+        );
+      }
+    } else {
+      const kept = keptLinesText(entry);
+      if (kept !== null) notes.push(kept);
+    }
   }
   return notes;
 }
 
+/** One change of an existing Work Order as one line of text, e.g.
+ * `Row 4 · A-100 · Qty 10 → 15 · leaves the Hot list` or
+ * `Row 5 · Add B-200 · Qty 3 · Due Jul 24, 2026 · Job 18112`. */
+export function changeText(
+  change: ImportChange,
+  formatDate: (iso: string | null) => string,
+): string {
+  const parts = [`Row ${change.row}`];
+  const jobs = (values: readonly string[]) =>
+    values.length > 0 ? values.join(', ') : '—';
+  if (change.kind === 'ADD_LINE') {
+    parts.push(`Add ${change.partNumber}`);
+    if (change.requestedQuantity !== null) {
+      parts.push(`Qty ${change.requestedQuantity.after}`);
+    }
+    if (change.dueDate?.after)
+      parts.push(`Due ${formatDate(change.dueDate.after)}`);
+    if (change.jobNumbers !== null && change.jobNumbers.after.length > 0) {
+      parts.push(`Job ${change.jobNumbers.after.join(', ')}`);
+    }
+    if (change.newPartNumber) parts.push('new Part Number');
+    return parts.join(' · ');
+  }
+  parts.push(change.partNumber);
+  if (change.requestedQuantity !== null) {
+    parts.push(
+      `Qty ${change.requestedQuantity.before ?? '—'} → ${change.requestedQuantity.after}`,
+    );
+  }
+  if (change.dueDate !== null) {
+    parts.push(
+      `Due ${formatDate(change.dueDate.before)} → ${formatDate(change.dueDate.after)}`,
+    );
+  }
+  if (change.jobNumbers !== null) {
+    parts.push(
+      `Job Numbers ${jobs(change.jobNumbers.before)} → ${jobs(change.jobNumbers.after)}`,
+    );
+  }
+  if (change.leavesHotList) parts.push('leaves the Hot list');
+  return parts.join(' · ');
+}
+
+/** The permissions the file's content needs that this user lacks. */
+export function missingPermissions(
+  report: WorkOrderImportReport,
+  can: (permission: Permission) => boolean,
+): Permission[] {
+  return report.requiredPermissions.filter((key) => !can(key));
+}
+
+/** Why Import stays disabled for one missing permission. */
+export function missingPermissionText(key: Permission): string {
+  const label = PERMISSION_LABELS[key];
+  if (key === 'MANAGE_WORK_ORDERS') {
+    return `Creating Work Orders needs the "${label}" permission.`;
+  }
+  if (key === 'EDIT_WORK_ORDER_DEMAND') {
+    return `Changing existing Work Orders needs the "${label}" permission.`;
+  }
+  return `This import needs the "${label}" permission.`;
+}
+
 /** Import may be pressed: a connected, idle Check file answer that
- * creates at least one Work Order and has no blocking rows. */
+ * creates or changes at least one Work Order, has no blocking rows, and
+ * needs no permission the user lacks. */
 export function commitAllowed(
   report: WorkOrderImportReport,
   writeBlocked: boolean,
   busy: boolean,
+  can: (permission: Permission) => boolean,
 ): boolean {
   return (
     !writeBlocked &&
     !busy &&
     report.dryRun &&
     !report.commitBlocked &&
-    report.summary.willCreate > 0
+    report.summary.willCreate + report.summary.willUpdate > 0 &&
+    missingPermissions(report, can).length === 0
   );
 }
 
 /** The one-line count summary of a report. */
 export function summaryLine(report: WorkOrderImportReport): string {
   const first = report.dryRun
-    ? `Will create ${report.summary.willCreate}`
-    : `Created ${report.summary.created}`;
+    ? `Will create ${report.summary.willCreate} · Will change ${report.summary.willUpdate}`
+    : `Created ${report.summary.created} · Changed ${report.summary.updated}`;
   return `${first} · Already in PartFlow ${report.summary.existing} · Not imported ${report.summary.refused}`;
+}
+
+/** An Import answer that left existing Work Orders unchanged because
+ * they (or the confirmed changes) changed after the check. */
+export function hasStaleUpdates(report: WorkOrderImportReport): boolean {
+  return (
+    !report.dryRun &&
+    report.workOrders.some(
+      (entry) =>
+        entry.outcome === 'REFUSED' &&
+        entry.workOrderId !== null &&
+        entry.errors.some((error) => error.row === null),
+    )
+  );
 }
 
 /** `{n} rows read`, plus the empty rows inside the data when any. */
@@ -176,13 +313,6 @@ export function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes === 1 ? '1 byte' : `${bytes} bytes`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** Undated lines of the Work Orders the Check file answer would create. */
-export function undatedLinesToCreate(report: WorkOrderImportReport): number {
-  return report.workOrders
-    .filter((entry) => entry.outcome === 'WILL_CREATE')
-    .reduce((sum, entry) => sum + entry.linesWithoutDueDate, 0);
 }
 
 /** The commit-blocked copy over the distinct unassigned rows. */

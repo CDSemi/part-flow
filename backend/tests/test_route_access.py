@@ -153,6 +153,7 @@ def test_only_the_content_and_guard_routes_have_conditional_keys() -> None:
         ("PATCH", "/api/users/{user_id}"),
         ("PUT", "/api/users/{user_id}/password"),
         ("PATCH", "/api/work-orders/{work_order_id}"),
+        ("POST", "/api/work-orders/import"),
         ("POST", "/api/hot-list/changes"),
         ("POST", "/api/scan-stations/{station_id}/device-enrollments"),
     }
@@ -215,10 +216,21 @@ _ROUTES_VIEW = {_VPD, Permission.MANAGE_ROUTE_TEMPLATES}
 _PN_VIEW = {_VPD, Permission.MANAGE_PART_NUMBER_MASTER}
 
 
+#: The Work Order import's own surfaces (Phase 15 slice 2): a dry run and
+#: header-only templates of a write workflow, opened by its write keys —
+#: not a Management view read, so View production data does not open them.
+_IMPORT_SURFACES = {
+    ("POST", "/api/work-orders/import/preview"),
+    ("GET", "/api/work-orders/import/template.csv"),
+    ("GET", "/api/work-orders/import/template.xlsx"),
+}
+
+
 def test_management_read_sets_equal_the_spec_literals() -> None:
-    """RA-8: every any-of read opens with View production data, and each
-    read set is the union of the sets of the views reading the route (the
-    frontend's management-access test holds the same view literals)."""
+    """RA-8: every any-of Management view read opens with View production
+    data, and each read set is the union of the sets of the views reading
+    the route (the frontend's management-access test holds the same view
+    literals); the import's own surfaces open with either write key."""
     expected = {
         ("GET", "/api/work-orders"): _WO_VIEW,
         ("GET", "/api/work-orders/completed"): _WO_VIEW,
@@ -239,10 +251,14 @@ def test_management_read_sets_equal_the_spec_literals() -> None:
         ("GET", "/api/route-templates/management"): _ROUTES_VIEW,
         ("GET", "/api/route-templates/{template_id}/usage"): _ROUTES_VIEW,
         ("GET", "/api/allocations"): {_VPD, Permission.EDIT_WORK_ORDER_ALLOCATION},
+        **{
+            key: {Permission.MANAGE_WORK_ORDERS, Permission.EDIT_WORK_ORDER_DEMAND}
+            for key in _IMPORT_SURFACES
+        },
     }
     actual = {key: set(access.any_of) for key, access in ROUTE_ACCESS.items() if access.any_of}
     assert actual == expected
-    assert all(_VPD in keys for keys in actual.values())
+    assert all(_VPD in keys for key, keys in actual.items() if key not in _IMPORT_SURFACES)
 
 
 def test_station_device_routes_and_bindings() -> None:

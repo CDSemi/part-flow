@@ -169,8 +169,10 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   `POST /api/work-orders/import` must exceed the measured worst case — a
   development-environment run of the largest allowed file (2,000 single-line
   Work Orders, one transaction each) took 26.03 s to import (0.3 s to check,
-  7.48 s to replay as already imported); a read timeout of at least 120 s is
-  recommended. The proxy configuration itself belongs to Phase 16;
+  7.48 s to replay as already imported), and a run in which every one of those
+  Work Orders changes a quantity (PF-2) took 27.23 s to import (2.45 s to
+  check, 2.45 s to replay as already as saved); a read timeout of at least
+  120 s is still recommended. The proxy configuration itself belongs to Phase 16;
 - required configuration is validated at startup and secrets have no committed
   defaults;
 - image or release versions are immutable and retained long enough to roll back

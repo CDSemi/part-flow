@@ -107,10 +107,13 @@ function ActiveWorkOrdersView() {
   // only reads (Phase 14 slices 3 and 5). The server checks every write.
   const { can } = useSession();
   const canCreate = can('MANAGE_WORK_ORDERS');
+  const canEditDemand = can('EDIT_WORK_ORDER_DEMAND');
+  // The file import creates Work Orders and changes the demand of
+  // existing ones: either key opens it, and the file's content decides
+  // what Import needs (Phase 15 slice 2).
+  const canImport = canCreate || canEditDemand;
   const viewOnly =
-    !canCreate &&
-    !can('EDIT_WORK_ORDER_DEMAND') &&
-    !can('EDIT_WORK_ORDER_ALLOCATION');
+    !canCreate && !canEditDemand && !can('EDIT_WORK_ORDER_ALLOCATION');
 
   // Selected Work Order — its details open as a modal dialog over the
   // list (GUI_DESIGN §11.2); the list stays mounted and the URL never
@@ -285,7 +288,7 @@ function ActiveWorkOrdersView() {
         onSearch={setSearch}
         onOpen={openWorkOrder}
         onNew={canCreate ? () => setNewWorkOrderOpen(true) : undefined}
-        onImport={canCreate ? () => setImportOpen(true) : undefined}
+        onImport={canImport ? () => setImportOpen(true) : undefined}
         writeBlocked={writeBlocked}
         viewOnly={viewOnly}
         dueSoon={dueSoonData.state}
@@ -376,8 +379,8 @@ function WorkOrderListPanel({
   onOpen: (id: number) => void;
   /** Absent for a user who may not create Work Orders. */
   onNew?: () => void;
-  /** Opens the file import; absent for a user who may not create Work
-   * Orders. */
+  /** Opens the file import; absent for a user who may neither create
+   * Work Orders nor edit Work Order Demand. */
   onImport?: () => void;
   /** Disconnected: the import needs the server. */
   writeBlocked: boolean;

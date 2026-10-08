@@ -1458,7 +1458,9 @@
 }
 
 .wo-import-outcome.will-create,
-.wo-import-outcome.created {
+.wo-import-outcome.created,
+.wo-import-outcome.will-update,
+.wo-import-outcome.updated {
   color: var(--ok-t);
 }
 
@@ -1515,6 +1517,62 @@
 .wo-import-lines td {
   padding: 4px 8px;
   border-top: 1px solid var(--hair);
+}
+
+/* Changes to an existing Work Order: one line each, wrapping on narrow
+   viewports (never a nested horizontal scroll). */
+.wo-import-changes {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.wo-import-change {
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.wo-import-change-note {
+  padding: 2px 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.wo-import-stale {
+  margin: 4px 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The typed confirmation's list of every change per Work Order: its own
+   keyboard-reachable scroll region inside the confirmation dialog. */
+.wo-import-confirm-list {
+  max-height: 40vh;
+  overflow-y: auto;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel2);
+}
+
+.wo-import-confirm-list:focus-visible {
+  outline: 2px solid var(--info-ring);
+  outline-offset: 2px;
+}
+
+.wo-import-confirm-wo + .wo-import-confirm-wo {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.wo-import-confirm-wo h4 {
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .wo-import-actions .bigbtn:disabled {

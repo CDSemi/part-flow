@@ -201,11 +201,6 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/route-templates/{template_id}/archive"): _permission(_MRT),
     ("DELETE", "/api/route-templates/{template_id}"): _permission(_MRT),
     ("POST", "/api/work-orders"): _permission(_MWO),
-    # Phase 15 slice 1: the Work Order file import and its templates.
-    ("POST", "/api/work-orders/import/preview"): _permission(_MWO),
-    ("POST", "/api/work-orders/import"): _permission(_MWO),
-    ("GET", "/api/work-orders/import/template.csv"): _permission(_MWO),
-    ("GET", "/api/work-orders/import/template.xlsx"): _permission(_MWO),
     ("POST", "/api/work-orders/{work_order_id}/demands/{demand_id}/release"): _permission(_MWO),
     ("DELETE", "/api/work-orders/{work_order_id}/demands/{demand_id}"): _permission(_EWOD),
     ("POST", "/api/allocations/management"): _permission(_EWOA),
@@ -239,6 +234,10 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     # Management (slice 3): a Work Order Save by its header and lines, a
     # Hot list change by whether it changes the list's members.
     ("PATCH", "/api/work-orders/{work_order_id}"): _permission(conditional=_keys(_MWO, _EWOD)),
+    # Phase 15 slice 2: the Work Order file import — creating needs
+    # Create and edit Work Orders, changing existing ones Edit Work Order
+    # Demand; either key passes the gate before the body is read.
+    ("POST", "/api/work-orders/import"): _permission(conditional=_keys(_MWO, _EWOD)),
     ("POST", "/api/hot-list/changes"): _permission(
         conditional=_keys(Permission.SET_DEMAND_PRIORITY, Permission.REORDER_HOT_ITEMS)
     ),
@@ -263,6 +262,13 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/route-templates/{template_id}/usage"): _any_of(_ROUTES_VIEW),
     # No view reads it yet: View production data ∪ its write surface's key.
     ("GET", "/api/allocations"): _any_of(_keys(_VPD, _EWOA)),
+    # Phase 15 slice 2: the import write workflow's own surfaces — the
+    # dry run and the header-only templates — open for either write key
+    # (OD-P10 precedent; not a Management view read, so no View
+    # production data).
+    ("POST", "/api/work-orders/import/preview"): _any_of(_keys(_MWO, _EWOD)),
+    ("GET", "/api/work-orders/import/template.csv"): _any_of(_keys(_MWO, _EWOD)),
+    ("GET", "/api/work-orders/import/template.xlsx"): _any_of(_keys(_MWO, _EWOD)),
 }
 
 FRAMEWORK_ROUTES: Final = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})

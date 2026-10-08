@@ -8,9 +8,12 @@ import {
   toWorkOrderImportReport,
 } from './work-order-import';
 
-// FU-2: the Work Order import API module — the report mapper over the
-// exact wire contract (Phase 15 slice 1, §4.2), file kinds by
-// extension, and the two raw-body uploads.
+// FU-2 / FU-4: the Work Order import API module — the report mapper
+// over the exact wire contract (Phase 15 slice 1 §4.2, extended by
+// slice 2 §4.2: change lists, update outcomes, `update_token`,
+// `required_permissions`), file kinds by extension, and the two
+// raw-body uploads (the Import adds the confirmation header only when
+// a token is given).
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -57,12 +60,73 @@ function entryWire(extra?: Record<string, unknown>) {
     ],
     new_part_numbers: ['B-200'],
     lines_without_due_date: 1,
+    changes: null,
+    completes_work_order: null,
+    lines_not_in_file: null,
     work_order_id: null,
     existing_status: null,
     differs_from_file: null,
     errors: [],
     ...extra,
   };
+}
+
+const CONFIRM = 'cd'.repeat(32);
+
+/** A WILL_UPDATE entry with one edit and one added line. */
+function updateWire(extra?: Record<string, unknown>) {
+  return entryWire({
+    work_order_number: '007400',
+    rows: [6, 7],
+    outcome: 'WILL_UPDATE',
+    lines: [
+      {
+        row: 6,
+        part_number: 'A-100',
+        requested_quantity: 15,
+        due_date: null,
+        job_number: 'J2',
+      },
+      {
+        row: 7,
+        part_number: 'N-1',
+        requested_quantity: 4,
+        due_date: null,
+        job_number: null,
+      },
+    ],
+    new_part_numbers: ['N-1'],
+    lines_without_due_date: 1,
+    changes: [
+      {
+        kind: 'EDIT_LINE',
+        row: 6,
+        part_number: 'A-100',
+        demand_id: 101,
+        new_part_number: false,
+        requested_quantity: { before: 10, after: 15 },
+        due_date: { before: null, after: '2026-07-24' },
+        job_numbers: { before: ['J1'], after: ['J1', 'J2'] },
+        leaves_hot_list: true,
+      },
+      {
+        kind: 'ADD_LINE',
+        row: 7,
+        part_number: 'N-1',
+        demand_id: null,
+        new_part_number: true,
+        requested_quantity: { before: null, after: 4 },
+        due_date: { before: null, after: null },
+        job_numbers: { before: [], after: [] },
+        leaves_hot_list: false,
+      },
+    ],
+    completes_work_order: false,
+    lines_not_in_file: ['K-9'],
+    work_order_id: 7,
+    existing_status: 'OPEN',
+    ...extra,
+  });
 }
 
 function previewWire(extra?: Record<string, unknown>) {
@@ -76,6 +140,8 @@ function previewWire(extra?: Record<string, unknown>) {
     empty_rows_ignored: 1,
     ignored_columns: ['Revision'],
     lines_without_due_date: 1,
+    update_token: null,
+    required_permissions: ['MANAGE_WORK_ORDERS'],
     work_orders: [
       entryWire(),
       entryWire({
@@ -107,7 +173,7 @@ function previewWire(extra?: Record<string, unknown>) {
       }),
     ],
     unassigned_rows: [],
-    summary: { will_create: 1, existing: 1, refused: 1 },
+    summary: { will_create: 1, will_update: 0, existing: 1, refused: 1 },
     ...extra,
   };
 }
@@ -133,6 +199,8 @@ test('the preview report maps every field, outcome and null', () => {
     emptyRowsIgnored: 1,
     ignoredColumns: ['Revision'],
     linesWithoutDueDate: 1,
+    updateToken: null,
+    requiredPermissions: ['MANAGE_WORK_ORDERS'],
     workOrders: [
       {
         workOrderNumber: '007201',
@@ -156,6 +224,9 @@ test('the preview report maps every field, outcome and null', () => {
         ],
         newPartNumbers: ['B-200'],
         linesWithoutDueDate: 1,
+        changes: null,
+        completesWorkOrder: null,
+        linesNotInFile: null,
         workOrderId: null,
         existingStatus: null,
         differsFromFile: null,
@@ -168,6 +239,9 @@ test('the preview report maps every field, outcome and null', () => {
         lines: [],
         newPartNumbers: [],
         linesWithoutDueDate: 0,
+        changes: null,
+        completesWorkOrder: null,
+        linesNotInFile: null,
         workOrderId: 3,
         existingStatus: 'COMPLETED',
         differsFromFile: true,
@@ -180,6 +254,9 @@ test('the preview report maps every field, outcome and null', () => {
         lines: [],
         newPartNumbers: [],
         linesWithoutDueDate: 0,
+        changes: null,
+        completesWorkOrder: null,
+        linesNotInFile: null,
         workOrderId: null,
         existingStatus: null,
         differsFromFile: null,
@@ -194,8 +271,150 @@ test('the preview report maps every field, outcome and null', () => {
       },
     ],
     unassignedRows: [],
-    summary: { willCreate: 1, existing: 1, refused: 1 },
+    summary: { willCreate: 1, willUpdate: 0, existing: 1, refused: 1 },
   });
+});
+
+test('FU-4: a WILL_UPDATE entry maps both change kinds, the token and the permissions', () => {
+  const report = toWorkOrderImportReport(
+    previewWire({
+      update_token: CONFIRM,
+      required_permissions: ['EDIT_WORK_ORDER_DEMAND', 'MANAGE_WORK_ORDERS'],
+      work_orders: [
+        updateWire(),
+        entryWire({
+          work_order_number: '007500',
+          outcome: 'EXISTS',
+          lines_without_due_date: 0,
+          new_part_numbers: [],
+          lines_not_in_file: [],
+          work_order_id: 8,
+          existing_status: 'RELEASED',
+          differs_from_file: false,
+        }),
+      ],
+      summary: { will_create: 0, will_update: 1, existing: 1, refused: 0 },
+    }),
+  );
+  expect(report.updateToken).toBe(CONFIRM);
+  expect(report.requiredPermissions).toEqual([
+    'EDIT_WORK_ORDER_DEMAND',
+    'MANAGE_WORK_ORDERS',
+  ]);
+  expect(report.summary).toEqual({
+    willCreate: 0,
+    willUpdate: 1,
+    existing: 1,
+    refused: 0,
+  });
+  const [update, exists] = report.workOrders;
+  expect(update.outcome).toBe('WILL_UPDATE');
+  expect(update.workOrderId).toBe(7);
+  expect(update.existingStatus).toBe('OPEN');
+  expect(update.completesWorkOrder).toBe(false);
+  expect(update.linesNotInFile).toEqual(['K-9']);
+  expect(update.differsFromFile).toBeNull();
+  expect(update.changes).toEqual([
+    {
+      kind: 'EDIT_LINE',
+      row: 6,
+      partNumber: 'A-100',
+      demandId: 101,
+      newPartNumber: false,
+      requestedQuantity: { before: 10, after: 15 },
+      dueDate: { before: null, after: '2026-07-24' },
+      jobNumbers: { before: ['J1'], after: ['J1', 'J2'] },
+      leavesHotList: true,
+    },
+    {
+      kind: 'ADD_LINE',
+      row: 7,
+      partNumber: 'N-1',
+      demandId: null,
+      newPartNumber: true,
+      requestedQuantity: { before: null, after: 4 },
+      dueDate: { before: null, after: null },
+      jobNumbers: { before: [], after: [] },
+      leavesHotList: false,
+    },
+  ]);
+  expect(exists.changes).toBeNull();
+  expect(exists.completesWorkOrder).toBeNull();
+  expect(exists.linesNotInFile).toEqual([]);
+
+  // An edit that changes only the quantity carries null pairs.
+  const quantityOnly = toWorkOrderImportReport(
+    previewWire({
+      work_orders: [
+        updateWire({
+          changes: [
+            {
+              kind: 'EDIT_LINE',
+              row: 6,
+              part_number: 'A-100',
+              demand_id: 101,
+              new_part_number: false,
+              requested_quantity: { before: 10, after: 8 },
+              due_date: null,
+              job_numbers: null,
+              leaves_hot_list: false,
+            },
+          ],
+          completes_work_order: true,
+          lines_not_in_file: [],
+        }),
+      ],
+    }),
+  );
+  expect(quantityOnly.workOrders[0].changes?.[0]).toMatchObject({
+    requestedQuantity: { before: 10, after: 8 },
+    dueDate: null,
+    jobNumbers: null,
+  });
+  expect(quantityOnly.workOrders[0].completesWorkOrder).toBe(true);
+});
+
+test('FU-4: the result maps UPDATED entries and its updated count', () => {
+  const report = toWorkOrderImportReport(
+    previewWire({
+      dry_run: false,
+      update_token: null,
+      required_permissions: ['EDIT_WORK_ORDER_DEMAND'],
+      work_orders: [
+        updateWire({ outcome: 'UPDATED', existing_status: 'COMPLETED' }),
+        entryWire({
+          work_order_number: '007600',
+          outcome: 'REFUSED',
+          lines: [],
+          new_part_numbers: [],
+          lines_without_due_date: 0,
+          work_order_id: 9,
+          existing_status: 'RELEASED',
+          errors: [
+            {
+              row: null,
+              column: null,
+              message:
+                'This Work Order changed after the file was checked, so nothing was changed on it. Check the file again.',
+            },
+          ],
+        }),
+      ],
+      summary: { created: 0, updated: 1, existing: 0, refused: 1 },
+    }),
+  );
+  expect(report.dryRun).toBe(false);
+  expect(report.summary).toEqual({
+    created: 0,
+    updated: 1,
+    existing: 0,
+    refused: 1,
+  });
+  expect(report.workOrders[0].outcome).toBe('UPDATED');
+  expect(report.workOrders[0].existingStatus).toBe('COMPLETED');
+  expect(report.workOrders[0].changes).toHaveLength(2);
+  expect(report.workOrders[1].workOrderId).toBe(9);
+  expect(report.workOrders[1].existingStatus).toBe('RELEASED');
 });
 
 test('the result report maps its own summary and CREATED entries', () => {
@@ -206,11 +425,16 @@ test('the result report maps its own summary and CREATED entries', () => {
       worksheet: null,
       work_orders: [entryWire({ outcome: 'CREATED', work_order_id: 41 })],
       unassigned_rows: [],
-      summary: { created: 1, existing: 0, refused: 0 },
+      summary: { created: 1, updated: 0, existing: 0, refused: 0 },
     }),
   );
   expect(report.dryRun).toBe(false);
-  expect(report.summary).toEqual({ created: 1, existing: 0, refused: 0 });
+  expect(report.summary).toEqual({
+    created: 1,
+    updated: 0,
+    existing: 0,
+    refused: 0,
+  });
   expect(report.fileFormat).toBe('CSV');
   expect(report.worksheet).toBeNull();
   expect(report.workOrders[0].outcome).toBe('CREATED');
@@ -238,12 +462,39 @@ test('the result report maps its own summary and CREATED entries', () => {
   ]);
 });
 
-test('an unknown outcome or a malformed report throws instead of rendering', () => {
+test('an unknown outcome, change kind or permission, or a malformed report throws instead of rendering', () => {
   expect(() =>
     toWorkOrderImportReport(
-      previewWire({ work_orders: [entryWire({ outcome: 'WILL_UPDATE' })] }),
+      previewWire({ work_orders: [entryWire({ outcome: 'WILL_DELETE' })] }),
     ),
   ).toThrow('The server answered a malformed import report.');
+  const removal = {
+    ...(updateWire().changes as unknown as Record<string, unknown>[])[0],
+    kind: 'REMOVE_LINE',
+  };
+  expect(() =>
+    toWorkOrderImportReport(
+      previewWire({ work_orders: [updateWire({ changes: [removal] })] }),
+    ),
+  ).toThrow('The server answered a malformed import report.');
+  expect(() =>
+    toWorkOrderImportReport(
+      previewWire({ required_permissions: ['IMPORT_EVERYTHING'] }),
+    ),
+  ).toThrow();
+  expect(() =>
+    toWorkOrderImportReport(previewWire({ update_token: undefined })),
+  ).toThrow();
+  expect(() =>
+    toWorkOrderImportReport(
+      previewWire({ work_orders: [updateWire({ changes: undefined })] }),
+    ),
+  ).toThrow();
+  expect(() =>
+    toWorkOrderImportReport(
+      previewWire({ summary: { will_create: 1, existing: 0, refused: 0 } }),
+    ),
+  ).toThrow();
   expect(() =>
     toWorkOrderImportReport(
       previewWire({ work_orders: [entryWire({ existing_status: 'CLOSED' })] }),
@@ -312,13 +563,13 @@ test('Import sends the same bytes with the check token header', async () => {
       previewWire({
         dry_run: false,
         work_orders: [entryWire({ outcome: 'CREATED', work_order_id: 9 })],
-        summary: { created: 1, existing: 0, refused: 0 },
+        summary: { created: 1, updated: 0, existing: 0, refused: 0 },
       }),
     ),
   );
   const bytes = new Uint8Array([1, 2, 3]).buffer;
 
-  const report = await importWorkOrderFile(bytes, 'CSV', TOKEN);
+  const report = await importWorkOrderFile(bytes, 'CSV', TOKEN, null);
 
   expect(report.dryRun).toBe(false);
   const [path, init] = fetchMock.mock.lastCall as [string, RequestInit];
@@ -330,4 +581,29 @@ test('Import sends the same bytes with the check token header', async () => {
     'X-PartFlow-Import-Check': TOKEN,
   });
   expect(await blobBytes(init.body as Blob)).toEqual([1, 2, 3]);
+});
+
+test('FU-4: Import sends the confirmation header only when a token is given', async () => {
+  fetchMock.mockResolvedValueOnce(
+    json(
+      previewWire({
+        dry_run: false,
+        work_orders: [updateWire({ outcome: 'UPDATED' })],
+        summary: { created: 0, updated: 1, existing: 0, refused: 0 },
+      }),
+    ),
+  );
+  const bytes = new Uint8Array([4, 5]).buffer;
+
+  await importWorkOrderFile(bytes, 'XLSX', TOKEN, CONFIRM);
+
+  const [path, init] = fetchMock.mock.lastCall as [string, RequestInit];
+  expect(path).toBe('/api/work-orders/import');
+  expect(init.headers).toEqual({
+    'Content-Type': IMPORT_MEDIA_TYPE.XLSX,
+    'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Import-Check': TOKEN,
+    'X-PartFlow-Import-Confirm': CONFIRM,
+  });
+  expect(await blobBytes(init.body as Blob)).toEqual([4, 5]);
 });

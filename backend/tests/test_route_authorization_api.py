@@ -232,6 +232,12 @@ def test_callers_without_the_keys_are_refused(
         _denied(caller.patch(_concrete(path), json={}), [MA])
     elif path == "/api/work-orders/{work_order_id}":
         _denied(caller.patch(_concrete(path), json={}), [Permission.MANAGE_WORK_ORDERS])
+    elif path == "/api/work-orders/import":
+        # Phase 15 slice 2: either import key passes the gate before the
+        # body is read; the content then names what it writes.
+        response = caller.post(path)
+        _denied(response, [Permission.EDIT_WORK_ORDER_DEMAND, Permission.MANAGE_WORK_ORDERS])
+        assert response.json()["any_permission"] is True
     elif path == "/api/hot-list/changes":
         # A valid Move body (same id set) — the content rule names Reorder.
         move = {
@@ -820,11 +826,9 @@ _MANAGEMENT_WRITES = {
     # Phase 14 slice 6: the AssignedRoute adjustment and its editor read.
     ("POST", "/api/quantity-flows/{quantity_flow_id}/route-adjustments"),
     ("GET", "/api/tracking/assigned-routes"),
-    # Phase 15 slice 1: the Work Order file import and its templates.
-    ("POST", "/api/work-orders/import/preview"),
+    # Phase 15: the Work Order file import (its Check file and templates
+    # are any-of surfaces since slice 2).
     ("POST", "/api/work-orders/import"),
-    ("GET", "/api/work-orders/import/template.csv"),
-    ("GET", "/api/work-orders/import/template.xlsx"),
 }
 
 

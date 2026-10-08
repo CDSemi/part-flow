@@ -430,10 +430,13 @@ class _Write:
     # Builds (path, request kwargs, target row) against fresh set-up data.
     prepare: Callable[[TestClient, _Shop], _Prepared]
     status: int = 200
-    # False for the demand line delete (no audit row of its own, F13), for
-    # the allocation context read (Phase 14 slice 5: a static-key GET) and
-    # for the Work Order import's Check file and templates (Phase 15 slice 1).
+    # False for the demand line delete (no audit row of its own, F13) and
+    # for the allocation context read (Phase 14 slice 5: a static-key GET).
     records: bool = True
+    # Keys every refused identity also holds: the Work Order import's
+    # other key (Phase 15 slice 2), so its any-of gate passes and the
+    # content decides the refusal.
+    lacking_extra: frozenset[Permission] = frozenset()
 
 
 def _machine(client: TestClient, shop: _Shop) -> int:
@@ -747,29 +750,48 @@ def _p_assigned_routes(client: TestClient, shop: _Shop) -> _Prepared:
     return f"/api/tracking/assigned-routes?part_number={pn}", {}, None
 
 
-def _import_file(work_order_number: str) -> bytes:
-    return (
-        "Work Order Number,Part Number,Requested Quantity\r\n"
-        f"{work_order_number},{_unique('PN')},3\r\n"
-    ).encode()
+def _import_file(*rows: tuple[str, str, int]) -> bytes:
+    lines = "".join(f"{number},{pn},{quantity}\r\n" for number, pn, quantity in rows)
+    return f"Work Order Number,Part Number,Requested Quantity\r\n{lines}".encode()
 
 
-def _p_import_preview(client: TestClient, shop: _Shop) -> _Prepared:
-    body = _import_file(_unique("WO"))
-    return "/api/work-orders/import/preview", {"content": body, "headers": _CSV_FILE}, None
-
-
-def _p_import(client: TestClient, shop: _Shop) -> _Prepared:
-    body = _import_file(_unique("WO"))
+def _import_request(client: TestClient, body: bytes) -> _Prepared:
+    """The commit request of ``body``, confirming the changes it finds."""
     headers = {**_CSV_FILE, "X-PartFlow-Import-Check": hashlib.sha256(body).hexdigest()}
+    preview = _ok(
+        admin_of(client).post("/api/work-orders/import/preview", content=body, headers=_CSV_FILE)
+    )
+    if preview["update_token"] is not None:
+        headers["X-PartFlow-Import-Confirm"] = preview["update_token"]
     return "/api/work-orders/import", {"content": body, "headers": headers}, None
 
 
-def _p_import_template(extension: str) -> Callable[[TestClient, _Shop], _Prepared]:
-    def prepare(client: TestClient, shop: _Shop) -> _Prepared:
-        return f"/api/work-orders/import/template.{extension}", {}, None
+def _p_import(client: TestClient, shop: _Shop) -> _Prepared:
+    return _import_request(client, _import_file((_unique("WO"), _unique("PN"), 3)))
 
-    return prepare
+
+def _changed_work_order(client: TestClient) -> tuple[str, str, int]:
+    """A Work Order and the file row raising its quantity."""
+    pn, number = _unique("PN"), _unique("WO")
+    lines = [{"part_number": pn, "requested_quantity": 5}]
+    _ok(
+        admin_of(client).post(
+            "/api/work-orders", json={"work_order_number": number, "lines": lines}
+        ),
+        201,
+    )
+    return number, pn, 6
+
+
+def _p_import_update(client: TestClient, shop: _Shop) -> _Prepared:
+    return _import_request(client, _import_file(_changed_work_order(client)))
+
+
+def _p_import_mixed(client: TestClient, shop: _Shop) -> _Prepared:
+    return _import_request(
+        client,
+        _import_file(_changed_work_order(client), (_unique("WO"), _unique("PN"), 3)),
+    )
 
 
 def _keys(*keys: Permission) -> frozenset[Permission]:
@@ -819,33 +841,26 @@ _WRITES: list[_Write] = [
         204,
     ),
     _Write("wo-create", "POST", "/api/work-orders", _keys(MWO), _p_work_order_create, 201),
-    # Phase 15 slice 1: the Work Order file import; Check file and the
-    # templates record nothing.
+    # Phase 15: the Work Order file import by content — creating needs
+    # MWO, changing an existing Work Order EWOD (slice 2; its Check file
+    # and templates are any-of surfaces, MA-2).
     _Write(
-        "wo-import-check",
+        "wo-import",
         "POST",
-        "/api/work-orders/import/preview",
+        "/api/work-orders/import",
         _keys(MWO),
-        _p_import_preview,
-        records=False,
-    ),
-    _Write("wo-import", "POST", "/api/work-orders/import", _keys(MWO), _p_import),
-    _Write(
-        "wo-import-csv-template",
-        "GET",
-        "/api/work-orders/import/template.csv",
-        _keys(MWO),
-        _p_import_template("csv"),
-        records=False,
+        _p_import,
+        lacking_extra=_keys(EWOD),
     ),
     _Write(
-        "wo-import-xlsx-template",
-        "GET",
-        "/api/work-orders/import/template.xlsx",
-        _keys(MWO),
-        _p_import_template("xlsx"),
-        records=False,
+        "wo-import-update",
+        "POST",
+        "/api/work-orders/import",
+        _keys(EWOD),
+        _p_import_update,
+        lacking_extra=_keys(MWO),
     ),
+    _Write("wo-import-mixed", "POST", "/api/work-orders/import", _keys(MWO, EWOD), _p_import_mixed),
     _Write(
         "wo-header", "PATCH", "/api/work-orders/{work_order_id}", _keys(MWO), _p_work_order_header
     ),
@@ -973,7 +988,7 @@ def test_each_management_write_needs_exactly_its_keys(
     refused = _refused_without_writes(db_engine, target, send(pending))
     assert refused.status_code == 403 and refused.json()["password_change_required"] is True
     for missing in sorted(write.required):
-        lacking = client_as(client, *(write.required - {missing}))
+        lacking = client_as(client, *((write.required - {missing}) | write.lacking_extra))
         _denied(_refused_without_writes(db_engine, target, send(lacking)), write.required)
 
     caller = client_as(client, *write.required)
@@ -1020,8 +1035,20 @@ def read_urls(client: TestClient, shop: _Shop) -> dict[tuple[str, str], str]:
             f"/api/route-templates/{shop.template_id}/usage"
         ),
         ("GET", "/api/allocations"): f"/api/allocations?part_number={pn}",
+        ("POST", "/api/work-orders/import/preview"): "/api/work-orders/import/preview",
+        ("GET", "/api/work-orders/import/template.csv"): "/api/work-orders/import/template.csv",
+        ("GET", "/api/work-orders/import/template.xlsx"): "/api/work-orders/import/template.xlsx",
     }
 
+
+#: The any-of surfaces read with a request body (Phase 15 slice 2: the
+#: Work Order import's Check file, a dry run that records nothing).
+_READ_REQUESTS: dict[tuple[str, str], dict[str, Any]] = {
+    ("POST", "/api/work-orders/import/preview"): {
+        "content": _import_file(("WO-READ", "PN-READ", 1)),
+        "headers": _CSV_FILE,
+    },
+}
 
 _IDENTITIES: dict[tuple[int, frozenset[Permission]], IdentityClient] = {}
 
@@ -1043,12 +1070,13 @@ def test_every_any_of_read_opens_with_any_one_key_of_its_set(
     anonymous = anonymous_client(client)
     for key, url in read_urls.items():
         read_set = any_of[key]
+        kwargs = _READ_REQUESTS.get(key, {})
         for holder_key in sorted(read_set):
-            response = _holding(client, frozenset({holder_key})).get(url)
+            response = _holding(client, frozenset({holder_key})).request(key[0], url, **kwargs)
             assert response.status_code == 200, (key, holder_key, response.text)
         outsider = _holding(client, frozenset(ALL_PERMISSIONS) - read_set)
-        _view_denied(outsider.get(url), read_set)
-        assert anonymous.get(url).status_code == 401, key
+        _view_denied(outsider.request(key[0], url, **kwargs), read_set)
+        assert anonymous.request(key[0], url, **kwargs).status_code == 401, key
 
 
 def test_the_asset_tag_format_read_needs_only_a_sign_in(client: TestClient, shop: _Shop) -> None:

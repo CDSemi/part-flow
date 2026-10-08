@@ -1,8 +1,10 @@
-"""File-based import of new Work Orders (Phase 15 slice 1).
+"""File-based import of Work Orders (Phase 15 slices 1 and 2).
 
 A prepared CSV (UTF-8) or Excel (.xlsx) file creates Work Orders with
 their demand lines through the one existing write path
-(:func:`app.application.work_orders.create_work_order`). The format
+(:func:`app.application.work_orders.create_work_order`), and changes
+the Open and Released Work Orders it lists through the one existing
+edit path (:func:`app.application.work_orders.update_work_order`). The format
 adapters (``app.api.work_order_import_files``) turn the bytes into an
 :class:`ImportSheet` of row-numbered raw cells; everything about the
 CONTENT is decided here, once for both formats (PROJECT_PROFILE §13
@@ -20,32 +22,47 @@ Source-System Mapping):
 - grouping by the trimmed Work Order Number, which every row needs: a
   number with spaces around it is a row error (it is stored exactly as
   written), and a row without a usable number blocks the whole import;
-- classification — ``WILL_CREATE``, ``EXISTS`` (an existing number,
-  completed history included, is never duplicated and never changed by
-  this slice) or ``REFUSED`` (any row error refuses the Work Order
-  whole) — and the commit, ONE transaction per Work Order in file
-  order: valid Work Orders commit, refused ones are listed with their
-  reasons.
+- classification — ``WILL_CREATE``; for an existing number either the
+  change list of an Open or Released Work Order (``WILL_UPDATE``:
+  changed quantities never below the released/allocated floor, set due
+  dates, added Job Numbers, lines added to an Open Work Order — a
+  blank cell and a saved line missing from the file keep the saved
+  values, and no line is ever removed), ``EXISTS`` (nothing to change,
+  or a completed Work Order, which is never changed), or ``REFUSED``
+  (any row error, or a change an edit rule refuses, refuses the Work
+  Order whole) — and the commit, ONE transaction per Work Order in
+  file order: valid Work Orders commit, refused ones are listed with
+  their reasons.
 
-The preview (Check file) reads only: no lock, no write. The commit
-holds no lock of its own; each Work Order's transaction is exactly the
-manual create's (PN advisory locks, then the inserts and audit rows),
-and it ends — commit or rollback — before the next begins, so two
-Work Orders' locks are never held together. The Work Order Number is
-the idempotency key: importing the same file again reports every
-created Work Order ``EXISTS`` and writes nothing, which is also the
-recovery after a lost response or a crash mid-import.
+The preview (Check file) reads only: no lock, no write. It digests the
+change list it shows into ``update_token``; the commit applies updates
+only when the confirmation it receives equals its own recomputed
+digest — otherwise every update of the file is refused per Work Order
+and the creates still commit (Phase 15 S2 SPEC D6). Each update also
+carries the state token of the values it was planned on, compared by
+``update_work_order`` under its own locks (U3).
+
+The commit holds no lock of its own; each Work Order's transaction is
+exactly the manual create's or Save's, and it ends — commit or
+rollback — before the next begins, so two Work Orders' locks are never
+held together. The Work Order Number is the idempotency key: importing
+the same file again reports every created or changed Work Order
+``EXISTS`` and writes nothing, which is also the recovery after a lost
+response or a crash mid-import.
 
 This module knows no file format, no transport and no permission: the
-adapters own the bytes, the routes own the check token and the
-``Manage Work Orders`` key.
+adapters own the bytes, the routes own the check token, the
+confirmation header and the keys (:attr:`ImportPlan.write_kinds` says
+what the content writes).
 """
 
 import dataclasses
 import datetime
+import hashlib
+import json
 import logging
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
@@ -54,8 +71,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.application import work_orders
-from app.application.errors import ConflictError, InvalidInputError
+from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.part_numbers import canonical_part_number
+from app.application.work_orders import WorkOrderState
+from app.domain.enums import WorkOrderStatus
 from app.infrastructure.models import PartNumber, WorkOrder
 
 logger = logging.getLogger(__name__)
@@ -126,7 +145,8 @@ SPREADSHEET_ERROR_LITERALS: Final = (
     "#PYTHON!",
 )
 
-#: The audit metadata of an imported Work Order's ``CREATED`` row (OD-15-12).
+#: The audit metadata of an imported Work Order's ``CREATED`` row (OD-15-12),
+#: and of every demand row an import update appends (Phase 15 S2 D3).
 IMPORT_AUDIT_METADATA: Final[Mapping[str, Any]] = {"intake": {"channel": "FILE_IMPORT"}}
 
 
@@ -204,10 +224,10 @@ MAX_IMPORT_RECORDS: Final = MAX_IMPORT_DATA_ROWS + 2
 
 
 class ImportOutcome(StrEnum):
-    """S1 outcomes; ``WILL_UPDATE`` / ``UPDATED`` are reserved for slice 2."""
-
     WILL_CREATE = "WILL_CREATE"
+    WILL_UPDATE = "WILL_UPDATE"
     CREATED = "CREATED"
+    UPDATED = "UPDATED"
     EXISTS = "EXISTS"
     REFUSED = "REFUSED"
 
@@ -230,6 +250,34 @@ class ImportLine:
     job_number: str | None
 
 
+class ImportChangeKind(StrEnum):
+    ADD_LINE = "ADD_LINE"
+    EDIT_LINE = "EDIT_LINE"
+
+
+@dataclass(frozen=True)
+class ImportChange:
+    """One change an import makes to an existing Work Order (S2 §3.2).
+
+    The value pairs are ``(before, after)``; a field an ``EDIT_LINE``
+    leaves unchanged is ``None``.
+    """
+
+    kind: ImportChangeKind
+    row: int
+    #: Canonical PN.
+    part_number: str
+    #: EDIT_LINE only.
+    demand_id: int | None
+    #: ADD_LINE whose PN has no master yet.
+    new_part_number: bool
+    quantity: tuple[int | None, int] | None
+    due_date: tuple[datetime.date | None, datetime.date | None] | None
+    job_numbers: tuple[tuple[str, ...], tuple[str, ...]] | None
+    #: EDIT_LINE: a ranked line lowered to its allocated quantity.
+    leaves_hot_list: bool
+
+
 @dataclass(frozen=True)
 class WorkOrderImportEntry:
     #: The trimmed group key.
@@ -240,15 +288,28 @@ class WorkOrderImportEntry:
     #: Empty when REFUSED.
     lines: tuple[ImportLine, ...]
     new_part_numbers: tuple[str, ...]
+    #: The lines this import writes without a due date (S2 D8):
+    #: WILL_CREATE/CREATED its undated lines, WILL_UPDATE/UPDATED its
+    #: undated added lines, EXISTS/REFUSED 0.
     lines_without_due_date: int
-    #: EXISTS and CREATED.
+    #: EXISTS, CREATED, WILL_UPDATE, UPDATED and REFUSED of an existing
+    #: Work Order.
     work_order_id: int | None = None
-    #: EXISTS only: the derived status (OPEN / RELEASED / COMPLETED).
+    #: The derived status (OPEN / RELEASED / COMPLETED): as planned, or
+    #: after the save on UPDATED. Not on CREATED.
     existing_status: str | None = None
-    #: EXISTS only: whether the file's (PN, quantity) pairs differ.
+    #: EXISTS only: completed — whether the file's (PN, quantity) pairs
+    #: differ; active — whether saved lines are missing from the file.
     differs_from_file: bool | None = None
     #: REFUSED only (non-empty).
     errors: tuple[RowError, ...] = ()
+    #: WILL_UPDATE / UPDATED only (non-empty), in file order.
+    changes: tuple[ImportChange, ...] | None = None
+    #: WILL_UPDATE / UPDATED only: every line becomes fully allocated.
+    completes_work_order: bool | None = None
+    #: WILL_UPDATE / UPDATED and EXISTS of an active Work Order: the
+    #: saved lines the file does not list (kept), in demand-id order.
+    lines_not_in_file: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -263,10 +324,13 @@ class ImportReport:
     ignored_columns: tuple[str, ...]
     work_orders: tuple[WorkOrderImportEntry, ...]
     unassigned_rows: tuple[RowError, ...]
+    #: Preview: the digest of every change the typed confirmation shows,
+    #: or None when nothing is updated. Result: always None.
+    update_token: str | None = None
 
     @property
     def lines_without_due_date(self) -> int:
-        """Total over the non-refused Work Orders."""
+        """Total of the lines this import writes without a due date (D8)."""
         return sum(entry.lines_without_due_date for entry in self.work_orders)
 
     def count(self, outcome: ImportOutcome) -> int:
@@ -290,6 +354,20 @@ CONCURRENT_CHANGE_MESSAGE: Final = (
     "This Work Order could not be created because another change happened at the same"
     " time. Check the file again."
 )
+#: U4: the commit's change list differs from the confirmed one (S2 D6).
+UNCONFIRMED_UPDATE_MESSAGE: Final = (
+    "Work Orders in this file changed after the changes were confirmed, so this Work Order"
+    " was not changed. Check the file again and confirm the new changes."
+)
+
+
+def _released_add_message(part_number: str) -> str:
+    """U1: lines are added only while the Work Order is Open (OD-S2-4)."""
+    return (
+        f"Part Number {part_number} is not on this Work Order, and the Work Order is Released:"
+        " lines can be added only while it is Open. Remove this row from the file."
+    )
+
 
 _QUOTE_LIMIT: Final = 60
 
@@ -681,6 +759,233 @@ def _analyse(sheet: ImportSheet) -> _Analysis:
 
 
 # ---------------------------------------------------------------------------
+# The change list of an existing active Work Order (pure; S2 SPEC §3.2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GroupPlan:
+    """What a file group changes on one active Work Order."""
+
+    #: In file order; empty when nothing changes.
+    changes: tuple[ImportChange, ...]
+    #: U1 / U2 row errors; any refuses the Work Order whole.
+    errors: tuple[RowError, ...]
+    #: Saved lines the file does not list (kept), in demand-id order.
+    lines_not_in_file: tuple[str, ...]
+    #: Informational: the save's completion judgement on the planned values.
+    completes_work_order: bool
+
+
+def plan_changes(
+    state: WorkOrderState, file_lines: Sequence[ImportLine], known_part_numbers: Collection[str]
+) -> GroupPlan:
+    """The change list of the file's lines against ONE saved state.
+
+    Matched by canonical PN. An existing line: a different quantity is
+    an edit judged by the quantity floor (U2); a due date in the file
+    that differs is set; a Job Number not yet listed is appended — a
+    blank cell keeps the saved value (OD-S2-2, OD-S2-3). A PN the Work
+    Order does not have is an added line while it is Open and a row
+    error (U1) once it is Released (OD-S2-4). Saved lines missing from
+    the file are kept and listed, never a change (OD-S2-1).
+    """
+    saved = {line.part_number: line for line in state.lines}
+    planned_quantity = {line.id: line.requested_quantity for line in state.lines}
+    changes: list[ImportChange] = []
+    errors: list[RowError] = []
+    for line in file_lines:
+        demand = saved.get(line.part_number)
+        if demand is None:
+            if state.status == WorkOrderStatus.RELEASED:
+                errors.append(
+                    RowError(line.row, COLUMN_PART_NUMBER, _released_add_message(line.part_number))
+                )
+                continue
+            changes.append(
+                ImportChange(
+                    kind=ImportChangeKind.ADD_LINE,
+                    row=line.row,
+                    part_number=line.part_number,
+                    demand_id=None,
+                    new_part_number=line.part_number not in known_part_numbers,
+                    quantity=(None, line.requested_quantity),
+                    due_date=(None, line.due_date),
+                    job_numbers=((), (line.job_number,) if line.job_number is not None else ()),
+                    leaves_hot_list=False,
+                )
+            )
+            continue
+        quantity: tuple[int | None, int] | None = None
+        leaves_hot_list = False
+        if line.requested_quantity != demand.requested_quantity:
+            try:
+                work_orders.check_quantity_floor(
+                    demand.part_number,
+                    line.requested_quantity,
+                    demand.requested_quantity,
+                    demand.released_quantity,
+                    demand.allocated_quantity,
+                )
+            except ConflictError as exc:
+                errors.append(RowError(line.row, COLUMN_REQUESTED_QUANTITY, exc.message))
+                continue
+            quantity = (demand.requested_quantity, line.requested_quantity)
+            planned_quantity[demand.id] = line.requested_quantity
+            leaves_hot_list = demand.ranked and line.requested_quantity <= demand.allocated_quantity
+        due_date = (
+            (demand.due_date, line.due_date)
+            if line.due_date is not None and line.due_date != demand.due_date
+            else None
+        )
+        job_numbers = (
+            (demand.job_numbers, (*demand.job_numbers, line.job_number))
+            if line.job_number is not None and line.job_number not in demand.job_numbers
+            else None
+        )
+        if quantity is not None or due_date is not None or job_numbers is not None:
+            changes.append(
+                ImportChange(
+                    kind=ImportChangeKind.EDIT_LINE,
+                    row=line.row,
+                    part_number=demand.part_number,
+                    demand_id=demand.id,
+                    new_part_number=False,
+                    quantity=quantity,
+                    due_date=due_date,
+                    job_numbers=job_numbers,
+                    leaves_hot_list=leaves_hot_list,
+                )
+            )
+    in_file = {line.part_number for line in file_lines}
+    completes = (
+        any(
+            change.kind is ImportChangeKind.EDIT_LINE and change.quantity is not None
+            for change in changes
+        )
+        and all(change.kind is ImportChangeKind.EDIT_LINE for change in changes)
+        and all(planned_quantity[line.id] <= line.allocated_quantity for line in state.lines)
+    )
+    return GroupPlan(
+        changes=tuple(changes),
+        errors=tuple(errors),
+        lines_not_in_file=tuple(
+            line.part_number for line in state.lines if line.part_number not in in_file
+        ),
+        completes_work_order=completes,
+    )
+
+
+def _iso(value: datetime.date | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def change_payload(change: ImportChange) -> dict[str, Any]:
+    """One change as JSON-ready values (the wire shape, S2 SPEC §4.2)."""
+    return {
+        "kind": change.kind.value,
+        "row": change.row,
+        "part_number": change.part_number,
+        "demand_id": change.demand_id,
+        "new_part_number": change.new_part_number,
+        "requested_quantity": (
+            {"before": change.quantity[0], "after": change.quantity[1]}
+            if change.quantity is not None
+            else None
+        ),
+        "due_date": (
+            {"before": _iso(change.due_date[0]), "after": _iso(change.due_date[1])}
+            if change.due_date is not None
+            else None
+        ),
+        "job_numbers": (
+            {"before": list(change.job_numbers[0]), "after": list(change.job_numbers[1])}
+            if change.job_numbers is not None
+            else None
+        ),
+        "leaves_hot_list": change.leaves_hot_list,
+    }
+
+
+def update_token_of(entries: Iterable[WorkOrderImportEntry]) -> str | None:
+    """The digest of everything the typed confirmation shows (S2 SPEC §3.5).
+
+    Per ``WILL_UPDATE`` entry in order: its Work Order, number and
+    status, every change with its values and consequences, the
+    completion and the kept lines — not the full saved state, so
+    activity that changes nothing shown keeps the confirmation valid.
+    ``None`` when nothing is updated.
+    """
+    payload = [
+        {
+            "work_order_id": entry.work_order_id,
+            "work_order_number": entry.work_order_number,
+            "existing_status": entry.existing_status,
+            "changes": [change_payload(change) for change in entry.changes or ()],
+            "completes_work_order": entry.completes_work_order,
+            "lines_not_in_file": list(entry.lines_not_in_file or ()),
+        }
+        for entry in entries
+        if entry.outcome == ImportOutcome.WILL_UPDATE
+    ]
+    if not payload:
+        return None
+    text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class _PlannedUpdate:
+    """The one ``update_work_order`` call a ``WILL_UPDATE`` group makes."""
+
+    work_order_id: int
+    state_token: str
+    line_edits: tuple[Mapping[str, Any], ...]
+    new_lines: tuple[Mapping[str, Any], ...]
+
+
+def _planned_update(state: WorkOrderState, changes: Sequence[ImportChange]) -> _PlannedUpdate:
+    """Only the changed fields of each edited line, every added line."""
+    line_edits: list[Mapping[str, Any]] = []
+    new_lines: list[Mapping[str, Any]] = []
+    for change in changes:
+        if change.kind is ImportChangeKind.ADD_LINE:
+            assert change.quantity is not None
+            new_lines.append(
+                {
+                    "part_number": change.part_number,
+                    "requested_quantity": change.quantity[1],
+                    "due_date": change.due_date[1] if change.due_date is not None else None,
+                    "job_numbers": (
+                        list(change.job_numbers[1]) if change.job_numbers is not None else []
+                    ),
+                }
+            )
+            continue
+        edit: dict[str, Any] = {"id": change.demand_id}
+        if change.quantity is not None:
+            edit["requested_quantity"] = change.quantity[1]
+        if change.due_date is not None:
+            edit["due_date"] = change.due_date[1]
+        if change.job_numbers is not None:
+            # The hashed saved list plus one value: a concurrent Job
+            # Number change fails the state token, never overwritten.
+            edit["job_numbers"] = list(change.job_numbers[1])
+        line_edits.append(edit)
+    quantity_edited = {
+        change.demand_id
+        for change in changes
+        if change.demand_id is not None and change.quantity is not None
+    }
+    return _PlannedUpdate(
+        work_order_id=state.work_order_id,
+        state_token=work_orders.work_order_state_token(state, quantity_edited),
+        line_edits=tuple(line_edits),
+        new_lines=tuple(new_lines),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Classification (reads only)
 # ---------------------------------------------------------------------------
 
@@ -697,72 +1002,184 @@ def _refused(group: _Group, errors: Iterable[RowError]) -> WorkOrderImportEntry:
     )
 
 
+def _refused_existing(
+    entry: WorkOrderImportEntry, errors: Iterable[RowError]
+) -> WorkOrderImportEntry:
+    """An existing Work Order refused: keeps its id and status (S2 D7)."""
+    return dataclasses.replace(
+        entry,
+        outcome=ImportOutcome.REFUSED,
+        lines=(),
+        new_part_numbers=(),
+        lines_without_due_date=0,
+        differs_from_file=None,
+        errors=tuple(errors),
+        changes=None,
+        completes_work_order=None,
+        lines_not_in_file=None,
+    )
+
+
 def _lines_without_due_date(group: _Group) -> int:
     return sum(1 for line in group.lines if line.due_date is None)
 
 
+def _differs(group: _Group, stored: Iterable[tuple[str, int]]) -> bool:
+    """S1: whether the file's (PN, quantity) pairs differ from the saved ones."""
+    return {(line.part_number, line.requested_quantity) for line in group.lines} != set(stored)
+
+
 def _existing(session: Session, group: _Group) -> WorkOrderImportEntry | None:
-    """The EXISTS entry of a group whose number is already in PartFlow."""
+    """The S1 EXISTS entry of a number created since the plan (the commit
+    fallback of a create — never an update: no confirmation covered it)."""
     hits = work_orders.list_work_orders(session, number=group.key)
     if not hits:
         return None
     summary = hits[0]
     detail = work_orders.get_work_order(session, summary.work_order.id)
-    in_file = {(line.part_number, line.requested_quantity) for line in group.lines}
-    stored = {(demand.part_number, demand.requested_quantity) for demand in detail.demands}
     return WorkOrderImportEntry(
         work_order_number=group.key,
         rows=tuple(group.rows),
         outcome=ImportOutcome.EXISTS,
         lines=tuple(group.lines),
         new_part_numbers=(),
-        lines_without_due_date=_lines_without_due_date(group),
+        lines_without_due_date=0,
         work_order_id=summary.work_order.id,
         existing_status=summary.status,
-        differs_from_file=in_file != stored,
+        differs_from_file=_differs(
+            group, ((demand.part_number, demand.requested_quantity) for demand in detail.demands)
+        ),
     )
 
 
-def _classify(session: Session, analysis: _Analysis) -> list[WorkOrderImportEntry]:
-    """``REFUSED`` / ``EXISTS`` / ``WILL_CREATE`` per group, in group order.
+def _classify_existing(
+    group: _Group, state: WorkOrderState, known: Collection[str], claimed: set[str]
+) -> tuple[WorkOrderImportEntry, _PlannedUpdate | None]:
+    """The entry of a group whose Work Order exists, from ONE saved state.
+
+    The change list and the state token are computed from the same
+    ``state`` object, so they certify identical values (CH-8). A PN the
+    group adds is claimed as new on the first group using it.
+    """
+
+    def entry(outcome: ImportOutcome, **fields: Any) -> WorkOrderImportEntry:
+        return WorkOrderImportEntry(
+            work_order_number=group.key,
+            rows=tuple(group.rows),
+            outcome=outcome,
+            work_order_id=state.work_order_id,
+            existing_status=state.status,
+            **fields,
+        )
+
+    if state.completed:
+        # A completed Work Order is never changed (OD-15-4/5).
+        return entry(
+            ImportOutcome.EXISTS,
+            lines=tuple(group.lines),
+            new_part_numbers=(),
+            lines_without_due_date=0,
+            differs_from_file=_differs(
+                group, ((line.part_number, line.requested_quantity) for line in state.lines)
+            ),
+        ), None
+    plan = plan_changes(state, group.lines, known)
+    if plan.errors:
+        return entry(
+            ImportOutcome.REFUSED,
+            lines=(),
+            new_part_numbers=(),
+            lines_without_due_date=0,
+            errors=plan.errors,
+        ), None
+    if not plan.changes:
+        return entry(
+            ImportOutcome.EXISTS,
+            lines=tuple(group.lines),
+            new_part_numbers=(),
+            lines_without_due_date=0,
+            differs_from_file=bool(plan.lines_not_in_file),
+            lines_not_in_file=plan.lines_not_in_file,
+        ), None
+    new: list[str] = []
+    for change in plan.changes:
+        if change.new_part_number and change.part_number not in claimed:
+            claimed.add(change.part_number)
+            new.append(change.part_number)
+    return entry(
+        ImportOutcome.WILL_UPDATE,
+        lines=tuple(group.lines),
+        new_part_numbers=tuple(new),
+        lines_without_due_date=sum(
+            1
+            for change in plan.changes
+            if change.kind is ImportChangeKind.ADD_LINE
+            and (change.due_date is None or change.due_date[1] is None)
+        ),
+        changes=plan.changes,
+        completes_work_order=plan.completes_work_order,
+        lines_not_in_file=plan.lines_not_in_file,
+    ), _planned_update(state, plan.changes)
+
+
+def _classify(
+    session: Session, analysis: _Analysis
+) -> tuple[list[WorkOrderImportEntry], dict[str, _PlannedUpdate]]:
+    """``REFUSED`` / ``EXISTS`` / ``WILL_UPDATE`` / ``WILL_CREATE`` per
+    group, in group order, with the update call of each ``WILL_UPDATE``.
 
     A refused group reads nothing. The existing numbers are found with
     ONE read over every valid group's number (verbatim equality, all
-    history); only those groups read their Work Order.
+    history); each of those groups reads its Work Order's state once.
     """
     valid = [group for group in analysis.groups if not group.errors]
-    existing_numbers = (
-        set(
-            session.scalars(
-                select(WorkOrder.work_order_number).where(
+    existing_ids: dict[str, int] = (
+        {
+            number: work_order_id
+            for number, work_order_id in session.execute(
+                select(WorkOrder.work_order_number, WorkOrder.id).where(
                     WorkOrder.work_order_number.in_([group.key for group in valid])
                 )
             )
-        )
+            if number is not None
+        }
         if valid
-        else set()
+        else {}
     )
-    by_key: dict[str, WorkOrderImportEntry] = {}
-    creating: list[_Group] = []
-    for group in valid:
-        entry = _existing(session, group) if group.key in existing_numbers else None
-        if entry is None:
-            creating.append(group)
-        else:
-            by_key[group.key] = entry
+    states = {
+        group.key: work_orders.read_work_order_state(session, existing_ids[group.key])
+        for group in valid
+        if group.key in existing_ids
+    }
 
-    part_numbers = {line.part_number for group in creating for line in group.lines}
+    # Every PN the import may write as a first use: the lines of new Work
+    # Orders and the lines an Open/Released Work Order does not have yet.
+    candidates: set[str] = set()
+    for group in valid:
+        state = states.get(group.key)
+        saved = {line.part_number for line in state.lines} if state is not None else set()
+        candidates.update(line.part_number for line in group.lines if line.part_number not in saved)
     known = (
         set(
             session.scalars(
-                select(PartNumber.part_number).where(PartNumber.part_number.in_(part_numbers))
+                select(PartNumber.part_number).where(PartNumber.part_number.in_(candidates))
             )
         )
-        if part_numbers
+        if candidates
         else set()
     )
+
     claimed: set[str] = set()
-    for group in creating:
+    by_key: dict[str, WorkOrderImportEntry] = {}
+    updates: dict[str, _PlannedUpdate] = {}
+    for group in valid:
+        state = states.get(group.key)
+        if state is not None:
+            entry, update = _classify_existing(group, state, known, claimed)
+            by_key[group.key] = entry
+            if update is not None:
+                updates[group.key] = update
+            continue
         new = []
         for line in group.lines:
             if line.part_number not in known and line.part_number not in claimed:
@@ -776,14 +1193,19 @@ def _classify(session: Session, analysis: _Analysis) -> list[WorkOrderImportEntr
             new_part_numbers=tuple(new),
             lines_without_due_date=_lines_without_due_date(group),
         )
-    return [
+    entries = [
         _refused(group, group.errors) if group.errors else by_key[group.key]
         for group in analysis.groups
     ]
+    return entries, updates
 
 
 def _report(
-    analysis: _Analysis, entries: Sequence[WorkOrderImportEntry], *, dry_run: bool
+    analysis: _Analysis,
+    entries: Sequence[WorkOrderImportEntry],
+    *,
+    dry_run: bool,
+    update_token: str | None = None,
 ) -> ImportReport:
     sheet = analysis.sheet
     return ImportReport(
@@ -797,6 +1219,7 @@ def _report(
         ignored_columns=analysis.ignored_columns,
         work_orders=tuple(entries),
         unassigned_rows=analysis.unassigned_rows,
+        update_token=update_token,
     )
 
 
@@ -805,14 +1228,61 @@ def _report(
 # ---------------------------------------------------------------------------
 
 
-def preview_work_order_import(session: Session, sheet: ImportSheet) -> ImportReport:
-    """Check file: the dry run. No lock, no write, no flush."""
+class ImportWriteKind(StrEnum):
+    """What an import's content writes; the routes map each to its key."""
+
+    CREATE = "CREATE"
+    UPDATE = "UPDATE"
+
+
+@dataclass(frozen=True)
+class ImportPlan:
+    """The read-only classification of one file (S2 D5).
+
+    ``report`` is preview-shaped (``dry_run`` True, ``update_token``
+    set when anything is updated); ``write_kinds`` holds ``CREATE`` iff
+    a Work Order will be created and ``UPDATE`` iff one will be changed.
+    The rest is this module's own, for :func:`import_work_orders`.
+    """
+
+    report: ImportReport
+    write_kinds: frozenset[ImportWriteKind]
+    analysis: _Analysis = dataclasses.field(repr=False)
+    updates: Mapping[str, _PlannedUpdate] = dataclasses.field(repr=False)
+
+
+def plan_work_order_import(session: Session, sheet: ImportSheet, *, commit: bool) -> ImportPlan:
+    """Analyse and classify the file; reads only, no lock, no write.
+
+    For the commit (``commit=True``) a row without a usable Work Order
+    Number refuses the whole import before any classification read
+    (S1 C2).
+    """
     analysis = _analyse(sheet)
+    if commit and analysis.commit_blocked:
+        rows = {error.row for error in analysis.unassigned_rows}
+        raise InvalidInputError(_blocked_message(len(rows)))
     try:
-        entries = _classify(session, analysis)
+        entries, updates = _classify(session, analysis)
     finally:
         session.rollback()
-    return _report(analysis, entries, dry_run=True)
+    report = _report(analysis, entries, dry_run=True, update_token=update_token_of(entries))
+    write_kinds = {
+        kind
+        for kind, outcome in (
+            (ImportWriteKind.CREATE, ImportOutcome.WILL_CREATE),
+            (ImportWriteKind.UPDATE, ImportOutcome.WILL_UPDATE),
+        )
+        if report.count(outcome)
+    }
+    return ImportPlan(
+        report=report, write_kinds=frozenset(write_kinds), analysis=analysis, updates=updates
+    )
+
+
+def preview_work_order_import(session: Session, sheet: ImportSheet) -> ImportReport:
+    """Check file: the dry run. No lock, no write, no flush."""
+    return plan_work_order_import(session, sheet, commit=False).report
 
 
 def _commit_group(
@@ -855,37 +1325,87 @@ def _commit_group(
     )
 
 
-def import_work_orders(session: Session, sheet: ImportSheet, *, actor_user_id: int) -> ImportReport:
-    """Import: re-validate the checked bytes, then one transaction per
-    ``WILL_CREATE`` Work Order in file order.
+def _commit_update(
+    session: Session, planned: WorkOrderImportEntry, update: _PlannedUpdate, *, actor_user_id: int
+) -> WorkOrderImportEntry:
+    """Change one Work Order in its own transaction (the manual Save's path).
 
-    A row without a usable Work Order Number refuses the whole import
-    (nothing written). Any unexpected failure propagates: the Work
-    Orders already committed stay, and checking and importing the same
-    file again completes the rest (the number is the idempotency key).
+    Only the confirmed changes are sent, under the state token they
+    were planned on: a Work Order changed since (U3), completed since,
+    released past the planned floor, or missing a planned line is
+    refused with the write path's message and nothing of it is written.
     """
-    analysis = _analyse(sheet)
-    if analysis.commit_blocked:
-        rows = {error.row for error in analysis.unassigned_rows}
-        raise InvalidInputError(_blocked_message(len(rows)))
     try:
-        planned = _classify(session, analysis)
-    finally:
+        detail = work_orders.update_work_order(
+            session,
+            update.work_order_id,
+            line_edits=update.line_edits,
+            new_lines=update.new_lines,
+            actor_user_id=actor_user_id,
+            audit_metadata=IMPORT_AUDIT_METADATA,
+            expected_state_token=update.state_token,
+        )
+    except (ConflictError, InvalidInputError, NotFoundError) as exc:
+        # Releases the PN advisory, Hot advisory and row locks this
+        # group took while the import continues.
         session.rollback()
-    groups = {group.key: group for group in analysis.groups}
-    entries = [
-        _commit_group(session, groups[entry.work_order_number], entry, actor_user_id=actor_user_id)
-        if entry.outcome == ImportOutcome.WILL_CREATE
-        else entry
-        for entry in planned
-    ]
-    report = _report(analysis, entries, dry_run=False)
+        return _refused_existing(planned, [RowError(None, None, exc.message)])
+    return dataclasses.replace(
+        planned, outcome=ImportOutcome.UPDATED, existing_status=detail.status
+    )
+
+
+def import_work_orders(
+    session: Session, plan: ImportPlan, *, actor_user_id: int, confirm_token: str | None
+) -> ImportReport:
+    """Import: one transaction per ``WILL_CREATE`` / ``WILL_UPDATE`` Work
+    Order in file order, on a plan made with ``commit=True``.
+
+    Updates are applied only when ``confirm_token`` equals the plan's own
+    ``update_token`` — the change list the user confirmed is the one
+    this commit found. Otherwise every update is refused per Work Order
+    (U4, nothing written to them) while the creates still commit (S2
+    D6). Any unexpected failure propagates: the Work Orders already
+    committed stay, and checking and importing the same file again
+    completes the rest (the number is the idempotency key).
+    """
+    planned = plan.report
+    confirmed = planned.update_token is None or confirm_token == planned.update_token
+    groups = {group.key: group for group in plan.analysis.groups}
+    entries: list[WorkOrderImportEntry] = []
+    unconfirmed = 0
+    for entry in planned.work_orders:
+        if entry.outcome == ImportOutcome.WILL_CREATE:
+            entries.append(
+                _commit_group(
+                    session, groups[entry.work_order_number], entry, actor_user_id=actor_user_id
+                )
+            )
+        elif entry.outcome == ImportOutcome.WILL_UPDATE and not confirmed:
+            unconfirmed += 1
+            entries.append(
+                _refused_existing(entry, [RowError(None, None, UNCONFIRMED_UPDATE_MESSAGE)])
+            )
+        elif entry.outcome == ImportOutcome.WILL_UPDATE:
+            entries.append(
+                _commit_update(
+                    session,
+                    entry,
+                    plan.updates[entry.work_order_number],
+                    actor_user_id=actor_user_id,
+                )
+            )
+        else:
+            entries.append(entry)
+    report = _report(plan.analysis, entries, dry_run=False)
     logger.info(
-        "Work Order import: format=%s rows_read=%d created=%d existing=%d refused=%d"
-        " actor_user_id=%d",
-        sheet.file_format,
-        analysis.rows_read,
+        "Work Order import: format=%s rows_read=%d created=%d updated=%d"
+        " update_unconfirmed=%d existing=%d refused=%d actor_user_id=%d",
+        planned.file_format,
+        planned.rows_read,
         report.count(ImportOutcome.CREATED),
+        report.count(ImportOutcome.UPDATED),
+        unconfirmed,
         report.count(ImportOutcome.EXISTS),
         report.count(ImportOutcome.REFUSED),
         actor_user_id,

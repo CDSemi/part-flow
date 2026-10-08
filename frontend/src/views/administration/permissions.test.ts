@@ -230,6 +230,9 @@ test('only Administration, the Management access presentation and the session mo
     'views/administration/sections.ts',
     'views/machines/MachinesView.tsx',
     'views/tracking/AuditTrailDialog.tsx',
+    // The file import names the permissions its content needs (Phase 15
+    // slice 2): the keys the server reports and their labels.
+    'views/work-orders/work-order-import.ts',
   ]);
 });
 
@@ -245,6 +248,7 @@ test('only Administration, the Management access presentation and the session mo
     'api/setup.ts',
     'api/station-devices.ts',
     'api/users.ts',
+    'api/work-order-import.ts',
     'app/management-access.ts',
     'app/session-context.ts',
     'components/AccountChip.tsx',
@@ -257,6 +261,7 @@ test('only Administration, the Management access presentation and the session mo
     'views/administration/permissions.ts',
     'views/administration/section-widgets.tsx',
     'views/administration/sections.ts',
+    'views/work-orders/work-order-import.ts',
   ]);
 });
 
@@ -291,5 +296,6 @@ test('only the session UI, the sign-in gate, the Administration sections, the Ma
     'views/work-orders/NewWorkOrderDialog.tsx',
     'views/work-orders/WorkOrderDetailPanel.tsx',
     'views/work-orders/WorkOrdersView.tsx',
+    'views/work-orders/work-order-import.ts',
   ]);
 });

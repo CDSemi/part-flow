@@ -12,14 +12,22 @@ import type {
   WorkOrderImportEntry,
   WorkOrderImportReport,
 } from '../../api/work-order-import';
+import { useSession } from '../../app/session-context';
 import { ModalDialog } from '../../components/ModalDialog';
+import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { formatIsoDate } from '../dates';
+import { workOrderStatusLabel } from './demand-lines';
 import {
+  changeText,
   commitAllowed,
   fileProblem,
   formatFileSize,
   formatRowList,
+  hasStaleUpdates,
   importButtonLabel,
+  keptLinesText,
+  missingPermissionText,
+  missingPermissions,
   orderEntries,
   outcomeIcon,
   outcomeLabel,
@@ -27,8 +35,9 @@ import {
   rowErrorText,
   rowsReadLine,
   summaryLine,
+  typedConfirmValue,
   unassignedRowsMessage,
-  undatedLinesToCreate,
+  workOrderNoun,
 } from './work-order-import';
 
 /** Where the dialog is in the choose → Check file → Import flow;
@@ -64,14 +73,18 @@ function accessRefusal(error: unknown): boolean {
 /**
  * Import Work Orders from a file (GUI_DESIGN §11.7): choose a CSV or
  * Excel file, `Check file` (a dry run on the server that writes
- * nothing), read the per-Work-Order report, then `Import N Work Orders`
- * with the same bytes — the server re-validates them and creates each
- * new Work Order in its own transaction. Nothing is released to
+ * nothing), read the per-Work-Order report, then Import with the same
+ * bytes — the server re-validates them and creates each new Work Order,
+ * and changes each Open or Released one the file lists, in its own
+ * transaction. Changes to existing Work Orders are applied only after a
+ * typed confirmation listing every change (`CHANGE {m}`), whose
+ * `updateToken` travels with the Import. Nothing is released to
  * production and nothing is queued: both steps need the server.
  * While the Import is in flight the dialog cannot be closed (its
  * writes cannot be recalled); the host guards navigation through
  * `onBusyChange`. `onClose(wrote)` tells the host whether the list must
- * be reloaded (a Work Order was created, or the outcome is unknown).
+ * be reloaded (a Work Order was created or changed, or the outcome is
+ * unknown).
  */
 export function ImportWorkOrdersDialog({
   writeBlocked,
@@ -98,6 +111,9 @@ export function ImportWorkOrdersDialog({
   const [wrote, setWrote] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [alertFocus, setAlertFocus] = useState<AlertFocus | null>(null);
+  // The typed confirmation of the changes to existing Work Orders.
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const { can } = useSession();
 
   const importing = phase === 'importing';
   const busy = importing || phase === 'checking';
@@ -179,11 +195,21 @@ export function ImportWorkOrdersDialog({
     }
   }
 
-  async function runImport() {
+  /** Import: straight away when the file changes no existing Work
+   * Order, otherwise after the typed confirmation. */
+  function requestImport() {
+    if (report === null || !commitAllowed(report, writeBlocked, busy, can)) {
+      return;
+    }
+    if (report.dryRun && report.summary.willUpdate > 0) setConfirmOpen(true);
+    else void runImport(null);
+  }
+
+  async function runImport(updateToken: string | null) {
     if (
       report === null ||
       kept === null ||
-      !commitAllowed(report, writeBlocked, busy)
+      !commitAllowed(report, writeBlocked, busy, can)
     ) {
       return;
     }
@@ -194,8 +220,14 @@ export function ImportWorkOrdersDialog({
         kept.bytes,
         kept.kind,
         report.checkToken,
+        updateToken,
       );
-      if (!result.dryRun && result.summary.created > 0) setWrote(true);
+      if (
+        !result.dryRun &&
+        (result.summary.created > 0 || result.summary.updated > 0)
+      ) {
+        setWrote(true);
+      }
       showReport(result);
       setPhase('done');
     } catch (error) {
@@ -238,140 +270,247 @@ export function ImportWorkOrdersDialog({
 
   const chosenProblem = file === null ? null : fileProblem(file);
   const willCreate = report?.dryRun ? report.summary.willCreate : 0;
+  const willUpdate = report?.dryRun ? report.summary.willUpdate : 0;
   const canImport =
-    report !== null && commitAllowed(report, writeBlocked, busy);
-  const disabledReason = writeBlocked
-    ? 'Reconnect to check or import the file.'
+    report !== null && commitAllowed(report, writeBlocked, busy, can);
+  const disabledReasons: string[] = writeBlocked
+    ? ['Reconnect to check or import the file.']
     : report === null
-      ? 'Check the file before importing it.'
-      : report.dryRun && !report.commitBlocked && willCreate === 0
-        ? 'Nothing new to import.'
-        : null;
+      ? ['Check the file before importing it.']
+      : !report.dryRun || report.commitBlocked
+        ? []
+        : willCreate + willUpdate === 0
+          ? ['Nothing to create or change.']
+          : missingPermissions(report, can).map(missingPermissionText);
 
   return (
-    <ModalDialog labelledBy={headingId} onClose={requestClose} size="xwide">
-      <div className="wo-import">
-        <h2 id={headingId} className="nwo-title">
-          Import Work Orders
-        </h2>
-        <p className="wo-sub">
-          Create Work Orders from a CSV or Excel file. Import saves business
-          demand only — nothing is released to production.
-        </p>
-        <p id={helpId} className="nwo-hint wo-import-help">
-          Required columns: Work Order Number, Part Number, Requested Quantity.
-          Optional: Job Number, Due Date (YYYY-MM-DD). One row per Part Number.
-          Format the Work Order Number, Part Number and Job Number columns as
-          Text so leading zeros stay. Columns A–BL are read. Excel files: the
-          first worksheet is read and must be visible; formulas are read as the
-          value last saved in Excel (a formula that was never calculated reads
-          as empty); every row is imported, hidden or filtered rows too. Limits:
-          1 MB, 2,000 rows, 500 lines per Work Order, 200 characters per text
-          cell.
-        </p>
-        <p className="nwo-hint wo-import-templates">
-          Download template:{' '}
-          <a href={IMPORT_TEMPLATE_URLS.CSV} download>
-            CSV
-          </a>{' '}
-          ·{' '}
-          <a href={IMPORT_TEMPLATE_URLS.XLSX} download>
-            Excel
-          </a>
-        </p>
+    <>
+      <ModalDialog labelledBy={headingId} onClose={requestClose} size="xwide">
+        <div className="wo-import">
+          <h2 id={headingId} className="nwo-title">
+            Import Work Orders
+          </h2>
+          <p className="wo-sub">
+            Create Work Orders from a CSV or Excel file, or change the Open and
+            Released Work Orders it lists. Import saves business demand only —
+            nothing is released to production.
+          </p>
+          <p id={helpId} className="nwo-hint wo-import-help">
+            Required columns: Work Order Number, Part Number, Requested
+            Quantity. Optional: Job Number, Due Date (YYYY-MM-DD). One row per
+            Part Number. Format the Work Order Number, Part Number and Job
+            Number columns as Text so leading zeros stay. Columns A–BL are read.
+            Excel files: the first worksheet is read and must be visible;
+            formulas are read as the value last saved in Excel (a formula that
+            was never calculated reads as empty); every row is imported, hidden
+            or filtered rows too. Limits: 1 MB, 2,000 rows, 500 lines per Work
+            Order, 200 characters per text cell. For a Work Order already in
+            PartFlow, the file changes quantities, sets due dates, adds Job
+            Numbers and adds lines to Open Work Orders; empty cells and lines
+            not in the file keep their saved values.
+          </p>
+          <p className="nwo-hint wo-import-templates">
+            Download template:{' '}
+            <a href={IMPORT_TEMPLATE_URLS.CSV} download>
+              CSV
+            </a>{' '}
+            ·{' '}
+            <a href={IMPORT_TEMPLATE_URLS.XLSX} download>
+              Excel
+            </a>
+          </p>
 
-        <div className="wo-import-file">
-          <label htmlFor={fileInputId}>Choose file</label>
-          <input
-            id={fileInputId}
-            ref={fileInputRef}
-            type="file"
-            accept=".csv,.xlsx"
-            aria-describedby={helpId}
-            disabled={busy}
-            onChange={choose}
-          />
-          {file !== null ? (
-            <span className="wo-import-chosen">
-              <span className="mono">{file.name}</span> ·{' '}
-              {formatFileSize(file.size)}
-            </span>
-          ) : null}
-          <button
-            className={report !== null ? 'btn ghost' : 'btn primary'}
-            disabled={
-              writeBlocked || file === null || chosenProblem !== null || busy
-            }
-            onClick={() => void check()}
-          >
-            {phase === 'checking'
-              ? 'Checking…'
-              : kept !== null
-                ? 'Check file again'
-                : 'Check file'}
-          </button>
-        </div>
-
-        {alert !== null ? (
-          <div
-            ref={alertRef}
-            className="wo-import-alert"
-            role="alert"
-            tabIndex={-1}
-          >
-            {alert}
-          </div>
-        ) : null}
-
-        {phase === 'unknown' ? (
-          <div
-            ref={unknownAlertRef}
-            className="wo-import-alert"
-            role="alert"
-            tabIndex={-1}
-          >
-            The import may be partly saved. Check the file again: Work Orders
-            already in PartFlow are never duplicated.
-          </div>
-        ) : null}
-
-        {report !== null ? (
-          <ImportReport
-            report={report}
-            headingId={resultHeadingId}
-            headingRef={resultHeadingRef}
-            expanded={expanded}
-            onToggleLines={toggleLines}
-          />
-        ) : null}
-
-        <div className="row wo-import-actions">
-          <button
-            className="bigbtn ghost"
-            disabled={importing}
-            onClick={requestClose}
-          >
-            {finished ? 'Close' : 'Cancel (Esc)'}
-          </button>
-          {finished ? null : (
+          <div className="wo-import-file">
+            <label htmlFor={fileInputId}>Choose file</label>
+            <input
+              id={fileInputId}
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.xlsx"
+              aria-describedby={helpId}
+              disabled={busy}
+              onChange={choose}
+            />
+            {file !== null ? (
+              <span className="wo-import-chosen">
+                <span className="mono">{file.name}</span> ·{' '}
+                {formatFileSize(file.size)}
+              </span>
+            ) : null}
             <button
-              className="bigbtn primary"
-              disabled={!canImport}
-              onClick={() => void runImport()}
+              className={report !== null ? 'btn ghost' : 'btn primary'}
+              disabled={
+                writeBlocked || file === null || chosenProblem !== null || busy
+              }
+              onClick={() => void check()}
             >
-              {importButtonLabel(willCreate)}
+              {phase === 'checking'
+                ? 'Checking…'
+                : kept !== null
+                  ? 'Check file again'
+                  : 'Check file'}
             </button>
+          </div>
+
+          {alert !== null ? (
+            <div
+              ref={alertRef}
+              className="wo-import-alert"
+              role="alert"
+              tabIndex={-1}
+            >
+              {alert}
+            </div>
+          ) : null}
+
+          {phase === 'unknown' ? (
+            <div
+              ref={unknownAlertRef}
+              className="wo-import-alert"
+              role="alert"
+              tabIndex={-1}
+            >
+              The import may be partly saved. Check the file again: Work Orders
+              already in PartFlow are never duplicated, and changes already
+              saved are not listed again.
+            </div>
+          ) : null}
+
+          {report !== null ? (
+            <ImportReport
+              report={report}
+              headingId={resultHeadingId}
+              headingRef={resultHeadingRef}
+              expanded={expanded}
+              onToggleLines={toggleLines}
+            />
+          ) : null}
+
+          <div className="row wo-import-actions">
+            <button
+              className="bigbtn ghost"
+              disabled={importing}
+              onClick={requestClose}
+            >
+              {finished ? 'Close' : 'Cancel (Esc)'}
+            </button>
+            {finished ? null : (
+              <button
+                className="bigbtn primary"
+                disabled={!canImport}
+                onClick={requestImport}
+              >
+                {importButtonLabel(willCreate, willUpdate)}
+              </button>
+            )}
+          </div>
+          {importing ? (
+            <p className="wo-import-reason" role="status">
+              Importing… Keep this page open.
+            </p>
+          ) : finished ? null : (
+            disabledReasons.map((reason) => (
+              <p key={reason} className="wo-import-reason">
+                {reason}
+              </p>
+            ))
           )}
         </div>
-        {importing ? (
-          <p className="wo-import-reason" role="status">
-            Importing… Keep this page open.
-          </p>
-        ) : !finished && disabledReason !== null ? (
-          <p className="wo-import-reason">{disabledReason}</p>
-        ) : null}
+      </ModalDialog>
+      {confirmOpen && report !== null && report.dryRun ? (
+        <ConfirmChangesDialog
+          report={report}
+          confirmDisabled={writeBlocked || busy}
+          onConfirm={() => {
+            setConfirmOpen(false);
+            void runImport(report.updateToken);
+          }}
+          onCancel={() => setConfirmOpen(false)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** The typed confirmation of the changes to existing Work Orders: every
+ * change of every Work Order the file changes, then `CHANGE {m}`. */
+function ConfirmChangesDialog({
+  report,
+  confirmDisabled,
+  onConfirm,
+  onCancel,
+}: {
+  report: WorkOrderImportReport;
+  confirmDisabled: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const updates = report.workOrders.filter(
+    (entry) => entry.outcome === 'WILL_UPDATE',
+  );
+  const m = updates.length;
+  const creates = report.dryRun ? report.summary.willCreate : 0;
+  return (
+    <TypedConfirmDialog
+      title={`Change ${m} existing ${workOrderNoun(m)}?`}
+      expectedValue={typedConfirmValue(m)}
+      valueLabel="Work Orders to change"
+      confirmLabel={`Import and change ${m} ${workOrderNoun(m)}`}
+      confirmDisabled={confirmDisabled}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    >
+      <p>
+        These Work Orders are already in PartFlow. Import applies every change
+        below; each Work Order is saved on its own.
+        {creates > 0
+          ? ` It also creates ${creates === 1 ? '1 new Work Order' : `${creates} new Work Orders`}.`
+          : null}
+      </p>
+      <div
+        className="wo-import-confirm-list"
+        tabIndex={0}
+        role="region"
+        aria-label="Changes to existing Work Orders"
+      >
+        {updates.map((entry) => (
+          <section key={entry.workOrderNumber} className="wo-import-confirm-wo">
+            <h4>
+              WO <span className="mono">{entry.workOrderNumber}</span> ·{' '}
+              {workOrderStatusLabel(entry.existingStatus ?? '')}
+            </h4>
+            <ChangeList entry={entry} />
+          </section>
+        ))}
       </div>
-    </ModalDialog>
+    </TypedConfirmDialog>
+  );
+}
+
+/** The change list of one changed Work Order: each change, then the
+ * completion and the kept lines when they apply. */
+function ChangeList({
+  entry,
+  id,
+}: {
+  entry: WorkOrderImportEntry;
+  id?: string;
+}) {
+  const kept = keptLinesText(entry);
+  return (
+    <ul id={id} className="wo-import-changes">
+      {(entry.changes ?? []).map((change) => (
+        <li key={`${change.kind}-${change.row}`} className="wo-import-change">
+          {changeText(change, formatIsoDate)}
+        </li>
+      ))}
+      {entry.completesWorkOrder === true ? (
+        <li className="wo-import-change-note">
+          Completes the Work Order — every line becomes fully allocated.
+        </li>
+      ) : null}
+      {kept !== null ? <li className="wo-import-change-note">{kept}</li> : null}
+    </ul>
   );
 }
 
@@ -391,8 +530,15 @@ function ImportReport({
   onToggleLines: (key: string) => void;
 }) {
   const entries = orderEntries(report.workOrders);
-  const undated = undatedLinesToCreate(report);
-  const anyExisting = entries.some((entry) => entry.outcome === 'EXISTS');
+  // The server counts exactly the lines this import writes.
+  const undated = report.linesWithoutDueDate;
+  const unscheduled = report.dryRun && report.summary.willCreate > 0;
+  const completedDiffers = entries.some(
+    (entry) =>
+      entry.outcome === 'EXISTS' &&
+      entry.existingStatus === 'COMPLETED' &&
+      entry.differsFromFile === true,
+  );
   return (
     <section className="wo-import-report" aria-labelledby={headingId}>
       <h3 id={headingId} ref={headingRef} tabIndex={-1}>
@@ -408,12 +554,14 @@ function ImportReport({
           <li>Ignored columns: {report.ignoredColumns.join(', ')}</li>
         ) : null}
       </ul>
-      {report.dryRun && report.summary.willCreate > 0 ? (
+      {report.dryRun && (unscheduled || undated > 0) ? (
         <ul className="wo-import-omissions">
-          <li>
-            Imported Work Orders get no Work Order due date — they stay
-            unscheduled.
-          </li>
+          {unscheduled ? (
+            <li>
+              Imported Work Orders get no Work Order due date — they stay
+              unscheduled.
+            </li>
+          ) : null}
           {undated > 0 ? (
             <li>
               {undated === 1
@@ -440,6 +588,13 @@ function ImportReport({
         </div>
       ) : null}
 
+      {hasStaleUpdates(report) ? (
+        <p className="wo-import-warn wo-import-stale">
+          Some Work Orders were not changed because they changed after the
+          check. Check the file again to see and confirm the current changes.
+        </p>
+      ) : null}
+
       {entries.length > 0 ? (
         <table className="wo-import-table">
           <thead>
@@ -462,14 +617,17 @@ function ImportReport({
           </tbody>
         </table>
       ) : null}
-      {anyExisting ? (
-        <p className="nwo-hint">Due dates and Job Numbers are not compared.</p>
+      {completedDiffers ? (
+        <p className="nwo-hint">
+          For completed Work Orders, due dates and Job Numbers are not compared.
+        </p>
       ) : null}
     </section>
   );
 }
 
-/** One Work Order of the report, plus its lines when disclosed. */
+/** One Work Order of the report, plus its lines — or, for a changed
+ * existing Work Order, its changes — when disclosed. */
 function ImportEntryRows({
   entry,
   open,
@@ -481,6 +639,9 @@ function ImportEntryRows({
 }) {
   const linesId = useId();
   const tone = entry.outcome.toLowerCase().replace('_', '-');
+  const changed = entry.changes !== null;
+  const noun = changed ? 'changes' : 'lines';
+  const disclosable = changed || entry.lines.length > 0;
   return (
     <Fragment>
       <tr className={`wo-import-entry ${tone}`}>
@@ -510,20 +671,26 @@ function ImportEntryRows({
               ))}
             </ul>
           ) : null}
-          {entry.lines.length > 0 ? (
+          {disclosable ? (
             <button
               className="wo-import-toggle"
               aria-expanded={open}
               aria-controls={open ? linesId : undefined}
-              aria-label={`${open ? 'Hide lines' : 'Show lines'} of ${entry.workOrderNumber}`}
+              aria-label={`${open ? 'Hide' : 'Show'} ${noun} of ${entry.workOrderNumber}`}
               onClick={onToggle}
             >
-              {open ? 'Hide lines' : 'Show lines'}
+              {open ? `Hide ${noun}` : `Show ${noun}`}
             </button>
           ) : null}
         </td>
       </tr>
-      {open ? (
+      {open && changed ? (
+        <tr className="wo-import-linesrow">
+          <td colSpan={4}>
+            <ChangeList entry={entry} id={linesId} />
+          </td>
+        </tr>
+      ) : open ? (
         <tr className="wo-import-linesrow">
           <td colSpan={4} id={linesId}>
             <table className="wo-import-lines">

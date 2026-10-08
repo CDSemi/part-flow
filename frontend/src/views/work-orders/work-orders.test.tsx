@@ -4490,8 +4490,23 @@ test('FV-8: Import from file… sits in the toolbar for Create and edit Work Ord
   );
 });
 
-test('FV-8: without Create and edit Work Orders the import entry is hidden, not disabled', async () => {
-  sessionPermissions = ['EDIT_WORK_ORDER_DEMAND', 'MANAGE_PART_NUMBER_MASTER'];
+/* ============ Phase 15 slice 2 — either key opens the import ============ */
+
+for (const [name, permissions] of [
+  ['Edit Work Order Demand', ['EDIT_WORK_ORDER_DEMAND']],
+  ['Create and edit Work Orders', ['MANAGE_WORK_ORDERS']],
+] as const) {
+  test(`FV-13: with only ${name} the import entry is in the toolbar`, async () => {
+    sessionPermissions = permissions;
+    await renderWorkOrders();
+    expect(
+      screen.getByRole('button', { name: 'Import from file…' }),
+    ).toBeInTheDocument();
+  });
+}
+
+test('FV-13: with neither key the import entry is hidden, not disabled', async () => {
+  sessionPermissions = ['VIEW_PRODUCTION_DATA', 'EDIT_WORK_ORDER_ALLOCATION'];
   await renderWorkOrders();
   expect(
     screen.queryByRole('button', { name: 'Import from file…' }),
