@@ -526,6 +526,70 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > pass verified bytes, and the SS-3 allowlist gains the two verified-bytes write sites. Nothing was run against a NAS,
 > DSM, Docker daemon, the running stack or a development database. Verdict unchanged: `PASS_WITH_DECLARED_LIMITS`.
 
+> **PF-A3.2 checkpoint addendum (2026-10-07) — operation journal, resume/abandon, workspace generation switch.**
+> Contracts first: AM-1..AM-10 in `contracts/lifecycle-records.schema.json` (byte-equal to `pf_config.LIFECYCLE_SCHEMA`);
+> the four A3.1 plan/journal corpus files rewritten to the amended shape with unchanged expectations, every other A3.1
+> corpus file byte-identical; 6 new valid examples, 9 invalid files, `example-app.env`; `cases.json` 54 → 70 rows.
+> `pf_instance` gains the operation store (`scan_operations`, `write_plan_once`, `write_journal_generation`, private
+> lists, `boot_id`, `process_start_ticks`, the descriptor-relative no-replace rename and the generation container);
+> `pf_config` the pure index, route table, `legal_next`, resume decision, gate and workspace reconciliation;
+> `pf_runner` `spawn_callback`; `pf_install` the journal-aware installer gate (§3.11a); `pf-admin.py` the plan/journal
+> protocol for every lifecycle kind, `resume [--operation] [--abandon | --keep-workspace]` and the aliases, the
+> still-running probe, the W1–W4 workspace switch with the §3.7a interval exception, frozen app/admin configuration,
+> phase-aware `fail_closed`, staging cleanup and the operations block of `status`/`doctor`/`instances`.
+> `pf_bootstrap.py`, `pf.sh`, `pf_docker.py`, `pf_source.py`, `compose.nas.yaml` and the shell wrappers are
+> unchanged.
+> Executed: `python -B -m unittest discover -s tests -p 'test*.py'` in disposable `python:3.12` (CPython 3.12.15) and
+> `python:3.9` (CPython 3.9.25) containers, uid 0, source mounted read-only and copied to `/tmp/r`: **918 tests OK, 0
+> skipped** on both (1476.924 s and 1465.037 s). Baseline: the 782 PF-A3.1 tests pass, updated without weakening per
+> SPEC §6.2 (journal assertions instead of `pending.json`, the replace-source tests as W1–W4 tests, DT-3 over
+> `OperationView` fixtures, the SS-3 allowlist reclassified with reasons, EH-* on a real operation). New: 136 tests in
+> `test_operations.py` (SchemaAmendments 11, Store 13, StoreInstance 4, Routes 10, CrashMatrix 6 — 198 seam rows over
+> deploy, update with migration, rollback `--restore-db`, reset-db, backup and restore-instance —, Resume 17,
+> ResumeDatabase 3, RestoreResume 7, Protocol 8, RunnerInterrupt 1, Workspace 20, ConfigConcurrency 6, FailClosed 6,
+> PurgeSurvival 6, Installer 3, ProcessProbes 8, CliRestart 5, CliPurgeSignals 2; several methods cover more than one
+> case ID). After the gate runs only the module docstring of `test_operations.py` changed; that module was re-run on
+> both images (136 OK, 418.758 s and 423.009 s) with `PF_A32_EVIDENCE` set. A final full-suite re-run on the final tree exited 0 on both images (stdout and exit code only; counts are those above). Evidence: `CRASH_MATRIX.json`,
+> `ROUTE-TABLE-1`, `OPEN-HANDLE-1`, `RESUME-CLI-1-CL-*` (installed launcher, real SIGKILL/SIGTERM), `RO-13`; static
+> checks in both images (`ast` (3, 9) on 20 files, `sh -n` on 4 scripts, the strict JSON reader on 102 contract files);
+> secret scan of the logs and evidence (the only hit of the fixture password string is the fixture database name
+> `pf_keep_20261001t000000z_abc123`). No NAS, DSM, Docker daemon, `/usr/local/bin/pf`, running stack or development
+> database was contacted.
+> *Completion run (2026-10-08).* The missing installed-launcher rows are implemented in `CliLifecycle`: real `pf
+> backup`, `pf update`, `pf rollback --restore-db`, `pf purge` and `pf restore-instance` runs through the installed
+> launcher on an optional simulated application plane of `tests/fake_docker.py` (per-service containers, images with an
+> Alembic contract, a JSON database model behind `psql`/`pg_dump`/`pg_restore`/`createdb`/`dropdb`, the upgrade
+> setting a database's heads; `block` gains `env`/`argv_match` selectors and `apply: after|before`). The disposable
+> fixture root installs the repository release with one test-only change, its `pf-admin.py` entry block
+> (`protected_fixture.fixture_release_files`): GitHub API answers from a fixture file, a local `file://` approved
+> remote and, for CL-11, a patched `TIMEOUT_DATA`; every production check runs unchanged. New: CL-1 (backup SIGKILLed
+> in `pg_dump` → new attempt), CL-3 (`apply: after`: resume forwards with exactly one live `alembic upgrade`), CL-4
+> with RS-25b (`apply: before`: `needs_operator` with no Alembic call; a running owned one-off refuses the superseding
+> `rollback --restore-db` before its plan; then it supersedes and completes), CL-11 (real runner timeouts: backup
+> `pg_dump` and verification `pg_restore` → `failed_preserved`, the runner record reconciled; the live upgrade past the
+> timeout → resume forwards or writes `needs_operator`), CL-12 (`.env` listener/password and `pf-config.json` health
+> timeout/`auto_update` edited after the freeze: every Compose child of the resume carries the frozen env-file and URL
+> hash, the frozen 180 s health timeout waits out a `starting` frontend, both proposal notes), CL-13 (rollback
+> SIGKILLed in `restoring-candidate`, `.env` edited), CL-14 (restore-instance after a purge with an edited `.env`:
+> `.env.proposal-<op8>`, SIGKILL after the `.env` write, resume binds the bundle snapshot), RS-18 (purge SIGKILLed
+> inside the `ALLOW_CONNECTIONS` window → resume closes the flag and reopens) and RS-26b (a session on the maintenance
+> database refuses a `database-switch` resume). One defect found and fixed: a resumed process restarted the
+> `compose-<n>.json` render numbering and failed `File exists` on its first Compose envelope (`bind_operation` now
+> continues the sequence). `CHECKPOINT = "PF-A3.2"`. Executed on the final tree, same command, uid 0: **927 tests OK,
+> 0 skipped** on `python:3.12` (CPython 3.12.15, 1355.554 s) and `python:3.9` (CPython
+> 3.9.25, 1386.263 s): the 782 baseline tests plus 145 in `test_operations.py`. `CRASH_MATRIX.json`
+> now has 14 installed-launcher rows (SIGKILL, SIGTERM, timeout). Static checks re-run in both images; pyflakes
+> leaves only the two pre-existing warnings of the untouched `tests/test_install.py`.
+> Gates: A3-T04 **blocked** (real Docker, PF-A3.4) — offline part passed (crash matrix, RS-*, RO-13) and installed-CLI
+> part **passed** with the fake daemon (CL-1..CL-5, CL-8..CL-11, RS-18, RS-25b; CL-6/CL-7 reachability evidence for the
+> workspace interval); A3-T05 **blocked** (PF-A3.4) — offline part passed (RS-1..RS-4), CLI part passed (CL-3, CL-4,
+> CL-11 migration branch); A3-T09 **passed** at `filesystem_and_cli` (CF-*, RS-27, RS-35, RS-36, CL-12..CL-14); A3-T10
+> **blocked** at its DSM/btrfs/SMB level (PF-A5.1) — filesystem part passed (WS-1..WS-20, `OPEN-HANDLE-1`). Earlier
+> A1/A2/A3.1 offline cases re-run **passed**; A2-T04, the A2-T09 SMB part, the A1-T17 DSM part, A1-T11..T14, the
+> A3-T03 real DB part, the launcher and reboot/power loss stay `not_run`/`blocked`. Declared limits: SPEC §10 and
+> SYNOLOGY_ADMIN §18 (PF-A3.2 limits). The SPEC §8 definition of done holds offline; proposed verdict for the PF-A3.2
+> audit: `PASS_WITH_DECLARED_LIMITS`. Not production-ready; no finding is closed overall.
+
 ## Executed checks
 
 | Check | Actual result |

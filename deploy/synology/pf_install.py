@@ -1425,24 +1425,58 @@ def _preflight_migrate(report, root, plan, request, runner, *, under_lock):
                                                 "adopted; pf mutation stays refused until legacy adoption (OD-A21-05)")
 
 
+def _lifecycle_validate(value, name, plan=None):
+    defs = pf_config.LIFECYCLE_SCHEMA["$defs"]
+    return validate_marked(value, defs[name], defs=defs) or pf_config.lifecycle_problems(value, name, plan=plan)
+
+
 def _instance_journal_checks(report, contexts):
+    """PF-A3.2 (sections 3.11, 3.11a): any blocking, invalid or conflicting instance operation (lifecycle journals and
+    the A2.3 permissions journal) refuses; runner records are interpreted through their operation's journal."""
     for context in contexts:
         if os.path.lexists(str(context.journal_path)):
             report.conflict("instance-operation-pending", context.journal_path,
                             f"instance {context.slug} has an incomplete operation; finish it with pf first")
+        try:
+            files, overflow = pf_instance.scan_operations(context.operations_dir)
+        except pf_instance.ContextError as exc:
+            report.conflict("instance-operation-pending", context.operations_dir,
+                            f"instance {context.slug}: the operation index cannot be read ({exc})")
+            continue
+        index = pf_config.classify_operations(files, permissions_journal=None, overflow=overflow,
+                                              validate=_lifecycle_validate)
+        if index.overflow:
+            report.conflict("instance-operation-pending", context.operations_dir,
+                            f"instance {context.slug}: operations/ holds more than {pf_config.OPERATION_SCAN_LIMIT} "
+                            "entries (operation-index-overflow); archive closed operations first (SYNOLOGY_ADMIN §16)")
+        for entry in index.blocking:
+            state = "invalid" if entry.cls == "invalid" else f"{entry.kind}/{entry.phase}"
+            report.conflict("instance-operation-pending", context.operations_dir / entry.operation_id,
+                            f"instance {context.slug} has an open operation {entry.operation_id} {state}; finish it "
+                            "with pf first")
         try:
             names = sorted(os.listdir(str(context.operations_dir)))
         except OSError:
             names = []
         for name in names:
             path = context.operations_dir / name / "unresolved-effects.json"
+            if not os.path.lexists(str(path)):
+                continue
             try:
                 effects = pf_runner.load_unresolved_effects(path)
             except pf_runner.RunnerError:
-                effects = [None]
-            if effects:
-                report.conflict("instance-effects-unresolved", path,
-                                f"instance {context.slug} recorded unresolved effects; observe and resolve them first")
+                effects = None
+            entry = index.entry(name)
+            if effects is not None:
+                if not effects:
+                    continue
+                state, _ = pf_config.runner_records_state(entry, index)
+                if state != "open" or (entry is not None and entry.cls in ("blocking", "invalid")):
+                    continue
+                if entry is not None and entry.cls == "superseded":
+                    continue  # refused through the blocking operation that supersedes it
+            report.conflict("instance-effects-unresolved", path,
+                            f"instance {context.slug} recorded unresolved effects; observe and resolve them first")
 
 
 def _bootstrap_equality(report, root, candidate, running_release):

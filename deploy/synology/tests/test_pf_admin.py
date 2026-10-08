@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import signal
 import stat
 import subprocess
@@ -39,6 +38,24 @@ def checkpoint(controller, reason="scheduled-or-manual-backup"):
     """A healthy checkpoint taken the way every route takes one: inside a locked operation."""
     with contextlib.redirect_stdout(io.StringIO()), controller.lock():
         return controller.snapshot(reason)
+
+
+def open_operations(controller):
+    """PF-A3.2: [(kind, phase)] of the blocking lifecycle operations of the controller's instance."""
+    return [(entry.kind, entry.phase) for entry in controller.operation_index().blocking]
+
+
+def latest_operation(controller, kind=None):
+    """PF-A3.2: (operation_id, plan, journal) of the newest operation with a plan (optionally of one kind)."""
+    found = pfx.operations_of(controller.context, kind)
+    return found[-1] if found else None
+
+
+def effect_states(journal, plan, kind=None):
+    """{target: state} of a journal (optionally only effects of one type)."""
+    states = {item["effect_id"]: item["state"] for item in journal["effects"]}
+    return {effect["target"]: states[effect["effect_id"]] for effect in plan["effects"]
+            if kind is None or effect["type"] == kind}
 
 
 def rewrite_manifest(folder, mutate):
@@ -195,10 +212,13 @@ class FakeController(pf.Controller):
         return {"origin": "protected-store", "manifest": manifest, "expanded_bytes": expanded,
                 "members": len(manifest["entries"]), "members_sha256": members_sha256}
 
-    def replace_source(self, candidate, revision, *, verified=True):
-        super().replace_source(candidate, revision, verified=verified)
-        self.workspace_head = revision if verified else None
+    def write_workspace_manifest(self, manifest):
+        # PF-A3.2: W4 (and deploy --current) record the new workspace; the simulated comparison follows it.
+        digest = super().write_workspace_manifest(manifest)
+        source = manifest["source"]
+        self.workspace_head = source.get("commit") if source["kind"] == "git_commit" else None
         self.workspace_dirty = False
+        return digest
 
     def inspect(self, service):
         return {"Image": self.current_images.get(service, DB_IMAGE_ID),
@@ -363,7 +383,7 @@ class FakeController(pf.Controller):
             program = args[3]
             assert "sh" not in args and "-c" not in args[:4], args
             if program == "pg_restore" and "--list" in args:
-                content = input_file.read()
+                input_file.read()
                 if output:
                     output.write(b"mock archive list\n")
                 return ""
@@ -389,7 +409,9 @@ class FakeController(pf.Controller):
             if program == "dropdb":
                 name = args[-1]
                 # PF-A3.1: a pf_restore_ candidate is dropped when the selected checkpoint is incompatible.
-                assert name.startswith(("pf_verify_", "pf_migrate_", "pf_restore_")) or name in self.droppable
+                # PF-A3.2: a resumed reset drops its own pf_clean_ candidate before redoing it.
+                assert name.startswith(("pf_verify_", "pf_migrate_", "pf_restore_", "pf_clean_")) \
+                    or name in self.droppable, (name, sorted(self.droppable))
                 del self.dbs[name]
                 return ""
         raise AssertionError(args)
@@ -487,7 +509,9 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.c.dbs["partflow_staging"]["heads"], ["r1"])
         self.assertEqual(self.c.dbs["partflow_staging"]["rows"], [])
         self.assertTrue(all(self.c.running.values()))
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
+        _, plan, journal = latest_operation(self.c, "deploy")
+        self.assertEqual((journal["phase"], journal["result"]["outcome"]), ("completed", "succeeded"))
         deployed = pf.load_json(self.c.state / "deployed.json")
         self.assertTrue(deployed["initial_deploy"])
         self.assertEqual(deployed["sha"], NEW)
@@ -500,12 +524,17 @@ class AdminTests(unittest.TestCase):
         self.c.running = {"db": True, "backend": False, "frontend": False}
         self.c.dbs = {"partflow_staging": {"heads": [], "rows": [], "connections": True}}
         self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
-        pf.write_json(self.c.pending, {
-            "operation": "deploy", "phase": "migrating-database",
-            "database": "partflow_staging", "started": "20260910T000000Z",
-        })
+        # PF-A3.2: an interrupted deploy whose initial migration is unknown (frontend effect not started).
+        plan = pfx.lifecycle_plan(self.context, "deploy")
+        deploy_op = plan["operation_id"]
+        pfx.write_operation(self.context, plan, pfx.lifecycle_journal(
+            plan, phase="initializing", states={"e0001": "complete", "e0002": "complete", "e0003": "unknown"},
+            unresolved="e0003"))
         self.assertEqual(self.invoke(["abort-deploy"]), 0)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
+        abort_op, abort_plan, journal = latest_operation(self.c, "abort-deploy")
+        self.assertEqual((abort_plan["supersedes"], journal["phase"]), (deploy_op, "completed"))
+        self.assertEqual(self.c.operation_index().entry(deploy_op).cls, "superseded")
         self.assertNotIn("partflow_staging", self.c.dbs)
         self.assertFalse(any(self.c.running.values()))
         self.assertTrue((self.c.config_dir / ".env").exists())
@@ -513,12 +542,17 @@ class AdminTests(unittest.TestCase):
     def test_abort_deploy_refuses_cleanup_after_frontend_may_have_opened(self):
         write_deploy_env(self.root)
         (self.c.state / "deployed.json").unlink()
-        pf.write_json(self.c.pending, {
-            "operation": "deploy", "phase": "opening-frontend",
-            "database": "partflow_staging", "started": "20260910T000000Z",
-        })
+        plan = pfx.lifecycle_plan(self.context, "deploy")
+        pfx.write_operation(self.context, plan, pfx.lifecycle_journal(
+            plan, phase="activating", unresolved="e0005",
+            states={"e0001": "complete", "e0002": "complete", "e0003": "complete", "e0004": "complete",
+                    "e0005": "unknown"}))
+        before = pfx.operation_files(self.context, plan["operation_id"])
         self.assertEqual(self.invoke(["abort-deploy"]), 1)
-        self.assertTrue(self.c.pending.exists())
+        self.assertIn("operation-open: operation " + plan["operation_id"] + " (deploy, phase activating)",
+                      self.errors_text())
+        self.assertEqual(pfx.operation_files(self.context, plan["operation_id"]), before)
+        self.assertEqual(open_operations(self.c), [("deploy", "activating")])
         self.assertIn("partflow_staging", self.c.dbs)
 
     def test_deploy_refuses_existing_project_resources_without_touching_database(self):
@@ -527,7 +561,7 @@ class AdminTests(unittest.TestCase):
         before = dict(self.c.dbs)
         self.assertEqual(self.invoke(["deploy", "--latest"]), 1)
         self.assertEqual(self.c.dbs, before)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
         self.assertTrue(all(self.c.running.values()))
 
     def test_prepare_new_env_generates_password_and_direct_lan_values(self):
@@ -587,7 +621,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.c.revision(), NEW)
         self.assertEqual(self.c.dbs["partflow_staging"]["rows"], ["old-record"])
         self.assertTrue(all(self.c.running.values()))
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
         saved = self.c.snapshots()[0]
         # PF-A3.1 mapping: source_revision -> the proven commit, restore_test -> the external verification level.
         self.assertEqual(saved.manifest["source"]["commit"], OLD)
@@ -599,24 +633,44 @@ class AdminTests(unittest.TestCase):
         self.assertEqual((self.c.config_dir / "pf-config.json").read_text(), config_before)
         self.assertEqual(self.c.env()["POSTGRES_PASSWORD"], "abc123")
 
-    def test_replace_source_replaces_entire_repository_but_preserves_external_control_and_config(self):
+    def test_workspace_switch_replaces_the_repository_and_retains_the_old_tree(self):
+        """PF-A3.2 (the former replace_source test, strictly stronger): the update's generation switch binds the
+        deployed tree as the workspace, keeps the whole old tree (also files the new tree lacks) as a retained
+        generation, and never touches the external control release or configuration."""
         (self.root / "compose.nas.yaml").write_text("local compose\n")
         (self.root / "docs/deployment").mkdir(parents=True)
         (self.root / "docs/deployment/SYNOLOGY_ADMIN.md").write_text("old docs\n")
+        (self.root / "untracked-notes.txt").write_text("editor notes\n")
         control_before = (self.c.control_dir / "pf-admin.py").read_text()
         config_before = (self.c.config_dir / "pf-config.json").read_text()
-        with tempfile.TemporaryDirectory() as tmp:
-            candidate = Path(tmp) / "candidate"
-            source_fixture(candidate, NEW)
-            (candidate / "compose.nas.yaml").write_text("remote compose\n")
-            (candidate / "deploy/synology/pf-admin.py").write_text("remote controller source\n")
-            (candidate / "docs/deployment").mkdir(parents=True)
-            (candidate / "docs/deployment/SYNOLOGY_ADMIN.md").write_text("new docs\n")
-            pf.write_json(self.c.pending, {"operation": "test", "phase": "paused"})
-            self.c.replace_source(candidate, NEW)
+        old_inode = os.stat(self.root).st_ino
+        original = self.c.materialize_source
+
+        def materialize(target, destination):
+            original(target, destination)
+            (destination / "compose.nas.yaml").write_text("remote compose\n")
+            (destination / "deploy/synology/pf-admin.py").write_text("remote controller source\n")
+            (destination / "docs/deployment").mkdir(parents=True)
+            (destination / "docs/deployment/SYNOLOGY_ADMIN.md").write_text("new docs\n")
+
+        self.c.workspace_dirty = True
+        with mock.patch.object(self.c, "materialize_source", side_effect=materialize):
+            self.assertEqual(self.invoke(["update", "--latest"]), 0, self.errors_text())
         self.assertEqual((self.root / "compose.nas.yaml").read_text(), "remote compose\n")
         self.assertEqual((self.root / "deploy/synology/pf-admin.py").read_text(), "remote controller source\n")
         self.assertEqual((self.root / "docs/deployment/SYNOLOGY_ADMIN.md").read_text(), "new docs\n")
+        self.assertFalse((self.root / "untracked-notes.txt").exists())
+        self.assertNotEqual(os.stat(self.root).st_ino, old_inode)
+        _, plan, journal = latest_operation(self.c, "update")
+        generation = plan["workspace"]["generation_id"]
+        retained = pf_instance.generation_container(self.context) / generation
+        self.assertEqual(os.stat(retained).st_ino, old_inode)
+        self.assertEqual((retained / "docs/deployment/SYNOLOGY_ADMIN.md").read_text(), "old docs\n")
+        self.assertEqual((retained / "compose.nas.yaml").read_text(), "local compose\n")
+        self.assertEqual((retained / "untracked-notes.txt").read_text(), "editor notes\n")
+        self.assertIn({"kind": "workspace-generation", "name": generation, "sha256": None},
+                      journal["retained_artifacts"])
+        self.assertEqual(stat.S_IMODE(os.stat(retained.parent).st_mode), 0o700)
         self.assertEqual((self.c.control_dir / "pf-admin.py").read_text(), control_before)
         self.assertEqual((self.c.config_dir / "pf-config.json").read_text(), config_before)
 
@@ -768,7 +822,7 @@ class AdminTests(unittest.TestCase):
         self.c.fail = "ci"
         self.assertEqual(self.invoke(["update", "--latest"]), 20)
         self.assertTrue(all(self.c.running.values()))
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
 
     def test_manual_ci_bypass_is_explicit(self):
         self.c.fail = "ci"
@@ -780,7 +834,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.invoke(["update", "--latest"]), 20)
         self.assertTrue(self.c.running["frontend"])
         self.assertEqual(self.c.revision(), OLD)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
 
     def test_approved_migration_rehearses_before_live_migration(self):
         self.c.new_migration = True
@@ -798,13 +852,21 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.c.db_heads(), ["r1"])
         self.assertEqual(self.c.revision(), OLD)
         self.assertFalse(self.c.running["frontend"])
-        self.assertEqual(pf.load_json(self.c.pending)["phase"], "backup-ready")
+        # PF-A3.2: the update stays open in migrating with the rehearsal migration unknown (an owned candidate).
+        _, plan, journal = latest_operation(self.c, "update")
+        self.assertEqual(open_operations(self.c), [("update", "migrating")])
+        states = effect_states(journal, plan, "database-migrate")
+        self.assertEqual(sorted(states.values()), ["not_started", "unknown"])
 
     def test_live_migration_failure_is_not_auto_downgraded(self):
         self.c.new_migration = True
         self.c.fail = "live-migration"
         self.assertEqual(self.invoke(["update", "--latest", "--allow-migrations"]), 1)
-        self.assertEqual(pf.load_json(self.c.pending)["phase"], "migrating-live")
+        _, plan, journal = latest_operation(self.c, "update")
+        self.assertEqual(open_operations(self.c), [("update", "migrating")])
+        self.assertEqual(effect_states(journal, plan, "database-migrate")["database:partflow_staging:heads=r2"],
+                         "unknown")
+        self.assertEqual(journal["unresolved_effect"], plan["effects"][6]["effect_id"])
         self.assertFalse(self.c.running["backend"])
         self.assertFalse(any("downgrade" in str(call) for call in self.c.calls))
 
@@ -843,7 +905,7 @@ class AdminTests(unittest.TestCase):
         self.c.fail = "swap"
         self.assertEqual(self.invoke(["reset-db"]), 1)
         self.assertEqual(self.c.dbs["partflow_staging"]["rows"], ["old-record"])
-        self.assertTrue(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [("reset-db", "switching")])
 
     def test_code_rollback_preserves_newer_rows(self):
         self.assertEqual(self.invoke(["update", "--latest"]), 0)
@@ -877,7 +939,7 @@ class AdminTests(unittest.TestCase):
     def test_health_failure_leaves_pending_and_services_stopped(self):
         self.c.fail = "health"
         self.assertEqual(self.invoke(["update", "--latest"]), 1)
-        self.assertTrue(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [("update", "activating")])
         self.assertFalse(self.c.running["backend"])
         self.assertFalse(self.c.running["frontend"])
 
@@ -888,7 +950,9 @@ class AdminTests(unittest.TestCase):
         selected = self.c.snapshots()[0].bundle_id
         self.c.fail = None
         self.assertEqual(self.invoke(["rollback", selected, "--restore-db"]), 0)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
+        update_op, _, _ = latest_operation(self.c, "update")
+        self.assertEqual(self.c.operation_index().entry(update_op).cls, "superseded")
         self.assertEqual(self.c.revision(), OLD)
         self.assertEqual(self.c.db_heads(), ["r1"])
 
@@ -898,15 +962,22 @@ class AdminTests(unittest.TestCase):
         self.c.fail = None
         self.assertEqual(self.invoke(["resume"]), 0)
         self.assertTrue(self.c.running["frontend"])
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
+        _, _, journal = latest_operation(self.c, "update")
+        self.assertEqual(journal["phase"], "cancelled")
 
     def test_resume_refuses_after_live_migration_phase(self):
         self.c.new_migration = True
         self.c.fail = "live-migration"
         self.assertEqual(self.invoke(["update", "--latest", "--allow-migrations"]), 1)
         self.c.fail = None
+        alembic = len([call for call in self.c.calls if call[0] == "compose" and "alembic" in call[1]])
         self.assertEqual(self.invoke(["resume"]), 1)
-        self.assertTrue(self.c.pending.exists())
+        # PF-A3.2: the live migration's result is unknown with the heads unchanged -> needs_operator, no retry.
+        self.assertIn("effect-unknown:", self.errors_text())
+        self.assertEqual(open_operations(self.c), [("update", "needs_operator")])
+        self.assertEqual(len([call for call in self.c.calls if call[0] == "compose" and "alembic" in call[1]]),
+                         alembic)
 
     def test_checkpoint_checksum_corruption_is_detected(self):
         view = checkpoint(self.c)
@@ -949,7 +1020,7 @@ class AdminTests(unittest.TestCase):
             with self.assertRaisesRegex(pf.Failure, "cannot verify.*nested/node_modules/tracked.js"):
                 self.c.rollback(view.bundle_id, restore_database=True)
             self.assertEqual(self.invoke(["rollback", view.bundle_id, "--restore-db"]), 1)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
         self.assertTrue(self.c.running["frontend"])
         self.assertEqual(self.c.revision(), OLD)
         self.assertFalse(any(name.startswith(("pf_keep_", "pf_restore_")) for name in self.c.dbs))
@@ -970,7 +1041,7 @@ class AdminTests(unittest.TestCase):
             with self.assertRaisesRegex(pf.Failure, "tracked reserved workspace artifact name"):
                 self.c.rollback(view.bundle_id, restore_database=True)
         proof.assert_called_once()
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
         self.assertTrue(self.c.running["frontend"])
         self.assertEqual(self.c.revision(), OLD)
         self.assertFalse(any(name.startswith(("pf_keep_", "pf_restore_")) for name in self.c.dbs))
@@ -982,7 +1053,6 @@ class AdminTests(unittest.TestCase):
                 raise OSError(5, "Input/output error")
 
         def interrupted_rollback(*args, **kwargs):
-            pf.write_json(self.c.pending, {"operation": "rollback", "phase": "paused", "started": pf.utc()})
             raise KeyboardInterrupt("Interrupted by signal 1")
 
         view = checkpoint(self.c)
@@ -1035,7 +1105,7 @@ class AdminTests(unittest.TestCase):
         with self.assertRaisesRegex(pf.Deferred, "migration change"):
             self.automatic_update()
         self.assertTrue(self.c.running["frontend"])
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
 
     def test_auto_update_refuses_divergent_history(self):
         self.c.config["auto_update"] = True
@@ -1105,8 +1175,13 @@ class AdminTests(unittest.TestCase):
             pass
 
     def test_pending_operation_blocks_new_update(self):
-        pf.write_json(self.c.pending, {"phase": "migrating-live"})
+        plan = pfx.lifecycle_plan(self.context, "update")
+        pfx.write_operation(self.context, plan, pfx.lifecycle_journal(
+            plan, phase="migrating", unresolved="e0007", states={**{f"e000{n}": "complete" for n in range(1, 7)},
+                                                                 "e0007": "unknown"}))
         self.assertEqual(self.invoke(["update", "--latest"]), 1)
+        self.assertIn("operation-open: operation " + plan["operation_id"] + " (update, phase migrating) is incomplete; "
+                      "'update' is not a legal next action for it.", self.errors_text())
         self.assertEqual(self.c.ci_calls, [])
 
 
@@ -1143,7 +1218,8 @@ class AdminTests(unittest.TestCase):
         selected = self.c.snapshots()[0].bundle_id
         self.c.fail = None
         self.assertEqual(self.invoke(["rollback", selected]), 0)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(open_operations(self.c), [])
+        self.assertEqual(latest_operation(self.c, "rollback")[1]["supersedes"], latest_operation(self.c, "update")[0])
         self.assertEqual(self.c.revision(), OLD)
 
     def test_frontend_failure_never_discards_possible_new_writes(self):
@@ -1534,163 +1610,184 @@ class PurgeRecoveryTests(unittest.TestCase):
             self.assertEqual(constructed.call_args.args[0].slug, "beta")
             purge.assert_called_once()
 
+    PURGE_SUMMARY = {
+        "project": "partflow-staging", "root": "", "database": "partflow_staging",
+        "database_user": "partflow_staging", "revision": OLD,
+        "containers": ["c1"], "volumes": ["v1"], "networks": ["n1"], "images": ["i1"],
+        "checkpoints": 0, "state_present": True, "env_present": True,
+    }
+
+    @contextlib.contextmanager
+    def purge_mocks(self, recovery, checkpoint, plan):
+        """PF-A3.2: the purge's effect bodies are mocked at their own seams (snapshot, the bundle capture and its
+        verification, the deletion and each cleanup); the plan, journal and gate run for real."""
+        with mock.patch.object(self.c, "instance_summary", return_value=dict(self.PURGE_SUMMARY, root=str(self.root))), \
+                mock.patch.object(self.c, "log_instance_summary"), \
+                mock.patch.object(self.c, "database_ready", return_value=16), \
+                mock.patch.object(self.c, "ensure_local_contract", return_value={"heads": ["r1"]}), \
+                mock.patch.object(self.c, "pause"), \
+                mock.patch.object(self.c, "snapshot", return_value=checkpoint), \
+                mock.patch.object(self.c, "capture_purge_bundle", return_value=(recovery, plan)) as capture, \
+                mock.patch.object(self.c, "verify_purge_bundle", return_value=recovery), \
+                mock.patch.object(self.c, "verify_recovery", return_value=recovery) as gate, \
+                mock.patch.object(self.c, "execute_deletion_plan", return_value=[]) as delete, \
+                mock.patch.object(self.c, "purge_cleanup", return_value="absent") as cleanup, \
+                mock.patch.object(self.c, "reopen_unchanged") as reopen:
+            yield types.SimpleNamespace(capture=capture, gate=gate, delete=delete, cleanup=cleanup, reopen=reopen)
+
     def test_purge_requires_recovery_then_multiple_confirmations_before_cleanup(self):
-        summary = {
-            "project": "partflow-staging", "root": str(self.root), "database": "partflow_staging",
-            "database_user": "partflow_staging", "revision": OLD,
-            "containers": ["c1"], "volumes": ["v1"], "networks": ["n1"], "images": ["i1"],
-            "checkpoints": 0, "state_present": True, "env_present": True,
-        }
         recovery, checkpoint = self.purge_views()
         confirmations = []
+
         def record_confirm(phrase, warning):
             confirmations.append(phrase)
 
         self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
-        with self.c.lock():
+        with contextlib.redirect_stdout(io.StringIO()), self.c.lock():
             plan = self.binding_plan(recovery.bundle_id)
-            with mock.patch.object(self.c, "instance_summary", return_value=summary), \
-                 mock.patch.object(self.c, "log_instance_summary"), \
-                 mock.patch.object(self.c, "database_ready", return_value=16), \
-                 mock.patch.object(self.c, "ensure_local_contract", return_value={"heads": ["r1"]}), \
-                 mock.patch.object(self.c, "pause"), \
-                 mock.patch.object(self.c, "phase"), \
-                 mock.patch.object(self.c, "durable_phase") as durable, \
-                 mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)) as create, \
-                 mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
-                 mock.patch.object(self.c, "verify_recovery", return_value=recovery) as gate, \
-                 mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
-                 mock.patch.object(pf, "confirm", side_effect=record_confirm), \
-                 mock.patch.object(pf, "prompt_yes_no", return_value=False):
+            with self.purge_mocks(recovery, checkpoint, plan) as mocks, \
+                    mock.patch.object(pf, "confirm", side_effect=record_confirm), \
+                    mock.patch.object(pf, "prompt_yes_no", return_value=False):
                 self.c.purge()
+            journal = self.c.journal
 
         self.assertEqual(confirmations[0], "PURGE partflow-staging")
         self.assertEqual(confirmations[1], "DELETE partflow_staging")
         self.assertTrue(confirmations[2].startswith("ERASE partflow-staging "))
         # The preliminary plan is handed to the bundle, and the binding plan is what deletion executes.
-        self.assertEqual(create.call_args.args[0]["image_coverage"], "pending")
-        self.assertEqual(durable.call_args.args[0], "deleting")
-        self.assertEqual(durable.call_args.kwargs["deletion_plan"]["sha256"], pf.pf_docker.plan_sha256(plan))
-        cleanup.assert_called_once_with(recovery.bundle_id, plan, delete_backups=False, reset_admin_config=False)
-        # PF-A3.1 deletion gate: the bundle is re-read strictly right before the durable deleting phase.
-        gate.assert_called_once_with(recovery.folder)
+        self.assertEqual(mocks.capture.call_args.args[0]["image_coverage"], "pending")
+        self.assertEqual(journal["deletion"]["plan_sha256"], pf.pf_docker.plan_sha256(plan))
+        self.assertEqual((journal["deletion"]["delete_backups"], journal["deletion"]["reset_admin_config"]),
+                         (False, False))
+        mocks.delete.assert_called_once_with(plan)
+        self.assertEqual([call.args[0] for call in mocks.cleanup.call_args_list],
+                         ["backups", "env", "state", "admin-config"])
+        self.assertEqual(journal["phase"], "completed")
+        # PF-A3.1 deletion gate: the bundle is re-read strictly right before the deletion approval is journaled.
+        mocks.gate.assert_called_once_with(recovery.folder)
 
     def purge_views(self, level="data_restore_verified"):
         """Stand-ins for the purge bundle and its before-purge checkpoint (the BundleView accessors purge reads)."""
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
         recovery = types.SimpleNamespace(
-            bundle_id=recovery_id, folder=self.c.recovery_root / recovery_id,
+            bundle_id=recovery_id, folder=self.c.recovery_root / recovery_id, manifest_sha256="b" * 64,
             derived_from="20260910T115900Z-" + OLD[:12] + "-aaaaaa", database="partflow_staging",
             stores=[{"database": "partflow_staging"}], level=level,
             purge={"saved_image_refs": [PROJECT + "-backend:test", PROJECT + "-frontend:test"]})
-        checkpoint = types.SimpleNamespace(bundle_id=recovery.derived_from, database_heads=["r1"], images={
-            "backend": {"reference": PROJECT + "-backend:old", "id": OLD_BACKEND},
-            "frontend": {"reference": PROJECT + "-frontend:old", "id": OLD_FRONTEND}})
+        checkpoint = types.SimpleNamespace(bundle_id=recovery.derived_from, manifest_sha256="a" * 64,
+                                           database_heads=["r1"], images={
+                                               "backend": {"reference": PROJECT + "-backend:old", "id": OLD_BACKEND},
+                                               "frontend": {"reference": PROJECT + "-frontend:old",
+                                                            "id": OLD_FRONTEND}})
         return recovery, checkpoint
 
     def test_purge_bundle_without_a_passed_record_is_refused_before_deleting_and_reopens(self):
         """PB-7: no passed data_restore_verified record of the bundle's own manifest -> purge-bundle-unverified,
-        no deleting journal, and the application is reopened from the before-purge checkpoint."""
-        summary = {
-            "project": "partflow-staging", "root": str(self.root), "database": "partflow_staging",
-            "database_user": "partflow_staging", "revision": OLD,
-            "containers": ["c1"], "volumes": ["v1"], "networks": [], "images": [],
-            "checkpoints": 1, "state_present": True, "env_present": True,
-        }
+        no deletion approval, and the application is reopened in-process; the purge closes cancelled (PU-5)."""
         for level in ("captured", "failed"):
             with self.subTest(level=level):
                 recovery, checkpoint = self.purge_views(level=level)
-                with self.c.lock():
+                with contextlib.redirect_stdout(io.StringIO()) as out, self.c.lock():
                     plan = self.binding_plan(recovery.bundle_id)
-                    with mock.patch.object(self.c, "instance_summary", return_value=summary), \
-                         mock.patch.object(self.c, "log_instance_summary"), \
-                         mock.patch.object(self.c, "database_ready", return_value=16), \
-                         mock.patch.object(self.c, "ensure_local_contract"), \
-                         mock.patch.object(self.c, "pause"), \
-                         mock.patch.object(self.c, "phase"), \
-                         mock.patch.object(self.c, "durable_phase") as durable, \
-                         mock.patch.object(self.c, "write_deletion_plan") as write_plan, \
-                         mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)), \
-                         mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
-                         mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
-                         mock.patch.object(self.c, "activate") as activate, \
-                         mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
-                         mock.patch.object(pf, "confirm"):
+                    with self.purge_mocks(recovery, checkpoint, plan) as mocks, \
+                            mock.patch.object(self.c, "write_deletion_plan") as write_plan, \
+                            mock.patch.object(pf, "confirm"):
                         with self.assertRaisesRegex(pf.Failure, "^purge-bundle-unverified: " + recovery.bundle_id
                                                     + ": no passed data_restore_verified record for this bundle's "
                                                     "manifest; deletion is blocked. The purge stops before deletion; "
                                                     "the application is reopened."):
                             self.c.purge(delete_backups=False)
-                durable.assert_not_called()
+                    journal = self.c.journal
                 write_plan.assert_not_called()
-                cleanup.assert_not_called()
-                activate.assert_called_once_with(checkpoint.images, ["r1"])
+                mocks.delete.assert_not_called()
+                mocks.cleanup.assert_not_called()
+                mocks.reopen.assert_called_once_with()
+                self.assertEqual((journal["phase"], journal["deletion"]), ("cancelled", None))
+                self.assertIn("Purge cancelled/failed before deletion; application services were restored.",
+                              out.getvalue())
 
-    def binding_plan(self, recovery_id):
-        plan = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge", operation_id=self.c.operation_id,
+    def binding_plan(self, recovery_id, operation_id=None):
+        plan = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge",
+                                          operation_id=operation_id or self.c.operation_id,
                                           daemon=self.c.verify_daemon(), recovery_id=recovery_id,
                                           covered_image_refs=set())
         plan["slug"] = self.c.context.slug
         return plan
 
     def test_purge_delete_backups_adds_separate_confirmation(self):
-        summary = {
-            "project": "partflow-staging", "root": str(self.root), "database": "partflow_staging",
-            "database_user": "partflow_staging", "revision": OLD,
-            "containers": ["c1"], "volumes": ["v1"], "networks": [], "images": [],
-            "checkpoints": 1, "state_present": True, "env_present": True,
-        }
         recovery, checkpoint = self.purge_views()
         confirmations = []
-        with self.c.lock():
+        with contextlib.redirect_stdout(io.StringIO()), self.c.lock():
             plan = self.binding_plan(recovery.bundle_id)
-            with mock.patch.object(self.c, "instance_summary", return_value=summary), \
-                 mock.patch.object(self.c, "log_instance_summary"), \
-                 mock.patch.object(self.c, "database_ready", return_value=16), \
-                 mock.patch.object(self.c, "ensure_local_contract"), \
-                 mock.patch.object(self.c, "pause"), \
-                 mock.patch.object(self.c, "phase"), \
-                 mock.patch.object(self.c, "durable_phase"), \
-                 mock.patch.object(self.c, "create_purge_recovery", return_value=(recovery, plan)), \
-                 mock.patch.object(self.c, "verify_snapshot", return_value=checkpoint), \
-                 mock.patch.object(self.c, "verify_recovery", return_value=recovery), \
-                 mock.patch.object(self.c, "finish_purge_cleanup"), \
-                 mock.patch.object(pf, "confirm", side_effect=lambda phrase, warning: confirmations.append(phrase)):
+            with self.purge_mocks(recovery, checkpoint, plan), \
+                    mock.patch.object(pf, "confirm", side_effect=lambda phrase, warning: confirmations.append(phrase)):
                 self.c.purge(delete_backups=True)
+            journal = self.c.journal
         self.assertIn("DELETE BACKUPS partflow-staging", confirmations)
+        self.assertTrue(journal["deletion"]["delete_backups"])
+
+    def deleting_purge(self, *, delete_backups=True):
+        """PF-A3.2: an interrupted purge in deleting (the frozen binding plan and the deletion approval)."""
+        plan = pfx.lifecycle_plan(self.context, "purge")
+        directory = pfx.write_operation(self.context, plan)
+        self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
+        binding = self.binding_plan(pfx.BUNDLE_ID, operation_id=plan["operation_id"])
+        data = pf.pf_docker.plan_bytes(binding)
+        pf_instance._write_private_file(directory / "deletion-plan.json", data, 0o600)
+        journal = pfx.lifecycle_journal(
+            plan, phase="deleting", unresolved="e0005",
+            states={"e0001": "complete", "e0002": "complete", "e0003": "complete", "e0004": "complete",
+                    "e0005": "unknown"},
+            deletion={"plan_sha256": pf_instance.sha256_bytes(data), "delete_backups": delete_backups,
+                      "reset_admin_config": False, "confirmed_at": "20261007T040500Z"})
+        pf_instance.write_journal_generation(directory, pf_instance.normalize_json(journal))
+        return plan, binding
+
+    def run_cli(self, arguments, *, confirm=None):
+        errors = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors), \
+                mock.patch.object(pf, "Controller", return_value=self.c), \
+                mock.patch.object(pf, "confirm", confirm or mock.Mock()), \
+                mock.patch.object(pf, "unattended", return_value=False):
+            code = pf.main(arguments, installation_root=self.layout.root, running_release=self.layout.release_dir,
+                           trusted_launch=True)
+        return code, errors.getvalue()
 
     def test_interrupted_deleting_purge_can_resume_from_verified_bundle(self):
-        recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
-        self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
-        with self.c.lock():
-            plan = self.binding_plan(recovery_id)
-            reference = self.c.write_deletion_plan(plan)
-        pf.write_json(self.c.pending, {
-            "operation": "purge", "phase": "deleting", "recovery": recovery_id, "deletion_plan": reference,
-            "deleted": [], "delete_backups": True, "reset_admin_config": False,
-        })
-        item = pf.InvalidBundle(self.c.recovery_root / recovery_id, "", "")
-        with mock.patch.object(self.c, "recoveries", return_value=[item]), \
-             mock.patch.object(self.c, "verify_recovery", return_value=item) as reread, \
-             mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
-             mock.patch.object(pf, "confirm") as confirmation:
-            self.c.purge()
+        plan, binding = self.deleting_purge()
+        item = pf.InvalidBundle(self.c.recovery_root / pfx.BUNDLE_ID, "", "")
+        confirmation = mock.Mock()
+        with mock.patch.object(self.c, "verify_recovery", return_value=item) as reread, \
+                mock.patch.object(self.c, "execute_deletion_plan", return_value=[]) as delete, \
+                mock.patch.object(self.c, "purge_cleanup", return_value="absent") as cleanup:
+            code, errors = self.run_cli(["purge"], confirm=confirmation)
+        self.assertEqual(code, 0, errors)
+        # `pf purge` aliases `pf resume` (section 3.3): one RESUME PURGE confirmation, the frozen plan only.
         confirmation.assert_called_once()
-        # Resume executes exactly the frozen plan the journal references (PF-A1.3); PF-A3.1 PB-8: the bundle is
-        # re-read strictly (no new verification).
+        self.assertEqual(confirmation.call_args.args[0], f"RESUME PURGE partflow-staging {pfx.BUNDLE_ID}")
+        # PF-A3.1 PB-8: the bundle is re-read strictly (no new verification).
         reread.assert_called_once_with(item.folder)
-        cleanup.assert_called_once_with(recovery_id, plan, delete_backups=True, reset_admin_config=False)
+        delete.assert_called_once_with(binding)
+        self.assertEqual([(call.args[0], call.kwargs["delete_backups"]) for call in cleanup.call_args_list],
+                         [("backups", True), ("env", True), ("state", True), ("admin-config", True)])
+        _, journal = pfx.operation(self.context, plan["operation_id"])
+        self.assertEqual(journal["phase"], "completed")
+        attempts = json.loads((self.context.operations_dir / plan["operation_id"] / "attempts.json").read_bytes())
+        self.assertEqual([item["action"] for item in attempts], ["alias:purge"])
 
-    def test_pre_plan_deleting_journal_is_refused_with_plan_missing(self):
+    def test_legacy_lifecycle_pending_journal_is_refused_as_unsupported(self):
+        """PF-A3.2 (former plan-missing case): a lifecycle state/pending.json can only come from an unsupported control
+        change; every mutating route refuses journal-format-unsupported and nothing is read further."""
         recovery_id = "purge-20260910T120000Z-" + OLD[:12] + "-abcdef"
         pf.write_json(self.c.pending, {
             "operation": "purge", "phase": "deleting", "recovery": recovery_id,
             "delete_backups": True, "reset_admin_config": False,
         })
-        with mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, \
-             mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation")):
-            with self.assertRaisesRegex(pf.Failure, "plan-missing"):
-                self.c.purge()
+        with mock.patch.object(self.c, "purge_cleanup") as cleanup:
+            code, errors = self.run_cli(["purge"], confirm=mock.Mock(side_effect=AssertionError("no confirmation")))
+        self.assertEqual(code, 1)
+        self.assertIn("journal-format-unsupported: " + str(self.context.paths.private_state)
+                      + "/state/pending.json records purge/deleting", errors)
         cleanup.assert_not_called()
 
     def test_side_by_side_restore_never_replaces_active_database(self):
@@ -1735,8 +1832,6 @@ class PurgeRecoveryTests(unittest.TestCase):
         folder = pfx.legacy_purge_bundle(self.c.recovery_root / recovery_id, project=PROJECT, root=self.root,
                                          tree=tree)
         (self.c.state / "deployed.json").unlink()
-        if self.c.pending.exists():
-            self.c.pending.unlink()
         return self.c.verify_recovery(folder)
 
     def assert_exact_restore_refused_before_any_effect(self, recovery, pattern):
@@ -1748,8 +1843,8 @@ class PurgeRecoveryTests(unittest.TestCase):
                                side_effect=AssertionError("configuration must not be touched")):
             with self.assertRaisesRegex(pf.Failure, pattern):
                 self.c.restore_instance(recovery)
-        # No route-less restore-instance journal is left behind to wedge the instance.
-        self.assertFalse(self.c.pending.exists())
+        # No restore-instance plan or journal is left behind to wedge the instance.
+        self.assertEqual(pfx.operations_of(self.context), [])
         self.assertEqual(env_path.read_bytes() if env_path.exists() else None, env_before)
 
     def test_exact_restore_refuses_reserved_bundle_paths_before_confirmation_or_journal(self):
@@ -1874,29 +1969,6 @@ class RecoverySourceTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
-
-    def test_recovery_replaces_workspace_but_preserves_external_control_and_admin_config(self):
-        current_admin = self.c.control_dir / "pf-admin.py"
-        current_admin.write_text("# current v2.5 installed control plane\n")
-        current_config = self.c.config_dir / "pf-config.json"
-        current_config.write_text(json.dumps({
-            "project": "partflow-staging",
-            "backup_read_group": TEST_GROUP,
-            "workspace_write_group": TEST_GROUP,
-        }) + "\n")
-
-        candidate = Path(self.temp.name) / "candidate"
-        source_fixture(candidate, NEW)
-        (candidate / "deploy/synology/pf-admin.py").write_text("# old recovered repository source\n")
-
-        self.c.replace_source_for_recovery(candidate, NEW)
-
-        self.assertEqual(current_admin.read_text(), "# current v2.5 installed control plane\n")
-        self.assertNotIn('"minimum_free_mb": 777', current_config.read_text())
-        self.assertIn('"project": "partflow-staging"', current_config.read_text())
-        self.assertEqual((self.root / "deploy/synology/pf-admin.py").read_text(), "# old recovered repository source\n")
-        self.assertFalse((self.root / ".env").exists())
-        self.assertFalse((self.root / "DEPLOYED_SOURCE.txt").exists())
 
     def test_restore_runtime_environment_writes_external_config_env(self):
         # Audit AF-1: the caller passes the verified payload bytes (runtime_environment_bytes).

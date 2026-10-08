@@ -76,6 +76,17 @@ class Terminal:
         return self.value
 
 
+def fixture_context():
+    """PF-A3.2: the identity fields a lifecycle plan names, without an installation (pure table tests)."""
+    return types.SimpleNamespace(
+        instance_id="3f0c6a8e-1b2d-4c5e-9f00-a1b2c3d4e5f6", slug="staging", compose_project=PROJECT,
+        daemon=types.SimpleNamespace(engine_id=pfx.ENGINE_ID), record_sha256="1" * 64,
+        control=types.SimpleNamespace(release_id="pf-fixture", sha256="2" * 64),
+        profile=types.SimpleNamespace(id="partflow-staging-legacy", version="2.5.0-a1.1", sha256="3" * 64),
+        approved_policy=types.SimpleNamespace(revision=1, sha256="4" * 64),
+        paths=types.SimpleNamespace(workspace=Path("/volume1/partflow/repo")))
+
+
 def record_evidence(name, payload):
     directory = os.environ.get("PF_A14_EVIDENCE")
     if not directory:
@@ -175,17 +186,15 @@ def write_sites(tree):
 # write site). A new site fails SS-3 until it is classified here with its reason.
 WRITE_SITE_ALLOWLIST = {
     "pf-admin.py": {
-        (".mkdir", "Controller.create_purge_recovery"), (".mkdir", "Controller.ensure_backup_tree"),
+        (".mkdir", "Controller.ensure_backup_tree"),
         (".mkdir", "Controller.ensure_recovery_tree"),
         (".mkdir", "Controller.lock"),
-        (".mkdir", "Controller.restore_revision_checkpoints"), (".mkdir", "Controller.restore_runtime_environment"),
+        (".mkdir", "Controller.restore_runtime_environment"),
         (".open", "Controller.create_tree_archive"),
         (".open", "write_json"),
-        (".unlink", "Controller.abort_deploy"),
-        (".unlink", "Controller.finish_purge_cleanup"),
-        (".unlink", "Controller.purge"), (".unlink", "Controller.replace_source"),
-        (".unlink", "Controller.replace_source_for_recovery"), (".unlink", "Controller.reset_database"),
-        (".unlink", "Controller.restore_instance"), (".unlink", "Controller.resume"),
+        
+        
+        (".unlink", "Controller.restore_instance"), 
         (".write_bytes", "Controller.make_override"),
         ("_write_private", "Controller.write_deletion_plan"), ("_write_private", "Controller.write_private_json"),
         ("os.chmod", "Controller.begin_operation"),
@@ -195,9 +204,7 @@ WRITE_SITE_ALLOWLIST = {
         ("os.replace", "Controller.restore_runtime_environment"), ("os.replace", "write_json"),
         # PF-A2.2: the config wizard's compare-and-swap publish (replace mode) and its audit record.
         ("os.replace", "write_editable_file"), ("write_private_json", "Controller.write_config_change"),
-        ("shutil.rmtree", "Controller.finish_purge_cleanup"), ("shutil.rmtree", "Controller.replace_source"),
-        ("shutil.rmtree", "Controller.replace_source_for_recovery"),
-        ("shutil.rmtree", "Controller.restore_revision_checkpoints"),
+        
         # PF-A2.3 (section 3.10): the content-only copy of every flow (no mode or xattr is copied): mkdir 0700 for a
         # directory, the bytes of a no-follow, identity-checked source descriptor into a private temporary sibling,
         # then the rename that makes the copy a new inode; all relative to held directory descriptors (audit fix).
@@ -226,9 +233,7 @@ WRITE_SITE_ALLOWLIST = {
         ("tempfile.TemporaryDirectory", "Controller.restore_instance"), ("tempfile.TemporaryDirectory", "Controller.rollback"),
         ("tempfile.TemporaryDirectory", "Controller.update"), ("tempfile.mkdtemp", "Controller.restore_revision_checkpoints"),
         ("write_json", "Controller.begin_operation"),
-        ("write_json", "Controller.deploy"), ("write_json", "Controller.pause"), ("write_json", "Controller.phase"),
-        ("write_json", "Controller.reset_database"), ("write_json", "Controller.resolve"),
-        ("write_json", "Controller.restore_instance"),
+        ("write_json", "Controller.resolve"),
         ("write_private_json", "Controller._append_envelope_record"), ("write_private_json", "Controller._record_daemon"),
         ("write_private_json", "Controller.binding_blocked"),
         ("write_private_json", "Controller.purge"), ("write_private_json", "Controller.require_empty_target"),
@@ -244,8 +249,7 @@ WRITE_SITE_ALLOWLIST = {
         ("os.mkdir", "Controller.stage_deployment"), ("os.chmod", "Controller.stage_deployment"),
         ("_write_private_file", "Controller.stage_deployment"), ("write_private_json", "Controller.stage_deployment"),
         ("_write_private_file", "Controller._seal_compose"), ("_write_private_file", "Controller._seal_config"),
-        ("_write_private_file", "Controller.seal_deployment"), ("write_json", "Controller.finish_deployment"),
-        (".unlink", "Controller.finish_deployment"), ("write_private_json", "Controller.finish_deployment"),
+        ("_write_private_file", "Controller.seal_deployment"), 
         (".mkdir", "Controller._capture"), (".open", "Controller.dump_store"), ("os.replace", "Controller.dump_store"),
         (".open", "Controller.write_dump_list"), ("_write_private_file", "Controller.write_manifest"),
         ("_write_private_file", "Controller.write_verification"), ("write_private_json", "Controller._record_capture"),
@@ -255,7 +259,23 @@ WRITE_SITE_ALLOWLIST = {
         # Audit AF-1: the runtime .env and the restored state files are written from their verified payload bytes
         # (restore-instance, under its journal), never copied from an unlisted bundle path.
         ("_write_private_file", "Controller.restore_runtime_environment"),
-        ("_write_private_file", "Controller.restore_instance"),
+        # PF-A3.2 (sections 3.1-3.7), all inside the instance lock and an operation the gate admitted: the private
+        # state directory (ensure_state_dir) and the revisions root of restore-instance; the private temporary trees
+        # (the deployed tree a switch stages from, the restore bundle's workspace tree and .env bytes) and the two
+        # bundle files removed from that private tree; the W1 stage tree (mkdir 0700 inside the generation
+        # container) and the restore history tree; the purge bundle's folder; the frozen admin configuration copy
+        # (0400); the effect writers (the seal record, the deployed pointer, the state files and last-reset of a
+        # file-write effect) and the purge cleanup effects (backups, .env, state, the legacy marker, the reset admin
+        # configuration). The pending.json writers (phase/pause/resume/finish_*) and replace_source* are gone.
+        ("os.chmod", "Controller.ensure_state_dir"), (".mkdir", "Controller.ensure_state_dir"),
+        (".mkdir", "Controller.ensure_revisions_root"),
+        ("tempfile.mkdtemp", "Controller.deployed_tree"), ("tempfile.mkdtemp", "Controller.restore_workspace_tree"),
+        ("tempfile.mkdtemp", "Controller.restore_env_bytes"), (".unlink", "Controller.restore_workspace_tree"),
+        ("os.mkdir", "Controller.w1_stage"), ("os.mkdir", "Controller.history_tree"),
+        (".mkdir", "Controller.capture_purge_bundle"), ("_write_private_file", "Controller.freeze_admin_config"),
+        ("write_private_json", "Controller.act_seal"), ("write_json", "Controller.act_pointer"),
+        ("write_json", "Controller.act_file"), ("_write_private_file", "Controller.act_file"),
+        (".unlink", "Controller.purge_cleanup"), ("shutil.rmtree", "Controller.purge_cleanup"),
     },
     "pf_instance.py": {
         ("_write_private_file", "_stage_instance_dir"), ("_write_private_file", "_write_registry"),
@@ -268,6 +288,12 @@ WRITE_SITE_ALLOWLIST = {
         # PF-A2.3: the one metadata engine (section 3.9): fchown then fchmod of a descriptor opened no-follow relative
         # to its parent, after the identity, link-count, before-state and ACL checks.
         ("os.fchown", "apply_entry_target"), ("os.fchmod", "apply_entry_target"),
+        # PF-A3.2 operation store (section 3.1): journal generations and the private lists (attempts, children,
+        # deletion progress) through the one private-file writer; the generation container (mkdir 0700, fchmod of
+        # the held descriptor) and the noreplace rename relative to held directory descriptors (W2/W3).
+        ("_write_private_file", "write_journal_generation"), ("_write_private_file", "rewrite_private_list"),
+        ("os.mkdir", "create_generation_container"), ("os.fchmod", "create_generation_container"),
+        ("os.rename", "rename_noreplace_at"),
     },
     "pf_bootstrap.py": set(),
     "pf_runner.py": {("open", "ProcessRunner.run"), ("os.replace", "ProcessRunner._record_effect")},
@@ -477,10 +503,21 @@ class Base(unittest.TestCase):
                 str(context.diagnostic_env_path), "-p", context.compose_project, "-f",
                 str(context.control.path / "compose.nas.yaml")]
 
-    def write_journal(self, operation="update", phase="paused"):
-        pf.write_json(self.context.journal_path, {"operation": operation, "phase": phase,
-                                                  "started": "20261006T000000Z"})
-        return self.context.journal_path.read_bytes()
+    def write_journal(self):
+        """PF-A3.2: an interrupted deploy as a real plan and journal (the former pending.json): staged and the
+        database service started, the migration not started and nothing unresolved, so a resume forwards (section
+        3.6) without observing first. Returns the operation files' bytes."""
+        self.journal_plan = pfx.frozen_operation(self.context, "deploy", phase="initializing",
+                                                 states={"e0001": "complete", "e0002": "complete"})
+        return pfx.operations_bytes(self.context)
+
+    def oneoff_exited(self, container_id):
+        """An owned one-off that is not running (the section 3.6 probe would refuse a resume next to a running one)."""
+        state = self.fake.state()
+        for item in state["containers"]:
+            if item["id"] == container_id:
+                item["status"] = "exited"
+        self.fake.write_state(state)
 
     def set_config(self, **values):
         path = self.paths["configuration"] / "pf-config.json"
@@ -553,29 +590,50 @@ class DispatchTables(unittest.TestCase):
             self.assertEqual(route.pending == "refuse", name not in pf.PENDING_ROUTES, name)
             if name in pf.PENDING_ROUTES:
                 self.assertEqual(route.pending, name)
-        stub = types.SimpleNamespace(legal_routes=lambda journal: [])
-        expected = {
-            # PF-A3.1: an attended emergency capture is legal next to an interrupted lifecycle operation.
-            ("deploy", "paused"): {"resume", "abort-deploy", "backup emergency"},
-            ("update", "backup-ready"): {"resume", "rollback", "backup emergency"},
-            ("purge", "deleting"): {"purge"},
-            ("rollback", "activating"): {"rollback", "backup emergency"},
-            ("permissions", "interrupted"): {"permissions apply"},
-            ("permissions", "applying"): {"permissions apply"},
+        # PF-A3.2 (section 6.2 DT-3): the former pending.json dicts become OperationView fixtures of real plans and
+        # journals; the predicates are the section 3.3 gate. The former six rows keep their accepted sets (`resume`
+        # now re-enters every non-terminal journal), plus the alias rows and the pending-switch and interval rows.
+        context = fixture_context()
+        complete = lambda *ids: {item: "complete" for item in ids}  # noqa: E731
+        rows = {
+            "deploy/initializing": (pfx.lifecycle_plan(context, "deploy"), "initializing",
+                                    dict(complete("e0001", "e0002"), e0003="unknown"),
+                                    {"resume", "abort-deploy", "backup emergency"}),
+            "update/preserving": (pfx.lifecycle_plan(context, "update"), "preserving",
+                                  dict(complete("e0001", "e0002"), e0003="unknown"),
+                                  {"resume", "rollback", "backup emergency"}),
+            "purge/deleting": (pfx.lifecycle_plan(context, "purge"), "deleting",
+                               dict(complete("e0001", "e0002", "e0003", "e0004"), e0005="unknown"),
+                               {"resume", "purge"}, {"plan_sha256": "d" * 64, "delete_backups": True,
+                                                     "reset_admin_config": False,
+                                                     "confirmed_at": "20261007T040500Z"}),
+            "rollback/activating": (pfx.lifecycle_plan(context, "rollback"), "activating",
+                                    dict(complete("e0001", "e0002", "e0003", "e0004", "e0005"), e0006="unknown"),
+                                    {"resume", "rollback", "backup emergency"}),
+            "backup/capturing": (pfx.lifecycle_plan(context, "backup"), "capturing", {"e0001": "unknown"},
+                                 {"resume", "backup"}),
+            "restore-instance/preparing-target": (pfx.lifecycle_plan(context, "restore-instance"), "preparing-target",
+                                                  dict(complete("e0001"), e0002="unknown"),
+                                                  {"resume", "restore-instance"}),
+            "update/workspace_sync_pending": (pfx.lifecycle_plan(context, "update"), "workspace_sync_pending",
+                                              complete(*[f"e{index:04d}" for index in range(1, 12)]),
+                                              {"resume", "rollback", "backup", "backup emergency"}),
+            "update/syncing-workspace (interval)": (pfx.lifecycle_plan(context, "update"), "syncing-workspace",
+                                                    dict(complete(*[f"e{index:04d}" for index in range(1, 14)]),
+                                                         e0014="unknown"), {"resume"}),
         }
         own = {name for name in locked if pf.DISPATCH[name].pending == name}
-        for (operation, phase), routes in expected.items():
-            with self.subTest(journal=operation + "/" + phase):
-                journal = {"operation": operation, "phase": phase}
-                accepted = set()
-                for name in locked:
-                    try:
-                        pf.Controller.check_pending_route(stub, journal, name)
-                    except pf.Failure as exc:
-                        self.assertIn("A previous operation is incomplete", str(exc))
-                    else:
-                        accepted.add(name)
-                self.assertEqual(accepted, routes)
+        views = {label: pf.OperationView(row[0]["kind"], row[1], row[0], pfx.lifecycle_journal(
+            row[0], phase=row[1], states=row[2], deletion=row[4] if len(row) > 4 else None))
+                 for label, row in rows.items()}
+        expected = {label: row[3] for label, row in rows.items()}
+        for phase in ("interrupted", "applying"):
+            views["permissions/" + phase] = pf.OperationView("permissions", phase)
+            expected["permissions/" + phase] = {"permissions apply"}
+        for label, view in views.items():
+            with self.subTest(journal=label):
+                accepted = {name for name in locked if name in pf.PENDING_ROUTES and pf.PENDING_ROUTES[name][0](view)}
+                self.assertEqual(accepted, expected[label])
                 self.assertTrue(accepted <= own)
 
     def test_dt4_every_handler_resolves(self):
@@ -970,10 +1028,10 @@ class ReadOnlyViews(Base):
                 self.assertEqual(self.fake.argvs(), [PROBE])
 
     def test_ra6_a_pending_journal_does_not_block_or_change(self):
-        journal = self.write_journal("update", "paused")
+        journal = self.write_journal()
         code, out, err = self.run_main(["--instance", "staging", "ps"])
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.context.journal_path.read_bytes(), journal)
+        self.assertEqual(pfx.operations_bytes(self.context), journal)
 
     def test_ra7_refused_context_or_untrusted_launch_starts_nothing(self):
         os.chmod(self.paths["workspace"].parent, 0o777)
@@ -1022,10 +1080,8 @@ class UnattendedGate(Base):
 
     def assert_nothing_started(self, journal=None):
         self.assertEqual(self.fake.calls(), [])
-        self.assertEqual(self.operation_dirs(), [])
         self.assert_lock_free()
-        self.assertEqual(self.context.journal_path.read_bytes() if self.context.journal_path.exists() else None,
-                         journal)
+        self.assertEqual(pfx.operations_bytes(self.context), journal or {})
 
     def test_us1_unattended_routes_must_name_their_instance(self):
         for selected_by in ("single registration", "protected default"):
@@ -1102,7 +1158,7 @@ class UnattendedGate(Base):
                  ["abort-deploy"], ["purge", "--keep-backups"], ["restore-instance", RECOVERY_ID])
         for arguments in cases:
             with self.subTest(arguments=arguments):
-                journal = self.write_journal("update", "paused") if arguments[0] == "resume" else None
+                journal = self.write_journal() if arguments[0] == "resume" else None
                 with mock.patch.object(pf.Controller, "github") as github, \
                         mock.patch.object(pf.Controller, "fail_closed") as fail_closed:
                     code, out, err = self.run_main(["--instance", "staging", *arguments], terminal=False)
@@ -1114,7 +1170,7 @@ class UnattendedGate(Base):
                 fail_closed.assert_not_called()
                 self.assert_nothing_started(journal)
                 if journal is not None:
-                    self.context.journal_path.unlink()
+                    pfx.clear_operations(self.context)
 
     def test_us7_policy_routes_need_a_protected_grant_without_a_terminal(self):
         # PF-A2.3: `permissions` left the policy-grant list (OD-A23-11): check/plan are read-only, apply is terminal.
@@ -1347,11 +1403,13 @@ class ErrorHandler(Base):
 
     @contextlib.contextmanager
     def failed_operation(self):
-        """A locked `resume` whose body failed: the operation's own lock, journal and preflight are in place."""
-        self.write_journal("update", "paused")
+        """A locked `resume` whose body failed after its confirmation: the operation's own lock, re-entered journal
+        and preflight are in place (PF-A3.2: a refused re-entry never fails closed, section 3.9)."""
+        self.write_journal()
         controller = self.controller()
         output = io.StringIO()
         with contextlib.redirect_stdout(output), controller.lock("resume"):
+            controller._reentered = True
             controller.require_topology_owned("resume")
             self.fake.clear_calls()
             yield controller, output
@@ -1394,18 +1452,15 @@ class ErrorHandler(Base):
         self.assertIn(["stop", "frontend", "backend"], self.verbs())
 
     def test_eh3_a_cached_daemon_refusal_starts_nothing(self):
-        self.write_journal("update", "paused")
-        controller = self.controller()
-        state = self.fake.state()
-        state["info"] = pfx.daemon_info("OTHER-ENGINE-9999")
-        self.fake.write_state(state)
-        with self.assertRaises(pf.DaemonFailure):
-            controller.verify_daemon()
-        self.fake.clear_calls()
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with self.failed_operation() as (controller, output):
+            state = self.fake.state()
+            state["info"] = pfx.daemon_info("OTHER-ENGINE-9999")
+            self.fake.write_state(state)
+            with self.assertRaises(pf.DaemonFailure):
+                controller.verify_daemon(refresh=True)
+            self.fake.clear_calls()
             controller.fail_closed()
-        self.assertEqual(self.fake.calls(), [])
+            self.assertEqual(self.fake.calls(), [])
         warnings = [line for line in output.getvalue().splitlines() if line.startswith("WARNING:")]
         self.assertEqual(len(warnings), 1, output.getvalue())
         self.assertIn("daemon-drift", warnings[0])
@@ -1419,15 +1474,17 @@ class ErrorHandler(Base):
         self.assertFalse([argv for argv in self.fake.argvs() if "--filter" in argv and argv[:1] == ["ps"]])
 
     def test_eh5_a_vanished_oneoff_is_skipped_and_the_original_failure_is_kept(self):
-        self.write_journal("update", "paused")
+        self.write_journal()
+        self.oneoff_exited("b" * 64)
         state = self.fake.state()
         state["compose"]["stop_fail"] = {"1" * 64: "Error response from daemon: No such container: " + "1" * 64}
-        state["compose"]["fail_verbs"] = ["ps"]  # resume fails reading the database container
+        state["compose"]["fail_verbs"] = ["exec"]  # the confirmed resume fails on the migration's database check
         self.fake.write_state(state)
         self.fake.clear_calls()
-        code, out, err = self.run_main(["--instance", "staging", "resume"], interactive=True)
+        with mock.patch.object(pf, "confirm"):
+            code, out, err = self.run_main(["--instance", "staging", "resume"], interactive=True)
         self.assertEqual(code, 1, err)
-        self.assertIn("fake compose ps failed", err)
+        self.assertIn("fake compose exec failed", err)
         self.assertIn("WARNING: Could not stop one-off container 111111111111: Error response from daemon: No such "
                       "container", out)
         self.assertEqual(self.stops(), [["stop", "--time", "30", "1" * 64], ["stop", "--time", "30", "b" * 64]])
@@ -1441,20 +1498,23 @@ class ErrorHandler(Base):
         record = self.base / "lock-probe.txt"
         for signum in (signal.SIGHUP, signal.SIGQUIT, signal.SIGTERM, signal.SIGINT):
             with self.subTest(signal=signum.name):
-                journal = self.write_journal("update", "paused")
+                pfx.clear_operations(self.context)
+                self.write_journal()
+                self.oneoff_exited("b" * 64)
                 for path in (marker, record):
                     if path.exists():
                         path.unlink()
                 state = self.fake.state()
-                # resume -> database_ready -> `compose ps -a -q db` is the child the signal interrupts.
-                state["block"] = {"argv_contains": ["compose", "ps", "-q", "db"], "seconds": 300,
+                # resume -> forward migration -> `compose exec -T db ...` is the child the signal interrupts.
+                state["block"] = {"argv_contains": ["compose", "exec", "-T", "db"], "seconds": 300,
                                   "marker": str(marker)}
                 state["lock_probe"] = {"argv_contains": ["stop"], "lock": str(self.context.lock_path),
                                        "record": str(record)}
                 self.fake.write_state(state)
                 self.fake.clear_calls()
                 with open(str(self.base / "cli-out.txt"), "wb") as out, \
-                        open(str(self.base / "cli-err.txt"), "wb") as err, pfx.interactive_stdin() as terminal:
+                        open(str(self.base / "cli-err.txt"), "wb") as err, \
+                        pfx.typed_terminal(["RESUME " + self.journal_plan["operation_id"][-8:]]) as terminal:
                     process = subprocess.Popen(
                         [str(self.layout.launcher), "--instance", "staging", "resume"],
                         env={"PATH": "/usr/bin:/bin", "TERM": "dumb"}, cwd=str(self.layout.root.parent),
@@ -1476,7 +1536,8 @@ class ErrorHandler(Base):
                 self.assertEqual(returncode, 1, stderr)
                 self.assertIn(f"Interrupted by signal {int(signum)}", stderr)
                 calls = self.fake.argvs()
-                blocked = next(index for index, argv in enumerate(calls) if argv[-4:] == ["ps", "-a", "-q", "db"])
+                blocked = next(index for index, argv in enumerate(calls)
+                               if argv[:1] == ["compose"] and "exec" in argv and "db" in argv)
                 after = calls[blocked + 1:]
                 self.assertEqual([argv for argv in after if argv[:1] == ["stop"]],
                                  [["stop", "--time", "30", "1" * 64], ["stop", "--time", "30", "b" * 64]])
@@ -1490,7 +1551,7 @@ class ErrorHandler(Base):
                                   "stop frontend backend held"])
                 self.assertIn("Operation incomplete. Application services are intentionally stopped. Inspect "
                               "'pf --instance staging status'. Automation and Compose writes remain blocked.", stdout)
-                self.assertEqual(self.context.journal_path.read_bytes(), journal)  # journal kept for status
+                self.assertEqual(pfx.open_operations(self.context), [("deploy", "initializing")])  # kept for status
                 self.assert_lock_free()
 
     def test_eh6_container_identity_shape_is_unchanged_and_frozen_plans_still_compare(self):
@@ -1708,22 +1769,35 @@ class PurgeResumeAuthority(docker_scope.PurgeHarness):
         return self.journal()
 
     def test_ci6_resume_accepts_the_instance_bundle_and_refuses_one_outside(self):
-        journal = self.interrupted_purge()
-        recovery = self.context.paths.recovery / docker_scope.PROJECT / journal["recovery"]
+        # PF-A3.2 (section 3.6): the purge resume re-reads the plan's own bundle before its confirmation. The bundle
+        # folder replaced by a link to a byte-identical copy outside the instance refuses plan-input-changed and
+        # changes no operation file; the restored folder resumes.
+        self.interrupted_purge()
+        op, plan, journal = self.operation()
+        self.assertEqual(journal["phase"], "deleting")
+        bundle_id = next(item.split(":", 1)[1] for effect in plan["effects"] if effect["target"] == "purge-bundle"
+                         for item in effect["preconditions"] if item.startswith("bundle:"))
+        recovery = self.context.paths.recovery / docker_scope.PROJECT / bundle_id
         self.assertTrue(recovery.is_dir())
-        controller = self.controller()
-        outside = self.base / "outside" / journal["recovery"]
-        shutil.copytree(recovery, outside)
-        output = io.StringIO()
-        with mock.patch.object(controller, "recoveries", return_value=[pf.InvalidBundle(outside, "", "")]), \
-                mock.patch.object(pf, "confirm", side_effect=AssertionError("no confirmation")), \
-                contextlib.redirect_stdout(output):
-            with self.assertRaisesRegex(pf.Failure, "^recovery-outside-instance: "):
-                controller.purge()
-        self.assertEqual(self.journal(), journal)
+        outside = self.base / "outside" / bundle_id
+        shutil.copytree(str(recovery), str(outside), symlinks=True)
+        held = self.base / "held" / bundle_id
+        held.parent.mkdir()
+        os.rename(str(recovery), str(held))
+        os.symlink(str(outside), str(recovery))
+        before = pfx.operations_bytes(self.context)
+        code, out, err, confirmations = self.purge()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"ERROR: plan-input-changed: recovery bundle {bundle_id} of operation {op} no longer reads or "
+                      "verifies (recovery-outside-instance); deletion stays blocked", err)
+        self.assertEqual(confirmations, [])
+        self.assertEqual(pfx.operations_bytes(self.context), before)
+        os.unlink(str(recovery))
+        os.rename(str(held), str(recovery))
         code, out, err, confirmations = self.purge()
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(confirmations, ["RESUME PURGE partflow " + journal["recovery"]])
+        self.assertEqual(confirmations, ["RESUME PURGE partflow " + bundle_id])
+        self.assertEqual(self.journal()["phase"], "completed")
 
 
 # ============================================================================ SS: static scan
@@ -1782,9 +1856,13 @@ class StaticScan(unittest.TestCase):
         self.assertEqual(sites, {
             "Controller": {"main.select"},
             # PF-A2.2: the pre-registration wizard reloads the registry under the registry lock.
-            "pf_instance.load_registry": {"main", "config_admin_unregistered.conflict_checks"},
+            "pf_instance.load_registry": {"main", "config_admin_unregistered.conflict_checks",
+                                          # PF-A3.2 section 3.7a: the registry's capacity reading for a switch.
+                                          "Controller.workspace_preflight"},
             "pf_instance.resolve_instance": {"main.select"},
-            "pf_instance.validate_context": {"main.select", "Controller.ensure_validation"},
+            # PF-A3.2 section 3.7: the re-validation after W3 (the bound workspace is the new generation).
+            "pf_instance.validate_context": {"main.select", "Controller.ensure_validation",
+                                             "Controller.workspace_validation"},
             "pf_instance.load_policy": {"Controller.policy_permits"},
         })
 
@@ -1862,6 +1940,9 @@ class StaticScan(unittest.TestCase):
             ("os.open(write)", "Controller._permissions_resume"),
             # PF-A3.1: an emergency capture removes its own partial source archive before it falls back.
             ("os.unlink", "Controller._discard"),
+            # PF-A3.2: the restore abandon removes the .env its own file-write effect wrote (hash-matched), and the
+            # abort-deploy file-write effect removes the active-images override (section 3.6).
+            ("os.unlink", "Controller.abandon_restore_instance"), ("os.unlink", "Controller.act_file"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")
@@ -1982,7 +2063,7 @@ class StaticScan(unittest.TestCase):
         admin = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
         self.assertEqual(admin.count("sys.stdin.isatty("), 0)
         self.assertEqual(admin.count("stream.isatty()"), 1)
-        self.assertEqual(pf.CHECKPOINT, "PF-A3.1")
+        self.assertEqual(pf.CHECKPOINT, "PF-A3.2")
         self.assertEqual(pf.VERSION, "2.5.0")
 
     def test_ss6_every_parser_refuses_abbreviations(self):

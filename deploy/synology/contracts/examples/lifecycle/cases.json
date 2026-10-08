@@ -77,7 +77,8 @@
     "expect": {
       "valid": true,
       "problem": null
-    }
+    },
+    "plan": "operation-plan.json"
   },
   {
     "file": "legacy-format2-checkpoint.json",
@@ -467,7 +468,8 @@
     "expect": {
       "valid": false,
       "problem": "phase deleting is not a phase of update"
-    }
+    },
+    "plan": "operation-plan.json"
   },
   {
     "file": "invalid-plan-duplicate-effect.json",
@@ -476,5 +478,139 @@
       "valid": false,
       "problem": "effect ids must be unique and increasing"
     }
+  },
+  {
+    "file": "operation-plan-update.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "operation-journal-update-migrating.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "plan": "operation-plan-update.json"
+  },
+  {
+    "file": "operation-plan-purge.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "operation-journal-purge-deleting.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": true,
+      "problem": null
+    },
+    "plan": "operation-plan-purge.json"
+  },
+  {
+    "file": "operation-plan-abort-deploy.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "operation-plan-restore-instance.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "operation-plan-update-keep.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": true,
+      "problem": null
+    }
+  },
+  {
+    "file": "invalid-plan-effect-phase-order.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "comes before the phase of an earlier effect"
+    }
+  },
+  {
+    "file": "invalid-plan-effect-phase-planned.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "$.effects[0].phase"
+    }
+  },
+  {
+    "file": "invalid-plan-supersedes-wrong-kind.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "a update operation never supersedes another operation"
+    }
+  },
+  {
+    "file": "invalid-plan-switch-without-generation.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "generation_id and container are set exactly for mode switch or pending"
+    }
+  },
+  {
+    "file": "invalid-plan-purge-deletion-hash.json",
+    "record": "operation_plan",
+    "expect": {
+      "valid": false,
+      "problem": "deletion_plan_sha256: set exactly for abort-deploy"
+    }
+  },
+  {
+    "file": "invalid-journal-purge-deleting-without-deletion.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": false,
+      "problem": "required once a resource-delete effect of the purge started"
+    },
+    "plan": "operation-plan-purge.json"
+  },
+  {
+    "file": "invalid-journal-sync-pending-untouched.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": false,
+      "problem": "the plan's workspace mode is neither switch nor pending"
+    },
+    "plan": "operation-plan-update-keep.json"
+  },
+  {
+    "file": "invalid-journal-evidence-control-char.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": false,
+      "problem": "evidence: control character"
+    },
+    "plan": "operation-plan.json"
+  },
+  {
+    "file": "invalid-journal-restore-deletion-after-data.json",
+    "record": "operation_journal",
+    "expect": {
+      "valid": false,
+      "problem": "carries a deletion approval only for an abandon in preparing-target"
+    },
+    "plan": "operation-plan-restore-instance.json"
   }
 ]

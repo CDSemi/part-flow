@@ -1,4 +1,4 @@
-# Lifecycle record examples (PF-A3.1)
+# Lifecycle record examples (PF-A3.1, PF-A3.2)
 
 These files are the executable acceptance corpus of `contracts/lifecycle-records.schema.json`
 (A3-T01). They are not host state, they are not shipped in a control release, and nothing reads
@@ -14,8 +14,18 @@ Legacy inputs (`legacy-format*.json`, other than the `-migrated` files) are stor
 
 ```json
 {"file": "<name>", "record": "<$defs record name | legacy>",
- "expect": {"valid": true | false, "problem": "<substring of one problem> | null"}}
+ "expect": {"valid": true | false, "problem": "<substring of one problem> | null"},
+ "plan": "<operation_plan file the journal binds to (operation_journal rows only, PF-A3.2)>"}
 ```
+
+PF-A3.2 (SPEC section 2.3, amendments AM-1..AM-10, `schema_version` still 1): an `operation_journal` row names
+the plan it binds to, and the journal is also checked against that plan (`pf_config.lifecycle_problems(journal,
+"operation_journal", plan=plan)`: effect IDs, `workspace_sync_pending` only for a switch or pending plan, the purge
+and abort-deploy deletion approval, the restore-instance abandon). AM-10 fixes the meaning of
+`operation_plan.frozen_config`: `sha256` is the SHA-256 of the **rendered `app.env` bytes** of the snapshot the
+operation consumes (`env_file_sha256` of its `frozen-config.json` record) and `bytes` their length; never the hash of
+the snapshot record (which embeds `created_at` and `operation_id`) and never the hash of the editable `.env`.
+`example-app.env` holds the synthetic rendered bytes every PF-A3.2 example plan references (no real secret).
 
 Legacy rows also carry `bundle_kind`, `payload_sizes` (the verified payload sizes the reader
 passes to the migration) and `migrated` (the expected migrated manifest). The test reads the input
@@ -33,7 +43,11 @@ then checked as a `recovery_manifest` row of its own.
 | `deployment-record.json` | Valid DeploymentRecord of an update. |
 | `verification-record.json` | Valid `data_restore_verified` record (rows `not_run`: writers were running). |
 | `verification-functional-schema-valid.json` | Valid by schema; no PF-A3.1 writer produces `functional_recovery_verified` (SC-6). |
-| `operation-plan.json`, `operation-journal.json` | Valid frozen v1 OperationPlan/OperationJournal (no runtime writer in PF-A3.1). |
+| `operation-plan.json`, `operation-journal.json` | Valid OperationPlan/OperationJournal of an update without a schema change (rewritten to the PF-A3.2 amended shape: effect phases, `supersedes`, `admin_config`, `workspace`, `input_bundle`, `deletion`; exact command lines in `recovery_route`/`legal_next`). |
+| `operation-plan-update.json`, `operation-journal-update-migrating.json` | Valid update with a rehearsal; the live migration is `unknown` after an interrupt (pre-heads recorded as evidence). |
+| `operation-plan-purge.json`, `operation-journal-purge-deleting.json` | Valid purge: no deletion hash in the plan; the binding deletion plan and backup/admin-config choices in `journal.deletion`. |
+| `operation-plan-abort-deploy.json` | Valid abort-deploy superseding an incomplete deploy; its frozen deletion plan hash in the plan. |
+| `operation-plan-restore-instance.json`, `operation-plan-update-keep.json` | Valid restore-instance (input bundle, workspace switch) and an update kept with `--keep-workspace`; the plans of two invalid journal rows. |
 | `legacy-format2-checkpoint.json` -> `legacy-format2-migrated.json` | Healthy legacy checkpoint; provenance unknown, claims kept in `legacy`. |
 | `legacy-format2-before-rollback.json` -> `legacy-format2-before-rollback-migrated.json` | Emergency preservation (`reason: legacy`, `claimed_reason: before-rollback`). |
 | `legacy-format1-checkpoint.json` -> `legacy-format1-checkpoint-migrated.json` | Partial (no migration fingerprint); never a rollback target. |

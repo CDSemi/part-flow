@@ -119,7 +119,7 @@ class HostileBootstrapValues(Base):
         beta, beta_paths = self.instance("beta")
         pfx.deployed_record(alpha)
         pfx.deployed_record(beta)
-        pf.write_json(beta.journal_path, {"operation": "update", "phase": "migrating-live", "started": "x"})
+        plan = pfx.migrating_update(beta)
         before = pfx.snapshot_tree(self.base)
         holder = {}
 
@@ -132,7 +132,7 @@ class HostileBootstrapValues(Base):
         with mock.patch.dict(os.environ, hostile), mock.patch.object(pf, "Controller", Capture):
             code, out, err = run_main(["--instance", "beta", "update", "--latest"], self.layout, interactive=True)
         self.assertEqual(code, 1)
-        self.assertIn("previous operation is incomplete", err)
+        self.assertIn(f"operation-open: operation {plan['operation_id']} (update, phase migrating) is incomplete", err)
         self.assertEqual(holder["controller"].calls, [])
         self.assertEqual(holder["controller"].context.slug, "beta")
         self.assertEqual(pfx.snapshot_tree(self.base), before)
@@ -330,7 +330,7 @@ class ReadOnlyDiagnostics(Base):
         # status/doctor run with a disabled transport: identity and journal are
         # printed, live data is reported unavailable, and nothing was created.
         self.assertIn("Instance: staging", by_command[("status",)][1])
-        self.assertIn("No incomplete managed operation", by_command[("status",)][1])
+        self.assertIn("Operations: none open", by_command[("status",)][1])
         self.assertIn("unavailable", by_command[("status",)][1])
         self.assertIn("mutation allowed", by_command[("doctor",)][1])
         self.assertEqual(by_command[("frobnicate", "--now")][0], 1)
@@ -458,33 +458,35 @@ class StableLocks(Base):
                 pass
 
     def test_pending_journal_routes_are_explicit_not_blanket(self):
+        # PF-A3.2 (section 3.3): the gate over the operation journals replaces the pending.json predicates.
         controller = pf.Controller(self.alpha)
-        pf.write_json(self.alpha.journal_path, {"operation": "update", "phase": "migrating-live"})
+        update = pfx.migrating_update(self.alpha)
         for command in ("deploy", "update", "backup", "reset-db", "permissions apply", "restore-instance", "release-check",
-                        None):
+                        "purge", "abort-deploy", None):
             with self.subTest(command=command):
-                with self.assertRaisesRegex(pf.Failure, "previous operation is incomplete"):
+                with self.assertRaisesRegex(pf.Failure, "^operation-open: operation " + update["operation_id"]):
                     with controller.lock(pending_route=command):
                         pass
         with controller.lock(pending_route="rollback"):
-            pass
-        pf.write_json(self.alpha.journal_path, {"operation": "purge", "phase": "deleting", "recovery": "purge-x"})
-        with self.assertRaises(pf.Failure):
-            with controller.lock(pending_route="resume"):
-                pass
+            self.assertEqual((controller.gate.action, controller.gate.entry.operation_id),
+                             ("supersede", update["operation_id"]))
+        pfx.clear_operations(self.alpha)
+        purge = pfx.deleting_purge(self.alpha)
+        with controller.lock(pending_route="resume"):
+            self.assertEqual((controller.gate.action, controller.operation_id), ("reenter", purge["operation_id"]))
         with controller.lock(pending_route="purge"):
-            pass
-        self.assertEqual(
-            controller.legal_routes({"operation": "purge", "phase": "deleting"}),
-            ["pf purge --instance alpha: resume the recorded purge deletion plan with the already verified recovery bundle"],
-        )
+            self.assertEqual((controller.gate.action, controller.gate.alias), ("reenter", "purge"))
+        _, journal = pfx.operation(self.alpha, purge["operation_id"])
+        self.assertEqual(journal["legal_next"], [
+            f"pf --instance alpha resume --operation {purge['operation_id']}", "pf --instance alpha purge"])
         # Read-only commands never take the lock and never consult the route table.
         with controller.lock(pending_route="purge"):
             code, out, err = run_main(["--instance", "alpha", "instances"], self.layout)
             self.assertEqual(code, 0)
+            self.assertIn("journal=purge/deleting", out)
             with mock.patch.object(pf, "Controller", RecordingController):
                 code, out, err = run_main(["--instance", "alpha", "status"], self.layout)
-            self.assertIn("operation: purge", out)
+            self.assertIn(f"Operations: {purge['operation_id']} purge phase deleting", out)
 
 
 @ROOT_REQUIRED
@@ -495,10 +497,8 @@ class PendingJournalVisibility(Base):
         super().setUp()
         self.context, self.paths = self.instance("staging", project="partflow-staging")
         pfx.deployed_record(self.context)
-        self.journal = {"operation": "purge", "phase": "deleting", "started": "20260914T000000Z",
-                        "recovery": "purge-20260914T000000Z-111111111111-abcdef",
-                        "delete_backups": True, "reset_admin_config": False, "target": {"token": "private"}}
-        pf.write_json(self.context.journal_path, self.journal)
+        # PF-A3.2: an interrupted purge in deleting, as a real plan and journal under operations/.
+        self.plan = pfx.deleting_purge(self.context)
         (self.paths["configuration"] / ".env").unlink()
 
     def launcher(self, arguments, env=None):
@@ -514,13 +514,13 @@ class PendingJournalVisibility(Base):
                                     "PYTHONPATH": str(self.base), "DOCKER_HOST": "tcp://127.0.0.1:1"})
         self.assertEqual(result.returncode, 1, result.stderr)
         out = result.stdout
+        op = self.plan["operation_id"]
         self.assertIn("Instance: staging", out)
-        journal_at = out.index("INCOMPLETE OPERATION")
-        self.assertIn("operation: purge", out)
-        self.assertIn("phase: deleting", out)
-        self.assertIn("Next supported action: pf purge --instance staging", out)
-        self.assertIn("private fields not shown: target", out)
-        self.assertNotIn("token", out)
+        journal_at = out.index(f"Operations: {op} purge phase deleting sequence 1")
+        self.assertIn("  unresolved effect: e0005 resource-delete deletion-plan (unknown)", out)
+        self.assertIn(f"  next (recorded at sequence 1): pf --instance staging resume --operation {op}: ", out)
+        self.assertIn("pf --instance staging purge: resume the frozen purge deletion", out)
+        self.assertNotIn("d" * 64, out)  # no hash of the deletion approval is shown
         first_unavailable = out.index("unavailable")
         self.assertLess(journal_at, first_unavailable)
         self.assertIn("Runtime .env: unavailable: missing", out)
@@ -532,7 +532,7 @@ class PendingJournalVisibility(Base):
         before = pfx.snapshot_tree(self.base)
         doctor = self.launcher(["doctor"])
         self.assertEqual(doctor.returncode, 1, doctor.stderr)
-        self.assertLess(doctor.stdout.index("INCOMPLETE OPERATION"), doctor.stdout.index("unavailable"))
+        self.assertLess(doctor.stdout.index("Operations: " + self.plan["operation_id"]), doctor.stdout.index("unavailable"))
         self.assertIn("created, repaired and migrated nothing", doctor.stdout)
         listing = self.launcher(["instances"])
         self.assertEqual(listing.returncode, 0, listing.stderr)
@@ -553,14 +553,18 @@ class PendingJournalVisibility(Base):
         conf.write_bytes(original)
 
     def test_in_process_restore_journal_is_visible_without_env_git_or_docker(self):
-        pf.write_json(self.context.journal_path, {"operation": "restore-instance", "phase": "confirmed",
-                                                  "recovery": "purge-x", "database": "partflow_staging"})
+        pfx.clear_operations(self.context)
+        plan = pfx.lifecycle_plan(self.context, "restore-instance")
+        pfx.write_operation(self.context, plan, pfx.lifecycle_journal(
+            plan, phase="preparing-target", unresolved="e0002",
+            states={"e0001": "complete", "e0002": "unknown"}))
         with mock.patch.object(pf, "Controller", RecordingController):
             code, out, err = run_main(["status"], self.layout)
         self.assertEqual(code, 1)
-        self.assertLess(out.index("INCOMPLETE OPERATION"), out.index("unavailable"))
-        self.assertIn("operation: restore-instance", out)
-        self.assertIn("Next supported action: none automatic", out)
+        self.assertLess(out.index(f"Operations: {plan['operation_id']} restore-instance phase preparing-target"),
+                        out.index("unavailable"))
+        self.assertIn(f"pf --instance staging resume --operation {plan['operation_id']} --abandon", out)
+        self.assertIn(f"pf --instance staging restore-instance {pfx.BUNDLE_ID}", out)
 
     def test_legacy_control_directory_is_diagnostics_only_and_executes_no_payload(self):
         home = self.base / "legacyhome"
@@ -1308,7 +1312,7 @@ class RefusedContextDiagnostics(Base):
         super().setUp()
         self.context, self.paths = self.instance("staging", project="partflow-staging")
         pfx.deployed_record(self.context)
-        pf.write_json(self.context.journal_path, {"operation": "purge", "phase": "deleting", "recovery": "purge-x"})
+        self.plan = pfx.deleting_purge(self.context)
 
     def run_recorded(self, command):
         holder = {}
@@ -1329,9 +1333,11 @@ class RefusedContextDiagnostics(Base):
         self.assertEqual(code, 1)
         self.assertEqual(calls, [], command)
         self.assertIn("Instance: staging", out)
-        self.assertIn("INCOMPLETE OPERATION", out)
-        self.assertIn(journal_label, out)
-        self.assertIn("operation: purge", out)
+        self.assertIn(f"Operations: {self.plan['operation_id']} purge phase deleting", out)
+        if journal_label == "UNVERIFIED private state":
+            self.assertIn("Operations (read from UNVERIFIED private state", out)
+        else:
+            self.assertNotIn("UNVERIFIED", out)
         self.assertIn("Live checks skipped: " + reason, out)
         if reason.startswith("protected context"):
             self.assertIn("REFUSED", out)
@@ -1352,27 +1358,27 @@ class RefusedContextDiagnostics(Base):
         config = self.paths["configuration"] / "pf-config.json"
         config.write_text('{"project": "partflow-staging", "unexpected": true}\n')
         for command in ("status", "doctor"):
-            self.assert_offline_only(command, reason="runtime configuration rejected", journal_label="protected journal")
+            self.assert_offline_only(command, reason="runtime configuration rejected", journal_label="protected operations")
 
     def test_invalid_control_and_profile_paths_refuse_live_transport(self):
         (self.layout.release_dir / "compose.nas.yaml").write_bytes(b"services: {}\n")
-        self.assert_offline_only("status", reason="protected context refused", journal_label="protected journal")
+        self.assert_offline_only("status", reason="protected context refused", journal_label="protected operations")
         self.layout.release_dir.joinpath("compose.nas.yaml").write_bytes(pfx.release_files()["compose.nas.yaml"])
         self.layout.profile_path.write_bytes(pfx.profile_document(version="tampered"))
-        self.assert_offline_only("doctor", reason="protected context refused", journal_label="protected journal")
+        self.assert_offline_only("doctor", reason="protected context refused", journal_label="protected operations")
 
     def test_healthy_context_without_env_still_runs_live_checks_after_the_journal(self):
         (self.paths["configuration"] / ".env").unlink()
         code, out, err, calls = self.run_recorded("status")
         self.assertEqual(code, 1)
         self.assertGreater(len(calls), 0)
-        self.assertLess(out.index("INCOMPLETE OPERATION"), out.index("unavailable"))
+        self.assertLess(out.index("Operations: " + self.plan["operation_id"]), out.index("unavailable"))
         self.assertIn("Runtime .env: unavailable: missing", out)
         self.assertIn("Protected context: trusted", out)
         self.assertFalse((self.paths["configuration"] / ".env").exists())
         code, out, err, calls = self.run_recorded("doctor")
         self.assertGreater(len(calls), 0)
-        self.assertLess(out.index("INCOMPLETE OPERATION"), out.index("unavailable"))
+        self.assertLess(out.index("Operations: " + self.plan["operation_id"]), out.index("unavailable"))
 
 
 class StaticCallSites(unittest.TestCase):

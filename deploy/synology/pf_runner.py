@@ -343,6 +343,11 @@ class _Stream:
 class ProcessRunner:
     """Runs registered host tools under one boundary. Construction performs no I/O."""
 
+    # PF-A3.2 (SPEC section 4.3): callable(spec, process) or None. Called for a spec whose effect is not None, after
+    # Popen, as the first statement inside the try whose ``except BaseException`` terminates the process group, i.e.
+    # before _pump. It records the child (controller code); it never decides whether the child runs.
+    spawn_callback = None
+
     def __init__(self, tools, *, home, docker_config, docker_host, redactor=None, effects_path=None,
                  stream_sink=None):
         unknown = sorted(set(tools) - set(RUNNER_TOOL_IDS))
@@ -453,6 +458,8 @@ class ProcessRunner:
         timed_out = False
         interrupted = False
         try:
+            if spec.effect is not None and self.spawn_callback is not None:
+                self.spawn_callback(spec, process)
             timed_out = self._pump(process, spec, out, err, stream, input_bytes, started)
         except BaseException:
             interrupted = True

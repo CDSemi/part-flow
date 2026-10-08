@@ -58,15 +58,16 @@ def example(name):
     return json.loads((EXAMPLES / name).read_bytes())
 
 
-def record_problems(data, record):
-    """The strict reader's view of one example's bytes: parse, normalized byte form, schema, cross-field rules."""
+def record_problems(data, record, plan=None):
+    """The strict reader's view of one example's bytes: parse, normalized byte form, schema, cross-field rules
+    (PF-A3.2: a journal against its ``plan``)."""
     try:
         parsed = pf_instance.parse_strict_json(data, label="example")
     except pf_instance.ContextError as exc:
         return [str(exc)]
     if data != pf_instance.normalize_json(parsed):
         return ["not normalized"]
-    return pf.lifecycle_errors(parsed, record)
+    return pf.lifecycle_errors(parsed, record, plan=plan)
 
 
 def tree_hash(root):
@@ -134,6 +135,18 @@ class Base(unittest.TestCase):
         self.assertEqual(self.invoke(["deploy", "--latest"]), 0, self.last_error)
         return self.c.current_deployment()
 
+    def open_ops(self):
+        """PF-A3.2: [(kind, phase)] of the blocking lifecycle operations."""
+        return tpa.open_operations(self.c)
+
+    def interrupted_update(self, phase="activating"):
+        """PF-A3.2: an update interrupted in its backend start (activating), as a real plan and journal."""
+        plan = pfx.lifecycle_plan(self.context, "update", pfx.default_effects("update", migration=False))
+        pfx.write_operation(self.context, plan, pfx.lifecycle_journal(
+            plan, phase=phase, unresolved="e0004",
+            states={"e0001": "complete", "e0002": "complete", "e0003": "complete", "e0004": "unknown"}))
+        return plan
+
     def records(self, bundle_id):
         directory = self.c.verifications_dir / bundle_id
         return [json.loads(path.read_bytes()) for path in sorted(directory.glob("ver-*.json"))] \
@@ -176,7 +189,8 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(record["before_sha256"], hashlib.sha256(data).hexdigest())
                     problems = []
                 else:
-                    problems = record_problems(data, case["record"])
+                    problems = record_problems(data, case["record"],
+                                              plan=example(case["plan"]) if "plan" in case else None)
                 expect = case["expect"]
                 self.assertEqual(not problems, expect["valid"], problems)
                 if not expect["valid"]:
@@ -335,7 +349,7 @@ class ManifestStrict(Base):
         self.assertEqual(self.invoke(command, confirm=confirm), 1)
         self.assertRegex(self.last_error, pattern)
         confirm.assert_not_called()
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
         self.assertEqual(self.c.calls[calls:], [])
         self.assertEqual(sorted(os.listdir(str(self.c.state))), state_before)  # no rollback-* extraction left
         self.assertFalse([name for name in self.deployments() if name.startswith(".staging-")])
@@ -524,7 +538,7 @@ class Legacy(Base):
         self.assertEqual(self.invoke(["rollback", folder.name]), 1)
         self.assertIn(f"ERROR: checkpoint-not-rollback-target: {folder.name} is a partial capture: evidence and data "
                       "for repair or export, never a rollback target. Nothing was changed.", self.last_error)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
 
     def test_lg5_lg6_incomplete_or_unmapped_legacy_manifests_are_unsupported(self):
         incomplete = self.legacy(extra={"status": "incomplete"})
@@ -1102,7 +1116,9 @@ class DeployedArtifact(Base):
                                   "protected source store or the workspace either. Keep the folder as evidence; see "
                                   "SYNOLOGY_ADMIN §16. Nothing was changed.", self.last_error)
         confirm.assert_not_called()
-        self.assertFalse(self.c.pending.exists())
+        # PF-A3.2: only the completed first deployment has an operation; neither refused route wrote a plan.
+        self.assertEqual([(plan["kind"], journal["phase"]) for _, plan, journal in pfx.operations_of(self.context)],
+                         [("deploy", "completed")])
         self.assertEqual(self.c.snapshots(), [])
         self.assertFalse([call for call in self.c.calls[calls:] if call[0] == "compose" and call[1][0] == "stop"])
         self.assertTrue(all(self.c.running.values()))
@@ -1114,7 +1130,7 @@ class DeployedArtifact(Base):
         self.assertEqual(self.invoke(["rollback", checkpoint.bundle_id]), 1)
         self.assertIn("A retained image is missing or changed. Rollback refuses an unverified rebuild.",
                       self.last_error)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context, "rollback"), [])
 
     def test_da6b_a_legacy_checkpoint_is_compared_with_its_legacy_image_ids(self):
         tree = Path(self.temp.name) / "legacy-tree"
@@ -1138,7 +1154,12 @@ class DeployedArtifact(Base):
                       "activation's inputs was recorded). The operation was closed and the deployment is treated as "
                       "one without a record; the next deploy, update, rollback or restore-instance seals one. Run "
                       "'pf --instance staging status'.", self.last_error)
-        self.assertFalse(self.c.pending.exists())
+        # PF-A3.2: the operation closed failed_preserved (not blocking); the workspace was still refreshed.
+        self.assertEqual(self.open_ops(), [])
+        _, plan, journal = tpa.latest_operation(self.c)
+        self.assertEqual((journal["phase"], journal["last_error"]["code"]),
+                         ("failed_preserved", "deployment-record-incomplete"))
+        self.assertEqual(list(tpa.effect_states(journal, plan, "artifact-seal").values()), ["partial"])
         self.assertTrue(all(self.c.running.values()))  # fail_closed never ran: the healthy application keeps running
         pointer = self.pointer()
         self.assertNotIn("deployment_id", pointer)
@@ -1188,12 +1209,12 @@ class DeployedArtifact(Base):
             self.assertEqual(PurgeBundle.restore(self, bundle), 1)
         self.assertIn("deployment-record-incomplete: the application was activated and passed health checks, but its "
                       "deployment record could not be sealed (docker image inspect: no such image)", self.last_error)
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(self.open_ops(), [])
         self.assertTrue(all(self.c.running.values()))
         self.assertIn("deployment_seal_failed", self.pointer())
         text = self.c.describe_deployment()
         self.assertTrue(text.startswith("not recorded"))
-        # The unsealed staging is reported and never used (PF-A3.2 cleans it).
+        # The unsealed staging of the running deployment is reported and kept (section 3.13: never swept).
         self.assertIn("Unsealed deployment staging: 1", text)
 
     def test_da8_a_crash_between_seal_and_pointer_leaves_an_unreferenced_deployment(self):
@@ -1207,11 +1228,17 @@ class DeployedArtifact(Base):
 
         with mock.patch.object(pf, "write_json", side_effect=failing):
             self.update(code=1)
-        self.assertTrue(self.c.pending.exists())  # today's journal routes stay (PF-A3.2 adds a dedicated one)
+        # PF-A3.2 RS-14: the pointer effect stays open in activating; no compose stop (activation completed).
+        self.assertEqual(self.open_ops(), [("update", "activating")])
+        self.assertTrue(all(self.c.running.values()))
         self.assertEqual(self.c.current_deployment().deployment_id, first.deployment_id)
         self.assertEqual(len([name for name in self.deployments() if pf.DEPLOYMENT_ID_RE.fullmatch(name)]), 2)
         text = self.c.describe_deployment()
         self.assertIn("Unreferenced deployments: 1", text)
+        # `resume` rewrites the pointer (closes the A3.1 pointer-route gap) and refreshes the workspace.
+        self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+        self.assertEqual(self.open_ops(), [])
+        self.assertNotEqual(self.c.current_deployment().deployment_id, first.deployment_id)
 
     def test_da9_artifact_capacity_is_refused_before_the_confirmation(self):
         checkpoint = self.checkpoint()
@@ -1227,7 +1254,7 @@ class DeployedArtifact(Base):
                 self.assertRegex(self.last_error, r"ERROR: artifact-capacity: [0-9]+ MiB needed in .*/artifacts, "
                                                   r"0 MiB free\. Nothing was changed\.")
                 confirm.assert_not_called()
-                self.assertFalse(self.c.pending.exists())
+                self.assertEqual(self.open_ops(), [])
                 self.assertFalse([call for call in self.c.calls[calls:] if call[0] == "compose" and call[1][0] == "stop"])
                 self.assertEqual(len(self.c.snapshots()), 1)
                 self.assertEqual(self.deployments(), [])
@@ -1239,7 +1266,7 @@ class DeployedArtifact(Base):
             self.assertEqual(self.invoke(["deploy", "--latest"], confirm=confirm), 1)
         self.assertIn("ERROR: artifact-capacity: ", self.last_error)
         confirm.assert_not_called()
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context, "deploy"), [])
 
     def test_da9d_a_staging_failure_after_the_confirmation_changes_nothing(self):
         confirm = mock.Mock()
@@ -1247,15 +1274,18 @@ class DeployedArtifact(Base):
         with mock.patch.object(pf.pf_source, "archive_verified_tree", side_effect=OSError(5, "Input/output error")):
             self.c.target = {"sha": "3" * 40, "ref": "v0.3", "release_id": 3}
             self.assertEqual(self.invoke(["update", "--latest"], confirm=confirm), 1)
+        # PF-A3.2 (DA-9d updated): the operation is closed cancelled and its own staging removed.
+        operation, _, journal = tpa.latest_operation(self.c, "update")
         self.assertIn("ERROR: deployment-stage-failed: [Errno 5] Input/output error. The application, database and "
-                      "workspace were not changed; an unsealed staging directory may remain under "
-                      f"{self.c.deployments_dir} (PF-A3.2 cleans it).", self.last_error)
+                      f"workspace were not changed; operation {operation} was closed (cancelled) and its staging "
+                      "removed.", self.last_error)
         confirm.assert_called_once()
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(journal["phase"], "cancelled")
+        self.assertEqual(self.open_ops(), [])
         self.assertFalse([call for call in self.c.calls[calls:] if call[0] == "compose" and call[1][0] == "stop"])
         self.assertTrue(all(self.c.running.values()))
         self.assertEqual(self.c.revision(), OLD)
-        self.assertIn("Unsealed deployment staging: 1", self.c.describe_deployment())
+        self.assertNotIn("Unsealed deployment staging", self.c.describe_deployment())
 
     def test_da10_secrets_stay_in_private_state(self):
         self.deploy()
@@ -1387,10 +1417,11 @@ class DeployedArtifact(Base):
         self.assertEqual((record["operation"]["kind"], record["source"]["commit"]), ("update", NEW))
 
     def test_da16_the_seal_selects_the_render_by_its_full_input_key_and_re_hashes_it(self):
-        real_activate = self.c.activate
+        # PF-A3.2: the last activation step is the frontend effect (the A3.1 activate() split).
+        real_activate = self.c.activate_frontend
 
-        def activate_then_decoy(images, heads):
-            real_activate(images, heads)
+        def activate_then_decoy(images):
+            real_activate(images)
             decoy = {"name": "decoy", "services": {}}
             (self.c.operation_dir / "compose-99.json").write_bytes(pf_instance.normalize_json(decoy))
             self.c._append_envelope_record({
@@ -1401,7 +1432,7 @@ class DeployedArtifact(Base):
                 "resolved_sha256": pf_instance.sha256_bytes(pf_instance.normalize_json(decoy)), "escape_mode": "doubled",
                 "result": "approved"})
 
-        with mock.patch.object(self.c, "activate", side_effect=activate_then_decoy):
+        with mock.patch.object(self.c, "activate_frontend", side_effect=activate_then_decoy):
             view = self.deploy()
         operation = sorted(self.context.operations_dir.iterdir())[-1]
         renders = json.loads((operation / "compose-envelope.json").read_bytes())["renders"]
@@ -1412,13 +1443,13 @@ class DeployedArtifact(Base):
         self.assertEqual(view.record["compose"]["model_sha256"], selected["resolved_sha256"])
         self.assertNotEqual(view.record["compose"]["model_sha256"], renders[-1]["resolved_sha256"])
 
-        def activate_then_tamper(images, heads):
-            real_activate(images, heads)
+        def activate_then_tamper(images):
+            real_activate(images)
             name = json.loads((self.c.operation_dir / "compose-envelope.json").read_bytes())["renders"][-1][
                 "resolved_file"]
             (self.c.operation_dir / name).write_bytes(b'{"name":"changed"}')
 
-        with mock.patch.object(self.c, "activate", side_effect=activate_then_tamper):
+        with mock.patch.object(self.c, "activate_frontend", side_effect=activate_then_tamper):
             self.update(code=1)
         self.assertIn("deployment-record-incomplete: the application was activated and passed health checks, but its "
                       "deployment record could not be sealed (the recorded resolved Compose model does not re-hash "
@@ -1437,16 +1468,20 @@ class Emergency(Base):
         self.c.dbs["partflow_staging"]["rows"] = list(rows)
         self.c.running["backend"] = False
         if pending:
-            pf.write_json(self.c.pending, {"operation": "update", "phase": "activating", "started": "20261007T000000Z"})
+            # PF-A3.2: an update interrupted in its backend start (a real plan and journal).
+            self.update_plan = self.interrupted_update()
 
     def test_ep1_backup_emergency_captures_the_mismatch_and_leaves_the_journal(self):
         self.mismatch()
-        journal = self.c.pending.read_bytes()
+        before = pfx.operation_files(self.context, self.update_plan["operation_id"])
         confirm = mock.Mock()
         self.assertEqual(self.invoke(["backup", "--emergency"], confirm=confirm), 0, self.last_error)
         confirm.assert_called_once()
         self.assertEqual(confirm.call_args.args[0], "EMERGENCY BACKUP partflow-staging")
-        self.assertEqual(self.c.pending.read_bytes(), journal)  # RT-3: the capture never touches pending.json
+        # RT-3/RO-5: the capture is journal-less and never touches the interrupted update's files.
+        self.assertEqual(pfx.operation_files(self.context, self.update_plan["operation_id"]), before)
+        self.assertEqual([name for name, plan, _ in pfx.operations_of(self.context)],
+                         [self.update_plan["operation_id"]])
         view = self.c.snapshots()[0]
         self.assertEqual((view.capture_class, view.reason, view.level),
                          ("emergency_preservation", "emergency-manual", "data_restore_verified"))
@@ -1495,7 +1530,7 @@ class Emergency(Base):
         self.mismatch()
         dbs = json.dumps(self.c.dbs, sort_keys=True)
         self.c.fail = failure
-        with Events(self.c, "restore_candidate", "swap_database", "replace_source") as events:
+        with Events(self.c, "restore_candidate", "swap_database", "w1_stage") as events:
             self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 1)
         self.assertEqual(events.order, [])
         self.assertIn("ERROR: preservation-failed: the current database partflow_staging could not be preserved (",
@@ -1509,9 +1544,12 @@ class Emergency(Base):
                          (current["heads"], current["rows"]))
         self.assertFalse([name for name in self.c.dbs if name.startswith(("pf_keep_", "pf_restore_"))])
         self.assertFalse(self.c.running["backend"] or self.c.running["frontend"])
-        journal = json.loads(self.c.pending.read_text())
-        self.assertEqual((journal["operation"], journal["phase"]), ("rollback", "paused"))
-        self.assertIn("resume", [route.split(" ")[1] for route in self.c.legal_routes(journal)])
+        # PF-A3.2: the rollback superseding the interrupted update stays open in preserving-current; resume (which
+        # withdraws a superseding operation) is a recorded legal next command.
+        operation, plan, journal = tpa.latest_operation(self.c, "rollback")
+        self.assertEqual((plan["supersedes"], journal["phase"]), (self.update_plan["operation_id"],
+                                                                  "preserving-current"))
+        self.assertIn(f"pf --instance staging resume --operation {operation}", journal["legal_next"])
 
     def test_ep5_a_dump_failure_blocks_the_rollback(self):
         self.preservation_failed("dump")
@@ -1554,11 +1592,11 @@ class Emergency(Base):
 
     def test_ep10_code_only_rollback_preserves_after_the_pause_and_before_the_source(self):
         target = self.checkpoint()
-        with Events(self.c, "pause", "preserve_current", "replace_source") as events:
+        with Events(self.c, "pause", "preserve_current", "w1_stage") as events:
             self.assertEqual(self.invoke(["rollback", target.bundle_id]), 0, self.last_error)
-        self.assertEqual(events.order, ["pause", "preserve_current", "replace_source"])
+        self.assertEqual(events.order, ["pause", "preserve_current", "w1_stage"])
         self.c.fail = "dump"
-        with Events(self.c, "replace_source") as events:
+        with Events(self.c, "w1_stage") as events:
             self.assertEqual(self.invoke(["rollback", target.bundle_id]), 1)
         self.assertIn("ERROR: preservation-failed: ", self.last_error)
         self.assertEqual(events.order, [])
@@ -1593,7 +1631,8 @@ class Emergency(Base):
         self.assertIn("passwd-link", self.last_error)
         self.assertEqual(tree_hash(self.root), before)
         self.assertTrue(os.path.islink(str(self.root / "passwd-link")))
-        self.c.pending.unlink()
+        # PF-A3.2: the failed rollback stays open; an emergency capture is legal next to it.
+        self.assertEqual(self.open_ops(), [("rollback", "preserving-current")])
         self.c.running.update(backend=True, frontend=True)
         self.assertEqual(self.invoke(["backup", "--emergency"]), 0, self.last_error)
         view = next(item for item in self.c.snapshots() if isinstance(item, pf.BundleView)
@@ -1630,31 +1669,27 @@ class Emergency(Base):
                               "archive size limits).", self.last_error)
                 self.assertIn("Nothing was changed.", self.last_error)
                 confirm.assert_not_called()
-                self.assertFalse(self.c.pending.exists())
+                self.assertEqual(pfx.operations_of(self.context), [])
                 self.assertTrue(self.c.running["backend"] and self.c.running["frontend"])
                 self.assertEqual([item.bundle_id for item in self.c.snapshots()], [target.bundle_id])
 
     def test_ep15_resume_names_a_healthy_target_after_an_emergency_preserved_rollback(self):
-        # Audit AF-5: the rollback journal records its preservation capture, here an emergency one (never a target).
+        # Audit AF-5: the rollback retains its preservation capture, here an emergency one (never a target). PF-A3.2:
+        # the recorded routes name the operation's healthy target (its input bundle), never the preservation.
         target = self.checkpoint()
         self.mismatch()
-        with mock.patch.object(self.c, "activate", side_effect=pf.Failure("frontend did not become healthy")):
+        with mock.patch.object(self.c, "activate_backend", side_effect=pf.Failure("backend did not become healthy")):
             self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 1)
-        journal = json.loads(self.c.pending.read_text())
-        preserved = self.c.verify_snapshot(journal["checkpoint"])
+        operation, plan, journal = tpa.latest_operation(self.c, "rollback")
+        preserved = self.c.verify_snapshot(next(item["name"] for item in journal["retained_artifacts"]
+                                                if item["kind"] == "checkpoint"))
         self.assertEqual(preserved.capture_class, "emergency_preservation")
-        # The route gate refuses `pf resume` for this phase and names the legal route ...
-        self.assertEqual(self.invoke(["resume"]), 1)
-        self.assertIn("roll back to a healthy checkpoint (use --restore-db when data/schema may have changed; an "
-                      "emergency or partial capture is evidence and data, never a rollback target)", self.last_error)
-        # ... and the controller's own refusal (defence in depth) names the operation's healthy target, not the
-        # recorded preservation capture.
-        with self.assertRaises(pf.Failure) as caught:
-            self.c.resume()
-        self.assertEqual(str(caught.exception),
-                         f"Source/database may have changed. Roll back to a healthy checkpoint (this operation's: "
-                         f"{target.bundle_id}) with 'rollback <backup-id> --restore-db' instead; an emergency or "
-                         "partial capture is evidence and data, never a rollback target.")
+        self.assertIn(f"pf --instance staging rollback {target.bundle_id} --restore-db", journal["legal_next"])
+        self.assertFalse([line for line in journal["legal_next"] if preserved.bundle_id in line])
+        # `pf resume` continues the rollback forward (its database switch completed) and completes it.
+        self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+        self.assertEqual(self.open_ops(), [])
+        self.assertEqual(pfx.operation(self.context, operation)[1]["phase"], "completed")
 
 
 # ============================================================================ VR: verification records
@@ -2002,7 +2037,7 @@ class PurgeBundle(Base):
         self.assertIn("ERROR: archive-member-refused: revision-checkpoints.tar.gz: type: 'partflow-staging/escape'. "
                       "Nothing was extracted.", self.last_error)
         confirm.assert_not_called()
-        self.assertFalse(self.c.pending.exists())
+        self.assertEqual(pfx.operations_of(self.context, "restore-instance"), [])
 
     def test_pb5_side_by_side_reads_strictly_first(self):
         view = PurgeBundle.build(self)
@@ -2034,18 +2069,18 @@ class PurgeBundle(Base):
                          hashlib.sha256((view.folder / "manifest.json").read_bytes()).hexdigest())
 
     def test_pb7_a_bundle_without_a_passed_record_stops_the_purge_before_deletion(self):
-        real = self.c.create_purge_recovery
+        real = self.c.verify_purge_bundle
 
-        def without_record(preliminary):
-            view, binding = real(preliminary)
+        def without_record(view, names):
+            verified = real(view, names)
             shutil.rmtree(str(self.c.verifications_dir / view.bundle_id))
-            return view, binding
+            return verified
 
         self.c.resources = {"containers": ["db"], "volumes": ["partflow-staging_postgres_data"]}
         with PurgeBundle.fake_command(self), \
                 mock.patch.object(self.c, "available_snapshot_image_refs", return_value=([], [])), \
-                mock.patch.object(self.c, "create_purge_recovery", side_effect=without_record), \
-                mock.patch.object(self.c, "durable_phase") as durable, \
+                mock.patch.object(self.c, "verify_purge_bundle", side_effect=without_record), \
+                mock.patch.object(self.c, "write_deletion_plan") as write_plan, \
                 mock.patch.object(pf, "confirm"), mock.patch.object(pf, "prompt_yes_no", return_value=False), \
                 self.c.lock():
             with self.assertRaisesRegex(pf.Failure, r"^purge-bundle-unverified: purge-.*: no passed "
@@ -2053,28 +2088,37 @@ class PurgeBundle(Base):
                                                     r"deletion is blocked\. The purge stops before deletion; the "
                                                     r"application is reopened\.$"):
                 self.c.purge()
-        durable.assert_not_called()
-        self.assertFalse(self.c.pending.exists())
+            journal = self.c.journal
+        write_plan.assert_not_called()
+        # PU-5: reopened in-process, the purge closed cancelled with no deletion approval.
+        self.assertEqual((journal["phase"], journal["deletion"]), ("cancelled", None))
+        self.assertEqual(self.open_ops(), [])
         self.assertTrue(self.c.running["backend"] and self.c.running["frontend"])
         self.assertIn("partflow_staging", self.c.dbs)
 
     def test_pb8_a_resumed_deleting_purge_re_reads_without_a_new_verification(self):
         view = PurgeBundle.build(self)
-        with self.c.lock():
-            plan = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge", operation_id=self.c.operation_id,
-                                              daemon=self.c.verify_daemon(), recovery_id=view.bundle_id,
-                                              covered_image_refs=set())
-            plan["slug"] = self.c.context.slug
-            reference = self.c.write_deletion_plan(plan)
-        pf.write_json(self.c.pending, {"operation": "purge", "phase": "deleting", "recovery": view.bundle_id,
-                                       "deletion_plan": reference, "deleted": [], "delete_backups": False,
-                                       "reset_admin_config": False})
+        effects = pfx.default_effects("purge")
+        effects[2] = dict(effects[2], preconditions=["bundle:" + view.bundle_id, "checkpoint:" + view.derived_from])
+        plan = pfx.lifecycle_plan(self.context, "purge", effects)
+        directory = pfx.write_operation(self.context, plan)
+        binding = pf.pf_docker.plan_deletion(self.c.docker_inventory(), kind="purge",
+                                             operation_id=plan["operation_id"], daemon=self.c.verify_daemon(),
+                                             recovery_id=view.bundle_id, covered_image_refs=set())
+        binding["slug"] = self.c.context.slug
+        data = pf.pf_docker.plan_bytes(binding)
+        pf_instance._write_private_file(directory / "deletion-plan.json", data, 0o600)
+        pf_instance.write_journal_generation(directory, pf_instance.normalize_json(pfx.lifecycle_journal(
+            plan, phase="deleting", states={"e0001": "complete", "e0002": "complete", "e0003": "complete",
+                                            "e0004": "complete"},
+            deletion={"plan_sha256": pf_instance.sha256_bytes(data), "delete_backups": False,
+                      "reset_admin_config": False, "confirmed_at": "20261007T040500Z"})))
         before = self.records(view.bundle_id)
         with Events(self.c, "read_bundle") as events, \
-                mock.patch.object(self.c, "finish_purge_cleanup") as cleanup, mock.patch.object(pf, "confirm"):
-            self.c.purge()
+                mock.patch.object(self.c, "purge_cleanup", return_value="absent") as cleanup:
+            self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
         self.assertIn("read_bundle", events.order)
-        cleanup.assert_called_once()
+        self.assertEqual(len(cleanup.call_args_list), 4)
         self.assertEqual(self.records(view.bundle_id), before)
 
     def test_pb9_a_copy_altered_before_the_seal_stops_the_purge(self):
@@ -2106,6 +2150,32 @@ class PurgeBundle(Base):
             self.assertEqual(archive.extractfile("frontend/app.txt").read(), OLD.encode())
 
 
+    def test_pb12_recovery_replaces_workspace_but_preserves_external_control_and_admin_config(self):
+        """Moved from test_pf_admin.RecoverySourceTests (former replace_source_for_recovery, PF-A3.2: W1-W4 of
+        restore-instance): a format 1 bundle (its runtime .env inside the source archive) restores the recovered
+        source as the workspace, keeps the old workspace as a retained generation, and never touches the external
+        control release or pf-config.json; no .env or DEPLOYED_SOURCE.txt ever lands in the workspace."""
+        control = self.c.control_dir / "pf-admin.py"
+        control_before = control.read_bytes()
+        config = self.c.config_dir / "pf-config.json"
+        config_before = config.read_bytes()
+        tree = Path(self.temp.name) / "legacy-bundle-tree"
+        pfx.source_fixture(tree)
+        (tree / "deploy/synology/pf-admin.py").write_text("# old recovered repository source\n")
+        (self.root / "editor-scratch.txt").write_text("kept in the retained generation\n")
+        view = PurgeBundle.legacy(self, fmt=1)
+        self.assertEqual(PurgeBundle.restore(self, view), 0, self.last_error)
+        self.assertEqual(control.read_bytes(), control_before)
+        self.assertEqual(config.read_bytes(), config_before)
+        self.assertEqual((self.root / "deploy/synology/pf-admin.py").read_text(), "# old recovered repository source\n")
+        self.assertFalse((self.root / ".env").exists())
+        self.assertFalse((self.root / "DEPLOYED_SOURCE.txt").exists())
+        self.assertFalse((self.root / "editor-scratch.txt").exists())
+        _, plan, journal = tpa.latest_operation(self.c, "restore-instance")
+        retained = pf_instance.generation_container(self.context) / plan["workspace"]["generation_id"]
+        self.assertEqual((retained / "editor-scratch.txt").read_text(), "kept in the retained generation\n")
+        self.assertEqual(journal["phase"], "completed")
+
     def test_pb11_a_listed_state_file_without_its_payload_is_refused(self):
         # Audit AF-1 (schema 1): a state file is restored only from its verified state/<name> payload.
         view = PurgeBundle.build(self)
@@ -2133,10 +2203,17 @@ class Routes(Base):
 
     def test_rt2_the_pending_route(self):
         accepts = pf.PENDING_ROUTES["backup emergency"][0]
-        for operation in ("deploy", "update", "rollback", "reset-db"):
-            self.assertTrue(accepts({"operation": operation, "phase": "x"}), operation)
-        for operation in ("purge", "permissions", "restore-instance", "abort-deploy"):
-            self.assertFalse(accepts({"operation": operation, "phase": "deleting"}), operation)
+        phases = {"deploy": "initializing", "update": "preserving", "rollback": "preserving-current",
+                  "reset-db": "initializing", "purge": "deleting", "restore-instance": "restoring-data",
+                  "abort-deploy": "deleting"}
+        for kind, phase in phases.items():
+            plan = pfx.lifecycle_plan(self.context, kind, supersedes=pfx.operation_id("deploy", "00000000", -60)
+                                      if kind == "abort-deploy" else None)
+            journal = pfx.lifecycle_journal(plan, phase=phase, states={"e0001": "complete"})
+            with self.subTest(kind=kind):
+                self.assertEqual(accepts(pf.OperationView(kind, phase, plan, journal)),
+                                 kind in ("deploy", "update", "rollback", "reset-db"))
+        self.assertFalse(accepts(pf.OperationView("permissions", "applying")))
 
     @ROOT_FS
     def test_rt4_listing_lines(self):
@@ -2180,11 +2257,16 @@ class Routes(Base):
         self.assertEqual(pfx.snapshot_tree(self.context.paths.private_state, self.layout.root / "locks"), before)
 
     def test_rt6_legal_routes_spell_the_command(self):
-        routes = self.c.legal_routes({"operation": "update", "phase": "backup-ready"})
-        self.assertIn("pf backup --emergency --instance staging: capture the current data as emergency preservation "
-                      "(does not change the interrupted operation)", routes)
-        self.assertIn("pf resume --instance staging: resume the unchanged deployment after a pre-change failure",
-                      routes)
+        plan = pfx.lifecycle_plan(self.context, "update")
+        journal = pfx.lifecycle_journal(plan, phase="preserving", unresolved="e0003",
+                                        states={"e0001": "complete", "e0002": "complete", "e0003": "unknown"})
+        routes = {command: description for _, command, description in
+                  pf.pf_config.operation_routes(plan, journal, slug="staging")}
+        self.assertEqual(routes["pf --instance staging backup --emergency"],
+                         "capture the current data as emergency preservation (does not change this operation)")
+        self.assertEqual(routes[f"pf --instance staging resume --operation {plan['operation_id']}"],
+                         "reopen the unchanged deployment (no data or source effect started)")
+        self.assertEqual(journal["legal_next"], list(routes))
 
 
 if __name__ == "__main__":

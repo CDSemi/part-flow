@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A2.3 (trên commit `1244457`).
+> Baseline đồng bộ: package revision PF-A3.2 (trên commit `c939141`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -277,6 +277,31 @@
 > *Downgrade.* Quay về control PF-A2.3 là **không được hỗ trợ** khi đã có bundle schema 1 (listing, chọn rollback và
 > purge của bản cũ lỗi trên manifest mới).
 > Khối này **thay thế** nội dung checkpoint ở mục 10 và dòng `Deployed source` ở mục 8.
+
+> **Warning (PF-A3.2).** Checkpoint Deployment Admin PF-A3.2 (2026-10-07) — operation journal, `resume` và
+> `--abandon`, workspace generation switch; vẫn là **trạng thái phát triển, chưa phải bản phát hành NAS**. Chỉ có bằng
+> chứng offline, filesystem và installed CLI với Docker daemon giả: không dùng DSM host, Docker daemon, PostgreSQL
+> server hay SMB client thật.
+> *Journal.* Mỗi `deploy`, `update`, `rollback`, `reset-db`, `backup`, `purge`, `restore-instance` và `abort-deploy`
+> ghi một plan đóng băng và một journal trong `<root>/instances/<uuid>/operations/<operation-id>/` (`plan.json` ghi một
+> lần, sau đó là các generation `journal.json` có fsync; `attempts.json`, `children.json`, `deletion-progress.json`,
+> `admin-config.json` và `app.env` đã đóng băng). `state/pending.json` cũ chỉ còn dùng cho `pf permissions apply`;
+> mọi `pending.json` khác bị từ chối (`journal-format-unsupported`). Mỗi effect được ghi journal là "dự định" trước
+> khi bắt đầu và chỉ "complete" sau khi kết quả đã được quan sát.
+> *Resume.* `pf resume [--operation ID] [--abandon | --keep-workspace]` vào lại operation đang mở: kiểm tra lại các
+> authority đã được duyệt, từ chối khi một child đã ghi nhận, một one-off container của instance hoặc một database
+> session của operation vẫn chạy (`effect-still-running`; không bao giờ dừng chúng), quan sát effect chưa rõ kết quả,
+> rồi hoặc mở lại deployment không đổi (chưa có effect nào về data hay source), hoặc tiếp tục về phía trước, hoặc dừng ở
+> `needs_operator` khi chạy lại có thể lặp một thay đổi. `purge`, `restore-instance <cùng bundle>`, `abort-deploy` và
+> `backup` vào lại operation đang mở của chính chúng theo cùng cách.
+> *Workspace.* `repo/` không còn bị thay thế tại chỗ: sau activation, cây đã deploy được stage bên cạnh và đổi bằng hai
+> lần rename; cây cũ được giữ, không bao giờ xóa, thành retained generation trong
+> `<thư mục cha của workspace>/.pf-generations-<instance-uuid>/`.
+> *Chẩn đoán.* `status`, `doctor` và `instances` hiển thị operation đang mở từ các file được bảo vệ trước mọi thứ khác;
+> `pf status --operation ID` hiển thị chi tiết một operation.
+> *Downgrade.* Chỉ có thể quay về control PF-A3.1 khi không có operation nào đang mở; khi đó mất phần hiển thị journal
+> và generation switch, và runner record đã được journal reconcile lại bị coi là chưa giải quyết.
+> Khối này **thay thế** câu "PF-A3.2 dọn nó" của A3.1 (mục 7) và việc thay workspace tại chỗ ở mục 8 và 9.
 
 ## 1. Mục đích
 
@@ -835,6 +860,15 @@ volume hoặc network) làm `deploy` bị từ chối với `resource-target-not
 không bao giờ chạy `compose down --volumes`, giữ lại image, và một lần abort bị gián đoạn sẽ
 tiếp tục đúng plan đó sau `RESUME ABORT DEPLOY <project>`.
 
+Từ PF-A3.2, deploy ghi plan và journal ngay sau `DEPLOY <SHA12>` (mục 16, Lifecycle operation dang dở). Các effect
+chạy theo thứ tự: staging, khởi động database, initial migration, backend, frontend, seal, `deployed.json`, rồi
+**workspace refresh** (mục 8). Deploy bị gián đoạn được tiếp tục bằng `sudo pf --instance <slug> resume`;
+`abort-deploy` chỉ hợp lệ cho tới khi effect frontend bắt đầu (sau đó bị từ chối với `operation-open` và `resume` hoàn
+tất deploy). Khi kết quả của initial migration bị mất, operation dừng ở `needs_operator`; `abort-deploy` khi đó
+supersede deploy và chỉ xóa resource đã đóng băng của chính nó, sau đó `deploy` có thể chạy lại. Staging riêng của
+một operation bị `cancelled` được xóa (`note: staging-removed`); thư mục `.staging-*` không còn được tham chiếu sẽ bị
+xóa ở lần staging kế tiếp, trừ staging của deployment đang chạy mà seal thất bại (`note: unsealed-active-staging`).
+
 ## 8. Repository được sửa tự do và deployed revision
 
 Từ v2.5, `repo/` là working tree chứ không phải bằng chứng duy nhất về code đang chạy.
@@ -903,6 +937,39 @@ workspace phải bằng đúng cây đó từng byte; nếu không, lệnh dừn
 yêu cầu `--commit`/`--latest`/`--release` tường minh. Cây chép từ ZIP hay checkout chưa xác
 minh vì thế không bao giờ được deploy như "current".
 
+**Workspace generation switch (PF-A3.2).** `deploy`, `update`, `rollback` và `restore-instance` không còn chép cây mới
+vào `repo/`. Sau activation, seal và `deployed.json`, chúng:
+
+1. stage cây đã deploy thành `stage-<generation>` trong generation container
+   `<thư mục cha của workspace>/.pf-generations-<instance-uuid>/` (root, `0700`, cùng filesystem với `repo/`),
+2. rename `repo/` thành retained generation `<container>/<generation>` (`wsg-<stamp>-<8 hex>`),
+3. rename stage thành `repo/`,
+4. ghi lại protected source manifest của workspace mới.
+
+Cây cũ được **giữ** làm retained generation chưa seal; không có gì bên trong bị xóa, kể cả file untracked và `.git`
+của nó. File mà editor đang mở, hoặc lưu trong lúc switch chạy, sẽ nằm trong retained generation, không nằm trong
+`repo/` mới. Chép công việc như vậy về bằng root, ví dụ
+`sudo cp -a /volume1/partflow/.pf-generations-<uuid>/<generation>/<path> /volume1/partflow/repo/<path>`; công cụ không
+bao giờ chạy Git hay chương trình nào khác bên trong retained generation, nên hook `.git` hay thiết lập `fsmonitor`
+của nó không có tác dụng. `pf status` đếm các retained generation (`Workspace generations: N unsealed in <container>
+(latest <generation> from operation <op>)`) và báo `stage-*` còn sót là `in progress` hoặc `superseded-stage`;
+retention thuộc PF-A5.1.
+
+Giữa hai lần rename, `repo/` vắng mặt trong chốc lát. Nếu process bị ngắt đúng lúc đó, mọi lệnh trừ `resume` đều bị từ
+chối (đường dẫn đã đăng ký bị thiếu) và `status` in `workspace: the registered workspace path may be absent between
+the two renames of the workspace switch; only 'resume' (or 'resume --keep-workspace') may continue`.
+`sudo pf --instance <slug> resume` bind cây đã stage; `resume --keep-workspace` thì rename cây cũ trở lại.
+
+Switch không khả dụng — khi đó operation hoàn tất activation, seal và pointer, thoát 1 với `workspace-sync-pending`
+và vẫn mở ở `workspace_sync_pending` trong khi application vẫn chạy — khi `repo/` là mount point, subvolume hoặc gốc
+shared folder (`workspace-is-mount-point`), container không an toàn hoặc trùng một đường dẫn đã đăng ký
+(`generation-container-unsafe`, `generation-container-collision`), chính `repo/` mang ACL (`workspace-root-acl`) hoặc
+thiết bị không đủ chỗ cho cây stage cộng `minimum_free_mb` (`workspace-capacity`). Sửa nguyên nhân rồi chạy `resume`,
+hoặc chạy `resume --keep-workspace` để giữ workspace hiện tại (manifest và provenance để nguyên như đã quan sát). Vẫn
+có thể chạy `pf backup` thủ công khi switch đang chờ và chưa bắt đầu. `deploy`, `update`, `rollback` và
+`restore-instance` cũng nhận `--keep-workspace` để bỏ qua refresh ngay từ đầu; bản tóm tắt xác nhận hiển thị lựa chọn
+này cùng số lượng và dung lượng retained generation.
+
 ## 9. Manual update
 
 Staging thường dùng:
@@ -944,6 +1011,19 @@ tại được đọc từ deployment record (rồi tới `deployed.json` `sha` 
 update vẫn chạy — pre-update checkpoint lấy source từ deployment record — còn automatic update bị hoãn (`Automatic
 update refuses a deployment whose source commit is unknown; run a manual update.`). Pre-update checkpoint là healthy
 checkpoint schema 1 có verification record (mục 10).
+
+**Phase và resume (PF-A3.2).** Một update chạy `preparing` (staging), `preserving` (dừng, pre-update checkpoint),
+`migrating` (restore rehearsal candidate, rehearsal migration, drop candidate, live migration), `activating` (backend,
+frontend, seal, pointer) và `syncing-workspace` (mục 8). Sau khi bị gián đoạn, `pf resume`:
+
+- **trước mọi effect database** (staging, dừng, checkpoint, rehearsal candidate): drop candidate của chính operation
+  theo tên đã lập kế hoạch, mở lại deployment không đổi và đóng update ở `cancelled` (nghĩa cũ của `pf resume`);
+- **sau một live database effect**: tiếp tục về phía trước theo journal;
+- khi **kết quả của live migration bị mất**: đọc live Alembic heads. Heads bằng target được tính là đã xong (upgrade
+  không bao giờ bị lặp); heads vẫn ở revision trước, hoặc heads khác, dừng ở `needs_operator` (`effect-unknown`) vì không
+  thể loại trừ một thay đổi non-transactional dang dở. Route được hỗ trợ khi đó không mất dữ liệu:
+  `sudo pf --instance <slug> rollback <before-update checkpoint> --restore-db` supersede update, preserve database hiện
+  tại trước rồi restore checkpoint. Update khi đó được liệt kê là `superseded`.
 
 ## 10. Backup và rollback
 
@@ -1083,6 +1163,17 @@ với tên `pf_keep_*`, không âm thầm xóa newer writes.
 <n>. <folder>  [invalid: <code>]
 ```
 
+**Journal cho backup và rollback (PF-A3.2).** `pf backup` ghi một plan (capture, rồi verification). Lỗi capture hoặc
+verification bị bắt sẽ đóng nó ở `failed_preserved` (không chặn; thư mục dang dở được liệt kê là `bundle-attempt` và
+không bao giờ được chọn); chỉ khi process bị ngắt nó mới còn mở, và `pf backup` hoặc `pf resume` khi đó tạo một lần
+thử mới với bundle ID mới (candidate `pf_verify_*` verify dở của plan được drop trước). `pf rollback ... --restore-db`
+có thể **supersede** một `update`, `rollback` hoặc `reset-db` đang mở đã dừng application (hoặc đang ở
+`needs_operator`); code-only rollback chỉ được supersede một update không có database effect nào, nếu không sẽ bị từ
+chối với `review recovery with --restore-db`. Restore rollback candidate bị gián đoạn sẽ được drop và restore lại từ
+cùng checkpoint; checkpoint đã thay đổi trong lúc đó bị từ chối với `plan-input-changed`. Một operation superseding
+được resume trước khi thay đổi gì sẽ **withdraw**: không khởi động service nào, và operation bị supersede cùng các
+route của nó lại có hiệu lực.
+
 ## 11. Reset staging data
 
 Muốn giữ application/version hiện tại nhưng dùng database sạch:
@@ -1107,6 +1198,10 @@ Từ PF-A3.1, checkpoint `before-reset` là healthy checkpoint schema 1 có veri
 chạy cùng kiểm tra gắn image với deployment như `pf backup` (`deployment-image-mismatch` trước mọi thay đổi).
 Emergency preservation bên trong `reset-db` thuộc PF-A3.3: khi healthy checkpoint bị từ chối, chạy
 `pf backup --emergency` và xử lý mismatch trước.
+
+Từ PF-A3.2, `reset-db` bị gián đoạn drop candidate `pf_clean_*` của chính nó và làm lại. Database switch mà tên
+database chứng minh là chưa bắt đầu sẽ được làm lại; switch để lại tên đổi nửa chừng sẽ dừng ở `needs_operator`
+(`database-switch-unknown`) và được khôi phục bằng `rollback <before-reset checkpoint> --restore-db`.
 
 ## 12. Full purge, recovery và clean redeploy
 
@@ -1253,6 +1348,15 @@ hiện không bao giờ được thêm vào, và plan bị thiếu, bị di chuy
 từ chối với `plan-invalid`. Journal ghi trước PF-A1.3 (không có plan đóng băng) bị từ chối với
 `plan-missing`: hãy review thủ công các resource còn lại.
 
+Từ PF-A3.2, purge có duyệt hai giai đoạn: plan được ghi ở `PURGE <project>`; deletion plan ràng buộc và lựa chọn về
+backup/admin-config chỉ được đóng băng vào journal sau `ERASE ...`. Lỗi hoặc xác nhận bị từ chối trước đó sẽ mở lại
+application ngay và đóng purge ở `cancelled` (hành vi không đổi). Journal và instance lock nằm ngoài mọi thứ purge xóa,
+nên `pf status` hiển thị purge (và bước kế tiếp) kể cả khi không còn `.env` và daemon. `pf purge` vào lại purge đang
+mở ở `deleting` hoặc `finalizing` (alias của `pf resume`, `RESUME PURGE <project> <bundle-id>`); yêu cầu lựa chọn
+backup hoặc admin-config khác với lựa chọn đã duyệt bị từ chối với `plan-inputs-conflict`. Purge với
+`--reset-admin-config` resume bằng admin configuration mà nó đã đóng băng. Nếu recovery bundle không còn đọc hoặc
+verify được, deletion vẫn bị chặn (mục 16).
+
 ### Brand-new deploy sau purge
 
 ```sh
@@ -1301,6 +1405,16 @@ deployment mới; sau health check một deployment record mới được seal v
 Installed root-owned control plane hiện tại được giữ; recovery không downgrade lifecycle
 controller giữa operation. `config/pf-config.json` hiện tại cũng tiếp tục là authoritative config;
 bản được lưu trong recovery chỉ để compare/reapply thủ công, không bị activate giữa restore.
+
+Từ PF-A3.2, `restore-instance` ghi plan có bundle ID và manifest hash, và đóng băng `.env` của bundle trước effect đầu
+tiên. `pf resume` (hoặc `pf restore-instance <cùng bundle>`) tiếp tục về phía trước; bundle khác bị từ chối với
+`plan-inputs-conflict`. Trong lúc chỉ mới chuẩn bị target (staging, `.env`, nạp image, khởi động database),
+`pf resume --abandon` (`ABANDON RESTORE <project> <op8>`) xóa những gì restore này tạo ra — resource đã đóng băng của
+nó, `.env` nó đã ghi (chỉ khi byte không đổi) và staging của nó — và trả lại `.env` đã sửa; khi data restore đã bắt đầu
+thì chỉ còn tiếp tục về phía trước. `config/.env` có sẵn với byte khác không bao giờ bị ghi đè: nó được rename thành
+`config/.env.proposal-<op8>` (`note: env-proposal-preserved`). Checkpoint history có sẵn khác với của bundle được rename
+thành `backups/revisions/<project>.pre-restore-<op8>` (không bao giờ xóa, không được `backups` liệt kê); history giống hệt
+thì để nguyên.
 
 ### Khôi phục old data side-by-side
 
@@ -1415,6 +1529,11 @@ khi được review.
 Raw Docker/Compose bỏ qua controller lock, recovery check và destructive guard. Không chạy
 song song với `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
 
+**PF-A3.2:** không chạy dạng raw khi `pf status` đang hiển thị operation mở — nhất là ở `syncing-workspace` hoặc
+`workspace_sync_pending`, khi đường dẫn workspace truyền vào `--project-directory` và `PARTFLOW_REPO_ROOT` có thể vắng
+mặt — và không bao giờ với `config/.env` đã sửa mà operation đang mở chưa đóng băng (controller dùng `app.env` đã đóng
+băng của từng operation).
+
 Không dùng các lệnh rộng như:
 
 ```text
@@ -1471,6 +1590,14 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   `permission-policy.json` và quay lại group trong `pf-config.json`. Installer từ chối mọi lần đổi control,
   upgrade hay downgrade, khi một lần permission apply đang mở (`instance-operation-pending`): hãy hoàn tất bằng
   `--resume` hoặc `--abandon` trước.
+
+- **PF-A3.1 → PF-A3.2.** Byte của bootstrap không đổi. `pf install control` bị từ chối khi bất kỳ instance
+  operation nào đang mở (`instance-operation-pending`, nêu tên operation; cả khi journal không hợp lệ hoặc operation
+  index tràn). Runner record (`unresolved-effects.json`) của operation có journal được reconcile bởi journal đã đóng
+  của nó (`status --operation` hiển thị `reconciled by journal sequence <n>`); record trong thư mục operation không có
+  journal (`backup --emergency`, side-by-side restore, operation trước A3.2) vẫn bị từ chối với
+  `instance-effects-unresolved`: kiểm tra bằng `pf status`, xác nhận không còn gì của chúng đang chạy và giữ nguyên thư
+  mục; route xác nhận (acknowledgement) thuộc PF-A3.3.
 
 Bước install explicit này chính là security boundary cho phép `repo/` writable bởi users.
 Không cài tree chưa review/không rõ nguồn bằng `sudo`.
@@ -1841,11 +1968,58 @@ update refuse drift và chờ manual review.
 Chạy:
 
 ```sh
-sudo pf status
+sudo pf --instance <slug> status
+sudo pf --instance <slug> status --operation <operation-id>
 ```
 
-Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `purge`, hoặc
-`restore-instance`) thay vì tự xóa state file.
+`status` in, trước mọi kiểm tra live, một khối cho mỗi operation đang mở:
+
+```text
+Operations: <op> <kind> phase <phase> sequence <n> updated <stamp> [blocking|needs operator]
+  last error: <code>: <message>
+  unresolved effect: <eid> <type> <target> (<state>)
+  next (recorded at sequence <n>): <command>: <description>; ...
+```
+
+tiếp theo là `Recent operations:`, `Workspace generations:` và `Runner effects:` khi có. `status --operation` liệt kê
+mọi effect với trạng thái và evidence, các attempt và child process đã ghi nhận (không có secret, không có giá trị đã
+đóng băng). Chỉ dùng các bước kế tiếp được in ra. **Không bao giờ xóa hay sửa journal**: thư mục operation là bằng
+chứng và plan của nó là sự phê duyệt.
+
+Các code:
+
+- `operation-open` — một lệnh không phải bước kế tiếp hợp lệ của operation đang mở; thông báo liệt kê các bước hợp lệ.
+- `operation-needs-operator` / `effect-unknown` / `database-switch-unknown` — không có cách tự động tiếp tục an toàn;
+  dùng route khôi phục được in ra (`rollback <checkpoint> --restore-db` cho update, rollback hoặc reset, `abort-deploy`
+  cho lần deploy đầu, `backup --emergency` để preserve data trước).
+- `effect-still-running` — một child process group đã ghi nhận, một one-off container của instance hoặc một database
+  session vẫn chạy; `resume` không bao giờ dừng nó. Chờ rồi chạy lại `resume`. `effect-probe-unavailable` — có process
+  đã ghi nhận nhưng không đọc được `/proc` hoặc boot ID ở đây; không quyết định gì khi thiếu probe đó.
+- `database-unavailable` — `resume` không khởi động được database service để quan sát một effect; operation không đổi.
+- `plan-authority-changed` — instance record, policy, control release, profile hoặc daemon đã đổi sau khi duyệt; khôi
+  phục trạng thái đã duyệt hoặc nhờ administrator review. `plan-input-changed` — một input đã đóng băng (bundle,
+  checkpoint, `app.env` hoặc `admin-config.json` đã đóng băng, deployment đã stage) đã thay đổi; khôi phục nó đúng từng
+  byte. `plan-inputs-conflict` — một alias yêu cầu lựa chọn khác với lựa chọn đã duyệt.
+- `abandon-not-legal` (một live effect đã bắt đầu), `abandon-in-progress` (chỉ `resume --abandon` tiếp tục một restore
+  abandon đã được chấp nhận), `keep-workspace-not-legal` (workspace mới đã được bind).
+- `workspace-generation-mismatch` — `repo/`, retained generation hoặc stage không phải thứ journal đã ghi; không có gì bị
+  di chuyển. Khôi phục trạng thái đã ghi (ví dụ xóa thư mục được tạo ở `repo/` trong lúc đó) rồi chạy `resume`, hoặc
+  `resume --keep-workspace`. `workspace-validation-failed` — workspace đã bind không validate; sửa finding rồi chạy
+  `resume`. `checkpoint-history-unknown` — chuyển cây lạ sang chỗ khác bằng root rồi `resume`.
+- `journal-changed` — một writer khác đã đổi journal; process đã dừng. Chạy `status`.
+- `operation-conflict` — có hơn một operation đang mở (không phải cặp được phép: một backup cạnh một update đang chờ ở
+  `workspace_sync_pending`); mọi route thay đổi bị từ chối cho tới khi administrator review bằng `status --operation`.
+- `operation-journal-invalid` / `journal-format-unsupported` — journal hoặc plan không validate, hoặc có
+  `state/pending.json` không phải permission apply (chỉ một lần đổi control không được hỗ trợ mới ghi ra nó). Mọi route
+  thay đổi bị từ chối; `status`, `doctor`, `backups`, `recoveries`, `ps` và `logs` vẫn chạy. Giữ nguyên thư mục, so
+  sánh với `status --operation` và liên hệ người phụ trách control trước khi di chuyển bất cứ thứ gì.
+- `operation-index-overflow` — hơn 20000 entry trong `operations/`. Lưu trữ các operation **đã đóng** (`completed`,
+  `cancelled`, `failed_preserved`, như `status --operation` hiển thị) bằng root sang thư mục ngoài `operations/`, không
+  bao giờ là operation đang mở hay bị supersede; retention thuộc PF-A5.1.
+- Purge ở `deleting` mà recovery bundle không còn đọc hoặc verify được (`plan-input-changed: recovery bundle ... no
+  longer reads or verifies`) giữ deletion bị chặn: khôi phục thư mục bundle đúng từng byte từ bản sao ngoài NAS rồi
+  chạy `resume`.
+- Trong khoảng workspace switch chỉ `resume` và `resume --keep-workspace` được chạy (mục 8).
 
 ## 17. Command reference
 
@@ -1877,7 +2051,11 @@ Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `p
 | `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB bên cạnh current instance |
 | `sudo pf release-check` | Check eligible release, không apply |
 | `sudo pf release-check --apply` | Bị từ chối ở checkpoint này (exit 20): cần grant trong protected policy (PF-A4.3) |
-| `sudo pf resume` | Resume chỉ khi early-failure state chưa thay đổi |
+| `sudo pf resume [--operation ID]` | Vào lại operation đang mở theo journal: mở lại không đổi, tiếp tục về phía trước hoặc dừng ở `needs_operator` (`RESUME <op8>`) |
+| `sudo pf resume --abandon` | Hủy operation khi hợp lệ (trước data effect; restore khi target đang được chuẩn bị: `ABANDON RESTORE <project> <op8>`) |
+| `sudo pf resume --keep-workspace` | Hoàn tất operation mà không refresh `repo/` (`KEEP WORKSPACE <op8>`) |
+| `sudo pf status --operation ID` | Chi tiết một operation: effect, evidence, attempt, child |
+| `... deploy\|update\|rollback\|restore-instance --keep-workspace` | Chạy không có workspace generation switch |
 | `sudo pf ps [options] [SERVICE...]` | View container Compose read-only của instance (mục 14) |
 | `sudo pf logs [options] [SERVICE...]` | Log service có giới hạn và được redact (mục 14) |
 | `sudo sh ./deploy/synology/install-control.sh init --root <root>` | Khởi tạo protected installation root mới (mục 5 (a)) |
@@ -1975,6 +2153,27 @@ Giới hạn PF-A3.1 (chỉ có bằng chứng offline và filesystem; Docker v�
 - downgrade về control PF-A2.3 không được hỗ trợ khi còn bất kỳ bundle schema 1 nào;
 - checksum chứng minh tính toàn vẹn, không chứng minh tác giả: bundle không có trust anchor nào ngoài các thư mục
   được bảo vệ, thuộc root.
+
+Giới hạn PF-A3.2 (bằng chứng offline, filesystem và installed CLI với Docker daemon giả; không chạy gì trên DSM,
+btrfs, SMB, Docker daemon hay PostgreSQL thật):
+
+- A3-T04 và A3-T05 bị chặn ở mức Docker/PostgreSQL thật (PF-A3.4); phần DSM/btrfs/SMB của A3-T10 bị chặn (PF-A5.1);
+  các case restart qua installed CLI chạy trên application plane mô phỏng của Docker daemon giả, với release source
+  chỉ dùng cho test (xem `TEST_REPORT.md`);
+- kết quả live migration bị mất mà heads không đổi không bao giờ được thử lại (`needs_operator`) cho tới khi profile
+  khai báo upgrade có transaction (PF-A4.1);
+- một SIGKILL giữa lúc child khởi động và lúc ghi `children.json` chỉ còn probe daemon và database cho child đó; probe
+  database đếm mọi client session, nên một session thoáng qua sẽ từ chối cho tới lần `resume` sau;
+- độ bền của workspace staging dựa vào `os.sync()` trước các lần rename; chưa chứng minh trường hợp mất điện (PF-A3.4);
+- workspace root có ACL, workspace là mount point hoặc container không an toàn sẽ kết thúc update ở
+  `workspace_sync_pending` cho tới khi dùng `--keep-workspace` hoặc sửa nguyên nhân;
+- `abort-deploy` sau khi frontend đã mở vẫn bị từ chối; `restore-instance` không có abandon khi data restore đã bắt đầu;
+  `backup --emergency` và side-by-side restore vẫn không có journal;
+- thư mục capture dang dở, `pf_verify_*` còn lại sau verification thất bại, stage bị supersede, image tag do restore bị
+  abandon nạp vào, checkpoint history bị dời chỗ và retained workspace generation chỉ được báo cáo, không bao giờ bị
+  dọn (PF-A3.3/PF-A5.1);
+- runner record của operation không có journal vẫn chặn `pf install` (acknowledgement thuộc PF-A3.3);
+- hơn 20000 entry trong `operations/` từ chối mọi route thay đổi cho tới khi các operation đã đóng được lưu trữ.
 
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;

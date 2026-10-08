@@ -20,12 +20,10 @@ import io
 import json
 import os
 from pathlib import Path
-import re
 import socket
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import types
 import unittest
@@ -110,6 +108,11 @@ def classify_topology(*fragments, **kwargs):
 
 
 DAEMON = {"endpoint": "unix:///run/docker.sock", "engine_id": pfx.ENGINE_ID}
+# PF-A3.2: the operation-record helpers of the fixture.
+clear_operations = pfx.clear_operations
+operations_bytes = pfx.operations_bytes
+open_operations = pfx.open_operations
+interrupted_deploy = pfx.interrupted_deploy
 
 
 # ============================================================================ pure: daemon
@@ -745,17 +748,14 @@ class DaemonBinding(ScopeBase):
         for name, (arguments, prepare) in commands.items():
             with self.subTest(name):
                 deployed = self.context.state_dir / "deployed.json"
-                pending = self.context.journal_path
-                if pending.exists():
-                    pending.unlink()
+                clear_operations(self.context)
                 if prepare in ("deploy", "abort", "restore") and deployed.exists():
                     deployed.unlink()
                 if prepare == "abort":
-                    pf.write_json(pending, {"operation": "deploy", "phase": "migrating-database",
-                                            "database": "partflow_staging", "started": "20261006T000000Z"})
+                    interrupted_deploy(self.context)
                 if prepare == "restore":
                     arguments = arguments + [self.prepare_restore_bundle()]
-                journal_before = pending.read_bytes() if pending.exists() else None
+                journal_before = operations_bytes(self.context)
                 self.drift()
                 state_before = self.fake.state_bytes()
                 before = self.operation_dirs()
@@ -766,14 +766,17 @@ class DaemonBinding(ScopeBase):
                 self.assertIn("nothing was changed", err)
                 self.assertEqual(self.fake.argvs(), [PROBE])
                 self.assertEqual(confirmations, [])
-                self.assertEqual(pending.read_bytes() if pending.exists() else None, journal_before)
+                self.assertEqual({name: data for name, data in operations_bytes(self.context).items()
+                                  if name.split("/")[0] in before}, journal_before)
                 new = self.operation_dirs() - before
                 self.assertEqual(len(new), 1)
                 for files in self.operation_files(new).values():
                     # PF-A3.1: the strict read of a legacy bundle records its migration (and only that) inside the
-                    # operation directory, before any Docker child.
+                    # operation directory, before any Docker child. PF-A3.2: the frozen admin configuration too;
+                    # no plan or journal is written before the refusal.
                     files = [name for name in files if not name.startswith(("manifest-migration-", "migrated-"))]
-                    self.assertTrue(set(files) <= {"operation.json", "app.env", "frozen-config.json"}, files)
+                    self.assertTrue(set(files) <= {"operation.json", "app.env", "frozen-config.json",
+                                                   "admin-config.json"}, files)
                 self.assertEqual(self.fake.state_bytes(), state_before)
                 pfx.deployed_record(self.context)
 
@@ -798,7 +801,7 @@ class DaemonBinding(ScopeBase):
         code, out, err, _ = self.main("backup", confirm=refuse_confirmation)
         self.assertEqual(code, 1)
         self.assertIn("daemon-rootless", err)
-        self.assertFalse(self.context.journal_path.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
 
     def test_db8_db9_unusable_or_unreachable_daemon_answers(self):
         good = pfx.daemon_info()
@@ -874,7 +877,7 @@ class DaemonBinding(ScopeBase):
         code, out, err, _ = self.main("backup", confirm=refuse_confirmation)
         self.assertEqual(code, 1)
         self.assertIn("daemon-unreachable", err)
-        self.assertFalse(self.context.journal_path.exists())
+        self.assertEqual(pfx.operations_of(self.context), [])
         self.assertEqual(self.fake.calls(), [])
 
 
@@ -1138,8 +1141,7 @@ class PurgeHarness(ScopeBase):
             return {"Image": harness.image_ids[service], "State": {"Running": running, "Health": {"Status": "healthy"}},
                     "Config": {"Env": []}}
 
-        def pause(controller, kind, **extra):
-            pf.write_json(controller.pending, {"operation": kind, "phase": "paused", "started": pf.utc(), **extra})
+        def pause(controller, kind=None, **extra):
             harness.paused = True
 
         def activate(controller, images, heads):
@@ -1204,12 +1206,19 @@ class PurgeHarness(ScopeBase):
         return {key: [item for item in state[key] if json.dumps(item).find(prefix) >= 0]
                 for key in ("containers", "volumes", "networks", "images")}
 
-    def journal(self):
-        return json.loads(self.context.journal_path.read_text())
+    def operation(self, kind="purge"):
+        """PF-A3.2: (operation_id, plan, journal) of the newest operation of ``kind``."""
+        return pfx.operations_of(self.context, kind)[-1]
 
-    def plan_file(self):
-        reference = self.journal()["deletion_plan"]
-        return Path(reference["path"])
+    def journal(self, kind="purge"):
+        return self.operation(kind)[2]
+
+    def progress(self, kind="purge"):
+        path = self.context.operations_dir / self.operation(kind)[0] / "deletion-progress.json"
+        return json.loads(path.read_text()) if path.exists() else []
+
+    def plan_file(self, kind="purge"):
+        return self.context.operations_dir / self.operation(kind)[0] / "deletion-plan.json"
 
 
 @ROOT_REQUIRED
@@ -1286,16 +1295,14 @@ class ResourceInventory(PurgeHarness):
                                         (["rollback", "--restore-db"], "resource-not-owned")):
                 with self.subTest(code=code, command=arguments[0]):
                     self.state(fragment)
-                    pending = self.context.journal_path
-                    if pending.exists():
-                        pending.unlink()
+                    pfx.clear_operations(self.context)
                     deployed = self.context.state_dir / "deployed.json"
                     if arguments[0] in ("deploy", "abort-deploy") and deployed.exists():
                         deployed.unlink()
                     if arguments[0] == "abort-deploy":
-                        pf.write_json(pending, {"operation": "deploy", "phase": "starting-database",
-                                                "database": "partflow_staging", "started": "20261006T000000Z"})
-                    journal = pending.read_bytes() if pending.exists() else None
+                        # PF-A3.2: the interrupted first deployment abort-deploy supersedes (a real plan and journal).
+                        pfx.interrupted_deploy(self.context)
+                    journal = pfx.operations_bytes(self.context)
                     with self.plane():
                         code_, out, err, confirmations = self.main(*arguments, confirm=refuse_confirmation)
                     self.assertEqual(code_, 1, err)
@@ -1303,7 +1310,7 @@ class ResourceInventory(PurgeHarness):
                     self.assertIn(code, err)
                     self.assertEqual(confirmations, [])
                     self.assertEqual(self.mutations(), [])
-                    self.assertEqual(pending.read_bytes() if pending.exists() else None, journal)
+                    self.assertEqual(pfx.operations_bytes(self.context), journal)
                     pfx.deployed_record(self.context)
 
     def test_ri3_foreign_claim_blocks(self):
@@ -1348,7 +1355,8 @@ class ResourceInventory(PurgeHarness):
         self.assertIn("plan-drift: Planned volume partflow_postgres_data changed after the plan was frozen "
                       "(replaced: new creation time); deletion stopped. Already removed: 0.", err)
         self.assertEqual([argv for argv in self.mutations() if argv[:1] != ["tag"]], [])
-        self.assertEqual(self.journal()["deleted"], [])
+        self.assertEqual(self.progress(), [])
+        self.assertEqual(self.journal()["phase"], "deleting")
 
     def test_ri5_recreated_volume_mid_execution_stops_at_the_volume(self):
         sibling = self.sibling()
@@ -1363,11 +1371,11 @@ class ResourceInventory(PurgeHarness):
         self.assertIn("plan-drift: Planned volume partflow_postgres_data changed after the plan was frozen", err)
         journal = self.journal()
         self.assertEqual(journal["phase"], "deleting")
-        removed = [entry for entry in journal["deleted"] if entry["outcome"] == "removed"]
+        removed = [entry for entry in self.progress() if entry["outcome"] == "removed"]
         self.assertEqual([entry["kind"] for entry in removed], ["container"] * 3 + ["network"])
         self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["volume", "rm"]])
         code, out, err, _ = self.main("status")
-        self.assertIn("pf purge --instance staging", out)
+        self.assertIn("pf --instance staging purge: resume the frozen purge deletion", out)
         self.assertEqual(self.resources("partflow_test"), before)
 
     def test_ri6_label_or_option_change_before_the_effect_is_drift(self):
@@ -1383,7 +1391,7 @@ class ResourceInventory(PurgeHarness):
                 self.assertEqual(code, 1)
                 self.assertIn("plan-drift: Planned volume partflow_postgres_data", err)
                 self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["volume", "rm"]])
-                self.context.journal_path.unlink()
+                clear_operations(self.context)
 
     def test_ri7_replaced_container_is_drift_absent_container_is_already_absent(self):
         fragment = topology(self.context)
@@ -1395,8 +1403,9 @@ class ResourceInventory(PurgeHarness):
         code, out, err, _ = self.purge()
         self.assertEqual(code, 1)
         self.assertIn("plan-changed", err)
-        self.assertEqual(len(self.activated), 1)  # reopened; no journal is left behind
-        self.assertFalse(self.context.journal_path.exists())
+        self.assertEqual(len(self.activated), 1)  # reopened in-process; the purge closed cancelled
+        self.assertEqual(self.journal()["phase"], "cancelled")
+        self.assertEqual(open_operations(self.context), [])
         # Absent without replacement at execution time: recorded as already-absent.
         fragment = topology(self.context)
         first = fragment["containers"][0]
@@ -1405,14 +1414,12 @@ class ResourceInventory(PurgeHarness):
         with self.plane(), controller.lock("purge"):
             inventory = controller.docker_inventory()
             plan = controller.plan_for("purge", inventory, command="purge", covered_image_refs=set())
-            reference = controller.write_deletion_plan(plan)
-            pf.write_json(controller.pending, {"operation": "purge", "phase": "deleting", "deletion_plan": reference,
-                                               "deleted": []})
+            controller.write_deletion_plan(plan)
             state = self.fake.state()
             state["containers"] = [item for item in state["containers"] if item["id"] != first["id"]]
             self.fake.write_state(state)
             controller.execute_deletion_plan(plan)
-            deleted = json.loads(controller.pending.read_text())["deleted"]
+            deleted = json.loads((controller.operation_dir / "deletion-progress.json").read_text())
         self.assertEqual(deleted[0], {"kind": "container", "key": first["id"], "outcome": "already-absent"})
         replaced = topology(self.context)
         replaced_first = replaced["containers"][0]
@@ -1420,7 +1427,6 @@ class ResourceInventory(PurgeHarness):
         controller = self.controller()
         with self.plane(), controller.lock("purge"):
             plan = controller.plan_for("purge", controller.docker_inventory(), command="purge", covered_image_refs=set())
-            pf.write_json(controller.pending, {"operation": "purge", "phase": "deleting", "deleted": []})
             state = self.fake.state()
             state["containers"][0] = dict(replaced_first, id="6" * 64)
             self.fake.write_state(state)
@@ -1449,7 +1455,6 @@ class ResourceInventory(PurgeHarness):
         controller = self.controller()
         with self.plane(), controller.lock("purge"):
             plan = controller.plan_for("purge", controller.docker_inventory(), command="purge", covered_image_refs=set())
-            pf.write_json(controller.pending, {"operation": "purge", "phase": "deleting", "deleted": []})
             state = self.fake.state()
             state["containers"].append(attach["value"])
             self.fake.write_state(state)
@@ -1464,15 +1469,14 @@ class ResourceInventory(PurgeHarness):
             with self.subTest(kind):
                 fragment = topology(self.context)
                 last = fragment["containers"][-1]["id"]
-                if self.context.journal_path.exists():
-                    self.context.journal_path.unlink()
+                clear_operations(self.context)
                 self.state(fragment, hooks=[{"after_argv_prefix": ["rm", "-f", last], "mutate": [mutation]}])
                 code, out, err, _ = self.purge()
                 self.assertEqual(code, 1)
                 self.assertIn("plan-drift", err)
                 self.assertIn("resource-shared", err)
                 self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] in (["network", "rm"], ["volume", "rm"])])
-                removed = [entry["kind"] for entry in self.journal()["deleted"]]
+                removed = [entry["kind"] for entry in self.progress()]
                 self.assertEqual(removed, ["container"] * 3)
 
     def test_ri11_an_image_shared_with_another_app_keeps_the_foreign_tag(self):
@@ -1517,8 +1521,7 @@ class ResourceInventory(PurgeHarness):
                             ("by image ID", pfx.container("8" * 64, "other-app", {}, status="exited",
                                                           image=pfx.topology_image_id("a", "backend"), config_image=pfx.topology_image_id("a", "backend")))):
             with self.subTest(label):
-                if self.context.journal_path.exists():
-                    self.context.journal_path.unlink()
+                clear_operations(self.context)
                 self.state(topology(self.context), hooks=[{"after_argv_prefix": ["volume", "rm"], "mutate": [
                     {"op": "append", "list": "containers", "value": late}]}])
                 code, out, err, _ = self.purge()
@@ -1569,7 +1572,7 @@ class ResourceInventory(PurgeHarness):
         self.assertEqual(code, 1)
         self.assertIn("Interrupted by signal 15", err)
         journal = self.journal()
-        self.assertEqual((journal["phase"], journal["deleted"]), ("deleting", []))
+        self.assertEqual((journal["phase"], self.progress()), ("deleting", []))
         plan_path = self.plan_file()
         plan_bytes = plan_path.read_bytes()
         # A new owned-labelled volume outside the topology appears; resume never adds it.
@@ -1580,8 +1583,6 @@ class ResourceInventory(PurgeHarness):
         for label, mutate, restore in (
                 ("tampered byte", lambda: plan_path.write_bytes(plan_bytes.replace(b'"purge"', b'"purgE"', 1)),
                  lambda: plan_path.write_bytes(plan_bytes)),
-                ("path mismatch", lambda: self.rewrite_journal(path=str(plan_path) + ".x"),
-                 lambda: self.rewrite_journal(path=str(plan_path))),
                 ("abort-deploy plan from a purge journal",
                  lambda: self.replace_with_abort_plan(controller, plan_path), lambda: self.restore_plan(plan_path, plan_bytes))):
             with self.subTest(label):
@@ -1604,22 +1605,27 @@ class ResourceInventory(PurgeHarness):
             self.assertEqual(code, 1)
             self.assertIn("symlink", err)
             self.assertEqual(confirmations, [])
+            loader = pf.Controller(self.context)
+            loader.operation_id, loader.operation_dir = self.operation()[0], plan_path.parent
             with self.assertRaisesRegex(pf.Failure, "^plan-invalid: .*\n  detail: cannot open"):
-                pf.Controller(self.context).load_deletion_plan(self.journal(), kind="purge")
+                loader.load_frozen_deletion_plan("purge", journal["deletion"]["plan_sha256"])
         finally:
             self.unsymlink_plan(plan_path, plan_bytes)
         code, out, err, confirmations = self.purge()
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(confirmations, ["RESUME PURGE partflow " + journal["recovery"]])
+        bundle = next(item["name"] for item in journal["retained_artifacts"] if item["kind"] == "purge-bundle")
+        self.assertEqual(confirmations, ["RESUME PURGE partflow " + bundle])
         state = self.fake.state()
         self.assertEqual([item["name"] for item in state["volumes"]], ["partflow_extra"])
         self.assertFalse(state["containers"])
         self.assertFalse(state["networks"])
 
     def rewrite_journal(self, **reference):
-        journal = self.journal()
-        journal["deletion_plan"].update(reference)
-        pf.write_json(self.context.journal_path, journal)
+        """An out-of-band edit of the purge journal's deletion approval (``sha256``: the approved plan hash)."""
+        operation, _, journal = self.operation()
+        journal["deletion"]["plan_sha256"] = reference["sha256"]
+        path = self.context.operations_dir / operation / "journal.json"
+        path.write_bytes(pf_instance.normalize_json(journal))
 
     def symlink_plan(self, plan_path):
         real = plan_path.with_name("real-plan.json")
@@ -1643,18 +1649,21 @@ class ResourceInventory(PurgeHarness):
         plan_path.write_bytes(data)
         self.rewrite_journal(sha256=pf_instance.sha256_bytes(data))
 
-    def test_ri14_pre_plan_journals_are_refused_with_plan_missing(self):
+    def test_ri14_pre_plan_journals_are_refused_as_unsupported(self):
+        # PF-A3.2: a lifecycle state/pending.json (any pre-A3.2 shape) is journal-format-unsupported for every
+        # mutating route; nothing is read further and nothing is deleted.
         self.state(topology(self.context))
         recovery_id = "purge-20261006T000000Z-" + pfx.OLD[:12] + "-abcdef"
         pf.write_json(self.context.journal_path, {"operation": "purge", "phase": "deleting", "recovery": recovery_id})
         code, out, err, confirmations = self.purge(confirm=refuse_confirmation)
         self.assertEqual(code, 1)
-        self.assertIn("plan-missing: This interrupted purge predates frozen deletion plans (PF-A1.3)", err)
+        self.assertIn("journal-format-unsupported: ", err)
+        self.assertIn("records purge/deleting in a format this control does not run", err)
         (self.context.state_dir / "deployed.json").unlink()
         pf.write_json(self.context.journal_path, {"operation": "deploy", "phase": "aborting"})
         code, out, err, confirmations = self.main("abort-deploy", confirm=refuse_confirmation)
         self.assertEqual(code, 1)
-        self.assertIn("plan-missing: This interrupted abort-deploy predates", err)
+        self.assertIn("records deploy/aborting in a format this control does not run", err)
         deletions = [argv for argv in self.fake.argvs() if argv[:1] == ["rm"] or argv[1:2] == ["rm"]
                      or (argv[:1] == ["compose"] and "down" in argv)]
         self.assertEqual(deletions, [])  # (fail-closed may stop the application services; nothing is deleted)
@@ -1672,8 +1681,7 @@ class ResourceInventory(PurgeHarness):
         (self.context.state_dir / "deployed.json").unlink()
         fragment = topology(self.context)
         self.state(fragment)
-        pf.write_json(self.context.journal_path, {"operation": "deploy", "phase": "migrating-database",
-                                                  "database": "partflow_staging", "started": "20261006T000000Z"})
+        deploy_plan = interrupted_deploy(self.context)
         original_run = pf.pf_runner.ProcessRunner.run
         seen = []
 
@@ -1688,11 +1696,12 @@ class ResourceInventory(PurgeHarness):
             code, out, err, confirmations = self.main("abort-deploy")
         self.assertEqual(code, 1)
         self.assertEqual(confirmations, ["ABORT DEPLOY partflow"])
-        self.assertEqual(self.journal()["phase"], "aborting")
+        self.assertEqual(self.journal("abort-deploy")["phase"], "deleting")
         code, out, err, confirmations = self.main("abort-deploy")
         self.assertEqual(code, 0, out + err)
         self.assertEqual(confirmations, ["RESUME ABORT DEPLOY partflow"])
-        self.assertFalse(self.context.journal_path.exists())
+        self.assertEqual(open_operations(self.context), [])
+        self.assertEqual(self.operation("abort-deploy")[1]["supersedes"], deploy_plan["operation_id"])
         state = self.fake.state()
         self.assertFalse(state["containers"] or state["volumes"] or state["networks"])
         # The harness's untagged database image (PF-A3.1) is not part of the instance inventory.
@@ -1711,7 +1720,7 @@ class ResourceInventory(PurgeHarness):
                 self.assertEqual(code, 1, err)
                 self.assertIn("resource-target-not-empty: restore-instance requires an empty target", err)
                 self.assertEqual(confirmations, [])
-                self.assertFalse(self.context.journal_path.exists())
+                self.assertEqual(pfx.operations_of(self.context), [])
 
     def test_ri18_status_issues_only_read_only_calls(self):
         state = self.state(topology(self.context))
@@ -1797,7 +1806,7 @@ class ResourceInventory(PurgeHarness):
                 bundles = list((self.context.paths.recovery / PROJECT).iterdir())
                 self.assertTrue(bundles)
                 self.assertFalse([bundle for bundle in bundles if (bundle / "manifest.json").exists()])
-                self.assertFalse(self.context.journal_path.exists())
+                self.assertEqual(open_operations(self.context), [])
                 self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["rm"]])
 
     def test_ri21_a_blocker_appearing_during_the_bundle_is_plan_changed_after_the_pause(self):
@@ -1815,8 +1824,7 @@ class ResourceInventory(PurgeHarness):
         )
         for label, newcomer, reopened in variants:
             with self.subTest(label):
-                if self.context.journal_path.exists():
-                    self.context.journal_path.unlink()
+                clear_operations(self.context)
                 before = self.operation_dirs()
                 self.state(topology(self.context), hooks=[{"after_argv_prefix": ["image", "save"], "mutate": [
                     {"op": "append", "list": "containers", "value": newcomer}]}])
@@ -1837,11 +1845,12 @@ class ResourceInventory(PurgeHarness):
                 if reopened:
                     self.assertIn("The application is reopened.", err)
                     self.assertEqual(len(self.activated), 1)
-                    self.assertFalse(self.context.journal_path.exists())
+                    self.assertEqual(open_operations(self.context), [])
                 else:
                     self.assertIn("The application is NOT reopened", err)
                     self.assertEqual(self.activated, [])
-                    self.assertEqual(self.journal()["phase"], "paused")
+                    # PF-A3.2: the purge stays open in capturing; `resume` reopens once the blocker is resolved.
+                    self.assertEqual(open_operations(self.context), [("purge", "capturing")])
 
     def test_db5_resume_routes_verify_the_daemon_before_the_resume_confirmation(self):
         """Audit F3: a deleting purge journal and an aborting abort-deploy journal refuse a drifted
@@ -1863,19 +1872,18 @@ class ResourceInventory(PurgeHarness):
         for route in ("purge", "abort-deploy"):
             with self.subTest(route):
                 self.state(topology(self.context))
+                clear_operations(self.context)
                 if route == "abort-deploy":
                     (self.context.state_dir / "deployed.json").unlink()
-                    pf.write_json(self.context.journal_path, {
-                        "operation": "deploy", "phase": "migrating-database", "database": "partflow_staging",
-                        "started": "20261006T000000Z"})
+                    interrupted_deploy(self.context)
                 with mock.patch.object(pf.pf_runner.ProcessRunner, "run", interrupt_after_first_rm):
                     if route == "purge":
                         code, out, err, _ = self.purge()
                     else:
                         code, out, err, _ = self.main("abort-deploy")
                 self.assertEqual(code, 1)
-                journal_before = self.context.journal_path.read_bytes()
-                self.assertEqual(self.journal()["phase"], "deleting" if route == "purge" else "aborting")
+                journal_before = operations_bytes(self.context)
+                self.assertEqual(self.journal(route)["phase"], "deleting")
                 drift()
                 if route == "purge":
                     code, out, err, confirmations = self.purge(confirm=refuse_confirmation)
@@ -1886,8 +1894,8 @@ class ResourceInventory(PurgeHarness):
                               + pfx.ENGINE_ID, err)
                 self.assertEqual(confirmations, [])
                 self.assertEqual(self.fake.argvs(), [PROBE])
-                self.assertEqual(self.context.journal_path.read_bytes(), journal_before)
-                self.context.journal_path.unlink()
+                self.assertEqual(operations_bytes(self.context), journal_before)
+                clear_operations(self.context)
                 pfx.deployed_record(self.context)
 
     def test_ri25_inventory_tolerates_a_container_vanishing_between_listing_and_inspect(self):
@@ -1935,11 +1943,11 @@ class ResourceInventory(PurgeHarness):
 
         with controller.lock("purge"):
             plan = controller.plan_for("purge", controller.docker_inventory(), command="purge", covered_image_refs=set())
-            pf.write_json(controller.pending, {"operation": "purge", "phase": "recovery-ready"})
             with mock.patch.object(os, "fsync", record_fsync), mock.patch.object(os, "open", record_open):
                 reference = controller.write_deletion_plan(plan)
                 plan_dirs = sum(fsynced)
-                controller.durable_phase("deleting", deletion_plan=reference, deleted=[])
+                # PF-A3.2: the deletion approval is one journal generation (temp, fsync, rename, directory fsync).
+                pf_instance.write_journal_generation(controller.operation_dir, b"{}")
         self.assertGreaterEqual(plan_dirs, 1)
         self.assertGreater(sum(fsynced), plan_dirs)
         creates = [flags for path, flags in opened if "deletion-plan.json.tmp" in path]
@@ -2144,7 +2152,7 @@ class ReleaseWiring(unittest.TestCase):
             self.assertNotIn(absent, source)
 
     def test_rw6_checkpoint(self):
-        self.assertEqual(pf.CHECKPOINT, "PF-A3.1")
+        self.assertEqual(pf.CHECKPOINT, "PF-A3.2")
 
 
 if __name__ == "__main__":

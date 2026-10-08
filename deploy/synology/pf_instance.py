@@ -2271,3 +2271,219 @@ def proc_scan_available():
     except OSError:
         return False
     return True
+
+
+
+# ------------------------------------------------------------ operation store (PF-A3.2)
+# The protected operation files of SPEC section 2.2 and the fd primitives of the workspace generation switch (section
+# 3.7). Every write happens inside the held instance lock; scan_operations is read-only and never creates or repairs.
+
+OPERATION_FILES = ("plan.json", "journal.json", "attempts.json", "children.json", "deletion-progress.json",
+                   "admin-config.json")
+GENERATION_CONTAINER_PREFIX = ".pf-generations-"
+OPERATION_SCAN_LIMIT = 20000
+OPERATION_FILE_LIMIT = 4 * 1024 * 1024
+OPERATION_NAME_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\Z")
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
+
+@dataclasses.dataclass(frozen=True)
+class OperationFiles:
+    operation_id: str
+    plan_bytes: object      # bytes or None (absent)
+    journal_bytes: object   # bytes or None (absent)
+    error: object           # None, or why the directory or one of its two records cannot be read safely
+
+
+def _read_bounded_at(dir_fd, name, limit):
+    """Bytes of the regular file ``name`` below ``dir_fd`` (no-follow, at most ``limit``); None when absent."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ContextError(f"{name} is not a regular file")
+        if info.st_size > limit:
+            raise ContextError(f"{name} is larger than {limit} bytes")
+        chunks, total = [], 0
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > limit:
+                raise ContextError(f"{name} is larger than {limit} bytes")
+            chunks.append(block)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def scan_operations(operations_dir, *, limit=None):
+    """Read-only, no-follow, bounded scan of ``<private_state>/operations`` (section 3.2). Returns (entries,
+    overflow): OperationFiles for every directory entry named like an operation, and 0 or the number of entries seen
+    when more than ``limit`` (default OPERATION_SCAN_LIMIT) exist; the scan stops reading there and nothing is
+    truncated silently."""
+    limit = OPERATION_SCAN_LIMIT if limit is None else limit
+    try:
+        dir_fd = os.open(str(operations_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return (), 0
+    except OSError as exc:
+        raise ContextError(f"{operations_dir} cannot be opened safely ({exc.strerror or exc})") from exc
+    entries, seen = [], 0
+    try:
+        with os.scandir(dir_fd) as listing:
+            for item in listing:
+                seen += 1
+                if seen > limit:
+                    return tuple(sorted(entries, key=lambda entry: entry.operation_id)), seen
+                if OPERATION_NAME_RE.fullmatch(item.name):
+                    entries.append(_scan_operation(dir_fd, item.name))
+    finally:
+        os.close(dir_fd)
+    return tuple(sorted(entries, key=lambda entry: entry.operation_id)), 0
+
+
+def _scan_operation(parent_fd, name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    except OSError as exc:
+        return OperationFiles(name, None, None, "not a directory that can be opened without following a link "
+                                                f"({exc.strerror or exc})")
+    try:
+        plan = _read_bounded_at(fd, "plan.json", OPERATION_FILE_LIMIT)
+        journal = _read_bounded_at(fd, "journal.json", OPERATION_FILE_LIMIT)
+    except (OSError, ContextError) as exc:
+        return OperationFiles(name, None, None, str(getattr(exc, "strerror", None) or exc))
+    finally:
+        os.close(fd)
+    return OperationFiles(name, plan, journal, None)
+
+
+def write_plan_once(operation_dir, data):
+    """Create ``plan.json`` exactly once (O_CREAT|O_EXCL|O_NOFOLLOW, 0600), fsync it and its directory."""
+    path = Path(operation_dir) / "plan.json"
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_directory(operation_dir)
+
+
+def write_journal_generation(operation_dir, data):
+    """One journal generation: temp, fsync, atomic rename, directory fsync (section 2.2)."""
+    _write_private_file(Path(operation_dir) / "journal.json", data, 0o600)
+    _fsync_directory(operation_dir)
+
+
+def rewrite_private_list(path, entries):
+    """attempts.json / children.json / deletion-progress.json: the normalized list, written atomically (0600)."""
+    _write_private_file(path, normalize_json(list(entries)), 0o600)
+
+
+def read_private_list(path):
+    """A list written by rewrite_private_list (strict); [] when absent."""
+    try:
+        data = read_bytes_nofollow(path)
+    except FileNotFoundError:
+        return []
+    value = parse_strict_json(data, label=str(path))
+    if not isinstance(value, list):
+        raise ContextError(f"{path} is not a JSON list")
+    return value
+
+
+def boot_id():
+    """The kernel boot ID (36 characters), or None when it cannot be read (the host-side probe is then disabled)."""
+    try:
+        with open(BOOT_ID_PATH, "rb") as stream:
+            value = stream.read(64).decode("ascii", "replace").strip()
+    except OSError:
+        return None
+    return value if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value) else None
+
+
+def process_start_ticks(pid):
+    """Field 22 (starttime) of ``/proc/<pid>/stat``, or None when the process or /proc is not readable."""
+    try:
+        with open(f"{PROC_ROOT}/{int(pid)}/stat", "rb") as stream:
+            text = stream.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+    # The fields after "(comm)" start with field 3 (state); starttime is field 22.
+    fields = text.rsplit(")", 1)[-1].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def identity_at(dir_fd, name):
+    """(st_dev, st_ino) of ``name`` below ``dir_fd`` without following a link, or None when absent."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def rename_noreplace_at(src_dir_fd, src_name, dst_dir_fd, dst_name):
+    """Rename ``src_name`` to ``dst_name`` (descriptor-relative) only while the destination does not exist (even an
+    empty directory that rename(2) would replace refuses), then fsync both directories."""
+    if identity_at(dst_dir_fd, dst_name) is not None:
+        raise ContextError(f"{dst_name} already exists; it is never replaced")
+    os.rename(src_name, dst_name, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+    os.fsync(dst_dir_fd)
+    if src_dir_fd != dst_dir_fd:
+        os.fsync(src_dir_fd)
+
+
+def generation_container(context):
+    """The workspace generation container of an instance: ``<workspace parent>/.pf-generations-<instance-uuid>``."""
+    workspace = context.paths.workspace
+    return workspace.parent / (GENERATION_CONTAINER_PREFIX + context.instance_id)
+
+
+def generation_container_problem(parent_fd, name, workspace_dev):
+    """None when ``name`` below ``parent_fd`` is absent or a usable container: a root-owned 0700 directory (no link,
+    no ACL) on the workspace device; else why it is unsafe (section 3.7 generation-container-unsafe)."""
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return "the container is a symbolic link"
+    if not stat.S_ISDIR(info.st_mode):
+        return "the container is not a directory"
+    if info.st_uid != TRUSTED_UID:
+        return f"the container is owned by uid {info.st_uid}"
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        return f"the container mode is {stat.S_IMODE(info.st_mode):04o}, not 0700"
+    if info.st_dev != workspace_dev:
+        return "the container is on another device than the workspace"
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    try:
+        if inspect_acl_fd(fd).state.kind != "none":
+            return "the container carries an ACL"
+    finally:
+        os.close(fd)
+    return None
+
+
+def create_generation_container(parent_fd, name):
+    """Exclusive mkdir of the container (0700, root), fchmod, parent fsync (W1 step 1)."""
+    os.mkdir(name, 0o700, dir_fd=parent_fd)
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+    os.fsync(parent_fd)

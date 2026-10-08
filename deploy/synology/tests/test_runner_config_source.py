@@ -1493,21 +1493,23 @@ class ProvenanceWithoutGit(Base):
             with self.subTest(candidate_entry=relative):
                 candidate = candidate_with(relative)
                 with self.c.lock():
-                    pf.write_json(self.c.pending, {"operation": "update", "phase": "x"})
+                    # PF-A3.2: the staging effect refuses the candidate; the workspace switch never starts.
                     with self.assertRaisesRegex(pf.Failure, "cannot verify"):
-                        self.c.replace_source(candidate, pfx.NEW)
-                    self.c.pending.unlink()
+                        pfx.run_workspace_switch(self.c, candidate, pfx.NEW)
                 self.assertEqual(pfx.snapshot_tree(self.workspace), before)
                 self.assertEqual(self.context.source_manifest_path.read_bytes(), manifest_before)
         with self.c.lock():
             with self.assertRaisesRegex(pf.Failure, "cannot verify"):
-                self.c.replace_source_for_recovery(candidate_with("nested/node_modules/tracked.js"), pfx.NEW)
+                pfx.run_workspace_switch(self.c, candidate_with("nested/node_modules/tracked.js"), pfx.NEW,
+                                         verified=False)
         self.assertEqual(pfx.snapshot_tree(self.workspace), before)
         self.assertEqual(self.context.source_manifest_path.read_bytes(), manifest_before)
-        # A v1 bundle's top-level runtime .env is stripped from the candidate first (it is runtime
-        # configuration, never source), so the restored workspace and its manifest carry no .env.
+        # A recovered tree of unknown provenance (the restore removes a v1 bundle's top-level runtime .env from it
+        # first: test_artifacts PB-12/LG-10) is recorded with unknown provenance and compares clean.
+        recovered = self.base / "candidate-recovered"
+        pfx.source_fixture(recovered, pfx.NEW)
         with self.c.lock():
-            self.c.replace_source_for_recovery(candidate_with(".env"), pfx.NEW, verified=False)
+            pfx.run_workspace_switch(self.c, recovered, pfx.NEW, verified=False)
         self.assertFalse((self.workspace / ".env").exists())
         self.assertEqual(self.c.workspace_status()["provenance"], "unknown")
         self.assertFalse(self.c.workspace_status()["dirty"])
@@ -1530,9 +1532,7 @@ class ProvenanceWithoutGit(Base):
         candidate = self.base / "candidate"
         pfx.source_fixture(candidate, pfx.NEW)
         with self.c.lock():
-            pf.write_json(self.c.pending, {"operation": "update", "phase": "x"})
-            self.c.replace_source(candidate, pfx.NEW)
-            self.c.pending.unlink()
+            pfx.run_workspace_switch(self.c, candidate, pfx.NEW)
         status = self.c.workspace_status()
         self.assertEqual((status["head"], status["dirty"], status["provenance"]), (pfx.NEW, False, "git_commit"))
         manifest = pf_source.load_manifest(self.context.source_manifest_path, pf_instance.parse_strict_json)
@@ -1541,10 +1541,8 @@ class ProvenanceWithoutGit(Base):
         (candidate / "evil-link").symlink_to("/etc/passwd")
         before = pfx.snapshot_tree(self.workspace)
         with self.c.lock():
-            pf.write_json(self.c.pending, {"operation": "update", "phase": "x"})
-            with self.assertRaises(pf.Failure):
-                self.c.replace_source(candidate, pfx.NEW)
-            self.c.pending.unlink()
+            with self.assertRaisesRegex(pf.Failure, "deployment-stage-failed"):
+                pfx.run_workspace_switch(self.c, candidate, pfx.NEW)
         self.assertEqual(pfx.snapshot_tree(self.workspace), before)
 
 

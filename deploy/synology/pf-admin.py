@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import dataclasses
 import datetime as dt
 import errno
@@ -62,7 +63,7 @@ pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A3.1"
+CHECKPOINT = "PF-A3.2"
 PAGE_SIZE = 10
 # Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
 # security floor (every child has a deadline and a bounded, redacted capture) is here.
@@ -164,6 +165,14 @@ class PlanChanged(Failure):
     def __init__(self, message, checkpoint):
         super().__init__(message)
         self.checkpoint = checkpoint
+
+
+class StageFailed(Failure):
+    """PF-A3.2: the source-stage effect failed; only private files were written (section 3.1 step 4)."""
+
+    def __init__(self, detail):
+        super().__init__(f"deployment-stage-failed: {detail}")
+        self.detail = detail
 
 
 class DaemonFailure(Failure):
@@ -454,10 +463,11 @@ def create_source_archive(root, destination):
         raise Failure(f"Source backup refuses this tree: {exc}") from exc
 
 
-def lifecycle_errors(value, name):
-    """Schema (A1 subset + A2.1 markers) and then cross-field problems of one lifecycle record; [] when valid."""
+def lifecycle_errors(value, name, *, plan=None):
+    """Schema (A1 subset + A2.1 markers) and then cross-field problems of one lifecycle record; [] when valid.
+    PF-A3.2: a journal is checked against its ``plan`` when one is given."""
     errors = pf_install.validate_marked(value, LIFECYCLE_DEFS[name], defs=LIFECYCLE_DEFS)
-    return errors or pf_config.lifecycle_problems(value, name)
+    return errors or pf_config.lifecycle_problems(value, name, plan=plan)
 
 
 def bundle_failure(code, bundle_id, detail, *, tail="Nothing was changed."):
@@ -1386,48 +1396,112 @@ def depth_order(relative):
     return (-(relative.count("/") + 1) if relative else 0, relative)
 
 
-# Explicit routes into a pending journal (LIFECYCLE.md section 1, step 2). A
-# command absent from this table is refused while a journal exists. Each
-# handler still validates the exact journal state it accepts; the table only
-# replaces the former blanket ``allow_pending`` bypass.
+@dataclasses.dataclass(frozen=True)
+class OperationView:
+    """PF-A3.2 (section 4.2): what a PENDING_ROUTES predicate sees of the blocking operation. A permissions view has
+    ``kind == "permissions"``, the A2.3 phase and no plan or journal."""
+
+    kind: str
+    phase: str
+    plan: object = None
+    journal: object = None
+
+    def effect_state(self, effect_id):
+        return pf_config.effect_state(self.journal, effect_id) if self.journal is not None else None
+
+
+def _view_index(view):
+    """A one-operation OperationIndex of ``view`` (the gate's input for a PENDING_ROUTES predicate)."""
+    if view.kind == "permissions":
+        return pf_config.OperationIndex((), (), (), (), {"operation": "permissions", "phase": view.phase,
+                                                         "operation_id": "permissions"}, None, False, None, 0)
+    entry = pf_config.OperationEntry(view.plan["operation_id"], "blocking", plan=view.plan, journal=view.journal)
+    return pf_config.OperationIndex((entry,), (entry,), (), (), None, None, False, None, 0)
+
+
+def _gate_accepts(route):
+    """A PENDING_ROUTES predicate: whether the section 3.3 gate lets ``route`` act next to ``view`` (enter it as
+    resume or an alias, supersede it, or run beside it)."""
+    def accepts(view):
+        bundle = (view.plan or {}).get("input_bundle") or {}
+        decision = pf_config.gate_decision(_view_index(view), route, slug="instance",
+                                           request={"bundle_id": bundle.get("bundle_id")})
+        return decision.action != "refuse"
+
+    return accepts
+
+
+# Explicit routes next to an open operation (LIFECYCLE.md section 1, step 2; PF-A3.2 section 3.3). A command absent
+# from this table is refused while an operation is open. The predicates are the section 3.3 gate itself
+# (pf_config.gate_decision); the descriptions are the human text of each route.
 PENDING_ROUTES = {
     "resume": (
-        lambda journal: journal.get("phase") in ("paused", "backup-ready"),
-        "resume the unchanged deployment after a pre-change failure",
+        _gate_accepts("resume"),
+        "continue the interrupted operation from its journal (or reopen the unchanged deployment when no data or "
+        "source effect started)",
     ),
     "rollback": (
-        lambda journal: journal.get("operation") in ("update", "rollback", "reset-db"),
+        _gate_accepts("rollback"),
         "roll back to a healthy checkpoint (use --restore-db when data/schema may have changed; an emergency or "
         "partial capture is evidence and data, never a rollback target)",
     ),
     "abort-deploy": (
-        lambda journal: journal.get("operation") == "deploy",
+        _gate_accepts("abort-deploy"),
         "remove the incomplete first deployment before frontend access opened",
     ),
     "purge": (
-        lambda journal: journal.get("operation") == "purge" and journal.get("phase") == "deleting",
+        _gate_accepts("purge"),
         "resume the recorded purge deletion plan with the already verified recovery bundle",
     ),
     # PF-A2.3: the open permission apply journal (section 3.7).
     "permissions apply": (
-        lambda journal: journal.get("operation") == "permissions",
+        _gate_accepts("permissions apply"),
         "resume (--resume) or compensate (--abandon) the interrupted permission apply; once its permission policy "
         "revision is written only --resume is legal",
     ),
-    # PF-A3.1: an attended emergency capture next to an interrupted lifecycle operation; it never reads or writes
-    # pending.json (section 4.2).
+    # PF-A3.1: an attended emergency capture next to an interrupted lifecycle operation; journal-less (section 4.2).
     "backup emergency": (
-        lambda journal: journal.get("operation") in ("deploy", "update", "rollback", "reset-db"),
+        _gate_accepts("backup emergency"),
         "capture the current data as emergency preservation (does not change the interrupted operation)",
+    ),
+    # PF-A3.2 (section 4.2): the two routes whose DISPATCH pending cell became their own name.
+    "backup": (
+        _gate_accepts("backup"),
+        "resume the interrupted backup (`pf backup` aliases `pf resume`), or capture a manual backup while an "
+        "activated deployment waits for its workspace refresh",
+    ),
+    "restore-instance": (
+        _gate_accepts("restore-instance"),
+        "resume the interrupted exact restore of the same bundle (`pf restore-instance <same bundle>` aliases "
+        "`pf resume`)",
     ),
 }
 # The CLI spelling of a route whose DISPATCH key is not its command line (section 4.2).
-PENDING_ROUTE_COMMANDS = {"backup emergency": "backup --emergency"}
-# Journal keys shown by diagnostics. Anything else is reported by name only.
-JOURNAL_PUBLIC_KEYS = (
-    "operation", "phase", "started", "recovery", "active_checkpoint", "checkpoint", "selected",
-    "database", "migration_required", "delete_backups", "reset_admin_config",
-)
+PENDING_ROUTE_COMMANDS = dict(pf_config.ROUTE_COMMANDS)
+# PF-A3.2: the routes whose resume uses the frozen admin configuration of the operation they may alias (section 3.8).
+ALIAS_ROUTES = {"purge": "purge", "restore-instance": "restore-instance", "abort-deploy": "abort-deploy",
+                "backup": "backup"}
+# Lifecycle routes that freeze the admin configuration with their operation (section 3.8; not config/permissions).
+LIFECYCLE_ROUTES = frozenset({"deploy", "update", "rollback", "reset-db", "backup", "purge", "restore-instance",
+                              "abort-deploy", "resume", "backup emergency", "release-check"})
+CRASH_POINTS = ("before-intent", "after-intent", "after-effect")
+
+
+class SimulatedCrash(BaseException):
+    """Test seam (section 6): raised by Controller._crash_point; bypasses every ``except Exception`` and fail_closed,
+    as a dying process does. Never raised in production (the seam is None and not settable from the CLI)."""
+
+
+class EffectStep:
+    """The mutable record of one running effect (section 3.1 step 4): evidence, retained artifacts and whether the
+    step proved a partial state."""
+
+    def __init__(self, effect, evidence=None):
+        self.effect = effect
+        self.evidence = evidence
+        self.retained = []
+        self.partial = False
+        self.outcome = "complete"
 
 
 class Controller:
@@ -1487,6 +1561,22 @@ class Controller:
         self._current_scope = None
         self.permission_fault = None
         self.permission_hook = None
+        # PF-A3.2: the operation this process opened or re-entered (plan, its hash and the latest journal generation),
+        # the gate's decision, the effect a child belongs to, the frozen admin configuration source chosen before the
+        # lock, and the in-process crash seam of the tests (section 6; None in production, never settable from the CLI).
+        self.plan = None
+        self.plan_sha256 = None
+        self.journal = None
+        self.gate = None
+        self._current_effect = None
+        self._config_entry = None
+        self._crash_point = None
+        self._deployed_tree = None
+        self._workspace_note = None
+        self._config_bytes = None
+        self._interval_entry = None
+        self._config_selected = False
+        self._reentered = False
 
     def ensure_config(self):
         """Load the runtime configuration once (read-only); return the cached values."""
@@ -1508,6 +1598,9 @@ class Controller:
         Missing or invalid configuration is a diagnostic failure; the file is
         never created from the template or rewritten here.
         """
+        if self._config_entry is not None:
+            # PF-A3.2 (section 3.8): a resumed operation parses the copy it froze, never the editable file.
+            return self.load_frozen_admin_config(self._config_entry)
         path = self.config_dir / "pf-config.json"
         try:
             data = pf_instance.read_bytes_nofollow(path)
@@ -1516,6 +1609,13 @@ class Controller:
                 f"Runtime configuration is missing or unreadable: {path} ({exc.strerror}). "
                 f"The controller does not create it; create it with '{self.pf_command()} config admin'."
             ) from exc
+        config = self.parse_app_config(data, str(path))
+        self._config_bytes = data
+        return config
+
+    def parse_app_config(self, data, label):
+        """The shared parse and binding checks of pf-config.json bytes (the editable file or a frozen copy)."""
+        path = label
         # PF-A2.1: the parse and shape rules are shared with the installer; the first problem is raised with the
         # unchanged message. PF-A2.2: both schemas are read as they are (schema 1 with its frozen implicit values);
         # loading never migrates (INV-06).
@@ -1678,10 +1778,9 @@ class Controller:
             head = (f"Docker daemon drift: instance {context.slug} is bound to engine {context.daemon.engine_id} at "
                     f"{endpoint}, but the endpoint answers as engine {detail}.")
             if self.effects_started:
-                journal = self.read_journal() or {}
-                operation = journal.get("operation") or self._operation_command or "the operation"
+                operation = (self.plan or {}).get("kind") or self._operation_command or "the operation"
                 text = (head + f" Every further Docker/Compose step is refused. {operation} stopped in phase "
-                        f"{journal.get('phase') or 'unknown'}; review it with 'pf status --instance {context.slug}'. "
+                        f"{(self.journal or {}).get('phase') or 'unknown'}; review it with 'pf status --instance {context.slug}'. "
                         "Re-binding a daemon is an explicit installation transaction (PF-A2).")
             else:
                 text = head + (" Every Docker/Compose step is refused and nothing was changed. Re-binding a daemon is "
@@ -2092,34 +2191,18 @@ class Controller:
         pf_config._write_private(path, data, 0o600)
         return {"operation_id": self.operation_id, "path": str(path), "sha256": pf_instance.sha256_bytes(data)}
 
-    def durable_phase(self, phase, **fields):
-        """``phase()`` plus an fsync of the state directory (deletion-plan journal writes)."""
-        self.phase(phase, **fields)
-        directory = os.open(str(self.state), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-
-    def load_deletion_plan(self, journal, *, kind):
-        """The frozen plan the journal references: exact path, regular file, hash, instance, kind, operation."""
+    def load_frozen_deletion_plan(self, kind, expected_sha256):
+        """The frozen deletion plan of this operation (``deletion-plan.json`` in its own directory): exact path,
+        regular file, hash, instance, kind and operation (PF-A3.2: the hash comes from the plan or the journal's
+        deletion approval)."""
         def invalid(detail):
-            return Failure("plan-invalid: The frozen deletion plan for this journal is missing, not the expected "
+            return Failure("plan-invalid: The frozen deletion plan of this operation is missing, not the expected "
                            "regular file, of the wrong kind or operation, or does not match its recorded hash; "
                            "nothing was deleted.\n  detail: " + detail)
 
-        reference = journal.get("deletion_plan")
-        if not isinstance(reference, dict) or set(reference) != {"operation_id", "path", "sha256"} \
-                or not all(isinstance(value, str) for value in reference.values()):
-            raise invalid("journal reference is malformed")
-        operation_id = reference["operation_id"]
-        if not OPERATION_ID_RE.fullmatch(operation_id):
-            raise invalid("operation id is malformed")
-        expected = self.context.operations_dir / operation_id / "deletion-plan.json"
-        if reference["path"] != str(expected):
-            raise invalid("path is not the operation's deletion-plan.json")
+        path = self.operation_dir / "deletion-plan.json"
         try:
-            fd = os.open(str(expected), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except OSError as exc:
             raise invalid(f"cannot open: {exc.strerror or exc}") from exc
         try:
@@ -2134,10 +2217,18 @@ class Controller:
         finally:
             os.close(fd)
         try:
-            return pf_docker.load_plan(b"".join(chunks), expected_sha256=reference["sha256"],
-                                       instance_id=self.context.instance_id, kind=kind, operation_id=operation_id)
+            return pf_docker.load_plan(b"".join(chunks), expected_sha256=expected_sha256,
+                                       instance_id=self.context.instance_id, kind=kind, operation_id=self.operation_id)
         except pf_docker.DockerScopeError as exc:
             raise invalid("; ".join(finding.message for finding in exc.findings)) from exc
+
+    def deletion_progress(self):
+        """The A1.3 deletion entries of this operation (``deletion-progress.json``); [] before the first item."""
+        try:
+            return pf_instance.read_private_list(self.operation_dir / "deletion-progress.json")
+        except pf_instance.ContextError as exc:
+            raise Failure(f"plan-invalid: deletion-progress.json of operation {self.operation_id} is unreadable "
+                          f"({exc}); nothing was deleted.") from exc
 
     def plan_drift(self, kind, key, reason, deleted):
         removed = sum(1 for entry in deleted if entry.get("outcome") == "removed")
@@ -2151,21 +2242,14 @@ class Controller:
             raise self.plan_drift("daemon", plan["daemon"]["engine_id"],
                                   "the endpoint answers as engine " + observation.engine_id, deleted)
 
-    def verify_resume_daemon(self, plan, journal):
-        """Resume routes: the bound daemon and the plan's engine are verified before the RESUME prompt,
-        so a drifted, rootless or unreachable daemon refuses with its daemon-* copy and no confirmation."""
-        self.require_plan_engine(plan, self.verify_daemon(), list(journal.get("deleted") or []))
-
     def execute_deletion_plan(self, plan):
         """Execute exactly the frozen plan: re-observe every item and its users before its effect.
 
-        Never prunes, never ``compose down``, never forces an image removal. The journal's
-        ``deleted`` list is persisted durably after each item, so a resume continues the same
-        closed plan and never adds a resource.
+        Never prunes, never ``compose down``, never forces an image removal. PF-A3.2: the deleted
+        list is persisted durably in ``deletion-progress.json`` after each item, so a resume continues
+        the same closed plan and never adds a resource.
         """
-        journal = load_json(self.pending)
-        deleted = list(journal.get("deleted") or [])
-        phase = journal.get("phase")
+        deleted = self.deletion_progress()
         try:
             observation = self.verify_daemon(refresh=True)
         except DaemonFailure as exc:
@@ -2226,7 +2310,7 @@ class Controller:
                     raise Failure(f"plan-effect-unconfirmed: {item['kind']} {item['key']} is still present after "
                                   "removal; deletion stopped and the journal keeps the plan.")
                 deleted.append({"kind": item["kind"], "key": item["key"], "outcome": "removed"})
-            self.durable_phase(phase, deleted=deleted)
+            pf_instance.rewrite_private_list(self.operation_dir / "deletion-progress.json", deleted)
         return deleted
 
     # --------------------------------------------- application configuration (PF-A1.2)
@@ -2276,20 +2360,25 @@ class Controller:
             raise Failure("Missing installed control/compose.nas.yaml.")
         return self.load_app_env()
 
-    def freeze_app_config(self, *, explicit=False):
+    def freeze_app_config(self, *, explicit=False, source_bytes=None):
         """Render the current ``config/.env`` into the operation's private immutable snapshot.
 
         Implicitly (from ``lock``) it freezes once; a later implicit call only verifies that
         the editable file still equals the frozen source. ``explicit=True`` is used by the
-        operations that create or restore ``.env`` themselves.
+        operations that create or restore ``.env`` themselves. PF-A3.2: ``source_bytes`` (restore-instance) freezes
+        the verified bundle ``.env`` bytes instead of the editable file, before the plan is written (section 3.4).
         """
         if self.operation_dir is None:
             raise Failure("Application configuration can only be frozen inside a locked operation.")
         path = self.config_dir / ".env"
-        try:
-            data = pf_instance.read_bytes_nofollow(path)
-        except OSError as exc:
-            raise Failure(f"Cannot read {path}: {exc.strerror or exc}") from exc
+        if source_bytes is not None:
+            data = bytes(source_bytes)
+            explicit = True
+        else:
+            try:
+                data = pf_instance.read_bytes_nofollow(path)
+            except OSError as exc:
+                raise Failure(f"Cannot read {path}: {exc.strerror or exc}") from exc
         if self.frozen is not None and not explicit:
             if pf_instance.sha256_bytes(data) != self.frozen.source_sha256:
                 raise Failure("config/.env changed after this operation froze it; the operation stops and "
@@ -2363,8 +2452,58 @@ class Controller:
             "control_sha256": context.control.sha256, "profile_sha256": context.profile.sha256,
             "policy_revision": context.approved_policy.revision, "policy_sha256": context.approved_policy.sha256,
         })
+        if str(command) in LIFECYCLE_ROUTES:
+            self.freeze_admin_config()
         if freeze and (self.config_dir / ".env").is_file():
             self.freeze_app_config()
+
+    def freeze_admin_config(self):
+        """PF-A3.2 (section 3.8): the exact bytes of ``config/pf-config.json`` become ``admin-config.json`` (0400) and
+        this operation parses only them from here on. A missing file freezes nothing (the routes that need it refused
+        before the lock)."""
+        path = self.config_dir / "pf-config.json"
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise Failure(f"Cannot read {path}: {exc.strerror or exc}") from exc
+        pf_instance._write_private_file(self.operation_dir / "admin-config.json", data, 0o400)
+        if self._config is None or self._config_bytes != data:
+            self._config = self.parse_app_config(data, str(path))
+            self._config_bytes = data
+        return {"sha256": pf_instance.sha256_bytes(data), "bytes": len(data)}
+
+    def admin_config_ref(self):
+        """$defs.config_ref of this operation's frozen admin configuration, or None."""
+        try:
+            data = pf_instance.read_bytes_nofollow(self.operation_dir / "admin-config.json")
+        except FileNotFoundError:
+            return None
+        return {"sha256": pf_instance.sha256_bytes(data), "bytes": len(data)}
+
+    def load_frozen_admin_config(self, entry):
+        """The admin configuration operation ``entry`` froze, verified against its plan (section 3.8); a note when the
+        editable file differs or is absent."""
+        expected = entry.plan.get("admin_config") if entry.plan else None
+        path = self.context.operations_dir / entry.operation_id / "admin-config.json"
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except OSError as exc:
+            raise Failure(f"plan-input-changed: the frozen admin configuration of operation {entry.operation_id} "
+                          f"is unreadable ({exc.strerror or exc}). Nothing was changed.") from exc
+        if expected is None or pf_instance.sha256_bytes(data) != expected["sha256"] or len(data) != expected["bytes"]:
+            raise Failure(f"plan-input-changed: the frozen admin configuration of operation {entry.operation_id} no "
+                          "longer matches its plan (admin-config.json hash). Nothing was changed.")
+        config = self.parse_app_config(data, str(path))
+        try:
+            editable = pf_instance.read_bytes_nofollow(self.config_dir / "pf-config.json")
+        except OSError:
+            editable = None
+        if editable != data:
+            log(f"note: admin-config-proposal-differs: config/pf-config.json differs from (or is missing against) the "
+                f"copy operation {entry.operation_id} froze; it stays a proposal.")
+        return config
 
     def reset_operation_scope(self, command=None):
         """Per-operation Docker-scope state (PF-A1.3); the daemon verification is per process."""
@@ -2379,47 +2518,85 @@ class Controller:
         self.operation_id = None
         self.operation_dir = None
         self._snapshots = 0
+        self.plan = self.plan_sha256 = self.journal = None
+        self._current_effect = None
+        self.release_deployed_tree()
         self.reset_operation_scope()
         if self._runner is not None:
             self._runner.effects_path = None
+            self._runner.spawn_callback = None
 
-    def unresolved_effects(self):
-        """Every recorded unresolved effect of earlier operations (protected private state, read-only)."""
-        records = []
+    # ------------------------------------------- operation index and journal (PF-A3.2 sections 3.1-3.3)
+
+    def operation_index(self):
+        """Read-only (section 3.2): the classified operations of this instance. Never creates or repairs anything; an
+        operations directory that cannot be opened safely is fail-closed evidence (every mutating route refuses)."""
         try:
-            names = sorted(os.listdir(self.context.operations_dir))
+            files, overflow = pf_instance.scan_operations(self.context.operations_dir,
+                                                          limit=pf_instance.OPERATION_SCAN_LIMIT)
+        except pf_instance.ContextError as exc:
+            files, overflow = (pf_instance.OperationFiles("00000000T000000Z-operations-00000000", None, None,
+                                                          str(exc)),), 0
+        try:
+            pending = pf_instance.read_bytes_nofollow(self.pending)
+        except FileNotFoundError:
+            pending = None
         except OSError:
-            return records
+            pending = b"\x00unreadable"
+        return pf_config.classify_operations(
+            files, permissions_journal=pending, overflow=overflow,
+            validate=lambda value, name, plan=None: lifecycle_errors(value, name, plan=plan))
+
+    def runner_records(self, index=None):
+        """Section 3.11a: every runner record (``unresolved-effects.json``) with its ownership, as
+        [(record, "open" | "reconciled", sequence)]. Read-only; the files are never edited or deleted."""
+        index = index if index is not None else self.operation_index()
+        found = []
+        try:
+            names = sorted(os.listdir(str(self.context.operations_dir)))
+        except OSError:
+            return found
         for name in names:
             path = self.context.operations_dir / name / "unresolved-effects.json"
+            if not os.path.lexists(str(path)):
+                continue
             try:
-                for item in pf_runner.load_unresolved_effects(path):
-                    records.append(dict(item, operation_id=name))
+                items = pf_runner.load_unresolved_effects(path)
             except pf_runner.RunnerError as exc:
-                records.append({"operation_id": name, "outcome": "unreadable", "tool": "?", "argv": [],
-                                "recorded_at": "?", "error": str(exc)})
-        return records
+                found.append(({"operation_id": name, "outcome": "unreadable", "tool": "?", "argv": [],
+                               "recorded_at": "?", "error": str(exc)}, "open", None))
+                continue
+            state, sequence = pf_config.runner_records_state(index.entry(name), index)
+            for item in items:
+                found.append((dict(item, operation_id=name), state, sequence))
+        return found
 
-    def log_effects(self):
-        records = self.unresolved_effects()
+    def unresolved_effects(self, index=None):
+        """The open runner records of section 3.11a (records of a journaled, terminal operation are reconciled)."""
+        return [record for record, state, _ in self.runner_records(index) if state == "open"]
+
+    @staticmethod
+    def _record_summary(item):
+        effect = item.get("effect")
+        if isinstance(effect, dict):
+            # The descriptor names what to reconcile (kind, verb, targets); argv is the detail.
+            return " ".join(str(part) for part in (effect.get("kind"), effect.get("verb"), effect.get("service"),
+                                                   effect.get("database"), *(effect.get("targets") or []),
+                                                   effect.get("statement")) if part)
+        return " ".join(item.get("argv", []))[:120]
+
+    def log_effects(self, index=None):
+        records = self.unresolved_effects(index)
         if not records:
             return
         log(f"UNRESOLVED EFFECTS recorded by earlier operations: {len(records)} (observe before retrying):")
         for item in records[-10:]:
-            effect = item.get("effect")
-            if isinstance(effect, dict):
-                # The descriptor names what to reconcile (kind, verb, targets); argv is the detail.
-                summary = " ".join(str(part) for part in (effect.get("kind"), effect.get("verb"),
-                                                          effect.get("service"), effect.get("database"),
-                                                          *(effect.get("targets") or []),
-                                                          effect.get("statement")) if part)
-            else:
-                summary = " ".join(item.get("argv", []))[:120]
             log(f"  {item.get('recorded_at')} {item.get('operation_id')}: {item.get('tool')} "
-                f"{summary} -> {item.get('outcome')}")
+                f"{self._record_summary(item)} -> {item.get('outcome')}")
 
     def read_journal(self):
-        """Return the pending journal, None, or an unreadable-journal marker. Never creates or repairs it."""
+        """The A2.3 permissions apply journal (``state/pending.json``), None, or an unreadable-journal marker. Never
+        creates or repairs it. PF-A3.2: lifecycle operations never write it (their journals live under operations/)."""
         try:
             data = pf_instance.read_bytes_nofollow(self.pending)
         except FileNotFoundError:
@@ -2434,30 +2611,347 @@ class Controller:
             return {"operation": "<unreadable>", "phase": "<unreadable>", "error": "journal is not a JSON object"}
         return journal
 
-    def legal_routes(self, journal):
-        routes = []
-        for command, (predicate, description) in PENDING_ROUTES.items():
-            try:
-                accepted = bool(predicate(journal))
-            except (TypeError, AttributeError):
-                accepted = False
-            if accepted:
-                routes.append(f"pf {PENDING_ROUTE_COMMANDS.get(command, command)} --instance {self.context.slug}: "
-                              f"{description}")
-        return routes
+    def plan_effect(self, effect_id):
+        for effect in self.plan["effects"]:
+            if effect["effect_id"] == effect_id:
+                return effect
+        raise Failure(f"Internal error: effect {effect_id} is not in the plan of operation {self.operation_id}.")
 
-    def check_pending_route(self, journal, command):
-        route = PENDING_ROUTES.get(command)
-        if route is not None and route[0](journal):
+    def effect_state(self, effect_id):
+        return pf_config.effect_state(self.journal, effect_id)
+
+    def effects_of(self, role=None, *, type=None, target=None):
+        """The plan effects with ``role`` (pf_config.effect_role), ``type`` or a ``target`` prefix."""
+        found = []
+        for effect in self.plan["effects"]:
+            if role is not None and pf_config.effect_role(effect) != role:
+                continue
+            if type is not None and effect["type"] != type:
+                continue
+            if target is not None and not effect["target"].startswith(target):
+                continue
+            found.append(effect)
+        return found
+
+    @staticmethod
+    def precondition(effect, key):
+        """The value of the ``<key>:<value>`` precondition of a plan effect, or None."""
+        for item in effect["preconditions"]:
+            if item.startswith(key + ":"):
+                return item[len(key) + 1:]
+        return None
+
+    def _journal_draft(self, plan, plan_sha256, deletion, confirmed):
+        journal = {
+            "schema_version": 1, "operation_id": plan["operation_id"], "plan_sha256": plan_sha256,
+            "kind": plan["kind"], "sequence": 1, "phase": "planned", "updated_at": utc(),
+            "approvals": [{"plan_sha256": plan_sha256, "confirmed_at": confirmed, "method": "typed-phrase"}]
+            if plan["confirmation"] is not None else [],
+            "effects": [{"effect_id": effect["effect_id"], "state": "not_started", "observed_at": None,
+                         "evidence": None} for effect in plan["effects"]],
+            "unresolved_effect": None, "retained_artifacts": [], "last_error": None, "legal_next": [],
+            "result": None, "deletion": deletion}
+        journal["legal_next"] = pf_config.legal_next(plan, journal, slug=self.context.slug)
+        return journal
+
+    def permission_policy_ref(self):
+        found = self.read_permission_record()
+        if found is None:
+            return None
+        return {"revision": found[0]["revision"], "sha256": pf_instance.sha256_bytes(found[1])}
+
+    def open_operation(self, kind, *, effects, workspace, confirmation, images, source, coverage=(), supersedes=None,
+                       input_bundle=None, deletion=None, inventory_sha256=None, deletion_plan_sha256=None):
+        """Section 3.1 steps 2-3: the frozen OperationPlan (validated, exclusive create) and journal generation 1,
+        right after the final confirmation and before the first effect. A problem is an internal error raised before
+        any write."""
+        if self.operation_dir is None or self.plan is not None:
+            raise Failure("Internal error: an operation plan is written once, inside its locked operation.")
+        numbered = []
+        for index, effect in enumerate(effects, 1):
+            numbered.append({"effect_id": f"e{index:04d}", "type": effect["type"], "target": effect["target"],
+                             "phase": effect["phase"], "preconditions": [str(item) for item in
+                                                                          effect.get("preconditions", ())],
+                             "postcondition": effect["postcondition"],
+                             "preservation_refs": list(effect.get("preservation_refs", ()))})
+        context = self.context
+        frozen_ref = None
+        if self.frozen is not None:
+            rendered = pf_instance.read_bytes_nofollow(self.frozen.env_file)
+            frozen_ref = {"sha256": pf_instance.sha256_bytes(rendered), "bytes": len(rendered)}
+        plan = {
+            "schema_version": 1, "operation_id": self.operation_id, "kind": kind, "created_at": utc(),
+            "instance": {"instance_id": context.instance_id, "slug": context.slug,
+                         "compose_project": context.compose_project, "daemon_engine_id": context.daemon.engine_id,
+                         "record_sha256": context.record_sha256},
+            "producer": self.producer(),
+            "environment_policy": {"revision": context.approved_policy.revision,
+                                   "sha256": context.approved_policy.sha256},
+            "permission_policy": self.permission_policy_ref(),
+            "source": source, "images": images, "frozen_config": frozen_ref, "admin_config": self.admin_config_ref(),
+            "resources": {"inventory_sha256": inventory_sha256, "deletion_plan_sha256": deletion_plan_sha256},
+            "coverage": list(coverage), "confirmation": confirmation,
+            "limits": {"timeout_seconds": int(TIMEOUT_DATA),
+                       "minimum_free_bytes": int(self.config["minimum_free_mb"]) * 1024 * 1024},
+            "effects": numbered, "recovery_route": [], "supersedes": supersedes, "workspace": workspace,
+            "input_bundle": input_bundle,
+        }
+        confirmed = utc()
+        plan["recovery_route"] = pf_config.legal_next(plan, self._journal_draft(plan, "0" * 64, deletion, confirmed),
+                                                      slug=context.slug)
+        problems = lifecycle_errors(plan, "operation_plan")
+        if problems:
+            raise Failure(f"Internal error: the {kind} operation plan is invalid ({problems[0]}); nothing was written "
+                          "or changed.")
+        data = pf_instance.normalize_json(plan)
+        plan_sha256 = pf_instance.sha256_bytes(data)
+        journal = self._journal_draft(plan, plan_sha256, deletion, confirmed)
+        problems = lifecycle_errors(journal, "operation_journal", plan=plan)
+        if problems:
+            raise Failure(f"Internal error: the first journal generation of the {kind} operation is invalid "
+                          f"({problems[0]}); nothing was written or changed.")
+        pf_instance.write_plan_once(self.operation_dir, data)
+        self.plan, self.plan_sha256 = plan, plan_sha256
+        pf_instance.write_journal_generation(self.operation_dir, pf_instance.normalize_json(journal))
+        self.journal = journal
+        self._append_attempt("open")
+        self._arm_runner()
+        return plan
+
+    def _arm_runner(self):
+        self.runner.spawn_callback = self._record_child
+
+    def journal_update(self, *, phase=None, effects=None, unresolved=..., retained=(), last_error=..., result=...,
+                       deletion=..., approval=None):
+        """Section 3.1 step 6: one journal generation. The current generation is re-read no-follow and must be the
+        one this process wrote (else ``journal-changed``, no write); the next one is validated before it is
+        written. ``effects``: {effect_id: (state, observed_at, evidence)}."""
+        operation, slug = self.operation_id, self.context.slug
+        path = self.operation_dir / "journal.json"
+        expected = self.journal["sequence"]
+        try:
+            current = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(path), label=str(path))
+        except (OSError, pf_instance.ContextError) as exc:
+            raise Failure(f"journal-changed: the journal of operation {operation} cannot be re-read ({exc}); it "
+                          f"stopped before its next effect. Run 'pf --instance {slug} status'.") from exc
+        if not isinstance(current, dict) or current != self.journal:
+            found = current.get("sequence") if isinstance(current, dict) else "?"
+            raise Failure(f"journal-changed: the journal of operation {operation} changed under this process "
+                          f"(sequence {expected} expected, {found} found); it stopped before its next effect. Run "
+                          f"'pf --instance {slug} status'.")
+        new = copy.deepcopy(current)
+        new["sequence"] = expected + 1
+        new["updated_at"] = utc()
+        if phase is not None:
+            new["phase"] = phase
+        for effect_id, (state, observed_at, evidence) in (effects or {}).items():
+            for item in new["effects"]:
+                if item["effect_id"] == effect_id:
+                    item.update(state=state, observed_at=observed_at, evidence=self._evidence(evidence))
+        if unresolved is not ...:
+            new["unresolved_effect"] = unresolved
+        for artifact in retained:
+            if artifact not in new["retained_artifacts"]:
+                new["retained_artifacts"].append(artifact)
+        if last_error is not ...:
+            new["last_error"] = last_error
+        if result is not ...:
+            new["result"] = result
+        if deletion is not ...:
+            new["deletion"] = deletion
+        if approval is not None:
+            new["approvals"].append(approval)
+        new["legal_next"] = pf_config.legal_next(self.plan, new, slug=slug)
+        problems = lifecycle_errors(new, "operation_journal", plan=self.plan)
+        if problems:
+            raise Failure(f"Internal error: journal generation {new['sequence']} of operation {operation} is invalid "
+                          f"({problems[0]}); it was not written.")
+        pf_instance.write_journal_generation(self.operation_dir, pf_instance.normalize_json(new))
+        self.journal = new
+        return new
+
+    def _evidence(self, value):
+        """Evidence holds identities only (AM-9): redacted, one line, at most 2000 characters."""
+        if value is None:
+            return None
+        text = " ".join(self.redactor.text(str(value)).split())
+        return text[:pf_config.EVIDENCE_LIMIT] or None
+
+    def _error(self, exc, code=None):
+        """$defs.error of a failure: its code and first line (redacted, at most 2000 characters, no value)."""
+        if code is None:
+            if isinstance(exc, KeyboardInterrupt):
+                code = "interrupted"
+            elif isinstance(exc, Failure) and "(timed out)" in str(exc).split("\n", 1)[0]:
+                code = "timeout"
+            elif isinstance(exc, OSError):
+                code = "os-error"
+            else:
+                code = getattr(exc, "code", None)
+                head = str(exc).split(":", 1)[0]
+                if not (isinstance(code, str) and re.fullmatch(r"[a-z0-9-]{1,64}", code)):
+                    code = head if re.fullmatch(r"[a-z0-9-]{3,64}", head) else "failed"
+        lines = [line for line in self.redactor.text(str(exc) or type(exc).__name__).splitlines() if line.strip()]
+        message = (lines[0] if lines else type(exc).__name__)[:2000]
+        return {"code": code, "message": message}
+
+    def _crash(self, effect_id, when):
+        """The in-process crash seam (section 6): ``_crash_point`` is (effect id or target, point) or a callable."""
+        point = self._crash_point
+        if point is None:
             return
-        routes = self.legal_routes(journal)
-        raise Failure(
-            "A previous operation is incomplete (operation="
-            + str(journal.get("operation")) + ", phase=" + str(journal.get("phase")) + "). "
-            + ("Supported next actions: " + "; ".join(routes) + "." if routes else
-               "No automatic route is supported for this journal; review it with status.")
-            + " Automation and other mutations remain blocked."
-        )
+        if callable(point):
+            point(effect_id, when)
+            return
+        selector, wanted = point
+        effect = self.plan_effect(effect_id)
+        if wanted == when and selector in (effect_id, effect["target"], effect["target"].split(":", 1)[0] + ":*"):
+            raise SimulatedCrash(f"{when} {effect_id}")
+
+    @contextlib.contextmanager
+    def effect(self, effect_id, *, evidence=None):
+        """Section 3.1 step 4 for one plan effect: the intent generation (state unknown, unresolved_effect) before the
+        step, the completion generation after the step observed its postcondition, a best-effort failure generation
+        when it fails. The child process groups it spawns are recorded in children.json."""
+        effect = self.plan_effect(effect_id)
+        self._crash(effect_id, "before-intent")
+        self.journal_update(phase=effect["phase"], effects={effect_id: ("unknown", None, evidence)},
+                            unresolved=effect_id)
+        step = EffectStep(effect, evidence)
+        self._current_effect = effect_id
+        try:
+            self._crash(effect_id, "after-intent")
+            yield step
+            self._crash(effect_id, "after-effect")
+        except SimulatedCrash:
+            raise
+        except BaseException as exc:
+            self._current_effect = None
+            self._record_failure(effect_id, exc, partial=step.partial, evidence=step.evidence, retained=step.retained)
+            raise
+        finally:
+            self._current_effect = None
+        self.journal_update(effects={effect_id: (step.outcome, utc(), step.evidence)}, unresolved=None,
+                            retained=step.retained)
+
+    def _record_failure(self, effect_id, exc, *, partial=False, evidence=None, retained=()):
+        """The one best-effort failure generation of a failing effect (section 3.1 step 4)."""
+        try:
+            self.journal_update(effects={effect_id: ("partial" if partial else "unknown", None, evidence)},
+                                unresolved=effect_id, last_error=self._error(exc), retained=retained)
+        except (Failure, OSError, ValueError) as inner:
+            log("WARNING: the failure of effect " + effect_id + " could not be journaled: "
+                + (str(inner).splitlines() or ["?"])[0])
+
+    def run_effect(self, effect_id, action, *, evidence=None):
+        """Run one plan effect unless the journal records it complete. An effect an earlier process left unknown or
+        partial is observed first (section 3.5): observed complete -> recorded complete without a new child;
+        needs_operator -> the terminal generation; refused -> the operation stays open; else redone under a new
+        intent generation (its cleanup first). Returns the EffectStep, or None when nothing ran."""
+        state = self.effect_state(effect_id)
+        if state == "complete":
+            return None
+        cleanup = None
+        if state in ("unknown", "partial"):
+            effect = self.plan_effect(effect_id)
+            observed, detail, cleanup = self.observe_effect(self.plan, self.journal, effect)
+            log(f"observed: {effect_id} {effect['type']} {effect['target']}: {observed} ({detail})")
+            if observed == "complete":
+                self.journal_update(effects={effect_id: ("complete", utc(), detail)}, unresolved=None,
+                                    retained=self.observed_retained(effect))
+                return None
+            if observed == "needs_operator":
+                raise self.write_needs_operator(effect, detail)
+            if observed == "refuse":
+                raise Failure(detail)
+            attempts = 1 + sum(1 for line in [str(self.journal_effect(effect_id).get("evidence") or "")]
+                               if "attempt " in line)
+            evidence = f"attempt {attempts + 1} after: {detail}" + (f"; {evidence}" if evidence else "")
+        with self.effect(effect_id, evidence=evidence) as step:
+            if cleanup is not None:
+                cleanup()
+            action(step)
+        return step
+
+    def observed_retained(self, effect):
+        """The retained artifacts of an effect an earlier process completed but could not journal (section 3.5): the
+        retained workspace generation of W2, a displaced checkpoint-history tree, the bundle of a capture."""
+        target = effect["target"]
+        if target.startswith("workspace:retain:"):
+            return [{"kind": "workspace-generation", "name": target.split(":", 2)[2], "sha256": None}]
+        if effect["type"] == "file-write" and target.startswith("checkpoint-history"):
+            name = f"{self.config['project']}.pre-restore-{self.operation_id[-8:]}"
+            if os.path.lexists(str(self.revisions_root / name)):
+                return [{"kind": "checkpoint-history", "name": name, "sha256": None}]
+            return []
+        if effect["type"] == "capture":
+            bundle_id = self.attempt_bundle(effect, self.journal_effect(effect["effect_id"])["evidence"])
+            try:
+                if target == "purge-bundle":
+                    view = self.verify_recovery(self.recovery_root / bundle_id)
+                    return [{"kind": "purge-bundle", "name": bundle_id, "sha256": view.manifest_sha256}]
+                view = self.verify_snapshot(bundle_id)
+            except Failure:
+                return []
+            return [{"kind": "checkpoint", "name": view.bundle_id, "sha256": view.manifest_sha256}]
+        return []
+
+    def journal_effect(self, effect_id):
+        return next(item for item in self.journal["effects"] if item["effect_id"] == effect_id)
+
+    def write_needs_operator(self, effect, detail):
+        """The terminal ``needs_operator`` generation (no automatic continuation is safe); returns the Failure the
+        caller raises (exit 1)."""
+        code = "database-switch-unknown" if effect["type"] == "database-switch" else "effect-unknown"
+        steps = None
+        if code == "database-switch-unknown":
+            message = (f"database-switch-unknown: the database rename of operation {self.operation_id} left "
+                       f"{detail}; neither the old nor the new binding is complete.")
+        else:
+            message = (f"effect-unknown: effect {effect['effect_id']} ({effect['type']} {effect['target']}) of "
+                       f"operation {self.operation_id} has an unknown outcome: {detail}. Retrying could repeat a "
+                       "change that may already have happened.")
+        self.journal_update(phase="needs_operator", unresolved=effect["effect_id"],
+                            effects={effect["effect_id"]: ("unknown", None, detail)},
+                            last_error={"code": code, "message": message[:2000]},
+                            result={"outcome": "needs_operator", "deployment_id": None})
+        steps = "; ".join(self.journal["legal_next"]) or "none"
+        return Failure(f"{message} Supported next steps: {steps}.")
+
+    def close_operation(self, phase, *, deployment_id=None, last_error=...):
+        """The terminal generation: completed (succeeded), cancelled (own staging removed first) or
+        failed_preserved."""
+        outcome = {"completed": "succeeded", "cancelled": "cancelled", "failed_preserved": "failed_preserved"}[phase]
+        if phase == "cancelled":
+            self.remove_own_staging()
+        self.journal_update(phase=phase, result={"outcome": outcome, "deployment_id": deployment_id},
+                            unresolved=None, last_error=last_error)
+
+    def _append_attempt(self, action, route=None):
+        """Section 3.1 step 7: one entry per process that opens or re-enters the operation."""
+        path = self.operation_dir / "attempts.json"
+        entries = pf_instance.read_private_list(path)
+        entries.append({"attempt": len(entries) + 1, "pid": os.getpid(), "boot_id": pf_instance.boot_id(),
+                        "started_at": utc(), "route": route or self._operation_command or "operation",
+                        "release_id": self.context.control.release_id, "action": action})
+        pf_instance.rewrite_private_list(path, entries)
+
+    def _record_child(self, spec, process):
+        """pf_runner.ProcessRunner.spawn_callback (section 4.3): one children.json entry per effect-carrying child of
+        a journaled effect. A failed write is reported and never stops the child."""
+        effect_id = self._current_effect
+        if effect_id is None or self.operation_dir is None or self.plan is None:
+            return
+        try:
+            path = self.operation_dir / "children.json"
+            entries = pf_instance.read_private_list(path)
+            entries.append({"effect_id": effect_id, "tool": spec.tool, "pgid": process.pid,
+                            "boot_id": pf_instance.boot_id(), "start_ticks": pf_instance.process_start_ticks(process.pid),
+                            "recorded_at": utc()})
+            pf_instance.rewrite_private_list(path, entries)
+        except (OSError, pf_instance.ContextError) as exc:
+            log(f"note: child-record-failed: {(str(getattr(exc, 'strerror', None) or exc)).splitlines()[0]}; a later "
+                "resume probes the daemon and database only.")
 
     def log_context(self):
         context = self.context
@@ -2472,28 +2966,183 @@ class Controller:
         log(f"Workspace: {self.root}")
         log(f"Configuration: {self.config_dir}")
 
-    def log_journal(self, journal, *, trusted=True):
-        if journal is None:
-            log("No incomplete managed operation.")
-            return
-        if trusted:
-            log("INCOMPLETE OPERATION (protected journal, read before live checks):")
+    def log_operations(self, index=None, *, trusted=True, operation_id=None):
+        """Section 3.10: the operations block from protected files only, before any app config, .env, Git or Docker
+        access. ``operation_id``: the detail of one operation (status --operation)."""
+        index = index if index is not None else self.operation_index()
+        if not trusted:
+            log("Operations (read from UNVERIFIED private state; see trust findings; shown for recovery orientation "
+                "only, not as protected truth):")
+        if operation_id is not None:
+            return self.log_operation_detail(index, operation_id)
+        slug = self.context.slug
+        if index.overflow:
+            log(f"Operations: index overflow ({index.overflow} entries in operations/; mutating routes are refused, see "
+                "SYNOLOGY_ADMIN §16)")
+        elif not index.blocking and index.permissions is None and index.legacy is None:
+            log("Operations: none open")
+        for entry in index.blocking:
+            if entry.cls == "invalid":
+                log(f"Operations: {entry.operation_id} invalid: {entry.error} [blocking]")
+                log(f"  next: review it with 'pf --instance {slug} status --operation {entry.operation_id}' (SYNOLOGY_ADMIN "
+                    "§16); every mutating route is refused")
+                continue
+            self._log_operation_summary(index, entry)
+        if index.permissions is not None:
+            journal = index.permissions
+            log(f"Operations: permissions apply {journal.get('operation_id')} phase {journal.get('phase')} [blocking]")
+            log(f"  next: pf --instance {slug} permissions apply --resume | --abandon")
+        if index.legacy is not None:
+            log(f"Operations: state/pending.json {index.legacy.get('operation')}/{index.legacy.get('phase')} [blocking] "
+                "(journal-format-unsupported; see SYNOLOGY_ADMIN §16)")
+        if index.recent:
+            log("Recent operations: " + "; ".join(
+                f"{item.operation_id} {item.kind} {item.journal['phase']} {item.journal['updated_at']}"
+                for item in index.recent))
+        self.log_generations(index)
+        records = self.runner_records(index)
+        if records:
+            open_ops = sorted({record["operation_id"] for record, state, _ in records if state == "open"})
+            no_journal = sorted({record["operation_id"] for record, state, _ in records if state == "open"
+                                 and (index.entry(record["operation_id"]) is None
+                                      or index.entry(record["operation_id"]).cls == "no-journal")})
+            reconciled = sum(1 for _, state, _ in records if state == "reconciled")
+            opened = sum(1 for _, state, _ in records if state == "open")
+            log(f"Runner effects: {opened} open" + (f" (no journal: {', '.join(no_journal)})" if no_journal else "")
+                + (f" ({', '.join(item for item in open_ops if item not in no_journal)})"
+                   if [item for item in open_ops if item not in no_journal] else "")
+                + f"; {reconciled} reconciled by journals")
+        return index
+
+    def _log_operation_summary(self, index, entry):
+        plan, journal = entry.plan, entry.journal
+        slug = self.context.slug
+        state = "needs operator" if journal["phase"] == "needs_operator" else "blocking"
+        log(f"Operations: {entry.operation_id} {entry.kind} phase {journal['phase']} sequence {journal['sequence']} "
+            f"updated {journal['updated_at']} [{state}]")
+        if journal["last_error"] is not None:
+            log(f"  last error: {journal['last_error']['code']}: {journal['last_error']['message']}")
+        unresolved = journal["unresolved_effect"]
+        if unresolved is not None:
+            effect = next(item for item in plan["effects"] if item["effect_id"] == unresolved)
+            log(f"  unresolved effect: {unresolved} {effect['type']} {effect['target']} "
+                f"({pf_config.effect_state(journal, unresolved)})")
+        if pf_config.in_workspace_switch(plan, journal):
+            log("  workspace: the registered workspace path may be absent between the two renames of the workspace "
+                "switch; only 'resume' (or 'resume --keep-workspace') may continue")
+        if journal["retained_artifacts"]:
+            log("  retained: " + ", ".join(f"{item['kind']} {item['name']}" for item in journal["retained_artifacts"]))
+        routes = pf_config.operation_routes(plan, journal, slug=slug)
+        log(f"  next (recorded at sequence {journal['sequence']}): " + (
+            "; ".join(f"{command}: {description}" for _, command, description in routes) or
+            f"none automatic; review it with 'pf --instance {slug} status --operation {entry.operation_id}'"))
+        if plan["supersedes"]:
+            superseded = index.entry(plan["supersedes"])
+            log(f"  superseded: {plan['supersedes']} ({superseded.kind if superseded else 'unknown'}) by this "
+                "operation")
+
+    def log_operation_detail(self, index, operation_id):
+        """``status --operation``: the plan summary, every effect, the attempts and the children count (no frozen
+        value, no config.env byte, no hash of a secret)."""
+        entry = index.entry(operation_id)
+        if entry is None:
+            raise Failure(f"operation-not-found: no operation {operation_id} exists for instance {self.context.slug}. "
+                          "Nothing was changed.")
+        directory = self.context.operations_dir / operation_id
+        if entry.cls == "invalid":
+            log(f"Operation {operation_id}: invalid ({entry.error}); every mutating route is refused (SYNOLOGY_ADMIN §16)")
+        elif entry.cls == "no-journal":
+            log(f"Operation {operation_id}: no journal (an operation without a lifecycle journal; never blocking)")
         else:
-            log("INCOMPLETE OPERATION (journal read from UNVERIFIED private state; see trust findings; "
-                "shown for recovery orientation only, not as protected truth):")
-        for key in JOURNAL_PUBLIC_KEYS:
-            if key in journal:
-                log(f"  {key}: {journal[key]}")
-        if "error" in journal:
-            log("  error: " + str(journal["error"]))
-        hidden = sorted(set(journal) - set(JOURNAL_PUBLIC_KEYS) - {"error"})
-        if hidden:
-            log("  (private fields not shown: " + ", ".join(hidden) + ")")
-        routes = self.legal_routes(journal)
-        if routes:
-            log("  Next supported action: " + "; ".join(routes))
-        else:
-            log("  Next supported action: none automatic; review with status, backups and recoveries.")
+            plan, journal = entry.plan, entry.journal
+            confirmation = plan["confirmation"]["phrase"] if plan["confirmation"] else "none"
+            log(f"Operation {operation_id}: {plan['kind']} created {plan['created_at']} | class {entry.cls}"
+                + (f" (superseded by {entry.superseded_by})" if entry.superseded_by else "")
+                + f" | confirmation {confirmation} | workspace {plan['workspace']['mode']}"
+                + (f" ({plan['workspace']['reason']})" if plan["workspace"]["reason"] else "")
+                + f" | supersedes {plan['supersedes'] or 'none'}"
+                + f" | input bundle {plan['input_bundle']['bundle_id'] if plan['input_bundle'] else 'none'}")
+            log(f"  journal: phase {journal['phase']} sequence {journal['sequence']} updated {journal['updated_at']}"
+                + (f" | result {journal['result']['outcome']}" if journal["result"] else ""))
+            if journal["last_error"] is not None:
+                log(f"  last error: {journal['last_error']['code']}: {journal['last_error']['message']}")
+            states = {item["effect_id"]: item for item in journal["effects"]}
+            for effect in plan["effects"]:
+                item = states[effect["effect_id"]]
+                log(f"  {effect['effect_id']} {effect['phase']} {effect['type']} {effect['target']} {item['state']} "
+                    f"{item['observed_at'] or '-'} {item['evidence'] or '-'}")
+            if journal["retained_artifacts"]:
+                log("  retained: " + ", ".join(f"{item['kind']} {item['name']}"
+                                                for item in journal["retained_artifacts"]))
+            routes = pf_config.operation_routes(plan, journal, slug=self.context.slug)
+            if routes:
+                log("  next: " + "; ".join(f"{command}: {description}" for _, command, description in routes))
+        try:
+            attempts = pf_instance.read_private_list(directory / "attempts.json")
+        except (OSError, pf_instance.ContextError) as exc:
+            attempts = []
+            log(f"  attempts: unreadable ({exc})")
+        for item in attempts:
+            if isinstance(item, dict):
+                log(f"  attempt {item.get('attempt')}: {item.get('action')} by {item.get('route')} pid {item.get('pid')} "
+                    f"at {item.get('started_at')} (release {item.get('release_id')})")
+        try:
+            children = pf_instance.read_private_list(directory / "children.json")
+            log(f"  children: {len(children)} recorded process group(s)")
+        except (OSError, pf_instance.ContextError) as exc:
+            log(f"  children: unreadable ({exc})")
+        for record, state, sequence in self.runner_records(index):
+            if record["operation_id"] != operation_id:
+                continue
+            suffix = f" (reconciled by journal sequence {sequence})" if state == "reconciled" else " (open)"
+            log(f"  runner record: {record.get('recorded_at')} {operation_id}: {record.get('tool')} "
+                f"{self._record_summary(record)} -> {record.get('outcome')}{suffix}")
+        return index
+
+    def generation_listing(self):
+        """(container, [generation names], [stage names]) of the workspace generation container (no-follow, read-only);
+        an absent or unreadable container lists nothing."""
+        container = pf_instance.generation_container(self.context)
+        try:
+            fd = os.open(str(container), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return container, [], []
+        try:
+            names = sorted(os.listdir(fd))
+        finally:
+            os.close(fd)
+        pattern = re.compile(pf_config.GENERATION_PATTERN[1:-1])
+        generations = [name for name in names if pattern.fullmatch(name)]
+        stages = [name for name in names if name.startswith("stage-") and pattern.fullmatch(name[len("stage-"):])]
+        return container, generations, stages
+
+    def log_generations(self, index):
+        """Section 3.7 Tracking: retained (unsealed) generations and stages, cross-referenced with the journals."""
+        container, generations, stages = self.generation_listing()
+        owners = {}
+        for entry in index.entries:
+            if entry.plan is None:
+                continue
+            generation = entry.plan["workspace"]["generation_id"]
+            if generation:
+                owners[generation] = entry
+        if generations:
+            latest = generations[-1]
+            owner = owners.get(latest)
+            referenced = owner is not None and owner.journal is not None and any(
+                item["kind"] == "workspace-generation" and item["name"] == latest
+                for item in owner.journal["retained_artifacts"])
+            log(f"Workspace generations: {len(generations)} unsealed in {container} (latest {latest} "
+                + (f"from operation {owner.operation_id})" if referenced else "unreferenced)"))
+        if stages:
+            parts = []
+            for name in stages:
+                owner = owners.get(name[len("stage-"):])
+                if owner is not None and owner.cls == "blocking":
+                    parts.append(f"{name} in progress ({owner.operation_id})")
+                else:
+                    parts.append(f"{name} superseded-stage ({owner.operation_id if owner else 'unreferenced'})")
+            log("  stages: " + "; ".join(parts))
 
     def ensure_validation(self):
         if self.validation is None:
@@ -2523,21 +3172,106 @@ class Controller:
         log("Live checks skipped: " + reason + ". No Git, Docker or Compose command was issued and nothing was changed.")
         raise Failure("Diagnostics are offline-only: " + reason)
 
-    def require_trusted_context(self, *, load_config=True):
+    def require_trusted_context(self, *, load_config=True, route=None, index=None, operation=None):
         """Refuse privileged mutation unless the protected context and app configuration validated cleanly.
 
         Runs before any lock, journal write, transport call or filesystem effect. PF-A2.2: ``load_config=False``
         (the ``config`` route only) skips the final configuration load so the wizard can reach an absent, refused
-        or mismatched pf-config.json; the protected-context refusal always runs.
+        or mismatched pf-config.json; the protected-context refusal always runs. PF-A3.2: ``route``/``index`` (a
+        read-only, pre-lock operation_index) select the journal-proven workspace-switch exception of section 3.7a
+        and the frozen admin configuration of an operation this route may re-enter (section 3.8).
         """
         validation = self.ensure_validation()
         if not validation.mutation_allowed:
-            raise Failure(
-                "Protected context validation refused mutation:\n" + "\n".join(validation.blocking_messages())
-            )
+            entry = self.workspace_interval_exception(route, validation, index, operation=operation)
+            if entry is None:
+                raise Failure(
+                    "Protected context validation refused mutation:\n" + "\n".join(validation.blocking_messages())
+                )
+            self._interval_entry = entry.operation_id
+            log(f"note: workspace-switch-in-progress {entry.operation_id}: the workspace path is absent between the two "
+                "renames; only resume may continue.")
         # A rejected editable configuration blocks the mutation here, not after effects started.
         if load_config:
+            if index is not None and route is not None:
+                self._config_entry = self.config_source(route, index, operation=operation)
+                self._config_selected = True
             self.ensure_config()
+
+    def workspace_interval_exception(self, route, validation, index, *, operation=None):
+        """Section 3.7a: the blocking operation that proves an absent registered workspace is the gap between the two
+        renames of its workspace switch, or None. Only ``resume``; the only refuse finding must be the missing
+        workspace; the journal must place the operation inside its interval and the retained generation must be
+        the old workspace inode recorded at W2."""
+        if route != "resume" or index is None:
+            return None
+        refused = [finding for finding in validation.findings if finding.severity == "refuse"]
+        workspace = str(self.context.paths.workspace)
+        # The absent path is reported twice (the registered path and its last path component); both must name the
+        # workspace and its absence, and nothing else may be refused.
+        if not any(finding.code == "registered-path-missing" for finding in refused) or any(
+                str(finding.path) != workspace or not (
+                    finding.code == "registered-path-missing"
+                    or (finding.code == "path-component" and "No such file or directory" in finding.message))
+                for finding in refused):
+            return None
+        blocking = [entry for entry in index.blocking if entry.cls == "blocking"]
+        if len(blocking) != 1 or index.permissions is not None or index.legacy is not None or index.overflow \
+                or len(index.blocking) != 1:
+            return None
+        entry = blocking[0]
+        if operation is not None and operation != entry.operation_id:
+            return None
+        if entry.plan["workspace"]["mode"] not in ("switch", "pending") \
+                or not pf_config.in_workspace_switch(entry.plan, entry.journal):
+            return None
+        ids = pf_config.workspace_effect_ids(entry.plan)
+        # The old identity is recorded by W1 (intent and completion) and repeated by W2 when W2 completed.
+        evidence = {}
+        for item in entry.journal["effects"]:
+            if item["effect_id"] in ids:
+                evidence.update(self.identities(item["evidence"]))
+        old = evidence.get("old")
+        container = pf_instance.generation_container(self.context)
+        try:
+            fd = os.open(str(container), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            observed = pf_instance.identity_at(fd, entry.plan["workspace"]["generation_id"])
+        finally:
+            os.close(fd)
+        return entry if old is not None and observed == old else None
+
+    @staticmethod
+    def identities(evidence):
+        """{"old": (dev, ino), "new": (dev, ino)} parsed from W-effect evidence ``old:<dev>:<ino> new:<dev>:<ino>``."""
+        found = {}
+        for word in str(evidence or "").split():
+            match = re.fullmatch(r"(old|new):([0-9]+):([0-9]+)", word)
+            if match:
+                found[match.group(1)] = (int(match.group(2)), int(match.group(3)))
+        return found
+
+    def config_source(self, route, index, *, operation=None):
+        """Section 3.8: the operation whose frozen admin configuration this route reads (``resume`` and the
+        alias-capable routes next to exactly one blocking operation of their kind), else None (the editable file)."""
+        blocking = [entry for entry in index.blocking if entry.cls == "blocking"]
+        if index.overflow or index.legacy is not None or index.permissions is not None:
+            return None
+        if route == "resume":
+            if operation is not None:
+                chosen = [entry for entry in blocking if entry.operation_id == operation]
+            else:
+                chosen = blocking if len(blocking) == 1 else []
+        elif route in ALIAS_ROUTES:
+            chosen = [entry for entry in blocking if entry.kind == ALIAS_ROUTES[route]]
+            chosen = chosen if len(chosen) == 1 and len(blocking) == 1 else []
+        else:
+            return None
+        if len(chosen) != 1 or chosen[0].plan.get("admin_config") is None:
+            return None
+        return chosen[0]
 
     def policy_permits(self, operation_class):
         """Whether the approved protected policy permits ``operation_class`` without an operator (PF-A1.4).
@@ -3464,7 +4198,7 @@ class Controller:
                                            plan_sha256=plan.plan_sha256, unplanned=unplanned, conflicts=0,
                                            approved_revision=approved_revision, statuses=statuses)
             self.pending.unlink()
-        except _EffectFree as exc:
+        except _EffectFree:
             try:
                 self._restore_fences(fences, root_fds, effects_path)
             except BaseException as restore_exc:
@@ -4799,17 +5533,19 @@ class Controller:
         return {"reference": reference, "id": image_id, "platform": platform, "repo_digests": digests,
                 "archived": False}
 
-    def stage_deployment(self, candidate, manifest, *, kind, images=None, ref=None):
-        """Stage the deployed-source artifact right after the final confirmation, before the first effect.
+    def stage_deployment(self, candidate, manifest, *, kind, images=None, ref=None, deployment_id=None, pointer=None):
+        """Stage the deployed-source artifact: the plan's first effect (PF-A3.2 ``source-stage deployment:<dep>``).
 
         ``manifest`` is the candidate's pf_source manifest with its proven provenance; ``images`` the backend/
         frontend images ({service: {"reference", "id"}}) known without effect (restore-instance: observed at seal).
-        Any failure -> ``deployment-stage-failed`` (no journal exists yet)."""
+        PF-A3.2: ``deployment_id`` is the plan's pre-assigned ID and ``pointer`` the base of the deployed.json the
+        pointer effect writes; both are kept with the staged details in deployment-artifact.json so a resumed process
+        can seal and point without the private candidate. Any failure -> StageFailed (``deployment-stage-failed``)."""
         candidate = Path(candidate)
-        pointer = self.read_pointer() or {}
-        previous = pointer.get("deployment_id")
+        current = self.read_pointer() or {}
+        previous = current.get("deployment_id")
         previous = previous if isinstance(previous, str) and DEPLOYMENT_ID_RE.fullmatch(previous) else None
-        deployment_id = f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
+        deployment_id = deployment_id or f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
         staging = self.deployments_dir / (".staging-" + deployment_id)
         try:
             self.refuse_reserved_candidate_paths(candidate)
@@ -4850,15 +5586,14 @@ class Controller:
                 raise Failure(f"the draft deployment record is invalid ({problems[0]})")
             self.write_private_json("deployment-artifact.json", {
                 "deployment_id": deployment_id, "state": "staged", "source_sha256": archive_sha256,
-                "entries_sha256": staged_source["manifest"]["entries_sha256"]})
+                "entries_sha256": staged_source["manifest"]["entries_sha256"],
+                "staged": {"source": staged_source, "images": identities, "previous_deployment_id": previous,
+                           "migration_files_sha256": staged.migration_files_sha256, "pointer": pointer or {}}})
             return staged
         except DaemonFailure:
             raise
         except (Failure, OSError, pf_source.SourceError, pf_instance.ContextError, ValueError, KeyError) as exc:
-            detail = (str(exc).splitlines() or [type(exc).__name__])[0]
-            raise Failure(f"deployment-stage-failed: {detail}. The application, database and workspace were not "
-                          f"changed; an unsealed staging directory may remain under {self.deployments_dir} "
-                          "(PF-A3.2 cleans it).") from exc
+            raise StageFailed((str(exc).splitlines() or [type(exc).__name__])[0]) from exc
 
     def _deployment_record(self, staged, *, draft=False, images=None, compose=None, config=None, heads=None,
                            server=None, restored_from=None):
@@ -4984,36 +5719,6 @@ class Controller:
         except (OSError, pf_docker.DockerScopeError) as exc:
             raise Failure(f"the active image override cannot be read ({exc})") from exc
         return images[service]
-
-    def finish_deployment(self, staged, pointer, *, restored_from=None):
-        """Seal, then the pointer, then the journal (order: record -> pointer -> journal). A seal failure after a
-        healthy activation is non-wedging (section 3.3): the pointer is written without a record, the journal is
-        closed and ``deployment-record-incomplete`` is raised without stopping the application."""
-        try:
-            sealed = self.seal_deployment(staged, restored_from=restored_from)
-        except (Failure, OSError, pf_instance.ContextError, pf_config.ConfigError, pf_docker.DockerScopeError,
-                ValueError, KeyError, TypeError) as exc:
-            detail = (str(exc).splitlines() or [type(exc).__name__])[0][:300]
-            write_json(self.state / "deployed.json", dict(pointer, deployment_seal_failed=self.operation_id))
-            self.pending.unlink()
-            self.write_private_json("deployment-artifact.json", {"deployment_id": staged.deployment_id,
-                                                                 "state": "seal-failed", "detail": detail})
-            raise Failure(
-                f"deployment-record-incomplete: the application was activated and passed health checks, but its "
-                f"deployment record could not be sealed ({detail}). The operation was closed and the deployment is "
-                "treated as one without a record; the next deploy, update, rollback or restore-instance seals one. "
-                f"Run 'pf --instance {self.context.slug} status'.") from exc
-        write_json(self.state / "deployed.json", dict(pointer, deployment_id=sealed["deployment_id"],
-                                                      deployment_record_sha256=sealed["record_sha256"]))
-        if staged.kind == "restore-instance":
-            # PF-A2.3 FL-9: a restore publishes the private state files it (re)creates with the policy target.
-            self.publish_fresh("private_state", self.state / "deployed.json")
-        self.pending.unlink()
-        self.write_private_json("deployment-artifact.json", {"deployment_id": sealed["deployment_id"],
-                                                             "state": "sealed",
-                                                             "record_sha256": sealed["record_sha256"]})
-        log(f"Deployment {sealed['deployment_id']} sealed (record {sealed['record_sha256'][:12]}).")
-        return sealed
 
     # ------------------------------------------- PostgreSQL facts (PF-A3.1 section 3.8)
 
@@ -5423,8 +6128,11 @@ class Controller:
         pf_instance._write_private_file(Path(folder) / "manifest.sha256", (sha256 + "\n").encode("ascii"), 0o600)
         return sha256
 
-    def _capture(self, reason, *, capture_class, observation=None, unsupported="refuse"):
-        """The common capture body (section 3.4 steps 1-9) of a checkpoint: healthy, emergency or partial."""
+    def _capture(self, reason, *, capture_class, observation=None, unsupported="refuse", bundle_id=None,
+                 verify_name=None, verify=True):
+        """The common capture body (section 3.4 steps 1-9) of a checkpoint: healthy, emergency or partial. PF-A3.2:
+        ``bundle_id``/``verify_name`` are the plan's pre-assigned IDs; ``verify=False`` (the backup kind) stops at the
+        sealed manifest and verify_capture() runs step 8 as its own effect."""
         if self.operation_dir is None:
             raise Failure("Internal error: a capture runs inside a locked operation.")
         healthy = capture_class == "healthy_checkpoint"
@@ -5433,7 +6141,7 @@ class Controller:
         deployment = view if view is not None and view.mismatch is None else None
         mismatch_view = view if view is not None and view.mismatch is not None else None
         commit = deployment.record["source"]["commit"] if deployment is not None else self.deployed_commit()
-        backup_id = f"{utc()}-{(commit or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
+        backup_id = bundle_id or f"{utc()}-{(commit or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
         self.ensure_backup_tree()
         folder = self.backups_dir / backup_id
         folder.mkdir(mode=0o700)
@@ -5535,17 +6243,33 @@ class Controller:
         }
         manifest_sha256 = self.write_manifest(folder, manifest)
         sealed = BundleView(folder, manifest, manifest_sha256, None, "captured")
-        record, passed = self.verify_bundle(sealed, {store["store_id"]: dump}, started_at=manifest["created_at"])
-        self._record_capture(sealed, record, mismatch["kind"] if mismatch else None)
+        if not verify:
+            self._record_capture(sealed, None, mismatch["kind"] if mismatch else None)
+            log(f"Checkpoint {backup_id}: {capture_class}, sealed (verification follows)")
+            return sealed
+        return self.verify_capture(sealed, verify_name)
+
+    def verify_capture(self, view, verify_name):
+        """Step 8 of a capture and the publish (PF-A3.2: the backup kind's own verification effect): every store
+        restored from the bundle's own dump into the named ``pf_verify_*`` candidate, the data_restore_verified record,
+        then the backups targets of the fresh checkpoint."""
+        folder = view.folder
+        mismatch = view.manifest["compatibility"]["mismatch"]
+        dumps = {store["store_id"]: folder / store["dump"] for store in view.manifest["stores"]}
+        record, passed = self.verify_bundle(view, dumps, started_at=view.manifest["created_at"],
+                                            names=[verify_name] if verify_name else None)
+        self._record_capture(view, record, mismatch["kind"] if mismatch else None)
         if not passed:
             failed = next(check for check in record["checks"] if check["result"] == "failed")
-            raise Failure(f"Verification of {backup_id} failed ({failed['name']}: {failed['detail']}). Verification "
-                          "database retained.")
+            exc = Failure(f"Verification of {view.bundle_id} failed ({failed['name']}: {failed['detail']}). "
+                          "Verification database retained.")
+            exc.code = "verification-failed"
+            raise exc
         # PF-A2.3: explicit backups targets for the fresh checkpoint only, verified after the change.
         self.publish_fresh("backups", folder)
-        view = dataclasses.replace(sealed, level=record["level"], latest_verification_id=record["verification_id"])
-        log(f"Checkpoint {backup_id}: {capture_class}, {record['level']}")
-        return view
+        result = dataclasses.replace(view, level=record["level"], latest_verification_id=record["verification_id"])
+        log(f"Checkpoint {view.bundle_id}: {view.capture_class}, {record['level']}")
+        return result
 
     def source_instance(self):
         return {"instance_id": self.context.instance_id, "slug": self.context.slug,
@@ -5630,20 +6354,22 @@ class Controller:
                 checks.append({"name": f"{name}:{store_id}", "result": "failed", "detail": detail})
         return checks
 
-    def verify_bundle(self, view, dumps, *, started_at):
+    def verify_bundle(self, view, dumps, *, started_at, names=None):
         """Restore every store of ``view`` from its own dump (``dumps``: {store_id: path}) into a fresh
-        ``pf_verify_*`` candidate, then write the data_restore_verified record bound to the manifest hash."""
-        checks, names, passed = [], [], True
-        for store in view.manifest["stores"]:
-            candidate = "pf_verify_" + uuid.uuid4().hex[:20]
-            names.append(candidate)
+        ``pf_verify_*`` candidate (PF-A3.2: ``names``, the pre-assigned candidates, in store order), then write the
+        data_restore_verified record bound to the manifest hash."""
+        checks, used, passed = [], [], True
+        planned = list(names or [])
+        for index, store in enumerate(view.manifest["stores"]):
+            candidate = planned[index] if index < len(planned) else "pf_verify_" + uuid.uuid4().hex[:20]
+            used.append(candidate)
             store_checks, ok, _ = self.verify_store(store, dumps[store["store_id"]], candidate)
             checks += store_checks
             if not ok:
                 passed = False
                 break
         record = self.write_verification(view, level="data_restore_verified", result="passed" if passed else "failed",
-                                         target={"kind": "isolated-database", "names": names, "removed": passed},
+                                         target={"kind": "isolated-database", "names": used, "removed": passed},
                                          checks=checks, started_at=started_at)
         return record, passed
 
@@ -5669,12 +6395,13 @@ class Controller:
                                         pf_instance.normalize_json(record), 0o600)
         return record
 
-    def snapshot(self, reason):
+    def snapshot(self, reason, *, bundle_id=None, verify_name=None):
         """A healthy checkpoint (name kept; section 3.4): today's equality gate, the exact deployed source and the
-        deployment image binding; returns the sealed BundleView with its data_restore_verified level."""
-        return self._capture(reason, capture_class="healthy_checkpoint")
+        deployment image binding; returns the sealed BundleView with its data_restore_verified level. PF-A3.2: the
+        plan's pre-assigned bundle ID and verification candidate."""
+        return self._capture(reason, capture_class="healthy_checkpoint", bundle_id=bundle_id, verify_name=verify_name)
 
-    def capture_emergency(self, reason="emergency-manual", *, observation=None):
+    def capture_emergency(self, reason="emergency-manual", *, observation=None, bundle_id=None, verify_name=None):
         """Emergency preservation (section 3.4): the actual database, images and source with mismatch evidence and
         no schema/image equality gate. `pf backup --emergency` (reason emergency-manual) shows the observed contract
         and asks one typed confirmation first; a link in the workspace is then recorded instead of refused."""
@@ -5693,7 +6420,8 @@ class Controller:
                     "switched, restored or replaced; the capture is evidence and data for repair or export, never a "
                     "rollback target.")
         view = self._capture(reason, capture_class="emergency_preservation", observation=observation,
-                             unsupported="record" if manual else "refuse")
+                             unsupported="record" if manual else "refuse", bundle_id=bundle_id,
+                             verify_name=verify_name)
         if manual:
             log(f"Emergency preservation {view.bundle_id} captured ({view.level}). It is evidence and data for repair "
                 "or export, not a rollback target.")
@@ -5708,7 +6436,7 @@ class Controller:
             f"'pf --instance {slug} backup --emergency', then retry; 'pf --instance {slug} resume' reopens the "
             "unchanged deployment.")
 
-    def preserve_current(self, reason, *, stores):
+    def preserve_current(self, reason, *, stores, bundle_id=None, verify_name=None):
         """INV-09 before an overwrite: a healthy checkpoint when the contract holds, else emergency preservation; the
         active store must be sealed with a passed data_restore_verified record, else ``preservation-failed``."""
         database = stores[0] if stores else self.env()["POSTGRES_DB"]
@@ -5717,14 +6445,19 @@ class Controller:
             observation = self.observe_contract()
             if observation["matches"]:
                 try:
-                    view = self._capture(reason, capture_class="healthy_checkpoint", observation=observation)
+                    view = self._capture(reason, capture_class="healthy_checkpoint", observation=observation,
+                                         bundle_id=bundle_id, verify_name=verify_name)
                 except DaemonFailure:
                     raise
                 except (Failure, OSError, pf_source.SourceError) as exc:
                     log("note: a healthy checkpoint was not possible (" + (str(exc).splitlines() or ["?"])[0]
                         + "); capturing emergency preservation instead.")
             if view is None:
-                view = self.capture_emergency(reason, observation=observation)
+                if bundle_id is not None and os.path.lexists(str(self.backups_dir / bundle_id)):
+                    # The healthy attempt left its folder (never selectable); the fallback needs its own ID.
+                    bundle_id = f"{utc()}-{bundle_id.split('-')[1]}-{uuid.uuid4().hex[:6]}"
+                view = self.capture_emergency(reason, observation=observation, bundle_id=bundle_id,
+                                              verify_name=verify_name)
         except DaemonFailure:
             raise
         except (Failure, OSError, pf_source.SourceError, pf_config.ConfigError) as exc:
@@ -5779,14 +6512,17 @@ class Controller:
         return self.command(command + list(args), env=child, timeout=timeout, **kwargs)
 
     @contextlib.contextmanager
-    def lock(self, pending_route=None, *, freeze=True):
+    def lock(self, pending_route=None, *, freeze=True, resume=None, request=None):
         """Hold this instance's stable lock for one mutating operation.
 
         The lock inode lives under <installation-root>/locks and is never
         created here or removed by purge. ``pending_route`` is the command
-        name; PENDING_ROUTES decides whether it may enter an existing journal.
-        Inside the lock the operation directory is created and the application
-        configuration is frozen (PF-A1.2) before any effect.
+        name; the PF-A3.2 gate (section 3.3) decides whether it starts a new
+        operation, re-enters the blocking one (``resume`` and the aliases),
+        supersedes it or is refused. Inside the lock the operation directory is
+        created and the application configuration is frozen (PF-A1.2) before
+        any effect; a re-entry binds the existing directory and its frozen
+        configuration instead and writes nothing yet.
         """
         try:
             handle = pf_instance.acquire_instance_lock(self.context)
@@ -5795,18 +6531,80 @@ class Controller:
         try:
             # PF-A2.1: inside the lock, before the journal is read or any operation begins.
             self.require_install_binding(pending_route or "operation")
-            journal = self.read_journal()
-            if journal is not None:
-                self.check_pending_route(journal, pending_route)
-            # Private runtime state is created only here, inside a locked mutation route.
-            if not self.state.is_dir():
-                self.state.mkdir(mode=0o700)
-                os.chmod(self.state, 0o700)
-            self.begin_operation(pending_route or "operation", freeze=freeze)
+            # Every lock passes the gate; an unnamed route (helpers, tests) is refused next to any open operation.
+            self.gate_route(pending_route or "operation", dict(request or {}, **(resume or {})))
+            if self.gate is not None and self.gate.action == "reenter":
+                self.bind_operation(self.gate.entry, route=pending_route)
+            else:
+                # Private runtime state is created only here, inside a locked mutation route.
+                if not self.state.is_dir():
+                    self.state.mkdir(mode=0o700)
+                    os.chmod(self.state, 0o700)
+                self.begin_operation(pending_route or "operation", freeze=freeze)
             yield handle
         finally:
             self.end_operation()
             handle.release()
+
+    def gate_route(self, route, request):
+        """Section 3.3 inside the lock: rebuild the index, decide, and re-prove the pre-lock selections (the frozen
+        admin configuration of section 3.8, the workspace-interval exception of section 3.7a). Writes nothing."""
+        index = self.operation_index()
+        decision = pf_config.gate_decision(index, route, slug=self.context.slug, request=request,
+                                           private_state=str(self.context.paths.private_state))
+        if decision.action == "refuse":
+            raise Failure(decision.message)
+        selected = self._config_entry.operation_id if self._config_entry is not None else None
+        entered = decision.entry.operation_id if decision.action == "reenter" else None
+        if self._config_selected and selected != entered and (
+                selected is not None or decision.entry.plan.get("admin_config") is not None):
+            raise Failure(f"plan-input-changed: the operation '{PENDING_ROUTE_COMMANDS.get(route, route)}' acts on changed while it was "
+                          "starting (the open operations differ from the ones read before the lock). Nothing was "
+                          "changed; run the command again.")
+        if self._interval_entry is not None:
+            validation = self.ensure_validation()
+            again = self.workspace_interval_exception(route, validation, index, operation=request.get("operation"))
+            if again is None or again.operation_id != self._interval_entry:
+                raise Failure("Protected context validation refused mutation:\n"
+                              + "\n".join(validation.blocking_messages()))
+        self.gate = decision
+        return decision
+
+    def bind_operation(self, entry, *, route=None):
+        """Re-enter ``entry`` (section 3.6): the same operation ID and directory, its plan and journal, the runner's
+        effect file, the frozen admin configuration and the plan's frozen application snapshot. Writes nothing; a
+        missing or changed snapshot refuses ``plan-input-changed``."""
+        directory = self.context.operations_dir / entry.operation_id
+        self.operation_id, self.operation_dir = entry.operation_id, directory
+        self.reset_operation_scope(route or "resume")
+        # The renders of earlier processes keep their compose-<n>.json names (exclusive create); this one continues.
+        self._envelope_sequence = max((int(match.group(1)) for match in (
+            re.fullmatch(r"compose-([0-9]+)\.json", name) for name in os.listdir(str(directory))) if match), default=0)
+        self._permission_targets = None
+        self.runner.effects_path = directory / "unresolved-effects.json"
+        self.plan, self.plan_sha256, self.journal = entry.plan, entry.plan_sha256, entry.journal
+        self._snapshots = 1 + sum(1 for name in os.listdir(str(directory)) if re.fullmatch(r"refreeze-[0-9]+", name))
+        if entry.plan["admin_config"] is not None:
+            self._config_entry = entry
+            self._config = self.load_frozen_admin_config(entry)
+        frozen = entry.plan["frozen_config"]
+        if frozen is not None:
+            try:
+                self.frozen = pf_config.load_frozen_app_config(directory, frozen["sha256"], frozen["bytes"])
+            except pf_config.ConfigError as exc:
+                text = str(exc)
+                raise Failure(f"plan-input-changed: frozen application configuration of operation {entry.operation_id} "
+                              f"no longer matches its plan ({text.split(': ', 1)[-1]}). Nothing was changed.") from exc
+            for key in pf_config.SECRET_KEYS:
+                self.redactor.add(self.frozen.values[key])
+            try:
+                editable = pf_instance.sha256_bytes(pf_instance.read_bytes_nofollow(self.config_dir / ".env"))
+            except OSError:
+                editable = None
+            if editable is not None and editable != self.frozen.source_sha256:
+                log(f"note: config-proposal-differs: config/.env differs from the configuration operation "
+                    f"{entry.operation_id} froze; it stays a proposal for the next operation.")
+        self._arm_runner()
 
     def require_install_binding(self, route):
         """PF-A2.1 inside the instance lock: the binding re-check, then the install gate (read-only).
@@ -6369,27 +7167,47 @@ class Controller:
             level = "captured"
         return level, (records[-1]["verification_id"] if records else None)
 
-    def pause(self, kind, **extra):
-        write_json(self.pending, {"operation": kind, "phase": "paused", "started": utc(), **extra})
+    def pause(self, kind=None, **extra):
+        """The ``services:stop:frontend,backend`` effect body: stop the writers and observe them stopped. PF-A3.2:
+        it no longer writes a journal (the operation journal records the effect)."""
         self.compose("stop", "frontend", "backend")
         for service in ("frontend", "backend"):
             if self.inspect(service)["State"].get("Running"):
                 raise Failure("Application writes have not been stopped.")
 
-    def phase(self, phase, **fields):
-        data = load_json(self.pending)
-        data.update({"phase": phase, **fields})
-        write_json(self.pending, data)
+    def activation_complete(self):
+        """Section 3.9: every ``service:<svc>:start`` effect of phase activating is complete (False without one)."""
+        if self.plan is None:
+            return False
+        starts = [effect for effect in self.plan["effects"] if effect["phase"] == "activating"
+                  and pf_config.effect_role(effect) in ("backend", "frontend")]
+        return bool(starts) and all(self.effect_state(effect["effect_id"]) == "complete" for effect in starts)
+
+    def fail_closed_allowed(self):
+        """Section 3.9 (phase-aware): only for a blocking operation whose kind's DISPATCH column allows it and whose
+        activation is not complete; never for purge or backup, never without a blocking operation, never for a
+        refused re-entry."""
+        if self.plan is None or self.journal is None or self.journal["phase"] in pf_config.CLOSED_PHASES:
+            return False
+        if self.gate is not None and self.gate.action == "reenter" and not self._reentered:
+            return False
+        if pf_config.KIND_FAIL_CLOSED[self.plan["kind"]] == "never":
+            return False
+        if self.activation_complete():
+            log(f"Application left running (activation completed in operation {self.operation_id}).")
+            return False
+        return True
 
     def fail_closed(self):
-        """After a failed operation with a pending journal: stop this instance's own one-off Compose
+        """After a failed operation with a blocking journal: stop this instance's own one-off Compose
         containers (exact PF-A1.3 inventory), then the application services (PF-A1.4).
 
         Runs under the failing operation's lock, through the same context and runner. A cached daemon
         refusal ends it before any further process; a one-off that vanished after the inventory (an
         exited ``--rm`` job) is reported and skipped. Nothing is selected by the legacy run label.
+        PF-A3.2: only while fail_closed_allowed() holds (section 3.9).
         """
-        if not self.pending.exists():
+        if not self.fail_closed_allowed():
             return
         daemon_refused = False
         try:
@@ -6429,63 +7247,1665 @@ class Controller:
             time.sleep(2)
         raise Failure(f"{service} did not become healthy within the configured timeout.")
 
-    def activate(self, images, expected_heads):
+    def activate_backend(self, images, expected_heads):
+        """The ``service:backend:start`` effect: the selected images, the backend up and healthy on the expected
+        heads (PF-A3.2 split of the A3.1 activate())."""
         self.verify_images(images)
         self.make_override(images, self.override)
         self.compose("up", "-d", "--no-deps", "--no-build", "--force-recreate", "backend")
         self.wait_health("backend")
         if self.db_heads() != expected_heads:
             raise Failure("Live Alembic revision differs from the selected application.")
-        self.phase("opening-frontend")
+
+    def activate_frontend(self, images):
+        """The ``service:frontend:start`` effect; the API health check is part of its postcondition."""
+        self.make_override(images, self.override)
         self.compose("up", "-d", "--no-deps", "--no-build", "--force-recreate", "frontend")
         self.wait_health("frontend")
         response = self.compose("exec", "-T", "frontend", "wget", "-q", "-O", "-", "http://127.0.0.1:5173/api/health")
         data = json.loads(response)
         if data.get("status") != "ok" or data.get("database") != "connected":
             raise Failure("Frontend/API/database health check failed.")
-        self.phase("health-checked")
         log("Application health checks passed. Perform the UI/workflow and network-access smoke tests separately.")
 
-    def replace_source(self, candidate, revision, *, verified=True):
-        # The private candidate is inventoried before the workspace is touched; the
-        # protected manifest then records what was deployed (workspace generation switch
-        # and deployed-artifact persistence remain PF-A3).
-        candidate = Path(candidate)
-        try:
-            self.refuse_reserved_candidate_paths(candidate)
-            source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
-                else {"kind": "unknown"}
-            manifest = pf_source.build_manifest(candidate, source=source, excludes=SOURCE_EXCLUDES)
-        except pf_source.SourceError as exc:
-            raise Failure(str(exc)) from exc
-        if any(entry["kind"] != "file" for entry in manifest["entries"]):
-            raise Failure("Candidate source contains an unsupported link/special file; nothing was replaced.")
-        self.phase("changing-source")
-        # v2.5 keeps all runtime control/configuration outside repo/. The writable
-        # repository can therefore be replaced as one application working tree.
-        for item in list(self.root.iterdir()):
-            if item.is_dir() and not item.is_symlink():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-        self.publish_source_tree(candidate, manifest)
-        try:
-            pf_source.write_manifest(self.context.source_manifest_path, manifest)
-        except pf_source.SourceError as exc:
-            raise Failure(str(exc)) from exc
-        self.phase("source-replaced")
+    def activate(self, images, expected_heads):
+        self.activate_backend(images, expected_heads)
+        self.activate_frontend(images)
 
-    def publish_source_tree(self, candidate, manifest):
-        """PF-A2.3: content-only copies of the candidate's top-level names into the emptied workspace, then the
-        workspace root target and explicit targets for exactly the names copied (executables from ``manifest``)."""
+    def publish_source_tree(self, candidate, manifest, target):
+        """PF-A2.3/PF-A3.2 W1 body: content-only copies of the tree's top-level names into the new directory
+        ``target``, then the workspace root target and explicit targets for exactly the names copied (executables
+        from ``manifest``), through one inventory of ``target`` as the workspace scope root."""
         names = sorted(item.name for item in Path(candidate).iterdir())
         for name in names:
-            copy_fresh(Path(candidate) / name, self.root / name)
+            copy_fresh(Path(candidate) / name, Path(target) / name)
         designated = frozenset(entry["path"] for entry in manifest["entries"]
                                if entry["kind"] == "file" and entry.get("executable"))
-        self.apply_single("workspace", self.root, "dir")
+        _, compiled, _ = self.permission_targets()
+        inventory = pf_instance.inventory_scope("workspace", Path(target), owner_rule=compiled["workspace"].owner_rule,
+                                                limit=pf_source.MANIFEST_ENTRY_LIMIT)
+        self._publish("workspace", inventory, executables=designated)
+
+    def write_workspace_manifest(self, manifest):
+        """W4 / deploy --current: the protected workspace source manifest; returns the hash of its bytes."""
+        try:
+            return pf_source.write_manifest(self.context.source_manifest_path, manifest)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
+
+    # ------------------------------------------- workspace generation switch (PF-A3.2 section 3.7)
+
+    def workspace_preflight(self, manifest):
+        """Read-only, before the confirmation (and again at the syncing point): ("switch", None) or ("pending",
+        "<reason>: <detail>") for the first matching unavailability reason of section 3.7."""
+        workspace = self.root
+        parent = workspace.parent
+        name = pf_instance.GENERATION_CONTAINER_PREFIX + self.context.instance_id
+        container = parent / name
+        try:
+            info, parent_info = os.lstat(str(workspace)), os.lstat(str(parent))
+        except OSError as exc:
+            return "pending", f"workspace-is-mount-point: the workspace cannot be examined ({exc.strerror})"
+        if info.st_dev != parent_info.st_dev:
+            return "pending", "workspace-is-mount-point: the workspace is a mount point, subvolume or shared-folder root"
+        try:
+            parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            return "pending", f"generation-container-unsafe: the workspace parent cannot be opened ({exc.strerror})"
+        try:
+            problem = pf_instance.generation_container_problem(parent_fd, name, info.st_dev)
+        finally:
+            os.close(parent_fd)
+        if problem is not None:
+            return "pending", "generation-container-unsafe: " + problem
+        try:
+            registry = pf_instance.load_registry(self.context.installation_root)
+            inventory = pf_instance.inventory_of(registry)
+        except pf_instance.ContextError as exc:
+            return "pending", f"generation-container-collision: the registry cannot be read ({exc})"[:200]
+        for owner, role, path in inventory:
+            path = Path(path)
+            if path == container or pf_instance._contains(path, container) or pf_instance._contains(container, path):
+                return "pending", f"generation-container-collision: {role} of {owner}"[:200]
+        try:
+            fd = os.open(str(workspace), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            return "pending", f"workspace-root-acl: the workspace cannot be opened ({exc.strerror})"
+        try:
+            acl = pf_instance.inspect_acl_fd(fd)
+        finally:
+            os.close(fd)
+        if acl.state.kind != "none":
+            return "pending", "workspace-root-acl: the workspace root carries an ACL a new root inode cannot keep"
+        need = sum(entry.get("size", 0) for entry in manifest["entries"]) \
+            + int(self.config["minimum_free_mb"]) * 1024 * 1024
+        try:
+            free = self.artifact_free_bytes(parent)
+        except OSError as exc:
+            return "pending", f"workspace-capacity: free space cannot be measured ({exc.strerror})"
+        if free < need:
+            mib = 1024 * 1024
+            return "pending", f"workspace-capacity: {-(-need // mib)} MiB needed, {free // mib} MiB free"
+        return "switch", None
+
+    def workspace_plan(self, mode, reason=None):
+        """$defs.workspace_plan of a new operation (section 3.7; AM-4)."""
+        if mode in ("switch", "pending"):
+            return {"mode": mode, "generation_id": f"wsg-{utc()}-{uuid.uuid4().hex[:8]}",
+                    "container": str(pf_instance.generation_container(self.context)),
+                    "reason": (reason or "")[:200] if mode == "pending" else None}
+        return {"mode": mode, "generation_id": None, "container": None, "reason": None}
+
+    def workspace_decision(self, manifest, keep_workspace):
+        """(workspace plan, confirmation summary lines) for deploy/update/rollback/restore-instance."""
+        if keep_workspace:
+            return self.workspace_plan("keep"), ["Workspace refresh: kept (--keep-workspace)"]
+        mode, reason = self.workspace_preflight(manifest)
+        container, generations, _ = self.generation_listing()
+        size = 0
+        for name in generations:
+            for current, _, files in os.walk(str(container / name)):
+                for file_name in files:
+                    try:
+                        size += os.lstat(os.path.join(current, file_name)).st_size
+                    except OSError:
+                        pass
+        try:
+            free = self.artifact_free_bytes(self.root.parent) // (1024 * 1024)
+        except OSError:
+            free = "unknown"
+        lines = ["Workspace refresh: generation switch" if mode == "switch" else
+                 f"Workspace refresh: unavailable ({reason}); the workspace is left untouched and the operation ends "
+                 "in workspace_sync_pending until you decide",
+                 f"Retained workspace generations: {len(generations)} ({size // (1024 * 1024)} MiB, unsealed, never "
+                 f"deleted); free space on the workspace device: {free} MiB"]
+        return self.workspace_plan(mode, reason), lines
+
+    def workspace_effect_specs(self, workspace, *, deployment_id, tree_digest=None):
+        """The W1-W4 effect specs of a switch or pending plan (section 3.7), else []."""
+        generation = workspace["generation_id"]
+        if workspace["mode"] not in ("switch", "pending"):
+            return []
+        stage = {"phase": "syncing-workspace", "type": "source-stage", "target": "workspace:stage:" + generation,
+                 "postcondition": f"stage tree equals deployment {deployment_id} entries",
+                 "preconditions": ["workspace preflight available"]
+                 + ([f"workspace-tree:{tree_digest}"] if tree_digest else [])}
+        return [stage,
+                {"phase": "syncing-workspace", "type": "source-switch", "target": "workspace:retain:" + generation,
+                 "postcondition": f"old workspace is the retained generation {generation}",
+                 "preconditions": ["workspace is the old tree", "the retained name is absent"]},
+                {"phase": "syncing-workspace", "type": "source-switch", "target": "workspace:bind:" + generation,
+                 "postcondition": "workspace is the staged tree",
+                 "preconditions": ["workspace path absent", "stage is the new tree"]},
+                {"phase": "syncing-workspace", "type": "file-write", "target": "source-manifest",
+                 "postcondition": "bytes sha256 recorded at completion", "preconditions": ["workspace is the new tree"]}]
+
+    @contextlib.contextmanager
+    def workspace_fds(self):
+        """(parent descriptor, container descriptor or None) of the workspace parent and the generation container."""
+        parent_fd = os.open(str(self.root.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        container_fd = None
+        try:
+            name = pf_instance.GENERATION_CONTAINER_PREFIX + self.context.instance_id
+            try:
+                container_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                       dir_fd=parent_fd)
+            except FileNotFoundError:
+                container_fd = None
+            yield parent_fd, container_fd
+        finally:
+            if container_fd is not None:
+                os.close(container_fd)
+            os.close(parent_fd)
+
+    def workspace_observation(self):
+        """{"W", "CG", "S"} identities of the workspace, the retained generation and the stage (section 3.7)."""
+        generation = self.plan["workspace"]["generation_id"]
+        with self.workspace_fds() as (parent_fd, container_fd):
+            return {"W": pf_instance.identity_at(parent_fd, self.root.name),
+                    "CG": pf_instance.identity_at(container_fd, generation) if container_fd is not None else None,
+                    "S": pf_instance.identity_at(container_fd, "stage-" + generation)
+                    if container_fd is not None else None}
+
+    def workspace_evidence(self):
+        """The old/new identities recorded by the W effects' evidence."""
+        found = {}
+        for effect_id in pf_config.workspace_effect_ids(self.plan) or ():
+            found.update(self.identities(self.journal_effect(effect_id)["evidence"]))
+        return found
+
+    @staticmethod
+    def identity_text(identity):
+        return f"{identity[0]}:{identity[1]}" if identity else "none"
+
+    def workspace_tree(self):
+        """(tree, manifest of the provenance W4 records, expected entries digest) of the workspace switch: the
+        operation's deployed tree, or the restore bundle's workspace archive tree (unknown provenance)."""
+        effect = self.effects_of("workspace", type="source-stage")[0]
+        archive_digest = self.precondition(effect, "workspace-tree")
+        if archive_digest is not None:
+            tree = self.restore_workspace_tree()
+            manifest = pf_source.build_manifest(tree, source={"kind": "unknown"}, excludes=SOURCE_EXCLUDES)
+            return tree, manifest, archive_digest
+        tree = self.deployed_tree()
+        return tree, self.deployed_manifest(), self.plan["source"]["entries_sha256"]
+
+    def w1_stage(self, step):
+        """W1: the staged new workspace tree in the generation container (same filesystem as the workspace)."""
+        generation = self.plan["workspace"]["generation_id"]
+        stage = "stage-" + generation
+        tree, manifest, expected = self.workspace_tree()
+        with self.workspace_fds() as (parent_fd, container_fd):
+            old = pf_instance.identity_at(parent_fd, self.root.name)
+            if old is None:
+                raise Failure("workspace-generation-mismatch: the workspace is absent before its stage was built; "
+                              "nothing was moved or deleted.")
+            step.evidence = f"old:{self.identity_text(old)}"
+            name = pf_instance.GENERATION_CONTAINER_PREFIX + self.context.instance_id
+            if container_fd is None:
+                pf_instance.create_generation_container(parent_fd, name)
+            else:
+                problem = pf_instance.generation_container_problem(parent_fd, name, os.fstat(parent_fd).st_dev)
+                if problem is not None:
+                    raise Failure(f"generation-container-unsafe: {problem}; nothing was moved or deleted.")
+        with self.workspace_fds() as (parent_fd, container_fd):
+            if pf_instance.identity_at(container_fd, stage) is not None:
+                pf_instance.remove_private_tree_at(container_fd, stage)
+            os.mkdir(stage, 0o700, dir_fd=container_fd)
+        target = pf_instance.generation_container(self.context) / stage
+        self.publish_source_tree(tree, manifest, target)
+        digest = pf_source.entries_digest(pf_source.build_manifest(target, source={"kind": "unknown"},
+                                                                   excludes=SOURCE_EXCLUDES))
+        if digest != expected:
+            raise Failure(f"workspace-stage-mismatch: the staged workspace tree {digest[:12]} is not the selected "
+                          f"tree {expected[:12]}; the workspace was not changed.")
+        os.sync()
+        with self.workspace_fds() as (parent_fd, container_fd):
+            new = pf_instance.identity_at(container_fd, stage)
+        step.evidence = f"old:{self.identity_text(old)} new:{self.identity_text(new)}"
+
+    def w2_retain(self, step):
+        """W2: rename the old workspace to the retained generation (descriptor-relative, no-clobber, fsync both)."""
+        generation = self.plan["workspace"]["generation_id"]
+        recorded = self.workspace_evidence()
+        old, new = recorded.get("old"), recorded.get("new")
+        step.evidence = f"old:{self.identity_text(old)} new:{self.identity_text(new)}"
+        with self.workspace_fds() as (parent_fd, container_fd):
+            if old is None or pf_instance.identity_at(parent_fd, self.root.name) != old \
+                    or pf_instance.identity_at(container_fd, generation) is not None:
+                raise Failure(self.workspace_mismatch(self.workspace_observation()))
+            pf_instance.rename_noreplace_at(parent_fd, self.root.name, container_fd, generation)
+        step.retained.append({"kind": "workspace-generation", "name": generation, "sha256": None})
+
+    def w3_bind(self, step):
+        """W3: bind the staged tree as the workspace (the name must be absent, even an empty directory refuses)."""
+        generation = self.plan["workspace"]["generation_id"]
+        recorded = self.workspace_evidence()
+        old, new = recorded.get("old"), recorded.get("new")
+        step.evidence = f"old:{self.identity_text(old)} new:{self.identity_text(new)}"
+        with self.workspace_fds() as (parent_fd, container_fd):
+            if pf_instance.identity_at(parent_fd, self.root.name) is not None \
+                    or pf_instance.identity_at(container_fd, "stage-" + generation) != new:
+                raise Failure(self.workspace_mismatch(self.workspace_observation()))
+            pf_instance.rename_noreplace_at(container_fd, "stage-" + generation, parent_fd, self.root.name)
+
+    def w4_manifest(self, step):
+        """W4: the protected source manifest of the new workspace, only after a proven bind."""
+        _, manifest, _ = self.workspace_tree()
+        digest_value = self.write_workspace_manifest(manifest)
+        step.evidence = f"bytes sha256 {digest_value}"
+
+    def workspace_mismatch(self, observed, *, keep=False):
+        recorded = self.workspace_evidence()
+
+        def describe(label, identity):
+            if identity is None:
+                return f"{label} absent"
+            if identity == recorded.get("old"):
+                return f"{label} is the old workspace"
+            if identity == recorded.get("new"):
+                return f"{label} is the staged tree"
+            return f"{label} is an unknown inode {self.identity_text(identity)}"
+
+        op = self.operation_id
+        steps = f"pf --instance {self.context.slug} resume --operation {op} --keep-workspace" + (
+            "" if observed.get("W") is not None else
+            " (recreate the workspace directory as root first: nothing can be rebound)")
+        return (f"workspace-generation-mismatch: the workspace switch of operation {op} found "
+                f"{describe('the workspace', observed.get('W'))}, {describe('the retained generation', observed.get('CG'))}, "
+                f"{describe('the stage', observed.get('S'))}; nothing was moved or deleted. Supported next steps: "
+                f"{steps}. Nothing was changed.")
+
+    def workspace_validation(self):
+        """Section 3.7a after W3 (or a keep rebind): the registered workspace validates again."""
+        validation = pf_instance.validate_context(self.context, running_release=self.running_release)
+        workspace = str(self.context.paths.workspace)
+        found = [finding for finding in validation.findings
+                 if finding.severity == "refuse" and str(finding.path) == workspace]
+        if found:
+            message = (f"workspace-validation-failed: after the workspace switch of operation {self.operation_id} "
+                       f"the registered workspace does not validate ({found[0].code}: {found[0].message}); the source "
+                       f"manifest was not rewritten. Fix the finding, then run 'pf --instance {self.context.slug} "
+                       f"resume --operation {self.operation_id}'.")
+            self.journal_update(last_error={"code": "workspace-validation-failed", "message": message[:2000]})
+            raise Failure(message)
+
+    def run_workspace(self):
+        """Section 3.7 at the syncing point: the preflight again, then W1-W4 (each observed when an earlier process
+        left it unknown), or workspace_sync_pending when the switch is unavailable."""
+        ids = pf_config.workspace_effect_ids(self.plan)
+        if ids is None or all(self.effect_state(effect_id) == "complete" for effect_id in ids):
+            return
+        if self.effect_state(ids[0]) == "not_started":
+            _, manifest, _ = self.workspace_tree()
+            mode, reason = self.workspace_preflight(manifest)
+            if mode != "switch":
+                deployment = self.plan["source"]["deployment_id"]
+                message = (f"workspace-sync-pending: deployment {deployment} is active and recorded, but the workspace "
+                           f"was not refreshed ({reason}). Operation {self.operation_id} stays open in "
+                           f"workspace_sync_pending. Run 'pf --instance {self.context.slug} resume --operation "
+                           f"{self.operation_id}' after fixing the cause, or add --keep-workspace to keep the current "
+                           "workspace.")
+                self.journal_update(phase="workspace_sync_pending",
+                                    last_error={"code": "workspace-sync-pending", "message": message[:2000]})
+                raise Failure(message)
+        # W1's intent generation records the old workspace identity, so a crash inside W1 can still be reconciled
+        # against it (the evidence of an earlier attempt keeps the identity it recorded first).
+        old = self.workspace_evidence().get("old")
+        if old is None:
+            with self.workspace_fds() as (parent_fd, _):
+                old = pf_instance.identity_at(parent_fd, self.root.name)
+        self.run_effect(ids[0], self.w1_stage, evidence=f"old:{self.identity_text(old)}" if old else None)
+        self.run_effect(ids[1], self.w2_retain)
+        self.run_effect(ids[2], self.w3_bind)
+        if self.effect_state(ids[3]) != "complete":
+            self.workspace_validation()
+        self.run_effect(ids[3], self.w4_manifest)
+
+    def observe_workspace(self, effect):
+        """Section 3.7 reconciliation of an unknown W effect: (classification, detail, cleanup)."""
+        ids = pf_config.workspace_effect_ids(self.plan)
+        generation = self.plan["workspace"]["generation_id"]
+        observed = self.workspace_observation()
+        evidence = self.workspace_evidence()
+        index = ids.index(effect["effect_id"])
+        if index == 3:
+            _, manifest, _ = self.workspace_tree()
+            try:
+                current = pf_instance.read_bytes_nofollow(self.context.source_manifest_path)
+            except OSError:
+                current = None
+            # pf_source.write_manifest writes manifest_bytes plus one newline.
+            if current == pf_source.manifest_bytes(manifest) + b"\n":
+                return "complete", f"bytes sha256 {pf_instance.sha256_bytes(current)}", None
+            return "redo", "the source manifest is not the new tree's", None
+        if index == 0:
+            stage = observed.get("S")
+            if observed.get("W") == evidence.get("old") and observed.get("CG") is None and stage is not None:
+                target = pf_instance.generation_container(self.context) / ("stage-" + generation)
+                _, _, expected = self.workspace_tree()
+                try:
+                    digest = pf_source.entries_digest(pf_source.build_manifest(
+                        target, source={"kind": "unknown"}, excludes=SOURCE_EXCLUDES))
+                except (pf_source.SourceError, OSError):
+                    digest = None
+                if digest == expected:
+                    return "complete", (f"old:{self.identity_text(evidence.get('old'))} "
+                                        f"new:{self.identity_text(stage)}"), None
+            if observed.get("W") == evidence.get("old") and observed.get("CG") is None:
+                return "redo", "stage incomplete", self.remove_own_stage
+            return "refuse", self.workspace_mismatch(observed), None
+        row = pf_config.workspace_reconcile(evidence, observed)
+        text = f"old:{self.identity_text(evidence.get('old'))} new:{self.identity_text(evidence.get('new'))}"
+        if index == 1:
+            if row == "retain-not-started":
+                return "redo", "retain not started", None
+            if row in ("between-renames", "bind-done"):
+                return "complete", text, None
+            if row == "stage-incomplete":
+                return "redo", "stage incomplete", self.restage
+            return "refuse", self.workspace_mismatch(observed), None
+        if row == "between-renames":
+            return "redo", "crash between the renames", None
+        if row == "bind-done":
+            return "complete", text, None
+        return "refuse", self.workspace_mismatch(observed), None
+
+    def remove_own_stage(self):
+        """Remove this operation's own workspace stage, descriptor-relative inside the container (never anything
+        else)."""
+        generation = self.plan["workspace"]["generation_id"]
+        with self.workspace_fds() as (_, container_fd):
+            if container_fd is not None and pf_instance.identity_at(container_fd, "stage-" + generation) is not None:
+                pf_instance.remove_private_tree_at(container_fd, "stage-" + generation)
+
+    def restage(self):
+        """Row "stage incomplete" under a W2 redo: remove the own partial stage and build it again (W1's body)."""
+        self.remove_own_stage()
+        step = EffectStep(self.plan_effect(pf_config.workspace_effect_ids(self.plan)[0]))
+        self.w1_stage(step)
+        self.journal_update(effects={step.effect["effect_id"]: ("complete", utc(), step.evidence)})
+
+    def keep_workspace(self):
+        """``resume --keep-workspace`` (section 3.6/3.7): leave or rebind the old tree, remove the own stage, record
+        the W effects ``kept by operator`` and close."""
+        ids = pf_config.workspace_effect_ids(self.plan)
+        observed = self.workspace_observation()
+        evidence = self.workspace_evidence()
+        generation = self.plan["workspace"]["generation_id"]
+        started = [effect_id for effect_id in ids if self.effect_state(effect_id) != "not_started"]
+        rebound = False
+        if started:
+            row = pf_config.workspace_reconcile(evidence, observed) if evidence.get("old") else "stage-incomplete"
+            if row == "bind-done":
+                raise Failure(f"keep-workspace-not-legal: operation {self.operation_id} is in "
+                              f"{self.journal['phase']}; --keep-workspace applies only to the workspace refresh. "
+                              "Nothing was changed.")
+            if row in ("between-renames", "stage-lost"):
+                with self.workspace_fds() as (parent_fd, container_fd):
+                    pf_instance.rename_noreplace_at(container_fd, generation, parent_fd, self.root.name)
+                rebound = True
+            elif row == "foreign" and observed.get("W") is None:
+                raise Failure(self.workspace_mismatch(observed))
+            self.remove_own_stage()
+        if rebound:
+            self.workspace_validation()
+        note = "kept by operator" + (" (old tree rebound)" if rebound else "")
+        self.journal_update(effects={effect_id: ("complete", utc(), note) for effect_id in ids}, unresolved=None)
+        log("Workspace kept: it was not refreshed (manifest unchanged; provenance as observed).")
+        self.finish_operation()
+
+    # ------------------------------------------- staging and the deployed tree (PF-A3.2 sections 3.6, 3.13)
+
+    def remove_own_staging(self):
+        """An operation's own unsealed ``.staging-<dep>`` (descriptor-relative); a sealed deployment is never
+        removed."""
+        dep = self.plan["source"]["deployment_id"] if self.plan is not None else None
+        if not dep or not real_directory(self.deployments_dir):
+            return
+        fd = os.open(str(self.deployments_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = None
+            try:
+                info = os.stat(".staging-" + dep, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            if info is not None and stat.S_ISDIR(info.st_mode):
+                pf_instance.remove_private_tree_at(fd, ".staging-" + dep)
+        finally:
+            os.close(fd)
+
+    def sweep_staging(self, index=None):
+        """Section 3.13 (OD-A31-13): remove every ``.staging-<dep>`` no blocking plan references, except the staging of
+        the running deployment after a seal failure; links and non-directories are reported, never removed."""
+        if not real_directory(self.deployments_dir):
+            return
+        index = index if index is not None else self.operation_index()
+        referenced = {entry.plan["source"]["deployment_id"] for entry in index.entries
+                      if entry.plan is not None and entry.cls in ("blocking", "invalid", "superseded")}
+        if self.plan is not None:
+            referenced.add(self.plan["source"]["deployment_id"])
+        active = None
+        pointer = self.read_pointer() or {}
+        failed_op = pointer.get("deployment_seal_failed")
+        if isinstance(failed_op, str) and OPERATION_ID_RE.fullmatch(failed_op):
+            try:
+                record = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(
+                    self.context.operations_dir / failed_op / "deployment-artifact.json"), label="deployment-artifact")
+                if isinstance(record, dict) and record.get("state") == "seal-failed":
+                    active = record.get("deployment_id")
+            except (OSError, pf_instance.ContextError):
+                active = None
+        fd = os.open(str(self.deployments_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for name in sorted(os.listdir(fd)):
+                if not name.startswith(".staging-") or not DEPLOYMENT_ID_RE.fullmatch(name[len(".staging-"):]):
+                    continue
+                dep = name[len(".staging-"):]
+                if dep in referenced:
+                    continue
+                if dep == active:
+                    log(f"note: unsealed-active-staging: {dep}: the staging of the running deployment (seal failed in "
+                        f"operation {failed_op}) is kept.")
+                    continue
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode):
+                    log(f"note: staging-not-removed: {name} is not a directory (a link or file is reported, never "
+                        "removed).")
+                    continue
+                pf_instance.remove_private_tree_at(fd, name)
+                log(f"note: staging-removed: {dep}")
+        finally:
+            os.close(fd)
+
+    def deployment_folder(self, dep):
+        """The sealed ``deployments/<dep>`` or, before the seal, ``.staging-<dep>`` (real directories only)."""
+        for name in (dep, ".staging-" + dep):
+            folder = self.deployments_dir / name
+            if real_directory(folder):
+                return folder
+        raise Failure(f"plan-input-changed: the deployed source {dep} of operation {self.operation_id} is neither "
+                      "staged nor sealed. Nothing was changed.")
+
+    def deployed_manifest(self):
+        """The staged (or sealed) source manifest of this operation's deployment, with its proven provenance."""
+        folder = self.deployment_folder(self.plan["source"]["deployment_id"])
+        try:
+            return pf_source.load_manifest(folder / "source-manifest.json", pf_instance.parse_strict_json)
+        except (pf_source.SourceError, pf_instance.ContextError, OSError) as exc:
+            raise Failure(f"plan-input-changed: the staged source manifest of operation {self.operation_id} is "
+                          f"unusable ({exc}). Nothing was changed.") from exc
+
+    def deployed_tree(self):
+        """Section 3.6 source rule: the operation's deployed tree, re-extracted from its own staged or sealed
+        ``source.tar.gz`` into a private temporary directory under state/; its entries digest must equal the plan's
+        ``source.entries_sha256``. Cached for this process, removed by end_operation."""
+        if self._deployed_tree is not None:
+            return self._deployed_tree[1]
+        folder = self.deployment_folder(self.plan["source"]["deployment_id"])
+        self.ensure_state_dir()
+        temporary = Path(tempfile.mkdtemp(prefix="deployed-tree-", dir=str(self.state)))
+        self._deployed_tree = (temporary, temporary / "tree")
+        fd = os.open(str(folder / "source.tar.gz"), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            try:
+                inventory = pf_source.inspect_archive(fd, limits=pf_source.SOURCE_LIMITS)
+                parent_fd = os.open(str(temporary), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    manifest = pf_source.extract_archive(fd, parent_fd, "tree", inventory,
+                                                         limits=pf_source.SOURCE_LIMITS)
+                finally:
+                    os.close(parent_fd)
+            except pf_source.ArchiveRefused as exc:
+                raise self.archive_failure("source.tar.gz", exc) from exc
+        finally:
+            os.close(fd)
+        if pf_source.entries_digest(manifest) != self.plan["source"]["entries_sha256"]:
+            raise Failure(f"plan-input-changed: the deployed source of operation {self.operation_id} no longer "
+                          "matches its plan (entries digest). Nothing was changed.")
+        return self._deployed_tree[1]
+
+    def release_deployed_tree(self):
+        if self._deployed_tree is None:
+            return
+        temporary = self._deployed_tree[0]
+        self._deployed_tree = None
+        try:
+            fd = os.open(str(temporary.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return
+        try:
+            pf_instance.remove_private_tree_at(fd, temporary.name)
+        except OSError as exc:
+            log(f"note: a temporary deployed tree could not be removed ({exc.strerror or exc}): {temporary}")
+        finally:
+            os.close(fd)
+
+    def ensure_state_dir(self):
+        if not self.state.is_dir():
+            self.state.mkdir(mode=0o700)
+            os.chmod(self.state, 0o700)
+
+    # ------------------------------------------- restart observation and the still-running probe (section 3.5)
+
+    @staticmethod
+    def database_target(target):
+        """(name, heads or None, flag or None) of a ``database:<name>[:heads=<h>,...|:allow_connections=false]``
+        target."""
+        parts = target.split(":")
+        name = parts[1] if len(parts) > 1 else ""
+        heads = flag = None
+        for part in parts[2:]:
+            if part.startswith("heads="):
+                heads = sorted(item for item in part[len("heads="):].split(",") if item)
+            elif part.startswith("allow_connections="):
+                flag = part
+        return name, heads, flag
+
+    def database_effect_unresolved(self, plan, journal):
+        """Whether the unresolved effect (or, for a superseded operation, any unknown/partial effect) is a database
+        effect (section 3.5 part (c))."""
+        unresolved = journal["unresolved_effect"]
+        effects = [effect for effect in plan["effects"]
+                   if (effect["effect_id"] == unresolved) or (unresolved is None and pf_config.effect_state(
+                       journal, effect["effect_id"]) in ("unknown", "partial"))]
+        return any(effect["type"].startswith("database-") for effect in effects)
+
+    def db_running(self):
+        try:
+            return bool(self.inspect("db")["State"].get("Running"))
+        except DaemonFailure:
+            raise
+        except Failure:
+            return False
+
+    def still_running(self, entry, *, database_effects=None):
+        """Section 3.5 still-running probe over ``entry`` (read-only; never kills): [(kind, detail)] hits. Raises
+        ``effect-probe-unavailable`` when process groups were recorded but /proc or the boot ID cannot be read."""
+        hits = []
+        directory = self.context.operations_dir / entry.operation_id
+        unresolved = entry.journal["unresolved_effect"] if entry.journal else None
+        try:
+            children = pf_instance.read_private_list(directory / "children.json")
+        except (OSError, pf_instance.ContextError) as exc:
+            raise Failure(f"effect-probe-unavailable: operation {entry.operation_id} recorded child process groups, but "
+                          f"this host cannot inspect processes (children.json: {exc}); without that probe a "
+                          "still-running effect cannot be excluded. Nothing was changed.") from exc
+        if children:
+            current = pf_instance.boot_id()
+            for child in children:
+                if not isinstance(child, dict):
+                    continue
+                if current is None or child.get("boot_id") is None:
+                    raise Failure(f"effect-probe-unavailable: operation {entry.operation_id} recorded child process "
+                                  "groups, but this host cannot inspect processes (boot ID unreadable); without that "
+                                  "probe a still-running effect cannot be excluded. Nothing was changed.")
+                if child["boot_id"] != current:
+                    continue
+                members = pf_runner.group_members(child["pgid"])
+                if members is None:
+                    raise Failure(f"effect-probe-unavailable: operation {entry.operation_id} recorded child process "
+                                  "groups, but this host cannot inspect processes (/proc unavailable); without that "
+                                  "probe a still-running effect cannot be excluded. Nothing was changed.")
+                if members:
+                    ticks = pf_instance.process_start_ticks(child["pgid"])
+                    if ticks is None or ticks == child.get("start_ticks"):
+                        hits.append((child.get("effect_id") or unresolved,
+                                     f"process group {child['pgid']} ({child.get('tool')})"))
+        inventory = self.docker_inventory()
+        oneoffs = set(pf_docker.owned_oneoffs(inventory))
+        if oneoffs:
+            running = set(line.strip() for line in self.docker("ps", "-q", "--no-trunc").splitlines() if line.strip())
+            for container_id in sorted(oneoffs & running):
+                hits.append((unresolved, f"one-off container {container_id[:12]}"))
+        if database_effects is None:
+            database_effects = entry.plan is not None and self.database_effect_unresolved(entry.plan, entry.journal)
+        if database_effects and self.db_running():
+            count = self.sql("postgres", "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' "
+                                         "AND pid <> pg_backend_pid();")
+            if count.strip() not in ("0", ""):
+                hits.append((unresolved, f"database session on {self.env()['POSTGRES_DB']}"))
+        return hits
+
+    def require_not_running(self, entry, *, database_effects=None):
+        hits = self.still_running(entry, database_effects=database_effects)
+        if hits:
+            effect_id, detail = hits[0]
+            effect = next((item for item in entry.plan["effects"] if item["effect_id"] == effect_id), None) \
+                if entry.plan else None
+            described = f"{effect_id} ({effect['type']} {effect['target']})" if effect else str(effect_id)
+            raise Failure(f"effect-still-running: effect {described} of operation {entry.operation_id} still has a "
+                          f"running {detail}. resume never stops it; wait until it ends, then run 'pf --instance "
+                          f"{self.context.slug} resume --operation {entry.operation_id}' again. Nothing was changed.")
+
+    def start_db_for_observation(self):
+        """Section 3.5 part (c) recovery action after the confirmation: only the db service (no writer), then
+        database_ready(); a failure is ``database-unavailable`` with the operation unchanged."""
+        try:
+            self.compose("up", "-d", "--no-deps", "--no-build", "db")
+            self.wait_health("db")
+            self.database_ready()
+        except DaemonFailure:
+            raise
+        except Failure as exc:
+            unresolved = self.journal["unresolved_effect"] or "?"
+            raise Failure(f"database-unavailable: the database service could not be started to observe effect "
+                          f"{unresolved} of operation {self.operation_id} ({str(exc).splitlines()[0]}). The operation "
+                          "is unchanged. Nothing else was changed.") from exc
+
+    def database_names(self):
+        return set(self.database_rows())
+
+    def observe_effect(self, plan, journal, effect):
+        """Section 3.5: (classification, detail, cleanup) of one unresolved effect, from the daemon, the database or
+        the filesystem; never from an exit code. classification: complete | not_started | redo | needs_operator |
+        refuse. ``cleanup`` (or None) runs inside the redo's own intent generation."""
+        etype, target, eid = effect["type"], effect["target"], effect["effect_id"]
+        role = pf_config.effect_role(effect)
+        evidence = self.journal_effect(eid)["evidence"] or ""
+        if role == "workspace":
+            return self.observe_workspace(effect)
+        if etype == "source-stage":
+            dep = target.split(":", 1)[1]
+            if real_directory(self.deployments_dir / dep):
+                return "complete", f"sealed {dep}", None
+            if os.path.lexists(str(self.deployments_dir / (".staging-" + dep))):
+                return "redo", f"own staging {dep} incomplete", self.remove_own_staging
+            return "not_started", "neither staged nor sealed", None
+        if role == "stop":
+            states = [self.inspect(service)["State"].get("Running") for service in ("frontend", "backend")]
+            return ("complete", "stopped", None) if not any(states) else ("redo", "a writer still runs", None)
+        if role in ("backend", "frontend", "db-start"):
+            service = {"backend": "backend", "frontend": "frontend", "db-start": "db"}[role]
+            try:
+                state = self.inspect(service)
+            except DaemonFailure:
+                raise
+            except Failure:
+                return "redo", f"{service} absent", None
+            healthy = state["State"].get("Running") and state["State"].get("Health", {}).get("Status") == "healthy"
+            planned = target.rsplit(":", 1)[-1] if role != "db-start" else None
+            if healthy and (planned is None or state["Image"][7:19] == planned):
+                if role == "frontend":
+                    try:
+                        data = json.loads(self.compose("exec", "-T", "frontend", "wget", "-q", "-O", "-",
+                                                       "http://127.0.0.1:5173/api/health"))
+                    except (Failure, ValueError):
+                        data = {}
+                    if data.get("status") != "ok" or data.get("database") != "connected":
+                        return "redo", "API health not ok", None
+                return "complete", f"running healthy {state['Image'][7:19]}", None
+            return "redo", f"{service} not running healthy on the planned image", None
+        if etype == "capture":
+            return self.observe_capture(effect, evidence)
+        if etype == "verification":
+            return self.observe_verification(effect, evidence)
+        if etype == "database-switch":
+            _, current, prepared, retained = target.split(":")
+            names = self.database_names()
+            present = {name for name in (current, prepared, retained) if name in names}
+            if present == {current, retained}:
+                return "complete", f"current {current}, retained {retained}", None
+            if present == {current, prepared}:
+                return "not_started", f"current {current}, prepared {prepared}", None
+            return "needs_operator", ", ".join(f"{name} {'present' if name in present else 'absent'}"
+                                               for name in (current, prepared, retained)), None
+        if etype.startswith("database-"):
+            return self.observe_database(effect, evidence)
+        if etype == "image-load":
+            recovery = self.op_recovery()
+            missing = [service for service, image in recovery.images.items() if image is not None
+                       and not self.image_present(image["id"])]
+            return ("complete", "planned image IDs present", None) if not missing else \
+                ("redo", "missing " + ",".join(missing), None)
+        if role == "seal":
+            dep = target.split(":", 1)[1]
+            view = self.sealed_view(dep)
+            if view is not None:
+                return "complete", f"sealed {dep}", None
+            return "redo", "staging complete, seal not published", None
+        if etype == "resource-delete":
+            return "redo", "continue the frozen deletion plan", None
+        if etype == "file-write":
+            return self.observe_file(effect)
+        return "redo", "re-run", None
+
+    def image_present(self, image_id):
+        try:
+            self.docker("image", "inspect", image_id)
+            return True
+        except DaemonFailure:
+            raise
+        except Failure:
+            return False
+
+    def observe_capture(self, effect, evidence):
+        bundle_id = self.attempt_bundle(effect, evidence)
+        if effect["target"] == "purge-bundle":
+            folder = self.recovery_root / bundle_id
+            reader = lambda: self.verify_recovery(folder)  # noqa: E731
+        else:
+            folder = self.backups_dir / bundle_id
+            reader = lambda: self.verify_snapshot(bundle_id)  # noqa: E731
+        # A capture that verifies inline restores into the attempt's own pf_verify_* candidate; a redo drops it.
+        cleanup = (lambda: self.drop_owned(self.owned_verify_names(effect, evidence)))  # noqa: E731
+        if not os.path.lexists(str(folder)):
+            return "not_started", f"bundle:{bundle_id} absent", cleanup
+        try:
+            view = reader()
+        except Failure as exc:
+            return "redo", f"bundle:{bundle_id} without a sealed manifest ({failure_code(exc)})", cleanup
+        if self.plan["kind"] == "backup":
+            return "complete", f"bundle:{bundle_id} sealed", None
+        if view.level in PASSED_LEVELS:
+            return "complete", f"bundle:{bundle_id} sealed and {view.level}", None
+        return "redo", f"bundle:{bundle_id} sealed without a passed record", cleanup
+
+    def owned_verify_names(self, capture, *evidences):
+        """The pf_verify_* candidates this operation named for one capture: the plan's pre-assigned name and every
+        name an attempt recorded in its evidence (never any other database)."""
+        names = []
+        texts = list(evidences) + [self.journal_effect(capture["effect_id"])["evidence"]]
+        for text in texts:
+            for name in re.findall(r"pf_verify_[0-9a-f]{20}", text or ""):
+                if name not in names:
+                    names.append(name)
+        planned = self.precondition(capture, "verify")
+        if planned and planned not in names:
+            names.append(planned)
+        return names
+
+    def attempt_bundle(self, effect, evidence):
+        """The bundle ID of the capture attempt in flight: the evidence's ``bundle:<id>``, else the plan's."""
+        match = re.search(r"bundle:((?:purge-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6})", evidence or "")
+        return match.group(1) if match else self.precondition(effect, "bundle")
+
+    def observe_verification(self, effect, evidence):
+        capture = self.capture_effect_for(effect)
+        bundle_id = self.attempt_bundle(capture, self.journal_effect(capture["effect_id"])["evidence"])
+        try:
+            view = self.verify_recovery(self.recovery_root / bundle_id) if capture["target"] == "purge-bundle" \
+                else self.verify_snapshot(bundle_id)
+        except Failure as exc:
+            return "redo", f"bundle {bundle_id} unreadable ({failure_code(exc)})", None
+        if view.level in PASSED_LEVELS:
+            return "complete", f"passed {view.latest_verification_id}", None
+        names = self.owned_verify_names(capture, evidence)
+        return "redo", f"no passed record for {bundle_id}", (lambda: self.drop_owned(names))
+
+    def capture_effect_for(self, verification):
+        captures = [effect for effect in self.plan["effects"] if effect["type"] == "capture"
+                    and effect["effect_id"] < verification["effect_id"]]
+        return captures[-1]
+
+    def drop_owned(self, names):
+        """Drop owned candidate databases named by the plan or evidence when they exist (dropdb of an owned name)."""
+        existing = self.database_names()
         for name in names:
-            self.publish_fresh("workspace", self.root / name, executables=designated)
+            if name in existing:
+                self.drop_database(name)
+
+    def observe_database(self, effect, evidence):
+        etype, eid = effect["type"], effect["effect_id"]
+        name, heads, flag = self.database_target(effect["target"])
+        names = self.database_names()
+        candidate = pf_config.CANDIDATE_RE.fullmatch(name) is not None
+        if candidate:
+            if etype in ("database-restore", "database-create"):
+                if name in names:
+                    return "redo", f"{name} exists (never inferred complete)", (lambda: self.drop_owned([name]))
+                return "not_started", f"{name} absent", None
+            if etype == "database-drop":
+                return ("complete", f"{name} absent", None) if name not in names else ("redo", f"{name} exists", None)
+            if etype == "database-migrate":
+                if name in names and sorted(set(self.db_heads(name))) == heads:
+                    return "complete", f"heads {','.join(heads)}", None
+                return "redo", f"{name} not at heads {','.join(heads)}", (lambda: self.recreate_candidate(effect))
+        if self.plan["kind"] == "restore-instance" and etype in ("database-drop", "database-restore"):
+            backend = self.effects_of("backend")
+            if backend and self.effect_state(backend[0]["effect_id"]) != "not_started":
+                raise Failure(f"operation-journal-invalid: {self.operation_id}: the journal records effect {eid} "
+                              "unresolved after the backend start, against its own plan order. The operation's state "
+                              "cannot be proven, so every mutating route is refused; status, doctor, backups, "
+                              "recoveries, ps and logs work. See SYNOLOGY_ADMIN §16. Nothing was changed.")
+            if etype == "database-drop":
+                return "redo", f"{name} {'present' if name in names else 'absent'}; the restore follows", None
+            return "redo", f"target {name} redone from the bundle", (lambda: self.drop_owned([name]))
+        if etype == "database-alter":
+            rows = self.database_rows()
+            if name in rows and not rows[name]["allow_connections"]:
+                return "complete", "flag false", None
+            return "redo", "flag not false", None
+        if etype == "database-migrate":
+            current = sorted(set(self.db_heads(name))) if name in names else []
+            if current == heads:
+                return "complete", f"heads {','.join(heads) or 'none'}", None
+            pre = re.search(r"pre-heads:([A-Za-z0-9_,]*)", evidence)
+            before = sorted(item for item in pre.group(1).split(",") if item) if pre else None
+            if before is not None and current == before:
+                return "needs_operator", (f"live heads {','.join(current) or 'none'} equal the pre-heads (a lost result; "
+                                          "a partial non-transactional change cannot be excluded)"), None
+            return "needs_operator", f"live heads {','.join(current) or 'none'} are neither the pre-heads nor the " \
+                                     f"target {','.join(heads)}", None
+        if etype == "database-drop":
+            return ("complete", f"{name} absent", None) if name not in names else ("redo", f"{name} exists", None)
+        if etype == "database-restore":
+            return "redo", f"{name} redone", (lambda: self.drop_owned([name]))
+        return "redo", "re-run", None
+
+    def recreate_candidate(self, migrate):
+        """A candidate whose migration is unknown is dropped and recreated by its creation effect's body (section 3.5
+        'drop the candidate and redo from its creation effect')."""
+        name, _, _ = self.database_target(migrate["target"])
+        self.drop_owned([name])
+        creation = next(effect for effect in self.plan["effects"] if effect["type"] in ("database-restore",
+                                                                                        "database-create")
+                        and self.database_target(effect["target"])[0] == name)
+        self.effect_action(creation, {})(EffectStep(creation))
+
+    def observe_file(self, effect):
+        target = effect["target"]
+        expected = None
+        match = re.fullmatch(r"bytes sha256 ([0-9a-f]{64})", effect["postcondition"])
+        if match:
+            expected = match.group(1)
+        path = self.file_target_path(target)
+        if target.startswith("purge-cleanup:") or target.startswith("override:"):
+            if target == "purge-cleanup:backups" and not (self.journal["deletion"] or {}).get("delete_backups"):
+                return "complete", "kept", None
+            if target == "purge-cleanup:admin-config" and not (self.journal["deletion"] or {}).get(
+                    "reset_admin_config"):
+                return "complete", "kept", None
+            return ("complete", "absent", None) if not os.path.lexists(str(path)) else ("redo", "present", None)
+        if target == "checkpoint-history":
+            return self.observe_history(effect)
+        if target == "pointer:deployed.json":
+            pointer = self.read_pointer() or {}
+            dep = self.plan["source"]["deployment_id"]
+            if pointer.get("deployment_id") == dep or pointer.get("deployment_seal_failed") == self.operation_id:
+                data = pf_instance.read_bytes_nofollow(path)
+                return "complete", f"bytes sha256 {pf_instance.sha256_bytes(data)}", None
+            return "redo", "deployed.json does not name this deployment", None
+        if target == "last-reset":
+            try:
+                record = load_json(path)
+            except (OSError, ValueError):
+                record = {}
+            checkpoint = self.precondition(effect, "checkpoint")
+            if record.get("checkpoint") == checkpoint:
+                return "complete", "last-reset.json names the checkpoint", None
+            return "redo", "last-reset.json not written", None
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except OSError:
+            data = None
+        if data is not None and expected is not None and pf_instance.sha256_bytes(data) == expected:
+            return "complete", f"bytes sha256 {expected}", None
+        return "redo", "bytes differ or absent", None
+
+    def file_target_path(self, target):
+        if target == "pointer:deployed.json":
+            return self.state / "deployed.json"
+        if target == "config:.env":
+            return self.config_dir / ".env"
+        if target == "source-manifest":
+            return self.context.source_manifest_path
+        if target.startswith("state-file:"):
+            return self.state / target.split(":", 1)[1]
+        if target == "last-reset":
+            return self.state / "last-reset.json"
+        if target == "override:active-images.yaml":
+            return self.override
+        if target.startswith("purge-cleanup:"):
+            return {"backups": self.backups_dir, "env": self.config_dir / ".env", "state": self.state,
+                    "admin-config": self.config_dir / "pf-config.json"}[target.split(":", 1)[1]]
+        return self.revisions_root / self.config["project"]
+
+    # ------------------------------------------- authority, decisions and resume (sections 3.6, 3.8)
+
+    def check_authority(self, plan):
+        """Section 3.8: the plan's authorities equal the current protected state, else plan-authority-changed."""
+        context = self.context
+        producer = plan["producer"]
+        permission = self.permission_policy_ref()
+        compared = (
+            ("instance record", plan["instance"]["record_sha256"], context.record_sha256),
+            ("environment policy", f"{plan['environment_policy']['revision']}:{plan['environment_policy']['sha256']}",
+             f"{context.approved_policy.revision}:{context.approved_policy.sha256}"),
+            ("permission policy", json.dumps(plan["permission_policy"], sort_keys=True),
+             json.dumps(permission, sort_keys=True)),
+            ("control release", f"{producer['control_release_id']}:{producer['control_sha256']}",
+             f"{context.control.release_id}:{context.control.sha256}"),
+            ("profile", producer["profile_sha256"], context.profile.sha256),
+            ("daemon engine", plan["instance"]["daemon_engine_id"], context.daemon.engine_id),
+        )
+        for field, recorded, current in compared:
+            if recorded != current:
+                short = lambda value: pf_instance.sha256_bytes(str(value).encode("utf-8"))[:12]  # noqa: E731
+                raise Failure(f"plan-authority-changed: {field} changed after operation {plan['operation_id']} was "
+                              f"approved ({short(recorded)} -> {short(current)}); resume refuses to mix authorities. "
+                              f"Restore the approved {field} or have an administrator review the instance. Nothing was "
+                              "changed.")
+
+    def resume_phrase(self, action):
+        op8 = self.operation_id[-8:]
+        kind, project = self.plan["kind"], self.context.compose_project
+        if action == "abandon" and kind == "restore-instance":
+            return f"ABANDON RESTORE {project} {op8}"
+        if action == "abandon":
+            return f"ABANDON {op8}"
+        if action == "keep-workspace":
+            return f"KEEP WORKSPACE {op8}"
+        if action == "forward" and kind == "purge" and self.journal["deletion"] is not None:
+            return f"RESUME PURGE {project} {self.plan_bundle_id()}"
+        if action == "forward" and kind == "abort-deploy":
+            return f"RESUME ABORT DEPLOY {project}"
+        return f"RESUME {op8}"
+
+    def plan_bundle_id(self):
+        capture = self.effects_of(type="capture", target="purge-bundle")
+        return self.precondition(capture[0], "bundle") if capture else "?"
+
+    def resume_operation(self, operation_id=None, *, abandon=False, keep_workspace=False, alias=None):
+        """``pf resume [--operation ID] [--abandon | --keep-workspace]`` and the aliases (section 3.6): authority,
+        probe, observation, decision and one typed confirmation before the attempt is recorded; then exactly one
+        action. A refused or declined resume changes no operation file."""
+        self.staging()
+        entry = self.gate.entry
+        plan, journal = self.plan, self.journal
+        kind, phase, op = plan["kind"], journal["phase"], self.operation_id
+        self.check_authority(plan)
+        if kind == "restore-instance" and journal["deletion"] is not None and not abandon:
+            raise Failure(f"abandon-in-progress: operation {op} (restore-instance) is being abandoned with a frozen "
+                          f"deletion plan; only 'pf --instance {self.context.slug} resume --operation {op} --abandon' "
+                          "continues it. Nothing was changed.")
+        database_effect = self.database_effect_unresolved(plan, journal)
+        self.require_not_running(entry, database_effects=database_effect)
+        deferred = database_effect and not self.db_running()
+        observed = None
+        # An abandon decides from the journal alone (section 3.6); it never needs (or re-reads the inputs of) the
+        # unresolved effect's observation.
+        if journal["unresolved_effect"] is not None and not deferred and not abandon:
+            effect = self.plan_effect(journal["unresolved_effect"])
+            observed, detail, _ = self.observe_effect(plan, journal, effect)
+            log(f"observed: {effect['effect_id']} {effect['type']} {effect['target']}: {observed} ({detail})")
+        decision = pf_config.resume_decision(plan, journal, observed)
+        if abandon and not decision.abandon_legal:
+            reached = [effect for effect in plan["effects"]
+                       if pf_config.effect_state(journal, effect["effect_id"]) != "not_started"]
+            last = reached[-1] if reached else plan["effects"][0]
+            steps = "; ".join(journal["legal_next"]) or "none"
+            raise Failure(f"abandon-not-legal: operation {op} ({kind}) is past effect {last['effect_id']} "
+                          f"({last['type']} {last['target']}); abandoning would leave {decision.reason} without its "
+                          f"recovery. Legal next: {steps}. Nothing was changed.")
+        if keep_workspace and not decision.keep_legal:
+            raise Failure(f"keep-workspace-not-legal: operation {op} is in {phase}; --keep-workspace applies only to "
+                          "the workspace refresh. Nothing was changed.")
+        action = "abandon" if abandon else "keep-workspace" if keep_workspace else decision.action
+        label = {"forward": "forward", "reopen": "reopen unchanged deployment", "withdraw": "withdraw (no reopen)",
+                 "close": "close", "abandon": "abandon", "keep-workspace": "keep workspace",
+                 "needs_operator": "forward"}[action]
+        log(f"Resuming operation {op} ({kind}, phase {phase}): {label}")
+        if deferred:
+            log(f"note: start the database service, then observe {journal['unresolved_effect']} and continue")
+        if action == "forward" and kind == "purge" and journal["deletion"] is not None:
+            self.prepare_purge_resume()
+        if action == "forward" and kind == "abort-deploy":
+            self.prepare_abort_resume()
+        if action == "abandon" and kind == "restore-instance":
+            deletion_plan = self.prepare_restore_abandon()
+        else:
+            deletion_plan = None
+        confirm(self.resume_phrase(action), self.resume_summary(action, decision))
+        if deferred and action not in ("abandon", "keep-workspace"):
+            # Section 3.5 part (c): only the db service, after the confirmation and before any operation file
+            # changes; a failing start leaves the operation unchanged (database-unavailable, no fail-closed).
+            self.start_db_for_observation()
+        self._reentered = True
+        self._append_attempt({"forward": "resume-forward", "reopen": "reopen-unchanged", "withdraw": "reopen-unchanged",
+                              "close": "abandon", "abandon": "abandon", "keep-workspace": "keep-workspace",
+                              "needs_operator": "resume-forward"}[action] if alias is None else f"alias:{alias}",
+                             route=alias or "resume")
+        self.journal_update(approval={"plan_sha256": self.plan_sha256, "confirmed_at": utc(),
+                                      "method": "typed-phrase"})
+        if deferred:
+            if journal["unresolved_effect"] is not None and action not in ("abandon", "keep-workspace"):
+                effect = self.plan_effect(journal["unresolved_effect"])
+                observed, detail, _ = self.observe_effect(self.plan, self.journal, effect)
+                log(f"observed: {effect['effect_id']} {effect['type']} {effect['target']}: {observed} ({detail})")
+                if observed == "needs_operator":
+                    raise self.write_needs_operator(effect, detail)
+                decision = pf_config.resume_decision(self.plan, self.journal, observed)
+                action = decision.action
+        if action == "needs_operator":
+            effect = self.plan_effect(journal["unresolved_effect"])
+            _, detail, _ = self.observe_effect(self.plan, self.journal, effect)
+            raise self.write_needs_operator(effect, detail)
+        if action == "keep-workspace":
+            return self.keep_workspace()
+        if action == "abandon" and kind == "restore-instance":
+            return self.abandon_restore_instance(deletion_plan)
+        if action in ("close", "abandon"):
+            return self.close_abandoned()
+        if action == "withdraw":
+            return self.withdraw_superseding()
+        if action == "reopen":
+            return self.reopen_and_cancel()
+        return self.run_plan({})
+
+    def resume_summary(self, action, decision):
+        op = self.operation_id
+        text = {"forward": f"Continue operation {op} forward from its journal ({decision.reason}).",
+                "reopen": f"Reopen the unchanged deployment and cancel operation {op} (no data or source effect "
+                          "started; owned candidates are dropped).",
+                "withdraw": f"Withdraw operation {op}: its own staging is removed, application services stay as they "
+                            "are and the superseded operation's routes apply again.",
+                "close": f"Close operation {op} (only private files were written).",
+                "abandon": f"Abandon operation {op}.",
+                "keep-workspace": f"Keep the current workspace for operation {op}; it is not refreshed.",
+                "needs_operator": f"Observe operation {op}."}[action]
+        return text
+
+    def close_abandoned(self):
+        """``--abandon`` / close where only private effects (or a backup's capture/verification) happened."""
+        if self.plan["kind"] == "backup":
+            for effect in self.effects_of(type="capture"):
+                bundle_id = self.attempt_bundle(effect, self.journal_effect(effect["effect_id"])["evidence"])
+                folder = self.backups_dir / bundle_id if bundle_id else None
+                if folder is not None and os.path.lexists(str(folder)) \
+                        and self.effect_state(effect["effect_id"]) != "complete":
+                    self.journal_update(retained=[{"kind": "bundle-attempt", "name": bundle_id, "sha256": None}])
+        self.close_operation("cancelled")
+        log(f"Operation {self.operation_id} cancelled.")
+        return 0
+
+    def withdraw_superseding(self):
+        """Section 3.6: a superseding operation never reopens; it removes its own staging, closes cancelled and leaves
+        the application services as they are. The superseded operation's routes apply again."""
+        self.close_operation("cancelled")
+        superseded = self.operation_index().entry(self.plan["supersedes"])
+        log(f"Operation {self.operation_id} withdrawn (cancelled); application services were left as they are.")
+        if superseded is not None and superseded.journal is not None:
+            routes = pf_config.operation_routes(superseded.plan, superseded.journal, slug=self.context.slug)
+            log(f"Operation {superseded.operation_id} ({superseded.kind}) is blocking again. Legal next: "
+                + ("; ".join(f"{command}: {description}" for _, command, description in routes) or "none"))
+        return 0
+
+    def reopen_unchanged(self):
+        """Reopen the unchanged deployment (today's ``pf resume``; a recovery action, not a plan effect)."""
+        self.database_ready()
+        contract = self.ensure_local_contract()
+        images = self.retain_images(utc().lower() + "-resume-" + uuid.uuid4().hex[:6])
+        self.activate(images, contract["heads"])
+
+    def restore_allow_connections(self):
+        """A purge's listed non-connectable stores whose flag an interrupted window left open are closed again."""
+        capture = self.effects_of(type="capture", target="purge-bundle")
+        listed = self.precondition(capture[0], "allow_connections=false") if capture else None
+        if not listed:
+            return
+        rows = self.database_rows()
+        for name in listed.split(","):
+            if name in rows and rows[name]["allow_connections"]:
+                self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS false;",
+                         mutation=True)
+
+    def owned_candidates(self):
+        names = []
+        for effect in self.plan["effects"]:
+            if effect["type"].startswith("database-"):
+                name = self.database_target(effect["target"])[0]
+                if pf_config.CANDIDATE_RE.fullmatch(name) and name not in names:
+                    names.append(name)
+        return names
+
+    def reopen_and_cancel(self):
+        """Section 3.6 reopen: owned candidates dropped, a purge's connection flags restored, the unchanged deployment
+        reopened; then cancelled."""
+        self.database_ready()
+        self.drop_owned(self.owned_candidates())
+        if self.plan["kind"] == "purge":
+            self.restore_allow_connections()
+        self.reopen_unchanged()
+        self.close_operation("cancelled")
+        log(f"Operation {self.operation_id} cancelled; the unchanged deployment was reopened.")
+        return 0
+
+    def prepare_purge_resume(self):
+        """A purge in deleting/finalizing: the strict bundle re-read, the frozen plan and the daemon (before the
+        RESUME PURGE confirmation)."""
+        bundle_id = self.plan_bundle_id()
+        folder = self.recovery_root / bundle_id
+        try:
+            self.verify_recovery(folder)
+        except Failure as exc:
+            raise Failure(f"plan-input-changed: recovery bundle {bundle_id} of operation {self.operation_id} no longer "
+                          f"reads or verifies ({failure_code(exc)}); deletion stays blocked and the operation stays "
+                          "open in deleting. Restore the bundle folder byte-identically from an off-NAS copy, then "
+                          "resume (SYNOLOGY_ADMIN §16). Nothing was changed.") from exc
+        if self.effects_of(type="resource-delete") and \
+                self.effect_state(self.effects_of(type="resource-delete")[0]["effect_id"]) != "complete":
+            plan = self.load_frozen_deletion_plan("purge", self.journal["deletion"]["plan_sha256"])
+            self.require_plan_engine(plan, self.verify_daemon(), self.deletion_progress())
+            self._topology_checked = True
+            self.log_plan(plan, title="Frozen purge plan (resume; only these items are removed):")
+
+    def prepare_abort_resume(self):
+        plan = self.load_frozen_deletion_plan("abort-deploy", self.plan["resources"]["deletion_plan_sha256"])
+        self.require_plan_engine(plan, self.verify_daemon(), self.deletion_progress())
+        self._topology_checked = True
+        self.log_plan(plan, title="Frozen abort-deploy plan (resume; only these items are removed):")
+
+    def prepare_restore_abandon(self):
+        """Section 3.6 restore-instance abandon, before its confirmation: the deletion plan (abort-deploy scope) is
+        built and shown when the db start may have created resources, or the frozen one is reused."""
+        if self.journal["deletion"] is not None:
+            plan = self.load_frozen_deletion_plan("abort-deploy", self.journal["deletion"]["plan_sha256"])
+            self._topology_checked = True
+            self.log_plan(plan, title="Frozen restore-instance abandon plan (resume; only these items are removed):")
+            return plan
+        db_start = self.effects_of("db-start")
+        if db_start and self.effect_state(db_start[0]["effect_id"]) != "not_started":
+            plan = self.plan_for("abort-deploy", self.docker_inventory(), command="restore-instance --abandon")
+            self.log_plan(plan, title="Restore-instance abandon plan (exact resources of this instance; images are "
+                                      "retained):")
+            return plan
+        return None
+
+    def abandon_restore_instance(self, deletion_plan):
+        """Section 3.6: delete what this restore created (frozen A1.3 abort-deploy scope), remove the .env it wrote
+        (bytes unchanged only), give an edited .env back, remove the own staging and close cancelled."""
+        if deletion_plan is not None and self.journal["deletion"] is None:
+            reference = self.write_deletion_plan(deletion_plan)
+            self.journal_update(deletion={"plan_sha256": reference["sha256"], "delete_backups": False,
+                                          "reset_admin_config": False, "confirmed_at": utc()})
+        if deletion_plan is not None:
+            self.execute_deletion_plan(deletion_plan)
+        env_effect = self.effects_of(target="config:.env")
+        if env_effect and self.effect_state(env_effect[0]["effect_id"]) != "not_started":
+            expected = re.fullmatch(r"bytes sha256 ([0-9a-f]{64})", env_effect[0]["postcondition"]).group(1)
+            path = self.config_dir / ".env"
+            try:
+                data = pf_instance.read_bytes_nofollow(path)
+            except FileNotFoundError:
+                data = None
+            if data is not None and pf_instance.sha256_bytes(data) == expected:
+                os.unlink(str(path))
+            elif data is not None:
+                log(f"note: env-kept-changed: config/.env changed after operation {self.operation_id} wrote it; it was "
+                    "kept.")
+            proposal = ".env.proposal-" + self.operation_id[-8:]
+            if not os.path.lexists(str(path)) and os.path.lexists(str(self.config_dir / proposal)):
+                fd = os.open(str(self.config_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    pf_instance.rename_noreplace_at(fd, proposal, fd, ".env")
+                finally:
+                    os.close(fd)
+        self.close_operation("cancelled")
+        log(f"Restore operation {self.operation_id} abandoned; the resources it created were removed. Loaded image "
+            "tags are retained.")
+        return 0
+
+    # ------------------------------------------- the plan runner and the effect bodies (sections 3.4, 3.5)
+
+    def run_plan(self, ctx):
+        """Run every effect of the plan that is not complete, in plan order (first run and resume alike), then close
+        the operation. ``ctx`` carries the in-memory inputs of a first run (the private candidate, the purge's binding
+        plan); a resumed process rebuilds what it needs from the plan, its files and the strictly re-read inputs.
+        A backup's caught capture or verification failure closes it failed_preserved (OD-A32-13)."""
+        if self.plan["kind"] != "backup":
+            return self._run_plan(ctx)
+        try:
+            return self._run_plan(ctx)
+        except (Failure, OSError, pf_source.SourceError) as exc:
+            if self.journal is None or self.journal["phase"] in pf_config.TERMINAL_PHASES:
+                raise
+            self.close_operation("failed_preserved", last_error=self._error(exc))
+            log(f"Backup operation {self.operation_id} closed failed_preserved; the capture is kept as evidence and is "
+                "not selectable.")
+            raise
+
+    def _run_plan(self, ctx):
+        for effect in self.plan["effects"]:
+            if self.journal["phase"] in pf_config.TERMINAL_PHASES:
+                return 0
+            effect_id = effect["effect_id"]
+            if self.effect_state(effect_id) == "complete":
+                continue
+            role = pf_config.effect_role(effect)
+            if role == "workspace":
+                self.run_workspace()
+                continue
+            if role == "deletion" and self.plan["kind"] == "purge" and self.journal["deletion"] is None:
+                self.purge_approve_deletion(ctx)
+            self.run_effect(effect_id, self.effect_action(effect, ctx), evidence=self.intent_evidence(effect))
+        return self.finish_operation()
+
+    def intent_evidence(self, effect):
+        """The identities known before an effect (section 3.1 step 4): the live heads before a live migration, the
+        pre-existing checkpoint history, the capture attempt."""
+        if self.effect_state(effect["effect_id"]) != "not_started":
+            return None
+        if effect["type"] == "database-migrate":
+            name, _, _ = self.database_target(effect["target"])
+            if pf_config.CANDIDATE_RE.fullmatch(name):
+                return None
+            heads = self.db_heads(name) if name in self.database_names() else []
+            return "pre-heads:" + ",".join(sorted(set(heads)))
+        if effect["type"] == "capture":
+            return f"bundle:{self.precondition(effect, 'bundle')} verify:{self.precondition(effect, 'verify')}"
+        if effect["target"] == "checkpoint-history":
+            revisions = self.revisions_root
+            existing = None
+            if real_directory(revisions):
+                fd = os.open(str(revisions), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    existing = pf_instance.identity_at(fd, self.config["project"])
+                finally:
+                    os.close(fd)
+            return "existing:" + self.identity_text(existing)
+        return None
+
+    def finish_operation(self):
+        """The terminal generation after the last effect: completed, or failed_preserved when the seal failed after a
+        healthy activation (the A3.1 non-wedging rule; no compose stop)."""
+        seal = self.effects_of("seal")
+        if seal and self.effect_state(seal[0]["effect_id"]) == "partial":
+            detail = (self.journal_effect(seal[0]["effect_id"])["evidence"] or "seal-failed").split(": ", 1)[-1]
+            message = (f"deployment-record-incomplete: the application was activated and passed health checks, but its "
+                       f"deployment record could not be sealed ({detail}). The operation was closed and the deployment "
+                       "is treated as one without a record; the next deploy, update, rollback or restore-instance "
+                       f"seals one. Run 'pf --instance {self.context.slug} status'.")
+            self.close_operation("failed_preserved", last_error={"code": "deployment-record-incomplete",
+                                                                 "message": message[:2000]})
+            raise Failure(message)
+        deployment_id = self.plan["source"]["deployment_id"] if seal else None
+        self.close_operation("completed", deployment_id=deployment_id)
+        self.completion_log()
+        return 0
+
+    def completion_log(self):
+        kind, plan = self.plan["kind"], self.plan
+        log(f"Operation {self.operation_id} completed.")
+        if kind == "deploy":
+            log("Initial deployment complete.")
+            log("Run the UI/workflow and firewall smoke tests, then create the first baseline checkpoint with: sudo pf "
+                "backup")
+        elif kind == "update":
+            log("Update complete. Previous revision checkpoint: " + self.operation_checkpoint())
+        elif kind == "rollback":
+            log("Rollback complete. Safety checkpoint: " + self.operation_checkpoint())
+        elif kind == "reset-db":
+            log("Clean database is active. Configure Departments/Areas/Operations/Stations again.")
+        elif kind == "restore-instance":
+            log("Instance restore complete. Run UI/workflow/network smoke tests before accepting the recovered staging "
+                "instance.")
+            log("postgres-globals.sql is preserved in the bundle for manual review; it was not executed automatically.")
+        elif kind == "abort-deploy":
+            log("Incomplete first deployment resources were removed. Source and .env were kept; rerun deploy when "
+                "ready.")
+        elif kind == "backup":
+            view = self.verify_snapshot(self.operation_checkpoint())
+            log(f"Checkpoint class: {view.capture_class}")
+            log(f"Verification level: {view.level} (record {view.latest_verification_id})")
+            log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though "
+                "runtime .env is stored separately.")
+        if plan["workspace"]["mode"] == "keep":
+            log("Workspace refresh: kept (--keep-workspace); the workspace was not changed.")
+
+    def effect_action(self, effect, ctx):
+        """The body of one plan effect (section 3.4), by type and target."""
+        etype, target = effect["type"], effect["target"]
+        role = pf_config.effect_role(effect)
+        if etype == "source-stage" and target.startswith("deployment:"):
+            return lambda step: self.act_stage(step, ctx)
+        if etype == "file-write" and target == "source-manifest":
+            return lambda step: self.act_record_current(step, ctx)
+        if role == "stop":
+            return lambda step: self.pause()
+        if role == "db-start":
+            return lambda step: self.act_db_start(step)
+        if etype == "capture":
+            return lambda step: self.act_capture(step, effect, ctx)
+        if etype == "verification":
+            return lambda step: self.act_verification(step, effect, ctx)
+        if etype.startswith("database-") and etype != "database-switch":
+            return lambda step: self.act_database(step, effect, ctx)
+        if etype == "database-switch":
+            _, current, prepared, retained = target.split(":")
+            return lambda step: self.swap_database(prepared, retained, current=current)
+        if etype == "image-load":
+            return lambda step: self.act_image_load(step)
+        if role == "backend":
+            return lambda step: self.activate_backend(self.activation_images(ctx), self.activation_heads(effect))
+        if role == "frontend":
+            return lambda step: self.activate_frontend(self.activation_images(ctx))
+        if role == "seal":
+            return lambda step: self.act_seal(step)
+        if role == "pointer":
+            return lambda step: self.act_pointer(step)
+        if etype == "resource-delete":
+            return lambda step: self.act_delete(step)
+        if etype == "file-write":
+            return lambda step: self.act_file(step, effect, ctx)
+        raise Failure(f"Internal error: no body for effect {effect['effect_id']} ({etype} {target}).")
+
+    def act_stage(self, step, ctx):
+        if "candidate" not in ctx:
+            raise Failure("Internal error: a deployment is staged only by the process that confirmed it.")
+        staged = self.stage_deployment(ctx["candidate"], ctx["manifest"], kind=self.plan["kind"],
+                                       images=ctx.get("images"), ref=ctx.get("ref"),
+                                       deployment_id=self.plan["source"]["deployment_id"],
+                                       pointer=ctx.get("pointer"))
+        step.evidence = f"staged {staged.deployment_id}"
+
+    def act_record_current(self, step, ctx):
+        if "candidate" not in ctx:
+            raise Failure("Internal error: deploy --current records the manifest of its own candidate only.")
+        manifest = self.candidate_manifest(ctx["candidate"], self.plan["source"]["commit"], verified=True)
+        step.evidence = f"bytes sha256 {self.write_workspace_manifest(manifest)}"
+
+    def act_db_start(self, step):
+        self.compose("up", "-d", "--no-deps", "db")
+        self.wait_health("db")
+        if self.plan["kind"] == "restore-instance":
+            recovery = self.op_recovery()
+            values = self.env()
+            owner = recovery.database_user
+            if values["POSTGRES_DB"] != recovery.database or (owner is not None and values["POSTGRES_USER"] != owner):
+                raise Failure("Recovered .env database identity does not match the recovery manifest.")
+            return
+        self.database_ready()
+        migrate = self.effects_of(type="database-migrate")
+        if self.plan["kind"] == "deploy" and migrate and self.effect_state(migrate[0]["effect_id"]) == "not_started" \
+                and self.db_heads():
+            raise Failure("The supposedly new database already contains an Alembic revision. New deploy refuses to "
+                          "adopt it.")
+        step.evidence = "db healthy"
+
+    def capture_ids(self, effect, step):
+        """(bundle ID, verification candidate) of a capture attempt: the plan's, or for a backup's new attempt (a redo)
+        a new bundle ID, the earlier attempt's folder recorded as ``bundle-attempt`` (section 3.5)."""
+        bundle_id = self.precondition(effect, "bundle")
+        verify = self.precondition(effect, "verify")
+        if self.plan["kind"] == "backup" and step.evidence and step.evidence.startswith("attempt "):
+            used = re.findall(r"bundle:([0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{6})", step.evidence)
+            last = used[-1] if used else bundle_id
+            if os.path.lexists(str(self.backups_dir / last)):
+                step.retained.append({"kind": "bundle-attempt", "name": last, "sha256": None})
+            bundle_id = f"{utc()}-{last.split('-')[1]}-{uuid.uuid4().hex[:6]}"
+            verify = "pf_verify_" + uuid.uuid4().hex[:20]
+        return bundle_id, verify
+
+    def act_capture(self, step, effect, ctx):
+        kind = self.plan["kind"]
+        bundle_id, verify = self.capture_ids(effect, step)
+        step.evidence = (step.evidence + " " if step.evidence and "attempt " in step.evidence else "") + \
+            f"bundle:{bundle_id} verify:{verify}"
+        if effect["target"] == "purge-bundle":
+            checkpoint = ctx.get("checkpoint") or self.verify_snapshot(self.precondition(effect, "checkpoint"))
+            view, binding = self.capture_purge_bundle(ctx["preliminary"], checkpoint=checkpoint, bundle_id=bundle_id)
+            ctx.update(recovery=view, binding=binding)
+            step.retained.append({"kind": "purge-bundle", "name": bundle_id, "sha256": view.manifest_sha256})
+            return
+        reason = effect["target"].split(":", 1)[1]
+        if kind == "backup":
+            try:
+                view = self._capture(reason, capture_class="healthy_checkpoint", bundle_id=bundle_id,
+                                     verify_name=verify, verify=False)
+            except (Failure, OSError, pf_source.SourceError) as exc:
+                if not isinstance(exc, DaemonFailure) and os.path.lexists(str(self.backups_dir / bundle_id)):
+                    step.retained.append({"kind": "bundle-attempt", "name": bundle_id, "sha256": None})
+                raise
+        elif kind == "rollback":
+            view = self.preserve_current(reason, stores=[self.env()["POSTGRES_DB"]], bundle_id=bundle_id,
+                                         verify_name=verify)
+        else:
+            if kind == "purge":
+                self.database_ready()
+            view = self.snapshot(reason, bundle_id=bundle_id, verify_name=verify)
+        ctx["checkpoint" if kind != "backup" else "view"] = view
+        if view.bundle_id != bundle_id:
+            step.evidence += f" bundle:{view.bundle_id}"
+        step.retained.append({"kind": "checkpoint", "name": view.bundle_id, "sha256": view.manifest_sha256})
+
+    def operation_checkpoint(self):
+        """The checkpoint this operation captured (its retained artifact), else the plan's pre-assigned ID."""
+        found = [item["name"] for item in self.journal["retained_artifacts"] if item["kind"] == "checkpoint"]
+        if found:
+            return found[-1]
+        captures = self.effects_of(type="capture")
+        return str(self.precondition(captures[0], "bundle")) if captures else "none"
+
+    def act_verification(self, step, effect, ctx):
+        capture = self.capture_effect_for(effect)
+        bundle_id = self.attempt_bundle(capture, self.journal_effect(capture["effect_id"])["evidence"])
+        if self.plan["kind"] == "purge":
+            view = ctx.get("recovery") or self.verify_recovery(self.recovery_root / bundle_id)
+            names = ["pf_verify_" + uuid.uuid4().hex[:20] for _ in view.stores]
+            step.evidence = f"bundle:{bundle_id} verify:{','.join(names)}"
+            ctx["recovery"] = self.verify_purge_bundle(view, names)
+            return
+        view = ctx.get("view") or self.verify_snapshot(bundle_id)
+        verify = (re.findall(r"verify:(pf_verify_[0-9a-f]{20})", self.journal_effect(capture["effect_id"])["evidence"]
+                             or "") or [self.precondition(capture, "verify")])[-1]
+        if step.evidence and "attempt " in step.evidence:
+            verify = "pf_verify_" + uuid.uuid4().hex[:20]
+        step.evidence = (step.evidence + " " if step.evidence else "") + f"bundle:{bundle_id} verify:{verify}"
+        ctx["view"] = self.verify_capture(view, verify)
+
+    def act_database(self, step, effect, ctx):
+        etype = effect["type"]
+        name, heads, flag = self.database_target(effect["target"])
+        kind = self.plan["kind"]
+        if etype == "database-create":
+            self.create_database(name)
+        elif etype == "database-drop":
+            if name in self.database_names():
+                self.drop_database(name)
+        elif etype == "database-alter":
+            self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS false;", mutation=True)
+        elif etype == "database-restore":
+            if name.startswith("pf_migrate_"):
+                checkpoint = ctx.get("checkpoint") or self.verify_snapshot(
+                    self.precondition(self.effects_of(type="capture")[0], "bundle"))
+                self.restore_into(name, checkpoint.folder / checkpoint.active_store["dump"])
+            elif name.startswith("pf_restore_"):
+                self.restore_candidate(self.op_selected(), name)
+            else:
+                recovery = self.op_recovery()
+                store = next(item for item in recovery.stores if item["database"] == name)
+                if name in self.database_names():
+                    self.drop_database(name)
+                self.restore_into(name, recovery.folder / store["dump"])
+                if store["role"] == "active" and self.db_heads(name) != recovery.database_heads:
+                    raise Failure("Restored active database Alembic revision does not match the recovery bundle.")
+        elif etype == "database-migrate":
+            env = None if name == self.env()["POSTGRES_DB"] else {"POSTGRES_DB": name}
+            if kind == "reset-db":
+                override = self.state / "reset-images.yaml"
+                self.make_override(self.activation_images(ctx), override)
+                root = None
+            else:
+                override = self.state / "candidate-images.yaml"
+                self.make_override(self.activation_images(ctx), override)
+                root = ctx.get("candidate") or self.deployed_tree()
+            self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
+                         root=root, override=override, env=env)
+            reached = sorted(set(self.db_heads(name)))
+            if reached != heads:
+                if name.startswith("pf_migrate_"):
+                    raise Failure("Migration rehearsal did not reach the target head.")
+                if name.startswith("pf_clean_"):
+                    raise Failure("The clean database did not reach the current schema head.")
+                if kind == "deploy":
+                    raise Failure("Initial database migration did not reach the selected application's Alembic head.")
+                raise Failure("The live database migration did not reach the target head.")
+            step.evidence = (step.evidence + " " if step.evidence else "") + "heads:" + ",".join(reached)
+
+    def act_image_load(self, step):
+        recovery = self.op_recovery()
+        self.docker("image", "load", "-i", recovery.folder / "images.tar")
+        self.verify_images(recovery.images)
+        self.make_override(recovery.images, self.override)
+        step.evidence = "images:" + ",".join(image["id"][7:19] for image in recovery.images.values() if image)
+
+    def activation_images(self, ctx):
+        """The backend/frontend images an activation or migration of this operation uses."""
+        kind = self.plan["kind"]
+        if kind == "restore-instance":
+            return self.op_recovery().images
+        if kind == "rollback":
+            return self.op_selected().images
+        if kind == "reset-db":
+            checkpoint = ctx.get("checkpoint") or self.verify_snapshot(
+                self.precondition(self.effects_of(type="capture")[0], "bundle"))
+            return checkpoint.images
+        return {service: {"reference": self.plan["images"][service]["reference"],
+                          "id": self.plan["images"][service]["id"]} for service in pf_docker.BUILT_SERVICES}
+
+    def activation_heads(self, effect):
+        value = self.precondition(effect, "heads")
+        return sorted(item for item in (value or "").split(",") if item)
+
+    def staged_record(self):
+        """The operation's deployment-artifact.json (state, deployment ID and the staged details)."""
+        path = self.operation_dir / "deployment-artifact.json"
+        try:
+            record = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(path), label=str(path))
+        except (OSError, pf_instance.ContextError) as exc:
+            raise Failure(f"plan-input-changed: the staged deployment record of operation {self.operation_id} is "
+                          f"unreadable ({exc}). Nothing was changed.") from exc
+        if not isinstance(record, dict) or record.get("deployment_id") != self.plan["source"]["deployment_id"] \
+                or not isinstance(record.get("staged"), dict):
+            raise Failure(f"plan-input-changed: the staged deployment record of operation {self.operation_id} names "
+                          "another deployment. Nothing was changed.")
+        return record
+
+    def staged_deployment(self):
+        """The StagedDeployment of this operation rebuilt from its staged record (section 3.6)."""
+        record = self.staged_record()
+        staged = record["staged"]
+        dep = record["deployment_id"]
+        return StagedDeployment(dep, self.plan["kind"], self.deployments_dir / (".staging-" + dep), staged["source"],
+                                staged["images"], staged["previous_deployment_id"], staged["migration_files_sha256"])
+
+    def sealed_view(self, dep):
+        """A valid sealed record of ``dep`` (the A3.1 read), else None."""
+        folder = self.deployments_dir / dep
+        if not real_directory(folder):
+            return None
+        fd = os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            data = self._bundle_file(fd, "deployment-record.json", MANIFEST_READ_LIMIT)
+            record, record_sha256, mismatch = self._deployment_check(fd, dep, pf_instance.sha256_bytes(data))
+        except (OSError, ValueError):
+            return None
+        finally:
+            os.close(fd)
+        return None if mismatch is not None else (record, record_sha256)
+
+    def act_seal(self, step):
+        staged = self.staged_deployment()
+        record = self.staged_record()
+        restored_from = self.plan["input_bundle"] if self.plan["kind"] == "restore-instance" else None
+        try:
+            sealed = self.seal_deployment(staged, restored_from=restored_from)
+        except DaemonFailure:
+            raise
+        except (Failure, OSError, pf_instance.ContextError, pf_config.ConfigError, pf_docker.DockerScopeError,
+                ValueError, KeyError, TypeError) as exc:
+            detail = (str(exc).splitlines() or [type(exc).__name__])[0][:300]
+            self.write_private_json("deployment-artifact.json", dict(record, state="seal-failed", detail=detail))
+            step.outcome = "partial"
+            step.evidence = "seal-failed: " + detail
+            return
+        self.write_private_json("deployment-artifact.json", dict(record, state="sealed",
+                                                                 record_sha256=sealed["record_sha256"]))
+        step.evidence = f"sealed {sealed['deployment_id']} record {sealed['record_sha256'][:12]}"
+        log(f"Deployment {sealed['deployment_id']} sealed (record {sealed['record_sha256'][:12]}).")
+
+    def act_pointer(self, step):
+        record = self.staged_record()
+        dep = record["deployment_id"]
+        pointer = dict(record["staged"]["pointer"], deployed_at=utc())
+        seal = self.effects_of("seal")[0]
+        if self.effect_state(seal["effect_id"]) == "complete":
+            sealed = self.sealed_view(dep)
+            if sealed is None:
+                raise Failure(f"deployment-artifact-mismatch: the sealed record of {dep} cannot be read for the "
+                              "pointer.")
+            pointer.update(deployment_id=dep, deployment_record_sha256=sealed[1])
+        else:
+            pointer["deployment_seal_failed"] = self.operation_id
+        self.ensure_state_dir()
+        write_json(self.state / "deployed.json", pointer)
+        if self.plan["kind"] == "restore-instance":
+            # PF-A2.3 FL-9: a restore publishes the private state files it (re)creates with the policy target.
+            self.publish_fresh("private_state", self.state / "deployed.json")
+        step.evidence = "bytes sha256 " + pf_instance.sha256_bytes(pf_instance.read_bytes_nofollow(
+            self.state / "deployed.json"))
+
+    def act_delete(self, step):
+        kind = self.plan["kind"]
+        if kind == "purge":
+            plan = self.load_frozen_deletion_plan("purge", self.journal["deletion"]["plan_sha256"])
+        else:
+            plan = self.load_frozen_deletion_plan("abort-deploy", self.plan["resources"]["deletion_plan_sha256"])
+        deleted = self.execute_deletion_plan(plan)
+        step.evidence = f"removed {sum(1 for item in deleted if item.get('outcome') == 'removed')} of " \
+                        f"{len(plan['candidates'])} planned items"
+
+    def act_file(self, step, effect, ctx):
+        target = effect["target"]
+        if target == "config:.env":
+            return self.act_install_env(step, effect, ctx)
+        if target == "checkpoint-history":
+            return self.act_checkpoint_history(step, effect)
+        if target.startswith("state-file:"):
+            name = target.split(":", 1)[1]
+            data = self.read_small_payload(self.op_recovery(), "state/" + name, "state_file")
+            self.ensure_state_dir()
+            pf_instance._write_private_file(self.state / name, data, 0o600)
+            self.publish_fresh("private_state", self.state / name)
+            step.evidence = "bytes sha256 " + pf_instance.sha256_bytes(data)
+            return None
+        if target == "last-reset":
+            switch = self.effects_of(type="database-switch")[0]
+            retained = switch["target"].split(":")[3]
+            write_json(self.state / "last-reset.json", {"time": utc(),
+                                                        "checkpoint": self.precondition(effect, "checkpoint"),
+                                                        "retained_database": retained})
+            log("Previous database retained (connections disabled): " + retained)
+            return None
+        if target == "override:active-images.yaml":
+            if os.path.lexists(str(self.override)):
+                os.unlink(str(self.override))
+            step.evidence = "absent"
+            return None
+        if target.startswith("purge-cleanup:"):
+            return self.act_purge_cleanup(step, target.split(":", 1)[1])
+        raise Failure(f"Internal error: no body for file-write {target}.")
 
     def github(self, path, missing=False):
         # Unauthenticated GitHub API only: no credential is taken from the inherited environment
@@ -6606,7 +9026,7 @@ class Controller:
                   for service, reference in images.items()}
         return pinned, override
 
-    def deploy(self, target=None, *, use_current=False, skip_ci=False):
+    def deploy(self, target=None, *, use_current=False, skip_ci=False, keep_workspace=False):
         self.staging()
         self.assert_new_deployment()
         self.command(["git", "--version"], effect=None)
@@ -6648,108 +9068,122 @@ class Controller:
             if len(contract["heads"]) != 1:
                 raise Failure("Initial deployment requires exactly one Alembic head in the selected source.")
             # PF-A3.1: the candidate's manifest (provenance proven by the protected store above), the read-only
-            # artifact capacity preflight before the confirmation, then staging before the first effect.
+            # artifact capacity preflight before the confirmation. PF-A3.2: the workspace preflight (section 3.7).
             manifest = self.candidate_manifest(source, target["sha"], verified=True)
             self.deployment_preflight(manifest)
-
-            confirm(
-                "DEPLOY " + target["sha"][:12],
-                "Create a new PartFlow staging deployment. No existing project data will be adopted or deleted.\n"
-                + f"Source: {target['ref']} -> {target['sha']}\n"
-                + self.environment_summary(values),
-            )
-            staged = self.stage_deployment(source, manifest, kind="deploy", images=images, ref=target["ref"])
-            write_json(self.pending, {
-                "operation": "deploy", "phase": "confirmed", "started": utc(),
-                "target": target, "database": values["POSTGRES_DB"],
-            })
-
             if use_current:
+                workspace, lines = self.workspace_plan("record-current"), [
+                    "Workspace refresh: none (--current deploys the workspace that is already the selected tree)"]
+            else:
+                workspace, lines = self.workspace_decision(manifest, keep_workspace)
+            summary = ("Create a new PartFlow staging deployment. No existing project data will be adopted or deleted.\n"
+                       + f"Source: {target['ref']} -> {target['sha']}\n" + self.environment_summary(values)
+                       + "\n" + "\n".join(lines))
+            phrase = "DEPLOY " + target["sha"][:12]
+            confirm(phrase, summary)
+            self.sweep_staging()
+            deployment_id = f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
+            heads = sorted(contract["heads"])
+            identities = {service: self.image_identity(images[service]["id"], reference=images[service]["reference"])
+                          for service in pf_docker.BUILT_SERVICES}
+            effects = [{"phase": "preparing", "type": "source-stage", "target": "deployment:" + deployment_id,
+                        "postcondition": f"staged {deployment_id}", "preconditions": ["confirmed"]}]
+            if use_current:
+                effects.append({"phase": "preparing", "type": "file-write", "target": "source-manifest",
+                                "postcondition": "bytes sha256 recorded at completion",
+                                "preconditions": ["the workspace equals the selected commit"]})
                 # PF-A2.3: no bulk change of the editable workspace without a verified editor freeze.
                 log(f"Workspace permissions were not changed; check them with '{self.pf_command()} permissions check "
                     "--scope workspace'.")
-                self.record_source_manifest(source, target["sha"], verified=True)
-                self.phase("source-ready")
-            else:
-                self.replace_source(source, target["sha"])
+            effects += [
+                {"phase": "initializing", "type": "service-change", "target": "service:db:start",
+                 "postcondition": "db healthy", "preconditions": ["no database of this instance exists"]},
+                {"phase": "initializing", "type": "database-migrate",
+                 "target": f"database:{values['POSTGRES_DB']}:heads={','.join(heads)}", "postcondition": "heads equal",
+                 "preconditions": ["heads empty"]}]
+            effects += self.activation_specs(identities, heads, deployment_id)
+            effects += self.workspace_effect_specs(workspace, deployment_id=deployment_id)
+            ctx = {"candidate": source, "manifest": manifest, "images": images, "ref": target["ref"],
+                   "pointer": {**target, "checkpoint": None, "initial_deploy": True, "database_heads": heads}}
+            return self.start_operation(
+                "deploy", ctx, effects=effects, workspace=workspace, images=identities,
+                confirmation=self.confirmation_ref(phrase, summary),
+                source={"provenance": "git_commit", "commit": target["sha"],
+                        "entries_sha256": pf_source.entries_digest(manifest), "deployment_id": deployment_id})
 
-            self.phase("starting-database")
-            self.compose("up", "-d", "--no-deps", "db")
-            self.wait_health("db")
-            self.database_ready()
-            if self.db_heads():
-                raise Failure("The supposedly new database already contains an Alembic revision. New deploy refuses to adopt it.")
+    @staticmethod
+    def confirmation_ref(phrase, summary):
+        return {"phrase": phrase[:120], "summary_sha256": pf_instance.sha256_bytes(summary.encode("utf-8"))}
 
-            self.phase("migrating-database")
-            self.compose(
-                "run", "--rm", "--no-deps", "-T", "backend",
-                "uv", "run", "alembic", "upgrade", "head",
-                override=override,
-            )
-            if self.db_heads() != contract["heads"]:
-                raise Failure("Initial database migration did not reach the selected application's Alembic head.")
+    @staticmethod
+    def activation_specs(images, heads, deployment_id, *, seal=True):
+        """The activating effects (section 3.4): backend and frontend starts (the API health check is part of the
+        frontend's postcondition), then the seal and the pointer."""
+        def short(service):
+            return images[service]["id"][7:19] if service in images else "bundle"
 
-            self.phase("activating")
-            self.activate(images, contract["heads"])
-            self.finish_deployment(staged, {
-                **target, "deployed_at": utc(), "checkpoint": None,
-                "initial_deploy": True, "database_heads": contract["heads"],
-            })
-            log("Initial deployment complete.")
-            log("Run the UI/workflow and firewall smoke tests, then create the first baseline checkpoint with: sudo pf backup")
+        effects = [
+            {"phase": "activating", "type": "service-change", "target": f"service:backend:start:{short('backend')}",
+             "postcondition": f"running healthy {short('backend')}", "preconditions": ["heads:" + ",".join(heads)]},
+            {"phase": "activating", "type": "service-change", "target": f"service:frontend:start:{short('frontend')}",
+             "postcondition": f"running healthy {short('frontend')}", "preconditions": ["backend healthy"]}]
+        if seal:
+            effects += [
+                {"phase": "activating", "type": "artifact-seal", "target": "deployment:" + deployment_id,
+                 "postcondition": "sealed", "preconditions": ["activation passed"]},
+                {"phase": "activating", "type": "file-write", "target": "pointer:deployed.json",
+                 "postcondition": "bytes sha256 recorded at completion", "preconditions": ["seal attempted"]}]
+        return effects
 
-    def plan_missing(self, operation):
-        return Failure(f"plan-missing: This interrupted {operation} predates frozen deletion plans (PF-A1.3); "
-                       "automatic resume is refused. Review the remaining resources manually; nothing was deleted.")
+    def start_operation(self, kind, ctx, **plan_args):
+        """Write the plan and journal generation 1, then run the plan (section 3.1). A failure of the source-stage
+        effect (only private files written) closes the operation cancelled after removing its own staging."""
+        self.open_operation(kind, **plan_args)
+        try:
+            return self.run_plan(ctx)
+        except StageFailed as exc:
+            self.close_operation("cancelled")
+            raise Failure(f"deployment-stage-failed: {exc.detail}. The application, database and workspace were not "
+                          f"changed; operation {self.operation_id} was closed (cancelled) and its staging "
+                          "removed.") from exc
 
     def abort_deploy(self):
+        """``pf abort-deploy``: a new operation superseding the incomplete deploy (section 3.3), allowed only while the
+        deploy's frontend effect has not started. Its frozen deletion plan is approved in generation 1; a repeated
+        ``abort-deploy`` while it is open aliases ``pf resume`` (the gate re-enters it)."""
         self.staging()
-        if not self.pending.exists():
+        superseded = self.gate.entry if self.gate is not None and self.gate.action == "supersede" else None
+        if superseded is None or superseded.kind != "deploy":
             raise Failure("No incomplete initial deployment exists.")
-        pending = load_json(self.pending)
-        if pending.get("operation") != "deploy":
-            raise Failure("The pending operation is not an initial deployment; abort-deploy refuses to touch it.")
         if (self.state / "deployed.json").exists():
-            raise Failure("A managed deployment record already exists; abort-deploy is only for an incomplete first deployment.")
-        safe_phases = {
-            "confirmed", "changing-source", "source-replaced", "source-ready",
-            "starting-database", "migrating-database", "activating", "aborting",
-        }
-        if pending.get("phase") not in safe_phases:
-            raise Failure(
-                "Frontend access may already have opened. Automatic first-deploy cleanup is refused; preserve the database and review recovery manually."
-            )
+            raise Failure("A managed deployment record already exists; abort-deploy is only for an incomplete first "
+                          "deployment.")
+        self.require_not_running(superseded, database_effects=False)
         project = self.config["project"]
-        if pending.get("phase") == "aborting":
-            # Resume: the frozen plan only (closed); nothing newly discovered is ever added.
-            if "deletion_plan" not in pending:
-                raise self.plan_missing("abort-deploy")
-            plan = self.load_deletion_plan(pending, kind="abort-deploy")
-            self.verify_resume_daemon(plan, pending)
-            self._topology_checked = True
-            self.log_plan(plan, title="Frozen abort-deploy plan (resume; only these items are removed):")
-            confirm(
-                "RESUME ABORT DEPLOY " + project,
-                "An earlier abort-deploy froze this plan and began removing resources. Resume only the remaining "
-                "planned items; the source checkout and .env are kept.",
-            )
-        else:
-            database = pending.get("database") or self.env()["POSTGRES_DB"]
-            plan = self.plan_for("abort-deploy", self.docker_inventory(), command="abort-deploy")
-            self.log_plan(plan, title="Abort-deploy plan (exact resources of this instance; images are retained):")
-            confirm(
-                "ABORT DEPLOY " + project,
-                f"Delete containers and Docker volumes created by the incomplete first deployment for database {database}. "
-                "The source checkout and .env are kept so deployment can be retried. This is allowed only before frontend access opened.",
-            )
-            reference = self.write_deletion_plan(plan)
-            self.durable_phase("aborting", deletion_plan=reference, deleted=[])
-        # LIFECYCLE section 8: per-resource proof, never `compose down -v` as a substitute.
-        self.execute_deletion_plan(plan)
-        if self.override.exists():
-            self.override.unlink()
-        self.pending.unlink()
-        log("Incomplete first deployment resources were removed. Source and .env were kept; rerun deploy when ready.")
+        try:
+            database = self.env()["POSTGRES_DB"]
+        except Failure:
+            database = "unknown"
+        plan = self.plan_for("abort-deploy", self.docker_inventory(), command="abort-deploy")
+        self.log_plan(plan, title="Abort-deploy plan (exact resources of this instance; images are retained):")
+        summary = (f"Delete containers and Docker volumes created by the incomplete first deployment for database "
+                   f"{database}. The source checkout and .env are kept so deployment can be retried. This is allowed "
+                   "only before frontend access opened.")
+        phrase = "ABORT DEPLOY " + project
+        confirm(phrase, summary)
+        reference = self.write_deletion_plan(plan)
+        effects = [{"phase": "deleting", "type": "resource-delete", "target": "deletion-plan",
+                    "postcondition": "every planned item removed or already absent",
+                    "preconditions": ["deletion plan " + reference["sha256"]]},
+                   {"phase": "finalizing", "type": "file-write", "target": "override:active-images.yaml",
+                    "postcondition": "absent", "preconditions": ["deletion complete"]}]
+        return self.start_operation(
+            "abort-deploy", {}, effects=effects, workspace=self.workspace_plan("untouched"), images={},
+            confirmation=self.confirmation_ref(phrase, summary),
+            source={"provenance": "not_applicable", "commit": None, "entries_sha256": None, "deployment_id": None},
+            supersedes=superseded.operation_id, deletion_plan_sha256=reference["sha256"],
+            deletion={"plan_sha256": reference["sha256"], "delete_backups": False, "reset_admin_config": False,
+                      "confirmed_at": utc()})
 
     def instance_summary(self, plan):
         """What a purge would delete and retain, from a deletion plan (never from name prefixes)."""
@@ -6891,8 +9325,21 @@ class Controller:
         """
         self.database_ready()
         checkpoint = self.snapshot("before-purge")
+        view, binding = self.capture_purge_bundle(preliminary, checkpoint=checkpoint)
+        try:
+            return self.verify_purge_bundle(view, None), binding
+        except PlanChanged:
+            raise
+        except Failure as exc:
+            if failure_code(exc) == "purge-bundle-verification-failed":
+                raise PlanChanged(str(exc), checkpoint) from exc
+            raise
+
+    def capture_purge_bundle(self, preliminary, *, checkpoint, bundle_id=None):
+        """PF-A3.2 ``capture purge-bundle`` (create_purge_recovery steps 2-5 and 7): the sealed bundle and the binding
+        deletion plan; its verification is the next effect (verify_purge_bundle)."""
         commit = checkpoint.manifest["source"]["commit"]
-        recovery_id = f"purge-{utc()}-{(commit or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
+        recovery_id = bundle_id or f"purge-{utc()}-{(commit or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
         self.ensure_recovery_tree()
         folder = self.recovery_root / recovery_id
         folder.mkdir(mode=0o700)
@@ -7112,22 +9559,28 @@ class Controller:
         }
         manifest_sha256 = self.write_manifest(folder, manifest)
         sealed = BundleView(folder, manifest, manifest_sha256, None, "captured")
-        # Section 3.6 step 6: every store restored from the bundle's own payloads before deletion is possible.
-        record, passed = self.verify_bundle(sealed, {store["store_id"]: folder / store["dump"] for store in stores},
-                                            started_at=manifest["created_at"])
-        self._record_capture(sealed, record, None)
+        if missing_history_images:
+            log("WARNING: Some old rollback image tags were already missing before purge. Their checkpoint files are preserved, but those old image layers cannot be reconstructed automatically.")
+        return sealed, binding
+
+    def verify_purge_bundle(self, view, verify_names):
+        """PF-A3.2 ``verification bundle:purge`` (step 6): every store restored from the bundle's own payloads before
+        deletion is possible, then the recovery targets of the fresh bundle."""
+        folder = view.folder
+        stores = view.manifest["stores"]
+        record, passed = self.verify_bundle(view, {store["store_id"]: folder / store["dump"] for store in stores},
+                                            started_at=view.manifest["created_at"], names=verify_names)
+        self._record_capture(view, record, None)
         if not passed:
             failed = next(check for check in record["checks"] if check["result"] == "failed")
-            exc = Failure(f"purge-bundle-verification-failed: {recovery_id}: {failed['name']}: {failed['detail']}. "
-                          f"Verification database retained. {tail}")
+            exc = Failure(f"purge-bundle-verification-failed: {view.bundle_id}: {failed['name']}: {failed['detail']}. "
+                          "Verification database retained. The purge stops before deletion; the application is "
+                          "reopened.")
             exc.code = "purge-bundle-verification-failed"
             raise exc
         self.publish_fresh("recovery", folder)
         log("Recovery bundle verified: " + str(folder))
-        if missing_history_images:
-            log("WARNING: Some old rollback image tags were already missing before purge. Their checkpoint files are preserved, but those old image layers cannot be reconstructed automatically.")
-        view = dataclasses.replace(sealed, level=record["level"], latest_verification_id=record["verification_id"])
-        return view, binding
+        return dataclasses.replace(view, level=record["level"], latest_verification_id=record["verification_id"])
 
     def recoveries(self):
         """Bundle candidates of the selected instance only: ``<recovery>/<compose_project>/purge-*`` (a real
@@ -7191,20 +9644,33 @@ class Controller:
                 return self.verify_recovery(items[int(answer) - 1].folder)
 
     def finish_purge_cleanup(self, recovery_id, plan, *, delete_backups, reset_admin_config):
-        # Docker deletion runs exactly the frozen plan (PF-A1.3). State/.env are removed last so
-        # an interrupted Docker cleanup remains diagnosable and resumable; bind paths are never deleted.
+        """The deletion and the four cleanup bodies in their order (a composed helper; a purge runs each as its own
+        journaled effect: resource-delete, then purge-cleanup:backups, env, state, admin-config)."""
         self.execute_deletion_plan(plan)
+        for name in ("backups", "env", "state", "admin-config"):
+            self.purge_cleanup(name, delete_backups=delete_backups, reset_admin_config=reset_admin_config)
+        self.purge_complete_log(recovery_id, reset_admin_config=reset_admin_config)
 
-        if delete_backups and self.backups_dir.exists():
-            shutil.rmtree(self.backups_dir)
-        env_path = self.config_dir / ".env"
-        if env_path.exists():
-            env_path.unlink()
-        legacy_marker = self.root / "DEPLOYED_SOURCE.txt"
-        if legacy_marker.exists():
-            legacy_marker.unlink()
-        if self.state.exists():
-            shutil.rmtree(self.state)
+    def purge_cleanup(self, name, *, delete_backups, reset_admin_config):
+        """One finalizing cleanup of a purge (section 3.4); idempotent (an absent target is already removed).
+        State/.env are removed last so an interrupted Docker cleanup remains diagnosable; bind paths are never
+        deleted; operations/, artifacts/, home/, the lock and the registry are never touched (section 3.12)."""
+        if name == "backups":
+            if delete_backups and self.backups_dir.exists():
+                shutil.rmtree(self.backups_dir)
+            return "removed" if delete_backups else "kept"
+        if name == "env":
+            env_path = self.config_dir / ".env"
+            if env_path.exists():
+                env_path.unlink()
+            legacy_marker = self.root / "DEPLOYED_SOURCE.txt"
+            if legacy_marker.exists():
+                legacy_marker.unlink()
+            return "absent"
+        if name == "state":
+            if self.state.exists():
+                shutil.rmtree(self.state)
+            return "absent"
         if reset_admin_config:
             config = self.config_dir / "pf-config.json"
             if config.exists():
@@ -7212,7 +9678,10 @@ class Controller:
                     config.unlink()
                 except OSError as exc:
                     log("WARNING: purge completed but local admin config could not be removed: " + str(exc))
+            return "absent"
+        return "kept"
 
+    def purge_complete_log(self, recovery_id, *, reset_admin_config):
         log("Purge complete for " + self.config["project"] + ".")
         log("Verified recovery bundle retained at: " + str(self.recovery_root / recovery_id))
         log("The writable repository and root-owned control plane remain. Runtime .env was removed from config/.")
@@ -7221,38 +9690,20 @@ class Controller:
         else:
             log(f"Next: {self.pf_command()} deploy --latest.")
 
+    def act_purge_cleanup(self, step, name):
+        deletion = self.journal["deletion"] or {}
+        step.evidence = self.purge_cleanup(name, delete_backups=bool(deletion.get("delete_backups")),
+                                           reset_admin_config=bool(deletion.get("reset_admin_config")))
+        if name == "admin-config":
+            self.purge_complete_log(self.plan_bundle_id(), reset_admin_config=bool(deletion.get("reset_admin_config")))
+
     def purge(self, *, delete_backups=None, reset_admin_config=False):
+        """``pf purge`` (section 3.4): the plan at ``PURGE <project>``; stop, checkpoint, purge bundle and its
+        verification as effects; then the confirmations and the binding deletion plan frozen in one journal
+        generation (``deletion``); then the deletion and the cleanups. A failure or a declined confirmation before
+        the deletion generation reopens the application in-process and closes the operation cancelled (A3.1
+        behaviour). A repeated ``pf purge`` in deleting/finalizing aliases ``pf resume`` (the gate re-enters)."""
         self.staging()
-
-        # A power loss or Docker error after the final destructive confirmation
-        # leaves a resumable journal until the last filesystem cleanup step.
-        if self.pending.exists():
-            pending = load_json(self.pending)
-            if pending.get("operation") == "purge" and pending.get("phase") == "deleting" and pending.get("recovery"):
-                if "deletion_plan" not in pending:
-                    raise self.plan_missing("purge")
-                recovery_id = pending["recovery"]
-                matches = [item for item in self.recoveries() if item.bundle_id == recovery_id]
-                if len(matches) != 1:
-                    raise Failure("Interrupted purge recovery bundle is missing or ambiguous; manual recovery is required.")
-                # PF-A3.1: the strict re-read of the bundle; no new verification.
-                self.verify_recovery(matches[0].folder)
-                plan = self.load_deletion_plan(pending, kind="purge")
-                self.verify_resume_daemon(plan, pending)
-                self._topology_checked = True
-                self.log_plan(plan, title="Frozen purge plan (resume; only these items are removed):")
-                confirm(
-                    "RESUME PURGE " + self.config["project"] + " " + recovery_id,
-                    "An earlier purge passed all confirmations and began deleting resources. Resume only the remaining cleanup using the already verified recovery bundle.",
-                )
-                self.finish_purge_cleanup(
-                    recovery_id, plan,
-                    delete_backups=bool(pending.get("delete_backups")),
-                    reset_admin_config=bool(pending.get("reset_admin_config")),
-                )
-                return
-            raise Failure("An incomplete managed operation exists. Resolve it before purge so recovery state is unambiguous.")
-
         # Preliminary (advisory) plan: blockers refuse here, before any confirmation, pause or bundle.
         inventory = self.docker_inventory()
         preliminary = self.plan_for("purge", inventory, command="purge")
@@ -7266,122 +9717,156 @@ class Controller:
         self.database_ready()
         self.capture_preflight("purge")
         self.ensure_local_contract()
-
-        confirm(
-            "PURGE " + self.config["project"],
-            "This is a destructive staging teardown. The selected project's exact containers, volumes, networks and covered PartFlow image tags listed above, runtime state, and config/.env are candidates for deletion. The writable repo, bind-mounted paths and installed control plane are retained. A verified recovery bundle is created before any destructive Docker deletion.",
-        )
-
-        # Stop writes first so the recovery bundle is a stable point-in-time state.
-        self.pause("purge", project=self.config["project"])
-        recovery = None
-        checkpoint = None
+        rows = self.database_rows()
+        closed = sorted(name for name, row in rows.items() if not row["allow_connections"])
+        text = ("This is a destructive staging teardown. The selected project's exact containers, volumes, networks and "
+                "covered PartFlow image tags listed above, runtime state, and config/.env are candidates for deletion. "
+                "The writable repo, bind-mounted paths and installed control plane are retained. A verified recovery "
+                "bundle is created before any destructive Docker deletion.")
+        phrase = "PURGE " + self.config["project"]
+        confirm(phrase, text)
+        view = self.current_deployment()
+        commit = (view.record["source"]["commit"] if view is not None and view.mismatch is None
+                  else self.deployed_commit()) or "0" * 40
+        checkpoint_id = f"{utc()}-{commit[:12]}-{uuid.uuid4().hex[:6]}"
+        recovery_id = f"purge-{utc()}-{commit[:12]}-{uuid.uuid4().hex[:6]}"
+        stores = ",".join(sorted(rows))
+        effects = [
+            {"phase": "preserving", "type": "service-change", "target": "services:stop:frontend,backend",
+             "postcondition": "stopped", "preconditions": ["confirmed"]},
+            {"phase": "preserving", "type": "capture", "target": "checkpoint:before-purge",
+             "postcondition": "sealed and data_restore_verified",
+             "preconditions": ["bundle:" + checkpoint_id, "verify:pf_verify_" + uuid.uuid4().hex[:20],
+                               "writers stopped"]},
+            {"phase": "capturing", "type": "capture", "target": "purge-bundle",
+             "postcondition": "sealed and data_restore_verified",
+             "preconditions": ["bundle:" + recovery_id, "checkpoint:" + checkpoint_id, "stores:" + stores]
+             + (["allow_connections=false:" + ",".join(closed)] if closed else []),
+             "preservation_refs": [checkpoint_id]},
+            {"phase": "verifying", "type": "verification", "target": "bundle:purge",
+             "postcondition": "passed data_restore_verified record", "preconditions": ["bundle:" + recovery_id]},
+            {"phase": "deleting", "type": "resource-delete", "target": "deletion-plan",
+             "postcondition": "every planned item removed or already absent",
+             "preconditions": ["ERASE confirmed", "deletion approval journaled"],
+             "preservation_refs": [checkpoint_id, recovery_id]}]
+        for name in ("backups", "env", "state", "admin-config"):
+            effects.append({"phase": "finalizing", "type": "file-write", "target": "purge-cleanup:" + name,
+                            "postcondition": "absent", "preconditions": ["deletion complete"]})
+        ctx = {"preliminary": preliminary, "delete_backups": delete_backups,
+               "reset_admin_config": reset_admin_config}
+        self.open_operation(
+            "purge", effects=effects, workspace=self.workspace_plan("untouched"), images=self.running_images(),
+            confirmation=self.confirmation_ref(phrase, text),
+            source=self.running_source(), inventory_sha256=pf_instance.sha256_bytes(
+                pf_instance.normalize_json(inventory.record())),
+            coverage=[{"store_id": "postgresql:" + name, "strategy_id": "postgresql-logical", "included": True,
+                       "reason": "every database of the db service"} for name in sorted(rows)])
         try:
-            recovery, binding = self.create_purge_recovery(preliminary)
-            checkpoint = self.verify_snapshot(recovery.derived_from)
-            self.phase("recovery-ready", recovery=recovery.bundle_id, active_checkpoint=checkpoint.bundle_id)
-            log("Recovery summary:")
-            log("  Bundle: " + recovery.bundle_id)
-            log("  Path: " + str(self.recovery_root / recovery.bundle_id))
-            log("  Active database: " + recovery.database)
-            log("  Preserved databases: " + ", ".join(store["database"] for store in recovery.stores))
-            log("  Saved Docker image tags: " + str(len(recovery.purge["saved_image_refs"])))
-            log("  Revision checkpoints archived: yes")
-            log("  Verification: " + LEVEL_NAMES[recovery.level] + " (every store restored from the bundle's own "
-                "payloads)")
-            self.log_plan(binding, title="Binding deletion plan (frozen before the final confirmation):")
-
-            # Second gate proves the operator understands which database becomes inaccessible.
-            confirm(
-                "DELETE " + recovery.database,
-                "The verified recovery bundle is complete. Continuing will remove the selected project's PostgreSQL Docker volume. The active database can be restored from the recovery bundle, but automatic merge into a later production history is intentionally not supported.",
-            )
-
-            if delete_backups is None:
-                delete_backups = prompt_yes_no(
-                    "Delete the normal revision checkpoint tree too (it is already archived inside the purge recovery bundle)",
-                    default=True,
-                )
-            if delete_backups:
-                confirm(
-                    "DELETE BACKUPS " + self.config["project"],
-                    "Normal revision checkpoints will be deleted from backups/revisions after the purge recovery bundle has preserved them.",
-                )
-
-            if reset_admin_config:
-                confirm(
-                    "RESET ADMIN CONFIG " + self.config["project"],
-                    "config/pf-config.json will also be deleted. The next control command recreates it from the installed root-owned template.",
-                )
-
-            challenge = secrets.token_hex(3).upper()
-            confirm(
-                "ERASE " + self.config["project"] + " " + challenge,
-                "FINAL CONFIRMATION. After this point the controller will start deleting Docker resources. Recovery bundle: "
-                + recovery.bundle_id,
-            )
-            # PF-A3.1 deletion gate (OD-A31-19): the purge bundle's own passed data_restore_verified record, re-read
-            # strictly from disk immediately before the durable deleting phase.
-            gate = self.verify_recovery(recovery.folder)
-            if gate.level not in PASSED_LEVELS:
-                raise Failure(f"purge-bundle-unverified: {gate.bundle_id}: no passed data_restore_verified record for "
-                              "this bundle's manifest; deletion is blocked. The purge stops before deletion; the "
-                              "application is reopened.")
-            reference = self.write_deletion_plan(binding)
-            self.durable_phase(
-                "deleting",
-                recovery=recovery.bundle_id,
-                deletion_plan=reference,
-                deleted=[],
-                delete_backups=bool(delete_backups),
-                reset_admin_config=bool(reset_admin_config),
-            )
+            return self.run_plan(ctx)
         except Exception as exc:
-            # No destructive deletion has happened yet. Reopen the exact current
-            # application if the recovery checkpoint was created successfully.
-            if checkpoint is None and isinstance(exc, PlanChanged):
-                checkpoint = exc.checkpoint
-            if checkpoint is not None:
+            if self.journal is None or self.journal["deletion"] is not None \
+                    or self.journal["phase"] in pf_config.TERMINAL_PHASES:
+                raise
+            # No destructive deletion has happened yet: reopen the exact current application in-process.
+            reopen = not (isinstance(exc, PlanChanged) and exc.checkpoint is None)
+            if reopen and self.effect_state(self.effects_of("stop")[0]["effect_id"]) != "not_started":
                 try:
-                    self.activate(checkpoint.images, checkpoint.database_heads)
-                    if self.pending.exists():
-                        self.pending.unlink()
+                    self.restore_allow_connections()
+                    self.reopen_unchanged()
+                    self.close_operation("cancelled", last_error=self._error(exc))
                     log("Purge cancelled/failed before deletion; application services were restored.")
                 except Exception as resume_exc:
                     log("WARNING: Could not automatically resume after pre-delete purge failure: " + str(resume_exc))
+            elif reopen:
+                self.close_operation("cancelled", last_error=self._error(exc))
             raise
 
-        self.finish_purge_cleanup(
-            recovery.bundle_id, binding,
-            delete_backups=bool(delete_backups),
-            reset_admin_config=bool(reset_admin_config),
+    def purge_approve_deletion(self, ctx):
+        """The second stage of the purge approval (section 3.4, OD-A32-21): the recovery summary, DELETE <db>, the
+        backup choice, RESET ADMIN CONFIG, ERASE <project> <challenge>, the deletion gate, the binding deletion plan
+        written, then one journal generation setting ``deletion``. First run only (a resume after a crash in these
+        steps reopens instead)."""
+        if "recovery" not in ctx or "binding" not in ctx:
+            raise Failure("Internal error: a purge deletion is approved only by the process that verified its bundle.")
+        recovery, binding = ctx["recovery"], ctx["binding"]
+        checkpoint = ctx.get("checkpoint")
+        delete_backups, reset_admin_config = ctx.get("delete_backups"), ctx.get("reset_admin_config")
+        log("Recovery summary:")
+        log("  Bundle: " + recovery.bundle_id)
+        log("  Path: " + str(self.recovery_root / recovery.bundle_id))
+        log("  Active database: " + recovery.database)
+        log("  Preserved databases: " + ", ".join(store["database"] for store in recovery.stores))
+        log("  Saved Docker image tags: " + str(len(recovery.purge["saved_image_refs"])))
+        log("  Revision checkpoints archived: yes")
+        log("  Verification: " + LEVEL_NAMES[recovery.level] + " (every store restored from the bundle's own "
+            "payloads)")
+        if checkpoint is not None:
+            log("  Before-purge checkpoint: " + checkpoint.bundle_id)
+        self.log_plan(binding, title="Binding deletion plan (frozen before the final confirmation):")
+        # Second gate proves the operator understands which database becomes inaccessible.
+        confirm(
+            "DELETE " + recovery.database,
+            "The verified recovery bundle is complete. Continuing will remove the selected project's PostgreSQL Docker volume. The active database can be restored from the recovery bundle, but automatic merge into a later production history is intentionally not supported.",
         )
+        if delete_backups is None:
+            delete_backups = prompt_yes_no(
+                "Delete the normal revision checkpoint tree too (it is already archived inside the purge recovery bundle)",
+                default=True,
+            )
+        if delete_backups:
+            confirm(
+                "DELETE BACKUPS " + self.config["project"],
+                "Normal revision checkpoints will be deleted from backups/revisions after the purge recovery bundle has preserved them.",
+            )
+        if reset_admin_config:
+            confirm(
+                "RESET ADMIN CONFIG " + self.config["project"],
+                "config/pf-config.json will also be deleted. The next control command recreates it from the installed root-owned template.",
+            )
+        challenge = secrets.token_hex(3).upper()
+        confirm(
+            "ERASE " + self.config["project"] + " " + challenge,
+            "FINAL CONFIRMATION. After this point the controller will start deleting Docker resources. Recovery bundle: "
+            + recovery.bundle_id,
+        )
+        # PF-A3.1 deletion gate (OD-A31-19): the purge bundle's own passed data_restore_verified record, re-read
+        # strictly from disk immediately before the deletion approval is journaled.
+        gate = self.verify_recovery(recovery.folder)
+        if gate.level not in PASSED_LEVELS:
+            raise Failure(f"purge-bundle-unverified: {gate.bundle_id}: no passed data_restore_verified record for "
+                          "this bundle's manifest; deletion is blocked. The purge stops before deletion; the "
+                          "application is reopened.")
+        reference = self.write_deletion_plan(binding)
+        self.journal_update(deletion={"plan_sha256": reference["sha256"], "delete_backups": bool(delete_backups),
+                                      "reset_admin_config": bool(reset_admin_config), "confirmed_at": utc()})
 
-    def replace_source_for_recovery(self, candidate, revision, *, verified=False):
-        """Restore the writable repository; executable control stays external/root-owned."""
-        candidate = Path(candidate)
-        # Runtime secrets/state never belong in the writable repository (v1 bundles carried them).
-        for legacy in (candidate / ".env", candidate / "DEPLOYED_SOURCE.txt"):
-            if legacy.exists():
-                legacy.unlink()
-        verified = bool(verified and isinstance(revision, str) and SHA_RE.fullmatch(revision))
-        try:
-            self.refuse_reserved_candidate_paths(candidate)
-            source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
-                else {"kind": "unknown"}
-            manifest = pf_source.build_manifest(candidate, source=source, excludes=SOURCE_EXCLUDES)
-        except pf_source.SourceError as exc:
-            raise Failure(str(exc)) from exc
-        for item in list(self.root.iterdir()):
-            if item.is_dir() and not item.is_symlink():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-        self.publish_source_tree(candidate, manifest)
-        try:
-            pf_source.write_manifest(self.context.source_manifest_path, manifest)
-        except pf_source.SourceError as exc:
-            raise Failure(str(exc)) from exc
+    def running_images(self):
+        """$defs.image of the running backend/frontend images (plan images of kinds that do not replace them); an
+        image that cannot be identified is omitted (its identity is observed by the effects)."""
+        found = {}
+        for service in pf_docker.BUILT_SERVICES:
+            try:
+                running = self.inspect(service)["Image"]
+                identity = self.image_identity(running, reference=self.inspect_reference(service))
+            except DaemonFailure:
+                raise
+            except (Failure, ValueError, KeyError, IndexError):
+                continue
+            if identity["platform"] is not None:
+                found[service] = identity
+        return found
+
+    def running_source(self):
+        """The plan source of a kind that keeps the deployed source: the current valid deployment record, else the
+        proven commit, else unknown."""
+        view = self.current_deployment()
+        if view is not None and view.mismatch is None:
+            source = view.record["source"]
+            return {"provenance": source["provenance"], "commit": source["commit"],
+                    "entries_sha256": source["manifest"]["entries_sha256"], "deployment_id": None}
+        commit = self.deployed_commit()
+        return {"provenance": "git_commit" if commit else "unknown", "commit": commit, "entries_sha256": None,
+                "deployment_id": None}
 
     def runtime_environment_bytes(self, recovery, extracted_source=None):
         """The verified runtime .env of a strictly read bundle: its ``config_env`` payload or, for a format 1
@@ -7412,26 +9897,209 @@ class Controller:
         self.apply_single("configuration", temporary, "file")
         os.replace(temporary, self.config_dir / ".env")
 
-    def restore_revision_checkpoints(self, view):
-        """Restore the archived checkpoint history of a bundle through the safe importer (HISTORY_LIMITS)."""
-        payload = view.payload("revision-checkpoints.tar.gz")
-        if payload is None:
-            return
-        temporary = Path(tempfile.mkdtemp(prefix="restore-checkpoints-", dir=self.state))
-        try:
-            self.extract_payload(view, "revision-checkpoints.tar.gz", temporary / "history",
-                                 limits=pf_source.HISTORY_LIMITS)
-            source = temporary / "history" / self.config["project"]
-            if source.is_dir():
-                if self.backups_dir.exists():
-                    shutil.rmtree(self.backups_dir)
-                self.backups_dir.parent.mkdir(parents=True, exist_ok=True)
-                copy_fresh(source, self.backups_dir)
-                self.publish_fresh("backups", self.backups_dir)
-        finally:
-            shutil.rmtree(temporary, ignore_errors=True)
+    def history_tree(self, view, temporary):
+        """The bundle's checkpoint history extracted through the safe importer (HISTORY_LIMITS) below ``temporary``;
+        (tree of <project> or None, its entries digest or None)."""
+        if view.payload("revision-checkpoints.tar.gz") is None:
+            return None, None
+        if not real_directory(temporary):
+            os.mkdir(str(temporary), 0o700)
+        self.extract_payload(view, "revision-checkpoints.tar.gz", Path(temporary) / "history",
+                             limits=pf_source.HISTORY_LIMITS)
+        source = Path(temporary) / "history" / self.config["project"]
+        if not real_directory(source):
+            return None, None
+        return source, pf_source.entries_digest(pf_source.build_manifest(source, source={"kind": "unknown"},
+                                                                          excludes=()))
 
-    def restore_instance(self, recovery, *, side_by_side=False):
+    def history_digest(self, path):
+        try:
+            return pf_source.entries_digest(pf_source.build_manifest(path, source={"kind": "unknown"}, excludes=()))
+        except (pf_source.SourceError, OSError):
+            return None
+
+    def ensure_revisions_root(self):
+        for directory in (self.backups_root, self.revisions_root):
+            if not directory.is_dir():
+                directory.mkdir(mode=0o750)
+            self.apply_single("backups", directory, "dir")
+
+    def restore_revision_checkpoints(self, view):
+        """Restore the archived checkpoint history of a bundle (PF-A3.2 ``file-write checkpoint-history``, section 3.5;
+        OD-A32-24): an existing tree with the bundle's digest is left as it is; any other existing tree is renamed
+        (no-clobber) to ``<project>.pre-restore-<op8>`` and recorded; then a content-only copy is published under a
+        private temporary name and renamed into place. Nothing is ever removed recursively. Returns (evidence,
+        retained artifacts)."""
+        project = self.config["project"]
+        temporary = Path(tempfile.mkdtemp(prefix="restore-checkpoints-", dir=str(self.state)))
+        retained = []
+        try:
+            source, digest = self.history_tree(view, temporary)
+            if source is None:
+                return "absent in the bundle", retained
+            self.ensure_revisions_root()
+            fd = os.open(str(self.revisions_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                staged_name = f".{project}.restore-{self.operation_id[-8:]}"
+                if pf_instance.identity_at(fd, staged_name) is not None:
+                    pf_instance.remove_private_tree_at(fd, staged_name)
+                existing = pf_instance.identity_at(fd, project)
+                displaced = f"{project}.pre-restore-{self.operation_id[-8:]}"
+                if existing is None and pf_instance.identity_at(fd, displaced) is not None:
+                    # A redo after a crash between the displacement and the publication: still recorded.
+                    retained.append({"kind": "checkpoint-history", "name": displaced, "sha256": None})
+                if existing is not None:
+                    if self.history_digest(self.revisions_root / project) == digest:
+                        return f"entries {digest} (already present)", retained
+                    pf_instance.rename_noreplace_at(fd, project, fd, displaced)
+                    retained.append({"kind": "checkpoint-history", "name": displaced, "sha256": None})
+                    log(f"note: checkpoint-history-displaced: the existing {project} history was kept as {displaced}.")
+                copy_fresh(source, self.revisions_root / staged_name)
+                self.publish_fresh("backups", self.revisions_root / staged_name)
+                pf_instance.rename_noreplace_at(fd, staged_name, fd, project)
+            finally:
+                os.close(fd)
+            return f"entries {digest}", retained
+        finally:
+            parent = os.open(str(temporary.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                pf_instance.remove_private_tree_at(parent, temporary.name)
+            finally:
+                os.close(parent)
+
+    def act_checkpoint_history(self, step, effect):
+        evidence, retained = self.restore_revision_checkpoints(self.op_recovery())
+        step.evidence = ((step.evidence + " ") if step.evidence else "") + evidence
+        step.retained += retained
+
+    def observe_history(self, effect):
+        """Section 3.5 ``file-write checkpoint-history`` observation."""
+        project = self.config["project"]
+        expected = effect["postcondition"].split(" ", 1)[1]
+        recorded = re.search(r"existing:([0-9]+:[0-9]+|none)", self.journal_effect(effect["effect_id"])["evidence"]
+                             or "")
+        current = None
+        if real_directory(self.revisions_root):
+            fd = os.open(str(self.revisions_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                current = pf_instance.identity_at(fd, project)
+            finally:
+                os.close(fd)
+        if current is not None and self.history_digest(self.revisions_root / project) == expected:
+            return "complete", f"entries {expected}", None
+        if current is None or (recorded and recorded.group(1) == self.identity_text(current)):
+            return "redo", "history not yet restored", None
+        message = (f"checkpoint-history-unknown: {self.revisions_root}/{project} of operation {self.operation_id} is "
+                   "neither the tree that existed before the restore nor the restored history; nothing was moved or "
+                   "deleted. Move the foreign tree aside as root (SYNOLOGY_ADMIN §16), then run 'pf --instance "
+                   f"{self.context.slug} resume --operation {self.operation_id}'. Nothing was changed.")
+        return "refuse", message, None
+
+    def op_recovery(self):
+        """The restore's input bundle, strictly re-read (section 3.8 Inputs): another manifest hash or an unreadable
+        bundle is ``plan-input-changed``. Cached for this process."""
+        cached = getattr(self, "_op_recovery", None)
+        if cached is not None and cached[0] == self.operation_id:
+            return cached[1]
+        bundle = self.plan["input_bundle"]
+        try:
+            view = self.verify_recovery(self.recovery_root / bundle["bundle_id"])
+        except Failure as exc:
+            raise Failure(f"plan-input-changed: recovery bundle {bundle['bundle_id']} of operation {self.operation_id} "
+                          f"no longer reads or verifies ({failure_code(exc)}). Nothing was changed.") from exc
+        if view.manifest_sha256 != bundle["manifest_sha256"]:
+            raise Failure(f"plan-input-changed: recovery bundle {bundle['bundle_id']} of operation {self.operation_id} "
+                          "no longer matches its plan (manifest hash). Nothing was changed.")
+        self._op_recovery = (self.operation_id, view)
+        return view
+
+    def op_selected(self):
+        """The rollback's selected checkpoint, strictly re-read; another manifest hash is ``plan-input-changed``."""
+        cached = getattr(self, "_op_selected", None)
+        if cached is not None and cached[0] == self.operation_id:
+            return cached[1]
+        bundle = self.plan["input_bundle"]
+        try:
+            view = self.verify_snapshot(bundle["bundle_id"])
+        except Failure as exc:
+            raise Failure(f"plan-input-changed: checkpoint {bundle['bundle_id']} of operation {self.operation_id} no "
+                          f"longer reads or verifies ({failure_code(exc)}). Nothing was changed.") from exc
+        if view.manifest_sha256 != bundle["manifest_sha256"]:
+            raise Failure(f"plan-input-changed: checkpoint {bundle['bundle_id']} of operation {self.operation_id} no "
+                          "longer matches its plan (manifest hash). Nothing was changed.")
+        self._op_selected = (self.operation_id, view)
+        return view
+
+    def restore_workspace_tree(self):
+        """The restore bundle's workspace archive tree (without .env/DEPLOYED_SOURCE.txt), extracted again from the
+        strictly re-read bundle into a private temporary directory (section 3.6 source rule); cached."""
+        cached = getattr(self, "_restore_tree", None)
+        if cached is not None and cached[0] == self.operation_id and Path(cached[1]).is_dir():
+            return Path(cached[1])
+        recovery = self.op_recovery()
+        self.ensure_state_dir()
+        if self._deployed_tree is None:
+            self._deployed_tree = (Path(tempfile.mkdtemp(prefix="deployed-tree-", dir=str(self.state))), None)
+        workspace = self._deployed_tree[0] / "workspace"
+        self.extract_payload(recovery, recovery.workspace_payload, workspace)
+        for name in (".env", "DEPLOYED_SOURCE.txt"):
+            path = workspace / name
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+        self.refuse_reserved_candidate_paths(workspace)
+        self._restore_tree = (self.operation_id, workspace)
+        return workspace
+
+    def restore_env_bytes(self):
+        """The bundle's runtime .env bytes for a resumed ``config:.env`` effect (format 1: from its source archive)."""
+        recovery = self.op_recovery()
+        if recovery.payloads_of("config_env"):
+            return self.runtime_environment_bytes(recovery)
+        temporary = Path(tempfile.mkdtemp(prefix="restore-env-", dir=str(self.state)))
+        try:
+            self.extract_payload(recovery, recovery.source_payload, temporary / "source")
+            return self.runtime_environment_bytes(recovery, extracted_source=temporary / "source" / ".env")
+        finally:
+            parent = os.open(str(temporary.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                pf_instance.remove_private_tree_at(parent, temporary.name)
+            finally:
+                os.close(parent)
+
+    def act_install_env(self, step, effect, ctx):
+        """``file-write config:.env`` (section 3.8 Restore .env): the verified bundle bytes; an existing .env with other
+        bytes is renamed (no-clobber) to ``.env.proposal-<op8>`` first and never rewritten or deleted."""
+        data = ctx.get("runtime_env") or self.restore_env_bytes()
+        path = self.config_dir / ".env"
+        try:
+            existing = pf_instance.read_bytes_nofollow(path)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and existing != data:
+            proposal = ".env.proposal-" + self.operation_id[-8:]
+            fd = os.open(str(self.config_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                pf_instance.rename_noreplace_at(fd, ".env", fd, proposal)
+            finally:
+                os.close(fd)
+            log(f"note: env-proposal-preserved: config/.env differed from the bundle's; it was kept as {proposal}.")
+        if existing != data:
+            self.restore_runtime_environment(data)
+        step.evidence = "bytes sha256 " + pf_instance.sha256_bytes(data)
+
+    def freeze_restore_snapshot(self, data):
+        """Section 3.4 restore-instance: the bundle-derived snapshot frozen before the plan (AM-10); an existing
+        snapshot with the same rendered bytes is that snapshot."""
+        try:
+            values = self.check_app_values(pf_config.parse_app_env(data, label="bundle .env"))
+            rendered = pf_config.render_app_env(values)
+        except pf_config.ConfigError as exc:
+            raise Failure(str(exc)) from exc
+        if self.frozen is not None and pf_instance.sha256_bytes(rendered) == self.frozen.env_sha256:
+            return self.frozen
+        return self.freeze_app_config(explicit=True, source_bytes=data)
+
+    def restore_instance(self, recovery, *, side_by_side=False, keep_workspace=False):
         """``recovery``: the BundleView of choose_recovery (strictly read before any confirmation)."""
         if not isinstance(recovery, BundleView):
             recovery = self.verify_recovery(recovery)
@@ -7452,7 +10120,7 @@ class Controller:
             self.restore_into(name, folder / recovery.active_store["dump"])
             log("Recovery database created: " + name)
             log("It is intentionally not connected to the active application. Compare/export data explicitly; do not merge immutable Movement history by ad hoc SQL.")
-            return
+            return 0
 
         if recovery.compose_project != self.config["project"]:
             raise Failure("Exact restore must be run from the bootstrap root/config for the same project.")
@@ -7473,15 +10141,15 @@ class Controller:
         log("  Recovery bundle: " + recovery.bundle_id)
         with tempfile.TemporaryDirectory(prefix="restore-source-", dir=self.state) as temp:
             # PF-A3.1: the deployed source is always the source payload (never the workspace archive). Anything the
-            # manifest could not verify, and any provenance-proof failure, stops here: before any confirmation,
-            # pending journal or configuration change (restore-instance has no automatic journal route).
+            # manifest could not verify, and any provenance-proof failure, stops here: before any confirmation, plan
+            # or configuration change.
             candidate = Path(temp) / "source"
             tree = self.extract_payload(recovery, recovery.source_payload, candidate)
             self.require_source_identity(recovery, tree, recovery.source_payload)
             legacy_env = None
             if (candidate / ".env").is_file() and not (candidate / ".env").is_symlink():
                 # Format 1 stored the runtime .env inside source.tar.gz: it leaves the deployed tree here and is
-                # read by restore_runtime_environment after the journal exists.
+                # read below as the bundle's runtime .env.
                 legacy_env = Path(temp) / "legacy.env"
                 os.replace(str(candidate / ".env"), str(legacy_env))
             marker = candidate / "DEPLOYED_SOURCE.txt"
@@ -7492,94 +10160,101 @@ class Controller:
             verified = self.prove_tree_commit(candidate, hypothesis)
             revision = hypothesis if verified else None
             manifest = self.candidate_manifest(candidate, revision, verified=verified)
-            workspace = candidate
+            workspace_tree, workspace_digest = candidate, None
             if recovery.workspace_payload:
-                workspace = Path(temp) / "workspace"
-                self.extract_payload(recovery, recovery.workspace_payload, workspace)
+                workspace_tree = Path(temp) / "workspace"
+                self.extract_payload(recovery, recovery.workspace_payload, workspace_tree)
                 for name in (".env", "DEPLOYED_SOURCE.txt"):
-                    path = workspace / name
+                    path = workspace_tree / name
                     if path.is_file() and not path.is_symlink():
                         path.unlink()
-                self.refuse_reserved_candidate_paths(workspace)
+                self.refuse_reserved_candidate_paths(workspace_tree)
+                workspace_digest = pf_source.entries_digest(pf_source.build_manifest(
+                    workspace_tree, source={"kind": "unknown"}, excludes=SOURCE_EXCLUDES))
+            history_digest = None
             if recovery.payload("revision-checkpoints.tar.gz") is not None:
-                # A hostile checkpoint history is refused here, before any confirmation or journal (PB-4).
+                # A hostile checkpoint history is refused here, before any confirmation or plan (PB-4); its tree
+                # digest is the checkpoint-history effect's postcondition.
                 self.inspect_payload(recovery, "revision-checkpoints.tar.gz", limits=pf_source.HISTORY_LIMITS)
+                _, history_digest = self.history_tree(recovery, Path(temp) / "history-check")
             # Audit AF-1: the runtime .env and the state files are their verified payload bytes, read before any
-            # confirmation or journal; an unlisted file in the bundle folder is never opened.
+            # confirmation or plan; an unlisted file in the bundle folder is never opened.
             runtime_env = self.runtime_environment_bytes(recovery, extracted_source=legacy_env)
             state_files = [(name, self.read_small_payload(recovery, "state/" + name, "state_file"))
                            for name in recovery.purge["state_files"] if name != "deployed.json"]
             self.deployment_preflight(manifest)
+            workspace_manifest = manifest if workspace_digest is None else pf_source.build_manifest(
+                workspace_tree, source={"kind": "unknown"}, excludes=SOURCE_EXCLUDES)
+            workspace, lines = self.workspace_decision(workspace_manifest, keep_workspace)
             confirm(
                 "RESTORE INSTANCE " + recovery.compose_project,
                 "This recreates the purged functional instance from its recovery bundle. Docker container/network IDs are newly created. PostgreSQL globals are preserved as evidence but extra roles are not automatically executed.",
             )
-            confirm(
-                "RESTORE " + recovery.database + " " + recovery.bundle_id,
-                "Final restore confirmation. Repository workspace, runtime .env, application images, active database, retained databases, and revision checkpoints will be restored into an empty project. The current pf-config.json remains authoritative.",
-            )
-            staged = self.stage_deployment(candidate, manifest, kind="restore-instance", images=recovery.images,
-                                           ref="restore:" + recovery.bundle_id)
-
-            write_json(self.pending, {
-                "operation": "restore-instance", "phase": "confirmed", "started": utc(),
-                "recovery": recovery.bundle_id, "database": recovery.database,
-            })
-            self.restore_runtime_environment(runtime_env)
-            # The restored .env is the configuration this operation consumes from here on.
-            self.freeze_app_config(explicit=True)
-            # The editable workspace receives the workspace archive when the bundle has one (unknown provenance),
-            # else the deployed source tree.
-            exact = workspace == candidate
-            self.replace_source_for_recovery(workspace, revision if exact else None, verified=verified and exact)
-
-        self.phase("loading-images")
-        self.docker("image", "load", "-i", folder / "images.tar")
-        self.verify_images(recovery.images)
-        self.make_override(recovery.images, self.override)
-
-        self.phase("starting-database")
-        self.compose("up", "-d", "--no-deps", "db")
-        self.wait_health("db")
-        values = self.env()
-        owner = recovery.database_user
-        if values["POSTGRES_DB"] != recovery.database or (owner is not None and values["POSTGRES_USER"] != owner):
-            raise Failure("Recovered .env database identity does not match the recovery manifest.")
-
-        # Replace the empty init database with the verified logical dump.
-        self.drop_database(recovery.database)
-        active = recovery.active_store
-        self.restore_into(recovery.database, folder / active["dump"])
-        if self.db_heads(recovery.database) != recovery.database_heads:
-            raise Failure("Restored active database Alembic revision does not match the recovery bundle.")
-
-        for store in recovery.stores:
-            if store["role"] == "active":
-                continue
-            self.restore_into(store["database"], folder / store["dump"])
-            if not store["allow_connections"]:
-                self.sql("postgres", f"ALTER DATABASE {quote_identifier(store['database'])} ALLOW_CONNECTIONS false;",
-                         mutation=True)
-
-        self.phase("restoring-checkpoints")
-        self.restore_revision_checkpoints(recovery)
-        for name, data in state_files:
-            pf_instance._write_private_file(self.state / name, data, 0o600)
-            self.publish_fresh("private_state", self.state / name)
-
-        self.phase("activating")
-        self.activate(recovery.images, recovery.database_heads)
-        # PF-A3.1 (OD-A31-16): a fresh pointer to the new record; the bundle's deployed.json stays evidence.
-        self.finish_deployment(staged, {"sha": revision, "ref": "restore:" + recovery.bundle_id,
-                                        "deployed_at": utc(), "checkpoint": recovery.derived_from},
-                               restored_from={"bundle_id": recovery.bundle_id,
-                                              "manifest_sha256": recovery.manifest_sha256})
-        log("Instance restore complete. Run UI/workflow/network smoke tests before accepting the recovered staging instance.")
+            phrase = "RESTORE " + recovery.database + " " + recovery.bundle_id
+            summary = ("Final restore confirmation. Repository workspace, runtime .env, application images, active "
+                       "database, retained databases, and revision checkpoints will be restored into an empty project. "
+                       "The current pf-config.json remains authoritative.\n" + "\n".join(lines))
+            confirm(phrase, summary)
+            self.sweep_staging()
+            # Section 3.4 (AM-10): the bundle-derived snapshot is frozen before the plan, so every resume binds it.
+            self.freeze_restore_snapshot(runtime_env)
+            deployment_id = f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
+            active = recovery.active_store
+            effects = [
+                {"phase": "preparing-target", "type": "source-stage", "target": "deployment:" + deployment_id,
+                 "postcondition": f"staged {deployment_id}", "preconditions": ["confirmed"]},
+                {"phase": "preparing-target", "type": "file-write", "target": "config:.env",
+                 "postcondition": "bytes sha256 " + pf_instance.sha256_bytes(runtime_env),
+                 "preconditions": ["an edited .env is kept as .env.proposal-" + self.operation_id[-8:]]},
+                {"phase": "preparing-target", "type": "image-load", "target": "images:" + recovery.bundle_id,
+                 "postcondition": "backend/frontend IDs present", "preconditions": ["bundle re-read"]},
+                {"phase": "preparing-target", "type": "service-change", "target": "service:db:start",
+                 "postcondition": "db healthy", "preconditions": ["the target was empty at plan time"]},
+                {"phase": "restoring-data", "type": "database-drop", "target": "database:" + recovery.database,
+                 "postcondition": "absent", "preconditions": ["the init database of the new volume"]},
+                {"phase": "restoring-data", "type": "database-restore", "target": "database:" + recovery.database,
+                 "postcondition": "restored and checked", "preconditions": ["from:" + recovery.bundle_id,
+                                                                            "dump:" + active["dump"]]}]
+            for store in recovery.stores:
+                if store["role"] == "active":
+                    continue
+                effects.append({"phase": "restoring-data", "type": "database-restore",
+                                "target": "database:" + store["database"], "postcondition": "restored and checked",
+                                "preconditions": ["from:" + recovery.bundle_id, "dump:" + store["dump"]]})
+                if not store["allow_connections"]:
+                    effects.append({"phase": "restoring-data", "type": "database-alter",
+                                    "target": f"database:{store['database']}:allow_connections=false",
+                                    "postcondition": "flag false", "preconditions": ["restored"]})
+            if history_digest is not None:
+                effects.append({"phase": "restoring-data", "type": "file-write", "target": "checkpoint-history",
+                                "postcondition": "entries " + history_digest,
+                                "preconditions": ["a differing existing tree is displaced, never removed"]})
+            for name, data in state_files:
+                effects.append({"phase": "restoring-data", "type": "file-write", "target": "state-file:" + name,
+                                "postcondition": "bytes sha256 " + pf_instance.sha256_bytes(data),
+                                "preconditions": ["from:" + recovery.bundle_id]})
+            images = {service: image for service, image in recovery.images.items() if image is not None}
+            effects += self.activation_specs(images, sorted(recovery.database_heads), deployment_id)
+            effects += self.workspace_effect_specs(workspace, deployment_id=deployment_id,
+                                                   tree_digest=workspace_digest)
+            self._restore_tree = (self.operation_id, workspace_tree) if workspace_digest is not None else None
+            ctx = {"candidate": candidate, "manifest": manifest, "images": recovery.images,
+                   "ref": "restore:" + recovery.bundle_id, "runtime_env": runtime_env,
+                   "pointer": {"sha": revision, "ref": "restore:" + recovery.bundle_id,
+                               "checkpoint": recovery.derived_from}}
+            self._op_recovery = (self.operation_id, recovery)
+            code = self.start_operation(
+                "restore-instance", ctx, effects=effects, workspace=workspace, images={},
+                confirmation=self.confirmation_ref(phrase, summary),
+                source={"provenance": "git_commit" if verified else "unknown", "commit": revision,
+                        "entries_sha256": pf_source.entries_digest(manifest), "deployment_id": deployment_id},
+                input_bundle={"bundle_id": recovery.bundle_id, "manifest_sha256": recovery.manifest_sha256})
+            self._restore_tree = None
         if recovery.purge["missing_historical_image_refs"]:
             log("WARNING: Some historical rollback image tags were already missing when the purge bundle was created. Those old rollback points remain source/data archives but may not be directly activatable.")
-        log("postgres-globals.sql is preserved in the bundle for manual review; it was not executed automatically.")
+        return code
 
-    def update(self, target, *, automatic=False, allow_migrations=False, skip_ci=False):
+    def update(self, target, *, automatic=False, allow_migrations=False, skip_ci=False, keep_workspace=False):
         self.staging()
         self.database_ready()
         # PF-A3.1: the deployment record first, then the legacy pointer; never a claimed or unproven commit.
@@ -7588,7 +10263,7 @@ class Controller:
         workspace_matches_deployed = current is not None and workspace["head"] == current and not workspace["dirty"]
         if current == target["sha"] and workspace_matches_deployed:
             log("Already at " + current + " with a clean matching workspace; no update needed.")
-            return
+            return 0
         if automatic and current is None:
             raise Deferred("Automatic update refuses a deployment whose source commit is unknown; run a manual update.")
         if automatic and not workspace_matches_deployed:
@@ -7622,40 +10297,67 @@ class Controller:
                                   target_contract["heads"], allow=allow_migrations and not automatic)
             manifest = self.candidate_manifest(candidate, target["sha"], verified=True)
             self.deployment_preflight(manifest)
+            workspace_plan, lines = self.workspace_decision(manifest, keep_workspace)
+            phrase = "UPDATE " + target["sha"][:12]
+            summary = (f"Deploy {target['ref']} -> {target['sha']}\nMigration required: {changed}. Application access "
+                       "will pause.\n" + "\n".join(lines))
             if not automatic:
-                confirm("UPDATE " + target["sha"][:12],
-                        f"Deploy {target['ref']} -> {target['sha']}\nMigration required: {changed}. Application access will pause.")
-            staged = self.stage_deployment(candidate, manifest, kind="update", images=images, ref=target["ref"])
-            self.pause("update", target=target, migration_required=changed)
-            checkpoint = self.snapshot("before-update")
-            self.phase("backup-ready", checkpoint=checkpoint.bundle_id)
+                confirm(phrase, summary)
+            self.sweep_staging()
+            deployment_id = f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
+            view = self.current_deployment()
+            commit = (view.record["source"]["commit"] if view is not None and view.mismatch is None else current) \
+                or "0" * 40
+            checkpoint_id = f"{utc()}-{commit[:12]}-{uuid.uuid4().hex[:6]}"
+            heads = sorted(target_contract["heads"])
+            database = self.env()["POSTGRES_DB"]
+            identities = {service: self.image_identity(images[service]["id"], reference=images[service]["reference"])
+                          for service in pf_docker.BUILT_SERVICES}
+            effects = [
+                {"phase": "preparing", "type": "source-stage", "target": "deployment:" + deployment_id,
+                 "postcondition": f"staged {deployment_id}", "preconditions": ["confirmed"]},
+                {"phase": "preserving", "type": "service-change", "target": "services:stop:frontend,backend",
+                 "postcondition": "stopped", "preconditions": ["staged"]},
+                {"phase": "preserving", "type": "capture", "target": "checkpoint:before-update",
+                 "postcondition": "sealed and data_restore_verified",
+                 "preconditions": ["bundle:" + checkpoint_id, "verify:pf_verify_" + uuid.uuid4().hex[:20],
+                                   "writers stopped"]}]
             if changed:
-                # Run on a clone of the data before touching the live database.
                 rehearsal = "pf_migrate_" + uuid.uuid4().hex[:20]
-                self.restore_into(rehearsal, checkpoint.folder / checkpoint.active_store["dump"])
-                self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
-                             root=candidate, override=override, env={"POSTGRES_DB": rehearsal})
-                if self.db_heads(rehearsal) != target_contract["heads"]:
-                    raise Failure("Migration rehearsal did not reach the target head.")
-                self.drop_database(rehearsal)
-                self.phase("migrating-live")
-                self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
-                             root=candidate, override=override)
-            self.replace_source(candidate, target["sha"])
-            self.phase("activating", checkpoint=checkpoint.bundle_id)
-            self.activate(images, target_contract["heads"])
-            self.finish_deployment(staged, {**target, "deployed_at": utc(), "checkpoint": checkpoint.bundle_id})
-            log("Update complete. Previous revision checkpoint: " + checkpoint.bundle_id)
+                effects += [
+                    {"phase": "migrating", "type": "database-restore", "target": "database:" + rehearsal,
+                     "postcondition": "restored and checked", "preconditions": ["from:" + checkpoint_id],
+                     "preservation_refs": [checkpoint_id]},
+                    {"phase": "migrating", "type": "database-migrate",
+                     "target": f"database:{rehearsal}:heads={','.join(heads)}", "postcondition": "heads equal",
+                     "preconditions": ["rehearsal candidate restored"], "preservation_refs": [checkpoint_id]},
+                    {"phase": "migrating", "type": "database-drop", "target": "database:" + rehearsal,
+                     "postcondition": "absent", "preconditions": ["rehearsal passed"],
+                     "preservation_refs": [checkpoint_id]},
+                    {"phase": "migrating", "type": "database-migrate",
+                     "target": f"database:{database}:heads={','.join(heads)}", "postcondition": "heads equal",
+                     "preconditions": ["writers stopped since the checkpoint"], "preservation_refs": [checkpoint_id]}]
+            effects += self.activation_specs(identities, heads, deployment_id)
+            effects += self.workspace_effect_specs(workspace_plan, deployment_id=deployment_id)
+            ctx = {"candidate": candidate, "manifest": manifest, "images": images, "ref": target["ref"],
+                   "pointer": {**target, "checkpoint": checkpoint_id}}
+            return self.start_operation(
+                "update", ctx, effects=effects, workspace=workspace_plan, images=identities,
+                confirmation=self.confirmation_ref(phrase, summary) if not automatic else None,
+                source={"provenance": "git_commit", "commit": target["sha"],
+                        "entries_sha256": pf_source.entries_digest(manifest), "deployment_id": deployment_id},
+                coverage=[{"store_id": "postgresql:" + database, "strategy_id": "postgresql-logical",
+                           "included": True, "reason": "the active store"}])
 
-    def swap_database(self, prepared):
-        current = self.env()["POSTGRES_DB"]
-        retained = "pf_keep_" + utc().lower() + "_" + uuid.uuid4().hex[:6]
+    def swap_database(self, prepared, retained=None, *, current=None):
+        """The ``database-switch`` effect: one transaction renames the current database to the plan's retained name
+        and the prepared candidate to the current name. PF-A3.2: both names are pre-assigned by the plan."""
+        current = current or self.env()["POSTGRES_DB"]
+        retained = retained or "pf_keep_" + utc().lower() + "_" + uuid.uuid4().hex[:6]
         connections = self.sql("postgres", "SELECT count(*) FROM pg_stat_activity WHERE datname = '" + current + "';")
         if connections != "0":
             raise Failure("Other database sessions remain. Close IDE/psql connections; the script will not kill them.")
-        self.phase("switching-database", database_switch={"current": current, "prepared": prepared, "retained": retained})
         self.sql("postgres", database_swap_sql(current, prepared, retained), mutation=True)
-        self.phase("database-switched")
         log("Previous database retained (connections disabled): " + retained)
         return retained
 
@@ -7776,8 +10478,9 @@ class Controller:
             raise Failure(f"checkpoint-incompatible: {view.bundle_id}: {failed['detail'] or failed['name']}. The "
                           "candidate database was dropped; the current database is unchanged.")
 
-    def rollback(self, requested=None, restore_database=False):
+    def rollback(self, requested=None, restore_database=False, *, keep_workspace=False):
         self.staging()
+        superseded = self.gate.entry if self.gate is not None and self.gate.action == "supersede" else None
         selected = self.choose_snapshot(requested)
         # PF-A3.1 target rule: only a healthy checkpoint (schema 1 or legacy) is a rollback target.
         if selected.capture_class != "healthy_checkpoint":
@@ -7797,8 +10500,6 @@ class Controller:
         if recorded_db is not None and running_db != recorded_db:
             log(f"note: db-image-changed: the running database image {running_db[7:19]} differs from the checkpoint's "
                 f"{recorded_db[7:19]}; PostgreSQL major {selected.postgres_major} matches.")
-        incomplete = self.pending.exists()
-        previous_operation = load_json(self.pending) if incomplete else {}
         with tempfile.TemporaryDirectory(prefix="rollback-", dir=self.state) as folder:
             candidate = Path(folder) / "source"
             tree = self.extract_payload(selected, selected.source_payload, candidate)
@@ -7807,8 +10508,9 @@ class Controller:
             if migration_files(candidate) != selected.migration_files:
                 raise Failure("Checkpoint migration fingerprint mismatch.")
             if not restore_database:
-                if incomplete and not (previous_operation.get("operation") == "update"
-                                       and previous_operation.get("migration_required") is False):
+                # PF-A3.2 (section 3.3): a code-only rollback may supersede only an update without a database effect.
+                if superseded is not None and not (superseded.kind == "update" and not any(
+                        effect["type"].startswith("database-") for effect in superseded.plan["effects"])):
                     raise Failure("The incomplete operation may have changed data/schema; review recovery with --restore-db.")
                 current_contract = self.ensure_local_contract()
                 if current_contract["files"] != selected.migration_files or self.db_heads() != selected.database_heads:
@@ -7826,27 +10528,62 @@ class Controller:
             manifest = self.candidate_manifest(candidate, revision, verified=verified)
             self.capture_preflight("rollback")
             self.deployment_preflight(manifest)
+            workspace, lines = self.workspace_decision(manifest, keep_workspace)
+            if superseded is not None:
+                # Section 3.5: nothing of the superseded operation may still run before this plan is written.
+                self.require_not_running(superseded)
             phrase = ("RESTORE " + values["POSTGRES_DB"] + " " if restore_database else "ROLLBACK ") + selected.bundle_id
-            confirm(phrase, ("Database will return to the selected backup time. Newer writes will no longer appear in the active app; the current DB is retained."
-                             if restore_database else "Only code/images will change. Current data is kept. Schema equality does not prove all business-semantic compatibility."))
-            staged = self.stage_deployment(candidate, manifest, kind="rollback", images=selected.images,
-                                           ref="rollback:" + selected.bundle_id)
-            self.pause("rollback", selected=selected.bundle_id)
-            # INV-09: every rollback preserves the current data first; inability to preserve blocks it.
-            preserved = self.preserve_current("before-rollback", stores=[values["POSTGRES_DB"]])
-            self.phase("backup-ready", checkpoint=preserved.bundle_id)
+            summary = ("Database will return to the selected backup time. Newer writes will no longer appear in the "
+                       "active app; the current DB is retained." if restore_database else
+                       "Only code/images will change. Current data is kept. Schema equality does not prove all "
+                       "business-semantic compatibility.") + "\n" + "\n".join(lines) + (
+                f"\nSupersedes the incomplete {superseded.kind} operation {superseded.operation_id}."
+                if superseded is not None else "")
+            confirm(phrase, summary)
+            self.sweep_staging()
+            deployment_id = f"dep-{utc()}-{uuid.uuid4().hex[:8]}"
+            checkpoint_id = f"{utc()}-{(self.deployed_commit() or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
+            database = values["POSTGRES_DB"]
+            effects = [
+                {"phase": "preparing", "type": "source-stage", "target": "deployment:" + deployment_id,
+                 "postcondition": f"staged {deployment_id}", "preconditions": ["confirmed"]},
+                {"phase": "preserving-current", "type": "service-change", "target": "services:stop:frontend,backend",
+                 "postcondition": "stopped", "preconditions": ["staged"]},
+                {"phase": "preserving-current", "type": "capture", "target": "checkpoint:before-rollback",
+                 "postcondition": "sealed and data_restore_verified",
+                 "preconditions": ["bundle:" + checkpoint_id, "verify:pf_verify_" + uuid.uuid4().hex[:20],
+                                   "writers stopped"]}]
             retained = None
             if restore_database:
                 prepared = "pf_restore_" + uuid.uuid4().hex[:20]
-                self.restore_candidate(selected, prepared)
-                retained = self.swap_database(prepared)
-            self.replace_source(candidate, revision, verified=verified)
-            self.phase("activating", checkpoint=preserved.bundle_id)
-            self.activate(selected.images, selected.database_heads)
-            self.finish_deployment(staged, {"sha": revision, "ref": "rollback:" + selected.bundle_id,
-                                            "deployed_at": utc(), "checkpoint": preserved.bundle_id,
-                                            "retained_database": retained})
-            log("Rollback complete. Safety checkpoint: " + preserved.bundle_id)
+                retained = "pf_keep_" + utc().lower() + "_" + uuid.uuid4().hex[:6]
+                effects += [
+                    {"phase": "restoring-candidate", "type": "database-restore", "target": "database:" + prepared,
+                     "postcondition": "restored and checked", "preconditions": ["from:" + selected.bundle_id],
+                     "preservation_refs": [checkpoint_id]},
+                    {"phase": "switching", "type": "database-switch",
+                     "target": f"database-switch:{database}:{prepared}:{retained}",
+                     "postcondition": "current is the prepared database; retained exists",
+                     "preconditions": ["no other session on the current database"],
+                     "preservation_refs": [checkpoint_id]}]
+            images = {service: image for service, image in selected.images.items()
+                      if image is not None and image.get("platform")}
+            effects += self.activation_specs(selected.images, sorted(selected.database_heads), deployment_id)
+            effects += self.workspace_effect_specs(workspace, deployment_id=deployment_id)
+            ctx = {"candidate": candidate, "manifest": manifest, "images": selected.images,
+                   "ref": "rollback:" + selected.bundle_id,
+                   "pointer": {"sha": revision, "ref": "rollback:" + selected.bundle_id, "checkpoint": checkpoint_id,
+                               "retained_database": retained}}
+            self._op_selected = (self.operation_id, selected)
+            return self.start_operation(
+                "rollback", ctx, effects=effects, workspace=workspace, images=images,
+                confirmation=self.confirmation_ref(phrase, summary),
+                source={"provenance": "git_commit" if verified else "unknown", "commit": revision,
+                        "entries_sha256": pf_source.entries_digest(manifest), "deployment_id": deployment_id},
+                supersedes=superseded.operation_id if superseded is not None else None,
+                input_bundle={"bundle_id": selected.bundle_id, "manifest_sha256": selected.manifest_sha256},
+                coverage=[{"store_id": "postgresql:" + database, "strategy_id": "postgresql-logical",
+                           "included": True, "reason": "the active store"}])
 
     def reset_database(self):
         self.staging()
@@ -7854,45 +10591,67 @@ class Controller:
         self.capture_preflight("reset-db")
         contract = self.ensure_local_contract()
         database = self.env()["POSTGRES_DB"]
-        confirm("RESET " + database,
-                "All current application data, including configuration/master data, will be removed from the active instance. A verified backup and retained database are created first. This does not make staging production-ready.")
-        self.pause("reset-db")
-        checkpoint = self.snapshot("before-reset")
-        self.phase("backup-ready", checkpoint=checkpoint.bundle_id)
+        phrase = "RESET " + database
+        summary = ("All current application data, including configuration/master data, will be removed from the "
+                   "active instance. A verified backup and retained database are created first. This does not make "
+                   "staging production-ready.")
+        confirm(phrase, summary)
+        heads = sorted(contract["heads"])
+        commit = (self.deployed_commit() or "0" * 40)
+        checkpoint_id = f"{utc()}-{commit[:12]}-{uuid.uuid4().hex[:6]}"
         prepared = "pf_clean_" + uuid.uuid4().hex[:20]
-        self.create_database(prepared)
-        override = self.state / "reset-images.yaml"
-        self.make_override(checkpoint.images, override)
-        self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
-                     override=override, env={"POSTGRES_DB": prepared})
-        if self.db_heads(prepared) != contract["heads"]:
-            raise Failure("The clean database did not reach the current schema head.")
-        retained = self.swap_database(prepared)
-        self.phase("activating", checkpoint=checkpoint.bundle_id)
-        self.activate(checkpoint.images, contract["heads"])
-        write_json(self.state / "last-reset.json", {"time": utc(), "checkpoint": checkpoint.bundle_id, "retained_database": retained})
-        self.pending.unlink()
-        log("Clean database is active. Configure Departments/Areas/Operations/Stations again.")
+        retained = "pf_keep_" + utc().lower() + "_" + uuid.uuid4().hex[:6]
+        images = self.running_images()
+        effects = [
+            {"phase": "preserving", "type": "service-change", "target": "services:stop:frontend,backend",
+             "postcondition": "stopped", "preconditions": ["confirmed"]},
+            {"phase": "preserving", "type": "capture", "target": "checkpoint:before-reset",
+             "postcondition": "sealed and data_restore_verified",
+             "preconditions": ["bundle:" + checkpoint_id, "verify:pf_verify_" + uuid.uuid4().hex[:20],
+                               "writers stopped"]},
+            {"phase": "initializing", "type": "database-create", "target": "database:" + prepared,
+             "postcondition": "exists", "preconditions": ["checkpoint sealed"], "preservation_refs": [checkpoint_id]},
+            {"phase": "initializing", "type": "database-migrate", "target": f"database:{prepared}:heads={','.join(heads)}",
+             "postcondition": "heads equal", "preconditions": ["clean candidate created"],
+             "preservation_refs": [checkpoint_id]},
+            {"phase": "switching", "type": "database-switch", "target": f"database-switch:{database}:{prepared}:{retained}",
+             "postcondition": "current is the prepared database; retained exists",
+             "preconditions": ["no other session on the current database"], "preservation_refs": [checkpoint_id]}]
+        effects += self.activation_specs(images, heads, None, seal=False)
+        effects.append({"phase": "finalizing", "type": "file-write", "target": "last-reset",
+                        "postcondition": "bytes sha256 recorded at completion",
+                        "preconditions": ["checkpoint:" + checkpoint_id]})
+        return self.start_operation(
+            "reset-db", {}, effects=effects, workspace=self.workspace_plan("untouched"), images=images,
+            confirmation=self.confirmation_ref(phrase, summary), source=self.running_source(),
+            coverage=[{"store_id": "postgresql:" + database, "strategy_id": "postgresql-logical", "included": True,
+                       "reason": "the active store"}])
 
-    def resume(self):
-        self.staging()
-        if not self.pending.exists():
-            raise Failure("No interrupted operation exists.")
-        pending = load_json(self.pending)
-        if pending["phase"] not in ("paused", "backup-ready"):
-            # Audit AF-5: a rollback journal's recorded checkpoint is its preservation capture, which may be an
-            # emergency or partial capture (never a rollback target); name the operation's healthy target instead.
-            hint = pending.get("selected") if pending.get("operation") == "rollback" else pending.get("checkpoint")
-            named = f" (this operation's: {hint})" if isinstance(hint, str) and BACKUP_RE.fullmatch(hint) else ""
-            raise Failure("Source/database may have changed. Roll back to a healthy checkpoint" + named + " with "
-                          "'rollback <backup-id> --restore-db' instead; an emergency or partial capture is evidence "
-                          "and data, never a rollback target.")
+    def backup_operation(self):
+        """``pf backup`` (section 3.4): the capture through the sealed manifest, then the verification, as two
+        journaled effects. A caught capture or verification failure closes the backup failed_preserved in-process
+        (OD-A32-13; not blocking, no fail_closed); only a crash or an interrupt leaves it open for ``resume``."""
         self.database_ready()
-        contract = self.ensure_local_contract()
-        confirm("RESUME " + self.env()["POSTGRES_DB"], "Resume the unchanged deployment after a pre-change failure.")
-        images = self.retain_images(utc().lower() + "-resume-" + uuid.uuid4().hex[:6])
-        self.activate(images, contract["heads"])
-        self.pending.unlink()
+        self.capture_preflight("backup")
+        self.ensure_local_contract()
+        view = self.current_deployment()
+        commit = (view.record["source"]["commit"] if view is not None and view.mismatch is None
+                  else self.deployed_commit()) or "0" * 40
+        bundle_id = f"{utc()}-{commit[:12]}-{uuid.uuid4().hex[:6]}"
+        database = self.env()["POSTGRES_DB"]
+        reason = "scheduled-or-manual-backup"
+        effects = [
+            {"phase": "capturing", "type": "capture", "target": "checkpoint:" + reason,
+             "postcondition": "sealed and data_restore_verified",
+             "preconditions": ["bundle:" + bundle_id, "verify:pf_verify_" + uuid.uuid4().hex[:20]]},
+            {"phase": "verifying", "type": "verification", "target": "bundle:" + reason,
+             "postcondition": "passed data_restore_verified record", "preconditions": ["sealed manifest"]}]
+        self.open_operation(
+            "backup", effects=effects, workspace=self.workspace_plan("untouched"), confirmation=None,
+            images=self.running_images(), source=self.running_source(),
+            coverage=[{"store_id": "postgresql:" + database, "strategy_id": "postgresql-logical", "included": True,
+                       "reason": "the active store"}])
+        return self.run_plan({})
 
     def live_sections(self, sections):
         """Run read-only probes one by one; report each unavailable section instead of stopping."""
@@ -7959,8 +10718,8 @@ class Controller:
         self.log_installation()
         validation = self.ensure_validation()
         self.log_validation()
-        self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
-        self.log_effects()
+        index = self.log_operations(trusted=validation.private_state_trusted)
+        self.log_effects(index)
         log("Python: " + sys.version.split()[0])
         self.log_registered_tools()
         log("Permissions: " + self.describe_permissions())
@@ -7995,15 +10754,19 @@ class Controller:
         if unavailable:
             raise Failure("Doctor found unavailable components: " + ", ".join(unavailable))
 
-    def status(self):
+    def status(self, operation_id=None):
         # Identity, trust summary and journal come from protected state and are
         # shown before any app config, .env, Git or Docker access (A1-T16). A refused
         # context or a rejected configuration ends here with zero transport calls (A11-R05).
+        # PF-A3.2 (section 3.10): the operations block reads only protected operation files; ``--operation``
+        # prints the detail of one operation and ends there (nothing read beyond the scan and its files).
         self.log_context()
         self.log_installation()
         validation = self.log_trust_summary()
-        self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
-        self.log_effects()
+        index = self.log_operations(trusted=validation.private_state_trusted, operation_id=operation_id)
+        if operation_id is not None:
+            return 0
+        self.log_effects(index)
         if not validation.mutation_allowed:
             self.refuse_live_checks("protected context refused (" + ", ".join(validation.refused_codes()) + ")")
         try:
@@ -8126,6 +10889,16 @@ def since_value(value):
     return value
 
 
+KEEP_WORKSPACE_HELP = "Keep the current workspace instead of the generation switch (recorded in the plan)"
+
+
+def operation_id_value(value):
+    """argparse type of --operation: the operation ID pattern (a usage error, exit 2, otherwise)."""
+    if not OPERATION_ID_RE.fullmatch(value or ""):
+        raise argparse.ArgumentTypeError(f"{value!r} is not an operation ID (<stamp>-<command>-<8 hex>)")
+    return value
+
+
 def parser():
     # PF-A1.4: abbreviations are refused everywhere (OD-A14-10); `pf --inst x` is unknown-option.
     result = argparse.ArgumentParser(description="PartFlow NAS staging administration; use --help on a command.",
@@ -8136,8 +10909,19 @@ def parser():
     def add(name, **kwargs):
         return subs.add_parser(name, allow_abbrev=False, **kwargs)
 
-    for name in ("doctor", "status", "reset-db", "resume", "abort-deploy"):
+    for name in ("doctor", "reset-db", "abort-deploy"):
         add(name)
+    # PF-A3.2 (section 4.1): resume by journal; status of one operation.
+    status = add("status", help="Show the instance's state; --operation prints one operation's journal (read-only)")
+    status.add_argument("--operation", type=operation_id_value, help="An operation ID (open or closed)")
+    resume = add("resume", help="Continue, reopen, abandon or keep the workspace of the interrupted operation")
+    resume.add_argument("--operation", type=operation_id_value,
+                        help="The operation to resume (default: the single blocking operation)")
+    resume_action = resume.add_mutually_exclusive_group()
+    resume_action.add_argument("--abandon", action="store_true",
+                               help="Cancel the operation where a cancel route exists")
+    resume_action.add_argument("--keep-workspace", action="store_true",
+                               help="Keep the current workspace (workspace refresh phases only)")
     backup = add("backup", help="Create a verified healthy checkpoint (--emergency: emergency preservation)")
     backup.add_argument("--emergency", action="store_true",
                         help="Capture the current data even when the schema/image contract does not hold (terminal "
@@ -8183,6 +10967,7 @@ def parser():
     deploy_selection.add_argument("--release", help="Deploy a published release tag or 'latest'")
     deploy.add_argument("--channel", choices=("stable", "prerelease"))
     deploy.add_argument("--skip-ci", action="store_true", help="Explicit manual staging exception; CI is checked by default")
+    deploy.add_argument("--keep-workspace", action="store_true", help=KEEP_WORKSPACE_HELP)
 
     purge = add("purge", help="Create a full recovery bundle, then remove one managed staging instance")
     purge.add_argument("--project", type=project_name, help="Legacy alias: select the registered instance whose Compose project is unique; prefer --instance")
@@ -8199,12 +10984,14 @@ def parser():
     restore.add_argument("recovery_id", nargs="?")
     restore.add_argument("--project", type=project_name, help="Legacy alias for selection; the restore target and the bundles listed are always the selected registered instance's own")
     restore.add_argument("--side-by-side", action="store_true", help="Restore only the old active database under a separate recovery DB name; do not replace the current instance")
+    restore.add_argument("--keep-workspace", action="store_true", help=KEEP_WORKSPACE_HELP)
 
     backups = add("backups", help="List revision checkpoints, newest first, 10 per page")
     backups.add_argument("--page", type=int, default=1)
     rollback = add("rollback")
     rollback.add_argument("backup_id", nargs="?")
     rollback.add_argument("--restore-db", action="store_true")
+    rollback.add_argument("--keep-workspace", action="store_true", help=KEEP_WORKSPACE_HELP)
     update = add("update")
     selection = update.add_mutually_exclusive_group()
     selection.add_argument("--latest", action="store_true", help="Resolve the current configured branch tip to a fixed SHA")
@@ -8213,6 +11000,7 @@ def parser():
     update.add_argument("--channel", choices=("stable", "prerelease"))
     update.add_argument("--allow-migrations", action="store_true")
     update.add_argument("--skip-ci", action="store_true", help="Explicit manual staging exception; never used by the scheduler")
+    update.add_argument("--keep-workspace", action="store_true", help=KEEP_WORKSPACE_HELP)
     check = add("release-check")
     check.add_argument("--channel", choices=("stable", "prerelease"))
     check.add_argument("--apply", action="store_true",
@@ -8293,15 +11081,15 @@ DISPATCH = {route.name: route for route in (
     _locked("deploy", "mutating", "refuse", "empty-target", "always", "terminal", "", "Controller.deploy"),
     _locked("abort-deploy", "mutating", "abort-deploy", "plan", "always", "terminal", "", "Controller.abort_deploy"),
     _locked("purge", "mutating", "purge", "plan", "never", "terminal", "", "Controller.purge"),
-    _locked("restore-instance", "mutating", "refuse", "restore", "unless-side-by-side", "terminal", "",
+    _locked("restore-instance", "mutating", "restore-instance", "restore", "unless-side-by-side", "terminal", "",
             "Controller.restore_instance"),
-    _locked("backup", "mutating", "refuse", "owned", "never", "policy", "backup", "Controller.snapshot"),
+    _locked("backup", "mutating", "backup", "owned", "never", "policy", "backup", "Controller.backup_operation"),
     # PF-A3.1: attended emergency preservation (section 4.2); its own pending route, never a policy grant.
     _locked("backup emergency", "mutating", "backup emergency", "owned", "never", "terminal", "",
             "Controller.capture_emergency"),
     _locked("reset-db", "mutating", "refuse", "owned", "always", "terminal", "", "Controller.reset_database"),
     _locked("rollback", "mutating", "rollback", "owned", "always", "terminal", "", "Controller.rollback"),
-    _locked("resume", "mutating", "resume", "owned", "always", "terminal", "", "Controller.resume"),
+    _locked("resume", "mutating", "resume", "owned", "always", "terminal", "", "Controller.resume_operation"),
     _locked("update", "mutating", "refuse", "owned", "always", "terminal", "", "Controller.update"),
     _locked("release-check", "conditional", "refuse", "apply", "if-apply", "policy", "release-check",
             "Controller.resolve"),
@@ -8375,7 +11163,7 @@ ENTRY_ROUTES = (
     EntryRoute("E4", "global launcher (created by install-control.sh init when absent) -> <root>/bootstrap/pf", "*",
                "per-route", "per-route", "per-route",
                "test_install.LauncherBinding.test_lb2_global_launcher_execs_the_bootstrap", "PF-A2.1"),
-    EntryRoute("E5", "backup.sh", "backup", "mutating", "yes", "refuse",
+    EntryRoute("E5", "backup.sh", "backup", "mutating", "yes", "backup",
                "test_entry_routes.SchedulerWrappers.test_sw6_installed_wrappers_reach_the_policy_gates", "PF-A1.4"),
     EntryRoute("E6", "release-check.sh", "release-check", "conditional", "yes", "refuse",
                "test_entry_routes.SchedulerWrappers.test_sw6_installed_wrappers_reach_the_policy_gates", "PF-A1.4"),
@@ -8454,6 +11242,26 @@ def check_permission_options(args):
                             "interrupted apply; --scope cannot be combined with them. Nothing was read or changed.")
 
 
+def check_keep_workspace(args):
+    """PF-A3.2 (section 4.1): --keep-workspace where no workspace switch exists is a usage error (exit 2)."""
+    if getattr(args, "keep_workspace", False) and (getattr(args, "current", False) or getattr(args, "side_by_side",
+                                                                                                 False)):
+        raise OptionRefused("usage-error: --keep-workspace has no effect here (deploy --current and restore-instance "
+                            "--side-by-side never switch the workspace). Nothing was read or changed.")
+    if args.command == "deploy" and getattr(args, "keep_workspace", False)             and not (args.latest or args.commit or args.release):
+        raise OptionRefused("usage-error: --keep-workspace has no effect here (deploy --current never switches the "
+                            "workspace). Nothing was read or changed.")
+
+
+def gate_request(args):
+    """The section 3.3 gate inputs of one parsed command line."""
+    delete = True if getattr(args, "delete_backups", False) else False if getattr(args, "keep_backups", False)         else None
+    return {"operation": getattr(args, "operation", None), "abandon": bool(getattr(args, "abandon", False)),
+            "keep_workspace": bool(getattr(args, "keep_workspace", False)), "delete_backups": delete,
+            "reset_admin_config": bool(getattr(args, "reset_admin_config", False)),
+            "bundle_id": getattr(args, "recovery_id", None), "side_by_side": bool(getattr(args, "side_by_side", False))}
+
+
 def route_preflight(route, args):
     """The topology preflight main() runs right after the lock: "owned" or "none" (PF-A1.3 OD-A13-03).
 
@@ -8508,6 +11316,31 @@ def require_attended(route, args, controller, *, explicit_instance, selected_by)
                        "Nothing was changed.")
 
 
+def journal_column(context):
+    """PF-A3.2 (section 3.10): the ``instances`` journal column from protected files only: ``<kind>/<phase>`` of the
+    blocking lifecycle operation, ``permissions/<phase>``, ``invalid`` or ``none`` (read-only)."""
+    try:
+        files, overflow = pf_instance.scan_operations(context.operations_dir)
+    except pf_instance.ContextError:
+        return "invalid"
+    try:
+        pending = pf_instance.read_bytes_nofollow(context.journal_path)
+    except FileNotFoundError:
+        pending = None
+    except OSError:
+        pending = b"\x00unreadable"
+    index = pf_config.classify_operations(
+        files, permissions_journal=pending, overflow=overflow,
+        validate=lambda value, name, plan=None: lifecycle_errors(value, name, plan=plan))
+    if index.overflow or index.legacy is not None or any(item.cls == "invalid" for item in index.blocking):
+        return "invalid"
+    if index.permissions is not None:
+        return f"permissions/{index.permissions.get('phase')}"
+    if index.blocking:
+        return "; ".join(f"{item.kind}/{item.phase}" for item in index.blocking)
+    return "none"
+
+
 def display_registry(registry):
     """Read-only listing of the protected registry: records, journals and unpublished registrations."""
     root = registry.root
@@ -8523,14 +11356,7 @@ def display_registry(registry):
         if context is None:
             log(f"{number:>3}. {entry.slug}  {entry.instance_id}{marker}  record=INVALID: {error}")
             continue
-        journal_path = context.journal_path
-        try:
-            journal = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(journal_path), label=str(journal_path))
-            journal_text = f"{journal.get('operation')}/{journal.get('phase')}" if isinstance(journal, dict) else "unreadable"
-        except FileNotFoundError:
-            journal_text = "none"
-        except (OSError, pf_instance.ContextError):
-            journal_text = "unreadable"
+        journal_text = journal_column(context)
         log(
             f"{number:>3}. {context.slug}  {context.instance_id}{marker}  project={context.compose_project}"
             f"  environment={context.approved_environment}  state={context.state}"
@@ -8832,11 +11658,16 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         if options.instance is not None and project is not None and project != context.compose_project:
             raise Failure(f"selection-conflict: --project {project} does not match the selected instance {context.slug} "
                           f"(project {context.compose_project}). Use --instance alone. Nothing was changed.")
+        check_keep_workspace(args)
         if route.trusted_context:
             # PF-A2.2: the config wizards read pf-config.json themselves (absent, refused or mismatched files reach
             # their own outcome); the protected-context refusal still runs for every trusted route. PF-A2.3:
-            # `permissions apply` reads it only for workspace_write_group and the proposals.
-            controller.require_trusted_context(load_config=route.name not in NO_CONFIG_ROUTES)
+            # `permissions apply` reads it only for workspace_write_group and the proposals. PF-A3.2: a locked route
+            # reads the operation index first (read-only) for the section 3.7a exception and the section 3.8
+            # admin configuration source; the gate re-checks both under the lock.
+            index = controller.operation_index() if route.lock else None
+            controller.require_trusted_context(load_config=route.name not in NO_CONFIG_ROUTES, route=route.name,
+                                               index=index, operation=getattr(args, "operation", None))
         if route.trusted_launch and not trusted_launch:
             raise Failure(
                 ("Mutating commands" if route.lock else "Compose views (ps, logs)")
@@ -8847,7 +11678,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             if args.command == "doctor":
                 controller.doctor()
             elif args.command == "status":
-                controller.status()
+                controller.status(args.operation)
             elif args.command == "backups":
                 controller.display_page(controller.snapshots(), args.page)
             elif args.command == "recoveries":
@@ -8875,12 +11706,18 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 f"revision {revision} of instance {slug} does not (automatic apply is off in this checkpoint). The "
                 f"editable auto_update setting is a proposal only. Nothing was changed. Check with 'pf --instance "
                 f"{slug} release-check' and apply manually with 'pf --instance {slug} update --release <tag>'.")
-        held_lock.enter_context(controller.lock(pending_route=route.name, freeze=route.name not in NO_CONFIG_ROUTES))
+        held_lock.enter_context(controller.lock(pending_route=route.name, freeze=route.name not in NO_CONFIG_ROUTES,
+                                                request=gate_request(args)))
         if route_preflight(route, args) == "owned":
             controller.require_topology_owned(route.name)
         managed_started = route_fail_closed(route, args)
 
-        if route.name == "permissions apply":
+        if controller.gate is not None and controller.gate.action == "reenter":
+            # PF-A3.2 (section 3.3): `resume` and the aliases re-enter the blocking operation by its journal.
+            controller.resume_operation(getattr(args, "operation", None), abandon=bool(getattr(args, "abandon", False)),
+                                        keep_workspace=bool(getattr(args, "keep_workspace", False)),
+                                        alias=None if route.name == "resume" else route.name)
+        elif route.name == "permissions apply":
             controller.permissions_apply(args)
         elif args.command == "deploy":
             use_current = args.current or not (args.latest or args.commit or args.release)
@@ -8889,7 +11726,8 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             )
             if not use_current and target is None:
                 raise Failure("No published release exists for this channel. Select prerelease, --latest, or an explicit commit.")
-            controller.deploy(target, use_current=use_current, skip_ci=args.skip_ci)
+            controller.deploy(target, use_current=use_current, skip_ci=args.skip_ci,
+                              keep_workspace=args.keep_workspace)
         elif args.command == "purge":
             delete_backups = True if args.delete_backups else False if args.keep_backups else None
             controller.purge(delete_backups=delete_backups, reset_admin_config=args.reset_admin_config)
@@ -8897,19 +11735,13 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
             # The mutation target is the selected registered instance, never a
             # path embedded in the (untrusted) recovery bundle.
             recovery = controller.choose_recovery(args.recovery_id)
-            controller.restore_instance(recovery, side_by_side=args.side_by_side)
+            controller.restore_instance(recovery, side_by_side=args.side_by_side, keep_workspace=args.keep_workspace)
             managed_started = False
         elif route.name == "backup emergency":
             controller.capture_emergency()
             log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though runtime .env is stored separately.")
         elif args.command == "backup":
-            controller.database_ready()
-            controller.capture_preflight("backup")
-            controller.ensure_local_contract()
-            view = controller.snapshot("scheduled-or-manual-backup")
-            log(f"Checkpoint class: {view.capture_class}")
-            log(f"Verification level: {view.level} (record {view.latest_verification_id})")
-            log("Copy the entire checkpoint directory off-NAS. It contains production-like database data even though runtime .env is stored separately.")
+            controller.backup_operation()
         elif args.command == "reset-db":
             controller.reset_database()
         elif args.command == "config":
@@ -8917,14 +11749,13 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         elif args.command == "abort-deploy":
             controller.abort_deploy()
         elif args.command == "rollback":
-            controller.rollback(args.backup_id, args.restore_db)
-        elif args.command == "resume":
-            controller.resume()
+            controller.rollback(args.backup_id, args.restore_db, keep_workspace=args.keep_workspace)
         elif args.command == "update":
             target = controller.resolve(latest=args.latest, commit=args.commit, release=args.release, channel=args.channel)
             if target is None:
                 raise Failure("No published release exists for this channel. Select prerelease or use --latest manually.")
-            controller.update(target, allow_migrations=args.allow_migrations, skip_ci=args.skip_ci)
+            controller.update(target, allow_migrations=args.allow_migrations, skip_ci=args.skip_ci,
+                              keep_workspace=args.keep_workspace)
         elif args.command == "release-check":
             target = controller.resolve(channel=args.channel)
             if target is None:

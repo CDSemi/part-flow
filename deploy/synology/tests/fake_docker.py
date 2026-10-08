@@ -9,12 +9,22 @@ invocation is appended to ``<tooldir>/calls.jsonl``; for Compose invocations the
 password). Unknown argv exits 64; a request for a full container object fails the test.
 
 The module is also imported by the tests (``render_model``) to build expected models.
+
+PF-A3.2: an optional simulated application plane (``state["plane"]``, absent in every earlier test) lets a lifecycle
+command run end to end through the installed launcher: per-service ``compose ps -a -q``, ``inspect`` of one
+container (Image, State, Config.Env of the db service only), ``compose stop|up|build|run`` changing containers and
+images, and the database programs of the db service (``psql`` statements, ``pg_dump``/``pg_restore`` of a JSON
+model, ``createdb``/``dropdb``, the Alembic upgrade setting a database's heads to the backend image's contract).
+``block`` gains ``env`` and ``argv_match`` selectors and ``apply`` ("after": the call's state change is saved before
+it blocks, i.e. committed then lost; "before": it is saved only if the call wakes up). Still no daemon is contacted.
 """
+import copy
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tarfile
 import time
@@ -166,6 +176,8 @@ def dispatch(state, argv, env):
             if matches(container.get("labels") or {}, filters):
                 rows.append(container["id"])
         return Result(0, "".join(row + "\n" for row in rows))
+    if verb == "inspect" and "plane" in state and "--format" not in argv:
+        return plane_inspect(state, positional_after(argv, 1))
     if verb == "container" and argv[1:2] == ["inspect"] or verb == "inspect":
         if "--format" not in argv:
             return violation(state, "full container object requested: " + " ".join(argv))
@@ -220,6 +232,8 @@ def dispatch(state, argv, env):
                 if in_use:
                     return Result(1, "", f"Error: {verb} {name} is in use\n")
             items.remove(found[0])
+            if verb == "volume" and "plane" in state and name == state["plane"].get("data_volume"):
+                state["plane"]["databases"] = {}  # the cluster's data lived in this volume
         return Result(0, "".join(word + "\n" for word in argv[2:]))
     if verb == "image" and argv[1:2] == ["ls"]:
         filters = label_filter(argv)
@@ -284,6 +298,8 @@ def dispatch(state, argv, env):
             archive.addfile(info, io.BytesIO(data))
         return Result(0)
     if verb == "image" and argv[1:2] == ["load"]:
+        if "plane" in state:
+            return plane_load(state, argv[argv.index("-i") + 1])
         return Result(0, "Loaded image\n")
     if verb == "rm":
         if "-f" not in argv:
@@ -313,6 +329,7 @@ def compose(state, argv, env):
     settings = state.setdefault("compose", {})
     files = []
     project = None
+    directory = None
     index = 0
     while index < len(argv) and argv[index].startswith("-"):
         option, value = argv[index], argv[index + 1]
@@ -320,9 +337,14 @@ def compose(state, argv, env):
             files.append(value)
         elif option == "-p":
             project = value
+        elif option == "--project-directory":
+            directory = value
         index += 2
     rest = argv[index:]
     verb = rest[0] if rest else ""
+    if "plane" in state and verb in ("stop", "up", "build", "run", "exec") or "plane" in state and verb == "ps" \
+            and "-q" in rest:
+        return plane_compose(state, verb, rest[1:], project=project, directory=directory, files=files, env=env)
     if verb == "version":
         return Result(0, settings.get("version", "Docker Compose version v2.40.2-fixture") + "\n")
     if verb == "config" and rest[1:] == ["--format", "json"]:
@@ -359,6 +381,7 @@ def compose(state, argv, env):
 def main(argv):
     env = dict(os.environ)
     state = load_state()
+    original = copy.deepcopy(state)
     calls_path = Path(STATE_DIR) / "calls.jsonl"
     entry = {"argv": argv, "DOCKER_HOST": env.get("DOCKER_HOST"), "DOCKER_CONFIG": env.get("DOCKER_CONFIG"),
              "has_DOCKER_CONTEXT": "DOCKER_CONTEXT" in env, "env_keys": sorted(env)}
@@ -371,11 +394,18 @@ def main(argv):
     result = dispatch(state, argv, env)
     probe_lock(state, argv)
     block = state.get("block")
-    if block and all(word in argv for word in block["argv_contains"]):
+    deferred = None
+    if block and all(word in argv for word in block["argv_contains"]) \
+            and all(env.get(key) == value for key, value in block.get("env", {}).items()) \
+            and re.search(block.get("argv_match", ""), " ".join(argv)):
         # PF-A1.4 audit: one blocking child for a real-signal test; later calls answer at once.
         del state["block"]
         Path(block["marker"]).write_text(str(os.getpid()) + "\n", encoding="utf-8")
         result.sleep = block["seconds"]
+        if block.get("apply", "after") == "before":
+            # PF-A3.2: the call's change happens only if it wakes up (a kill while it blocks loses it).
+            deferred, state = state, original
+            del state["block"]
     for hook in state.get("hooks", []):
         prefix = hook.get("after_argv_prefix")
         fired = hook.get("after_call_n") == number
@@ -392,7 +422,270 @@ def main(argv):
     if result.sleep:
         sys.stdout.flush()
         time.sleep(result.sleep)
+    if deferred is not None:
+        save_state(deferred)
     return result.code
+
+
+# ------------------------------------------------------------------------- PF-A3.2 plane
+
+SERVICE_LABEL = "com.docker.compose.service"
+PROJECT_LABEL = "com.docker.compose.project"
+DUMP_MAGIC = "PFDUMP1 "
+
+
+def service_of(container):
+    return (container.get("labels") or {}).get(SERVICE_LABEL)
+
+
+def plane_containers(state, project, service):
+    return [item for item in state.get("containers", []) if service_of(item) == service
+            and (item.get("labels") or {}).get(PROJECT_LABEL) == project
+            and (item.get("labels") or {}).get("com.docker.compose.oneoff", "False") == "False"]
+
+
+def plane_inspect(state, ids):
+    """``docker inspect <id>`` (the controller's inspect()): Image, State and, for the db service only, Config.Env."""
+    plane = state["plane"]
+    objects = []
+    for wanted in ids:
+        found = [item for item in state.get("containers", []) if item["id"] == wanted]
+        if not found:
+            return Result(1, "", f"Error: No such container: {wanted}\n")
+        container = found[0]
+        service = service_of(container)
+        running = container.get("status") == "running"
+        health = "healthy"
+        sequence = plane.setdefault("health", {}).get(service)
+        if running and sequence:
+            health = sequence.pop(0) if len(sequence) > 1 else sequence[0]
+        objects.append({"Image": container["image"], "State": {"Running": running, "Health": {"Status": health}},
+                        "Config": {"Env": list(plane.get("db_env", [])) if service == "db" else []}})
+    return Result(0, json.dumps(objects) + "\n")
+
+
+def plane_load(state, path):
+    """``docker image load -i <tar>``: every manifest entry's image ID with its tags (an image save of this fake)."""
+    import tarfile
+    with tarfile.open(path) as archive:
+        manifest = json.load(archive.extractfile("manifest.json"))
+    for entry in manifest:
+        image = find_image(state, entry["Config"])
+        if image is None:
+            image = {"id": entry["Config"], "repo_tags": [], "labels": entry.get("Labels") or {}}
+            state.setdefault("images", []).append(image)
+        for tag in entry.get("RepoTags") or []:
+            for other in state["images"]:
+                if tag in other["repo_tags"] and other is not image:
+                    other["repo_tags"].remove(tag)
+            if tag not in image["repo_tags"]:
+                image["repo_tags"].append(tag)
+    return Result(0, "Loaded image\n")
+
+
+def override_images(files):
+    """{service: reference} of the image override (the second -f file), as render_model reads it."""
+    result = {}
+    if len(files) < 2:
+        return result
+    service = None
+    for line in Path(files[1]).read_text(encoding="utf-8").splitlines():
+        if line.startswith("  ") and not line.startswith("    "):
+            service = line.strip().rstrip(":")
+        elif line.startswith("    image: "):
+            result[service] = json.loads(line[len("    image: "):])
+    return result
+
+
+def contract_of(directory):
+    """The image contract a backend build of ``directory`` carries: pf-admin's migration_files() digests and the
+    Alembic heads of the fixture revision files (``revision='x'``/``down_revision='y'``)."""
+    base = Path(directory) / "backend"
+    files = [base / "alembic.ini"] + [path for path in (base / "alembic").rglob("*") if path.is_file()
+                                       and "__pycache__" not in path.parts and path.suffix != ".pyc"]
+    revisions, parents = set(), set()
+    for path in (base / "alembic" / "versions").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        revisions.update(re.findall(r"^revision\s*=\s*['\"]([^'\"]+)['\"]", text, re.M))
+        parents.update(re.findall(r"^down_revision\s*=\s*['\"]([^'\"]+)['\"]", text, re.M))
+    return {"files": {str(path.relative_to(base)): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in sorted(files)},
+            "heads": sorted(revisions - parents)}
+
+
+def new_database(plane, owner, locale=None):
+    return {"heads": [], "rows": {}, "allow": True, "owner": owner,
+            "locale": list(locale or plane.get("locale", ["UTF8", "C.UTF-8", "C.UTF-8"]))}
+
+
+def plane_compose(state, verb, words, *, project, directory, files, env):
+    plane = state["plane"]
+    if verb == "ps":
+        services = [word for word in words if not word.startswith("-")]
+        ids = [item["id"] for service in services for item in plane_containers(state, project, service)
+               if "-a" in words or item.get("status") == "running"]
+        return Result(0, "".join(item + "\n" for item in ids))
+    if verb == "stop":
+        for service in [word for word in words if not word.startswith("-")]:
+            for item in plane_containers(state, project, service):
+                item["status"] = "exited"
+        return Result(0)
+    if verb == "up":
+        service = words[-1]
+        found = plane_containers(state, project, service)
+        if not found:
+            template = copy.deepcopy(plane["templates"]["containers"][service])
+            state.setdefault("containers", []).append(template)
+            found = [template]
+            for kind in ("volumes", "networks"):
+                for item in plane["templates"].get(kind, []):
+                    if not [other for other in state.setdefault(kind, []) if other["name"] == item["name"]]:
+                        state[kind].append(copy.deepcopy(item))
+        reference = override_images(files).get(service)
+        if reference is not None:
+            image = find_image(state, reference)
+            if image is None:
+                return Result(1, "", f"Error: No such image: {reference}\n")
+            found[0]["image"] = image["id"]
+        found[0]["status"] = "running"
+        if service == "db" and not plane.get("databases"):
+            plane["databases"] = {env.get("POSTGRES_DB"): new_database(plane, env.get("POSTGRES_USER"))}
+        return Result(0)
+    if verb == "build":
+        service = words[-1]
+        reference = override_images(files)[service]
+        image = find_image(state, reference)
+        if image is None:
+            image_id = "sha256:" + hashlib.sha256((reference + "\0" + str(directory)).encode("utf-8")).hexdigest()
+            image = {"id": image_id, "repo_tags": [reference], "labels": dict(plane.get("build_labels", {}))}
+            state.setdefault("images", []).append(image)
+        if service == "backend":
+            image["contract"] = contract_of(directory)
+        return Result(0)
+    if verb == "run":
+        index = 0
+        while index < len(words) and words[index].startswith("-"):
+            index += 2 if words[index] == "--label" else 1
+        service, command = words[index], words[index + 1:]
+        reference = override_images(files).get(service)
+        if reference is not None:
+            image = find_image(state, reference)
+        else:
+            running = plane_containers(state, project, service)
+            image = find_image(state, running[0]["image"]) if running else None
+        if image is None or "contract" not in image:
+            return Result(1, "", "fake plane: the backend image has no contract\n")
+        if "python" in command:
+            return Result(0, json.dumps(image["contract"]) + "\n")
+        if command[-3:] == ["alembic", "upgrade", "head"]:
+            database = plane["databases"].get(env.get("POSTGRES_DB"))
+            if database is None:
+                return Result(1, "", "FATAL: database does not exist\n")
+            database["heads"] = list(image["contract"]["heads"])
+            return Result(0, "INFO  [alembic] upgrade\n")
+        return Result(64, "", "fake plane: unknown run command\n")
+    # exec -T <service> <program> ...
+    service, program, arguments = words[1], words[2], words[3:]
+    if service == "frontend":
+        return Result(0, json.dumps(plane.get("api_health", {"status": "ok", "database": "connected"})) + "\n")
+    databases = plane.setdefault("databases", {})
+
+    def option(name):
+        return arguments[arguments.index(name) + 1] if name in arguments else None
+
+    if program == "psql":
+        settings = state.get("compose", {}).get("psql", {})
+        statement = option("-c")
+        if statement in settings:
+            return Result(0, settings[statement] + "\n")
+        return plane_sql(state, option("-d"), statement)
+    if program == "pg_dump":
+        database = databases.get(option("-d"))
+        if database is None:
+            return Result(1, "", "pg_dump: error: database does not exist\n")
+        return Result(0, DUMP_MAGIC + json.dumps({"heads": database["heads"], "rows": database["rows"]}) + "\n")
+    if program == "pg_restore":
+        data = sys.stdin.buffer.read().decode("utf-8", "replace")
+        if "--list" in arguments:
+            return Result(0, "; fake archive list\n")
+        database = databases.get(option("-d"))
+        if database is None:
+            return Result(1, "", "pg_restore: error: database does not exist\n")
+        if data.startswith(DUMP_MAGIC):
+            dump = json.loads(data[len(DUMP_MAGIC):])
+        else:  # a dump this plane did not write (an in-process fixture's): the configured default model
+            dump = plane.get("foreign_dump", {"heads": ["r1"], "rows": {}})
+        database.update(heads=list(dump["heads"]), rows=dict(dump["rows"]))
+        return Result(0)
+    if program == "createdb":
+        name = arguments[-1]
+        if name in databases:
+            return Result(1, "", f'createdb: error: database "{name}" already exists\n')
+        locale = [value.split("=", 1)[1] for prefix in ("--encoding=", "--lc-collate=", "--lc-ctype=")
+                  for value in arguments if value.startswith(prefix)]
+        databases[name] = new_database(plane, option("-U"), locale if len(locale) == 3 else None)
+        return Result(0)
+    if program == "dropdb":
+        name = arguments[-1]
+        if databases.pop(name, None) is None:
+            return Result(1, "", f'dropdb: error: database "{name}" does not exist\n')
+        return Result(0)
+    if program == "pg_dumpall":
+        return Result(0, "-- fake globals\n")
+    return Result(0, state.get("compose", {}).get("exec_output", ""))
+
+
+def plane_sql(state, name, statement):
+    """One psql statement of the controller (the fixed set it issues) against the plane's databases."""
+    plane = state["plane"]
+    databases = plane["databases"]
+    if name != "postgres" and name not in databases:
+        return Result(2, "", f'psql: error: FATAL:  database "{name}" does not exist\n')
+    database = databases.get(name)
+    if statement == "SELECT 1;":
+        return Result(0, "1\n")
+    if statement == "SHOW server_version_num;":
+        return Result(0, plane.get("server_version_num", "160004") + "\n")
+    if statement.startswith("SELECT to_regclass('public.alembic_version')"):
+        return Result(0, ("t" if database["heads"] else "f") + "\n")
+    if statement.startswith("SELECT version_num FROM public.alembic_version"):
+        return Result(0, "".join(head + "\n" for head in sorted(database["heads"])))
+    if statement.startswith("SELECT d.datname, pg_get_userbyid(d.datdba)"):
+        return Result(0, "".join("|".join([key, item["owner"], *item["locale"], "t" if item["allow"] else "f"]) + "\n"
+                                 for key, item in sorted(databases.items())))
+    if statement.startswith("SELECT extname, extversion FROM pg_extension"):
+        return Result(0, "plpgsql|1.0\n")
+    if statement.startswith("SELECT n.nspname || '.' || c.relname"):
+        return Result(0, "".join(f"{table}|{count}\n" for table, count in sorted(database["rows"].items())))
+    if statement.startswith("SELECT rolname, rolsuper"):
+        return Result(0, "partflow_staging|f|f|t|t|f|f\n")
+    if statement.startswith("SELECT name FROM pg_available_extensions"):
+        return Result(0, "plpgsql\n")
+    if statement.startswith("SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'"):
+        return Result(0, str(plane.get("client_backends", 0)) + "\n")
+    match = re.fullmatch(r"SELECT count\(\*\) FROM pg_stat_activity WHERE datname = '([A-Za-z0-9_]+)';", statement)
+    if match:
+        return Result(0, str(plane.get("sessions", {}).get(match.group(1), 0)) + "\n")
+    match = re.fullmatch(r'ALTER DATABASE "([A-Za-z0-9_]+)" ALLOW_CONNECTIONS (true|false);', statement)
+    if match:
+        databases[match.group(1)]["allow"] = match.group(2) == "true"
+        return Result(0, "ALTER DATABASE\n")
+    if statement.startswith("BEGIN;"):
+        changed = copy.deepcopy(databases)  # one transaction: every statement applies, or none
+        for part in statement.split(";"):
+            part = part.strip()
+            rename = re.fullmatch(r'ALTER DATABASE "([A-Za-z0-9_]+)" RENAME TO "([A-Za-z0-9_]+)"', part)
+            flag = re.fullmatch(r'ALTER DATABASE "([A-Za-z0-9_]+)" ALLOW_CONNECTIONS (true|false)', part)
+            if rename:
+                if rename.group(1) not in changed or rename.group(2) in changed:
+                    return Result(3, "", "ERROR:  rename refused\n")
+                changed[rename.group(2)] = changed.pop(rename.group(1))
+            elif flag:
+                changed[flag.group(1)]["allow"] = flag.group(2) == "true"
+        plane["databases"] = changed
+        return Result(0, "COMMIT\n")
+    plane.setdefault("unknown_sql", []).append(statement[:200])
+    return Result(3, "", "fake plane: unknown statement\n")
 
 
 def probe_lock(state, argv):

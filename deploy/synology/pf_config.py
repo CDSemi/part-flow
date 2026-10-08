@@ -1456,11 +1456,15 @@ JOURNAL_PHASE_NAMES = ("planned", "preparing", "initializing", "activating", "pr
                        "restoring-candidate", "switching", "deleting", "finalizing", "preparing-target",
                        "restoring-data", "completed", "failed_preserved", "needs_operator", "cancelled")
 TERMINAL_PHASES = frozenset({"completed", "failed_preserved", "needs_operator", "cancelled"})
+# PF-A3.2: needs_operator is terminal (its journal is never advanced) but stays blocking until a superseding recovery
+# operation takes over (section 3.2).
+BLOCKING_TERMINAL = frozenset({"needs_operator"})
 # Allowed phases per operation kind (the LIFECYCLE section 2 phase table as the A3.1 contract reads it); every
-# terminal phase is allowed for every kind. A3.2 owns the runtime journal and may amend this table only through the
-# reviewed SPEC amendment of the section 2.4.2 freeze rule, before its first writer ships.
+# terminal phase is allowed for every kind. PF-A3.2 amendment AM-8 (SPEC section 2.3): the initial deploy also cuts the
+# workspace over after its activation (syncing-workspace, workspace_sync_pending).
 JOURNAL_PHASES = {
-    "deploy": frozenset({"planned", "preparing", "initializing", "activating", "finalizing"}) | TERMINAL_PHASES,
+    "deploy": frozenset({"planned", "preparing", "initializing", "activating", "syncing-workspace",
+                         "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
     "update": frozenset({"planned", "preparing", "preserving", "migrating", "activating", "syncing-workspace",
                          "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
     "backup": frozenset({"planned", "capturing", "verifying", "finalizing"}) | TERMINAL_PHASES,
@@ -1474,6 +1478,29 @@ JOURNAL_PHASES = {
                                    "syncing-workspace", "workspace_sync_pending", "finalizing"}) | TERMINAL_PHASES,
     "abort-deploy": frozenset({"planned", "deleting", "finalizing"}) | TERMINAL_PHASES,
 }
+# PF-A3.2 (SPEC section 2.4, normative): the order of the non-terminal phases of each kind; terminal phases follow any
+# phase. Effect phases of a plan are non-decreasing in this order (AM-1).
+PHASE_ORDER = {
+    "deploy": ("planned", "preparing", "initializing", "activating", "syncing-workspace", "workspace_sync_pending",
+               "finalizing"),
+    "update": ("planned", "preparing", "preserving", "migrating", "activating", "syncing-workspace",
+               "workspace_sync_pending", "finalizing"),
+    "backup": ("planned", "capturing", "verifying", "finalizing"),
+    "rollback": ("planned", "preparing", "preserving-current", "restoring-candidate", "switching", "activating",
+                 "syncing-workspace", "workspace_sync_pending", "finalizing"),
+    "reset-db": ("planned", "preparing", "preserving", "initializing", "switching", "activating", "finalizing"),
+    "purge": ("planned", "preparing", "preserving", "capturing", "verifying", "deleting", "finalizing"),
+    "restore-instance": ("planned", "preparing-target", "restoring-data", "activating", "syncing-workspace",
+                         "workspace_sync_pending", "finalizing"),
+    "abort-deploy": ("planned", "deleting", "finalizing"),
+}
+# AM-1: the phase of an effect is a non-terminal phase with a live effect (never planned, never the pending state).
+EFFECT_PHASES = tuple(name for name in JOURNAL_PHASE_NAMES
+                      if name not in TERMINAL_PHASES and name not in ("planned", "workspace_sync_pending"))
+WORKSPACE_MODES = ("switch", "keep", "pending", "record-current", "untouched")
+GENERATION_PATTERN = "^wsg-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+WORKSPACE_UNTOUCHED_KINDS = ("backup", "reset-db", "purge", "abort-deploy")
+EVIDENCE_LIMIT = 2000
 EFFECT_TYPES = ("source-stage", "source-switch", "image-build", "image-tag", "image-load", "service-change",
                 "database-create", "database-migrate", "database-restore", "database-switch", "database-drop",
                 "database-alter", "resource-delete", "artifact-seal", "capture", "verification", "file-write")
@@ -1548,14 +1575,20 @@ _L_PRODUCER = _record({"control_release_id": _l_str(None, 1, 128), "control_sha2
                        "profile_sha256": _l_str(_L_SHA), "instance_record_sha256": _l_str(_L_SHA)})
 _L_STRATEGY = _record({"id": {"const": "postgresql-logical"}, "version": {"const": 1}})
 _L_STATE = {"enum": ["running", "stopped", "absent"]}
+# AM-4: the workspace decision of an approved plan (section 3.7); the generation pattern and the reason length are
+# cross-field rules.
+_L_WORKSPACE_PLAN = _record({"mode": {"enum": list(WORKSPACE_MODES)}, "generation_id": _l_null("string"),
+                             "container": _l_null("path"), "reason": _l_null("string")})
 
 # Embedded copy of contracts/lifecycle-records.schema.json (section 2.4); a test asserts the two stay equal.
 LIFECYCLE_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "Deployment Admin lifecycle records v1 (PF-A3.1)",
+    "title": "Deployment Admin lifecycle records v1 (PF-A3.1, PF-A3.2 amendments AM-1..AM-10)",
     "description": (
-        "Frozen wire schemas of the lifecycle records: $defs.operation_plan and $defs.operation_journal (frozen v1, "
-        "no runtime writer in PF-A3.1), $defs.deployment_record (<private_state>/artifacts/deployments/<id>/"
+        "Frozen wire schemas of the lifecycle records: $defs.operation_plan and $defs.operation_journal (v1 with the "
+        "PF-A3.2 amendments AM-1..AM-10; written as <private_state>/operations/<operation-id>/plan.json and "
+        "journal.json; frozen_config is the SHA-256 and length of the rendered app.env bytes the operation consumes), "
+        "$defs.deployment_record (<private_state>/artifacts/deployments/<id>/"
         "deployment-record.json), $defs.recovery_manifest (manifest.json of a checkpoint or purge bundle) and "
         "$defs.verification_record (<private_state>/artifacts/verifications/<bundle-id>/<verification-id>.json). "
         "Strict UTF-8 JSON written as exactly pf_instance.normalize_json(value) (sorted keys, no whitespace, no "
@@ -1609,14 +1642,16 @@ LIFECYCLE_SCHEMA = {
                           "detail": _l_str(None, 0, 500)}),
         "effect": _record({"effect_id": _l_str(_L_EFFECT), "type": {"enum": list(EFFECT_TYPES)},
                            "target": _l_str(None, 1, 300), "preconditions": _l_items("string"),
-                           "postcondition": _l_str(None, 1, 300), "preservation_refs": _l_items("$defs.bundle_id")}),
+                           "postcondition": _l_str(None, 1, 300), "preservation_refs": _l_items("$defs.bundle_id"),
+                           "phase": {"enum": list(EFFECT_PHASES)}}),
         "effect_state": _record({"effect_id": _l_str(_L_EFFECT),
                                  "state": {"enum": ["not_started", "complete", "partial", "unknown"]},
                                  "observed_at": _l_null("$defs.stamp"), "evidence": _l_null("string")}),
         "approval": _record({"plan_sha256": _l_str(_L_SHA), "confirmed_at": _l_str(_L_STAMP),
                              "method": {"enum": ["typed-phrase", "policy-grant"]}}),
         "retained_artifact": _record({"kind": {"enum": ["checkpoint", "purge-bundle", "deployment", "database",
-                                                        "image-tag", "staging"]},
+                                                        "image-tag", "staging", "workspace-generation",
+                                                        "bundle-attempt", "checkpoint-history"]},
                                       "name": _l_str(None, 1, 300), "sha256": _l_null("sha256")}),
         "policy_ref": _record({"revision": _l_int(1), "sha256": _l_str(_L_SHA)}),
         "config_ref": _record({"sha256": _l_str(_L_SHA), "bytes": _l_int()}),
@@ -1628,6 +1663,9 @@ LIFECYCLE_SCHEMA = {
                              "deployment_id": _l_null("$defs.deployment_id")}),
         "deployment_ref": _record({"deployment_id": _l_str(_L_DEPLOYMENT), "record_sha256": _l_str(_L_SHA)}),
         "bundle_ref": _record({"bundle_id": _l_str(_L_BUNDLE), "manifest_sha256": _l_str(_L_SHA)}),
+        "workspace_plan": _L_WORKSPACE_PLAN,
+        "deletion_approval": _record({"plan_sha256": _l_str(_L_SHA), "delete_backups": _L_BOOL,
+                                      "reset_admin_config": _L_BOOL, "confirmed_at": _l_str(_L_STAMP)}),
         "consistency_group": _record({"group_id": _l_str("^[a-z0-9-]{1,40}$"), "stores": _l_items("string"),
                                       "claim": {"enum": ["transactional-single-store", "writers-stopped", "none"]}}),
         "mismatch": _record({"kind": {"enum": ["schema-image-mismatch", "deployment-image-mismatch"]},
@@ -1662,7 +1700,11 @@ LIFECYCLE_SCHEMA = {
             "confirmation": _l_null("$defs.confirmation"),
             "limits": _record({"timeout_seconds": _l_int(1), "minimum_free_bytes": _l_int()}),
             "effects": _l_items("$defs.effect"),
-            "recovery_route": _l_items("string")}),
+            "recovery_route": _l_items("string"),
+            "supersedes": _l_null("$defs.operation_id"),
+            "admin_config": _l_null("$defs.config_ref"),
+            "workspace": _L_WORKSPACE_PLAN,
+            "input_bundle": _l_null("$defs.bundle_ref")}),
         "operation_journal": _record({
             "schema_version": {"const": 1}, "operation_id": _l_str(_L_OPERATION), "plan_sha256": _l_str(_L_SHA),
             "kind": {"enum": list(OPERATION_KINDS)}, "sequence": _l_int(1),
@@ -1670,7 +1712,8 @@ LIFECYCLE_SCHEMA = {
             "approvals": _l_items("$defs.approval"), "effects": _l_items("$defs.effect_state"),
             "unresolved_effect": _l_null("$defs.effect_id"),
             "retained_artifacts": _l_items("$defs.retained_artifact"), "last_error": _l_null("$defs.error"),
-            "legal_next": _l_items("string"), "result": _l_null("$defs.terminal")}),
+            "legal_next": _l_items("string"), "result": _l_null("$defs.terminal"),
+            "deletion": _l_null("$defs.deletion_approval")}),
         "deployment_record": _record({
             "schema_version": {"const": 1}, "deployment_id": _l_str(_L_DEPLOYMENT), "instance_id": _l_str(_UUID),
             "compose_project": _l_str(_L_SLUG), "created_at": _l_str(_L_STAMP),
@@ -2133,10 +2176,26 @@ def _verification_problems(record):
     return problems
 
 
+def workspace_effect_targets(generation):
+    """The four workspace effects of a plan with workspace mode switch or pending (section 3.7): [(type, target)]."""
+    return [("source-stage", "workspace:stage:" + generation), ("source-switch", "workspace:retain:" + generation),
+            ("source-switch", "workspace:bind:" + generation), ("file-write", "source-manifest")]
+
+
+def _is_workspace_effect(effect):
+    return effect["target"].startswith("workspace:") or (effect["type"] == "file-write"
+                                                         and effect["target"] == "source-manifest"
+                                                         and effect["phase"] == "syncing-workspace")
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _plan_problems(plan):
     problems = []
     add = problems.append
     effects = plan["effects"]
+    kind = plan["kind"]
     if len(effects) > 1024:
         add("effects: more than 1024 entries")
     if len(plan["coverage"]) > 256:
@@ -2144,8 +2203,22 @@ def _plan_problems(plan):
     ids = [effect["effect_id"] for effect in effects]
     if ids != sorted(set(ids)):
         add("effects: effect ids must be unique and increasing")
-    if (plan["kind"] in ("purge", "abort-deploy")) != (plan["resources"]["deletion_plan_sha256"] is not None):
-        add("resources.deletion_plan_sha256: set exactly for purge and abort-deploy")
+    # AM-1: each effect names its phase; phases of the kind only, non-decreasing in PHASE_ORDER.
+    order = PHASE_ORDER[kind]
+    reached = 0
+    for effect in effects:
+        phase = effect["phase"]
+        if phase not in order or phase not in JOURNAL_PHASES[kind]:
+            add(f"effects.{effect['effect_id']}.phase: {phase} is not a phase of {kind}")
+            continue
+        index = order.index(phase)
+        if index < reached:
+            add(f"effects.{effect['effect_id']}.phase: {phase} comes before the phase of an earlier effect "
+                f"(phase order of {kind})")
+        reached = max(reached, index)
+    # AM-6: the abort-deploy plan freezes its deletion plan; a purge binds its deletion plan in the journal later.
+    if (kind == "abort-deploy") != (plan["resources"]["deletion_plan_sha256"] is not None):
+        add("resources.deletion_plan_sha256: set exactly for abort-deploy")
     if (plan["source"]["provenance"] == "git_commit") != (plan["source"]["commit"] is not None):
         add("source: provenance git_commit exactly when commit is set")
     for key, image in plan["images"].items():
@@ -2155,15 +2228,51 @@ def _plan_problems(plan):
             add(f"images.{key}.platform: required")
         else:
             problems += _image_problems(image, f"images.{key}")
+    # AM-2: only a recovery operation supersedes a blocking operation.
+    supersedes = plan["supersedes"]
+    if supersedes is not None and kind not in ("rollback", "abort-deploy"):
+        add(f"supersedes: a {kind} operation never supersedes another operation (rollback and abort-deploy only)")
+    if kind == "abort-deploy" and supersedes is None:
+        add("supersedes: required for abort-deploy (it supersedes the incomplete deploy)")
+    if supersedes is not None and supersedes == plan["operation_id"]:
+        add("supersedes: an operation cannot supersede itself")
+    # AM-5
+    if (kind in ("rollback", "restore-instance")) != (plan["input_bundle"] is not None):
+        add("input_bundle: set exactly for rollback and restore-instance")
+    # AM-4: the workspace decision.
+    workspace = plan["workspace"]
+    mode, generation, container, reason = (workspace["mode"], workspace["generation_id"], workspace["container"],
+                                           workspace["reason"])
+    switching = mode in ("switch", "pending")
+    if switching != (generation is not None) or switching != (container is not None):
+        add("workspace: generation_id and container are set exactly for mode switch or pending")
+    if generation is not None and not _match(GENERATION_PATTERN, generation):
+        add("workspace.generation_id: not a workspace generation id (wsg-<stamp>-<8 hex>)")
+    if (mode == "pending") != (reason is not None):
+        add("workspace.reason: set exactly for mode pending")
+    if reason is not None and (len(reason) > 200 or _CONTROL_RE.search(reason)):
+        add("workspace.reason: more than 200 characters or a control character")
+    if (mode == "untouched") != (kind in WORKSPACE_UNTOUCHED_KINDS):
+        add("workspace.mode: untouched exactly for backup, reset-db, purge and abort-deploy")
+    if mode == "record-current" and kind != "deploy":
+        add("workspace.mode: record-current only for deploy")
+    found = [(effect["type"], effect["target"]) for effect in effects if _is_workspace_effect(effect)]
+    expected = workspace_effect_targets(generation) if switching and isinstance(generation, str) else []
+    if found != expected:
+        add("workspace: the plan carries the four workspace effects exactly for mode switch or pending")
+    for effect in effects:
+        if effect["target"].startswith("workspace:") and effect["phase"] != "syncing-workspace":
+            add(f"effects.{effect['effect_id']}.phase: a workspace effect belongs to syncing-workspace")
     return problems
 
 
-def _journal_problems(journal):
+def _journal_problems(journal, plan=None):
     problems = []
     add = problems.append
     phase = journal["phase"]
-    if phase not in JOURNAL_PHASES[journal["kind"]]:
-        add(f"phase {phase} is not a phase of {journal['kind']}")
+    kind = journal["kind"]
+    if phase not in JOURNAL_PHASES[kind]:
+        add(f"phase {phase} is not a phase of {kind}")
     if (journal["result"] is not None) != (phase in TERMINAL_PHASES):
         add("result: set exactly in a terminal phase")
     unresolved = journal["unresolved_effect"]
@@ -2173,6 +2282,42 @@ def _journal_problems(journal):
         add("unresolved_effect: names no partial or unknown effect")
     if any(approval["plan_sha256"] != journal["plan_sha256"] for approval in journal["approvals"]):
         add("approvals: every approval binds plan_sha256")
+    # AM-9: evidence holds identities, never values.
+    for effect in journal["effects"]:
+        evidence = effect["evidence"]
+        if evidence is not None and len(evidence) > EVIDENCE_LIMIT:
+            add(f"effects.{effect['effect_id']}.evidence: more than {EVIDENCE_LIMIT} characters")
+        if evidence is not None and _CONTROL_RE.search(evidence):
+            add(f"effects.{effect['effect_id']}.evidence: control character")
+    deletion = journal["deletion"]
+    if deletion is not None and kind not in ("purge", "abort-deploy", "restore-instance"):
+        add(f"deletion: a {kind} journal never carries a deletion approval")
+    if plan is None:
+        return problems
+    # The rules that bind a journal to its approved plan (section 2.3, AM-6/AM-8).
+    if plan["kind"] != kind or plan["operation_id"] != journal["operation_id"]:
+        add("plan: the journal names another operation or kind than its plan")
+        return problems
+    planned = {effect["effect_id"]: effect for effect in plan["effects"]}
+    if [effect["effect_id"] for effect in journal["effects"]] != list(planned):
+        add("effects: the journal's effects are not exactly the plan's effects")
+        return problems
+    states = {effect["effect_id"]: effect["state"] for effect in journal["effects"]}
+    if phase == "workspace_sync_pending" and plan["workspace"]["mode"] not in ("switch", "pending"):
+        add("phase workspace_sync_pending: the plan's workspace mode is neither switch nor pending")
+    if kind == "purge" and deletion is None and any(
+            planned[eid]["type"] == "resource-delete" and state != "not_started" for eid, state in states.items()):
+        add("deletion: required once a resource-delete effect of the purge started")
+    if kind == "abort-deploy" and deletion is not None \
+            and deletion["plan_sha256"] != plan["resources"]["deletion_plan_sha256"]:
+        add("deletion.plan_sha256: differs from the plan's frozen deletion plan")
+    if kind == "restore-instance" and deletion is not None:
+        started = [eid for eid, state in states.items()
+                   if planned[eid]["phase"] == "restoring-data" and state != "not_started"]
+        if started or phase not in ("preparing-target", "cancelled") or deletion["delete_backups"] \
+                or deletion["reset_admin_config"]:
+            add("deletion: a restore-instance carries a deletion approval only for an abandon in preparing-target "
+                "before any restoring-data effect started")
     return problems
 
 
@@ -2181,15 +2326,657 @@ _LIFECYCLE_RULES = {"recovery_manifest": _manifest_problems, "deployment_record"
                     "operation_journal": _journal_problems}
 
 
-def lifecycle_problems(value, name):
+def lifecycle_problems(value, name, *, plan=None):
     """The cross-field rules of section 2.4 for one schema-valid record (run after pf_install.validate_marked); []
-    when valid. Pure. A value that is not schema-valid is reported, never repaired."""
+    when valid. Pure. A value that is not schema-valid is reported, never repaired. PF-A3.2: a journal is also checked
+    against its schema-valid ``plan`` when one is given (the rules of SPEC section 2.3 that bind the two)."""
     if name not in _LIFECYCLE_RULES:
         raise ConfigError(f"lifecycle-record-unknown: {name!r}")
     try:
+        if name == "operation_journal":
+            return _journal_problems(value, plan)
         return _LIFECYCLE_RULES[name](value)
-    except (KeyError, TypeError, AttributeError, IndexError) as exc:
+    except (KeyError, TypeError, AttributeError, IndexError, ValueError) as exc:
         return [f"$: cross-field rules not evaluated ({type(exc).__name__}: {exc}); validate the schema first"]
+
+
+# ------------------------------------------------------------ operation index, routes and decisions (PF-A3.2)
+# Pure interpretation of the protected operation files (SPEC sections 3.2, 3.3, 3.6, 3.7, 3.11a). Nothing here reads
+# a clock, a daemon or a filesystem except load_frozen_app_config, which reads its own operation's snapshot files.
+
+OPERATION_SCAN_LIMIT = 20000
+OPERATION_ID_RE = re.compile(_L_OPERATION[1:-1])
+CLOSED_PHASES = frozenset({"completed", "cancelled", "failed_preserved"})
+CANDIDATE_RE = re.compile(r"pf_(?:migrate|restore|clean)_[0-9a-f]{20}\Z")
+SWITCH_KINDS = ("deploy", "update", "rollback", "restore-instance")
+EMERGENCY_KINDS = ("deploy", "update", "rollback", "reset-db")
+# DISPATCH fail_closed column per operation kind (pf-admin.py DISPATCH; section 3.9): the route that creates the kind.
+KIND_FAIL_CLOSED = {"deploy": "always", "update": "always", "rollback": "always", "reset-db": "always",
+                    "abort-deploy": "always", "restore-instance": "unless-side-by-side", "purge": "never",
+                    "backup": "never"}
+ROUTE_COMMANDS = {"backup emergency": "backup --emergency"}
+
+
+@dataclasses.dataclass(frozen=True)
+class OperationEntry:
+    """One operation directory as the index reads it. ``cls``: no-journal | invalid | blocking | superseded |
+    closed. ``plan``/``journal`` are the parsed records of a valid entry (a plan alone for no-journal)."""
+
+    operation_id: str
+    cls: str
+    plan: object = None
+    plan_sha256: object = None
+    journal: object = None
+    error: object = None
+    superseded_by: object = None
+
+    @property
+    def kind(self):
+        return (self.journal or self.plan or {}).get("kind")
+
+    @property
+    def phase(self):
+        return (self.journal or {}).get("phase")
+
+
+@dataclasses.dataclass(frozen=True)
+class OperationIndex:
+    """The classified operations of one instance (section 3.2). ``blocking``: blocking lifecycle entries (valid
+    non-terminal or needs_operator, and invalid ones); ``permissions``: the A2.3 permissions journal (a dict) or None;
+    ``legacy``: any other ``state/pending.json`` content (journal-format-unsupported) or None; ``conflict``: more than
+    one blocking entry that is not the allowed pair; ``pair``: (backup entry, pending-switch entry) or None;
+    ``overflow``: the number of directory entries seen when the scan stopped at its bound, else 0."""
+
+    entries: tuple
+    blocking: tuple
+    recent: tuple
+    superseded: tuple
+    permissions: object
+    legacy: object
+    conflict: bool
+    pair: object
+    overflow: int
+
+    def entry(self, operation_id):
+        return next((item for item in self.entries if item.operation_id == operation_id), None)
+
+    @property
+    def open_count(self):
+        return len(self.blocking) + (self.permissions is not None) + (self.legacy is not None)
+
+
+@dataclasses.dataclass(frozen=True)
+class ResumeDecision:
+    """Section 3.6 for one re-entered operation. ``action``: forward | reopen | withdraw | close | needs_operator.
+    ``outcome``: the terminal phase the action ends in when it succeeds (``completed`` for forward)."""
+
+    action: str
+    outcome: str
+    abandon_legal: bool
+    keep_legal: bool
+    reason: str
+
+
+def effect_state(journal, effect_id):
+    for effect in journal["effects"]:
+        if effect["effect_id"] == effect_id:
+            return effect["state"]
+    return None
+
+
+def effect_role(effect):
+    """The section 3.6 role of one plan effect (pure, from type, target and phase)."""
+    kind, target = effect["type"], effect["target"]
+    if target.startswith("workspace:") or (kind == "file-write" and target == "source-manifest"
+                                           and effect["phase"] == "syncing-workspace"):
+        return "workspace"
+    if (kind == "source-stage" and target.startswith("deployment:")) or (
+            kind == "file-write" and target == "source-manifest"):
+        return "staging"
+    if kind == "service-change" and target.startswith("services:stop:"):
+        return "stop"
+    if kind == "service-change" and target.startswith("service:frontend:start"):
+        return "frontend"
+    if kind == "service-change" and target.startswith("service:backend:start"):
+        return "backend"
+    if kind == "service-change" and target == "service:db:start":
+        return "db-start"
+    if kind in ("capture", "verification", "artifact-seal", "resource-delete", "database-switch", "image-load"):
+        return {"capture": "capture", "verification": "verification", "artifact-seal": "seal",
+                "resource-delete": "deletion", "database-switch": "switch", "image-load": "image-load"}[kind]
+    if kind.startswith("database-"):
+        name = target.split(":")[1] if target.count(":") >= 1 else ""
+        return "candidate" if CANDIDATE_RE.fullmatch(name) else ("migration" if kind == "database-migrate"
+                                                                  else "data")
+    if kind == "file-write" and target == "pointer:deployed.json":
+        return "pointer"
+    return "file"
+
+
+def workspace_effect_ids(plan):
+    """(W1, W2, W3, W4) effect ids of a plan with workspace effects, else None."""
+    ids = [effect["effect_id"] for effect in plan["effects"] if effect_role(effect) == "workspace"]
+    return tuple(ids) if len(ids) == 4 else None
+
+
+def in_workspace_switch(plan, journal):
+    """Section 3.2: W2 (workspace:retain) started and W3 (workspace:bind) not complete. Only then may the registered
+    workspace path be absent."""
+    ids = workspace_effect_ids(plan)
+    if ids is None or journal["phase"] in TERMINAL_PHASES:
+        return False
+    return effect_state(journal, ids[1]) != "not_started" and effect_state(journal, ids[2]) != "complete"
+
+
+def _validated(files, validate):
+    """Classify one OperationFiles entry into an OperationEntry without the supersession and blocking rules."""
+    operation_id = files.operation_id
+    if files.error is not None:
+        return OperationEntry(operation_id, "invalid", error=files.error)
+    if files.journal_bytes is None:
+        plan = None
+        if files.plan_bytes is not None:
+            try:
+                plan = pf_instance.parse_strict_json(files.plan_bytes, label="plan.json")
+            except pf_instance.ContextError:
+                plan = None
+        return OperationEntry(operation_id, "no-journal", plan=plan if isinstance(plan, dict) else None)
+    if files.plan_bytes is None:
+        return OperationEntry(operation_id, "invalid", error="journal.json without plan.json")
+    records = {}
+    for name, data, record in (("plan", files.plan_bytes, "operation_plan"),
+                               ("journal", files.journal_bytes, "operation_journal")):
+        try:
+            value = pf_instance.parse_strict_json(data, label=name + ".json")
+        except pf_instance.ContextError as exc:
+            return OperationEntry(operation_id, "invalid", error=f"{name}.json: {exc}")
+        if not isinstance(value, dict) or data != pf_instance.normalize_json(value):
+            return OperationEntry(operation_id, "invalid", error=f"{name}.json: not the normalized JSON object form")
+        problems = validate(value, record, plan=records.get("plan"))
+        if problems:
+            return OperationEntry(operation_id, "invalid", error=f"{name}.json: {problems[0]}")
+        records[name] = value
+    plan, journal = records["plan"], records["journal"]
+    plan_sha256 = pf_instance.sha256_bytes(files.plan_bytes)
+    if plan["operation_id"] != operation_id or journal["operation_id"] != operation_id:
+        return OperationEntry(operation_id, "invalid", error="the records name another operation than the directory")
+    if journal["plan_sha256"] != plan_sha256:
+        return OperationEntry(operation_id, "invalid", error="journal.plan_sha256 is not the SHA-256 of plan.json")
+    if journal["kind"] != plan["kind"]:
+        return OperationEntry(operation_id, "invalid", error="the journal's kind is not the plan's kind")
+    closed = journal["phase"] in CLOSED_PHASES
+    return OperationEntry(operation_id, "closed" if closed else "blocking", plan=plan, plan_sha256=plan_sha256,
+                          journal=journal)
+
+
+def _default_validate(value, name, *, plan=None):
+    # The A2.1 marker validator lives in pf_install, which loads this module; it is resolved at call time (both
+    # modules are fully loaded by then), never at import.
+    pf_install = _load_sibling_module("pf_install")
+    defs = LIFECYCLE_SCHEMA["$defs"]
+    return pf_install.validate_marked(value, defs[name], defs=defs) or lifecycle_problems(value, name, plan=plan)
+
+
+def _is_pending_switch(entry):
+    """A deploy/update/rollback/restore-instance waiting in workspace_sync_pending with untouched W effects and its
+    activation, seal and pointer done (section 3.3 backup row)."""
+    if entry.cls != "blocking" or entry.kind not in SWITCH_KINDS or entry.phase != "workspace_sync_pending":
+        return False
+    plan, journal = entry.plan, entry.journal
+    ids = workspace_effect_ids(plan)
+    if ids is None or any(effect_state(journal, eid) != "not_started" for eid in ids):
+        return False
+    for effect in plan["effects"]:
+        role = effect_role(effect)
+        state = effect_state(journal, effect["effect_id"])
+        if role in ("backend", "frontend", "pointer") and state != "complete":
+            return False
+        if role == "seal" and state not in ("complete", "partial"):
+            return False
+    return True
+
+
+def parse_pending_journal(data):
+    """``state/pending.json`` bytes -> ("permissions", dict) | ("legacy", dict) | None (absent)."""
+    if data is None:
+        return None
+    try:
+        value = pf_instance.parse_strict_json(data, label="pending.json")
+    except pf_instance.ContextError as exc:
+        return "legacy", {"operation": "<unreadable>", "phase": "<unreadable>", "error": str(exc)}
+    if isinstance(value, dict) and value.get("operation") == "permissions":
+        return "permissions", value
+    if not isinstance(value, dict):
+        value = {"operation": "<unreadable>", "phase": "<unreadable>", "error": "not a JSON object"}
+    return "legacy", value
+
+
+def classify_operations(files, *, permissions_journal, overflow=0, validate=None):
+    """Section 3.2: the OperationIndex of ``files`` (pf_instance.scan_operations entries). ``permissions_journal``:
+    the bytes of ``state/pending.json`` or None. ``validate(value, record, plan=None)`` returns the schema and
+    cross-field problems of one lifecycle record (default: pf_install.validate_marked + lifecycle_problems)."""
+    validate = validate or _default_validate
+    entries = {item.operation_id: _validated(item, validate) for item in files}
+    # Supersession: a later valid operation whose plan supersedes X and whose journal is not cancelled.
+    superseders = {}
+    for entry in entries.values():
+        if entry.plan is not None and entry.journal is not None and entry.cls in ("blocking", "closed") \
+                and entry.plan.get("supersedes") and entry.journal["phase"] != "cancelled":
+            superseders.setdefault(entry.plan["supersedes"], []).append(entry.operation_id)
+    for operation_id, entry in list(entries.items()):
+        # A superseding plan is created after the operation it names (same-second IDs order by kind, not time, so
+        # the plans' creation stamps decide).
+        later = sorted((entries[item].plan["created_at"], item) for item in superseders.get(operation_id, ())
+                       if entry.plan is not None and entries[item].plan["created_at"] >= entry.plan["created_at"])
+        if entry.cls == "blocking" and later:
+            entries[operation_id] = dataclasses.replace(entry, cls="superseded", superseded_by=later[-1][1])
+    ordered = tuple(entries[name] for name in sorted(entries))
+    blocking = tuple(item for item in ordered if item.cls in ("blocking", "invalid"))
+    closed = sorted((item for item in ordered if item.cls == "closed"),
+                    key=lambda item: (item.journal["updated_at"], item.operation_id), reverse=True)
+    pending = parse_pending_journal(permissions_journal)
+    permissions = pending[1] if pending and pending[0] == "permissions" else None
+    legacy = pending[1] if pending and pending[0] == "legacy" else None
+    pair = None
+    if len(blocking) == 2 and permissions is None and legacy is None:
+        backups = [item for item in blocking if item.cls == "blocking" and item.kind == "backup"
+                   and item.phase not in TERMINAL_PHASES]
+        switches = [item for item in blocking if _is_pending_switch(item)]
+        if len(backups) == 1 and len(switches) == 1:
+            pair = (backups[0], switches[0])
+    count = len(blocking) + (permissions is not None) + (legacy is not None)
+    return OperationIndex(entries=ordered, blocking=blocking, recent=tuple(closed[:5]),
+                          superseded=tuple(item for item in ordered if item.cls == "superseded"),
+                          permissions=permissions, legacy=legacy, conflict=count > 1 and pair is None, pair=pair,
+                          overflow=int(overflow or 0))
+
+
+def superseding_entry(index, entry):
+    """The operation that supersedes ``entry`` (a superseded entry), or None."""
+    return index.entry(entry.superseded_by) if entry.superseded_by else None
+
+
+def runner_records_state(entry, index):
+    """Section 3.11a: ("open", None) or ("reconciled", sequence) for the runner records of one operation directory."""
+    if entry is None or entry.cls in ("blocking", "invalid", "no-journal"):
+        return "open", None
+    if entry.cls == "closed":
+        return "reconciled", entry.journal["sequence"]
+    successor = superseding_entry(index, entry)
+    if successor is not None and successor.cls == "closed" and successor.journal["phase"] != "cancelled":
+        return "reconciled", successor.journal["sequence"]
+    return "open", None
+
+
+def _prefix(slug):
+    return f"pf --instance {slug}"
+
+
+def _capture_bundle(plan, reason):
+    """The pre-assigned bundle ID of the plan's capture ``checkpoint:<reason>`` (precondition ``bundle:<id>``)."""
+    for effect in plan["effects"]:
+        if effect["type"] == "capture" and effect["target"] == "checkpoint:" + reason:
+            for item in effect["preconditions"]:
+                if item.startswith("bundle:"):
+                    return item[len("bundle:"):]
+    return None
+
+
+def rollback_target(plan, journal):
+    """The healthy checkpoint a superseding ``rollback --restore-db`` names for a blocking update/rollback/reset-db:
+    the operation's own completed before-update/before-reset capture, the rollback's selected checkpoint, else a
+    placeholder."""
+    if plan["kind"] == "rollback" and plan["input_bundle"] is not None:
+        return plan["input_bundle"]["bundle_id"]
+    reason = {"update": "before-update", "reset-db": "before-reset"}.get(plan["kind"])
+    if reason is not None:
+        for effect in plan["effects"]:
+            if effect["type"] == "capture" and effect["target"] == "checkpoint:" + reason \
+                    and effect_state(journal, effect["effect_id"]) == "complete":
+                return _capture_bundle(plan, reason)
+    return "<checkpoint>"
+
+
+def _stop_started(plan, journal):
+    return any(effect_role(effect) == "stop" and effect_state(journal, effect["effect_id"]) != "not_started"
+               for effect in plan["effects"])
+
+
+def _frontend_started(plan, journal):
+    return any(effect_role(effect) == "frontend" and effect_state(journal, effect["effect_id"]) != "not_started"
+               for effect in plan["effects"])
+
+
+def operation_routes(plan, journal, *, slug):
+    """Section 3.3: the legal next commands of one lifecycle operation as [(route_key, command, description)]. The
+    single source for the gate copy, the journal's legal_next and status."""
+    op = plan["operation_id"]
+    kind, phase = plan["kind"], journal["phase"]
+    prefix = _prefix(slug)
+    routes = []
+    if phase in CLOSED_PHASES:
+        return routes
+    resume = f"{prefix} resume --operation {op}"
+    if in_workspace_switch(plan, journal):
+        return [("resume", resume, "finish the workspace switch (bind the staged tree, then the source manifest)"),
+                ("resume keep-workspace", resume + " --keep-workspace",
+                 "rebind the old workspace tree and keep it (the workspace is not refreshed)")]
+    if kind == "restore-instance" and journal["deletion"] is not None:
+        return [("resume abandon", resume + " --abandon",
+                 "continue the frozen deletion plan of the accepted abandon (only route)")]
+    decision = resume_decision(plan, journal) if phase != "needs_operator" else None
+    if decision is not None:
+        routes.append(("resume", resume, {
+            "forward": "continue the recorded operation forward from its journal",
+            "reopen": "reopen the unchanged deployment (no data or source effect started)",
+            "withdraw": "withdraw this recovery operation; the superseded operation's routes apply again",
+            "close": "close the operation (nothing outside its private files was changed)",
+        }.get(decision.action, "continue the recorded operation")))
+        if decision.abandon_legal:
+            routes.append(("resume abandon", resume + " --abandon",
+                           "cancel the operation (" + ("remove what this restore created" if kind == "restore-instance"
+                                                       else "close it without a further effect") + ")"))
+        if decision.keep_legal:
+            routes.append(("resume keep-workspace", resume + " --keep-workspace",
+                           "keep the current workspace; the application stays activated and recorded"))
+    if kind in ("update", "rollback", "reset-db") and (_stop_started(plan, journal) or phase == "needs_operator"):
+        routes.append(("rollback", f"{prefix} rollback {rollback_target(plan, journal)} --restore-db",
+                       "roll back to a healthy checkpoint, restoring its database (the current data is preserved "
+                       "first)"))
+    if kind == "deploy" and not _frontend_started(plan, journal):
+        routes.append(("abort-deploy", f"{prefix} abort-deploy",
+                       "remove the incomplete first deployment before frontend access opened"))
+    if kind in EMERGENCY_KINDS:
+        routes.append(("backup emergency", f"{prefix} backup --emergency",
+                       "capture the current data as emergency preservation (does not change this operation)"))
+    if kind == "purge" and phase in ("deleting", "finalizing"):
+        routes.append(("purge", f"{prefix} purge", "resume the frozen purge deletion (pf purge aliases pf resume)"))
+    if kind == "restore-instance" and plan["input_bundle"] is not None:
+        routes.append(("restore-instance", f"{prefix} restore-instance {plan['input_bundle']['bundle_id']}",
+                       "resume the exact restore of the same bundle (aliases pf resume)"))
+    if kind == "backup":
+        routes.append(("backup", f"{prefix} backup", "resume the interrupted backup (pf backup aliases pf resume)"))
+    if kind == "abort-deploy":
+        routes.append(("abort-deploy", f"{prefix} abort-deploy",
+                       "resume the frozen abort-deploy deletion (aliases pf resume)"))
+    if kind in SWITCH_KINDS and phase == "workspace_sync_pending" and _is_pending_switch(
+            OperationEntry(op, "blocking", plan=plan, journal=journal)):
+        routes.append(("backup", f"{prefix} backup",
+                       "capture a manual backup while the activated deployment waits for its workspace refresh"))
+    return routes
+
+
+def legal_next(plan, journal, *, slug):
+    """The journal's ``legal_next``: the exact command lines of operation_routes."""
+    return [command for _, command, _ in operation_routes(plan, journal, slug=slug)]
+
+
+def resume_decision(plan, journal, observation=None):
+    """Section 3.6 (pure): what ``resume`` does for this journal. ``observation``: the controller's classification of
+    the unresolved effect when it decides the row ("needs_operator" forces that outcome)."""
+    kind, phase = plan["kind"], journal["phase"]
+    superseding = plan["supersedes"] is not None
+    if phase in TERMINAL_PHASES:
+        return ResumeDecision("none", phase, False, False, "the journal is terminal")
+    if observation == "needs_operator":
+        return ResumeDecision("needs_operator", "needs_operator", False, False, "no automatic continuation is safe")
+    states = {effect["effect_id"]: effect["state"] for effect in journal["effects"]}
+    reached = [effect for effect in plan["effects"] if states[effect["effect_id"]] != "not_started"]
+    roles = {effect_role(effect) for effect in reached}
+    ids = workspace_effect_ids(plan)
+    keep = ids is not None and (phase == "workspace_sync_pending" or (
+        "workspace" in roles and states[ids[2]] != "complete"))
+    if phase == "workspace_sync_pending" or "workspace" in roles:
+        return ResumeDecision("forward", "completed", False, keep, "workspace refresh")
+    if not reached:
+        return ResumeDecision("close", "cancelled", True, False, "no effect started")
+    if roles <= {"staging"}:
+        return ResumeDecision("close", "cancelled", True, False, "only private effects started")
+    restore_back = "withdraw" if superseding else "reopen"
+    if kind == "deploy" or kind == "abort-deploy":
+        return ResumeDecision("forward", "completed", False, False, "forward")
+    if kind == "backup":
+        return ResumeDecision("forward", "completed", True, False, "new attempt or verification")
+    if kind == "purge":
+        if journal["deletion"] is None:
+            return ResumeDecision("reopen", "cancelled", True, False, "no deletion started")
+        return ResumeDecision("forward", "completed", False, False, "frozen deletion")
+    if kind == "restore-instance":
+        data_started = any(effect["phase"] != "preparing-target" for effect in reached)
+        return ResumeDecision("forward", "completed", not data_started, False,
+                              "data restore started" if data_started else "preparing the target")
+    pre_data = {"staging", "stop", "capture", "verification"}
+    if roles <= pre_data:
+        return ResumeDecision(restore_back, "cancelled", True, False, "no database effect started")
+    if roles <= pre_data | {"candidate"}:
+        # Owned candidates only: update rehearsal (dropped, then reopen); reset-db/rollback candidate (redo forward).
+        if kind == "update":
+            return ResumeDecision(restore_back, "cancelled", True, False, "only the owned rehearsal candidate")
+        return ResumeDecision("forward", "completed", True, False, "owned candidate only")
+    return ResumeDecision("forward", "completed", False, False, "a live effect started")
+
+
+@dataclasses.dataclass(frozen=True)
+class GateDecision:
+    """Section 3.3 for one locked route. ``action``: new | reenter | supersede | refuse. ``entry``: the blocking
+    operation a re-entry or supersession acts on. ``code``/``message``: the refusal (first line exact, section 4.7).
+    ``alias``: the route name when a route other than ``resume`` re-enters an operation."""
+
+    action: str
+    entry: object = None
+    code: str = ""
+    message: str = ""
+    alias: str = ""
+
+
+def _route_spelling(route):
+    return ROUTE_COMMANDS.get(route, route)
+
+
+def operation_open_message(entry, route, slug):
+    routes = operation_routes(entry.plan, entry.journal, slug=slug)
+    listing = "; ".join(f"{command}: {description}" for _, command, description in routes) or \
+        f"none automatic; review it with '{_prefix(slug)} status --operation {entry.operation_id}'"
+    return (f"operation-open: operation {entry.operation_id} ({entry.kind}, phase {entry.phase}) is incomplete; "
+            f"'{_route_spelling(route)}' is not a legal next action for it. Legal next: {listing}. Nothing was changed.")
+
+
+def needs_operator_message(entry, slug):
+    plan, journal = entry.plan, entry.journal
+    error = journal["last_error"] or {"message": "the outcome of an effect could not be proven"}
+    stopped = journal["phase"]
+    unresolved = journal["unresolved_effect"]
+    for effect in plan["effects"]:
+        if effect["effect_id"] == unresolved:
+            stopped = effect["phase"]
+    steps = "; ".join(command for _, command, _ in operation_routes(plan, journal, slug=slug)) or "none"
+    return (f"operation-needs-operator: operation {entry.operation_id} ({entry.kind}) stopped at {stopped}: "
+            f"{error['message'].splitlines()[0]} No automatic continuation is safe. Supported next steps: {steps}. "
+            "Nothing was changed.")
+
+
+def gate_decision(index, route, *, slug, request=None, private_state="<private_state>"):
+    """Section 3.3 (pure): the decision of one locked mutating ``route`` ("resume", "backup", "backup emergency",
+    "purge", ...) against ``index``. ``request``: operation, abandon, keep_workspace, delete_backups (True | False |
+    None), reset_admin_config, bundle_id, side_by_side."""
+    request = request or {}
+    prefix = _prefix(slug)
+    wanted = request.get("operation")
+    if index.overflow:
+        return GateDecision("refuse", code="operation-index-overflow", message=(
+            f"operation-index-overflow: {private_state}/operations holds more than {OPERATION_SCAN_LIMIT} entries, so "
+            "an open operation could be hidden; every mutating route is refused. status, doctor, backups, recoveries, "
+            "ps and logs work. See SYNOLOGY_ADMIN §16 (archiving closed operations). Nothing was changed."))
+    if index.legacy is not None:
+        legacy = index.legacy
+        return GateDecision("refuse", code="journal-format-unsupported", message=(
+            f"journal-format-unsupported: {private_state}/state/pending.json records {legacy.get('operation')}/"
+            f"{legacy.get('phase')} in a format this control does not run. It can only come from an unsupported "
+            "control change; see SYNOLOGY_ADMIN §16. Nothing was changed."))
+    invalid = [item for item in index.blocking if item.cls == "invalid"]
+    if invalid:
+        return GateDecision("refuse", entry=invalid[0], code="operation-journal-invalid", message=(
+            f"operation-journal-invalid: {invalid[0].operation_id}: {invalid[0].error}. The operation's state cannot "
+            "be proven, so every mutating route is refused; status, doctor, backups, recoveries, ps and logs work. "
+            "See SYNOLOGY_ADMIN §16. Nothing was changed."))
+    if index.conflict:
+        listed = [f"{item.operation_id} {item.kind}/{item.phase}" for item in index.blocking]
+        if index.permissions is not None:
+            listed.append(f"{index.permissions.get('operation_id')} permissions/{index.permissions.get('phase')}")
+        first = index.blocking[0].operation_id if index.blocking else index.permissions.get("operation_id")
+        return GateDecision("refuse", code="operation-conflict", message=(
+            f"operation-conflict: {len(listed)} operations of instance {slug} are open ({'; '.join(listed)}); every "
+            f"mutating route is refused until an administrator reviews them with '{prefix} status --operation "
+            f"{first}'. Nothing was changed."))
+    if index.permissions is not None:
+        if route == "permissions apply":
+            return GateDecision("new")
+        journal = index.permissions
+        return GateDecision("refuse", code="operation-open", message=(
+            f"operation-open: operation {journal.get('operation_id')} (permissions, phase {journal.get('phase')}) is "
+            f"incomplete; '{_route_spelling(route)}' is not a legal next action for it. Legal next: {prefix} "
+            "permissions apply --resume: finish the interrupted permission apply; "
+            f"{prefix} permissions apply --abandon: compensate it from its effect journal. Nothing was changed."))
+    blocking = list(index.blocking)
+    if route == "resume" and wanted is not None and all(item.operation_id != wanted for item in blocking):
+        entry = index.entry(wanted)
+        if entry is None or entry.cls == "no-journal":
+            return GateDecision("refuse", code="operation-not-found", message=(
+                f"operation-not-found: no operation {wanted} exists for instance {slug}. Nothing was changed."))
+        state = f"superseded by {entry.superseded_by}" if entry.cls == "superseded" else entry.phase
+        return GateDecision("refuse", entry=entry, code="operation-not-open", message=(
+            f"operation-not-open: operation {wanted} is {state}; nothing to resume. Nothing was changed."))
+    if not blocking:
+        if route == "resume":
+            return GateDecision("refuse", code="nothing-to-resume",
+                                message="nothing-to-resume: No incomplete operation exists. Nothing was changed.")
+        return GateDecision("new")
+    if index.pair is not None:
+        if route == "resume" and wanted is not None:
+            return GateDecision("reenter", entry=next(item for item in blocking if item.operation_id == wanted))
+        listed = [f"{item.operation_id} {item.kind}/{item.phase}" for item in blocking]
+        if route == "resume":
+            return GateDecision("refuse", code="operation-conflict", message=(
+                f"operation-conflict: {len(listed)} operations of instance {slug} are open ({'; '.join(listed)}); "
+                f"name one with '{prefix} resume --operation <op>' (only resume --operation of either one and the "
+                "diagnostics are legal while both are open). Nothing was changed."))
+        commands = "; ".join(f"{prefix} resume --operation {item.operation_id}" for item in blocking)
+        return GateDecision("refuse", code="operation-open", message=(
+            f"operation-open: operations {' and '.join(item.operation_id for item in blocking)} are open; "
+            f"'{_route_spelling(route)}' is not a legal next action for them. Legal next: {commands}. Nothing was "
+            "changed."))
+    entry = blocking[0]
+    plan, journal = entry.plan, entry.journal
+    kind, phase = entry.kind, entry.phase
+    if in_workspace_switch(plan, journal) and route != "resume":
+        return GateDecision("refuse", entry=entry, code="operation-open", message=operation_open_message(
+            entry, route, slug))
+    if route == "resume":
+        if phase == "needs_operator":
+            return GateDecision("refuse", entry=entry, code="operation-needs-operator",
+                                message=needs_operator_message(entry, slug))
+        return GateDecision("reenter", entry=entry)
+    if route == "rollback" and kind in ("update", "rollback", "reset-db") \
+            and (_stop_started(plan, journal) or phase == "needs_operator"):
+        return GateDecision("supersede", entry=entry)
+    if route == "abort-deploy" and kind == "deploy" and not _frontend_started(plan, journal):
+        return GateDecision("supersede", entry=entry)
+    if route == "abort-deploy" and kind == "abort-deploy" and phase != "needs_operator":
+        return GateDecision("reenter", entry=entry, alias=route)
+    if route == "backup" and kind == "backup" and phase != "needs_operator":
+        return GateDecision("reenter", entry=entry, alias=route)
+    if route == "backup" and _is_pending_switch(entry):
+        return GateDecision("new", entry=entry)
+    if route == "backup emergency" and kind in EMERGENCY_KINDS:
+        return GateDecision("new", entry=entry)
+    if route == "purge" and kind == "purge" and phase in ("deleting", "finalizing"):
+        deletion = journal["deletion"] or {}
+        requested = []
+        if request.get("delete_backups") is not None and request["delete_backups"] != deletion.get("delete_backups"):
+            requested.append("--delete-backups" if request["delete_backups"] else "--keep-backups")
+        if request.get("reset_admin_config") and not deletion.get("reset_admin_config"):
+            requested.append("--reset-admin-config")
+        if requested:
+            recorded = ("delete backups" if deletion.get("delete_backups") else "keep backups") + \
+                (", reset admin config" if deletion.get("reset_admin_config") else "")
+            return GateDecision("refuse", entry=entry, code="plan-inputs-conflict", message=(
+                f"plan-inputs-conflict: 'purge {' '.join(requested)}' asks for {' and '.join(requested)}, but the open "
+                f"purge operation {entry.operation_id} was approved with {recorded}. Run '{prefix} resume --operation "
+                f"{entry.operation_id}' or finish it first. Nothing was changed."))
+        return GateDecision("reenter", entry=entry, alias=route)
+    if route == "restore-instance" and kind == "restore-instance":
+        recorded = plan["input_bundle"]["bundle_id"]
+        if request.get("bundle_id") == recorded and not request.get("side_by_side"):
+            return GateDecision("reenter", entry=entry, alias=route)
+        asked = (request.get("bundle_id") or "an interactively chosen bundle") + \
+            (" --side-by-side" if request.get("side_by_side") else "")
+        return GateDecision("refuse", entry=entry, code="plan-inputs-conflict", message=(
+            f"plan-inputs-conflict: 'restore-instance {asked}' asks for {asked}, but the open restore-instance "
+            f"operation {entry.operation_id} was approved with {recorded}. Run '{prefix} resume --operation "
+            f"{entry.operation_id}' or finish it first. Nothing was changed."))
+    return GateDecision("refuse", entry=entry, code="operation-open", message=operation_open_message(entry, route, slug))
+
+
+def workspace_reconcile(evidence, observed):
+    """Section 3.7 reconciliation matrix row: ``evidence`` {"old": (dev, ino), "new": (dev, ino) | None}; ``observed``
+    {"W": identity | None, "CG": identity | None, "S": identity | None}. Returns retain-not-started |
+    between-renames | bind-done | stage-incomplete | stage-lost | foreign."""
+    old, new = evidence.get("old"), evidence.get("new")
+    w, cg, s = observed.get("W"), observed.get("CG"), observed.get("S")
+    if old is None:
+        return "foreign"
+    if w == old and cg is None:
+        if s is not None and new is not None and s == new:
+            return "retain-not-started"
+        return "stage-incomplete"
+    if w is None and cg == old:
+        if s is not None and new is not None and s == new:
+            return "between-renames"
+        if s is None:
+            return "stage-lost"
+        return "foreign"
+    if w is not None and new is not None and w == new and cg == old and s is None:
+        return "bind-done"
+    return "foreign"
+
+
+def load_frozen_app_config(operation_dir, expected_sha256, expected_bytes=None):
+    """Section 3.8: the snapshot of ``operation_dir`` (or one of its ``refreeze-<n>`` directories) whose rendered
+    ``app.env`` bytes have ``expected_sha256`` (and length ``expected_bytes``), verified; ConfigError when none
+    matches or its bytes changed. Record timestamps and IDs play no part; snapshots with the same rendered bytes are
+    the same snapshot."""
+    operation_dir = Path(operation_dir)
+    directories = [operation_dir]
+    try:
+        names = sorted(os.listdir(str(operation_dir)))
+    except OSError as exc:
+        raise ConfigError(f"plan-input-changed: the operation directory cannot be listed ({exc.strerror})") from exc
+    directories += [operation_dir / name for name in names if re.fullmatch(r"refreeze-[0-9]{1,4}", name)
+                    and not os.path.islink(str(operation_dir / name))]
+    for directory in directories:
+        try:
+            data = _read_nofollow(directory / SNAPSHOT_RECORD)
+            record = json.loads(data.decode("utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(record, dict) or record.get("env_file_sha256") != expected_sha256 \
+                or (expected_bytes is not None and record.get("env_file_bytes") != expected_bytes):
+            continue
+        env_path = directory / SNAPSHOT_FILE
+        try:
+            rendered = _read_nofollow(env_path)
+        except OSError as exc:
+            raise ConfigError(f"plan-input-changed: the frozen snapshot {env_path} is unreadable "
+                              f"({exc.strerror})") from exc
+        if hashlib.sha256(rendered).hexdigest() != expected_sha256:
+            raise ConfigError(f"plan-input-changed: the frozen snapshot {env_path} changed on disk")
+        values = parse_app_env(rendered, label=str(env_path))
+        source = record.get("source_env_sha256")
+        frozen = FrozenAppConfig(operation_id=str(record.get("operation_id")), directory=directory, env_file=env_path,
+                                 env_sha256=expected_sha256, source_sha256=source if isinstance(source, str) else "",
+                                 values=types.MappingProxyType(dict(values)))
+        return verify_frozen(frozen)
+    raise ConfigError("plan-input-changed: no frozen snapshot of this operation has the approved rendered bytes")
 
 
 # ------------------------------------------------------------ legacy manifests (PF-A3.1 section 3.7)

@@ -745,15 +745,21 @@ class Approval(Instance):
             for name, value in (("require_empty_target", None), ("docker", ""),
                                 ("verify_images", None), ("make_override", None), ("compose", ""),
                                 ("wait_health", None), ("drop_database", None), ("restore_into", None),
-                                ("db_heads", ["r1"]), ("restore_revision_checkpoints", None), ("activate", None),
+                                ("db_heads", ["r1"]), ("restore_revision_checkpoints", ("absent in the bundle", [])),
+                                ("activate_backend", None), ("activate_frontend", None),
                                 ("stage_deployment", types.SimpleNamespace(deployment_id=sealed["deployment_id"],
                                                                              kind="restore-instance")),
-                                ("seal_deployment", sealed)):
+                                ("seal_deployment", sealed), ("act_seal", None),
+                                # PF-A3.2: the pointer effect runs for real from the simulated staged/sealed records.
+                                ("staged_record", {"deployment_id": sealed["deployment_id"],
+                                                   "staged": {"pointer": {"sha": pfx.OLD}}}),
+                                ("sealed_view", ({}, sealed["record_sha256"]))):
                 stack.enter_context(mock.patch.object(controller, name, return_value=value))
             stack.enter_context(mock.patch.object(pf, "confirm"))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             stack.enter_context(controller.lock())
-            controller.restore_instance(recovery)
+            # PF-A3.2: the staged source is simulated, so the workspace is kept (no generation switch).
+            controller.restore_instance(recovery, keep_workspace=True)
         self.assertEqual((self.record_path.read_bytes(), os.lstat(str(self.record_path)).st_ino), record)
         for name in ("last-reset.json", "deployed.json"):
             path = controller.state / name
@@ -1641,8 +1647,10 @@ class Partial(Instance):
         operation, _ = self.interrupted(fault=2)
         code, out, err = self.run_cli("backup")
         self.assertEqual(code, 1)
-        self.assertIn("A previous operation is incomplete (operation=permissions, phase=interrupted)", err)
-        self.assertIn("pf permissions apply --instance staging: resume (--resume) or compensate (--abandon)", err)
+        self.assertIn(f"operation-open: operation {operation} (permissions, phase interrupted) is incomplete; 'backup' "
+                      "is not a legal next action for it.", err)
+        self.assertIn("pf --instance staging permissions apply --resume: finish the interrupted permission apply; "
+                      "pf --instance staging permissions apply --abandon: compensate it from its effect journal", err)
         code, out, err = self.apply(phrase=None)
         self.assertEqual(code, 1)
         self.assertIn(f"ERROR: permissions-apply-pending: An interrupted permission apply {operation} is open", err)
@@ -1900,11 +1908,12 @@ class Routes(Instance):
                            running_release=self.layout.release_dir, trusted_launch=True)
         self.assertEqual(code, 1)
         self.assertIn("terminal-required: 'permissions apply' asks for a typed confirmation", stderr.getvalue())
-        pf.write_json(self.context.journal_path, {"operation": "update", "phase": "paused"})
+        update = pfx.migrating_update(self.context)
         code, out, err = self.apply(phrase=None)
         self.assertEqual(code, 1)
-        self.assertIn("A previous operation is incomplete (operation=update, phase=paused)", err)
-        self.context.journal_path.unlink()
+        self.assertIn(f"operation-open: operation {update['operation_id']} (update, phase migrating) is incomplete; "
+                      "'permissions apply' is not a legal next action for it.", err)
+        pfx.clear_operations(self.context)
         for extra in (["--resume", "--scope", "workspace"], ["--abandon", "--scope", "backups"],
                       ["--resume", "--abandon"]):
             with self.subTest(extra=extra):
@@ -2050,7 +2059,10 @@ class Flows(Instance):
         self.assertEqual((mode(controller.state / "last-reset.json"), owner(controller.state / "last-reset.json")[0]),
                          (0o600, 0))
 
-    def test_fl4_replace_source_designates_from_the_candidate_manifest_and_leaves_concurrent_entries(self):
+    def test_fl4_the_workspace_switch_designates_from_the_manifest_and_retains_concurrent_entries(self):
+        # PF-A3.2 (former replace_source test): W1 publishes the staged tree with the policy targets and the
+        # manifest's designated executables; an editor's file written into the old workspace while the switch runs
+        # stays, untouched, in the retained generation (never re-permissioned).
         controller = self.fake()
         candidate = self.base / "candidate"
         pfx.source_fixture(candidate, pfx.NEW)
@@ -2058,25 +2070,26 @@ class Flows(Instance):
         script.parent.mkdir()
         script.write_text("#!/bin/sh\n")
         os.chmod(script, 0o755)
-        real_apply_single = controller.apply_single
+        real_retain = controller.w2_retain
 
-        def apply_single(scope, path, kind):
-            if scope == "workspace" and Path(path) == self.workspace:
-                editor = self.workspace / "frontend/editor.txt"
-                editor.write_text("mine")
-                os.chown(editor, EDITOR_UID, -1)
-                os.chmod(editor, 0o600)
-            return real_apply_single(scope, path, kind)
+        def retain(step):
+            editor = self.workspace / "frontend/editor.txt"
+            editor.write_text("mine")
+            os.chown(editor, EDITOR_UID, -1)
+            os.chmod(editor, 0o600)
+            return real_retain(step)
 
         output = io.StringIO()
-        with mock.patch.object(controller, "apply_single", apply_single), mock.patch.object(controller, "phase"), \
-                contextlib.redirect_stdout(output), controller.lock():
-            controller.replace_source(candidate, pfx.NEW, verified=False)
+        with mock.patch.object(controller, "w2_retain", retain), contextlib.redirect_stdout(output), controller.lock():
+            pfx.run_workspace_switch(controller, candidate, pfx.NEW, verified=False)
+            generation = controller.plan["workspace"]["generation_id"]
         self.assertEqual(mode(self.workspace / "scripts/start.sh"), 0o770)
         self.assertEqual(mode(self.workspace / "app-version.txt"), 0o660)
         self.assertEqual(mode(self.workspace / "frontend"), 0o2770)
-        self.assertEqual(mode(self.workspace / "frontend/editor.txt"), 0o600)
-        self.assertIn("workspace-concurrent-entry: workspace: frontend/editor.txt", output.getvalue())
+        self.assertFalse((self.workspace / "frontend/editor.txt").exists())
+        retained = pf_instance.generation_container(self.context) / generation
+        self.assertEqual(mode(retained / "frontend/editor.txt"), 0o600)
+        self.assertEqual(owner(retained / "frontend/editor.txt")[0], EDITOR_UID)
 
     def test_fl5_restore_env_and_fl6_the_reuse_branch_touch_only_env(self):
         controller = self.fake()
@@ -2110,7 +2123,7 @@ class Flows(Instance):
 
     def test_fl8_deploy_current_no_longer_changes_workspace_permissions(self):
         source = (PACKAGE / "pf-admin.py").read_text(encoding="utf-8")
-        body = source[source.index("    def deploy(self, target=None"):source.index("    def plan_missing(")]
+        body = source[source.index("    def deploy(self, target=None"):source.index("    def confirmation_ref(")]
         self.assertIn("Workspace permissions were not changed; check them with", body)
         self.assertNotIn("publish_", body)
         self.assertNotIn("os.chmod", body)

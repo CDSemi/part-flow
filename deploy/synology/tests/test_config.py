@@ -1331,11 +1331,12 @@ class Concurrency(ConfigBase):
 
     def test_cc4_pending_journals_and_open_install_operations_refuse(self):
         before = self.file_state(self.config_path)
-        pf.write_json(self.context.journal_path, {"operation": "deploy", "phase": "paused", "started": "x"})
+        deploy = pfx.interrupted_deploy(self.context)
         code, out, err, script = self.admin(["y"])
         self.assertEqual(code, 1, out + err)
-        self.assertIn("A previous operation is incomplete (operation=deploy, phase=paused).", err)
-        self.context.journal_path.unlink()
+        self.assertIn(f"operation-open: operation {deploy['operation_id']} (deploy, phase initializing) is incomplete; "
+                      "'config' is not a legal next action for it.", err)
+        pfx.clear_operations(self.context)
         item = {"operation_id": "inst-20261007T000000Z-0123abcd", "kind": "control", "phase": "prepared",
                 "updated": None, "next": ["install resume"], "error": None, "journal": {"next": ["install resume"]},
                 "plan": {"instance": None, "legacy": None}}

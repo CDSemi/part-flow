@@ -151,18 +151,20 @@ def content_release_id():
         {name: pf_instance.sha256_bytes(data) for name, data in files.items()}))
 
 
-def install_root(base, *, launcher=None, interpreter=None, tools=None, wrappers=True, release_id=RELEASE_ID):
+def install_root(base, *, launcher=None, interpreter=None, tools=None, wrappers=True, release_id=RELEASE_ID,
+                 files=None):
     """Initialize <base>/install as a trusted installation root (plus the fixture daemon socket).
 
     ``wrappers``: place the repository scheduler wrappers in bootstrap/ as the PF-A2.1 installer does.
-    ``release_id``: the fixture id by default; content_release_id() gives the installer's own id."""
+    ``release_id``: the fixture id by default; content_release_id() gives the installer's own id.
+    ``files``: the release files (default: the repository's; fixture_release_files() for the PF-A3.2 CL harness)."""
     endpoint, socket_path = install_daemon_socket(base)
     values = pf_instance.initialize_installation_root(
         Path(base) / "install",
         launcher=launcher if launcher is not None else (REPO_PACKAGE / "pf.sh").read_bytes(),
         interpreter=interpreter or os.path.realpath(sys.executable),
         release_id=release_id,
-        release_files=release_files(),
+        release_files=files if files is not None else release_files(),
         wrappers=wrapper_files() if wrappers else None,
         profile=(PROFILE_NAME, profile_document()),
         policy_documents={
@@ -173,6 +175,56 @@ def install_root(base, *, launcher=None, interpreter=None, tools=None, wrappers=
     )
     values = dict(values, daemon_endpoint=endpoint, daemon_socket=socket_path)
     return Layout(values)
+
+
+FIXTURE_MAIN = '''if __name__ == "__main__":
+    install_interrupt_handlers()
+    sys.exit(main())
+'''
+
+
+def fixture_release_files(settings_path):
+    """PF-A3.2 installed-CLI harness only: the repository release whose pf-admin.py entry block first installs a
+    fixture-local release source, so update/rollback/backup run through the installed launcher offline. It answers
+    the GitHub API from ``settings_path`` ({"github": {path: answer}, "remote": <local approved remote>,
+    "timeout_data": seconds or null}) and uses that local remote with the file protocol (the test seams
+    ``remote_override``/``source_protocols`` the in-process tests set); every other byte of every file, and so every
+    production check, is the repository's. The test build is installed only into a disposable fixture root."""
+    files = release_files()
+    source = files["pf-admin.py"].decode("utf-8")
+    if source.count(FIXTURE_MAIN) != 1 or not source.endswith(FIXTURE_MAIN):
+        raise AssertionError("pf-admin.py entry block changed; update fixture_release_files")
+    shim = (
+        'if __name__ == "__main__":\n'
+        "    # PF-A3.2 fixture-local release source (tests/protected_fixture.py); never part of a real release.\n"
+        f"    _FIXTURE_SETTINGS = {str(settings_path)!r}\n"
+        "\n"
+        "    def _fixture_settings():\n"
+        "        return json.loads(Path(_FIXTURE_SETTINGS).read_text(encoding='utf-8'))\n"
+        "\n"
+        "    def _fixture_github(self, path, missing=False):\n"
+        "        answers = _fixture_settings()['github']\n"
+        "        if path in answers:\n"
+        "            return answers[path]\n"
+        "        if missing:\n"
+        "            return None\n"
+        "        raise Failure('fixture release source: no answer for ' + path)\n"
+        "\n"
+        "    _fixture_init = Controller.__init__\n"
+        "\n"
+        "    def _fixture_controller(self, *args, **kwargs):\n"
+        "        _fixture_init(self, *args, **kwargs)\n"
+        "        self.remote_override = _fixture_settings()['remote']\n"
+        "        self.source_protocols = ('file',)\n"
+        "\n"
+        "    Controller.github = _fixture_github\n"
+        "    Controller.__init__ = _fixture_controller\n"
+        "    if _fixture_settings().get('timeout_data'):\n"
+        "        TIMEOUT_DATA = float(_fixture_settings()['timeout_data'])\n"
+        "    install_interrupt_handlers()\n"
+        "    sys.exit(main())\n")
+    files["pf-admin.py"] = (source[:-len(FIXTURE_MAIN)] + shim).encode("utf-8")
+    return files
 
 
 def tool_script(directory, name, body):
@@ -861,3 +913,316 @@ def with_acl(path):
         raise unittest.SkipTest("posix ACL fixture unavailable: the filesystem refuses system.posix_acl_access "
                                 f"({exc.strerror or exc})")
     return path
+
+
+# ------------------------------------------------------------------ PF-A3.2 operation records (helpers only)
+
+def _stamp(offset=0):
+    return f"20261007T{(40000 + offset):06d}Z"
+
+
+def operation_id(kind, suffix="1234abcd", offset=0):
+    return f"{_stamp(offset)}-{kind}-{suffix}"
+
+
+def effect(phase, type_, target, *, preconditions=(), postcondition="done", preservation_refs=()):
+    return {"phase": phase, "type": type_, "target": target, "preconditions": list(preconditions),
+            "postcondition": postcondition, "preservation_refs": list(preservation_refs)}
+
+
+GENERATION = "wsg-20261007T040000Z-0badcafe"
+CHECKPOINT_ID = "20261007T040000Z-" + "1" * 12 + "-c0ffee"
+BUNDLE_ID = "purge-20261007T040000Z-" + "1" * 12 + "-c0ffee"
+
+
+def workspace_effects(generation=GENERATION):
+    return [effect("syncing-workspace", "source-stage", "workspace:stage:" + generation),
+            effect("syncing-workspace", "source-switch", "workspace:retain:" + generation),
+            effect("syncing-workspace", "source-switch", "workspace:bind:" + generation),
+            effect("syncing-workspace", "file-write", "source-manifest")]
+
+
+def activation_effects(deployment="dep-20261007T040000Z-0000abcd", heads=("r1",)):
+    return [effect("activating", "service-change", "service:backend:start:" + "a" * 12,
+                   preconditions=["heads:" + ",".join(heads)]),
+            effect("activating", "service-change", "service:frontend:start:" + "b" * 12),
+            effect("activating", "artifact-seal", "deployment:" + deployment),
+            effect("activating", "file-write", "pointer:deployed.json")]
+
+
+def default_effects(kind, *, migration=True, workspace=True, restore_db=True, deployment="dep-20261007T040000Z-0000abcd",
+                    generation=GENERATION):
+    """Effect specs in the section 3.4 shape of one kind (the targets a production plan writes)."""
+    stage = effect("preparing", "source-stage", "deployment:" + deployment)
+    stop = effect("preserving", "service-change", "services:stop:frontend,backend")
+    capture = lambda reason, phase="preserving": effect(  # noqa: E731
+        phase, "capture", "checkpoint:" + reason, preconditions=["bundle:" + CHECKPOINT_ID,
+                                                                 "verify:pf_verify_" + "0" * 20])
+    switch = [] if not workspace else workspace_effects(generation)
+    if kind == "deploy":
+        return [stage, effect("initializing", "service-change", "service:db:start"),
+                effect("initializing", "database-migrate", "database:partflow_staging:heads=r1")] \
+            + activation_effects(deployment) + switch
+    if kind == "update":
+        found = [stage, stop, capture("before-update")]
+        if migration:
+            candidate = "pf_migrate_" + "1" * 20
+            found += [effect("migrating", "database-restore", "database:" + candidate),
+                      effect("migrating", "database-migrate", f"database:{candidate}:heads=r2"),
+                      effect("migrating", "database-drop", "database:" + candidate),
+                      effect("migrating", "database-migrate", "database:partflow_staging:heads=r2")]
+        return found + activation_effects(deployment, ("r2",) if migration else ("r1",)) + switch
+    if kind == "rollback":
+        found = [stage, dict(stop, phase="preserving-current"), capture("before-rollback", "preserving-current")]
+        if restore_db:
+            found += [effect("restoring-candidate", "database-restore", "database:pf_restore_" + "2" * 20),
+                      effect("switching", "database-switch",
+                             f"database-switch:partflow_staging:pf_restore_{'2' * 20}:pf_keep_20261007t040000z_abcdef")]
+        return found + activation_effects(deployment) + switch
+    if kind == "reset-db":
+        return [stop, capture("before-reset"),
+                effect("initializing", "database-create", "database:pf_clean_" + "3" * 20),
+                effect("initializing", "database-migrate", f"database:pf_clean_{'3' * 20}:heads=r1"),
+                effect("switching", "database-switch",
+                       f"database-switch:partflow_staging:pf_clean_{'3' * 20}:pf_keep_20261007t040000z_abcdef"),
+                activation_effects()[0], activation_effects()[1],
+                effect("finalizing", "file-write", "last-reset", preconditions=["checkpoint:" + CHECKPOINT_ID])]
+    if kind == "backup":
+        return [capture("scheduled-or-manual-backup", "capturing"),
+                effect("verifying", "verification", "bundle:scheduled-or-manual-backup")]
+    if kind == "purge":
+        return [stop, capture("before-purge"),
+                effect("capturing", "capture", "purge-bundle", preconditions=["bundle:" + BUNDLE_ID,
+                                                                             "checkpoint:" + CHECKPOINT_ID]),
+                effect("verifying", "verification", "bundle:purge"),
+                effect("deleting", "resource-delete", "deletion-plan")] + [
+            effect("finalizing", "file-write", "purge-cleanup:" + name)
+            for name in ("backups", "env", "state", "admin-config")]
+    if kind == "restore-instance":
+        return [effect("preparing-target", "source-stage", "deployment:" + deployment),
+                effect("preparing-target", "file-write", "config:.env", postcondition="bytes sha256 " + "e" * 64),
+                effect("preparing-target", "image-load", "images:" + BUNDLE_ID),
+                effect("preparing-target", "service-change", "service:db:start"),
+                effect("restoring-data", "database-drop", "database:partflow_staging"),
+                effect("restoring-data", "database-restore", "database:partflow_staging")] \
+            + activation_effects(deployment) + switch
+    if kind == "abort-deploy":
+        return [effect("deleting", "resource-delete", "deletion-plan"),
+                effect("finalizing", "file-write", "override:active-images.yaml", postcondition="absent")]
+    raise ValueError(kind)
+
+
+def lifecycle_plan(context, kind, effects=None, *, op=None, workspace_mode=None, generation=GENERATION, reason=None,
+                   supersedes=None, input_bundle=None, deletion_plan_sha256=None, frozen_config=None,
+                   admin_config=None, deployment="dep-20261007T040000Z-0000abcd"):
+    """A schema-valid OperationPlan of this instance (validated by the real lifecycle rules)."""
+    effects = effects if effects is not None else default_effects(kind, deployment=deployment, generation=generation)
+    numbered = [dict(item, effect_id=f"e{index:04d}") for index, item in enumerate(effects, 1)]
+    if workspace_mode is None:
+        if kind in ("backup", "reset-db", "purge", "abort-deploy"):
+            workspace_mode = "untouched"
+        elif any(item["target"].startswith("workspace:") for item in effects):
+            workspace_mode = "switch"
+        else:
+            workspace_mode = "keep"
+    switching = workspace_mode in ("switch", "pending")
+    if kind in ("rollback", "restore-instance") and input_bundle is None:
+        input_bundle = {"bundle_id": CHECKPOINT_ID if kind == "rollback" else BUNDLE_ID, "manifest_sha256": "f" * 64}
+    if kind == "abort-deploy" and deletion_plan_sha256 is None:
+        deletion_plan_sha256 = "d" * 64
+    has_stage = any(item["type"] == "source-stage" and item["target"].startswith("deployment:") for item in effects)
+    plan = {
+        "schema_version": 1, "operation_id": op or operation_id(kind), "kind": kind, "created_at": _stamp(),
+        "instance": {"instance_id": context.instance_id, "slug": context.slug,
+                     "compose_project": context.compose_project, "daemon_engine_id": context.daemon.engine_id,
+                     "record_sha256": context.record_sha256},
+        "producer": {"control_release_id": context.control.release_id, "control_sha256": context.control.sha256,
+                     "profile_id": context.profile.id, "profile_version": context.profile.version,
+                     "profile_sha256": context.profile.sha256, "instance_record_sha256": context.record_sha256},
+        "environment_policy": {"revision": context.approved_policy.revision, "sha256": context.approved_policy.sha256},
+        "permission_policy": None,
+        "source": {"provenance": "git_commit", "commit": NEW, "entries_sha256": "c" * 64,
+                   "deployment_id": deployment if has_stage else None},
+        "images": {}, "frozen_config": frozen_config, "admin_config": admin_config,
+        "resources": {"inventory_sha256": None, "deletion_plan_sha256": deletion_plan_sha256},
+        "coverage": [], "confirmation": {"phrase": kind.upper(), "summary_sha256": "0" * 64}
+        if kind != "backup" else None,
+        "limits": {"timeout_seconds": 3600, "minimum_free_bytes": 1048576},
+        "effects": numbered, "recovery_route": [], "supersedes": supersedes,
+        "workspace": {"mode": workspace_mode, "generation_id": generation if switching else None,
+                      "container": str(pf_instance.generation_container(context)) if switching else None,
+                      "reason": (reason or "workspace-capacity: test") if workspace_mode == "pending" else None},
+        "input_bundle": input_bundle,
+    }
+    problems = pf.lifecycle_errors(plan, "operation_plan")
+    if problems:
+        raise AssertionError(problems)
+    return plan
+
+
+def lifecycle_journal(plan, *, phase="planned", states=None, sequence=1, deletion=None, unresolved=None,
+                      retained=(), last_error=None, result=None, evidence=None, slug=None):
+    """A journal generation of ``plan`` (``states``: {effect_id: state}; ``evidence``: {effect_id: text})."""
+    states = states or {}
+    evidence = evidence or {}
+    data = pf_instance.normalize_json(plan)
+    plan_sha256 = pf_instance.sha256_bytes(data)
+    terminal = phase in pf.pf_config.TERMINAL_PHASES
+    if result is None and terminal:
+        outcome = {"completed": "succeeded"}.get(phase, phase)
+        result = {"outcome": outcome, "deployment_id": None}
+    journal = {
+        "schema_version": 1, "operation_id": plan["operation_id"], "plan_sha256": plan_sha256, "kind": plan["kind"],
+        "sequence": sequence, "phase": phase, "updated_at": _stamp(sequence),
+        "approvals": [{"plan_sha256": plan_sha256, "confirmed_at": _stamp(), "method": "typed-phrase"}]
+        if plan["confirmation"] is not None else [],
+        "effects": [{"effect_id": item["effect_id"], "state": states.get(item["effect_id"], "not_started"),
+                     "observed_at": _stamp() if states.get(item["effect_id"]) == "complete" else None,
+                     "evidence": evidence.get(item["effect_id"])} for item in plan["effects"]],
+        "unresolved_effect": unresolved, "retained_artifacts": list(retained), "last_error": last_error,
+        "legal_next": [], "result": result, "deletion": deletion}
+    journal["legal_next"] = pf.pf_config.legal_next(plan, journal, slug=slug or plan["instance"]["slug"])
+    problems = pf.lifecycle_errors(journal, "operation_journal", plan=plan)
+    if problems:
+        raise AssertionError(problems)
+    return journal
+
+
+def write_operation(context, plan, journal=None, *, files=None):
+    """The real writers (pf_instance.write_plan_once / write_journal_generation) for a fixture operation; ``files``:
+    {name: bytes} written next to them (children.json, attempts.json, ...). Returns the operation directory."""
+    directory = context.operations_dir / plan["operation_id"]
+    os.mkdir(str(directory), 0o700)
+    pf_instance.write_plan_once(directory, pf_instance.normalize_json(plan))
+    if journal is not None:
+        pf_instance.write_journal_generation(directory, pf_instance.normalize_json(journal))
+    for name, data in (files or {}).items():
+        pf_instance._write_private_file(directory / name, data, 0o600)
+    return directory
+
+
+def frozen_operation(context, kind, *, phase, states=None, unresolved=None, effects=None):
+    """A real operation as a locked route writes it: its directory, the frozen application snapshot of the instance's
+    config/.env (section 3.8, named by the plan's ``frozen_config``), the plan and journal generation 1. Returns the
+    plan."""
+    op = operation_id(kind)
+    directory = context.operations_dir / op
+    os.mkdir(str(directory), 0o700)
+    data = (context.paths.configuration / ".env").read_bytes()
+    values = pf.pf_config.parse_app_env(data, label=".env")
+    frozen = pf.pf_config.freeze_app_config(values, source_bytes=data, operation_id=op, operation_dir=directory)
+    rendered = frozen.env_file.read_bytes()
+    plan = lifecycle_plan(context, kind, effects, op=op,
+                          frozen_config={"sha256": pf_instance.sha256_bytes(rendered), "bytes": len(rendered)})
+    pf_instance.write_plan_once(directory, pf_instance.normalize_json(plan))
+    journal = lifecycle_journal(plan, phase=phase, states=states, unresolved=unresolved)
+    pf_instance.write_journal_generation(directory, pf_instance.normalize_json(journal))
+    return plan
+
+
+def operation(context, operation_id):
+    """(plan, journal) of one operation directory (None for an absent file)."""
+    directory = context.operations_dir / operation_id
+    result = []
+    for name in ("plan.json", "journal.json"):
+        path = directory / name
+        result.append(json.loads(path.read_bytes()) if path.exists() else None)
+    return tuple(result)
+
+
+def operation_files(context, operation_id):
+    """{name: bytes} of the protected operation files that a refused resume must leave byte-identical."""
+    directory = context.operations_dir / operation_id
+    return {name: (directory / name).read_bytes() for name in pf_instance.OPERATION_FILES[:5]
+            if (directory / name).exists()}
+
+
+def operations_of(context, kind=None):
+    """[(operation_id, plan, journal)] of every operation with a plan, oldest first (optionally of one kind)."""
+    found = []
+    root = context.operations_dir
+    for name in sorted(os.listdir(str(root))) if root.exists() else []:
+        plan, journal = operation(context, name)
+        if plan is not None and (kind is None or plan["kind"] == kind):
+            found.append((name, plan, journal))
+    return found
+
+
+def clear_operations(context):
+    """Test cleanup between subtests: remove every operation directory that holds a plan (never in production)."""
+    import shutil
+    root = context.operations_dir
+    for name in sorted(os.listdir(str(root))) if root.exists() else []:
+        if (root / name / "plan.json").exists():
+            shutil.rmtree(str(root / name))
+
+
+def operations_bytes(context):
+    """{"<op>/<file>": bytes} of every plan/journal/attempts/children/progress file (byte-identity checks)."""
+    found = {}
+    root = context.operations_dir
+    for name in sorted(os.listdir(str(root))) if root.exists() else []:
+        for item in pf_instance.OPERATION_FILES[:5]:
+            path = root / name / item
+            if path.exists():
+                found[name + "/" + item] = path.read_bytes()
+    return found
+
+
+def open_operations(context):
+    """[(kind, phase)] of the blocking lifecycle operations of ``context`` (the real index)."""
+    files, overflow = pf_instance.scan_operations(context.operations_dir)
+    index = pf.pf_config.classify_operations(files, permissions_journal=None, overflow=overflow,
+                                             validate=lambda value, name, plan=None: pf.lifecycle_errors(
+                                                 value, name, plan=plan))
+    return [(entry.kind, entry.phase) for entry in index.blocking]
+
+
+def interrupted_deploy(context, *, phase="initializing", unknown="e0003"):
+    """An initial deploy interrupted in its migration (frontend effect not started): abort-deploy may supersede it."""
+    plan = lifecycle_plan(context, "deploy")
+    states = {f"e{index:04d}": "complete" for index in range(1, int(unknown[1:]))}
+    states[unknown] = "unknown"
+    write_operation(context, plan, lifecycle_journal(plan, phase=phase, states=states, unresolved=unknown))
+    return plan
+
+
+def deleting_purge(context):
+    """A purge interrupted in its deletion (the deletion approval journaled; no deletion plan file needed by the
+    read-only diagnostics). Returns the plan."""
+    plan = lifecycle_plan(context, "purge")
+    write_operation(context, plan, lifecycle_journal(
+        plan, phase="deleting", unresolved="e0005",
+        states={"e0001": "complete", "e0002": "complete", "e0003": "complete", "e0004": "complete",
+                "e0005": "unknown"},
+        deletion={"plan_sha256": "d" * 64, "delete_backups": True, "reset_admin_config": False,
+                  "confirmed_at": "20261007T040500Z"}))
+    return plan
+
+
+def migrating_update(context):
+    """An update interrupted in its live migration (heads unknown). Returns the plan."""
+    plan = lifecycle_plan(context, "update")
+    write_operation(context, plan, lifecycle_journal(
+        plan, phase="migrating", unresolved="e0007",
+        states={**{f"e000{index}": "complete" for index in range(1, 7)}, "e0007": "unknown"}))
+    return plan
+
+
+def run_workspace_switch(controller, candidate, revision, *, verified=True):
+    """PF-A3.2 test helper (the former ``replace_source``), inside ``controller.lock()``: a real plan whose source-stage
+    effect stages ``candidate`` as this operation's deployment and whose W1-W4 switch the workspace to it. A refused
+    candidate ends ``deployment-stage-failed`` (closed cancelled, workspace untouched)."""
+    import uuid as _uuid
+    manifest = controller.candidate_manifest(candidate, revision, verified=verified)
+    deployment = f"dep-{pf.utc()}-{_uuid.uuid4().hex[:8]}"
+    workspace = controller.workspace_plan("switch")
+    effects = [{"phase": "preparing", "type": "source-stage", "target": "deployment:" + deployment,
+                "postcondition": f"staged {deployment}", "preconditions": ["test"]}]
+    effects += controller.workspace_effect_specs(workspace, deployment_id=deployment)
+    git = manifest["source"]["kind"] == "git_commit"
+    return controller.start_operation(
+        "update", {"candidate": candidate, "manifest": manifest, "images": None, "ref": None, "pointer": {}},
+        effects=effects, workspace=workspace, images={}, confirmation={"phrase": "TEST", "summary_sha256": "0" * 64},
+        source={"provenance": "git_commit" if git else "unknown", "commit": revision if git else None,
+                "entries_sha256": pf.pf_source.entries_digest(manifest), "deployment_id": deployment})
