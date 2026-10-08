@@ -50,6 +50,10 @@ function importOutcomeUnknown(error: unknown): boolean {
   return error.status === 408 || error.status >= 500;
 }
 
+/** Which alert takes focus after a failed step (its control went away
+ * or was disabled while the step ran). */
+type AlertFocus = { target: 'alert' | 'unknown' };
+
 /** A sign-in or permission refusal: nothing ran, the report stays. */
 function accessRefusal(error: unknown): boolean {
   return (
@@ -84,6 +88,8 @@ export function ImportWorkOrdersDialog({
   const resultHeadingId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resultHeadingRef = useRef<HTMLHeadingElement>(null);
+  const alertRef = useRef<HTMLDivElement>(null);
+  const unknownAlertRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>('idle');
   const [file, setFile] = useState<File | null>(null);
   const [kept, setKept] = useState<KeptFile | null>(null);
@@ -91,6 +97,7 @@ export function ImportWorkOrdersDialog({
   const [alert, setAlert] = useState<string | null>(null);
   const [wrote, setWrote] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const [alertFocus, setAlertFocus] = useState<AlertFocus | null>(null);
 
   const importing = phase === 'importing';
   const busy = importing || phase === 'checking';
@@ -108,6 +115,22 @@ export function ImportWorkOrdersDialog({
   useEffect(() => {
     if (report !== null) resultHeadingRef.current?.focus();
   }, [report]);
+
+  // A failed step moves focus to its alert, so focus never falls out of
+  // the dialog with the control that started the step — unless another
+  // dialog (the sign-in prompt of a 401) has taken it meanwhile.
+  useEffect(() => {
+    if (alertFocus === null) return;
+    const target = (
+      alertFocus.target === 'unknown' ? unknownAlertRef : alertRef
+    ).current;
+    const active = document.activeElement;
+    const elsewhere =
+      active !== null &&
+      active !== document.body &&
+      target?.closest('[role="dialog"]')?.contains(active) !== true;
+    if (!elsewhere) target?.focus();
+  }, [alertFocus]);
 
   function showReport(next: WorkOrderImportReport | null) {
     setExpanded(new Set());
@@ -140,6 +163,7 @@ export function ImportWorkOrdersDialog({
         source = { bytes: await file.arrayBuffer(), kind };
       } catch {
         setAlert('The file could not be read. Choose it again.');
+        setAlertFocus({ target: 'alert' });
         setPhase(before);
         return;
       }
@@ -150,6 +174,7 @@ export function ImportWorkOrdersDialog({
       setPhase('checked');
     } catch (error) {
       setAlert(errorMessage(error));
+      setAlertFocus({ target: 'alert' });
       setPhase(before);
     }
   }
@@ -179,10 +204,12 @@ export function ImportWorkOrdersDialog({
         // what is already in PartFlow, and nothing is ever duplicated.
         setWrote(true);
         showReport(null);
+        setAlertFocus({ target: 'unknown' });
         setPhase('unknown');
         return;
       }
       setAlert(errorMessage(error));
+      setAlertFocus({ target: 'alert' });
       if (accessRefusal(error)) {
         setPhase('checked');
         return;
@@ -235,9 +262,12 @@ export function ImportWorkOrdersDialog({
           Required columns: Work Order Number, Part Number, Requested Quantity.
           Optional: Job Number, Due Date (YYYY-MM-DD). One row per Part Number.
           Format the Work Order Number, Part Number and Job Number columns as
-          Text so leading zeros stay. Excel files: the first worksheet is read,
-          columns A–BL; formulas are read as the value last saved in Excel;
-          every row is imported, hidden or filtered rows too.
+          Text so leading zeros stay. Columns A–BL are read. Excel files: the
+          first worksheet is read and must be visible; formulas are read as the
+          value last saved in Excel (a formula that was never calculated reads
+          as empty); every row is imported, hidden or filtered rows too. Limits:
+          1 MB, 2,000 rows, 500 lines per Work Order, 200 characters per text
+          cell.
         </p>
         <p className="nwo-hint wo-import-templates">
           Download template:{' '}
@@ -283,13 +313,23 @@ export function ImportWorkOrdersDialog({
         </div>
 
         {alert !== null ? (
-          <div className="wo-import-alert" role="alert">
+          <div
+            ref={alertRef}
+            className="wo-import-alert"
+            role="alert"
+            tabIndex={-1}
+          >
             {alert}
           </div>
         ) : null}
 
         {phase === 'unknown' ? (
-          <div className="wo-import-alert" role="alert">
+          <div
+            ref={unknownAlertRef}
+            className="wo-import-alert"
+            role="alert"
+            tabIndex={-1}
+          >
             The import may be partly saved. Check the file again: Work Orders
             already in PartFlow are never duplicated.
           </div>

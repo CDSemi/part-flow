@@ -21,13 +21,17 @@ import { PERMISSIONS } from '../../api/roles';
 // exactly like the server. Covered: the whole flow and the list reload,
 // the same-bytes rule, every reason Import is disabled, the in-flight
 // state (no close, navigation and unload guarded), the lost-outcome
-// state, file-level refusals and the report presentation.
+// state, sign-in and permission refusals, file-level refusals, focus
+// after a failed step and the report presentation.
 
 const C3 = 'Check the file before importing it.';
 const C4 =
   'This is not the file that was checked. Check the file again before importing.';
 const UNKNOWN_COPY =
   'The import may be partly saved. Check the file again: Work Orders already in PartFlow are never duplicated.';
+const A1 =
+  'You are not signed in, or your sign-in has ended. Sign in to continue.';
+const A3 = 'You do not have permission to do this.';
 const CSV_TEXT =
   'Work Order Number,Part Number,Requested Quantity\r\nWO-1,A-100,5\r\nWO-2,B-200,3\r\n';
 
@@ -652,6 +656,8 @@ for (const [name, failure] of [
     fireEvent.click(importButton(dialog));
 
     expect(await within(dialog).findByText(UNKNOWN_COPY)).toBeInTheDocument();
+    // The Import button is gone: focus moves to the alert, inside the dialog.
+    expect(within(dialog).getByRole('alert')).toHaveFocus();
     expect(uploadsTo(COMMIT)).toHaveLength(1);
     expect(
       within(dialog).queryByRole('heading', { name: 'Check result' }),
@@ -699,6 +705,7 @@ test('FV-5: a 409 "not the file that was checked" shows the message and Check fi
 
   const alert = await within(dialog).findByRole('alert');
   expect(alert).toHaveTextContent(C4);
+  await waitFor(() => expect(alert).toHaveFocus());
   expect(within(dialog).queryByText(UNKNOWN_COPY)).toBeNull();
   expect(importButton(dialog)).toBeDisabled();
   fireEvent.click(
@@ -708,6 +715,115 @@ test('FV-5: a 409 "not the file that was checked" shows the message and Check fi
   expect(importButton(dialog)).toBeEnabled();
   expect(within(dialog).queryByRole('alert')).toBeNull();
 });
+
+test('FV-5: a 401 on Import asks for the sign-in and keeps the checked report; Import again sends the same token', async () => {
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  nextCommitFailure = json({ detail: A1, authentication_required: true }, 401);
+  fireEvent.click(importButton(dialog));
+
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(A1);
+  const signIn = await screen.findByRole('dialog', { name: 'Sign in' });
+  // The dialog keeps its state: nothing ran, so the report still stands.
+  expect(
+    within(dialog).getByRole('heading', { name: 'Check result' }),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText(UNKNOWN_COPY)).toBeNull();
+
+  fireEvent.change(within(signIn).getByLabelText('Login name'), {
+    target: { value: 'mia' },
+  });
+  fireEvent.change(within(signIn).getByLabelText('Password'), {
+    target: { value: 'secret-password' },
+  });
+  fireEvent.click(within(signIn).getByRole('button', { name: 'Sign in' }));
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'Sign in' })).toBeNull(),
+  );
+
+  await waitFor(() => expect(importButton(dialog)).toBeEnabled());
+  fireEvent.click(importButton(dialog));
+  await within(dialog).findByRole('heading', { name: 'Import result' });
+  const commits = uploadsTo(COMMIT);
+  expect(commits).toHaveLength(2);
+  expect(commits[1].checkHeader).toBe(commits[0].checkHeader);
+  expect(commits[1].text).toBe(commits[0].text);
+  expect(uploadsTo(PREVIEW)).toHaveLength(1);
+});
+
+for (const [name, body] of [
+  [
+    'a permission refusal',
+    {
+      detail: A3,
+      permission_denied: true,
+      required_permissions: ['MANAGE_WORK_ORDERS'],
+    },
+  ],
+  ['a refused CSRF check', { detail: A3, csrf_rejected: true }],
+] as const) {
+  test(`FV-5: ${name} (403) on Import shows the detail, keeps the report and focus, and Import again sends the same token`, async () => {
+    const dialog = await openImport();
+    pick(dialog, importFile('orders.csv').file);
+    await checkFile(dialog);
+    nextCommitFailure = json(body, 403);
+    fireEvent.click(importButton(dialog));
+
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent(A3);
+    await waitFor(() => expect(alert).toHaveFocus());
+    expect(
+      within(dialog).getByRole('heading', { name: 'Check result' }),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(UNKNOWN_COPY)).toBeNull();
+    expect(importButton(dialog)).toBeEnabled();
+
+    fireEvent.click(importButton(dialog));
+    await within(dialog).findByRole('heading', { name: 'Import result' });
+    const commits = uploadsTo(COMMIT);
+    expect(commits).toHaveLength(2);
+    expect(commits[1].checkHeader).toBe(commits[0].checkHeader);
+    expect(uploadsTo(PREVIEW)).toHaveLength(1);
+  });
+}
+
+for (const [name, failure] of [
+  ['401', json({ detail: A1, authentication_required: true }, 401)],
+  [
+    '403',
+    json(
+      {
+        detail: A3,
+        permission_denied: true,
+        required_permissions: ['MANAGE_WORK_ORDERS'],
+      },
+      403,
+    ),
+  ],
+] as const) {
+  test(`FV-6: a ${name} on Check file shows the detail and keeps the chosen file`, async () => {
+    const dialog = await openImport();
+    pick(dialog, importFile('orders.csv').file);
+    nextPreviewFailure = failure;
+    fireEvent.click(checkButton(dialog));
+
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent(name === '401' ? A1 : A3);
+    expect(within(dialog).getByText('orders.csv')).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('heading', { name: 'Check result' }),
+    ).toBeNull();
+    expect(importButton(dialog)).toBeDisabled();
+    if (name === '401') {
+      expect(
+        await screen.findByRole('dialog', { name: 'Sign in' }),
+      ).toBeInTheDocument();
+    } else {
+      await waitFor(() => expect(alert).toHaveFocus());
+    }
+  });
+}
 
 /* ============ FV-6 — file-level refusals ============ */
 
@@ -720,6 +836,7 @@ test('FV-6: a file-level 422 and a 413 show one alert and keep the file', async 
   fireEvent.click(checkButton(dialog));
   const alert = await within(dialog).findByRole('alert');
   expect(alert).toHaveTextContent(f9);
+  await waitFor(() => expect(alert).toHaveFocus());
   expect(within(dialog).getAllByRole('alert')).toHaveLength(1);
   expect(within(dialog).getByText('orders.csv')).toBeInTheDocument();
   expect(importButton(dialog)).toBeDisabled();

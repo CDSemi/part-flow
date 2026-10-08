@@ -9,6 +9,8 @@ billion-laughs part), the worksheet part is replaced in the zip.
 
 import datetime
 import io
+import re
+import struct
 import time
 import tracemalloc
 import zipfile
@@ -18,7 +20,14 @@ from typing import Literal
 import openpyxl
 import pytest
 
-from app.api.work_order_import_files import read_csv, read_xlsx, write_xlsx_template
+from app.api.work_order_import_files import (
+    MAX_XLSX_CONTENT_TYPES_BYTES,
+    MAX_XLSX_SHARED_STRINGS_BYTES,
+    MAX_XLSX_STYLES_BYTES,
+    read_csv,
+    read_xlsx,
+    write_xlsx_template,
+)
 from app.application.errors import InvalidInputError
 from app.application.work_order_import import (
     IMPORT_COLUMNS,
@@ -153,6 +162,23 @@ def test_csv_rows_keep_their_spreadsheet_numbers() -> None:
     ]
 
 
+def test_csv_reads_columns_a_to_bl_only() -> None:
+    """FI-1: as for XLSX (OD-S1-15), cells beyond BL are not read; a row
+    holding data only beyond BL is blank."""
+    beyond = "," * MAX_IMPORT_COLUMNS
+    data = (
+        f"Work Order Number,Part Number,Requested Quantity{beyond}not read\r\n"
+        f"WO-1,PN-1,5{',' * (MAX_IMPORT_COLUMNS - 3)}last column read,not read\r\n"
+        f"{beyond}not read\r\n"
+        "WO-2,PN-2,6\r\n"
+    ).encode()
+    sheet = _csv(data)
+    assert [record.row for record in sheet.records] == [1, 2, 4]
+    assert [len(record.cells) for record in sheet.records] == [MAX_IMPORT_COLUMNS] * 2 + [3]
+    assert sheet.records[1].cells[-1] == "last column read"
+    assert all("not read" not in record.cells for record in sheet.records)
+
+
 def test_csv_refusals() -> None:
     """FI-2."""
     assert _refusal(_csv, b"") == F1
@@ -268,6 +294,54 @@ def test_xlsx_refusals() -> None:
     assert _refusal(_xlsx, _rewrite(workbook, {"xl/workbook.xml": b"not xml at all"})) == F7
 
 
+def _patch_zip_headers(data: bytes, patch: Callable[[bytearray, int, int], None]) -> bytes:
+    """Apply ``patch(buffer, offset, kind)`` to every local (kind 0) and
+    central (kind 1) zip header, e.g. to set values zipfile never writes."""
+    buffer = bytearray(data)
+    for kind, signature in enumerate((b"PK\x03\x04", b"PK\x01\x02")):
+        offset = buffer.find(signature)
+        while offset >= 0:
+            patch(buffer, offset, kind)
+            offset = buffer.find(signature, offset + 4)
+    return bytes(buffer)
+
+
+def _encrypted(buffer: bytearray, offset: int, kind: int) -> None:
+    buffer[offset + 6 + 2 * kind] |= 0x1  # general purpose flag bit 0
+
+
+def _compression(method: int) -> Callable[[bytearray, int, int], None]:
+    def patch(buffer: bytearray, offset: int, kind: int) -> None:
+        start = offset + 8 + 2 * kind
+        buffer[start : start + 2] = struct.pack("<H", method)
+
+    return patch
+
+
+def _two_row_workbook() -> bytes:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    assert worksheet is not None
+    worksheet.append(["Work Order Number", "Part Number", "Requested Quantity"])
+    worksheet.append(["WO-1", "PN-1", 5])
+    return _save(workbook)
+
+
+def test_foreign_zip_entries_and_bad_indexes_are_refused() -> None:
+    """FI-4: an encrypted entry, a compression method zipfile cannot read
+    (Deflate64, AES) and an out-of-range style or shared-string index are
+    refused as unreadable (F7), never an unhandled error."""
+    workbook = _two_row_workbook()
+    assert _refusal(_xlsx, _patch_zip_headers(workbook, _encrypted)) == F7
+    for method in (9, 99):
+        assert _refusal(_xlsx, _patch_zip_headers(workbook, _compression(method))) == F7
+    sheet = zipfile.ZipFile(io.BytesIO(workbook)).read("xl/worksheets/sheet1.xml")
+    bad_style = sheet.replace(b'<c r="C2"', b'<c r="C2" s="999"', 1)
+    assert bad_style != sheet
+    assert _refusal(_xlsx, _rewrite(workbook, {"xl/worksheets/sheet1.xml": bad_style})) == F7
+    assert _refusal(_xlsx, _with_shared_strings("")) == F7  # index 0 of an empty table
+
+
 def test_billion_laughs_is_refused_quickly() -> None:
     """FI-4: entity amplification is refused by expat (OD-S1-7)."""
     entities = '<!ENTITY lol0 "lol">' + "".join(
@@ -337,6 +411,109 @@ def test_empty_cells_at_the_last_column_are_not_read() -> None:
     sheet = _bounded(lambda: _xlsx(data))
     assert [record.row for record in sheet.records] == list(range(1, 20_001, 1000))
     assert {len(record.cells) for record in sheet.records} == {MAX_IMPORT_COLUMNS}
+
+
+_SHARED_STRINGS_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+)
+_SHARED_STRINGS_REL = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
+)
+
+
+def _with_shared_strings(entries: str, *, part: str = "xl/sharedStrings.xml") -> bytes:
+    """The two-row workbook with cell A2 read from index 0 of a shared-string
+    part holding ``entries``, registered at ``part``."""
+    workbook = _two_row_workbook()
+    source = zipfile.ZipFile(io.BytesIO(workbook))
+    rels = source.read("xl/_rels/workbook.xml.rels").replace(
+        b"</Relationships>",
+        f'<Relationship Id="rIdS" Type="{_SHARED_STRINGS_REL}" Target="/{part}"/>'
+        "</Relationships>".encode(),
+    )
+    types = source.read("[Content_Types].xml").replace(
+        b"</Types>",
+        f'<Override PartName="/{part}" ContentType="{_SHARED_STRINGS_TYPE}"/></Types>'.encode(),
+    )
+    sheet, replaced = re.subn(
+        rb'<c r="A2" t="inlineStr">.*?</c>',
+        b'<c r="A2" t="s"><v>0</v></c>',
+        source.read("xl/worksheets/sheet1.xml"),
+        count=1,
+    )
+    assert replaced == 1
+    strings = f'<?xml version="1.0" encoding="UTF-8"?><sst xmlns="{_NS}">{entries}</sst>'
+    return _rewrite(
+        workbook,
+        {
+            "xl/_rels/workbook.xml.rels": rels,
+            "[Content_Types].xml": types,
+            "xl/worksheets/sheet1.xml": sheet,
+            part: strings.encode(),
+        },
+    )
+
+
+def _with_cell_formats(declared_bytes: int) -> bytes:
+    """The two-row workbook whose ``cellXfs`` is padded with empty ``<xf/>``
+    entries to about ``declared_bytes`` of ``xl/styles.xml``."""
+    workbook = _two_row_workbook()
+    styles = zipfile.ZipFile(io.BytesIO(workbook)).read("xl/styles.xml").decode()
+    padding = "<xf/>" * ((declared_bytes - len(styles)) // len("<xf/>"))
+    padded, replaced = re.subn(r'<cellXfs count="\d+">', rf"\g<0>{padding}", styles, count=1)
+    assert replaced == 1
+    return _rewrite(workbook, {"xl/styles.xml": padded.encode()})
+
+
+def test_a_relocated_shared_strings_part_is_read() -> None:
+    """FI-3: the content types, not the part name, locate shared strings."""
+    sheet = _xlsx(_with_shared_strings("<si><t>WO-S</t></si>", part="xl/strings.xml"))
+    assert sheet.records[1].cells[:3] == ("WO-S", "PN-1", 5)
+
+
+def test_style_and_shared_string_tables_are_bounded() -> None:
+    """FI-6: a tiny workbook of empty style or shared-string entries —
+    tables openpyxl builds whole at load — is read within the budget just
+    below its part bound and refused (F6) above it, wherever the content
+    types place the shared strings."""
+    below_styles = _with_cell_formats(MAX_XLSX_STYLES_BYTES - 64)
+    assert len(below_styles) < 1_048_576
+    assert len(_bounded(lambda: _xlsx(below_styles)).records) == 2
+    assert _refusal(_xlsx, _with_cell_formats(MAX_XLSX_STYLES_BYTES + 64)) == F6
+
+    def strings(declared_bytes: int, part: str = "xl/sharedStrings.xml") -> bytes:
+        padding = "<si/>" * (declared_bytes // len("<si/>"))
+        return _with_shared_strings("<si><t>WO-S</t></si>" + padding, part=part)
+
+    below_strings = strings(MAX_XLSX_SHARED_STRINGS_BYTES - 256)
+    assert len(_bounded(lambda: _xlsx(below_strings)).records) == 2
+    assert _refusal(_xlsx, strings(MAX_XLSX_SHARED_STRINGS_BYTES)) == F6
+    assert _refusal(_xlsx, strings(MAX_XLSX_SHARED_STRINGS_BYTES, "xl/worksheets/s.xml")) == F6
+
+    workbook = _two_row_workbook()
+    types = zipfile.ZipFile(io.BytesIO(workbook)).read("[Content_Types].xml")
+    comment = b"<!--" + b"x" * MAX_XLSX_CONTENT_TYPES_BYTES + b"-->"
+    padded = types.replace(b"</Types>", comment + b"</Types>")
+    assert _refusal(_xlsx, _rewrite(workbook, {"[Content_Types].xml": padded})) == F6
+
+
+def test_a_wide_csv_row_costs_no_more_than_64_columns() -> None:
+    """FI-6: one row of about a million commas among 2,000 short rows (just
+    under 1 MB) is read as columns A–BL, so the header check stays cheap."""
+    data = (
+        "Work Order Number,Part Number,Requested Quantity\n"
+        + "WO-1,PN-1,1"
+        + "," * 1_000_000
+        + "\n"
+        + "WO-1,PN-2,1\n" * 1999
+    ).encode()
+    assert len(data) < 1_048_576
+    sheet = _bounded(lambda: _csv(data))
+    assert max(len(record.cells) for record in sheet.records) == MAX_IMPORT_COLUMNS
+    started = time.monotonic()
+    analysis = _analyse(sheet)
+    assert time.monotonic() - started < 2
+    assert analysis.ignored_columns == ()
 
 
 def test_csv_blank_lines_are_never_stored() -> None:

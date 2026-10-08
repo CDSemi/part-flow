@@ -8,17 +8,21 @@ limits and every cell rule live in ``app.application.work_order_import``
 (one rule source for both formats). This is the only module under
 ``app/`` that imports ``openpyxl``.
 
-Both adapters iterate lazily, never store a fully blank record (its
-row number is all the Application needs) and stop once
+Both adapters iterate lazily, read columns A–BL only
+(``MAX_IMPORT_COLUMNS``: cells beyond are never read, so a crafted
+row cannot widen the work done per record), never store a fully blank
+record (its row number is all the Application needs) and stop once
 ``MAX_IMPORT_RECORDS`` non-blank records are kept — enough for the
 Application to refuse a file over the row limit.
 
 XLSX is read values-only (OD-15-1/2): ``data_only=True`` reads the value
 Excel stored when it saved (a formula is never evaluated; one without
 a stored value reads as empty), macros are never run, the first
-worksheet is read (refused when hidden), columns A–BL only, and the
-stored ``<dimension>`` is never trusted. The zip guard bounds the XML
-that is parsed; Python's expat (≥ 2.4.1) bounds entity amplification.
+worksheet is read (refused when hidden) and the stored ``<dimension>``
+is never trusted. The zip guard bounds the XML that is parsed — in
+total, and separately for the parts openpyxl parses whole into object
+tables at load (content types, styles, shared strings; the worksheet
+is streamed); Python's expat (≥ 2.4.1) bounds entity amplification.
 """
 
 import csv
@@ -27,13 +31,16 @@ import io
 import xml.etree.ElementTree
 import zipfile
 import zlib
-from typing import Final
+from typing import Any, Final, cast
 
 import openpyxl
 from openpyxl.cell.read_only import EMPTY_CELL, ReadOnlyCell
+from openpyxl.packaging.manifest import Manifest
 from openpyxl.styles import Font
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+from openpyxl.xml.constants import ARC_CONTENT_TYPES, ARC_STYLE, SHARED_STRINGS
+from openpyxl.xml.functions import fromstring
 
 from app.application.errors import InvalidInputError, UnsupportedMediaTypeError
 from app.application.work_order_import import (
@@ -58,6 +65,15 @@ MAX_IMPORT_BYTES: Final = 1_048_576
 #: Zip guard: entries and total declared uncompressed size of a workbook.
 MAX_XLSX_ENTRIES: Final = 1000
 MAX_XLSX_UNPACKED_BYTES: Final = 16 * 1024 * 1024
+#: Zip guard per part openpyxl parses whole at load: its object tables
+#: grow with the entry count, not with the bytes kept (a tiny workbook
+#: of empty ``<xf/>`` or ``<si/>`` entries costs seconds and hundreds of
+#: MB below the total bound). Each bound keeps the worst case of its
+#: part inside the FI-6 budget (< 2 s, < 50 MB) and far above a real
+#: workbook's part.
+MAX_XLSX_CONTENT_TYPES_BYTES: Final = 256 * 1024
+MAX_XLSX_STYLES_BYTES: Final = 256 * 1024
+MAX_XLSX_SHARED_STRINGS_BYTES: Final = 2 * 1024 * 1024
 
 CSV_MEDIA_TYPE: Final = "text/csv"
 XLSX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -91,13 +107,18 @@ WORKBOOK_UNREADABLE_MESSAGE: Final = (
 _UTF8_BOM: Final = b"\xef\xbb\xbf"
 _ZIP_SIGNATURE: Final = b"PK\x03\x04"
 #: The failures of reading a damaged or foreign workbook: the file is
-#: refused (F7), nothing is written.
+#: refused (F7), nothing is written. ``RuntimeError``: an encrypted zip
+#: entry; ``NotImplementedError``: a compression method zipfile cannot
+#: read; ``IndexError``: a style or shared-string index out of range.
 _WORKBOOK_ERRORS: Final = (
     zipfile.BadZipFile,
     InvalidFileException,
     KeyError,
     ValueError,
     TypeError,
+    IndexError,
+    RuntimeError,
+    NotImplementedError,
     xml.etree.ElementTree.ParseError,
     OSError,
     EOFError,
@@ -139,7 +160,7 @@ def read_import_file(data: bytes, file_format: ImportFormat, *, check_token: str
 
 
 def read_csv(data: bytes, *, check_token: str) -> ImportSheet:
-    """UTF-8 (optional BOM), comma, RFC 4180 quoting.
+    """UTF-8 (optional BOM), comma, RFC 4180 quoting; columns A–BL.
 
     The row number of a record is its 1-based index among the records
     ``csv.reader`` yields (a blank line yields one and still counts), so
@@ -160,8 +181,9 @@ def read_csv(data: bytes, *, check_token: str) -> ImportSheet:
     reader = csv.reader(io.StringIO(text, newline=""), strict=True)
     row = 0
     try:
-        for cells in reader:
+        for fields in reader:
             row += 1
+            cells = fields[:MAX_IMPORT_COLUMNS]
             if cells and not all(is_blank_cell(cell) for cell in cells):
                 records.append(ImportRecord(row=row, cells=tuple(cells)))
                 if len(records) >= MAX_IMPORT_RECORDS:
@@ -209,17 +231,45 @@ def _cell_value(cell: object, row: int) -> CellValue:
     raise _UnreadableCellError
 
 
+def _shared_strings_part(archive: zipfile.ZipFile) -> str | None:
+    """The shared-string part openpyxl reads: the first override of its
+    content type in ``[Content_Types].xml``, resolved as openpyxl does."""
+    # The stubs type ``from_tree``'s node narrower than ``fromstring``'s
+    # result; at run time openpyxl passes exactly this element.
+    root = cast(Any, fromstring(archive.read(ARC_CONTENT_TYPES)))
+    manifest = Manifest.from_tree(root)
+    part = None if manifest is None else next(manifest.findall(SHARED_STRINGS), None)
+    return None if part is None else str(part.PartName)[1:]
+
+
 def _check_zip(data: bytes) -> None:
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            entries = archive.infolist()
+        archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
         raise InvalidInputError(NOT_XLSX_MESSAGE) from exc
-    if (
-        len(entries) > MAX_XLSX_ENTRIES
-        or sum(entry.file_size for entry in entries) > MAX_XLSX_UNPACKED_BYTES
-    ):
-        raise InvalidInputError(WORKBOOK_TOO_LARGE_MESSAGE)
+    with archive:
+        entries = archive.infolist()
+        if (
+            len(entries) > MAX_XLSX_ENTRIES
+            or sum(entry.file_size for entry in entries) > MAX_XLSX_UNPACKED_BYTES
+        ):
+            raise InvalidInputError(WORKBOOK_TOO_LARGE_MESSAGE)
+        # zipfile resolves a duplicated name to its last entry, as here.
+        sizes = {entry.filename: entry.file_size for entry in entries}
+        if (
+            sizes.get(ARC_CONTENT_TYPES, 0) > MAX_XLSX_CONTENT_TYPES_BYTES
+            or sizes.get(ARC_STYLE, 0) > MAX_XLSX_STYLES_BYTES
+        ):
+            raise InvalidInputError(WORKBOOK_TOO_LARGE_MESSAGE)
+        try:
+            shared_strings = _shared_strings_part(archive)
+        except _WORKBOOK_ERRORS as exc:
+            raise InvalidInputError(WORKBOOK_UNREADABLE_MESSAGE) from exc
+        if (
+            shared_strings is not None
+            and sizes.get(shared_strings, 0) > MAX_XLSX_SHARED_STRINGS_BYTES
+        ):
+            raise InvalidInputError(WORKBOOK_TOO_LARGE_MESSAGE)
 
 
 def read_xlsx(data: bytes, *, check_token: str) -> ImportSheet:

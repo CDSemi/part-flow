@@ -29,6 +29,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -392,13 +393,30 @@ def test_xlsx_reports_like_csv(mwo: IdentityClient, db_engine: Engine) -> None:
         assert list(due) == [datetime.date(2026, 10, 6), None, datetime.date(2026, 11, 1)]
 
 
+_LOCKING_SQL = re.compile(
+    r"\bpg_(try_)?advisory|\bFOR\s+(NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(KEY\s+)?SHARE\b|\bLOCK\s+TABLE\b",
+    re.IGNORECASE,
+)
+
+
 def test_check_file_takes_no_lock(mwo: IdentityClient, db_engine: Engine) -> None:
-    """ID-3."""
+    """ID-3: every statement the request sends is watched while it runs —
+    a transaction-level lock is gone once the request has returned."""
     rows, _, _ = _two_work_orders()
     before = _write_counts(db_engine)
-    _ok(_preview(mwo, _csv(*rows)))
+    locking: list[str] = []
+
+    def watch(connection: object, cursor: object, statement: str, *args: object) -> None:
+        if _LOCKING_SQL.search(statement):
+            locking.append(statement)
+
+    sa.event.listen(Engine, "before_cursor_execute", watch)
+    try:
+        _ok(_preview(mwo, _csv(*rows)))
+    finally:
+        sa.event.remove(Engine, "before_cursor_execute", watch)
+    assert locking == []
     assert _write_counts(db_engine) == before
-    assert _scalar(db_engine, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'") == 0
 
 
 def _manual_work_order(client: TestClient, number: str, *lines: tuple[str, int]) -> int:
