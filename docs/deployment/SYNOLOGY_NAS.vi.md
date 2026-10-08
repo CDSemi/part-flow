@@ -318,15 +318,24 @@ release checkout `repo/`.
    không liệt kê `partflow-staging`.
 2. **Tạo configuration.** Sao chép `.env.production.example` thành
    `.env.production` (mode 600) và điền mọi giá trị còn rỗng. Tạo thư mục secret
-   (`PARTFLOW_SECRETS_DIR`, mode 0700) và file một dòng `postgres_password` (mode
-   0444). Database role đặc quyền tối thiểu là P16-S4: cho đến lúc đó backend dùng
-   role bootstrap owner. Chạy `$PF config --quiet`.
+   (`PARTFLOW_SECRETS_DIR`, mode 0700) và ba file một dòng `postgres_password`,
+   `partflow_app_password` và `partflow_maintenance_password` (mode 0444; hai role
+   file dài 16 đến 128 ký tự ASCII in được không có khoảng trắng và khác nhau),
+   trước mọi lệnh `$PF` khởi động `backend` hoặc một ops service. Backend kết nối
+   bằng role ít đặc quyền `partflow_app` (P16-S4), không bao giờ bằng owner. Chạy
+   `$PF config --quiet`.
 3. **Kiểm tra time zone.** `PARTFLOW_SITE_TIMEZONE` phải bằng `SITE_TIMEZONE` của
    staging.
 4. **Build, rồi bắt đầu từ volume mới rỗng.** `PARTFLOW_RELEASE` là release tag
    (DEPLOYMENT §10). Build bằng
-   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`, rồi `$PF up -d db`, rồi
-   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`. Volume `partflow-production_postgres_data`
+   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` (cả hai image, không bao giờ chỉ `backend`), rồi `$PF up -d db`, rồi
+   `$PF --profile ops run --rm -T db-roles` (tạo `partflow_app` và
+   `partflow_maintenance`), rồi
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`
+   (cũng áp dụng grant). Một stack cài trước P16-S4 được chuyển theo thứ tự của
+   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1 (role secret file, `build backend
+   web` với `PARTFLOW_COMMIT`, `db-roles`, `db-roles apply-grants`, rồi
+   `release.sh`). Volume `partflow-production_postgres_data`
    mới và rỗng: dữ liệu staging không bao giờ được promote, và restore vào
    production là quy trình P16-S5 cần owner quyết định.
 5. **First-run setup với một worker.**
@@ -339,7 +348,7 @@ release checkout `repo/`.
 6. **Không bao giờ chạy `down -v`** (hay xóa volume) trên project
    `partflow-production`: nó xóa database production.
 
-Còn lại: role hardening (P16-S4), backup và restore (P16-S5),
+Còn lại: backup và restore (P16-S5),
 observability (P16-S6), và các host check trên NAS cùng pilot gate (P16-S7); bản
 thân release flow (`release.sh`, `smoke.sh`) đã triển khai và chưa được thực thi
 trên NAS.
@@ -353,7 +362,9 @@ trên NAS.
 - private backend/database network và một reverse-proxy entry point (§5.2; xác
   minh trên host ở P16-S7);
 - authentication/authorization Phase 14;
-- secret handling và database role tách biệt theo least privilege;
+- secret handling và database role tách biệt theo least privilege — đã triển khai
+  (P16-S4: `partflow_app`, `partflow_maintenance`, `db-roles`, grant trong mọi
+  `migrate`; bằng chứng trên host ở P16-S7);
 - logical backup theo lịch, replicate off-NAS có mã hóa, retention alert và
   restore drill thành công;
 - monitor health, log, disk, backup age, restart count và database growth;

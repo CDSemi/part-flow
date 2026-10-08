@@ -324,15 +324,25 @@ run from the release checkout `repo/`.
    lists no `partflow-staging`.
 2. **Create the configuration.** Copy `.env.production.example` to
    `.env.production` (mode 600) and fill every empty value. Create the secrets
-   directory (`PARTFLOW_SECRETS_DIR`, mode 0700) and the one-line file
-   `postgres_password` (mode 0444). Least-privilege database roles are P16-S4:
-   until then the backend uses the bootstrap owner role. Run `$PF config --quiet`.
+   directory (`PARTFLOW_SECRETS_DIR`, mode 0700) and the three one-line files
+   `postgres_password`, `partflow_app_password` and
+   `partflow_maintenance_password` (mode 0444; the two role files are 16 to 128
+   printable ASCII characters without spaces and different from each other),
+   before any `$PF` command that starts `backend` or an ops service. The backend
+   connects as the least-privilege role `partflow_app` (P16-S4), never as the
+   owner. Run `$PF config --quiet`.
 3. **Check the time zone.** `PARTFLOW_SITE_TIMEZONE` must equal the staging
    `SITE_TIMEZONE`.
 4. **Build, then start from a new empty volume.** `PARTFLOW_RELEASE` is the
    release tag (DEPLOYMENT §10). Build with
-   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`, then `$PF up -d db`, then
-   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`. The volume
+   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` (both images, never only `backend`), then `$PF up -d db`, then
+   `$PF --profile ops run --rm -T db-roles` (creates `partflow_app` and
+   `partflow_maintenance`), then
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`
+   (which also applies the grants). A stack installed before P16-S4 is converted
+   in the order of [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1 (role secret
+   files, `build backend web` with `PARTFLOW_COMMIT`, `db-roles`, `db-roles
+   apply-grants`, then `release.sh`). The volume
    `partflow-production_postgres_data` is new and empty: staging data is never
    promoted, and a restore into production is a P16-S5 procedure that needs an
    owner decision.
@@ -346,7 +356,7 @@ run from the release checkout `repo/`.
 6. **Never run `down -v`** (or remove a volume) on the `partflow-production`
    project: it deletes the production database.
 
-Pending: role hardening (P16-S4), backups and restore
+Pending: backups and restore
 (P16-S5), observability (P16-S6), and the NAS host checks and pilot gates
 (P16-S7); the release flow itself (`release.sh`, `smoke.sh`) is implemented and
 not yet executed on the NAS.
@@ -362,7 +372,9 @@ not yet executed on the NAS.
 - private backend/database networks and one reverse-proxy entry point
   (§5.2; host-verified in P16-S7);
 - Phase 14 authentication/authorization;
-- secret handling and separate least-privilege database roles;
+- secret handling and separate least-privilege database roles — implemented
+  (P16-S4: `partflow_app`, `partflow_maintenance`, `db-roles`, grants in every
+  `migrate`; host evidence in P16-S7);
 - scheduled logical backups, encrypted off-NAS replication, retention alerts,
   and successful restore drill;
 - monitoring for health, logs, disk, backup age, restart count, and database

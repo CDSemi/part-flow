@@ -16,12 +16,15 @@ Phase 16 slice 3 adds the release identity and the release gate:
 build arguments, never by Compose), ``ENFORCE_CLIENT_RELEASE`` (fixed on in
 the production Compose file) and ``ACCEPT_SCHEMA_REVISION`` (the per-revision
 readiness override of rollback path 2).
+
+Phase 16 slice 4 adds ``DATABASE_ROLES_REQUIRED`` and shares the secret-file
+reader (``read_secret_line``) with ``provision-roles``.
 """
 
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -74,29 +77,60 @@ def _present(value: object) -> bool:
     return value is not None and value != ""
 
 
-def _read_password_file(path: str) -> str:
-    """The one-line password of ``path``; its content never reaches a message."""
+class SecretFileError(Exception):
+    """A secret file is not exactly one UTF-8 line; never carries its content."""
+
+    def __init__(
+        self,
+        kind: Literal["unreadable", "not_utf8", "empty", "multiline"],
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(kind)
+        self.kind = kind
+        #: The operating-system reason of an ``unreadable`` file.
+        self.reason = reason
+
+
+def read_secret_line(path: Path) -> str:
+    """The one line of the secret file ``path`` (trailing CR/LF dropped).
+
+    Shared by ``DATABASE_PASSWORD_FILE`` and ``provision-roles``' role
+    password files (Phase 16 slice 4); each caller words the error.
+    """
     try:
-        raw = Path(path).read_bytes()
+        raw = path.read_bytes()
     except OSError as exc:
-        reason = exc.strerror or type(exc).__name__
-        raise ValueError(
-            f"DATABASE_PASSWORD_FILE {path} cannot be read ({reason}). Check that the secret"
-            " file exists and that the backend user may read it."
-        ) from exc
+        raise SecretFileError("unreadable", exc.strerror or type(exc).__name__) from exc
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         # `from None`: the decode error quotes a byte of the secret.
-        raise ValueError(f"DATABASE_PASSWORD_FILE {path} is not UTF-8 text.") from None
+        raise SecretFileError("not_utf8") from None
     # initdb takes the first line without its CR/LF, so only trailing line
     # breaks are dropped and the file must hold exactly one line.
-    password = text.rstrip("\r\n")
-    if not password:
-        raise ValueError(f"DATABASE_PASSWORD_FILE {path} is empty.")
-    if "\r" in password or "\n" in password:
-        raise ValueError(f"DATABASE_PASSWORD_FILE {path} must hold exactly one line.")
-    return password
+    line = text.rstrip("\r\n")
+    if not line:
+        raise SecretFileError("empty")
+    if "\r" in line or "\n" in line:
+        raise SecretFileError("multiline")
+    return line
+
+
+def _read_password_file(path: str) -> str:
+    """The one-line password of ``path``; its content never reaches a message."""
+    try:
+        return read_secret_line(Path(path))
+    except SecretFileError as exc:
+        if exc.kind == "unreadable":
+            raise ValueError(
+                f"DATABASE_PASSWORD_FILE {path} cannot be read ({exc.reason}). Check that the"
+                " secret file exists and that the backend user may read it."
+            ) from exc
+        if exc.kind == "not_utf8":
+            raise ValueError(f"DATABASE_PASSWORD_FILE {path} is not UTF-8 text.") from None
+        if exc.kind == "empty":
+            raise ValueError(f"DATABASE_PASSWORD_FILE {path} is empty.") from None
+        raise ValueError(f"DATABASE_PASSWORD_FILE {path} must hold exactly one line.") from None
 
 
 class Settings(BaseSettings):
@@ -132,6 +166,11 @@ class Settings(BaseSettings):
     # Rollback path 2 only: the one database revision, unknown to this
     # release, that it may serve after a verified compatibility check.
     accept_schema_revision: str | None = None
+    # Phase 16 slice 4: the PartFlow database roles must exist, so migrate
+    # refuses without them and reconcile check (h) runs (true on backend
+    # and migrate in production Compose only; development and test
+    # databases keep one owner role).
+    database_roles_required: bool = False
 
     @model_validator(mode="before")
     @classmethod

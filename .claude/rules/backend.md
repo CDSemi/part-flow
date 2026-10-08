@@ -47,6 +47,7 @@ docker compose exec backend uv run ruff format --check .
 docker compose exec backend uv run ruff check .
 docker compose exec backend uv run mypy app tests
 docker compose exec backend uv run pytest
+docker compose exec -e PARTFLOW_TEST_DATABASE_ROLE=app backend uv run pytest   # CI mode; required before committing changes to database writes, grants or test setup
 docker compose exec backend uv run alembic upgrade head
 ```
 

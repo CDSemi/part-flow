@@ -28,6 +28,9 @@ jobs:
 
         env:
             DATABASE_URL: postgresql+psycopg://partflow_user:partflow_ci_password@localhost:5432/partflow
+            # P16-S4: every connection to a partflow_test_* database runs under a temporary application database
+            # role (backend/tests/conftest.py), except Alembic, owner_engine and database_owner modules.
+            PARTFLOW_TEST_DATABASE_ROLE: app
         steps:
             - uses: actions/checkout@v5
             - uses: actions/setup-python@v6

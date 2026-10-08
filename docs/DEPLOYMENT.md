@@ -23,9 +23,11 @@ device enrolled by an administrator, §2) and Phase 15 — File-Based Work Order
 Import (closed 2026-10-08). Phase 16 is in progress: slice 1 (the read-only
 `reconcile` command), slice 2 (production artifacts: the production
 backend and `web` images, `compose.production.yaml`, its configuration and
-secret inventory, and network rate limiting, §3.1) and slice 3 (the release
+secret inventory, and network rate limiting, §3.1), slice 3 (the release
 flow: release identity, liveness and readiness, the backend write gate,
-`migrate`, `release.sh` and `smoke.sh`, §3.1) are implemented. Phase 16 still owns role hardening, backups, observability,
+`migrate`, `release.sh` and `smoke.sh`, §3.1) and slice 4 (database-role hardening: the `partflow_app` and
+`partflow_maintenance` database roles, `provision-roles`, grants applied by every `migrate` and by `apply-grants`, and
+reconcile check (h), §3.1) are implemented. Phase 16 still owns backups, observability,
 host TLS and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
@@ -34,7 +36,7 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Production artifacts and a release flow exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`), but role hardening, backups, observability and the pilot gates of §5 remain (Phase 16: P16-S4…S7). |
+| Pilot or production use | Not ready | Production artifacts, a release flow and database-role hardening exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`, `partflow_app`), but backups, observability and the pilot gates of §5 remain (Phase 16: P16-S5…S7). |
 | Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet (P16-S7), and the §5 gates have not passed. Network rate limiting exists in `web`; `compose.yaml` still exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
@@ -53,7 +55,7 @@ include:
 - source directories and dependency directories are bind-mounted;
 - PostgreSQL, backend, and frontend ports are published to the host;
 - development credential defaults exist;
-- the database and application share the Compose-created PostgreSQL role;
+- the database and application share the Compose-created PostgreSQL role (the production stack uses separate database roles, §3.1);
 - no production reverse proxy, TLS policy, secret store, log rotation, release
   image tags, scheduled backup job, restore drill, or deployment rollback
   command is provided;
@@ -125,7 +127,7 @@ Required boundaries:
 - identify every deployment by an immutable Git commit or image tag;
 - make the same backup format portable between NAS and VPS.
 
-### 3.1 Production stack (Phase 16 slices 2 and 3)
+### 3.1 Production stack (Phase 16 slices 2 to 4)
 
 **State.** Implemented (P16-S2): the `production` stages of
 `backend/Dockerfile` and `frontend/Dockerfile`, the `web` configuration in
@@ -138,17 +140,19 @@ has been verified on the Synology NAS or a VPS (that is P16-S7). Implemented
 (P16-S3): release identity, liveness and readiness, the backend write gate,
 `migrate` and `revision`, `release.sh` and `smoke.sh` with
 `reconcile_regression.py`, and the update notice in the frontend (the
-subsections below). Both production images take `PARTFLOW_RELEASE` and `PARTFLOW_COMMIT` as build arguments and carry the release identity (the backend `production` stage sets `RELEASE_TAG` and `RELEASE_COMMIT`); the production stack smoke and the release rehearsal have run (State, Evidence). Role hardening, backups and
-observability remain P16-S4…S6.
+subsections below). Both production images take `PARTFLOW_RELEASE` and `PARTFLOW_COMMIT` as build arguments and carry the release identity (the backend `production` stage sets `RELEASE_TAG` and `RELEASE_COMMIT`); the production stack smoke and the release rehearsal have run (State, Evidence). Implemented (P16-S4): the database roles
+`partflow_app` and `partflow_maintenance`, `provision-roles` and `apply-grants`, the `db-roles` service and reconcile check (h)
+(Database roles and grants, below). Backups and observability remain P16-S5…S6.
 
 **Services and networks (`compose.production.yaml`).**
 
 | Service | Role | Network | Notes |
 | --- | --- | --- | --- |
 | `db` | PostgreSQL `postgres:16.14` (Debian variant, never `-alpine`: collation and reconcile check (j) depend on glibc) | `internal` (no external route) | volume `postgres_data`; no published port; 60 s stop grace |
-| `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, `production` stage | `internal`, `edge` | `SESSION_COOKIE_SECURE=true` fixed; `WEB_CONCURRENCY` from `PARTFLOW_BACKEND_WORKERS` (default 2); `FORWARDED_ALLOW_IPS` = the edge subnet; 200 s stop grace (above `web`'s longest 180 s upstream timeout); `restart: unless-stopped` (never `on-failure`: with several workers a configuration refusal exits `0`) |
+| `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, `production` stage | `internal`, `edge` | connects as `partflow_app` (`DATABASE_ROLES_REQUIRED=true`) and mounts only `partflow_app_password`; `SESSION_COOKIE_SECURE=true` fixed; `WEB_CONCURRENCY` from `PARTFLOW_BACKEND_WORKERS` (default 2); `FORWARDED_ALLOW_IPS` = the edge subnet; 200 s stop grace (above `web`'s longest 180 s upstream timeout); `restart: unless-stopped` (never `on-failure`: with several workers a configuration refusal exits `0`) |
 | `web` | image `partflow/web:${PARTFLOW_RELEASE}`, `production` stage | `edge` | the only published port, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (no variable for the bind address); no `depends_on`, so it keeps serving the shell while `backend` is stopped |
 | `migrate` | one-shot `python -m app.cli migrate` from the backend image (entrypoint; one connection, one transaction) | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)`; without a backup option it is a usage error |
+| `db-roles` | one-shot `python -m app.cli provision-roles` (default command) or `apply-grants` (argument) from the backend image; connects as the owner and mounts the three secret files | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm -T db-roles [apply-grants]` |
 
 Images are built locally from the checked-out release, through the build-only
 companion file `compose.production.build.yaml`, and never pulled
@@ -162,8 +166,8 @@ liveness route, see Readiness and write gate), memory and CPU limits from
 the environment file (starting values, to be measured on the pilot host in
 P16-S7), and `json-file` log rotation (10 MiB, 5 files). Secrets are mounted as
 files under `/run/secrets`; no secret is an environment value, and none has a
-committed default. Until P16-S4 provisions least-privilege roles, `backend` and
-`migrate` use the PostgreSQL bootstrap (owner) role.
+committed default. The owner role (`POSTGRES_USER`, a superuser) is used only by `db`, `migrate` and `db-roles`;
+`backend` connects as `partflow_app` and never mounts the owner password.
 
 **Images.** `backend` (`production` stage): Python 3.12 slim, the locked
 non-development dependencies, no `tests/`, no `.env`, no reload server, runs as
@@ -183,6 +187,20 @@ role's password from the first line only; a multi-line, empty, unreadable or
 non-UTF-8 file is refused with a message naming the file path and never its
 content. No validation error echoes an input value. The URL is composed in the
 application, so special characters in the password need no manual encoding.
+
+**Database roles and grants (P16-S4).** The production database has three roles. The owner (`POSTGRES_USER`, default `partflow_owner`) is the PostgreSQL bootstrap superuser: it owns every object and is used by `db`, `migrate`, `db-roles` and backups. `partflow_app` is used by `backend` (the API, `reconcile`, `revision` and the recovery CLIs). `partflow_maintenance` is provisioned and granted SELECT on named tables, and no service uses it until the archival slice. Both are created by `provision-roles` as `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, with no membership, no per-role setting and no owned object; the names are fixed in code and in `compose.production.yaml`, and the owner name must differ from both.
+
+| Class | `partflow_app` privileges | Tables |
+| --- | --- | --- |
+| append-only | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
+| guarded update | SELECT, INSERT, UPDATE | `worker_sessions` (its row trigger limits the columns) |
+| no update | SELECT, INSERT, DELETE | `assigned_route_steps` |
+| read only | SELECT | `alembic_version` |
+| ordinary | SELECT, INSERT, UPDATE, DELETE | the other 21 tables |
+
+No role holds TRUNCATE, a sequence privilege (identity columns), a grant option, or `CREATE` on schema `public` or on the database, and PUBLIC and default privileges are removed. `partflow_maintenance` holds SELECT on 14 named tables only. The full classification is `SLICE1_DATA_MODEL.md` §17. The raise-on-write triggers stay as the first layer; the revocation is the second. A `permission denied` (SQLSTATE 42501) in the backend log is therefore an incident (`deployment/OPERATIONS_RUNBOOK.md` §2), never fixed by granting more.
+
+`provision-roles` reads `partflow_app_password` and `partflow_maintenance_password` (one line each, 16 to 128 printable ASCII characters without spaces, different from each other) before it connects, creates or repairs the two roles and sets their SCRAM-SHA-256 passwords in one transaction, and is safe to repeat. `apply-grants` derives every grant from the table classification in code and applies it in one transaction; it refuses unless the database is at the release's Alembic head. Every `migrate` runs it in its own transaction after the upgrade, so a release never leaves a new table without its grants: a table without a class, a role with a forbidden attribute or membership, a role that owns objects, or a privilege granted by a role PartFlow does not manage rolls the whole run back (`migrate` result `refused`, exit 1, nothing changed). With `DATABASE_ROLES_REQUIRED=true` (fixed on `backend` and `migrate` in `compose.production.yaml`) missing roles also refuse (`roles_not_provisioned`); without it (development, test, staging) the grants report is `not_provisioned` and nothing is granted. Grants are never restored from a dump: they are re-derived from the code head by every `migrate` and by `apply-grants` after a restore. A role password is rotated in a short write freeze (`deployment/OPERATIONS_RUNBOOK.md` §9). Reconcile check (h) verifies the result (§5 gate); a superuser that disables a trigger is outside detection (accepted).
 
 **Process model.** `WEB_CONCURRENCY` sets the number of uvicorn workers and
 `FORWARDED_ALLOW_IPS` the proxy addresses uvicorn trusts for forwarded headers;
@@ -253,7 +271,7 @@ recorded by that request, and an earlier unanswered attempt stays unknown) and a
 
 **Migration job and `revision` (P16-S3).** `python -m app.cli migrate` applies
 the pending migrations in one transaction on one connection, runs the
-`apply-grants` hook in the same transaction (a no-op until P16-S4) and prints
+`apply-grants` hook in the same transaction (it applies the grants, see Database roles and grants) and prints
 a JSON report; it needs exactly one of `--pre-release-backup REF` or
 `--no-backup-reason TEXT` (recorded; for example `first install: empty
 database`) and accepts `--lock-timeout SECONDS` (1-600, default 30). It refuses,
@@ -261,17 +279,15 @@ changing nothing, a revision file with non-transactional DDL
 (`autocommit_block`, `CONCURRENTLY`), a database revision this release does not
 know, a concurrent `migrate`, and (best effort, not proof that `backend` is
 stopped) a connected backend session; an at-head database answers
-`already_current`. The backend never migrates. `python -m app.cli revision`
+`already_current`. A role or grant refusal (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`, `role_owns_objects`, `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) is `refused` with exit 1 and rolls the upgrade of the same run back. The backend never migrates. `python -m app.cli revision`
 is read-only and prints the release identity, expected and database
 revisions, pending revisions and the readiness the backend would report; exit
 0 only when the schema is `current`.
 
-**First install (P16-S3).** From the release checkout, with the tag in
-`.env.production`: build with `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f
-compose.production.build.yaml build`; start the database (`$PF up -d db`);
-apply the schema (`$PF --profile ops run --rm -T migrate --no-backup-reason
-"first install: empty database"`); start `backend` with one worker for the
-first-run setup as the Process model describes, then `$PF up -d backend web`.
+**First install (P16-S3, extended by P16-S4).** From the release checkout, with the tag in
+`.env.production`, in this order: create the three secret files (`postgres_password`, `partflow_app_password`, `partflow_maintenance_password`) before any `$PF` command that starts `backend` or an ops service, because Compose replaces a missing file by an empty directory; build **both** images with `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`; start the database (`$PF up -d db`); create the roles (`$PF --profile ops run --rm -T db-roles`); apply the schema and the grants (`$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`); start `backend` with one worker for the first-run setup as the Process model describes, then `$PF up -d backend web`; finally run `reconcile` and expect check (h) `pass`.
+
+**Converting a stack installed before P16-S4** (rehearsal stacks only; no pilot exists before P16-S7). The database must already be at the candidate's head, otherwise `apply-grants` refuses `revision_mismatch` and changes nothing. In this order: (1) create `partflow_app_password` and `partflow_maintenance_password` before any `$PF` command of the new Compose file that runs `backend` or `db-roles` (remove an empty directory Compose created at a missing path); (2) build both images, never only `backend` and never without `PARTFLOW_COMMIT`: `PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build backend web`; (3) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles`; (4) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles apply-grants`; (5) `deploy/production/release.sh` as usual. Its first steps run the current image through `backend` as `partflow_app`, so steps 3 and 4 must come first, and the build step then reuses the images of step 2.
 
 **Releases (P16-S3).** `deploy/production/release.sh` runs the release
 sequence of §7 from the repository root of the release checkout with the
@@ -432,13 +448,14 @@ the set of `${NAME}` references in `compose.production.yaml` and
 Fixed in Compose, not configurable: `SESSION_COOKIE_SECURE=true`,
 `ENFORCE_CLIENT_RELEASE=true`,
 `DATABASE_HOST=db`, `DATABASE_PORT=5432`, the secret mount paths and the
-loopback bind. The one secret file in this slice is `postgres_password`
-(exactly one line). `db` reads it **only when a new data volume is
-initialized**; `backend` and `migrate` read it at every start. To change it on
-an existing database, run `ALTER ROLE <POSTGRES_USER> PASSWORD …` first, then
-replace the file and recreate `backend`; replacing the file alone breaks the
-backend's login. P16-S4 adds the application and maintenance role passwords to
-the same directory.
+loopback bind. The secret files are `postgres_password` (the owner), `partflow_app_password` and
+`partflow_maintenance_password`, each exactly one line; the two role files are 16 to 128 printable ASCII characters without spaces and different from each other
+(for example `openssl rand -base64 32`). `db` reads `postgres_password` **only when a new data volume is
+initialized**; `migrate` and `db-roles` read it at every start, and `backend` never mounts it. To change it on
+an existing database, run `ALTER ROLE <POSTGRES_USER> PASSWORD …` inside `db` first, then
+replace the file (no service restart is needed). `backend` mounts only `partflow_app_password`, read once per process: a role password is
+changed by replacing its file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, then `$PF up -d --force-recreate --no-deps backend`
+(`deployment/OPERATIONS_RUNBOOK.md` §9). `release.sh` refuses, with nothing changed, while any of the three files is missing, empty or not a regular file.
 
 **Operator commands.** Run from the release checkout, with
 `PF="docker compose -f compose.production.yaml --env-file .env.production"`.
@@ -449,7 +466,11 @@ the same directory.
 | Validate the configuration | `$PF config --quiet` |
 | Build a release (tag and commit in the shell; the only use of the build file) | `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` |
 | Start the database | `$PF up -d db` |
-| Apply migrations (once per release, with `backend` stopped) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)` (first install: the tag is already in `.env.production`) |
+| Apply migrations and grants (once per release, with `backend` stopped) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)` (first install: the tag is already in `.env.production`) |
+| Create or repair the database roles; set or rotate their passwords | `$PF --profile ops run --rm -T db-roles` (= `provision-roles`) |
+| Apply the grants outside a migrate (after a restore, or to repair drift) | `$PF --profile ops run --rm -T db-roles apply-grants` |
+| Guard-integrity check (reconcile check (h), as `partflow_app`) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile --check h` |
+| Privilege probe (evidence; one invocation per table and statement, zero rows, rolled back) | `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN -c "SET LOCAL ROLE partflow_app" -c "UPDATE part_movements SET id = id WHERE false" -c ROLLBACK'` (refused = stderr has `permission denied for table <t>`; allowed = stdout has `UPDATE 0` and no `ERROR`; the variables expand inside `db`) |
 | Release (the whole sequence of §7) | `deploy/production/release.sh --release <new> --operator … --approver … (--pre-release-backup REF \| --no-backup-reason TEXT)` |
 | Smoke checks of a running release | `deploy/production/smoke.sh --release <tag>` |
 | Expected and database revision, readiness | `$PF run --rm --no-deps -T backend python -m app.cli revision` |
@@ -488,7 +509,7 @@ the 11 mock sentinels), and a Compose stack smoke on Docker Desktop (cases
 SM-1…SM-22, including the rate limit, the proxy-generated JSON answers, the
 content security policy in a real browser, the one-worker first-run, the
 reconcile commands, and 2,000-Work-Order import timings of 18.06 s to create and
-31.33 s to change quantities, below `web`'s 180 s). P16-S3 evidence: the production static and script suite (93 tests, all passing), the 51 release-script and reconcile-regression tests passing under `dash` in a Linux container, `sh -n` on both scripts, both production images built with a full commit and the build failing without one, the Compose stack smoke passing (SM-1…SM-19 and SM-21…SM-28; SM-20 is the manual S2 browser check), the release rehearsal passing (RH-1…RH-8 and RH-10: a release with a migration, the write freeze, the two-step switch, the refused migration while a backend is connected, and `/api/health` and `/api/health/live` latency through `web`), and a browser check of the update notice and the automatic reload of the Production Board kiosk on the rehearsal stack. Not run (P16-S7): the Scan Station reload cases that need a configured Area, Operation and enrolled station, and every NAS and VPS host check. Host checks on the Synology NAS and a VPS are
+31.33 s to change quantities, below `web`'s 180 s). P16-S3 evidence: the production static and script suite (93 tests, all passing), the 51 release-script and reconcile-regression tests passing under `dash` in a Linux container, `sh -n` on both scripts, both production images built with a full commit and the build failing without one, the Compose stack smoke passing (SM-1…SM-19 and SM-21…SM-28; SM-20 is the manual S2 browser check), the release rehearsal passing (RH-1…RH-8 and RH-10: a release with a migration, the write freeze, the two-step switch, the refused migration while a backend is connected, and `/api/health` and `/api/health/live` latency through `web`), and a browser check of the update notice and the automatic reload of the Production Board kiosk on the rehearsal stack. Not run (P16-S7): the Scan Station reload cases that need a configured Area, Operation and enrolled station, and every NAS and VPS host check. P16-S4 evidence: the production static and script suite (98 tests on the host and 63 release-script, reconcile-regression and rehearsal tests under `dash` in a Linux container), the Compose stack smoke passing on its second run (39 automated cases, including the privilege probe, the role-password rotation and the secret-file checks; SM-20 is the manual S2 browser check), and the release rehearsal passing (RH-1…RH-8 and RH-10, with the conversion of a stack installed before P16-S4 as RH-11 and its refusal while a role file is missing as RH-11b). Host checks on the Synology NAS and a VPS are
 not part of this evidence.
 
 ## 4. Platform decision
@@ -586,6 +607,7 @@ The gates above remain gates until P16-S7 records passing evidence.
 - health, logs, disk use, backup age, database growth, and container restarts
   are monitored;
 - movement/quantity reconciliation checks run and alert without mutating data;
+- the backend connects as `partflow_app`, which holds no UPDATE, DELETE or TRUNCATE privilege on append-only history (UPDATE only on `worker_sessions`, DELETE only on `assigned_route_steps`) — evidenced by the privilege probe (§3.1) and a clean reconcile check (h) on the production database; the raise-on-write triggers stay as the first layer; a superuser (the owner role) who disables triggers is outside detection — accepted (owner decision OD-16-09);
 - a database that ran the unreleased Phase 12 commits (`80f7925` … `b9785d2`)
   passes this read-only check before the Hot list is relied on — it must return
   0 rows, otherwise the listed inactive Hot entries are removed in Management →

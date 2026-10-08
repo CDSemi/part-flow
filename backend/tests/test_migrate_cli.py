@@ -1,16 +1,20 @@
-"""Tests for ``python -m app.cli migrate`` (Phase 16 slice 3: M-1 … M-16).
+"""Tests for ``python -m app.cli migrate`` (Phase 16 slices 3 and 4: M-1 … M-21).
 
 ``migrate`` applies this release's pending Alembic revisions on one
 connection in one transaction, records the backup reference (or the
 reason there is none) and prints exactly one JSON document on stdout.
 Every case runs ``app.cli.main`` in process (M-16 as a subprocess)
 against its own temporary database created on the development cluster
-and dropped afterwards; ``DATABASE_URL`` points at it.
+and dropped afterwards; ``DATABASE_URL`` points at it. M-17 … M-21 add
+uniquely named temporary database roles (``tests.role_harness``) for the
+grants step. The module keeps the owner in the application-role test
+mode (``database_owner``): it migrates, creates roles and corrupts ACLs.
 """
 
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -28,9 +32,22 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
 from app import cli
-from app.application import migration
+from app.application import database_roles, migration, reconciliation
+from app.application.database_roles import DatabaseRoles
 from app.core.config import get_settings
 from app.infrastructure import schema_revision
+from app.infrastructure.database_privileges import TABLE_CLASSES, TableClass
+from tests.conftest import owner_engine
+from tests.role_harness import (
+    acl_snapshot,
+    cluster_engine,
+    drop_roles,
+    new_password,
+    temporary_name,
+    temporary_roles,
+)
+
+pytestmark = pytest.mark.database_owner
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
@@ -55,8 +72,11 @@ _KEYS = [
     "error",
 ]
 _GRANTS = {
-    "status": "not_applicable",
-    "detail": "Database-role hardening is not installed yet (P16-S4).",
+    "status": "not_provisioned",
+    "detail": (
+        "The database roles partflow_app and partflow_maintenance do not exist; grants were not"
+        " applied (development or test database)."
+    ),
 }
 _NOTHING_CHANGED = "Nothing was changed."
 
@@ -502,3 +522,216 @@ def test_migrate_with_the_file_based_configuration(tmp_path: Path) -> None:
             connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
             connection.execute(sa.text(f'DROP ROLE IF EXISTS "{role}"'))
         admin_engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# M-17 … M-21: the grants step (Phase 16 slice 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def roles(database: URL, monkeypatch: pytest.MonkeyPatch) -> Iterator[DatabaseRoles]:
+    """Temporary roles named as the PartFlow roles; DATABASE_ROLES_REQUIRED=true."""
+    names = temporary_roles()
+    cluster = make_url(os.environ["DATABASE_URL"])
+    monkeypatch.setattr(database_roles, "APP_ROLE", names.app)
+    monkeypatch.setattr(database_roles, "MAINTENANCE_ROLE", names.maintenance)
+    monkeypatch.setenv("DATABASE_ROLES_REQUIRED", "true")
+    get_settings.cache_clear()
+    try:
+        yield names
+    finally:
+        get_settings.cache_clear()
+        drop_roles(cluster, names)
+
+
+def _provision(url: URL, names: DatabaseRoles) -> None:
+    engine = owner_engine(url)
+    try:
+        with engine.begin() as connection:
+            database_roles.provision_roles(
+                connection,
+                roles=names,
+                passwords=DatabaseRoles(new_password(), new_password()),
+                lock_timeout_seconds=5,
+            )
+    finally:
+        engine.dispose()
+
+
+def _check_h(url: URL, names: DatabaseRoles) -> tuple[int, dict[str, Any]]:
+    engine = owner_engine(url)
+    try:
+        report = reconciliation.run_reconciliation(
+            engine,
+            checks=["h"],
+            expected_alembic_revision=schema_revision.code_head(),
+            database_roles=names,
+            roles_required=True,
+        )
+    finally:
+        engine.dispose()
+    document: dict[str, Any] = reconciliation.report_document(report)
+    [check] = [check for check in document["checks"] if check["id"] == "h"]
+    return document["exit_code"], check
+
+
+def _snapshot(url: URL) -> dict[str, Any]:
+    engine = owner_engine(url)
+    try:
+        with engine.connect() as connection:
+            return acl_snapshot(connection)
+    finally:
+        engine.dispose()
+
+
+def test_migrate_applies_the_grants(
+    database: URL, roles: DatabaseRoles, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-17."""
+    _provision(database, roles)
+    code, document, err = _migrate(capsys, "--no-backup-reason", "first install")
+    assert code == 0, err
+    assert document["result"] == "upgraded"
+    assert document["grants"] == {
+        "status": "applied",
+        "roles": {"application": roles.app, "maintenance": roles.maintenance},
+        "tables": 29,
+        "sequences": 23,
+        "default_privileges_removed": 0,
+        "foreign_grantees": [],
+    }
+    exit_code, check = _check_h(database, roles)
+    assert (exit_code, check["status"]) == (0, "pass"), check
+
+
+def test_migrate_refuses_without_the_roles(
+    database: URL, roles: DatabaseRoles, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-18: the upgrade of the same run is rolled back."""
+    code, document, _ = _migrate(capsys, "--no-backup-reason", "first install")
+    assert code == 1
+    _refused(document, "roles_not_provisioned")
+    assert document["error"]["message"] == (
+        f"The database roles {roles.app} and {roles.maintenance} do not exist. Run"
+        " provision-roles first. Nothing was changed."
+    )
+    assert _scalar(database, "SELECT to_regclass('public.part_movements')") is None
+    assert _revision(database) is None
+
+
+_PROBE_REVISION = "9999_s4_grant_probe"
+_PROBE_SOURCE = '''"""S4 grant probe (test only)."""
+
+from alembic import op
+
+revision = "9999_s4_grant_probe"
+down_revision = "{head}"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.execute("CREATE TABLE s4_grant_probe (id integer PRIMARY KEY)")
+
+
+def downgrade() -> None:
+    op.execute("DROP TABLE s4_grant_probe")
+'''
+
+
+@pytest.fixture
+def probe_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A copy of alembic/ with one more revision that creates s4_grant_probe."""
+    copy = tmp_path / "alembic"
+    shutil.copytree(_BACKEND_DIR / "alembic", copy, ignore=shutil.ignore_patterns("__pycache__"))
+    (copy / "versions" / "99990101_9999_s4_grant_probe.py").write_text(
+        _PROBE_SOURCE.replace("{head}", _HEAD), encoding="utf-8"
+    )
+    monkeypatch.setattr(schema_revision, "ALEMBIC_DIR", copy)
+    return _PROBE_REVISION
+
+
+def test_a_new_table_is_granted_in_the_same_transaction(
+    database: URL,
+    roles: DatabaseRoles,
+    probe_scripts: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-19."""
+    _provision(database, roles)
+    command.upgrade(_alembic_config(database), _HEAD)
+    classes = {**TABLE_CLASSES, "s4_grant_probe": TableClass.APPEND_ONLY}
+    monkeypatch.setattr(database_roles, "TABLE_CLASSES", classes)
+    code, document, err = _migrate(capsys, "--no-backup-reason", "probe")
+    assert code == 0, err
+    assert document["result"] == "upgraded"
+    assert document["applied_revisions"] == [probe_scripts]
+    assert document["grants"]["tables"] == 30
+    privileges = _scalar(
+        database,
+        "SELECT string_agg(privilege_type, ',' ORDER BY privilege_type)"
+        " FROM information_schema.role_table_grants"
+        f" WHERE table_name = 's4_grant_probe' AND grantee = '{roles.app}'",
+    )
+    assert privileges == "INSERT,SELECT"
+
+
+def test_an_unclassified_new_table_refuses(
+    database: URL,
+    roles: DatabaseRoles,
+    probe_scripts: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M-20."""
+    _provision(database, roles)
+    command.upgrade(_alembic_config(database), _HEAD)
+    code, document, _ = _migrate(capsys, "--no-backup-reason", "probe")
+    assert code == 1
+    _refused(document, "table_unclassified")
+    assert document["error"]["message"] == (
+        "Table s4_grant_probe has no privilege class in this release, so it cannot be granted."
+        " Nothing was changed."
+    )
+    assert _scalar(database, "SELECT to_regclass('public.s4_grant_probe')") is None
+    assert _revision(database) == _HEAD
+
+
+def test_foreign_grantees_and_grantors(
+    database: URL, roles: DatabaseRoles, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-21: a foreign grantee never fails migrate; a foreign grantor refuses."""
+    foreign = temporary_name("foreign")
+    cluster = make_url(os.environ["DATABASE_URL"])
+    admin = cluster_engine(cluster)
+    try:
+        with admin.connect() as connection:
+            connection.execute(sa.text(f'CREATE ROLE "{foreign}" NOLOGIN'))
+        _provision(database, roles)
+        assert _migrate(capsys, "--no-backup-reason", "first install")[0] == 0
+        owner = owner_engine(database)
+        try:
+            with owner.begin() as connection:
+                connection.execute(sa.text(f'GRANT SELECT ON audit_events TO "{foreign}"'))
+            code, document, err = _migrate(capsys, "--no-backup-reason", "rerun")
+            assert code == 0, err
+            assert document["result"] == "already_current"
+            assert document["grants"]["foreign_grantees"] == [f"audit_events/{foreign}"]
+            with owner.begin() as connection:
+                for statement in (
+                    f'GRANT UPDATE ON part_movements TO "{foreign}" WITH GRANT OPTION',
+                    f'SET LOCAL ROLE "{foreign}"',
+                    f'GRANT UPDATE ON part_movements TO "{roles.app}"',
+                ):
+                    connection.execute(sa.text(statement))
+        finally:
+            owner.dispose()
+        before = _snapshot(database)
+        code, document, _ = _migrate(capsys, "--no-backup-reason", "rerun")
+        assert code == 1
+        _refused(document, "foreign_grantor")
+        assert _snapshot(database) == before
+    finally:
+        drop_roles(cluster, [foreign])
+        admin.dispose()

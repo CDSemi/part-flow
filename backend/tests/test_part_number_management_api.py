@@ -54,6 +54,7 @@ from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
+from tests.conftest import owner_connection
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_part_number_management_api"
@@ -366,7 +367,8 @@ def _lock_waiters(engine: Engine, wait_event: str | None = None) -> int:
     )
     if wait_event is not None:
         query += " AND wait_event = :wait_event"
-    with engine.connect() as connection:
+    # As the owner: an application-role session sees no other session's wait.
+    with owner_connection(engine.url) as connection:
         return int(connection.execute(sa.text(query), {"wait_event": wait_event}).scalar_one())
 
 

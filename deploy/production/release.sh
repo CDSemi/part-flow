@@ -514,6 +514,39 @@ if ! pf config --quiet >>"$PREFLIGHT" 2>&1; then
     echo "release: '$PF_TEXT config --quiet' failed ($PREFLIGHT). Nothing was changed." >&2
     finish could_not_run 2
 fi
+# Every top-level secret file must exist before any `run`: Compose only warns about a missing file and creates an
+# empty directory at its path (P16-S4). The names and paths come from the resolved model ("secrets" block).
+secret_files=
+if model=$(pf config --format json 2>>"$PREFLIGHT"); then
+    secret_files=$(printf '%s\n' "$model" | awk '
+        /^  "secrets": \{/ { on = 1; next }
+        on && /^  \}/ { exit }
+        on && /^    "[^"]+": \{/ { name = $0; sub(/^    "/, "", name); sub(/".*$/, "", name); next }
+        on && /^      "file": "/ { path = $0; sub(/^      "file": "/, "", path); sub(/",?$/, "", path); print name "=" path }
+    ')
+fi
+if [ -z "$secret_files" ]; then
+    step_end 2
+    echo "release: '$PF_TEXT config --format json' failed or names no secret file ($PREFLIGHT). Nothing was changed." >&2
+    finish could_not_run 2
+fi
+set -f
+saved_ifs=$IFS
+IFS='
+'
+for entry in $secret_files; do
+    IFS=$saved_ifs
+    secret_name=${entry%%=*}
+    secret_path=${entry#*=}
+    echo "secret file $secret_name: $secret_path" >>"$PREFLIGHT"
+    if ! { [ -f "$secret_path" ] && [ -s "$secret_path" ]; }; then
+        set +f
+        step_end 1
+        stop_unchanged "the secret file $secret_name ($secret_path) is missing, empty or not a regular file. Create it as DEPLOYMENT §3.1 describes; if Compose already created a directory there, remove it first."
+    fi
+done
+IFS=$saved_ifs
+set +f
 HEAD_COMMIT=$(git rev-parse HEAD 2>>"$PREFLIGHT") || HEAD_COMMIT=
 if ! printf '%s' "$HEAD_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
     HEAD_COMMIT=

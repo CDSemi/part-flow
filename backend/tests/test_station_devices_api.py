@@ -85,6 +85,7 @@ from tests.auth_harness import (
     station_device_client,
     station_device_headers,
 )
+from tests.conftest import owner_connection
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_station_devices_api"
@@ -2133,13 +2134,16 @@ _RECORDS = {
 
 
 def _waiting_on_a_lock(engine: Engine) -> bool:
-    return bool(
-        _scalar(
-            engine,
-            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-            " AND wait_event_type = 'Lock'",
+    # As the owner: an application-role session sees no other session's wait.
+    with owner_connection(engine.url) as connection:
+        return bool(
+            connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    " AND wait_event_type = 'Lock'"
+                )
+            ).scalar()
         )
-    )
 
 
 @pytest.mark.parametrize("body", _BODIES)

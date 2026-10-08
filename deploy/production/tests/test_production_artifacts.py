@@ -1,9 +1,9 @@
-"""P16-S2/S3: static checks of the production artifacts (compose.production.yaml, its build-only companion
+"""P16-S2/S3/S4: static checks of the production artifacts (compose.production.yaml, its build-only companion
 compose.production.build.yaml, .env.production.example, both Dockerfiles and the web tier configuration in
 frontend/nginx/).
 
-Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2):
-  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17)
+Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2 and P16-S4 SPEC section 6.4):
+  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20)
   Dockerfiles and the development default              -> Dockerfiles (ST-13)
   Liveness probes and the release meta (P16-S3)        -> ReleaseArtifacts (ST-18, ST-19)
   nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-12)
@@ -41,7 +41,10 @@ RELEASE = "static-test"
 # The commit the generated env passes to the build file (ST-12); any 40-hex value.
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 LONG_RUNNING = {"db", "backend", "web"}
-PARTFLOW_IMAGES = ("backend", "web", "migrate")
+PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles")
+# P16-S4: the database-role secrets and the application database role's name in code (ST-9, ST-10).
+SECRET_NAMES = ("postgres_password", "partflow_app_password", "partflow_maintenance_password")
+DATABASE_ROLES_MODULE = REPO / "backend" / "app" / "application" / "database_roles.py"
 # Variables that must stop `config` when empty (ST-1).
 REQUIRED_VARIABLES = (
     "PARTFLOW_RELEASE",
@@ -356,7 +359,8 @@ class ComposeModel(unittest.TestCase):
         root = Path(cls._tmp.name)
         cls.secrets_dir = root / "secrets"
         cls.secrets_dir.mkdir()
-        (cls.secrets_dir / "postgres_password").write_text("static-test-password\n", encoding="utf-8")
+        for name in SECRET_NAMES:
+            (cls.secrets_dir / name).write_text(f"static-test-{name}\n", encoding="utf-8")
         cls.base_overrides = {
             "PARTFLOW_RELEASE": RELEASE,
             "PARTFLOW_SECRETS_DIR": cls.secrets_dir.as_posix(),
@@ -399,7 +403,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual({n for n, s in self.services.items() if not s.get("profiles")}, LONG_RUNNING)
         for name in self.ops_services():
             self.assertEqual(self.services[name]["profiles"], ["ops"], name)
-        self.assertEqual(self.ops_services(), {"migrate"})
+        self.assertEqual(self.ops_services(), {"migrate", "db-roles"})
 
     # ST-3
     def test_st3_only_web_published_on_loopback(self):
@@ -417,7 +421,7 @@ class ComposeModel(unittest.TestCase):
         for name, service in self.services.items():
             for volume in service.get("volumes") or []:
                 self.assertNotEqual(volume.get("type"), "bind", f"{name} has a host-path mount")
-        for name in ("backend", "web", "migrate"):
+        for name in ("backend", "web", "migrate", "db-roles"):
             self.assertFalse(self.services[name].get("volumes"), f"{name} has a volume")
         volumes = self.services["db"]["volumes"]
         self.assertEqual(
@@ -475,13 +479,20 @@ class ComposeModel(unittest.TestCase):
             self.assertTrue(logging.get("options", {}).get("max-size"), name)
             self.assertTrue(logging.get("options", {}).get("max-file"), name)
 
-    # ST-9
+    # ST-9 (amended by P16-S4: backend holds only the application database role's password)
     def test_st9_secret(self):
         secrets = self.model["secrets"]
-        self.assertEqual(set(secrets), {"postgres_password"})
-        self.assertTrue(same_path(secrets["postgres_password"]["file"], self.secrets_dir / "postgres_password"))
-        users = {name for name, s in self.services.items() if any(x["source"] == "postgres_password" for x in s.get("secrets") or [])}
-        self.assertEqual(users, {"db", "backend", "migrate"})
+        self.assertEqual(set(secrets), set(SECRET_NAMES))
+        for name in SECRET_NAMES:
+            self.assertTrue(same_path(secrets[name]["file"], self.secrets_dir / name), name)
+        expected_users = {
+            "postgres_password": {"db", "migrate", "db-roles"},
+            "partflow_app_password": {"backend", "db-roles"},
+            "partflow_maintenance_password": {"db-roles"},
+        }
+        for secret, expected in expected_users.items():
+            users = {name for name, s in self.services.items() if any(x["source"] == secret for x in s.get("secrets") or [])}
+            self.assertEqual(users, expected, secret)
         self.assertFalse(self.services["web"].get("secrets"))
 
     # ST-10
@@ -501,8 +512,19 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(backend["WEB_CONCURRENCY"], "2")
         self.assertEqual(backend["FORWARDED_ALLOW_IPS"], example_values()["PARTFLOW_EDGE_SUBNET"])
         self.assertEqual(self.services["web"]["environment"], {"PARTFLOW_TRUSTED_PROXY": ""})
-        for name in ("backend", "migrate"):
-            self.assertEqual(self.services[name]["environment"]["DATABASE_PASSWORD_FILE"], "/run/secrets/postgres_password")
+        # P16-S4: backend connects as the application database role; migrate and db-roles as the owner.
+        app_role = re.search(r'^APP_ROLE: Final = "([a-z_]+)"$', DATABASE_ROLES_MODULE.read_text(encoding="utf-8"), re.M)
+        self.assertIsNotNone(app_role, f"no APP_ROLE literal in {DATABASE_ROLES_MODULE}")
+        self.assertEqual(backend["DATABASE_USER"], "partflow_app")
+        self.assertEqual(backend["DATABASE_USER"], app_role.group(1))
+        self.assertEqual(backend["DATABASE_PASSWORD_FILE"], "/run/secrets/partflow_app_password")
+        for name in ("migrate", "db-roles"):
+            environment = self.services[name]["environment"]
+            self.assertEqual(environment["DATABASE_USER"], example_values()["POSTGRES_USER"], name)
+            self.assertEqual(environment["DATABASE_PASSWORD_FILE"], "/run/secrets/postgres_password", name)
+        for name, service in self.services.items():
+            required = (service.get("environment") or {}).get("DATABASE_ROLES_REQUIRED")
+            self.assertEqual(required, "true" if name in ("backend", "migrate") else None, name)
         self.assertEqual(self.services["db"]["environment"]["POSTGRES_PASSWORD_FILE"], "/run/secrets/postgres_password")
         override = self.variant("trusted-proxy", PARTFLOW_TRUSTED_PROXY="192.0.2.10")
         self.assertEqual(override.returncode, 0, override.stderr)
@@ -522,6 +544,7 @@ class ComposeModel(unittest.TestCase):
         attached = {name: set(service.get("networks") or {}) for name, service in self.services.items()}
         self.assertEqual(attached["db"], {"internal"})
         self.assertEqual(attached["migrate"], {"internal"})
+        self.assertEqual(attached["db-roles"], {"internal"})
         self.assertEqual(attached["backend"], {"internal", "edge"})
         self.assertEqual(attached["web"], {"edge"})
         self.assertFalse(self.services["web"].get("depends_on"), "web must start without backend")
@@ -532,6 +555,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(self.services["backend"]["image"], f"partflow/backend:{RELEASE}")
         self.assertEqual(self.services["web"]["image"], f"partflow/web:{RELEASE}")
         self.assertEqual(self.services["migrate"]["image"], self.services["backend"]["image"])
+        self.assertEqual(self.services["db-roles"]["image"], self.services["backend"]["image"])
         for name in PARTFLOW_IMAGES:
             self.assertEqual(self.services[name].get("pull_policy"), "never", name)
         # No service of the runtime file can build: `up` or `run` with a missing PARTFLOW_RELEASE image must fail
@@ -583,6 +607,12 @@ class ComposeModel(unittest.TestCase):
         # Compose resolves an entrypoint override with `command: null`: no default arguments, so a run without a
         # backup option is a usage error (exit 2).
         self.assertIsNone(migrate.get("command"))
+
+    # ST-20 (P16-S4): `run --rm db-roles` provisions the database roles; `run --rm db-roles apply-grants` grants.
+    def test_st20_db_roles_entrypoint(self):
+        db_roles = self.services["db-roles"]
+        self.assertEqual(db_roles.get("entrypoint"), ["python", "-m", "app.cli"])
+        self.assertEqual(db_roles.get("command"), ["provision-roles"])
 
     # ST-17 (P16-S3)
     def test_st17_release_identity_comes_from_the_image(self):
@@ -706,7 +736,8 @@ class ReleaseArtifacts(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="pf-s3-static-") as tmp:
             secrets_dir = Path(tmp) / "secrets"
             secrets_dir.mkdir()
-            (secrets_dir / "postgres_password").write_text("static-test-password\n", encoding="utf-8")
+            for name in SECRET_NAMES:
+                (secrets_dir / name).write_text(f"static-test-{name}\n", encoding="utf-8")
             env_file = Path(tmp) / "env"
             write_env(env_file, {"PARTFLOW_RELEASE": RELEASE, "PARTFLOW_SECRETS_DIR": secrets_dir.as_posix(), "PARTFLOW_SITE_TIMEZONE": "UTC"})
             arguments = ["--env-file", str(env_file), "--profile", "ops"] if path == COMPOSE_FILE else []

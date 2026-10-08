@@ -43,10 +43,20 @@ Commands:
   expected and database revisions, the pending revisions and the
   readiness the backend would report, as one JSON document; 0 current,
   1 any other state, 2 could not run.
+- ``provision-roles [--app-password-file PATH] [--maintenance-password-file
+  PATH] [--lock-timeout SECONDS]`` (Phase 16 slice 4): create or repair the
+  ``partflow_app`` and ``partflow_maintenance`` database roles and set their
+  passwords from the secret files (read and checked before connecting);
+  runs as the database owner role. 0 provisioned, 1 refused, 2 failed or
+  its outcome is unknown.
+- ``apply-grants [--lock-timeout SECONDS]`` (Phase 16 slice 4): derive every
+  grant of the two database roles at this release's revision (also part of
+  every ``migrate``); runs as the database owner role. 0 applied, 1
+  refused, 2 failed or its outcome is unknown.
 
 The CLI configures no logging on stdout: stdout carries only the
-command's outcome lines (``reconcile``, ``migrate``, ``revision``: their
-JSON document); refusals and errors go to stderr.
+command's outcome lines (``reconcile``, ``migrate``, ``revision``,
+``provision-roles``, ``apply-grants``: their JSON document); refusals and errors go to stderr.
 """
 
 import argparse
@@ -57,6 +67,7 @@ import logging
 import sys
 import traceback
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -64,7 +75,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.application import authentication, migration, reconciliation
+from app.application import authentication, database_roles, migration, reconciliation
 from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
 from app.core.config import get_settings
 from app.infrastructure import schema_revision
@@ -463,6 +474,125 @@ def _run_revision(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+_PROVISION_ROLES_HELP = (
+    "Create or repair the partflow_app and partflow_maintenance database roles and set their"
+    " passwords from the secret files; print a JSON report. Runs as the database owner role."
+)
+_APP_PASSWORD_FILE = Path("/run/secrets/partflow_app_password")
+_MAINTENANCE_PASSWORD_FILE = Path("/run/secrets/partflow_maintenance_password")
+
+
+def _add_provision_roles_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "provision-roles", help=_PROVISION_ROLES_HELP, description=_PROVISION_ROLES_HELP
+    )
+    parser.add_argument(
+        "--app-password-file",
+        type=Path,
+        default=_APP_PASSWORD_FILE,
+        metavar="PATH",
+        help="The partflow_app password file (default %(default)s).",
+    )
+    parser.add_argument(
+        "--maintenance-password-file",
+        type=Path,
+        default=_MAINTENANCE_PASSWORD_FILE,
+        metavar="PATH",
+        help="The partflow_maintenance password file (default %(default)s).",
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=_bounded_int(1, 600),
+        default=migration.DEFAULT_LOCK_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help="How long a statement may wait for a lock (1-600, default %(default)s).",
+    )
+    parser.set_defaults(handler=_run_provision_roles)
+
+
+def _provision_roles_report(args: argparse.Namespace) -> migration.ProvisionReport:
+    report = migration.ProvisionReport(started_at=datetime.datetime.now(datetime.UTC))
+    roles = database_roles.configured_roles()
+    try:
+        # Both files before any setting or connection.
+        passwords = migration.read_role_passwords(
+            roles, args.app_password_file, args.maintenance_password_file
+        )
+    except migration.PasswordFileError as exc:
+        return migration.provision_failure(report, exc.code, exc.message)
+    try:
+        get_settings()
+        engine = _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        return migration.provision_failure(report, "configuration_invalid", _CONFIGURATION_INVALID)
+    try:
+        return migration.run_provision_roles(
+            engine,
+            report,
+            roles=roles,
+            passwords=passwords,
+            lock_timeout_seconds=args.lock_timeout,
+        )
+    finally:
+        engine.dispose()
+
+
+def _run_provision_roles(args: argparse.Namespace) -> int:
+    report = _provision_roles_report(args)
+    _print_document(migration.provision_document(report))
+    _print_error_traceback(report.error)
+    print(migration.provision_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
+_APPLY_GRANTS_HELP = (
+    "Apply the database-role grants of this release (also part of every migrate) and print a"
+    " JSON report. Runs as the database owner role; safe while the backend runs."
+)
+
+
+def _add_apply_grants_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "apply-grants", help=_APPLY_GRANTS_HELP, description=_APPLY_GRANTS_HELP
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=_bounded_int(1, 600),
+        default=migration.DEFAULT_LOCK_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help="How long a statement may wait for a lock (1-600, default %(default)s).",
+    )
+    parser.set_defaults(handler=_run_apply_grants)
+
+
+def _apply_grants_report(args: argparse.Namespace) -> migration.GrantsReport:
+    report = migration.GrantsReport(started_at=datetime.datetime.now(datetime.UTC), release=None)
+    try:
+        settings = get_settings()
+        engine = _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        report.expected_revision = _code_alembic_head()
+        return migration.grants_failure(report, "configuration_invalid", _CONFIGURATION_INVALID)
+    report.release = settings.release_tag
+    try:
+        return migration.run_apply_grants(
+            engine,
+            report,
+            roles=database_roles.configured_roles(),
+            lock_timeout_seconds=args.lock_timeout,
+        )
+    finally:
+        engine.dispose()
+
+
+def _run_apply_grants(args: argparse.Namespace) -> int:
+    report = _apply_grants_report(args)
+    _print_document(migration.grants_document(report))
+    _print_error_traceback(report.error)
+    print(migration.grants_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -471,6 +601,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_reconcile_parser(subparsers)
     _add_migrate_parser(subparsers)
     _add_revision_parser(subparsers)
+    _add_provision_roles_parser(subparsers)
+    _add_apply_grants_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result

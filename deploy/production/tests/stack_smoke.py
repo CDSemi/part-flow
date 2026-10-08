@@ -43,6 +43,21 @@ setup migrates with `--profile ops run --rm -T migrate --no-backup-reason "s2 sm
   version/revision labels.
 - SM-27: migrate without a backup option is a usage error (exit 2); a second run is already_current (exit 0).
 - SM-28: GET / carries <meta name="partflow-release" content="s2-smoke">.
+
+Amended by P16-S4 (P16-S4 SPEC section 6.5; run it with --project partflow-s4-smoke): the secrets directory holds
+postgres_password, partflow_app_password and partflow_maintenance_password; the setup provisions the database roles
+(`--profile ops run --rm -T db-roles`) before its migrate, and backend connects as partflow_app. SM-17a/b use an empty
+partflow_app_password (backend no longer mounts postgres_password); new cases:
+- SM-17c: an empty postgres_password stops migrate and db-roles with configuration_invalid (exit 2, one JSON document).
+- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (29 tables).
+- SM-31: every partflow-api session in pg_stat_activity is partflow_app.
+- SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables.
+- SM-33: reconcile through backend: check (h) pass, connected as partflow_app (not a superuser).
+- SM-34: restore convergence: a --no-privileges dump restored into partflow_restore_s4, apply-grants, then (h) pass.
+- SM-35: the write flows through web (SM-6, SM-7..SM-9, SM-21, SM-36) pass as partflow_app.
+- SM-36: application-password rotation in a short write freeze (stop backend, db-roles, force-recreate backend).
+SM-17c gives migrate a backup option so that its configuration is read (without one, migrate is an argparse usage
+error before any configuration is read, SM-27).
 """
 import argparse
 import contextlib
@@ -85,7 +100,23 @@ CSP = (
 CREDENTIAL_URL = re.compile(r"://[^/\s]*:[^/\s]*@")
 IMAGE_TOO_LARGE_MESSAGE = "The image is larger than 2 MB. Choose a smaller image."
 FILE_TOO_LARGE_MESSAGE = "The file is larger than 1 MB. Split it into smaller files."
-EMPTY_PASSWORD_FILE_MESSAGE = "DATABASE_PASSWORD_FILE /run/secrets/postgres_password is empty."
+# P16-S4: backend reads only the application database role's password file.
+EMPTY_PASSWORD_FILE_MESSAGE = "DATABASE_PASSWORD_FILE /run/secrets/partflow_app_password is empty."
+APP_ROLE = "partflow_app"
+ROLE_SECRETS = ("partflow_app_password", "partflow_maintenance_password")
+# SM-32: the guarded tables (P16-S4 SPEC section 3.2) and the two cells the application database role may run.
+GUARDED_TABLES = (
+    "part_movements", "audit_events", "machine_lifecycle_events", "quantity_flow_lineage", "work_order_allocations",
+    "worker_sessions", "assigned_route_steps",
+)
+PROBE_STATEMENTS = {
+    "UPDATE": "UPDATE {table} SET id = id WHERE false",
+    "DELETE": "DELETE FROM {table} WHERE false",
+    "TRUNCATE": "TRUNCATE {table}",
+}
+PROBE_ALLOWED = {("worker_sessions", "UPDATE"): "UPDATE 0", ("assigned_route_steps", "DELETE"): "DELETE 0"}
+RESTORE_DATABASE = "partflow_restore_s4"
+CLASSIFIED_TABLES = 29
 MULTI_WORKER_STOP = "failed to start, stopping the parent process"
 TOKEN_PATTERN = re.compile(r"Setup token: ([A-Z2-7]{4}(?:-[A-Z2-7]{4})+)")
 IMPORT_HEADER = "Work Order Number,Part Number,Requested Quantity,Job Number,Due Date\r\n"
@@ -182,7 +213,7 @@ class Smoke:
         self.args = args
         self.project = args.project
         self.evidence = {
-            "slice": "P16-S2 (amended by P16-S3)",
+            "slice": "P16-S2 (amended by P16-S3 and P16-S4)",
             "project": self.project,
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "host": {"platform": platform.platform(), "python": platform.python_version()},
@@ -193,6 +224,10 @@ class Smoke:
                 "SM-14: a web JSON 504 server_unavailable is accepted while the resolver cache (valid=10s) holds the"
                 " stopped backend's address; JSON 502 is required within 40 s",
                 "SM-10/SM-11: invalid when request 7 started >= 6 s after request 1 (spec: after request 6)",
+                "SM-17c (P16-S4): migrate runs with --no-backup-reason so that its configuration is read (without a"
+                " backup option it is an argparse usage error before any configuration is read, SM-27)",
+                "SM-35 (P16-S4): judged from the write-flow cases SM-6, SM-7..SM-9, SM-21 and SM-36 plus SM-31"
+                " (every partflow-api session is partflow_app)",
             ],
         }
         self.workdir = Path(tempfile.mkdtemp(prefix="pf-s2-smoke-"))
@@ -208,12 +243,13 @@ class Smoke:
         env.update(extra)
         return env
 
-    def run(self, command, timeout=600, check_rc=True, env_extra=None, record_output=False):
+    def run(self, command, timeout=600, check_rc=True, env_extra=None, record_output=False, input_text=None):
+        """`input_text` goes to stdin (a password never enters the command line or the evidence)."""
         started = time.monotonic()
         try:
             result = subprocess.run(
                 command, cwd=REPO, env=self.environment(**(env_extra or {})), capture_output=True,
-                text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                text=True, encoding="utf-8", errors="replace", timeout=timeout, input=input_text,
             )
         except subprocess.TimeoutExpired as exc:
             self.evidence["commands"].append({"command": display(command, env_extra), "rc": "timeout", "seconds": timeout})
@@ -267,22 +303,38 @@ class Smoke:
             lines.append(f"{key}={overrides[key]}" if "=" in line and key in overrides else line)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def write_secrets(self, directory, empty=()):
+        """The three secret files (P16-S4), each a distinct 32-character value; the names in `empty` are empty."""
+        directory.mkdir()
+        for name in ("postgres_password", *ROLE_SECRETS):
+            path = directory / name
+            path.write_text("" if name in empty else secrets.token_urlsafe(24) + "\n", encoding="utf-8")
+            os.chmod(path, 0o444)
+
+    def replace_secret(self, name, value):
+        path = self.secrets_dir / name
+        os.chmod(path, 0o600)
+        path.write_text(value + "\n", encoding="utf-8")
+        os.chmod(path, 0o444)
+
+    def read_secret(self, name):
+        return (self.secrets_dir / name).read_text(encoding="utf-8").strip()
+
     def prepare(self):
         self.secrets_dir = self.workdir / "secrets"
-        self.secrets_dir.mkdir()
-        password_file = self.secrets_dir / "postgres_password"
-        password_file.write_text(secrets.token_urlsafe(24) + "\n", encoding="utf-8")
-        os.chmod(password_file, 0o444)
+        self.write_secrets(self.secrets_dir)
         self.env_file = self.workdir / "smoke.env"
         self.write_env(self.env_file, self.secrets_dir)
-        # SM-17: a secrets directory whose postgres_password is empty.
+        # SM-17a/b: a secrets directory whose partflow_app_password (the backend's only secret) is empty.
         self.empty_secrets_dir = self.workdir / "secrets-empty"
-        self.empty_secrets_dir.mkdir()
-        empty_file = self.empty_secrets_dir / "postgres_password"
-        empty_file.write_text("", encoding="utf-8")
-        os.chmod(empty_file, 0o444)
+        self.write_secrets(self.empty_secrets_dir, empty=("partflow_app_password",))
         self.empty_env_file = self.workdir / "smoke-empty-secret.env"
         self.write_env(self.empty_env_file, self.empty_secrets_dir)
+        # SM-17c: a secrets directory whose postgres_password (migrate, db-roles) is empty.
+        self.empty_owner_secrets_dir = self.workdir / "secrets-empty-owner"
+        self.write_secrets(self.empty_owner_secrets_dir, empty=("postgres_password",))
+        self.empty_owner_env_file = self.workdir / "smoke-empty-owner-secret.env"
+        self.write_env(self.empty_owner_env_file, self.empty_owner_secrets_dir)
         # SM-23: a release whose images were never built.
         self.missing_release = f"s2-smoke-missing-{secrets.token_hex(4)}"
         self.missing_env_file = self.workdir / "smoke-missing-release.env"
@@ -296,7 +348,9 @@ class Smoke:
         self.head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
         self.compose("-f", str(BUILD_FILE), "build", timeout=1800, env_extra={"PARTFLOW_COMMIT": self.head})
         self.compose("up", "-d", "--wait", "db", timeout=300)
-        self.compose(
+        # P16-S4: the database roles exist before the first migrate (migrate refuses roles_not_provisioned otherwise).
+        self.first_db_roles = self.compose("--profile", "ops", "run", "--rm", "-T", "db-roles", timeout=300, record_output=True)
+        self.first_migrate = self.compose(
             "--profile", "ops", "run", "--rm", "-T", "migrate", "--no-backup-reason", "s2 smoke", timeout=300, record_output=True
         )
         # First-run setup procedure: one worker, set in the shell (overrides the env file).
@@ -672,20 +726,20 @@ class Smoke:
             self.compose("up", "-d", "backend", timeout=300)
             observed["health"] = self.wait_for_health(60).status
 
-    def import_file(self, quantity):
+    def import_file(self, quantity, count=IMPORT_WORK_ORDERS, prefix="S2SMOKE", pn_prefix="S2-SMOKE-PN"):
         rows = "".join(
-            f"S2SMOKE-{index:05d},S2-SMOKE-PN-{index:05d},{quantity},," + "\r\n" for index in range(1, IMPORT_WORK_ORDERS + 1)
+            f"{prefix}-{index:05d},{pn_prefix}-{index:05d},{quantity},," + "\r\n" for index in range(1, count + 1)
         )
         return (IMPORT_HEADER + rows).encode("utf-8")
 
-    def run_import(self, body, expected):
+    def run_import(self, body, expected, count=IMPORT_WORK_ORDERS):
         headers = {**CSRF, "Content-Type": "text/csv"}
         started = time.monotonic()
         preview = self.client.request("POST", "/api/work-orders/import/preview", headers=headers, body=body, timeout=200)
         check(preview.status == 200, f"preview answered {preview.status}: {preview.excerpt()}")
         report = preview.json()
         check(report["check_token"] == hashlib.sha256(body).hexdigest(), "check token is not the body digest")
-        check(report["summary"][f"will_{expected}"] == IMPORT_WORK_ORDERS, f"preview summary {report['summary']}")
+        check(report["summary"][f"will_{expected}"] == count, f"preview summary {report['summary']}")
         commit_headers = {**headers, "X-PartFlow-Import-Check": report["check_token"]}
         if report.get("update_token"):
             commit_headers["X-PartFlow-Import-Confirm"] = report["update_token"]
@@ -700,7 +754,7 @@ class Smoke:
         result["summary"] = data["summary"]
         check("server_unavailable" not in data, "web answered instead of the backend")
         past = {"create": "created", "update": "updated"}[expected]
-        check(data["summary"][past] == IMPORT_WORK_ORDERS, f"import summary {data['summary']}")
+        check(data["summary"][past] == count, f"import summary {data['summary']}")
         return result
 
     def sm21(self):
@@ -797,6 +851,169 @@ class Smoke:
                     check(result.returncode == 3, f"one worker exited {result.returncode}, not 3")
                 else:
                     check(MULTI_WORKER_STOP in output, "the supervisor did not stop after the failed worker")
+        with self.case("SM-17c") as observed:
+            # An empty owner password stops both one-shot jobs before they connect (P16-S4).
+            attempts = {
+                "migrate": ("migrate", "--no-backup-reason", "s4 smoke sm-17c"),
+                "db-roles": ("db-roles",),
+            }
+            for label, arguments in attempts.items():
+                result = self.compose(
+                    "--profile", "ops", "run", "--rm", "--no-deps", "-T", *arguments,
+                    env_file=self.empty_owner_env_file, check_rc=False, timeout=120,
+                )
+                output = result.stdout + result.stderr
+                report = parse_report(result.stdout)
+                credential_lines = [line for line in output.splitlines() if CREDENTIAL_URL.search(line)]
+                observed[label] = {
+                    "rc": result.returncode, "result": report.get("result"), "error_code": (report.get("error") or {}).get("code"),
+                    "credential_url_lines": len(credential_lines),
+                }
+                check(result.returncode == 2, f"{label} exited {result.returncode}, not 2")
+                check(report.get("result") == "failed", f"{label} did not print one JSON document with result failed")
+                check((report.get("error") or {}).get("code") == "configuration_invalid", f"{label} is not configuration_invalid")
+                check(not credential_lines, f"an output line of {label} carries a credential URL")
+
+    # -- P16-S4: database roles --------------------------------------------------
+
+    def owner_psql(self, sql, *options, check_rc=True):
+        """psql as the owner inside db; the variables expand inside the container (the host has none)."""
+        script = 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" ' + " ".join(options) + f' -c "{sql}"'
+        return self.compose("exec", "-T", "db", "sh", "-c", script, check_rc=check_rc, timeout=120)
+
+    def sm29_to_sm33(self):
+        with self.case("SM-29") as observed:
+            first = parse_report(self.first_db_roles.stdout)
+            second_run = self.compose("--profile", "ops", "run", "--rm", "-T", "db-roles", check_rc=False, timeout=300)
+            second = parse_report(second_run.stdout)
+            observed["first"] = {"rc": self.first_db_roles.returncode, "result": first.get("result"), "roles": first.get("roles")}
+            observed["second"] = {"rc": second_run.returncode, "result": second.get("result"), "roles": second.get("roles")}
+            for label, run, report, action in (("first", self.first_db_roles, first, "created"), ("second", second_run, second, "unchanged")):
+                check(run.returncode == 0 and report.get("result") == "provisioned", f"{label} db-roles is not provisioned")
+                roles = report.get("roles") or []
+                check([r.get("name") for r in roles] == [APP_ROLE, "partflow_maintenance"], f"{label} db-roles roles {roles}")
+                check(all(r.get("action") == action and r.get("password") == "set" for r in roles), f"{label} db-roles is not {action}")
+        with self.case("SM-30") as observed:
+            report = parse_report(self.first_migrate.stdout)
+            grants = report.get("grants") or {}
+            observed.update({"rc": self.first_migrate.returncode, "result": report.get("result"), "grants": grants})
+            check(self.first_migrate.returncode == 0 and report.get("result") == "upgraded", "the first migrate did not upgrade")
+            check(grants.get("status") == "applied" and grants.get("tables") == CLASSIFIED_TABLES, "migrate did not apply the grants")
+        with self.case("SM-31") as observed:
+            check(self.client.request("GET", "/api/health").status == 200, "health is not 200")
+            result = self.owner_psql("SELECT usename FROM pg_stat_activity WHERE application_name = 'partflow-api'", "-At")
+            users = result.stdout.split()
+            observed["usenames"] = users
+            check(users, "no partflow-api session in pg_stat_activity")
+            check(all(user == APP_ROLE for user in users), f"a partflow-api session is not {APP_ROLE}")
+        with self.case("SM-32") as observed:
+            cells = {}
+            for table in GUARDED_TABLES:
+                for verb, statement in PROBE_STATEMENTS.items():
+                    sql = statement.format(table=table)
+                    script = (
+                        'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN'
+                        f' -c "SET LOCAL ROLE {APP_ROLE}" -c "{sql}" -c ROLLBACK'
+                    )
+                    result = self.compose("exec", "-T", "db", "sh", "-c", script, check_rc=False, timeout=120)
+                    allowed = PROBE_ALLOWED.get((table, verb))
+                    if allowed:
+                        verdict = "allowed" if allowed in result.stdout and "ERROR" not in result.stderr else "wrong"
+                    else:
+                        verdict = "refused" if f"permission denied for table {table}" in result.stderr else "wrong"
+                    cells[f"{table} {verb}"] = {
+                        "expected": "allowed" if allowed else "refused", "verdict": verdict, "psql_rc": result.returncode,
+                        "stderr": result.stderr.strip()[-200:],
+                    }
+            observed["cells"] = cells
+            wrong = [cell for cell, value in cells.items() if value["verdict"] == "wrong"]
+            check(not wrong, f"cells not as expected: {wrong}")
+        with self.case("SM-33") as observed:
+            result = self.compose("run", "--rm", "--no-deps", "-T", "backend", "python", "-m", "app.cli", "reconcile", "--check", "h",
+                                  check_rc=False, timeout=300)
+            report = parse_report(result.stdout)
+            h = next((c for c in report.get("checks") or [] if c.get("id") == "h"), {})
+            database = report.get("database") or {}
+            observed.update({
+                "rc": result.returncode, "h_status": h.get("status"), "h_examined": h.get("examined"),
+                "h_findings": h.get("findings"), "connected_role": database.get("connected_role"),
+                "connected_role_superuser": database.get("connected_role_superuser"),
+            })
+            check(result.returncode == 0 and report.get("exit_code") == 0, f"reconcile --check h exited {result.returncode}")
+            check(h.get("status") == "pass", f"check (h) is {h.get('status')}")
+            check(database.get("connected_role") == APP_ROLE, "reconcile is not connected as partflow_app")
+            check(database.get("connected_role_superuser") is False, "reconcile is connected as a superuser")
+
+    def sm34(self):
+        with self.case("SM-34") as observed:
+            live = values_of(self.env_file).get("POSTGRES_DB")
+            check(RESTORE_DATABASE != live, f"the restore database name equals the live database {live}")
+            dump = "/tmp/partflow-s4-restore.dump"
+            try:
+                steps = {
+                    "pg_dump": self.compose("exec", "-T", "db", "sh", "-c",
+                                            f'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges -f {dump}',
+                                            check_rc=False, timeout=300),
+                    "createdb": self.compose("exec", "-T", "db", "sh", "-c", f'createdb -U "$POSTGRES_USER" {RESTORE_DATABASE}',
+                                             check_rc=False, timeout=120),
+                }
+                steps["pg_restore"] = self.compose(
+                    "exec", "-T", "db", "sh", "-c",
+                    f'pg_restore -U "$POSTGRES_USER" -d {RESTORE_DATABASE} --exit-on-error --no-owner --no-privileges {dump}',
+                    check_rc=False, timeout=300,
+                )
+                steps["apply-grants"] = self.compose("--profile", "ops", "run", "--rm", "-T", "-e", f"DATABASE_NAME={RESTORE_DATABASE}",
+                                                     "db-roles", "apply-grants", check_rc=False, timeout=300)
+                steps["reconcile"] = self.compose("run", "--rm", "--no-deps", "-T", "-e", f"DATABASE_NAME={RESTORE_DATABASE}", "backend",
+                                                  "python", "-m", "app.cli", "reconcile", "--check", "h", check_rc=False, timeout=300)
+                observed.update({name: result.returncode for name, result in steps.items()})
+                grants = parse_report(steps["apply-grants"].stdout)
+                reconcile = parse_report(steps["reconcile"].stdout)
+                h = next((c for c in reconcile.get("checks") or [] if c.get("id") == "h"), {})
+                observed.update({"grants": grants.get("grants"), "h_status": h.get("status"), "h_findings": h.get("findings")})
+                for name in ("pg_dump", "createdb", "pg_restore"):
+                    check(steps[name].returncode == 0, f"{name} exited {steps[name].returncode}")
+                check(steps["apply-grants"].returncode == 0 and grants.get("result") == "applied", "apply-grants on the restore failed")
+                check(steps["reconcile"].returncode == 0 and h.get("status") == "pass", "(h) does not pass on the restore")
+            finally:
+                cleanup = self.compose("exec", "-T", "db", "sh", "-c",
+                                       f'dropdb -U "$POSTGRES_USER" --if-exists {RESTORE_DATABASE}; rm -f {dump}',
+                                       check_rc=False, timeout=120)
+                observed["cleanup_rc"] = cleanup.returncode
+
+    def sm36(self):
+        with self.case("SM-36") as observed:
+            old = self.read_secret("partflow_app_password")
+            new = secrets.token_urlsafe(24)
+            check(new not in (old, self.read_secret("partflow_maintenance_password")), "the new password is not distinct")
+            self.replace_secret("partflow_app_password", new)
+            self.compose("stop", "backend", timeout=300)
+            rotate = self.compose("--profile", "ops", "run", "--rm", "-T", "db-roles", check_rc=False, timeout=300)
+            report = parse_report(rotate.stdout)
+            observed["db_roles"] = {"rc": rotate.returncode, "result": report.get("result"), "roles": report.get("roles")}
+            self.compose("up", "-d", "--force-recreate", "--no-deps", "backend", timeout=300)
+            observed["health_seconds"] = self.seconds_to_health(30)
+            check(rotate.returncode == 0 and report.get("result") == "provisioned", "db-roles did not rotate the password")
+            check(all(r.get("action") == "unchanged" and r.get("password") == "set" for r in report.get("roles") or []),
+                  "db-roles is not unchanged/set")
+            check(self.user is not None, "not signed in (SM-6 failed)")
+            observed["write"] = self.run_import(self.import_file(5, count=5, prefix="S4ROT", pn_prefix="S4-ROT-PN"), "create", count=5)
+            # Over the container's network address (scram-sha-256; the image trusts the socket and loopback). The
+            # password arrives on stdin; tr drops the line break (a Windows host's text stdin sends CR LF).
+            login = 'PGPASSWORD=$(tr -d "\\r\\n") psql -h db -U ' + APP_ROLE + ' -d "$POSTGRES_DB" -At -c "SELECT current_user"'
+            with_old = self.compose("exec", "-T", "db", "sh", "-c", login, check_rc=False, timeout=60, input_text=old + "\n")
+            with_new = self.compose("exec", "-T", "db", "sh", "-c", login, check_rc=False, timeout=60, input_text=new + "\n")
+            observed["login_old"] = {"rc": with_old.returncode, "stderr": with_old.stderr.strip()[-200:]}
+            observed["login_new"] = {"rc": with_new.returncode, "stdout": with_new.stdout.strip(), "stderr": with_new.stderr.strip()[-200:]}
+            check(with_old.returncode != 0 and "password authentication failed" in with_old.stderr, "the old password is accepted")
+            check(with_new.returncode == 0 and with_new.stdout.strip() == APP_ROLE, "the new password is refused")
+
+    def sm35(self):
+        with self.case("SM-35") as observed:
+            flows = ("SM-6", "SM-7", "SM-8", "SM-9", "SM-21", "SM-31", "SM-36")
+            statuses = {case_id: (self.evidence["cases"].get(case_id) or {}).get("status") for case_id in flows}
+            observed["statuses"] = statuses
+            check(all(status == "pass" for status in statuses.values()), "a write flow through web did not pass as partflow_app")
 
     def sm20(self):
         self.evidence["cases"]["SM-20"] = {
@@ -856,8 +1073,12 @@ class Smoke:
             self.sm10_sm11()
             self.sm21()
             self.sm16()
+            self.sm29_to_sm33()
+            self.sm34()
             self.sm14()
             self.sm17()
+            self.sm36()
+            self.sm35()
             self.sm20()
             statuses = [c["status"] for c in self.evidence["cases"].values()]
             outcome = 1 if "fail" in statuses else 2 if "invalid" in statuses else 0
@@ -882,6 +1103,24 @@ def free_port():
         return probe.getsockname()[1]
 
 
+def parse_report(text):
+    """The one JSON document an app.cli command prints on stdout ({} when stdout is not exactly one object)."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def values_of(env_file):
+    values = {}
+    for line in Path(env_file).read_text(encoding="utf-8").splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, value = line.split("=", 1)
+            values[key] = value
+    return values
+
+
 def display(command, env_extra=None):
     prefix = " ".join(f"{k}={v}" for k, v in (env_extra or {}).items())
     return (prefix + " " if prefix else "") + " ".join(command)
@@ -894,7 +1133,7 @@ def describe(value):
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="P16-S2/S3 production stack smoke (throwaway Compose project).")
+    parser = argparse.ArgumentParser(description="P16-S2/S3/S4 production stack smoke (throwaway Compose project).")
     parser.add_argument("--evidence", required=True, help="path of the evidence JSON to write")
     parser.add_argument("--keep", action="store_true", help="leave the stack running for the manual SM-20 browser check")
     parser.add_argument("--project", default=DEFAULT_PROJECT, help=f"Compose project name (default {DEFAULT_PROJECT})")

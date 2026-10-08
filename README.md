@@ -1065,8 +1065,20 @@ station route must declare `RequireStationDevice` and be classified in
   — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
-  be allowed to create databases (the Compose and CI `partflow_user`
-  is).
+  be a superuser (the Compose and CI `partflow_user` is): the suite
+  creates databases and temporary database roles (`partflow_app_t…`,
+  `partflow_maint_t…`), and some cases set `session_replication_role`.
+
+  CI runs the suite with `PARTFLOW_TEST_DATABASE_ROLE=app`. Every
+  connection to a test database then runs under a temporary application
+  database role, except Alembic, `owner_engine` and `database_owner`
+  modules. Run it locally the same way before committing a change that
+  touches database writes, grants or test setup; the local default stays
+  the owner role:
+
+  ```bash
+  docker compose exec -e PARTFLOW_TEST_DATABASE_ROLE=app backend uv run pytest
+  ```
 
 ### Frontend
 
@@ -1141,21 +1153,41 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 
 `compose.production.yaml` (Compose project `partflow-production`) is the
 production stack: `db`, `backend`, `web` (nginx, published on `127.0.0.1` only)
-and a one-shot `migrate` job. **It is not for development** (use `compose.yaml`),
+and the one-shot `migrate` and `db-roles` jobs. **It is not for development** (use `compose.yaml`),
 it is not started by anything in this repository, and it has not been verified
 on a Synology NAS or a VPS yet (Phase 16 slice 7). Configuration is
 `.env.production` (copy `.env.production.example`, git-ignored) plus the secret
-file `postgres_password` in `PARTFLOW_SECRETS_DIR`. Build and start, from the
-release checkout:
+files `postgres_password`, `partflow_app_password` and
+`partflow_maintenance_password` in `PARTFLOW_SECRETS_DIR` (create all three before
+the first command that starts `backend` or an ops service). The backend connects as
+the least-privilege database role `partflow_app`, never as the owner. Build and
+start, from the release checkout:
 
 ```bash
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF config --quiet
 PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
 $PF up -d db
-$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"
+$PF --profile ops run --rm -T db-roles          # creates partflow_app and partflow_maintenance
+$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"   # also applies the grants
 $PF up -d backend web
 ```
+
+Database roles (Phase 16 slice 4): `db-roles` runs `provision-roles` (create or
+repair the two roles and set their passwords from the secret files; safe to
+repeat); `db-roles apply-grants` re-applies the grants outside a `migrate`
+(after a restore, or to repair drift); `reconcile --check h` verifies them. To
+rotate a role password, replace its file, then:
+
+```bash
+$PF stop backend
+$PF --profile ops run --rm -T db-roles
+$PF up -d --force-recreate --no-deps backend
+```
+
+A plain `up -d backend` does not pick up a new password. The privilege probe,
+the conversion of a stack installed before slice 4 and the owner-password rule
+are in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Later releases run through `deploy/production/release.sh`, which performs the
 release sequence (build, pre-release and post-release reconcile, write freeze,

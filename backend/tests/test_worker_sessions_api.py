@@ -58,6 +58,7 @@ from app.application.errors import NotFoundError
 from app.core.config import get_settings
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
+from tests.conftest import owner_connection
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -1574,7 +1575,8 @@ def test_an_area_deactivation_and_mode_change_waits_for_a_command_without_deadlo
         )
         try:
             _assert_blocked(thread)
-            with db_engine.connect() as probe:
+            # As the owner: an application-role session sees no other session's wait.
+            with owner_connection(db_engine.url) as probe:
                 waiting = list(
                     probe.execute(
                         sa.text(

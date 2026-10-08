@@ -128,18 +128,23 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
 1. Hoàn tất mọi gate ở [`DEPLOYMENT.md`](../DEPLOYMENT.md) §5.
 2. Provision và harden host.
 3. Cài đúng release file/image; ghi digest/commit.
-4. Tạo production secret và database role theo least privilege. Tạo
-   `PARTFLOW_SECRETS_DIR/postgres_password` (một dòng,
-   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; P16-S2) và `.env.production` từ
-   `.env.production.example`. Database role least-privilege là P16-S4
-   (`provision-roles`); cho đến lúc đó backend dùng bootstrap owner role. `PF` bên
-   dưới là `docker compose -f compose.production.yaml --env-file .env.production`.
-5. Start PostgreSQL ở private: `$PF up -d db`.
+4. Tạo production secret và database role theo least privilege. Tạo ba secret
+   file `postgres_password`, `partflow_app_password` và
+   `partflow_maintenance_password` trong `PARTFLOW_SECRETS_DIR` (mỗi file một
+   dòng, [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1) và `.env.production` từ
+   `.env.production.example`, trước mọi lệnh `$PF` khởi động `backend` hoặc một
+   ops service. `PF` bên dưới là `docker compose -f compose.production.yaml
+   --env-file .env.production`. Build cả hai image bằng
+   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`.
+5. Start PostgreSQL ở private: `$PF up -d db`, rồi tạo database role:
+   `$PF --profile ops run --rm -T db-roles` (P16-S4; backend kết nối bằng
+   `partflow_app`, không bao giờ bằng owner).
 6. Tạo database trống trong volume mới (dữ liệu production không bao giờ bắt đầu
    từ dữ liệu staging hay development; restore vào production cần owner quyết
    định, P16-S5).
 7. Chạy migration đúng một lần từ release backend image:
-   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`.
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`;
+   lệnh này cũng áp dụng grant.
 8. Start backend, `web` và host reverse proxy (§4). Với database chưa có
    Administrator, start backend với một worker
    (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, một setup token), hoàn tất
@@ -147,10 +152,21 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
    `$PF logs backend | grep "Setup token"`) trước khi mở truy cập, rồi khởi động
    lại với số worker đã cấu hình (`$PF up -d backend`).
    Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations → `Devices…`).
-9. Chạy smoke test và reconciliation qua HTTPS theo runbook.
+9. Chạy smoke test và reconciliation qua HTTPS theo runbook; reconcile
+   check (h) phải báo `pass`.
 10. Bật lịch monitoring/backup rồi chạy backup ngay.
 11. Thực hiện và đo isolated restore trước khi nhận pilot data.
 12. Chỉ mở nguồn network đã duyệt và bắt đầu pilot có kiểm soát.
+
+Để chuyển một rehearsal stack cài trước P16-S4, theo thứ tự: (1) tạo
+`partflow_app_password` và `partflow_maintenance_password` trước mọi lệnh `$PF`
+của Compose file mới chạy `backend` hoặc `db-roles`; (2) build cả hai image với
+`PARTFLOW_COMMIT` (`PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD)
+$PF -f compose.production.build.yaml build backend web`), không bao giờ chỉ
+`backend`; (3) `$PF --profile ops run --rm -T db-roles`; (4) `$PF --profile ops
+run --rm -T db-roles apply-grants`; (5) `deploy/production/release.sh`
+([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Chuyển một stack cài trước
+P16-S4).
 
 ## 7. Release và rollback
 

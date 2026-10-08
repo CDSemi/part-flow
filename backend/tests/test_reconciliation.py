@@ -51,6 +51,7 @@ from app.domain.enums import MovementType, QuantityFlowStatus
 from app.infrastructure import models
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEMPLATE_DATABASE = "partflow_test_reconciliation"
@@ -636,14 +637,17 @@ class Case(NamedTuple):
     url: URL
     engine: Engine
     scenario: Scenario
+    #: Corruption statements run as the database owner (also in the
+    #: application-role test mode, Phase 16 slice 4).
+    owner: Engine
 
     def execute(self, sql: str, **params: object) -> None:
-        with self.engine.begin() as connection:
+        with self.owner.begin() as connection:
             connection.execute(sa.text(sql), params)
 
     def scalar(self, sql: str, **params: object) -> Any:
         """One value; committed, so an ``INSERT … RETURNING`` persists."""
-        with self.engine.begin() as connection:
+        with self.owner.begin() as connection:
             return connection.execute(sa.text(sql), params).scalar()
 
     def rows(self, sql: str, **params: object) -> list[Any]:
@@ -661,10 +665,12 @@ def case(scenario: Scenario) -> Iterator[Case]:
         )
     url = make_url(os.environ[_DB_URL_ENV]).set(database=_CASE_DATABASE)
     engine = create_engine(url)
+    owner = owner_engine(url)
     try:
-        yield Case(url, engine, scenario)
+        yield Case(url, engine, scenario, owner)
     finally:
         engine.dispose()
+        owner.dispose()
         _drop(admin_engine, _CASE_DATABASE)
         admin_engine.dispose()
 
@@ -924,10 +930,20 @@ def test_clean_scenario_reports_clean(
         "No Movement-history archival exists yet. This check starts with the archival purge."
     )
     assert checks["h"]["status"] == "not_applicable"
+    assert checks["h"]["title"] == "Append-only guards and database-role privileges intact"
     assert checks["h"]["reason"] == (
-        "Database-role hardening is not in place yet. This check starts with it."
+        "The database roles partflow_app and partflow_maintenance do not exist here (a"
+        " development or test database with one owner role). Database-role hardening applies"
+        " to the production stack."
     )
     database = report["database"]
+    # The connected database role depends on the test mode (owner or app role).
+    with case.engine.connect() as connection:
+        role, superuser = connection.execute(
+            sa.text("SELECT rolname, rolsuper FROM pg_roles WHERE rolname = current_user")
+        ).one()
+    assert database["connected_role"] == role
+    assert database["connected_role_superuser"] is superuser
     assert database["transaction_read_only"] is True
     assert database["transaction_isolation"] == "repeatable read"
     assert database["name"] == _CASE_DATABASE
@@ -2075,7 +2091,8 @@ def test_connection_lost_at_the_advisory_guard_keeps_the_results(
     original = reconciliation._held_locks
 
     def terminated(session: Session) -> reconciliation.HeldLocks:
-        with case.engine.connect() as killer:
+        # Terminating another role's session needs the owner.
+        with case.owner.connect() as killer:
             killer.execute(
                 sa.text(
                     "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity"
@@ -2292,12 +2309,13 @@ def test_unexpected_error_keeps_finished_results(
     for check_id in ("a", "b", "c", "d"):
         assert checks[check_id]["status"] == "pass"
     assert (checks["e"]["status"], checks["e"]["error_code"]) == ("error", "internal_error")
-    for check_id in ("f", "i", "j"):
+    # (h) decides its applicability when it runs, so it is not run either.
+    for check_id in ("f", "h", "i", "j"):
         assert (checks[check_id]["status"], checks[check_id]["error_code"]) == (
             "error",
             "not_run",
         )
-    assert checks["g"]["status"] == checks["h"]["status"] == "not_applicable"
+    assert checks["g"]["status"] == "not_applicable"
     assert "RuntimeError: defect in check e" in result.stderr
     assert "Traceback" in result.stderr
 
@@ -2317,7 +2335,8 @@ def test_schema_revision_mismatch(case: Case, run: Callable[..., Run]) -> None:
     case.execute("UPDATE alembic_version SET version_num = :revision", revision=previous)
     result = run(case.url)
     checks = _checks(result.report)
-    for check_id in ("a", "b", "c", "d", "e", "f", "i"):
+    # (h) compares with this code head's guard state (Phase 16 slice 4, DV-5).
+    for check_id in ("a", "b", "c", "d", "e", "f", "h", "i"):
         assert (checks[check_id]["status"], checks[check_id]["error_code"]) == (
             "error",
             "schema_mismatch",

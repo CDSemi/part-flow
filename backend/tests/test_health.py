@@ -26,6 +26,7 @@ from app.core.config import get_settings
 from app.infrastructure import schema_revision
 from app.infrastructure.database import DatabaseUnavailableError
 from app.main import create_app
+from tests.conftest import owner_engine
 
 _HEAD = schema_revision.code_head()
 _PREVIOUS = "0031_phase14_beyond_demand"
@@ -203,24 +204,32 @@ def test_read_database_revision_on_a_temporary_database() -> None:
     """H-7: no table → None; one row → it; two rows → joined in ascending order."""
     admin_engine = create_engine(make_url(os.environ["DATABASE_URL"]), isolation_level="AUTOCOMMIT")
     engine: Engine | None = None
+    owner: Engine | None = None
     try:
         with admin_engine.connect() as connection:
             connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{_TEST_DATABASE}" WITH (FORCE)'))
             connection.execute(sa.text(f'CREATE DATABASE "{_TEST_DATABASE}"'))
-        engine = create_engine(make_url(os.environ["DATABASE_URL"]).set(database=_TEST_DATABASE))
+        url = make_url(os.environ["DATABASE_URL"]).set(database=_TEST_DATABASE)
+        engine = create_engine(url)
+        # Setup DDL and writes as the owner (application-role test mode);
+        # a new pooled connection then sees the table's grant.
+        owner = owner_engine(url)
         assert schema_revision.read_database_revision(engine) is None
-        with engine.begin() as connection:
+        with owner.begin() as connection:
             connection.execute(sa.text("CREATE TABLE alembic_version (version_num varchar(32))"))
+        engine.dispose()
         assert schema_revision.read_database_revision(engine) is None
-        with engine.begin() as connection:
+        with owner.begin() as connection:
             connection.execute(sa.text("INSERT INTO alembic_version VALUES ('b_second')"))
         assert schema_revision.read_database_revision(engine) == "b_second"
-        with engine.begin() as connection:
+        with owner.begin() as connection:
             connection.execute(sa.text("INSERT INTO alembic_version VALUES ('a_first')"))
         assert schema_revision.read_database_revision(engine) == "a_first,b_second"
     finally:
         if engine is not None:
             engine.dispose()
+        if owner is not None:
+            owner.dispose()
         with admin_engine.connect() as connection:
             connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{_TEST_DATABASE}" WITH (FORCE)'))
         admin_engine.dispose()

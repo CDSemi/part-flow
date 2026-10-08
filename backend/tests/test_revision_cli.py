@@ -29,6 +29,7 @@ from alembic import command
 from app import cli
 from app.core.config import get_settings
 from app.infrastructure import schema_revision
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
@@ -61,7 +62,8 @@ def _temporary_database(prepare: Callable[[URL], None]) -> Iterator[URL]:
 
 
 def _unknown(url: URL) -> None:
-    engine = create_engine(url)
+    # Setup DDL as the owner (application-role test mode).
+    engine = owner_engine(url)
     try:
         with engine.begin() as connection:
             connection.execute(sa.text("CREATE TABLE alembic_version (version_num varchar(32))"))

@@ -59,6 +59,7 @@ from tests.auth_harness import (
     station_device_client,
     station_device_headers,
 )
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_management_authorization_api"
@@ -1511,17 +1512,22 @@ def test_a_command_recorded_before_sign_in_is_not_replayed_to_a_user(
     body = _allocation_body(pn, demand, 2)
     _ok(editor.post("/api/allocations/management", json=body), 201)
     # Simulate a pre-slice-3 row: the append-only trigger is lifted for
-    # this one test UPDATE only.
-    with db_engine.begin() as connection:
-        connection.execute(sa.text("ALTER TABLE work_order_allocations DISABLE TRIGGER USER"))
-        connection.execute(
-            sa.text(
-                "UPDATE work_order_allocations SET actor_user_id = NULL"
-                " WHERE device_event_id = :event"
-            ),
-            {"event": body["device_event_id"]},
-        )
-        connection.execute(sa.text("ALTER TABLE work_order_allocations ENABLE TRIGGER USER"))
+    # this one test UPDATE only (as the owner, also in the application-role
+    # test mode).
+    owner = owner_engine(db_engine.url)
+    try:
+        with owner.begin() as connection:
+            connection.execute(sa.text("ALTER TABLE work_order_allocations DISABLE TRIGGER USER"))
+            connection.execute(
+                sa.text(
+                    "UPDATE work_order_allocations SET actor_user_id = NULL"
+                    " WHERE device_event_id = :event"
+                ),
+                {"event": body["device_event_id"]},
+            )
+            connection.execute(sa.text("ALTER TABLE work_order_allocations ENABLE TRIGGER USER"))
+    finally:
+        owner.dispose()
     _recorded_by_another(
         _refused_without_writes(
             db_engine, None, lambda: editor.post("/api/allocations/management", json=body)

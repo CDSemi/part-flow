@@ -28,8 +28,12 @@ comparators and set-based SQL.
 Check (j) re-evaluates the canonical identities under the RUNNING
 interpreter (Unicode tables) and the RUNNING database server (its libc,
 the database collation and ctype) — the platform-upgrade identity
-check. Checks (g) and (h) report ``not_applicable`` until Movement
-history archival and database-role hardening exist.
+check. Check (g) reports ``not_applicable`` until Movement history
+archival exists. Check (h) (Phase 16 slice 4) verifies guard integrity —
+guard triggers and functions, database-role privileges and attributes,
+``session_replication_role`` — through ``database_roles.guard_integrity``;
+it reports ``not_applicable`` on a database without the PartFlow
+database roles (development, test, staging).
 """
 
 import datetime
@@ -53,7 +57,9 @@ from app.application import (
     projections,
     work_orders,
 )
+from app.application.database_roles import DatabaseRoles, configured_roles, guard_integrity
 from app.application.errors import ConflictError
+from app.core.config import get_settings
 from app.domain.enums import (
     AuditEntityType,
     AuditEventType,
@@ -65,6 +71,7 @@ from app.domain.enums import (
 )
 from app.domain.part_number import InvalidPartNumberError, normalize_part_number
 from app.domain.worker_badge import InvalidBadgeBarcodeError, normalize_badge_barcode
+from app.infrastructure.database_privileges import GUARD_TABLES
 from app.infrastructure.models import (
     ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT,
     AREA_BARCODE_SQL,
@@ -99,7 +106,7 @@ CHECK_TITLES: Final[Mapping[str, str]] = {
     "e": "Release evidence and Work Order status",
     "f": "Allocations and Work Order completion",
     "g": "Retained Movements reference no purged row",
-    "h": "Append-only tables changed only through an approved path",
+    "h": "Append-only guards and database-role privileges intact",
     "i": "Hot list entries are active demand",
     "j": "Canonical identity under the running interpreter and database",
 }
@@ -129,7 +136,7 @@ CHECK_TABLES: Final[Mapping[str, tuple[str, ...]]] = {
     "e": _WORK_ORDER_TABLES,
     "f": _WORK_ORDER_TABLES,
     "g": (),
-    "h": (),
+    "h": GUARD_TABLES,
     "i": ("work_order_demands", "work_orders"),
     "j": (
         "areas",
@@ -146,11 +153,11 @@ CHECK_TABLES: Final[Mapping[str, tuple[str, ...]]] = {
 }
 
 #: Checks that run whatever the database's schema revision: (j) reads
-#: only identity columns stable across revisions; (g)/(h) read nothing.
-_REVISION_INDEPENDENT: Final = frozenset({"g", "h", "j"})
+#: only identity columns stable across revisions; (g) reads nothing. (h)
+#: compares the database with the guard state of this code's head.
+_REVISION_INDEPENDENT: Final = frozenset({"g", "j"})
 _NOT_APPLICABLE: Final[Mapping[str, str]] = {
     "g": "No Movement-history archival exists yet. This check starts with the archival purge.",
-    "h": "Database-role hardening is not in place yet. This check starts with it.",
 }
 _REPLAY_CHECKS: Final = frozenset({"a", "c", "d"})
 
@@ -376,6 +383,8 @@ def report_document(report: ReconciliationReport) -> dict[str, object]:
 class _Outcome(NamedTuple):
     examined: dict[str, int]
     findings: list[Finding]
+    #: Set when the runner decided the check does not apply here (h).
+    not_applicable_reason: str | None = None
 
 
 class _ReplayFailedError(Exception):
@@ -410,9 +419,17 @@ class _WorkOrder(NamedTuple):
 class _Context:
     """The run's session and the shared inputs, each loaded once when needed."""
 
-    def __init__(self, session: Session, database: Mapping[str, object]) -> None:
+    def __init__(
+        self,
+        session: Session,
+        database: Mapping[str, object],
+        roles: DatabaseRoles,
+        roles_required: bool,
+    ) -> None:
         self.session = session
         self.database = database
+        self.roles = roles
+        self.roles_required = roles_required
         self._flows: dict[int, _Flow] | None = None
         self._latest_types: dict[int, str] | None = None
         self._consumed: set[int] | None = None
@@ -592,7 +609,8 @@ def _database_block(session: Session) -> dict[str, object]:
     row = session.execute(
         text(
             "SELECT current_database() AS name, current_setting('server_version') AS version,"
-            " d.datcollate, d.datctype, d.datcollversion, d.oid"
+            " d.datcollate, d.datctype, d.datcollversion, d.oid, current_user AS role,"
+            " (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser"
             " FROM pg_database d WHERE d.datname = current_database()"
         )
     ).one()
@@ -620,6 +638,8 @@ def _database_block(session: Session) -> dict[str, object]:
         "ctype": row.datctype,
         "collation_version_recorded": row.datcollversion,
         "collation_version_actual": actual_version,
+        "connected_role": row.role,
+        "connected_role_superuser": bool(row.superuser),
     }
 
 
@@ -680,6 +700,8 @@ def run_reconciliation(
     statement_timeout_seconds: int = DEFAULT_STATEMENT_TIMEOUT_SECONDS,
     max_findings: int = DEFAULT_MAX_FINDINGS,
     expected_alembic_revision: str | None = None,
+    database_roles: DatabaseRoles | None = None,
+    roles_required: bool | None = None,
 ) -> ReconciliationReport:
     """Run the selected checks in one read-only snapshot; never writes.
 
@@ -687,9 +709,13 @@ def run_reconciliation(
     skips the comparison): when the database is at another revision,
     every selected check except (j) reports ``schema_mismatch`` without
     running. Run-level failures before the first check return a report
-    with no checks and ``error`` set.
+    with no checks and ``error`` set. ``database_roles`` (default: the
+    configured PartFlow names) and ``roles_required`` (default: the
+    ``DATABASE_ROLES_REQUIRED`` setting) decide check (h).
     """
     selected = _selected(checks)
+    roles = configured_roles() if database_roles is None else database_roles
+    required = get_settings().database_roles_required if roles_required is None else roles_required
     statement_timeout = int(statement_timeout_seconds)
     lock_timeout = int(LOCK_TIMEOUT_SECONDS)
     started_at = _now()
@@ -759,6 +785,8 @@ def run_reconciliation(
                 statement_timeout_seconds=statement_timeout,
                 max_findings=max_findings,
                 expected_alembic_revision=expected_alembic_revision,
+                roles=roles,
+                roles_required=required,
             )
             # 8. No advisory lock may ever be taken by a reconciliation run
             # (skipped once the run already stopped on an error).
@@ -779,6 +807,8 @@ def _run_checks(
     statement_timeout_seconds: int,
     max_findings: int,
     expected_alembic_revision: str | None,
+    roles: DatabaseRoles,
+    roles_required: bool,
 ) -> tuple[list[CheckResult], RunError | None]:
     runners: dict[str, Callable[[_Context], _Outcome]] = {
         "a": _check_a,
@@ -787,10 +817,11 @@ def _run_checks(
         "d": _check_d,
         "e": _check_e,
         "f": _check_f,
+        "h": _check_h,
         "i": _check_i,
         "j": _check_j,
     }
-    context = _Context(session, database)
+    context = _Context(session, database, roles, roles_required)
     revision = database["alembic_revision"]
     schema_differs = expected_alembic_revision is not None and revision != expected_alembic_revision
     results: list[CheckResult] = []
@@ -877,6 +908,9 @@ def _run_one_check(
             _check_error(check_id, "internal_error", reason, _elapsed_ms(started)),
             RunError("internal_error", RUN_ERROR_MESSAGES["internal_error"], exc),
         )
+    if outcome.not_applicable_reason is not None:
+        reason = outcome.not_applicable_reason
+        return _check_result(check_id, "not_applicable", reason=reason), None
     status = "fail" if outcome.findings else "pass"
     result = _check_result(
         check_id,
@@ -2030,6 +2064,31 @@ def _identity_key_findings(context: _Context) -> list[Finding]:
                 )
             )
     return findings
+
+
+# ---------------------------------------------------------------------------
+# (h) Append-only guards and database-role privileges intact
+# ---------------------------------------------------------------------------
+
+
+def _check_h(context: _Context) -> _Outcome:
+    """Guard integrity (OD-16-09), read from the catalogs inside the snapshot."""
+    integrity = guard_integrity(
+        context.session.connection(), roles=context.roles, required=context.roles_required
+    )
+    findings = [
+        Finding(
+            finding.code,
+            finding.entity_type,
+            finding.entity_id,
+            None,
+            finding.expected,
+            finding.actual,
+            finding.detail,
+        )
+        for finding in integrity.findings
+    ]
+    return _Outcome(integrity.examined, findings, integrity.not_applicable_reason)
 
 
 def _check_j(context: _Context) -> _Outcome:

@@ -177,7 +177,7 @@ Columns per PROJECT_PROFILE §8.11, with slice-relevant shape:
 - `occurred_at`, `server_received_at` — see §14.
 - `device_event_id` NOT NULL UNIQUE — idempotency key (§14).
 - `metadata` carries the deterministic request fingerprint (§14) and records the signed-in User who released it as `context.actor_user_id` (Phase 14 slice 3; server-derived, never a request value; older releases carry none) and may capture the initiating WorkOrderDemand context for audit display; none of this creates ownership — WorkOrderDemand never owns Movement (§3).
-- Immutable: insert-only; UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, per the PostgreSQL-constraints-first rule. This guard binds the application at all times; the later Movement-history retention maintenance (PROJECT_PROFILE §28, roadmap Phase 16) runs through a separate privileged Admin path and is out of this slice.
+- Immutable: insert-only; UPDATE/DELETE revoked from the application role plus a raise-on-write trigger (the revocation is applied by `apply-grants` on the production stack, Phase 16 slice 4; development and test databases keep one owner role), per the PostgreSQL-constraints-first rule. This guard binds the application at all times; the later Movement-history retention maintenance (PROJECT_PROFILE §28, roadmap Phase 16) runs through a separate privileged Admin path and is out of this slice.
 
 ---
 
@@ -291,7 +291,7 @@ Event mapping in this slice: Work Order create/edit → `CREATED`/`UPDATED` on `
 Rules:
 
 - Every audit row commits in the **same transaction** as the change it records; an audited write without its audit row (or vice versa) must be impossible.
-- Audit rows are append-only: UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, exactly like `part_movements`. The trigger ships with the Slice 1 migration; the application-role revocation arrives with deployment hardening once a distinct application database role exists (IMPLEMENTATION_ROADMAP Phases 3 and 16) — the same deferral as `part_movements`, and the trigger already binds every non-superuser path.
+- Audit rows are append-only: UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, exactly like `part_movements`. The trigger ships with the Slice 1 migration; the application-role revocation is applied by `apply-grants` (Phase 16 slice 4, IMPLEMENTATION_ROADMAP) on the production stack, where the backend connects as `partflow_app`; the development and test databases keep one owner role.
 - Edits append a new `UPDATED` row; prior rows are never rewritten.
 
 ---
@@ -346,6 +346,18 @@ Every table above exists in and is used by this slice; the Slice 1 migration con
 
 Cross-row invariants PostgreSQL cannot express declaratively (projection agrees with latest Movement; first Movement of a flow is `RECEIVED`; a Movement's `assigned_route_step_id` agrees with its flow's route mode and belongs to that flow's own AssignedRoute, §11; every audited change commits with its audit row; one canonical PN at most once among a Work Order's current demand lines, §5) are enforced by the transaction protocol (§13, §16 — including the WorkOrder row lock that serializes demand-line addition) and verified by replay/reconciliation checks (§15) and concurrency tests.
 
+**Database roles and grants (Phase 16 slice 4, no migration).** Privileges are not part of any migration: they are derived from one table classification in code (`backend/app/infrastructure/database_privileges.py`) and applied by `python -m app.cli apply-grants`, which every `migrate` also runs in its own transaction. The production stack has three database roles: the owner (`POSTGRES_USER`, a superuser; owns every object; used only by `db`, `migrate` and `db-roles`), `partflow_app` (used by the backend) and `partflow_maintenance` (provisioned, used by no service until the archival slice). Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
+
+| Class | `partflow_app` privileges | Tables (29 at head `0032_phase14_route_adjusted`) |
+|---|---|---|
+| `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
+| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
+| `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
+| `READ_ONLY` | SELECT | `alembic_version` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
+
+`partflow_maintenance` holds SELECT only, on `alembic_version`, `application_policy`, `areas`, `machines`, `operations`, `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`, `scan_stations`, `users`, `worker_sessions` and `workers`. Neither role holds any sequence privilege (identity columns), `CREATE` on schema `public` or on the database; PUBLIC holds nothing on any PartFlow table or sequence; default privileges for PUBLIC and both roles are removed. The column guards on `areas` and `machines` stay trigger-only. Grants are never restored from a dump: they are re-derived from the code head by every `migrate` and by `apply-grants` after a restore. A new table must be classified in the same commit (a test fails otherwise, and `apply-grants` and `migrate` refuse an unclassified table). Reconcile check (h) verifies the result (triggers, guard-function source hashes, grants, role attributes) and reports `not_applicable` on a database without the roles. A superuser that disables a trigger is outside detection (accepted, IMPLEMENTATION_ROADMAP Phase 16).
+
 ---
 
 ## 18. Explicitly Deferred Capabilities
@@ -389,7 +401,7 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 9. Reusing a `device_event_id` with a different normalized request (mismatched fingerprint) returns an explicit idempotency-conflict error and creates nothing.
 10. Editing a RouteTemplate after release does not change any AssignedRoute snapshot, and template edits never alter the route context recorded by any existing Movement.
 11. The projection rebuild procedure reproduces `current_area_id` for every flow from Movement history alone.
-12. `part_movements` and `audit_events` rows cannot be updated or deleted by the application role (trigger/permission verified by test).
+12. `part_movements` and `audit_events` rows cannot be updated or deleted by the application role (trigger/permission verified by test) (trigger: schema tests; permission: `tests/test_database_roles.py` GR-1 and the suite under the application role).
 13. Every WorkOrder and WorkOrderDemand creation or edit appends an `audit_events` row (`CREATED`/`UPDATED` with `before_data`/`after_data`) in the same transaction as the change; edits preserve all prior audit rows unchanged (append-only history, verified by test).
 14. `audit_events` contains rows only for `WorkOrder`, `WorkOrderDemand`, and `PartNumber` — never for production release or any other production activity (constraint- and test-verified).
 15. Conservation holds: Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).

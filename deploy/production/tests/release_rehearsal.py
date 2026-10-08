@@ -20,10 +20,28 @@ the rehearsal image tags partflow/{backend,web}:s3-rh-{a,b,c,d} (unless --keep, 
 Evidence JSON: per case pass / fail / manual with the observed answers (never a password, token or cookie value),
 the release.sh records and outputs (exit codes, steps), probe timelines and latencies. Exit 0 = every automated case
 passed; 1 = a case failed or the run broke.
+
+Amended by P16-S4 (P16-S4 SPEC section 6.5; run it with --project partflow-s4-rehearsal): the secrets directory holds
+the three secret files and the database roles are provisioned (`--profile ops run --rm -T db-roles`) before release
+A's first migrate, so backend runs as partflow_app throughout RH-1..RH-10. New, on its own throwaway project
+`partflow-s4-rh11` (--rh11-project; edge 172.30.253.0/24; torn down and its image tags removed like the main project):
+- RH-11b: release A0 = images built from `git archive 7b24d10` (that commit's backend/, frontend/ and production
+  Compose files) with PARTFLOW_COMMIT=7b24d10..., installed with that commit's compose.production.yaml (owner
+  credential on backend, no database roles, postgres_password only). Without the two role files, release.sh with the
+  S4 checkout stops at step 0 preflight (exit 1 stopped_unchanged, naming partflow_app_password): no service started
+  or stopped, no image built, revision and ACLs unchanged, no directory created in the secrets directory.
+- RH-11: conversion of that pre-S4 stack (DEPLOYMENT §3.1): with the role files, release.sh stops at step 1
+  current_revision (A0 as partflow_app cannot log in) with nothing changed; then the B images are built with
+  PARTFLOW_COMMIT=HEAD, `db-roles` and `db-roles apply-grants` run, and release.sh B completes without a freeze
+  (migrate already_current with the grants applied, the build reused), backend sessions are partflow_app and (h) passes.
+RH-11b runs on the fresh A0 install before RH-11 (it changes nothing), so one A0 install serves both.
+--cases main|rh11 runs one part only (default: both).
 """
 import argparse
 import contextlib
 import datetime
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -34,6 +52,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -49,6 +68,7 @@ from stack_smoke import (  # noqa: E402  (the stack smoke's HTTP client and help
     check,
     display,
     free_port,
+    parse_report,
 )
 
 REPO = Path(__file__).resolve().parents[3]
@@ -70,6 +90,20 @@ COPY_IGNORE = shutil.ignore_patterns(
     "node_modules", "dist", "coverage", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"
 )
 _HOST_VARIABLE_PREFIXES = ("PARTFLOW_", "POSTGRES_", "COMPOSE_")
+# P16-S4: the database-role secrets; RH-11 converts a stack installed from the P16-S3 commit.
+ROLE_SECRETS = ("partflow_app_password", "partflow_maintenance_password")
+APP_ROLE = "partflow_app"
+DEFAULT_RH11_PROJECT = "partflow-s4-rh11"
+RH11_EDGE_SUBNET = "172.30.253.0/24"
+RH11_RELEASES = {"A0": "s4-rh11-a0", "B": "s4-rh11-b"}
+PRE_S4_COMMIT = "7b24d1052ef9c7c92a9ec6230aa43d4651f05208"
+PRE_S4_PATHS = ("backend", "frontend", "compose.production.yaml", "compose.production.build.yaml")
+ACL_SNAPSHOT_SQL = (
+    "select coalesce(string_agg(c.relname || ':' || coalesce(c.relacl::text, '-'), ';' order by c.relname), '')"
+    " || '|' || (select coalesce(nspacl::text, '-') from pg_namespace where nspname = 'public')"
+    " || '|' || (select coalesce(datacl::text, '-') from pg_database where datname = current_database())"
+    " from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')"
+)
 ROW_COUNTS_SQL = (
     "select string_agg(table_name || '=' || (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from"
     " public.%I', table_name), false, true, '')))[1]::text, ',' order by table_name) from information_schema.tables"
@@ -195,17 +229,37 @@ class Prober(threading.Thread):
             self.stop_event.wait(0.5)
 
 
+def copy_checkout(destination):
+    """backend/, frontend/ and both production Compose files of the working tree (the repository is never modified)."""
+    destination.mkdir()
+    for name in ("backend", "frontend"):
+        shutil.copytree(REPO / name, destination / name, ignore=COPY_IGNORE)
+    for path in (COMPOSE_FILE, BUILD_FILE):
+        shutil.copyfile(path, destination / path.name)
+
+
+def write_secret_files(directory, names):
+    """Each secret file a distinct 32-character value (P16-S4: the role passwords differ from each other)."""
+    for name in names:
+        path = directory / name
+        path.write_text(secrets.token_urlsafe(24) + "\n", encoding="utf-8")
+        os.chmod(path, 0o444)
+
+
 class Rehearsal:
-    def __init__(self, args):
+    releases = RELEASES
+    edge_subnet = EDGE_SUBNET
+
+    def __init__(self, args, project=None, evidence=None):
         self.args = args
-        self.project = args.project
+        self.project = project or args.project
         self.workdir = Path(tempfile.mkdtemp(prefix="pf-s3-rehearsal-"))
         self.port = free_port()
         self.client = Client(self.port)
         self.created = False
         self.built = []
-        self.evidence = {
-            "slice": "P16-S3",
+        self.evidence = evidence if evidence is not None else {
+            "slice": "P16-S3 (amended by P16-S4)",
             "project": self.project,
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "host": {"platform": platform.platform(), "python": platform.python_version()},
@@ -239,12 +293,12 @@ class Rehearsal:
             raise CaseFailure(f"exit {result.returncode}: {display(command, env_extra)}\n{(result.stdout + result.stderr)[-1500:]}")
         return result
 
-    def compose(self, *arguments, release=None, **kwargs):
+    def compose(self, *arguments, release=None, compose_file=COMPOSE_FILE, **kwargs):
         """`$PF -p <project>` with the generated env file; `release` puts a candidate tag in the shell."""
         env_extra = dict(kwargs.pop("env_extra", None) or {})
         if release is not None:
             env_extra["PARTFLOW_RELEASE"] = release
-        command = ["docker", "compose", "-p", self.project, "-f", str(COMPOSE_FILE), "--env-file", str(self.env_file)]
+        command = ["docker", "compose", "-p", self.project, "-f", str(compose_file), "--env-file", str(self.env_file)]
         return self.run(command + list(arguments), env_extra=env_extra, **kwargs)
 
     def container(self, service):
@@ -262,7 +316,7 @@ class Rehearsal:
             "PARTFLOW_SECRETS_DIR": self.secrets_dir.as_posix(),
             "PARTFLOW_SITE_TIMEZONE": "UTC",
             "PARTFLOW_HTTP_PORT": str(self.port),
-            "PARTFLOW_EDGE_SUBNET": EDGE_SUBNET,
+            "PARTFLOW_EDGE_SUBNET": self.edge_subnet,
         }
         lines = []
         for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
@@ -318,9 +372,7 @@ class Rehearsal:
     def prepare(self):
         self.secrets_dir = self.workdir / "secrets"
         self.secrets_dir.mkdir()
-        password_file = self.secrets_dir / "postgres_password"
-        password_file.write_text(secrets.token_urlsafe(24) + "\n", encoding="utf-8")
-        os.chmod(password_file, 0o444)
+        write_secret_files(self.secrets_dir, ("postgres_password", *ROLE_SECRETS))
         self.env_file = self.workdir / "rehearsal.env"
         self.records = self.workdir / "records"
         self.set_env(RELEASES["A"])
@@ -328,11 +380,7 @@ class Rehearsal:
         # A: the checkout (working tree) as the build context; B, D add rehearsal-only revisions.
         self.sources = {}
         source_a = self.workdir / "src-a"
-        source_a.mkdir()
-        for name in ("backend", "frontend"):
-            shutil.copytree(REPO / name, source_a / name, ignore=COPY_IGNORE)
-        for path in (COMPOSE_FILE, BUILD_FILE):
-            shutil.copyfile(path, source_a / path.name)
+        copy_checkout(source_a)
         self.code_head = alembic_head(source_a / "backend" / "alembic" / "versions")
         source_b = self.workdir / "src-b"
         shutil.copytree(source_a, source_b)
@@ -347,14 +395,14 @@ class Rehearsal:
         self.sources = {"A": source_a, "B": source_b, "C": source_b, "D": source_d}
         self.evidence.update({"port": self.port, "edge_subnet": EDGE_SUBNET, "commit": self.head, "code_head": self.code_head})
 
-    def build(self, name):
+    def build(self, name, commit=None):
         source = self.sources[name]
-        tag = RELEASES[name]
+        tag = self.releases[name]
         self.built.append(tag)
         self.run(
             ["docker", "compose", "-p", self.project, "-f", str(source / COMPOSE_FILE.name), "--env-file", str(self.env_file),
              "-f", str(source / BUILD_FILE.name), "build", "backend", "web"],
-            timeout=2400, env_extra={"PARTFLOW_RELEASE": tag, "PARTFLOW_COMMIT": self.head},
+            timeout=2400, env_extra={"PARTFLOW_RELEASE": tag, "PARTFLOW_COMMIT": commit or self.head},
         )
 
     def health(self, timeout=10):
@@ -385,7 +433,7 @@ class Rehearsal:
         raise CaseFailure(f"{service} is not healthy within {seconds} s (last {status})")
 
     def release(self, name, *extra):
-        tag = RELEASES[name]
+        tag = self.releases[name]
         result = self.run(
             ["sh", RELEASE_SH.as_posix(), "--release", tag, "--operator", "S3 rehearsal", "--approver", "S3 rehearsal",
              "--no-backup-reason", "s3 rehearsal: throwaway database", "--env-file", self.env_file.as_posix(),
@@ -406,13 +454,21 @@ class Rehearsal:
             for name in ("A", "B", "C", "D"):
                 self.build(name)
             self.compose("up", "-d", "--wait", "db", timeout=300)
+            # P16-S4 first-install order: the database roles before the first migrate (which applies the grants).
+            roles = self.compose("--profile", "ops", "run", "--rm", "-T", "db-roles", timeout=300, check_rc=False)
+            roles_report = parse_report(roles.stdout)
+            observed["db_roles"] = {"rc": roles.returncode, "result": roles_report.get("result"),
+                                    "actions": [r.get("action") for r in roles_report.get("roles") or []]}
+            check(roles.returncode == 0 and roles_report.get("result") == "provisioned", "db-roles did not provision the roles")
             migrate = self.compose("--profile", "ops", "run", "--rm", "-T", "migrate", "--no-backup-reason",
                                    "first install: empty database", timeout=300, check_rc=False)
             report = json.loads(migrate.stdout)
             observed["migrate"] = {"rc": migrate.returncode, "result": report.get("result"),
-                                   "revision_after": report.get("revision_after"), "applied": len(report.get("applied_revisions") or [])}
+                                   "revision_after": report.get("revision_after"), "applied": len(report.get("applied_revisions") or []),
+                                   "grants": (report.get("grants") or {}).get("status")}
             check(migrate.returncode == 0 and report.get("result") == "upgraded", "first-install migrate did not upgrade")
             check(report.get("revision_after") == self.code_head, "first install is not at the code head")
+            check((report.get("grants") or {}).get("status") == "applied", "first-install migrate did not apply the grants")
             self.compose("up", "-d", "backend", "web", timeout=300, env_extra={"PARTFLOW_BACKEND_WORKERS": "1"})
             answer, body = self.wait_for(lambda a, b: getattr(a, "status", None) == 200, 120, "health 200 on A")
             observed["health"] = body
@@ -458,7 +514,9 @@ class Rehearsal:
             check(record["migration"]["result"] == "upgraded", "migrate did not upgrade")
             migrate = json.loads(next(self.records.glob(f"*-{RELEASES['B']}/migrate.json")).read_text(encoding="utf-8"))
             observed["applied"] = migrate.get("applied_revisions")
+            observed["grants"] = (migrate.get("grants") or {}).get("status")
             check(migrate.get("applied_revisions") == [NOOP_REVISION], "not exactly the rehearsal revision applied")
+            check(observed["grants"] == "applied", "the release migrate did not apply the grants (P16-S4)")
             check(record["reconcile"]["post"]["exit_code"] == 0 and record["smoke"]["exit_code"] == 0, "post reconcile or smoke")
             check(self.container("backend") != before, "backend was not recreated")
             verdict = probe_verdict(samples, RELEASES["A"], RELEASES["B"])
@@ -647,10 +705,13 @@ class Rehearsal:
             return
         if self.created:
             with contextlib.suppress(CaseFailure):
-                self.compose("down", "-v", "--remove-orphans", timeout=600)
+                self.compose("down", "-v", "--remove-orphans", timeout=600, compose_file=self.teardown_compose_file())
         for tag in self.built:
             for service in ("backend", "web"):
                 self.run(["docker", "image", "rm", f"partflow/{service}:{tag}"], check_rc=False)
+
+    def teardown_compose_file(self):
+        return COMPOSE_FILE
 
     def remove_workdir(self):
         if self.args.keep:
@@ -661,39 +722,225 @@ class Rehearsal:
                     os.chmod(path, 0o600)
         shutil.rmtree(self.workdir, ignore_errors=True)
 
-    def main(self):
-        self.refuse_foreign_project()
-        outcome = 1
+    def execute(self):
+        """Prepare, run the cases and tear down; a run-stopping error is recorded under run_errors[project]."""
         try:
             self.prepare()
             self.created = True
-            self.rh1_install_a()
-            if self.evidence["cases"]["RH-1"]["status"] != "pass":
-                raise CaseFailure("RH-1 failed: the later cases need release A installed")
-            self.rh2_release_b()
-            self.rh3_stale_client()
-            self.rh4_rollback_path2()
-            self.rh5_forward_from_path2()
-            self.rh6_rollback_path1()
-            self.rh7_freeze_with_import()
-            self.rh8_migrate_with_backend_connected()
-            self.rh10_health_cost()
-            self.rh9_manual()
-            statuses = [c["status"] for c in self.evidence["cases"].values()]
-            outcome = 1 if "fail" in statuses else 0
-        except (CaseFailure, OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
-            self.evidence["run_error"] = f"{type(exc).__name__}: {exc}"
-            print(f"run error: {exc}", file=sys.stderr, flush=True)
+            self.run_cases()
+        except (CaseFailure, OSError, subprocess.SubprocessError, ValueError, KeyError, tarfile.TarError) as exc:
+            self.evidence.setdefault("run_errors", {})[self.project] = f"{type(exc).__name__}: {exc}"
+            print(f"run error ({self.project}): {exc}", file=sys.stderr, flush=True)
         finally:
             self.teardown()
             self.remove_workdir()
-            self.evidence["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-            self.evidence["outcome"] = {0: "pass", 1: "fail"}[outcome]
-            evidence_path = Path(self.args.evidence)
-            evidence_path.parent.mkdir(parents=True, exist_ok=True)
-            evidence_path.write_text(json.dumps(self.evidence, indent=2, default=str) + "\n", encoding="utf-8")
-            print(f"evidence: {evidence_path} ({self.evidence['outcome']})", flush=True)
-        return outcome
+
+    def run_cases(self):
+        self.rh1_install_a()
+        if self.evidence["cases"]["RH-1"]["status"] != "pass":
+            raise CaseFailure("RH-1 failed: the later cases need release A installed")
+        self.rh2_release_b()
+        self.rh3_stale_client()
+        self.rh4_rollback_path2()
+        self.rh5_forward_from_path2()
+        self.rh6_rollback_path1()
+        self.rh7_freeze_with_import()
+        self.rh8_migrate_with_backend_connected()
+        self.rh10_health_cost()
+        self.rh9_manual()
+
+
+class Conversion(Rehearsal):
+    """RH-11b and RH-11 (P16-S4 SPEC section 6.5): a stack installed from the P16-S3 commit, converted to S4."""
+
+    releases = RH11_RELEASES
+    edge_subnet = RH11_EDGE_SUBNET
+
+    def prepare(self):
+        self.secrets_dir = self.workdir / "secrets"
+        self.secrets_dir.mkdir()
+        # A pre-S4 installation: the owner password only (RH-11b runs without the role files).
+        write_secret_files(self.secrets_dir, ("postgres_password",))
+        self.env_file = self.workdir / "rh11.env"
+        self.records = self.workdir / "records"
+        self.set_env(self.releases["A0"])
+        self.head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        source_a0 = self.workdir / "src-a0"
+        source_a0.mkdir()
+        command = ["git", "archive", "--format=tar", PRE_S4_COMMIT, *PRE_S4_PATHS]
+        archive = subprocess.run(command, cwd=REPO, capture_output=True, timeout=600)
+        self.evidence["commands"].append({"command": display(command), "rc": archive.returncode, "bytes": len(archive.stdout)})
+        check(archive.returncode == 0, f"git archive {PRE_S4_COMMIT} failed: {archive.stderr[-500:]!r}")
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            tar.extractall(source_a0, filter="data")
+        source_b = self.workdir / "src-b"
+        copy_checkout(source_b)
+        self.sources = {"A0": source_a0, "B": source_b}
+        self.a0_compose = source_a0 / COMPOSE_FILE.name
+        self.evidence["rh11"] = {"project": self.project, "port": self.port, "edge_subnet": self.edge_subnet,
+                                 "releases": dict(self.releases), "a0_commit": PRE_S4_COMMIT, "b_commit": self.head}
+
+    def install_a0(self):
+        with self.case("RH-11 setup (A0 install)") as observed:
+            self.build("A0", commit=PRE_S4_COMMIT)
+            self.compose("up", "-d", "--wait", "db", timeout=300, compose_file=self.a0_compose)
+            migrate = self.compose("--profile", "ops", "run", "--rm", "-T", "migrate", "--no-backup-reason",
+                                   "rh-11: A0 first install", timeout=300, check_rc=False, compose_file=self.a0_compose)
+            report = parse_report(migrate.stdout)
+            observed["migrate"] = {"rc": migrate.returncode, "result": report.get("result"), "grants": report.get("grants")}
+            check(migrate.returncode == 0 and report.get("result") == "upgraded", "the A0 migrate did not upgrade")
+            self.compose("up", "-d", "backend", "web", timeout=300, compose_file=self.a0_compose)
+            _, body = self.wait_for(lambda a, b: getattr(a, "status", None) == 200, 120, "health 200 on A0")
+            observed["health"] = body
+            check(body.get("release") == self.releases["A0"] and body.get("commit") == PRE_S4_COMMIT, "health is not A0")
+
+    def owner_query(self, sql):
+        user, database = self.env_value("POSTGRES_USER"), self.env_value("POSTGRES_DB")
+        return self.compose("exec", "-T", "db", "psql", "-U", user, "-d", database, "-At", "-c", sql,
+                            compose_file=self.a0_compose).stdout.strip()
+
+    def container_of(self, service):
+        # The A0 Compose file names only the secret every pre-S4 stack has, whatever the role files' state.
+        ids = self.compose("ps", "-q", service, compose_file=self.a0_compose).stdout.split()
+        check(len(ids) == 1, f"expected one {service} container, found {ids}")
+        return ids[0]
+
+    def state(self):
+        """What a refused release must leave unchanged: containers, revision, ACLs, the B images, the secrets dir."""
+        containers = {}
+        for service in ("db", "backend", "web"):
+            info = self.inspect(self.container_of(service))
+            containers[service] = {"id": info["Id"][:12], "started_at": info["State"]["StartedAt"],
+                                   "running": info["State"]["Running"]}
+        images = []
+        for service in ("backend", "web"):
+            image = f"partflow/{service}:{self.releases['B']}"
+            if self.run(["docker", "image", "inspect", image], check_rc=False).returncode == 0:
+                images.append(image)
+        entries = sorted(path.name + ("/" if path.is_dir() else "") for path in self.secrets_dir.iterdir())
+        return {
+            "containers": containers,
+            "revision": self.owner_query("select version_num from alembic_version"),
+            "acl_sha256": hashlib.sha256(self.owner_query(ACL_SNAPSHOT_SQL).encode("utf-8")).hexdigest(),
+            "b_images": images,
+            "secrets_dir": entries,
+        }
+
+    def rh11b_missing_role_files(self):
+        with self.case("RH-11b") as observed:
+            before = self.state()
+            result, record = self.release("B")
+            after = self.state()
+            steps = [(s["name"], s["exit_code"]) for s in (record or {}).get("steps", [])]
+            observed.update({"rc": result.returncode, "outcome": (record or {}).get("outcome"), "steps": steps,
+                             "stderr_tail": result.stderr[-800:], "before": before, "after": after})
+            check(result.returncode == 1 and record and record["outcome"] == "stopped_unchanged", f"release.sh exit {result.returncode}")
+            check(steps == [("preflight", 1)], f"steps {steps}")
+            check("the secret file partflow_app_password (" in result.stderr
+                  and "is missing, empty or not a regular file" in result.stderr, "the refusal does not name partflow_app_password")
+            check(before == after, "the refused release changed the stack, the database, the images or the secrets dir")
+            check(after["secrets_dir"] == ["postgres_password"], f"the secrets directory changed: {after['secrets_dir']}")
+
+    def rh11_conversion(self):
+        with self.case("RH-11") as observed:
+            # Conversion step 1: the two role files, before any command of the S4 Compose file runs backend or db-roles.
+            write_secret_files(self.secrets_dir, ROLE_SECRETS)
+            before = self.state()
+            result, record = self.release("B")
+            after = self.state()
+            steps = [(s["name"], s["exit_code"]) for s in (record or {}).get("steps", [])]
+            serving, body = self.health()
+            observed["before_conversion"] = {"rc": result.returncode, "outcome": (record or {}).get("outcome"), "steps": steps,
+                                             "stderr_tail": result.stderr[-800:], "health_release": body.get("release")}
+            check(result.returncode == 1 and record and record["outcome"] == "stopped_unchanged", f"release.sh exit {result.returncode}")
+            check(steps == [("preflight", 0), ("current_revision", 2)], f"did not stop at step 1 current_revision: {steps}")
+            check(before == after, "the release that stopped at step 1 changed something")
+            check(not after["b_images"], "B images were built")
+            check(serving.status == 200 and body.get("release") == self.releases["A0"], "A0 does not serve any more")
+            # Conversion steps 2-4: both images built as release.sh builds them, then db-roles and db-roles apply-grants.
+            self.build("B")
+            roles = self.compose("--profile", "ops", "run", "--rm", "-T", "db-roles", release=self.releases["B"],
+                                 check_rc=False, timeout=300)
+            grants = self.compose("--profile", "ops", "run", "--rm", "-T", "db-roles", "apply-grants", release=self.releases["B"],
+                                  check_rc=False, timeout=300)
+            roles_report, grants_report = parse_report(roles.stdout), parse_report(grants.stdout)
+            observed["db_roles"] = {"rc": roles.returncode, "result": roles_report.get("result")}
+            observed["apply_grants"] = {"rc": grants.returncode, "result": grants_report.get("result"),
+                                        "grants": grants_report.get("grants")}
+            check(roles.returncode == 0 and roles_report.get("result") == "provisioned", "db-roles failed")
+            check(grants.returncode == 0 and grants_report.get("result") == "applied", "apply-grants failed")
+            # Conversion step 5: the release.
+            result, record = self.release("B")
+            steps = [s["name"] for s in (record or {}).get("steps", [])]
+            observed["release"] = {"rc": result.returncode, "outcome": (record or {}).get("outcome"), "steps": steps,
+                                   "stdout_tail": result.stdout[-1500:]}
+            check(result.returncode == 0 and record and record["outcome"] == "completed", f"release.sh B exit {result.returncode}")
+            check("freeze" not in steps, "a freeze without a pending revision")
+            directory = sorted(self.records.glob(f"*-{self.releases['B']}/record.json"))[-1].parent
+            migrate = json.loads((directory / "migrate.json").read_text(encoding="utf-8"))
+            observed["migrate"] = {"result": migrate.get("result"), "grants": migrate.get("grants")}
+            check(migrate.get("result") == "already_current", "migrate is not already_current")
+            check((migrate.get("grants") or {}).get("status") == "applied", "migrate did not apply the grants")
+            build_log = (directory / "build.log").read_text(encoding="utf-8")
+            observed["build_reused"] = "reused:" in build_log
+            check("reused:" in build_log, "step 3 build did not reuse the converted images")
+            post = json.loads((directory / "post-reconcile.json").read_text(encoding="utf-8"))
+            h = next((c for c in post.get("checks") or [] if c.get("id") == "h"), {})
+            observed["post_h"] = {"status": h.get("status"), "findings": h.get("findings"),
+                                  "connected_role": (post.get("database") or {}).get("connected_role")}
+            check(h.get("status") == "pass", f"check (h) after the release is {h.get('status')}")
+            answer, body = self.health()
+            observed["health"] = body
+            check(answer.status == 200 and body.get("release") == self.releases["B"], "health is not B")
+            users = self.owner_query("select usename from pg_stat_activity where application_name = 'partflow-api'").split()
+            observed["partflow_api_sessions"] = users
+            check(users and all(user == APP_ROLE for user in users), f"backend sessions are not all {APP_ROLE}: {users}")
+
+    def teardown_compose_file(self):
+        # The A0 file names only postgres_password, so `down` works whatever the role files' state.
+        return getattr(self, "a0_compose", COMPOSE_FILE)
+
+    def run_cases(self):
+        self.install_a0()
+        if self.evidence["cases"]["RH-11 setup (A0 install)"]["status"] != "pass":
+            raise CaseFailure("the A0 install failed: RH-11b and RH-11 need it")
+        self.rh11b_missing_role_files()
+        self.rh11_conversion()
+
+
+def run_rehearsal(args):
+    if args.rh11_project == args.project:
+        raise SystemExit("--rh11-project must differ from --project.")
+    evidence = {
+        "slice": "P16-S3 (amended by P16-S4)",
+        "project": args.project if args.cases != "rh11" else None,
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "host": {"platform": platform.platform(), "python": platform.python_version()},
+        "releases": dict(RELEASES),
+        "commands": [],
+        "cases": {},
+    }
+    parts = []
+    if args.cases in ("all", "main"):
+        parts.append(Rehearsal(args, evidence=evidence))
+    if args.cases in ("all", "rh11"):
+        parts.append(Conversion(args, project=args.rh11_project, evidence=evidence))
+    for part in parts:
+        part.refuse_foreign_project()
+    outcome = 1
+    try:
+        for part in parts:
+            part.execute()
+        statuses = [c["status"] for c in evidence["cases"].values()]
+        outcome = 1 if "fail" in statuses or evidence.get("run_errors") or not statuses else 0
+    finally:
+        evidence["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        evidence["outcome"] = {0: "pass", 1: "fail"}[outcome]
+        evidence_path = Path(args.evidence)
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(json.dumps(evidence, indent=2, default=str) + "\n", encoding="utf-8")
+        print(f"evidence: {evidence_path} ({evidence['outcome']})", flush=True)
+    return outcome
 
 
 def describe_health(last):
@@ -706,12 +953,16 @@ def describe_health(last):
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="P16-S3 release rehearsal (throwaway Compose project).")
+    parser = argparse.ArgumentParser(description="P16-S3/S4 release rehearsal (throwaway Compose projects).")
     parser.add_argument("--evidence", required=True, help="path of the evidence JSON to write")
-    parser.add_argument("--keep", action="store_true", help="leave the stack running for the manual RH-9 browser check")
+    parser.add_argument("--keep", action="store_true", help="leave the stacks running for the manual RH-9 browser check")
     parser.add_argument("--project", default=DEFAULT_PROJECT, help=f"Compose project name (default {DEFAULT_PROJECT})")
+    parser.add_argument("--rh11-project", default=DEFAULT_RH11_PROJECT,
+                        help=f"Compose project of RH-11/RH-11b (default {DEFAULT_RH11_PROJECT})")
+    parser.add_argument("--cases", choices=("all", "main", "rh11"), default="all",
+                        help="all (default), main (RH-1..RH-10) or rh11 (RH-11b, RH-11)")
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
-    sys.exit(Rehearsal(parse_args(sys.argv[1:])).main())
+    sys.exit(run_rehearsal(parse_args(sys.argv[1:])))

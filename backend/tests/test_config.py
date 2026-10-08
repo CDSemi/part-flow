@@ -6,7 +6,8 @@ the file-based form ``DATABASE_HOST`` / ``DATABASE_NAME`` /
 ``DATABASE_PORT``) of the production stack. The password file must hold
 exactly one line, the way ``initdb`` reads it, and no refusal ever
 repeats an input value. Phase 16 slice 3 adds the release identity and
-release-gate settings (C-1 … C-5). No database: ``Settings`` is
+release-gate settings (C-1 … C-5) and Phase 16 slice 4
+``DATABASE_ROLES_REQUIRED`` (CF-12). No database: ``Settings`` is
 constructed only.
 """
 
@@ -26,7 +27,14 @@ _RELEASE = ("RELEASE_TAG", "RELEASE_COMMIT", "ENFORCE_CLIENT_RELEASE", "ACCEPT_S
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every case with no connection setting (the suite's DATABASE_URL removed)."""
-    for name in ("DATABASE_URL", *_FORM_TWO, "DATABASE_PASSWORD_FILE", "SITE_TIMEZONE", *_RELEASE):
+    for name in (
+        "DATABASE_URL",
+        *_FORM_TWO,
+        "DATABASE_PASSWORD_FILE",
+        "SITE_TIMEZONE",
+        *_RELEASE,
+        "DATABASE_ROLES_REQUIRED",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -296,3 +304,19 @@ def test_enforcement_needs_a_release_image(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(ValidationError) as invalid:
         _settings()
     assert [error["loc"] for error in invalid.value.errors()] == [("release_tag",)]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize(("value", "expected"), [("true", True), ("false", False), ("", False)])
+def test_database_roles_required(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    """CF-12: off by default; production Compose sets it on backend and migrate."""
+    assert _settings().database_roles_required is False
+    monkeypatch.setenv("DATABASE_ROLES_REQUIRED", value)
+    if value == "":
+        # An empty value is not a boolean (pydantic, like ENFORCE_CLIENT_RELEASE).
+        with pytest.raises(ValidationError):
+            _settings()
+        return
+    assert _settings().database_roles_required is expected

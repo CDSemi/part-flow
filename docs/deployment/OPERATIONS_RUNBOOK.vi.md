@@ -29,7 +29,7 @@ Ghi cho mỗi environment và release:
 | Deployment operator và approver |  |
 | Thời gian bắt đầu/kết thúc (UTC) |  |
 | Path, checksum và kết quả verify của pre-release backup |  |
-| Migration output |  |
+| Migration output (gồm báo cáo grants) và báo cáo provisioning database role |  |
 | Kết quả smoke/reconciliation |  |
 | Rollback deadline và observation owner |  |
 | Giới hạn đã biết |  |
@@ -40,7 +40,7 @@ trên: `environment` và `url` (dòng 1), `host` (dòng 2), `release` (tag, comm
 tag trước và image ID cục bộ của `backend` và `web`; dòng 3), `alembic`
 (`before`, `after`, `expected`; dòng 4), `operator`, `approver` (dòng 5),
 `started_at`, `finished_at` (dòng 6), `backup` (dòng 7; `verified` là `false` cho
-đến P16-S5), `migration` (các file `migrate.json` và `migrate.log`; dòng 8),
+đến P16-S5), `migration` (các file `migrate.json` và `migrate.log`; dòng 8; `migrate.json` mang kết quả `grants`, và các báo cáo JSON `provision-roles` và `apply-grants` của một lần chạy thủ công được giữ cạnh nó),
 `reconcile` và `smoke` (dòng 9), `rollback_deadline` và `observation_owner`
 (dòng 10), `known_limitations` (dòng 11); `outcome`, `writes_reopened_at` và
 `refrozen` nêu cách lần chạy kết thúc. Một thao tác thủ công (ví dụ rollback) ghi
@@ -78,6 +78,8 @@ method, path không có query string, status, bytes, duration, user agent); nó
 không bao giờ chứa query string, cookie hay header PartFlow. Một câu trả lời JSON
 502 hoặc 504 đến từ `web` (`server_unavailable`) và nghĩa là kết quả của write
 chưa rõ: xử lý bằng `device_event_id` gốc (bên dưới).
+
+Trong production stack, backend kết nối bằng `partflow_app`. Một `permission denied` (SQLSTATE 42501) trong log backend nghĩa là một code path đã thử đổi history được bảo vệ hoặc thiếu một grant: một incident (§8), không bao giờ được sửa bằng cách cấp thêm quyền. Chạy `reconcile --check h` (§7) trước mọi việc khác.
 
 Sau đó kiểm tra:
 
@@ -119,6 +121,8 @@ cùng version. Lưu cùng dump:
 - checksum dump/list;
 - operator và lý do backup.
 
+Dump không mang grant theo thiết kế (`--no-privileges`): database role và privilege của chúng được derive lại sau restore (§4).
+
 Mã hóa và copy bundle ra ngoài host. Alert khi scheduled backup bị thiếu, rỗng,
 quá cũ hoặc replicate off-site thất bại.
 
@@ -138,6 +142,8 @@ production database duy nhất:
 8. ghi thời gian restore và kết quả;
 9. chỉ xóa isolated restore copy sau khi đã giữ lại bằng chứng.
 
+Khi restore vào một cluster mới, hãy provision database role trước (`provision-roles`, với password tạm trong restore drill), và chạy `apply-grants` trên database đã restore trước khi start application (bước 5): dump không chứa grant, nên database đã restore không có grant nào cho đến khi `apply-grants` derive lại, và application role không thể hoạt động nếu thiếu chúng. Reconcile check (h) phải pass trước khi application start.
+
 Ví dụ trong Compose project cô lập:
 
 ```bash
@@ -147,6 +153,8 @@ docker compose exec -T db sh -c \
   'pg_restore -U "$POSTGRES_USER" -d partflow_restore_test --exit-on-error --no-owner --no-privileges' \
   < <verified-dump-file>
 ```
+
+Với production stack, role và grant của restore database được tạo bằng các lệnh của `DEPLOYMENT.md` §3.1 (`$PF --profile ops run --rm -T db-roles`, rồi `… db-roles apply-grants`), với `DATABASE_NAME` trỏ vào restore database.
 
 Dùng tên restore-test rõ ràng. Không thay production database name vào command
 diễn tập.
@@ -208,11 +216,13 @@ hiện tại và reconcile pre-release với release đang chạy; build candida
 không bao giờ build lại, và chỉ được dùng lại khi cả hai image được build từ commit này
 với đúng release này); check (j) và revision của candidate (phải báo đúng release và
 commit này); write freeze khi có
-migration đang chờ; `migrate`; reconcile post-release; chuyển `backend` trong khi
+migration đang chờ; `migrate` (cũng áp dụng grant); reconcile post-release; chuyển `backend` trong khi
 `web` vẫn phục vụ bundle trước (write vẫn bị từ chối, mọi page đã tải gửi release
 trước và nhận 409), chờ health của release mới và schema `current`; chuyển `web`,
 việc này mở lại write; và `smoke.sh`. Một check thất bại sau switch sẽ dừng
-`backend` lại.
+`backend` lại. Preflight của nó cũng từ chối, không đổi gì, khi `partflow_app_password`, `partflow_maintenance_password` hoặc `postgres_password` thiếu, rỗng hoặc không phải regular file.
+
+Mọi `migrate` áp dụng grant trong cùng transaction với upgrade. Kết quả `refused` với một mã database-role (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`, `role_owns_objects`, `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) rollback toàn bộ lần chạy và dừng release trước khi đổi gì (exit 1, như mọi từ chối khác); đọc thông báo được in, sửa nguyên nhân (`$PF --profile ops run --rm -T db-roles` cho mã role, `DEPLOYMENT.md` §3.1) rồi chạy lại. Khi cài đặt lần đầu, thứ tự là: secret file, build, `db`, `db-roles`, `migrate`, first-run setup (`DEPLOYMENT.md` §3.1).
 
 | Exit | Ý nghĩa | Làm gì |
 | --- | --- | --- |
@@ -242,7 +252,7 @@ Dạng thủ công tương đương, cùng thứ tự, với tag hiện tại tr
 3. Freeze khi có migration đang chờ: `$PF stop backend`, rồi xác nhận
    `$PF ps --status running -q backend` không in gì.
 4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`;
-   lưu JSON output của nó và revision mới.
+   lưu JSON output của nó (trường `grants` báo grant đã áp dụng) và revision mới.
 5. Chạy reconcile post-release với tag mới (§7) và so sánh với report pre-release:
    chỉ finding không có trong đó mới chặn bước 7; finding đã có từ trước vẫn là
    incident mở theo quyết định của owner.
@@ -371,12 +381,24 @@ Các check, mỗi check giữ yêu cầu gốc làm định nghĩa:
 | (e) | `released_quantity` của demand được derive từ evidence `RECEIVED`; |
 | (f) | `allocated_quantity` của demand và `completed_at` của Work Order reconcile với active allocation row; correction beyond-demand được cấp quyền (các allocation row ghi `exceeds_demand`, Phase 14 slice 5) không bị báo là allocation vượt requested quantity; |
 | (g) | không retained Movement nào reference row đã purge; |
-| (h) | không append-only table nào bị mutate ngoài archive/purge path đã duyệt; |
+| (h) | không append-only table nào bị mutate ngoài archive/purge path đã duyệt; được hiện thực thành một guard-integrity check: guard trigger hiện diện, được bật và không đổi, source của guard function không đổi, `partflow_app` và `partflow_maintenance` giữ đúng grant của chúng (không UPDATE, DELETE hay TRUNCATE trên history append-only), các role giữ attribute an toàn và không có membership, PUBLIC và default privilege không giữ gì, và `session_replication_role` không bị đặt thành `replica`. Nó không thấy được một mutation do superuser thực hiện sau khi tắt trigger hoặc đặt `session_replication_role` trong session của chính nó rồi khôi phục (giới hạn đã chấp nhận, quyết định owner OD-16-09); |
 | (i) | Hot list entry là demand đang active (query của `DEPLOYMENT.md` §5); |
 | (j) | canonical identity dưới interpreter và database đang chạy: canonical PN, Worker badge không phân biệt hoa/thường, rule prefix Asset Tag, mọi canonical-form CHECK được đánh giá lại dưới collation và ctype hiện tại của database, collation version và duplicate probe không phụ thuộc index cho các identity key (platform-upgrade identity check). |
 
-(g) và (h) báo `not_applicable` cho đến khi có Movement-history archival và
-database-role hardening; chúng trung lập với exit code.
+(g) báo `not_applicable` cho đến khi có Movement-history archival, và (h)
+chỉ báo `not_applicable` trên database không có các database role của PartFlow
+(development, test, staging); cả hai trung lập với exit code. Trong
+production stack (`DATABASE_ROLES_REQUIRED=true`) một role thiếu là một finding.
+
+Ánh xạ sửa chữa cho finding của check (h) (reconciliation không bao giờ repair; các lệnh dưới đây là của operator, owner quyết định):
+
+- mã privilege trên `partflow_app`, `partflow_maintenance` hoặc PUBLIC, và mã schema, database và default-privilege cho các grantee đó: `$PF --profile ops run --rm -T db-roles apply-grants`;
+- mã role trừ `ROLE_OWNS_OBJECTS` (`ROLE_ATTRIBUTE`, `ROLE_MEMBERSHIP`, `ROLE_MISSING`) và một `REPLICATION_ROLE_SETTING` theo phạm vi role (`<db>/<role>` hoặc `*/<role>`): `$PF --profile ops run --rm -T db-roles`, rồi `… db-roles apply-grants`;
+- finding về một database role khác (`PRIVILEGE_EXCESS` hoặc `DEFAULT_PRIVILEGE` với grantee lạ; một từ chối `foreign_grantor` của `apply-grants` hoặc `migrate`): xem xét ai đã cấp và vì sao, và revoke nó bằng owner hoặc grantor; `apply-grants` cố ý để nguyên nó;
+- mã trigger (`TRIGGER_MISSING`, `TRIGGER_CHANGED`, `TRIGGER_DISABLED`, `TRIGGER_ENABLE_MODE`), mã function (`GUARD_FUNCTION_MISSING`, `GUARD_FUNCTION_CHANGED`), `ROLE_OWNS_OBJECTS` (và từ chối `role_owns_objects`), một `REPLICATION_ROLE_SETTING` toàn database (`<db>/*`) và `REPLICATION_ROLE_ACTIVE`: một incident (§8); owner quyết định.
+
+Không bao giờ sửa bằng cách chạy lại hoặc downgrade migration. Một lần chạy đua với thay đổi grant hoặc trigger có thể cho finding tạm thời: chạy lại trước khi hành động.
+
 
 Quy tắc vận hành:
 
@@ -409,6 +431,14 @@ Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự 
 - không bao giờ sửa Movement history trực tiếp;
 - chỉ dùng Undo/correction workflow chuẩn sau khi biết chính xác committed state.
 
+### Finding guard-integrity (reconcile check (h))
+
+- freeze write (`$PF stop backend`, §5) khi một trigger hoặc guard function đã đổi, một trigger bị tắt, hoặc `session_replication_role` được đặt toàn database hoặc đang active: khi đó các guard thông thường không kích hoạt cho bất kỳ session nào, kể cả `partflow_app`;
+- với setting đó, owner chạy `ALTER DATABASE <db> RESET session_replication_role` trong `db`;
+- so sánh trigger và function với migration source;
+- owner quyết định cách sửa và có cần xác minh history với backup gần nhất hay không;
+- chạy `reconcile` và privilege probe (`DEPLOYMENT.md` §3.1) trước khi mở lại write.
+
 ### Áp lực database hoặc storage
 
 - block write mới trước khi hết disk (write freeze, §5);
@@ -433,7 +463,8 @@ Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự 
 | Liên tục | Alert health, restart, disk, certificate, backup age và error |
 | Hàng ngày | Review backup success, off-site replication và critical error |
 | Hàng tuần | Review capacity trend, database growth, failed login/authorization event và security update pending |
-| Hàng tháng | Patch staging rồi production; review user/role, firewall rule, secret và liên hệ trong runbook |
+| Hàng tháng | Patch staging rồi production; review user/role, firewall rule, secret và liên hệ trong runbook; review database role bằng `reconcile --check h` |
+| Khi rotate password của role | Một write freeze ngắn: thay role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, rồi check health. `up -d backend` thông thường không nhận password mới (container không được tạo lại), và chạy `db-roles` trong khi backend đang phục vụ làm các connection mới của nó thất bại. Password owner: `ALTER ROLE … PASSWORD` trong `db` trước, rồi thay `postgres_password` (không restart service: chỉ `migrate` và `db-roles` one-shot dùng nó) |
 | Hàng quý hoặc sau thay đổi schema quan trọng | Full isolated restore drill, bài tập RPO/RTO có đo thời gian và review reconciliation |
 | Trước mỗi release | Fresh verified backup, migration review, rollback decision và smoke-test plan |
 

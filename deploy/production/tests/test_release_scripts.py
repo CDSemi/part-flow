@@ -1,5 +1,6 @@
 """P16-S3: deploy/production/release.sh and smoke.sh against fake `docker`, `git`, `curl` and `sleep` executables
-(P16-S3 SPEC section 6.3, cases RS-1..RS-24 and SS-1..SS-8; RS-25 covers Ctrl-C/TERM while a step runs).
+(P16-S3 SPEC section 6.3, cases RS-1..RS-24 and SS-1..SS-8; RS-25 covers Ctrl-C/TERM while a step runs; P16-S4 SPEC
+section 6.4 adds RS-26, the preflight secret-file check).
 
 A temporary directory holds a fake repository root (copies of both production Compose files and an env file) and a
 `bin` directory placed first on PATH. Each fake is a POSIX `sh` wrapper that runs this interpreter (sys.executable) on
@@ -211,10 +212,34 @@ def migrate_doc(result, exit_code, before=DB_REVISION, after=None, applied=(), e
             "revision_after": after, "applied_revisions": list(applied),
             "backup": {"kind": "reference", "reference": backup_ref, "verified": False,
                        "verification": "pending: backup-verify arrives with P16-S5"},
-            "grants": None if error_code else {"status": "not_applicable", "detail": "Database-role hardening is not installed yet (P16-S4)."},
+            "grants": None if error_code else {
+                "status": "applied", "roles": {"application": "partflow_app", "maintenance": "partflow_maintenance"},
+                "tables": 29, "sequences": 23, "default_privileges_removed": 0, "foreign_grantees": [],
+            },
             "error": {"code": error_code, "message": "refused"} if error_code else None,
         },
         indent=2, ensure_ascii=True,
+    ) + "\n"
+
+
+# The top-level secrets of compose.production.yaml (P16-S4); the fake `config --format json` names a file for each.
+SECRET_NAMES = ("postgres_password", "partflow_app_password", "partflow_maintenance_password")
+SECRET_ERROR = ("is missing, empty or not a regular file. Create it as DEPLOYMENT §3.1 describes; if Compose already"
+                " created a directory there, remove it first. Nothing was changed.")
+
+
+def compose_config_doc(secrets_dir, names=SECRET_NAMES):
+    """`docker compose config --format json` as Compose prints it (two-space indent); services also name secrets."""
+    return json.dumps(
+        {
+            "name": "partflow-production",
+            "networks": {"internal": {"name": "partflow-production_internal", "internal": True}},
+            "secrets": {name: {"name": "partflow-production_" + name, "file": (Path(secrets_dir) / name).as_posix()}
+                        for name in names},
+            "services": {"backend": {"image": "partflow/backend:" + CURRENT,
+                                     "secrets": [{"source": "partflow_app_password", "file": "/not/a/top/level/secret"}]}},
+        },
+        indent=2,
     ) + "\n"
 
 
@@ -332,6 +357,11 @@ class Harness(unittest.TestCase):
                                f'fi\nexit $rc')
         self.wrapper("python3", f'exec "{python}" "$@"')
         self.rules = default_rules()
+        self.secrets = self.tmp / "secrets"
+        self.secrets.mkdir()
+        for name in SECRET_NAMES:
+            (self.secrets / name).write_text(f"rs-{name}-value\n", encoding="utf-8")
+        self.rules["docker"].insert(1, rule(r"config --format json$", out(compose_config_doc(self.secrets))))
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -433,6 +463,7 @@ class Harness(unittest.TestCase):
 # The docker sequence of a full release with a pending migration (RS-1).
 CURRENT_IMAGES = [
     "config --quiet",
+    "config --format json",
     'ps -a --format {{.Label "com.docker.compose.project"}}',
     f"image inspect --format {{{{.Id}}}} partflow/backend:{CURRENT}",
     f"image inspect --format {{{{.Id}}}} partflow/web:{CURRENT}",
@@ -658,6 +689,56 @@ class ReleaseFlow(Harness):
 
 
 class ReleasePreflight(Harness):
+    # RS-26 (P16-S4): every top-level secret file is a regular, non-empty file before anything runs.
+    def test_rs26_secret_files(self):
+        def missing(path):
+            path.unlink()
+
+        def empty(path):
+            path.write_text("", encoding="utf-8")
+
+        def directory(path):
+            path.unlink()
+            path.mkdir()
+
+        for name, damage in (("missing", missing), ("empty", empty), ("directory", directory)):
+            with self.subTest(case=name):
+                self.reset()
+                secret = self.secrets / "partflow_app_password"
+                damage(secret)
+                self.release()
+                self.assertExit(1, "stopped_unchanged")
+                self.assertIn(f"the secret file partflow_app_password ({secret.as_posix()}) {SECRET_ERROR}", self.result.stderr)
+                self.assertEqual(self.docker(), CURRENT_IMAGES[:2])
+                self.assertNoDocker(r"^run ", r"--profile ops run", r" build ", r"^stop ", r"^up ")
+                steps = self.record()["steps"]
+                self.assertEqual([(s["name"], s["exit_code"]) for s in steps], [("preflight", 1)])
+                self.assertEqual(self.calls("git"), [])
+                if name == "directory":
+                    self.assertTrue(secret.is_dir())
+                    self.assertEqual(list(secret.iterdir()), [])
+        with self.subTest(case="all three regular files"):
+            self.reset()
+            self.release()
+            self.assertExit(0, "completed")
+            self.assertEqual(self.docker(), FULL_PENDING)
+            preflight = (self.record_dir() / "preflight.log").read_text(encoding="utf-8")
+            for name in SECRET_NAMES:
+                self.assertIn(f"secret file {name}: {(self.secrets / name).as_posix()}", preflight)
+            self.assertNotIn("rs-partflow_app_password-value", preflight)
+        cases = {
+            "config --format json fails": out("", rc=1, stderr="config failed\n"),
+            "no secret file named": out(compose_config_doc(self.secrets, names=())),
+        }
+        for name, answer in cases.items():
+            with self.subTest(case=name):
+                self.reset()
+                self.prepend("docker", rule(r"config --format json$", answer))
+                self.release()
+                self.assertExit(2, "could_not_run")
+                self.assertIn("config --format json' failed or names no secret file", self.result.stderr)
+                self.assertEqual(self.docker(), CURRENT_IMAGES[:2])
+
     # RS-7
     def test_rs7_build_inputs_and_tag(self):
         cases = {

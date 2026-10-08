@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_tracking_api"
@@ -1066,13 +1067,18 @@ def _set_occurred_at(engine: Engine, movement_id: int, occurred_at: datetime.dat
     trigger); the seed bypasses the trigger for this one statement as
     the database superuser so ids and timestamps can disagree.
     """
-    with engine.begin() as connection:
-        connection.execute(sa.text("SET LOCAL session_replication_role = 'replica'"))
-        connection.execute(
-            sa.update(models.PartMovement)
-            .where(models.PartMovement.id == movement_id)
-            .values(occurred_at=occurred_at)
-        )
+    # The owner (also in the application-role test mode, Phase 16 slice 4).
+    owner = owner_engine(engine.url)
+    try:
+        with owner.begin() as connection:
+            connection.execute(sa.text("SET LOCAL session_replication_role = 'replica'"))
+            connection.execute(
+                sa.update(models.PartMovement)
+                .where(models.PartMovement.id == movement_id)
+                .values(occurred_at=occurred_at)
+            )
+    finally:
+        owner.dispose()
 
 
 def test_stock_allocated_to_earlier_work_never_makes_new_demand_stocked(

@@ -127,19 +127,23 @@ required account/service. PostgreSQL data is never inside a Git checkout.
 1. Complete all gates in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §5.
 2. Provision and harden the host.
 3. Install the exact release files/images; record their digest/commit.
-4. Create production secrets and least-privilege database roles. Create
-   `PARTFLOW_SECRETS_DIR/postgres_password` (one line,
-   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; P16-S2) and `.env.production`
-   from `.env.production.example`. Least-privilege database roles are P16-S4
-   (`provision-roles`); until then the backend uses the bootstrap owner role.
-   `PF` below is `docker compose -f compose.production.yaml --env-file
-   .env.production`.
-5. Start PostgreSQL privately: `$PF up -d db`.
+4. Create production secrets and least-privilege database roles. Create the
+   three secret files `postgres_password`, `partflow_app_password` and
+   `partflow_maintenance_password` in `PARTFLOW_SECRETS_DIR` (one line each,
+   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1) and `.env.production` from
+   `.env.production.example`, before any `$PF` command that starts `backend`
+   or an ops service. `PF` below is `docker compose -f compose.production.yaml
+   --env-file .env.production`. Build both images with
+   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`.
+5. Start PostgreSQL privately: `$PF up -d db`, then create the database roles:
+   `$PF --profile ops run --rm -T db-roles` (P16-S4; the backend connects as
+   `partflow_app`, never as the owner).
 6. Create an empty database in a new volume (production data never starts from
    staging or development data; a restore into production needs an owner
    decision, P16-S5).
 7. Run the migration once from the release backend image:
-   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`.
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`;
+   it also applies the grants.
 8. Start backend, `web` and the host reverse proxy (§4). On a database with no
    Administrator, start the backend with one worker
    (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, one setup token),
@@ -147,10 +151,21 @@ required account/service. PostgreSQL data is never inside a Git checkout.
    `$PF logs backend | grep "Setup token"`) before opening access, then
    restart it with the configured worker count (`$PF up -d backend`). Then enroll each Scan Station device
    (Administration → Scan Stations → `Devices…`).
-9. Run the runbook smoke and reconciliation checks through HTTPS.
+9. Run the runbook smoke and reconciliation checks through HTTPS; reconcile
+   check (h) must report `pass`.
 10. Enable monitoring and backup schedules, then run a backup immediately.
 11. Perform and time an isolated restore before pilot data is accepted.
 12. Open only the approved network sources and begin the controlled pilot.
+
+To convert a rehearsal stack installed before P16-S4, in this order: (1) create
+`partflow_app_password` and `partflow_maintenance_password` before any `$PF`
+command of the new Compose file that runs `backend` or `db-roles`; (2) build both
+images with `PARTFLOW_COMMIT` (`PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD)
+$PF -f compose.production.build.yaml build backend web`), never only `backend`;
+(3) `$PF --profile ops run --rm -T db-roles`; (4) `$PF --profile ops run --rm -T
+db-roles apply-grants`; (5) `deploy/production/release.sh`
+([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Converting a stack installed
+before P16-S4).
 
 ## 7. Releases and rollback
 

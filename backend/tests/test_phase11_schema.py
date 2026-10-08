@@ -30,6 +30,10 @@ from sqlalchemy.engine import URL, make_url
 
 from alembic import command
 
+# Schema, trigger and owner-only assertions: owner connections in the
+# application-role test mode (Phase 16 slice 4).
+pytestmark = pytest.mark.database_owner
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PHASE10_REVISION = "0011_phase10_stock_allocation"
 _PHASE11_REVISION = "0012_phase11_tracking_index"

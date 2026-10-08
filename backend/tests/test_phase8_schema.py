@@ -46,6 +46,10 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from alembic import command
 from app.infrastructure import models
 
+# Schema, trigger and owner-only assertions: owner connections in the
+# application-role test mode (Phase 16 slice 4).
+pytestmark = pytest.mark.database_owner
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 

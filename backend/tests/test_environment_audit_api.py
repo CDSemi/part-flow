@@ -52,6 +52,7 @@ from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_environment_audit_api"
@@ -131,7 +132,7 @@ def unconfigured_client(api_database_url: URL) -> Iterator[_Deployment]:
     order in which another test configured it.
     """
     name = f"partflow_test_env_audit_{uuid.uuid4().hex[:12]}"
-    admin_engine = create_engine(api_database_url, isolation_level="AUTOCOMMIT")
+    admin_engine = owner_engine(api_database_url, isolation_level="AUTOCOMMIT")
     with admin_engine.connect() as connection:
         connection.execute(sa.text(f'CREATE DATABASE "{name}"'))
     url = api_database_url.set(database=name)

@@ -46,3 +46,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "database_owner: every connection of the module's tests keeps the cluster (owner) user in the application-role test mode (schema, DDL, trigger and owner-only command tests only; PARTFLOW_TEST_DATABASE_ROLE=app, tests/conftest.py)",
+]

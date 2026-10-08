@@ -53,6 +53,7 @@ from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
 from tests.auth_harness import admin_of
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_machines_api"
@@ -861,14 +862,22 @@ def test_lifecycle_events_are_append_only_in_the_database(
     _retire(client, int(machine["id"]))
     event_id = _lifecycle_events(client, int(machine["id"]))[0]["id"]
 
-    for statement in (
-        sa.update(models.MachineLifecycleEvent)
-        .where(models.MachineLifecycleEvent.id == event_id)
-        .values(reason="rewritten"),
-        sa.delete(models.MachineLifecycleEvent).where(models.MachineLifecycleEvent.id == event_id),
-    ):
-        with pytest.raises(sa.exc.DBAPIError, match="append-only"), db_engine.begin() as connection:
-            connection.execute(statement)
+    # The trigger as the owner sees it (the application role is refused
+    # earlier by its grants: tests/test_database_roles.py GR-1).
+    owner = owner_engine(db_engine.url)
+    try:
+        for statement in (
+            sa.update(models.MachineLifecycleEvent)
+            .where(models.MachineLifecycleEvent.id == event_id)
+            .values(reason="rewritten"),
+            sa.delete(models.MachineLifecycleEvent).where(
+                models.MachineLifecycleEvent.id == event_id
+            ),
+        ):
+            with pytest.raises(sa.exc.DBAPIError, match="append-only"), owner.begin() as connection:
+                connection.execute(statement)
+    finally:
+        owner.dispose()
 
 
 def test_lifecycle_history_unknown_machine_not_found(client: TestClient) -> None:

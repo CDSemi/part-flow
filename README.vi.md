@@ -441,8 +441,22 @@ Test backend gồm:
   mở rộng gồm các entity audit môi trường, các downgrade từ chối và
   models↔migration parity).
 
-Integration test tạo database tạm `partflow_test_*`; role cấu hình phải có quyền
-tạo database. Test kiểm tra atomicity, constraint, append-only, idempotent replay,
+Integration test tạo database tạm `partflow_test_*`; role cấu hình phải là
+superuser (`partflow_user` của Compose và CI là superuser): suite tạo database và
+database role tạm (`partflow_app_t…`, `partflow_maint_t…`), và một số case đặt
+`session_replication_role`.
+
+CI chạy suite với `PARTFLOW_TEST_DATABASE_ROLE=app`. Khi đó mọi connection tới test
+database chạy dưới một application database role tạm, trừ Alembic, `owner_engine`
+và các module `database_owner`. Hãy chạy cùng cách này ở local trước khi commit một
+thay đổi chạm vào database write, grant hoặc test setup; mặc định ở local vẫn là
+owner role:
+
+```bash
+docker compose exec -e PARTFLOW_TEST_DATABASE_ROLE=app backend uv run pytest
+```
+
+Test kiểm tra atomicity, constraint, append-only, idempotent replay,
 conflicting reuse, lock/race, projection replay và conservation ở từng phase.
 
 ### Frontend
@@ -492,21 +506,41 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 ## Production stack (Phase 16)
 
 `compose.production.yaml` (Compose project `partflow-production`) là production
-stack: `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và job
-`migrate` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
+stack: `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và các job
+`migrate` và `db-roles` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
 có gì trong repo này tự khởi động nó, và nó chưa được xác minh trên Synology NAS
 hay VPS (Phase 16 slice 7). Configuration là `.env.production` (sao chép
-`.env.production.example`, git bỏ qua) cùng secret file `postgres_password` trong
-`PARTFLOW_SECRETS_DIR`. Build và start, từ release checkout:
+`.env.production.example`, git bỏ qua) cùng các secret file `postgres_password`, `partflow_app_password` và
+`partflow_maintenance_password` trong `PARTFLOW_SECRETS_DIR` (tạo cả ba trước lệnh
+đầu tiên khởi động `backend` hoặc một ops service). Backend kết nối bằng database
+role ít đặc quyền `partflow_app`, không bao giờ bằng owner. Build và start, từ
+release checkout:
 
 ```bash
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF config --quiet
 PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
 $PF up -d db
-$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"
+$PF --profile ops run --rm -T db-roles          # creates partflow_app and partflow_maintenance
+$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"   # also applies the grants
 $PF up -d backend web
 ```
+
+Database role (Phase 16 slice 4): `db-roles` chạy `provision-roles` (tạo hoặc sửa hai
+role và đặt password từ secret file; lặp lại an toàn); `db-roles apply-grants` áp
+dụng lại grant ngoài một `migrate` (sau restore, hoặc để sửa drift);
+`reconcile --check h` xác minh chúng. Để rotate password của một role, thay file của
+nó, rồi:
+
+```bash
+$PF stop backend
+$PF --profile ops run --rm -T db-roles
+$PF up -d --force-recreate --no-deps backend
+```
+
+`up -d backend` thông thường không nhận password mới. Privilege probe, cách chuyển
+một stack cài trước slice 4 và quy tắc password của owner nằm ở
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Các release sau chạy qua `deploy/production/release.sh`, thực hiện release
 sequence (build, reconcile pre-release và post-release, write freeze, `migrate`,

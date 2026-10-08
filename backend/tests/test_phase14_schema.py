@@ -82,6 +82,10 @@ from app.domain.enums import (
 )
 from app.infrastructure import models
 
+# Schema, trigger and owner-only assertions: owner connections in the
+# application-role test mode (Phase 16 slice 4).
+pytestmark = pytest.mark.database_owner
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0028_phase13_users_roles"
 _SIGN_IN_REVISION = "0029_phase14_sign_in"

@@ -1,4 +1,4 @@
-# PartFlow production stack (Phase 16 slices 2-3; DEPLOYMENT §3.1). Not for development:
+# PartFlow production stack (Phase 16 slices 2-4; DEPLOYMENT §3.1). Not for development:
 # development uses compose.yaml. Run from the release checkout with
 #   PF="docker compose -f compose.production.yaml --env-file .env.production"
 # and never `$PF down -v` (it deletes the production database volume). Releases run through
@@ -12,14 +12,24 @@ x-logging: &logging
         max-size: "10m"
         max-file: "5"
 
-# Backend database connection in the file-based form (backend/app/core/config.py):
-# the password is read from the secret file, never set in an environment value.
-x-database-environment: &database-environment
+# Database connections in the file-based form (backend/app/core/config.py): each password is read from a
+# secret file, never set in an environment value. The owner (POSTGRES_USER, a superuser) is used only by the
+# one-shot migrate and db-roles; backend connects as the application database role partflow_app (P16-S4).
+x-owner-database-environment: &owner-database-environment
     DATABASE_HOST: db
     DATABASE_PORT: "5432"
     DATABASE_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
     DATABASE_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.production}
     DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+    SITE_TIMEZONE: ${PARTFLOW_SITE_TIMEZONE:?Set PARTFLOW_SITE_TIMEZONE in .env.production}
+
+x-app-database-environment: &app-database-environment
+    DATABASE_HOST: db
+    DATABASE_PORT: "5432"
+    DATABASE_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
+    # Fixed: equals app.application.database_roles.APP_ROLE (static test ST-10).
+    DATABASE_USER: partflow_app
+    DATABASE_PASSWORD_FILE: /run/secrets/partflow_app_password
     SITE_TIMEZONE: ${PARTFLOW_SITE_TIMEZONE:?Set PARTFLOW_SITE_TIMEZONE in .env.production}
 
 services:
@@ -59,7 +69,8 @@ services:
         # building the current checkout under that tag.
         pull_policy: never
         environment:
-            <<: *database-environment
+            <<: *app-database-environment
+            DATABASE_ROLES_REQUIRED: "true"
             SESSION_COOKIE_SECURE: "true"
             # Writes from a page of another release are refused (409); fixed on in production.
             ENFORCE_CLIENT_RELEASE: "true"
@@ -67,7 +78,8 @@ services:
             ACCEPT_SCHEMA_REVISION: ${PARTFLOW_ACCEPT_SCHEMA_REVISION:-}
             WEB_CONCURRENCY: ${PARTFLOW_BACKEND_WORKERS:-2}
             FORWARDED_ALLOW_IPS: ${PARTFLOW_EDGE_SUBNET:-172.30.250.0/24}
-        secrets: [postgres_password]
+        # Never postgres_password: backend does not hold the owner credential.
+        secrets: [partflow_app_password]
         networks: [internal, edge]
         depends_on:
             db:
@@ -130,8 +142,38 @@ services:
         profiles: [ops]
         entrypoint: ["python", "-m", "app.cli", "migrate"]
         environment:
-            <<: *database-environment
+            <<: *owner-database-environment
+            # Refuses (roles_not_provisioned) instead of migrating without grants; every migrate applies them.
+            DATABASE_ROLES_REQUIRED: "true"
         secrets: [postgres_password]
+        networks: [internal]
+        depends_on:
+            db:
+                condition: service_healthy
+        restart: "no"
+        healthcheck:
+            disable: true
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_OPS_MEMORY:-512m}
+                    cpus: "${PARTFLOW_OPS_CPUS:-1.0}"
+        logging: *logging
+
+    # One-shot database-role job (P16-S4): `$PF --profile ops run --rm -T db-roles` creates or repairs the database
+    # roles partflow_app and partflow_maintenance and sets their passwords from the secret files (safe to repeat);
+    # `$PF --profile ops run --rm -T db-roles apply-grants` re-applies the grants outside a migrate (after a restore).
+    # A role password is rotated in a short write freeze: replace the file, `$PF stop backend`, db-roles,
+    # `$PF up -d --force-recreate --no-deps backend` (OPERATIONS_RUNBOOK §9).
+    db-roles:
+        image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        pull_policy: never
+        profiles: [ops]
+        entrypoint: ["python", "-m", "app.cli"]
+        command: ["provision-roles"]
+        environment:
+            <<: *owner-database-environment
+        secrets: [postgres_password, partflow_app_password, partflow_maintenance_password]
         networks: [internal]
         depends_on:
             db:
@@ -157,6 +199,12 @@ networks:
 volumes:
     postgres_data:
 
+# Create every file before the first command that starts backend or an ops service: Compose replaces a missing
+# file by an empty directory (release.sh refuses until each one is a regular, non-empty file).
 secrets:
     postgres_password:
         file: ${PARTFLOW_SECRETS_DIR:?Set PARTFLOW_SECRETS_DIR in .env.production}/postgres_password
+    partflow_app_password:
+        file: ${PARTFLOW_SECRETS_DIR:?Set PARTFLOW_SECRETS_DIR in .env.production}/partflow_app_password
+    partflow_maintenance_password:
+        file: ${PARTFLOW_SECRETS_DIR:?Set PARTFLOW_SECRETS_DIR in .env.production}/partflow_maintenance_password

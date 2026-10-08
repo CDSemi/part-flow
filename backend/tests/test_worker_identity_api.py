@@ -58,6 +58,7 @@ from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
+from tests.conftest import owner_connection
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APPLICATION_DIR = _BACKEND_DIR / "app" / "application"
@@ -1098,7 +1099,8 @@ def test_the_resolver_lock_conflicts_only_with_a_worker_write(
         thread, results = _start(lambda: _done(client, cell, first, pn, 10, machine=False))
         try:
             _assert_blocked(thread)
-            with db_engine.connect() as observer:
+            # As the owner: an application-role session sees no other session's wait.
+            with owner_connection(db_engine.url) as observer:
                 waiting = observer.execute(
                     sa.text(
                         "SELECT count(*) FROM pg_stat_activity"

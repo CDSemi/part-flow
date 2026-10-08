@@ -25,7 +25,7 @@ Record for every environment and release:
 | Deployment operator and approver |  |
 | Start/end time (UTC) |  |
 | Pre-release backup path, checksum, and verification |  |
-| Migration output |  |
+| Migration output (including the grants report) and database-role provisioning reports |  |
 | Smoke/reconciliation results |  |
 | Rollback deadline and observation owner |  |
 | Known limitations |  |
@@ -37,7 +37,7 @@ commit, previous tag and the local image IDs of `backend` and `web`; row 3),
 `alembic` (`before`, `after`, `expected`; row 4), `operator`, `approver`
 (row 5), `started_at`, `finished_at` (row 6), `backup` (row 7; `verified` is
 `false` until P16-S5), `migration` (the `migrate.json` and `migrate.log`
-files; row 8), `reconcile` and `smoke` (rows 9), `rollback_deadline` and
+files; row 8; `migrate.json` carries the `grants` result, and the `provision-roles` and `apply-grants` JSON reports of a manual run are kept beside it), `reconcile` and `smoke` (rows 9), `rollback_deadline` and
 `observation_owner` (row 10), `known_limitations` (row 11); `outcome`,
 `writes_reopened_at` and `refrozen` state how the run ended. A manual
 operation (for example a rollback) appends to the same directory with the same
@@ -76,6 +76,8 @@ method, path without query string, status, bytes, duration, user agent); it
 never contains query strings, cookies or PartFlow headers. A 502 or 504 JSON
 answer comes from `web` (`server_unavailable`) and means the outcome of a write
 is unknown: resolve it with the original `device_event_id` (below).
+
+In the production stack the backend connects as `partflow_app`. A `permission denied` (SQLSTATE 42501) in the backend log means a code path tried to change protected history or lacks a grant: an incident (§8), never fixed by granting more. Run `reconcile --check h` (§7) before anything else.
 
 Then check:
 
@@ -117,6 +119,8 @@ PostgreSQL client container. Store with the dump:
 - dump/list checksums;
 - operator and backup reason.
 
+Dumps carry no grants by design (`--no-privileges`): the database roles and their privileges are re-derived after a restore (§4).
+
 Encrypt and copy the bundle off-host. Alert when a scheduled backup is missing,
 empty, too old, or fails off-site replication.
 
@@ -137,6 +141,8 @@ only production database:
 8. record restore duration and result;
 9. destroy the isolated restore copy only after evidence is retained.
 
+In a restore into a new cluster, provision the database roles first (`provision-roles`, with throwaway passwords in a restore drill), and run `apply-grants` against the restored database before starting the application (step 5): a dump contains no grants, so a restored database has none until `apply-grants` re-derives them, and the application role cannot work without them. Reconcile check (h) must pass before the application starts.
+
 Example inside an isolated Compose project:
 
 ```bash
@@ -146,6 +152,8 @@ docker compose exec -T db sh -c \
   'pg_restore -U "$POSTGRES_USER" -d partflow_restore_test --exit-on-error --no-owner --no-privileges' \
   < <verified-dump-file>
 ```
+
+With the production stack the roles and grants of the restore database are created with the commands of `DEPLOYMENT.md` §3.1 (`$PF --profile ops run --rm -T db-roles`, then `… db-roles apply-grants`), with `DATABASE_NAME` pointed at the restore database.
 
 Use explicit restore-test names. Never substitute the production database name
 in a rehearsal command.
@@ -210,11 +218,13 @@ reconcile with the running release; the candidate build (an existing tag is
 never rebuilt, and is reused only when both images were built from this commit
 as this release); the candidate's check (j) and revision (which must report this
 release and commit); the write freeze when a
-migration is pending; `migrate`; the post-release reconcile; the `backend`
+migration is pending; `migrate` (which also applies the grants); the post-release reconcile; the `backend`
 switch while `web` still serves the previous bundle (writes stay refused, every
 loaded page sends the previous release and gets 409), the health wait for the
 new release and a `current` schema; the `web` switch, which reopens writes; and
-`smoke.sh`. A failed check after the switch stops `backend` again.
+`smoke.sh`. A failed check after the switch stops `backend` again. Its preflight also refuses, with nothing changed, while `partflow_app_password`, `partflow_maintenance_password` or `postgres_password` is missing, empty or not a regular file.
+
+Every `migrate` applies the grants in the same transaction as the upgrade. A `refused` result with a database-role code (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`, `role_owns_objects`, `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) rolls the whole run back and stops the release before anything changes (exit 1, as any other refusal); read the printed message, fix the cause (`$PF --profile ops run --rm -T db-roles` for a role code, `DEPLOYMENT.md` §3.1) and rerun. On a first installation the order is: secret files, build, `db`, `db-roles`, `migrate`, first-run setup (`DEPLOYMENT.md` §3.1).
 
 | Exit | Meaning | Do |
 | --- | --- | --- |
@@ -246,7 +256,7 @@ The manual equivalent, in the same order, with the current tag in
 3. Freeze when a migration is pending: `$PF stop backend`, then confirm
    `$PF ps --status running -q backend` prints nothing.
 4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`;
-   capture its JSON output and the new revision.
+   capture its JSON output (the `grants` field reports the applied grants) and the new revision.
 5. Run the post-release reconcile with the new tag (§7) and compare it with the
    pre-release report: only findings absent from it block step 7; pre-existing
    findings stay open incidents under the owner's decision.
@@ -380,12 +390,23 @@ Checks, each keeping the original requirement as its definition:
 | (e) | demand `released_quantity` derives from `RECEIVED` evidence; |
 | (f) | demand `allocated_quantity` and Work Order `completed_at` reconcile with active allocation rows; an authorized beyond-demand correction (allocation rows recorded `exceeds_demand`, Phase 14 slice 5) is not reported as allocation beyond the requested quantity; |
 | (g) | no retained Movement references a purged row; |
-| (h) | no append-only table was mutated outside an approved archival/purge path; |
+| (h) | no append-only table was mutated outside an approved archival/purge path; realized as a guard-integrity check: the guard triggers are present, enabled and unchanged, the guard functions' source is unchanged, `partflow_app` and `partflow_maintenance` hold exactly their grants (no UPDATE, DELETE or TRUNCATE on append-only history), the roles keep their safe attributes and no membership, PUBLIC and default privileges hold nothing, and `session_replication_role` is not set to `replica`. It cannot see a mutation made by a superuser who disabled a trigger or set `session_replication_role` in its own session and restored it (accepted limit, owner decision OD-16-09); |
 | (i) | Hot list entries are active demand (the `DEPLOYMENT.md` §5 query); |
 | (j) | canonical identity under the running interpreter and database: canonical PNs, case-insensitive Worker badges, the Asset Tag prefix rule, every canonical-form CHECK re-evaluated under the running database collation and ctype, the collation version, and index-independent duplicate probes of the identity keys (the platform-upgrade identity check). |
 
-(g) and (h) report `not_applicable` until Movement-history archival and
-database-role hardening exist; they are neutral for the exit code.
+(g) reports `not_applicable` until Movement-history archival exists, and (h)
+reports `not_applicable` only on a database without the PartFlow database roles
+(development, test, staging); both are neutral for the exit code. In the
+production stack (`DATABASE_ROLES_REQUIRED=true`) a missing role is a finding.
+
+Repair mapping for check (h) findings (reconciliation never repairs; the commands below are the operator's, the owner decides):
+
+- privilege codes on `partflow_app`, `partflow_maintenance` or PUBLIC, and schema, database and default-privilege codes for those grantees: `$PF --profile ops run --rm -T db-roles apply-grants`;
+- role codes except `ROLE_OWNS_OBJECTS` (`ROLE_ATTRIBUTE`, `ROLE_MEMBERSHIP`, `ROLE_MISSING`) and a role-scoped `REPLICATION_ROLE_SETTING` (`<db>/<role>` or `*/<role>`): `$PF --profile ops run --rm -T db-roles`, then `… db-roles apply-grants`;
+- a finding for another database role (`PRIVILEGE_EXCESS` or `DEFAULT_PRIVILEGE` with a foreign grantee; an `apply-grants` or `migrate` refusal `foreign_grantor`): review who granted it and why, and revoke it as the owner or the grantor; `apply-grants` deliberately leaves it in place;
+- trigger codes (`TRIGGER_MISSING`, `TRIGGER_CHANGED`, `TRIGGER_DISABLED`, `TRIGGER_ENABLE_MODE`), function codes (`GUARD_FUNCTION_MISSING`, `GUARD_FUNCTION_CHANGED`), `ROLE_OWNS_OBJECTS` (and the `role_owns_objects` refusal), a database-wide `REPLICATION_ROLE_SETTING` (`<db>/*`) and `REPLICATION_ROLE_ACTIVE`: an incident (§8); the owner decides.
+
+Never repair by re-running or downgrading migrations. A run that raced a grant or trigger change can show a transient finding: rerun before acting.
 
 Operating rules:
 
@@ -422,6 +443,14 @@ not trigger an automatic repair.
 - use the canonical Undo/correction workflow only after the committed state is
   known.
 
+### Guard-integrity finding (reconcile check (h))
+
+- freeze writes (`$PF stop backend`, §5) when a trigger or guard function changed, a trigger is disabled, or `session_replication_role` is set database-wide or is active: the ordinary guards then do not fire for any session, `partflow_app` included;
+- for the setting, the owner runs `ALTER DATABASE <db> RESET session_replication_role` inside `db`;
+- compare the triggers and functions with the migration source;
+- the owner decides the repair and whether history must be verified against the last backup;
+- run `reconcile` and the privilege probe (`DEPLOYMENT.md` §3.1) before reopening writes.
+
 ### Database or storage pressure
 
 - block new writes before disk is exhausted (the write freeze, §5);
@@ -446,7 +475,8 @@ not trigger an automatic repair.
 | Continuous | Health, restart, disk, certificate, backup-age, and error alerts |
 | Daily | Review backup success and off-site replication; review critical errors |
 | Weekly | Review capacity trend, database growth, failed logins/authorization events, and pending security updates |
-| Monthly | Patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts |
+| Monthly | Patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts; review database roles with `reconcile --check h` |
+| On role-password rotation | A short write freeze: replace the role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, then check health. A plain `up -d backend` does not pick up the new password (the container is not recreated), and running `db-roles` while the backend serves makes its new connections fail. Owner password: `ALTER ROLE … PASSWORD` inside `db` first, then replace `postgres_password` (no service restart: only the one-shot `migrate` and `db-roles` use it) |
 | Quarterly or after material schema change | Full isolated restore drill, measured RPO/RTO exercise, and reconciliation review |
 | Before every release | Fresh verified backup, migration review, rollback decision, and smoke-test plan |
 
