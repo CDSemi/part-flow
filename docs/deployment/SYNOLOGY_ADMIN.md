@@ -853,7 +853,9 @@ checkpoint (checkpoints refer to it by ID and hash) and it survives a checkout c
 A seal failure after a healthy activation does not stop the application: the operation is closed, `deployed.json`
 records `deployment_seal_failed` instead of a record, the command exits 1 with `deployment-record-incomplete`, and
 `status` reports `Deployment: not recorded (…)`. The next `deploy`, `update`, `rollback` or `restore-instance` seals a
-record. A staging folder left by an interrupted run is reported by `status` (`Unsealed deployment staging: N`) and is
+record. The seal is not retried inside the same operation: when its workspace refresh was still pending, a later
+`resume` finishes the refresh and closes the operation `failed_preserved` with the same exit 1 and copy.
+A staging folder left by an interrupted run is reported by `status` (`Unsealed deployment staging: N`) and is
 never used; PF-A3.2 cleans it.
 
 Since PF-A2.3 the new source tree is copied content-only and only the names `deploy` copied get the workspace
@@ -891,7 +893,9 @@ refused with `operation-open` and `resume` completes the deploy). A lost result 
 `needs_operator`; `abort-deploy` then supersedes the deploy and removes only its own frozen resources, after which
 `deploy` can run again. The private staging of a cancelled operation is removed (`note: staging-removed`); an
 unreferenced `.staging-*` folder is removed by the next staging flow, except the staging of a running deployment
-whose seal failed (`note: unsealed-active-staging`).
+whose seal failed (`note: unsealed-active-staging`). The staging of a superseded operation stays while the recovery
+that superseded it is open and is removed by the next staging flow once that recovery (or the last recovery of a
+chain of them) completed.
 
 ## 8. Editable repository and deployed revision
 
@@ -991,7 +995,12 @@ registered path (`generation-container-unsafe`, `generation-container-collision`
 (`workspace-root-acl`) or the device lacks room for the staged tree plus `minimum_free_mb`
 (`workspace-capacity`). Fix the cause and run `resume`, or run `resume --keep-workspace` to keep the current
 workspace (its manifest and provenance are then left as observed). A manual `pf backup` stays possible while the
-switch waits untouched. `deploy`, `update`, `rollback` and `restore-instance` also accept `--keep-workspace` to skip
+switch waits untouched. While that backup is open (it was interrupted), the waiting operation is held: `status` adds
+`waits: backup operation <op> is open; run 'pf --instance <slug> resume --operation <op>' (or add --abandon) first,
+then this operation's routes apply`, and `resume --operation <switch-op>` (also with `--keep-workspace`) is refused
+with `operation-open` naming the backup's `resume --operation <backup-op>` and its `--abandon`. Once the backup is
+closed, `resume` or `resume --keep-workspace` of the waiting operation apply again.
+`deploy`, `update`, `rollback` and `restore-instance` also accept `--keep-workspace` to skip
 the refresh from the start; the confirmation summary shows the choice and the number and size of retained
 generations.
 
@@ -1045,6 +1054,7 @@ checkpoint with a verification record (section 10).
 
 - **before any database effect** (staging, stop, checkpoint, rehearsal candidate): drops the operation's own candidate
   by its planned name, reopens the unchanged deployment and closes the update `cancelled` (the former `pf resume`);
+  `pf resume --abandon` does the same (`ABANDON <op8>`);
 - **after a live database effect**: continues forward from the journal;
 - when the **live migration's result was lost**: reads the live Alembic heads. Heads equal to the target count as done
   (the upgrade is never repeated); heads still at the previous revision, or any other heads, stop in
@@ -1203,8 +1213,10 @@ first). `pf rollback ... --restore-db` may **supersede** an open `update`, `roll
 application (or is in `needs_operator`); a code-only rollback may supersede only an update without any database
 effect, otherwise it is refused with `review recovery with --restore-db`. An interrupted rollback candidate restore
 is dropped and restored again from the same checkpoint; a checkpoint that changed meanwhile is refused with
-`plan-input-changed`. A superseding operation that is resumed before it changed anything **withdraws**: it starts no
-service, and the superseded operation and its routes apply again.
+`plan-input-changed` before the `RESUME <op8>` confirmation (nothing is recorded). A superseding operation that is
+resumed before it changed anything **withdraws**: it starts no service, and the superseded operation and its routes
+apply again. `pf resume --abandon` of a rollback before its database switch drops its own `pf_restore_*` candidate,
+then reopens the unchanged deployment (or, for a superseding rollback, withdraws and leaves the services stopped).
 
 ## 11. Reset staging data
 
@@ -1232,7 +1244,8 @@ Since PF-A3.1 the `before-reset` checkpoint is a schema-1 healthy checkpoint wit
 change). Emergency preservation inside `reset-db` is PF-A3.3: when the healthy checkpoint is refused, take
 `pf backup --emergency` and resolve the mismatch first.
 
-Since PF-A3.2 an interrupted `reset-db` drops its own `pf_clean_*` candidate and redoes it. A database switch whose
+Since PF-A3.2 an interrupted `reset-db` drops its own `pf_clean_*` candidate and redoes it; `pf resume --abandon`
+before the database switch drops the candidate and reopens the unchanged deployment instead. A database switch whose
 names prove it did not start is redone; one that left the names half renamed stops in `needs_operator`
 (`database-switch-unknown`) and is recovered with `rollback <before-reset checkpoint> --restore-db`.
 
@@ -1387,7 +1400,9 @@ manually.
 
 Since PF-A3.2 the purge has a two-stage approval: its plan is written at `PURGE <project>`; the binding deletion plan
 and the backup/admin-config choices are frozen in the journal only after `ERASE ...`. A failure or a declined
-confirmation before that reopens the application at once and closes the purge `cancelled` (unchanged behaviour). The
+confirmation before that reopens the application at once and closes the purge `cancelled` (unchanged behaviour). A
+purge interrupted before that point is reopened by `pf resume` or `pf resume --abandon` alike: every store the plan
+listed as not connectable gets `ALLOW_CONNECTIONS false` again and the unchanged deployment is reopened. The
 journal and the instance lock live outside everything purge deletes, so `pf status` shows the purge (and its next
 step) even with no `.env` and no daemon. `pf purge` re-enters an open purge in `deleting` or `finalizing` (an alias of
 `pf resume`, `RESUME PURGE <project> <bundle-id>`); asking for other backup or admin-config choices than the approved
@@ -1642,9 +1657,13 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
 - **PF-A3.1 → PF-A3.2.** The bootstrap bytes are unchanged. `pf install control` is refused while any instance
   operation is open (`instance-operation-pending`, naming the operation; also for an invalid journal or an operation
   index overflow). Runner records (`unresolved-effects.json`) of a journaled operation are reconciled by its closed
-  journal (`status --operation` shows `reconciled by journal sequence <n>`); records in an operation directory without
-  a journal (a `backup --emergency`, a side-by-side restore, a pre-A3.2 operation) still refuse with
-  `instance-effects-unresolved`: inspect them with `pf status`, confirm that nothing of them still runs, and keep the
+  journal (`status --operation` shows `reconciled by journal sequence <n>`), and those of a superseded operation by
+  the closing journal of the last recovery of its supersession chain; records in an operation directory without a
+  journal still refuse with `instance-effects-unresolved`. Such directories come from a `backup --emergency`, a
+  side-by-side restore, a pre-A3.2 operation, and from any lifecycle command whose child process was
+  interrupted or timed out before the confirmation, when no plan exists yet (for example Ctrl-C during the candidate
+  `compose build`, the `compose run` contract checks of `deploy`, `update` and `rollback`, or
+  `ensure_local_contract`): inspect them with `pf status`, confirm that nothing of them still runs, and keep the
   directory; their acknowledgement route is PF-A3.3.
 
 This explicit step is the security boundary that permits `repo/` to remain users-writable.
@@ -2054,7 +2073,13 @@ Codes:
   bundle, a checkpoint, the frozen `app.env` or `admin-config.json`, the staged deployment) changed; restore it
   byte-identically. `plan-inputs-conflict` — an alias asked for other choices than the approved ones.
 - `abandon-not-legal` (a live effect already started), `abandon-in-progress` (only `resume --abandon` continues an
-  accepted restore abandon), `keep-workspace-not-legal` (the new workspace is already bound).
+  accepted restore abandon), `keep-workspace-not-legal` (the new workspace is already bound). Where `--abandon` is
+  legal before a data effect it does what `resume` does there and then cancels: owned candidate databases are
+  dropped, a purge's non-connectable stores are closed again and the unchanged deployment is reopened (a superseding
+  rollback withdraws instead).
+- Refusals found while observing (`workspace-generation-mismatch`, `checkpoint-history-unknown`,
+  `keep-workspace-not-legal`, `plan-input-changed`) are decided before the typed confirmation: no attempt or approval
+  is recorded and the operation files are unchanged.
 - `workspace-generation-mismatch` — `repo/`, the retained generation or the stage is not what the journal recorded;
   nothing was moved. Restore the recorded state (for example remove a folder created at `repo/` meanwhile) and run
   `resume`, or `resume --keep-workspace`. `workspace-validation-failed` — the bound workspace does not validate; fix
@@ -2062,7 +2087,8 @@ Codes:
 - `journal-changed` — another writer changed the journal; the process stopped. Run `status`.
 - `operation-conflict` — more than one operation is open (not the allowed pair of a backup next to an update waiting
   in `workspace_sync_pending`); every mutating route is refused until an administrator reviews them with `status
-  --operation`.
+  --operation`. For the pair, `resume` without `--operation` names the backup: finish or abandon it with `resume
+  --operation <backup-op> [--abandon]` first; the waiting operation stays untouched until then (section 8).
 - `operation-journal-invalid` / `journal-format-unsupported` — a journal or plan does not validate, or a
   `state/pending.json` other than a permission apply exists (only an unsupported control change writes one). Every
   mutating route is refused; `status`, `doctor`, `backups`, `recoveries`, `ps` and `logs` work. Keep the directory,
@@ -2106,7 +2132,7 @@ Codes:
 | `sudo pf release-check` | Check eligible release without applying |
 | `sudo pf release-check --apply` | Refused in this checkpoint (exit 20): needs a protected policy grant (PF-A4.3) |
 | `sudo pf resume [--operation ID]` | Re-enter the open operation from its journal: reopen unchanged, continue forward or stop in `needs_operator` (`RESUME <op8>`) |
-| `sudo pf resume --abandon` | Cancel an operation where it is legal (before data effects; a restore while its target is prepared: `ABANDON RESTORE <project> <op8>`) |
+| `sudo pf resume --abandon` | Cancel an operation where it is legal (before data effects: owned candidates dropped, the unchanged deployment reopened, `ABANDON <op8>`; a restore while its target is prepared: `ABANDON RESTORE <project> <op8>`) |
 | `sudo pf resume --keep-workspace` | Finish an operation without refreshing `repo/` (`KEEP WORKSPACE <op8>`) |
 | `sudo pf status --operation ID` | One operation in detail: effects, evidence, attempts, children |
 | `... deploy\|update\|rollback\|restore-instance --keep-workspace` | Run without the workspace generation switch |
@@ -2226,7 +2252,10 @@ btrfs, SMB, a real Docker daemon or PostgreSQL):
 - partial capture folders, `pf_verify_*` leftovers of a failed verification, superseded stages, image tags loaded by an
   abandoned restore, a displaced checkpoint history and retained workspace generations are reported, never cleaned
   (PF-A3.3/PF-A5.1);
-- runner records of operations without a journal keep refusing `pf install` (acknowledgement PF-A3.3);
+- runner records of operations without a journal keep refusing `pf install` (acknowledgement PF-A3.3); besides
+  `backup --emergency` and side-by-side restores they include every lifecycle child
+  interrupted or timed out before the confirmation (candidate `compose build`, `compose run` contract checks,
+  `ensure_local_contract`);
 - more than 20000 entries in `operations/` refuse every mutating route until closed operations are archived.
 
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit

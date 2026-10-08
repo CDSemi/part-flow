@@ -584,11 +584,27 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > part **passed** with the fake daemon (CL-1..CL-5, CL-8..CL-11, RS-18, RS-25b; CL-6/CL-7 reachability evidence for the
 > workspace interval); A3-T05 **blocked** (PF-A3.4) — offline part passed (RS-1..RS-4), CLI part passed (CL-3, CL-4,
 > CL-11 migration branch); A3-T09 **passed** at `filesystem_and_cli` (CF-*, RS-27, RS-35, RS-36, CL-12..CL-14); A3-T10
-> **blocked** at its DSM/btrfs/SMB level (PF-A5.1) — filesystem part passed (WS-1..WS-20, `OPEN-HANDLE-1`). Earlier
+> **blocked** at its DSM/btrfs/SMB level (PF-A5.1) — filesystem part passed (WS-1..WS-20, `OPEN-HANDLE-1`; WS-21..WS-23 after the audit). Earlier
 > A1/A2/A3.1 offline cases re-run **passed**; A2-T04, the A2-T09 SMB part, the A1-T17 DSM part, A1-T11..T14, the
 > A3-T03 real DB part, the launcher and reboot/power loss stay `not_run`/`blocked`. Declared limits: SPEC §10 and
 > SYNOLOGY_ADMIN §18 (PF-A3.2 limits). The SPEC §8 definition of done holds offline; proposed verdict for the PF-A3.2
 > audit: `PASS_WITH_DECLARED_LIMITS`. Not production-ready; no finding is closed overall.
+
+> *Audit fix run (2026-10-08).* The PF-A3.2 audit (`_claude_outputs/ops/PF-A3.2/audit-findings.json`, nine confirmed
+> findings) is fixed: the pending switch waits while its paired backup is open (F1, RO-13 previously checked
+> single-operation journals only); `resume --abandon` in the pre-data rows reopens/withdraws as `resume` does there,
+> dropping owned candidates and restoring a purge's connection flags (F2); refusing observations, the keep-workspace
+> rows and the input re-read are decided before the confirmation, and a re-entry no longer overwrites the original
+> `inventory-preflight.json` (F3); supersession ignores a stepped-back clock (F4); journal-less runner-record sources
+> are documented (F5); a failed seal is never redone, the operation closes `failed_preserved` (F6); a superseded
+> operation's staging is swept once its chain closed (F7); runner records follow a supersession chain (F8);
+> `--keep-workspace` over a foreign directory records the retained generation (F9). 15 new tests (OS-8c, OS-15,
+> RO-14, RS-38..RS-42, RS-18b, SG-5, WS-17b, WS-21, WS-21b, WS-22, WS-23) plus stronger OS-14 and WS-12/13; every new
+> or changed test except WS-21b failed on `38a40cf` and passes now. Executed, same command, uid 0: **942 tests OK, 1
+> skipped** on `python:3.12` (1616.440 s) and `python:3.9` (1599.460 s); the skip is RO-14, which needs
+> `docs/deployment` (not copied by the canonical command) and passed on both images with the docs copied
+> (`evidence/audit-*.log`). `CRASH_MATRIX.json` and the CLI evidence were not regenerated (no row changed). No NAS,
+> DSM, Docker daemon, running stack or development database was contacted.
 
 ## Executed checks
 

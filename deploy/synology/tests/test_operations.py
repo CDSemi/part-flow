@@ -651,17 +651,31 @@ class Store(unittest.TestCase):
         index = index_of(self.root)
         self.assertFalse(index.conflict)
         self.assertEqual({item.operation_id for item in index.pair}, {update["operation_id"], backup["operation_id"]})
+        backup_resume = f"pf --instance staging resume --operation {backup['operation_id']}"
         refused = gate(index, "resume")
         self.assertEqual(refused.code, "operation-conflict")
-        self.assertIn("name one with 'pf --instance staging resume --operation <op>'", refused.message)
-        for op in (update["operation_id"], backup["operation_id"]):
-            decision = gate(index, "resume", operation=op)
-            self.assertEqual((decision.action, decision.entry.operation_id), ("reenter", op))
+        self.assertIn(f"name the backup with '{backup_resume}'", refused.message)
+        decision = gate(index, "resume", operation=backup["operation_id"])
+        self.assertEqual((decision.action, decision.entry.operation_id), ("reenter", backup["operation_id"]))
+        decision = gate(index, "resume", operation=backup["operation_id"], abandon=True)
+        self.assertEqual(decision.action, "reenter")
+        # Audit F1: the pending switch is frozen while the backup is open. Starting its W effects (or closing them
+        # with --keep-workspace) would end the pair and leave two blocking operations that no route can resume.
+        for request in ({}, {"keep_workspace": True}):
+            with self.subTest(request=request):
+                decision = gate(index, "resume", operation=update["operation_id"], **request)
+                self.assertEqual((decision.action, decision.code), ("refuse", "operation-open"))
+                self.assertTrue(decision.message.startswith(
+                    f"operation-open: operation {update['operation_id']} (update, phase workspace_sync_pending) waits "
+                    f"for backup operation {backup['operation_id']}"), decision.message)
+                self.assertIn(f"Legal next: {backup_resume}: ", decision.message)
+                self.assertIn(f"{backup_resume} --abandon: ", decision.message)
         for route in ("backup", "update", "rollback", "backup emergency", "purge"):
             with self.subTest(route=route):
                 decision = gate(index, route)
                 self.assertEqual(decision.code, "operation-open")
-                self.assertIn(f"pf --instance staging resume --operation {update['operation_id']}", decision.message)
+                self.assertIn(backup_resume, decision.message)
+                self.assertNotIn(f"resume --operation {update['operation_id']}", decision.message)
         # Any other two-blocking combination stays a conflict.
         shutil.rmtree(str(self.root / update["operation_id"]))
         migrating = pfx.lifecycle_plan(self.context, "update", op=pfx.operation_id("update", "0000dddd", 40))
@@ -671,6 +685,59 @@ class Store(unittest.TestCase):
         self.assertIsNone(index.pair)
         self.assertTrue(index.conflict)
         self.assertEqual(gate(index, "resume", operation=migrating["operation_id"]).code, "operation-conflict")
+
+    def test_os8c_a_superseding_plan_stamped_before_the_superseded_one_still_supersedes(self):
+        # Audit F4: a wall clock stepped back between the two operations never leaves both blocking. A superseding
+        # plan is only written while the operation it names is the single blocking one, so its stamp proves nothing.
+        update = dict(self.plan("update"), created_at="20261007T060000Z")
+        write_op(self.root, update, pfx.lifecycle_journal(update, phase="migrating", unresolved="e0007",
+                                                          states=dict(upto("e0007"), e0007="unknown")))
+        rollback = dict(pfx.lifecycle_plan(self.context, "rollback", op=pfx.operation_id("rollback", "0000cafe", 5),
+                                           supersedes=update["operation_id"]), created_at="20261007T055900Z")
+        directory = write_op(self.root, rollback, pfx.lifecycle_journal(rollback, phase="preserving-current",
+                                                                        states={"e0001": "complete"}))
+        index = index_of(self.root)
+        self.assertFalse(index.conflict)
+        self.assertEqual([(item.kind, item.cls) for item in index.blocking], [("rollback", "blocking")])
+        self.assertEqual([(item.operation_id, item.superseded_by) for item in index.superseded],
+                         [(update["operation_id"], rollback["operation_id"])])
+        self.assertEqual(gate(index, "resume").action, "reenter")
+        completed = pfx.lifecycle_journal(rollback, phase="completed", sequence=2,
+                                          states={item["effect_id"]: "complete" for item in rollback["effects"]})
+        pf_instance.write_journal_generation(directory, pf_instance.normalize_json(completed))
+        index = index_of(self.root)
+        self.assertEqual(index.blocking, ())
+        self.assertEqual([item.operation_id for item in index.superseded], [update["operation_id"]])
+
+    def test_os15_runner_records_of_a_chained_supersession(self):
+        # Audit F8: U <- R1 <- R2. U's records are reconciled by the end of the chain, never left open forever.
+        update = self.plan("update")
+        write_op(self.root, update, pfx.lifecycle_journal(update, phase="migrating", unresolved="e0007",
+                                                          states=dict(upto("e0007"), e0007="unknown")))
+        first = pfx.lifecycle_plan(self.context, "rollback", op=pfx.operation_id("rollback", "0000cafe", 5),
+                                   supersedes=update["operation_id"])
+        write_op(self.root, first, pfx.lifecycle_journal(
+            first, phase="needs_operator", unresolved="e0002", states=dict(upto("e0002"), e0002="unknown"),
+            last_error={"code": "effect-unknown", "message": "x"},
+            result={"outcome": "needs_operator", "deployment_id": None}))
+        second = pfx.lifecycle_plan(self.context, "rollback", op=pfx.operation_id("rollback", "0000beef", 7),
+                                    supersedes=first["operation_id"])
+        directory = write_op(self.root, second, pfx.lifecycle_journal(second, phase="preserving-current",
+                                                                      states={"e0001": "complete"}))
+        index = index_of(self.root)
+        states = {item.operation_id: pf_config.runner_records_state(item, index) for item in index.entries}
+        self.assertEqual(states[update["operation_id"]], ("open", None))
+        self.assertEqual(states[first["operation_id"]], ("open", None))
+        completed = pfx.lifecycle_journal(second, phase="completed", sequence=2,
+                                          states={item["effect_id"]: "complete" for item in second["effects"]})
+        pf_instance.write_journal_generation(directory, pf_instance.normalize_json(completed))
+        index = index_of(self.root)
+        self.assertEqual(index.blocking, ())
+        states = {item.operation_id: pf_config.runner_records_state(item, index) for item in index.entries}
+        self.assertEqual(states[update["operation_id"]], ("reconciled", 2))
+        self.assertEqual(states[first["operation_id"]], ("reconciled", 2))
+        self.assertEqual(pf_config.final_superseder(index, index.entry(update["operation_id"])).operation_id,
+                         second["operation_id"])
 
 
 # ============================================================================ RO: route gate and legal next steps
@@ -965,6 +1032,21 @@ class Routes(unittest.TestCase):
             self.assertIn("no longer reads or verifies", text)
         self.assertGreater(checked, 300)
         evidence("RO-13", {"checked_states": checked, "documented_procedures": documented})
+
+    def test_ro14_the_documented_sources_and_exits_of_audit_limits(self):
+        """Audit F5 and F1: the administrator guide (both languages) names every source of journal-less runner records
+        (a child interrupted or timed out before the confirmation) and the wait of a switch paired with a backup."""
+        docs = pfx.PACKAGE.parents[1] / "docs/deployment"
+        if not (docs / "SYNOLOGY_ADMIN.md").exists():
+            self.skipTest("the administrator guide is not part of this tree")
+        english = (docs / "SYNOLOGY_ADMIN.md").read_text(encoding="utf-8")
+        vietnamese = (docs / "SYNOLOGY_ADMIN.vi.md").read_text(encoding="utf-8")
+        for text in (english, vietnamese):
+            self.assertIn("`compose build`", text)
+            self.assertIn("ensure_local_contract", text)
+            self.assertIn("waits: backup operation", text)
+        self.assertIn("interrupted or timed out before the confirmation", english)
+        self.assertIn("bị ngắt hoặc hết thời gian trước khi xác nhận", vietnamese)
 
 
 # ============================================================================ controller-level store and routes
@@ -1695,6 +1777,98 @@ class Resume(Restartable):
                 self.assertIn(f"pf --instance staging rollback {before_update} --restore-db",
                               self.c.operation_index().blocking[0].journal["legal_next"])
 
+    def assert_abandoned(self, kind, op, *, running=True):
+        _, _, journal = tpa.latest_operation(self.c, kind)
+        self.assertEqual((journal["phase"], journal["result"]["outcome"]), ("cancelled", "cancelled"))
+        attempts = json.loads((self.context.operations_dir / op / "attempts.json").read_bytes())
+        self.assertEqual(attempts[-1]["action"], "abandon")
+        self.assertFalse([name for name in self.c.dbs if pf_config.CANDIDATE_RE.fullmatch(name)])
+        self.assertEqual(self.c.running, {"db": True, "backend": running, "frontend": running})
+
+    def test_rs38_abandon_before_a_database_effect_reopens_the_unchanged_deployment(self):
+        # Audit F2: --abandon is the "same" as resume in the stop/capture rows (section 3.6), never a bare close that
+        # leaves the writers stopped with no operation left to resume.
+        self.crash(["update", "--latest"], "e0003", "after-intent")
+        op, _, _ = tpa.latest_operation(self.c, "update")
+        self.assertFalse(self.c.running["backend"])
+        self.assertEqual(self.invoke(["resume", "--abandon"]), 0, self.last_error)
+        self.assertIn(f"Resuming operation {op} (update, phase preserving): abandon", self.output.getvalue())
+        self.assert_abandoned("update", op)
+        self.assertEqual(self.pointer()["sha"], OLD)
+        self.assertEqual(self.blocking(), [])
+
+    def test_rs39_reset_db_abandon_drops_the_owned_candidate_and_reopens(self):
+        self.crash(["reset-db"], "e0003", "after-effect")
+        op, plan, _ = tpa.latest_operation(self.c, "reset-db")
+        candidate = plan["effects"][2]["target"].split(":")[1]
+        self.assertIn(candidate, self.c.dbs)
+        rows = copy.deepcopy(self.c.dbs["partflow_staging"])
+        self.assertEqual(self.invoke(["resume", "--abandon"]), 0, self.last_error)
+        self.assert_abandoned("reset-db", op)
+        self.assertEqual(self.c.dbs["partflow_staging"], rows)
+
+    def test_rs40_rollback_abandon_drops_the_owned_candidate_and_reopens(self):
+        rollback = rollback_setup(self)
+        self.crash(rollback, "e0004", "after-effect")
+        op, plan, _ = tpa.latest_operation(self.c, "rollback")
+        self.assertIsNone(plan["supersedes"])
+        self.assertTrue([name for name in self.c.dbs if name.startswith("pf_restore_")])
+        rows = copy.deepcopy(self.c.dbs["partflow_staging"])
+        self.assertEqual(self.invoke(["resume", "--abandon"]), 0, self.last_error)
+        self.assert_abandoned("rollback", op)
+        self.assertEqual(self.c.dbs["partflow_staging"], rows)
+
+    def test_rs41_a_superseding_rollback_abandon_drops_its_candidate_and_withdraws(self):
+        op, _, _ = self.migrate_crash("after-intent")
+        self.assertEqual(self.invoke(["resume"]), 1)
+        before_update = next(item for item in self.c.snapshots() if item.reason == "before-update").bundle_id
+        self.crash(["rollback", before_update, "--restore-db"], "e0004", "after-effect")
+        rollback_op, plan, _ = tpa.latest_operation(self.c, "rollback")
+        self.assertEqual(plan["supersedes"], op)
+        self.assertTrue([name for name in self.c.dbs if name.startswith("pf_restore_")])
+        calls = len(self.c.calls)
+        self.assertEqual(self.invoke(["resume", "--abandon"]), 0, self.last_error)
+        self.assertFalse([call for call in self.c.calls[calls:] if call[0] == "compose" and call[1][0] in ("up", "start")])
+        self.assert_abandoned("rollback", rollback_op, running=False)
+        self.assertEqual(self.blocking(), [("update", "needs_operator")])
+
+    def test_rs42_a_moved_input_bundle_refuses_before_the_confirmation(self):
+        # Audit F3: the strict input re-read a remaining forward step needs runs before the typed confirmation, so the
+        # refusal leaves every operation file byte-identical and its "Nothing was changed." is true.
+        rollback = rollback_setup(self)
+        self.crash(rollback, "e0004", "after-effect")
+        op, _, _ = tpa.latest_operation(self.c, "rollback")
+        folder = self.c.backups_dir / self.selected
+        dump = folder / "database.dump"
+        original = dump.read_bytes()
+        os.chmod(str(dump), 0o600)
+        dump.write_bytes(original + b"tampered")
+        before = pfx.operation_files(self.context, op)
+        confirm = mock.Mock()
+        self.assertEqual(self.invoke(["resume"], confirm=confirm), 1)
+        self.assertIn(f"plan-input-changed: checkpoint {self.selected} of operation {op}", self.last_error)
+        confirm.assert_not_called()
+        self.assertEqual(pfx.operation_files(self.context, op), before)
+        dump.write_bytes(original)
+        self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+
+    def test_sg5_a_superseded_operations_staging_is_swept_once_its_superseder_completed(self):
+        # Audit F7: a superseded operation stays superseded forever; its unsealed staging is kept only while the
+        # recovery that supersedes it is open.
+        op, plan, _ = self.migrate_crash("after-intent")
+        self.assertEqual(self.invoke(["resume"]), 1)
+        before_update = next(item for item in self.c.snapshots() if item.reason == "before-update").bundle_id
+        self.assertEqual(self.invoke(["rollback", before_update, "--restore-db"]), 0, self.last_error)
+        dep = plan["source"]["deployment_id"]
+        staging = self.c.deployments_dir / (".staging-" + dep)
+        self.assertTrue(staging.is_dir())
+        self.assertEqual(self.c.operation_index().entry(op).cls, "superseded")
+        self.c.target = {"sha": "3" * 40, "ref": "v0.3", "release_id": 3}
+        self.c.new_migration = False
+        self.assertEqual(self.invoke(["update", "--latest"]), 0, self.last_error)
+        self.assertFalse(os.path.lexists(str(staging)))
+        self.assertIn(f"note: staging-removed: {dep}", self.output.getvalue())
+
 
 # ============================================================================ PR: durable effect protocol
 
@@ -2154,12 +2328,21 @@ class Workspace(Restartable):
         generation, plan, journal = self.interval()
         retained_hash = ta.tree_hash(self.container / generation)
         stage_hash = ta.tree_hash(self.container / ("stage-" + generation))
+        preflight = self.context.operations_dir / plan["operation_id"] / "inventory-preflight.json"
         for content in (["planted.txt"], []):
             with self.subTest(content=content):
                 self.root.mkdir()
                 for name in content:
                     (self.root / name).write_text("x")
-                self.assertEqual(self.invoke(["resume"]), 1)
+                # Audit F3: the refusing observation stops the resume before its confirmation; no operation file (and
+                # not the operation's own inventory preflight record) changes.
+                before = pfx.operations_bytes(self.context)
+                recorded = preflight.read_bytes()
+                confirm = mock.Mock()
+                self.assertEqual(self.invoke(["resume"], confirm=confirm), 1)
+                confirm.assert_not_called()
+                self.assertEqual(pfx.operations_bytes(self.context), before)
+                self.assertEqual(preflight.read_bytes(), recorded)
                 self.assertIn(f"workspace-generation-mismatch: the workspace switch of operation {plan['operation_id']} "
                               "found the workspace is an unknown inode", self.last_error)
                 _, _, journal = self.generation()
@@ -2253,6 +2436,115 @@ class Workspace(Restartable):
                       "to the workspace refresh. Nothing was changed.", self.last_error)
         self.assertEqual(pfx.operation_files(self.context, op), before)
         self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+
+    def test_ws17b_keep_workspace_after_an_unjournaled_bind_is_refused_before_the_confirmation(self):
+        # Audit F3: the section 3.7 "bind done" row (W3 unknown, observed bound) refuses --keep-workspace before the
+        # typed confirmation and the attempt entry.
+        self.crash(["update", "--latest"], "workspace:bind:", "after-effect")
+        op, plan, journal = tpa.latest_operation(self.c, "update")
+        self.assertEqual(pf_config.effect_state(journal, ws_ids(plan)[2]), "unknown")
+        before = pfx.operation_files(self.context, op)
+        confirm = mock.Mock()
+        self.assertEqual(self.invoke(["resume", "--keep-workspace"], confirm=confirm), 1)
+        self.assertIn(f"keep-workspace-not-legal: operation {op} is in syncing-workspace; --keep-workspace applies only "
+                      "to the workspace refresh. Nothing was changed.", self.last_error)
+        confirm.assert_not_called()
+        self.assertEqual(pfx.operation_files(self.context, op), before)
+        self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
+
+    def paired_backup(self):
+        """An update waiting in workspace_sync_pending and a backup interrupted inside its capture (the pair)."""
+        with self.no_workspace_space():
+            self.assertEqual(self.invoke(["update", "--latest"]), 1)
+        update_op, _, _ = tpa.latest_operation(self.c, "update")
+
+        def crash(*args, **kwargs):
+            raise pf.SimulatedCrash("inside the capture")
+
+        with mock.patch.object(self.c, "write_dump_list", side_effect=crash):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.invoke(["backup"])
+        self.restart()
+        backup_op, _, _ = tpa.latest_operation(self.c, "backup")
+        index = self.c.operation_index()
+        self.assertIsNotNone(index.pair)
+        self.assertFalse(index.conflict)
+        return update_op, backup_op
+
+    def test_ws21_a_pending_switch_waits_while_its_paired_backup_is_open(self):
+        # Audit F1: resuming the switch while the backup is open would start its W effects, end the pair and leave
+        # two blocking operations no route can resume (a failing or crashing W1/W2 left operation-conflict, or an
+        # absent workspace). The switch therefore waits; every refusal names the backup's routes.
+        update_op, backup_op = self.paired_backup()
+        backup_resume = f"pf --instance staging resume --operation {backup_op}"
+        before = pfx.operations_bytes(self.context)
+        for arguments in (["resume", "--operation", update_op], ["resume", "--operation", update_op, "--keep-workspace"],
+                          ["resume"], ["backup"]):
+            with self.subTest(arguments=arguments):
+                confirm = mock.Mock()
+                self.assertEqual(self.invoke(arguments, confirm=confirm), 1)
+                self.assertIn(backup_resume, self.last_error)
+                confirm.assert_not_called()
+        self.assertEqual(pfx.operations_bytes(self.context), before)
+        out = status_of(self)
+        self.assertIn(f"  waits: backup operation {backup_op} is open; run '{backup_resume}' (or add --abandon) first, "
+                      "then this operation's routes apply", out)
+        self.assertEqual(self.invoke(["resume", "--operation", backup_op]), 0, self.last_error)
+        self.assertEqual(self.blocking(), [("update", "workspace_sync_pending")])
+        # The switch's own routes apply again: a failing W1 leaves one resumable operation.
+        with mock.patch.object(self.c, "publish_source_tree", side_effect=OSError(28, "No space left on device")):
+            self.assertEqual(self.invoke(["resume", "--operation", update_op]), 1)
+        self.assertEqual(self.blocking(), [("update", "syncing-workspace")])
+        self.assertEqual(self.invoke(["resume", "--operation", update_op]), 0, self.last_error)
+        _, _, journal = self.generation()
+        self.assertEqual(journal["phase"], "completed")
+        self.assertEqual(self.blocking(), [])
+
+    def test_ws21b_an_abandoned_paired_backup_releases_the_switch(self):
+        update_op, backup_op = self.paired_backup()
+        self.assertEqual(self.invoke(["resume", "--operation", backup_op, "--abandon"]), 0, self.last_error)
+        self.assertEqual(self.invoke(["resume", "--operation", update_op, "--keep-workspace"]), 0, self.last_error)
+        self.assertEqual(self.blocking(), [])
+
+    def test_ws22_keep_workspace_over_a_foreign_directory_records_the_retained_generation(self):
+        # Audit F9: W2 renamed the old tree into the container but its completion was not journaled; an administrator
+        # recreated the workspace directory. --keep-workspace keeps it and links the retained generation to the journal.
+        generation, plan, journal = self.interval()
+        self.assertEqual(pf_config.effect_state(journal, ws_ids(plan)[1]), "unknown")
+        self.assertFalse([item for item in journal["retained_artifacts"] if item["kind"] == "workspace-generation"])
+        self.root.mkdir()
+        self.assertEqual(self.invoke(["resume", "--keep-workspace"]), 0, self.last_error)
+        _, _, journal = self.generation()
+        self.assertEqual(journal["phase"], "completed")
+        self.assertIn({"kind": "workspace-generation", "name": generation, "sha256": None},
+                      journal["retained_artifacts"])
+        self.assertTrue((self.container / generation).is_dir())
+        self.assertNotIn(f"latest {generation} unreferenced", status_of(self))
+
+    def test_ws23_a_failed_seal_is_never_redone_when_the_pending_switch_resumes(self):
+        # Audit F6: section 3.4 keeps a seal failure after a healthy activation terminal for the operation; a later
+        # resume of its workspace switch closes failed_preserved, so the journal and deployed.json agree.
+        with self.no_workspace_space(), \
+                mock.patch.object(self.c, "seal_deployment", side_effect=pf.Failure("simulated seal failure")):
+            self.assertEqual(self.invoke(["update", "--latest"]), 1)
+        op, plan, journal = tpa.latest_operation(self.c, "update")
+        seal = next(item["effect_id"] for item in plan["effects"] if item["type"] == "artifact-seal")
+        self.assertEqual((journal["phase"], pf_config.effect_state(journal, seal)), ("workspace_sync_pending", "partial"))
+        self.assertEqual(self.pointer().get("deployment_seal_failed"), op)
+        sealing = mock.Mock(side_effect=AssertionError("a failed seal is never redone"))
+        with mock.patch.object(self.c, "seal_deployment", sealing):
+            self.assertEqual(self.invoke(["resume"]), 1)
+        sealing.assert_not_called()
+        self.assertIn("deployment-record-incomplete: the application was activated and passed health checks",
+                      self.last_error)
+        _, _, journal = tpa.latest_operation(self.c, "update")
+        self.assertEqual(journal["phase"], "failed_preserved")
+        self.assertEqual(journal["result"], {"outcome": "failed_preserved", "deployment_id": None})
+        self.assertEqual(pf_config.effect_state(journal, seal), "partial")
+        self.assertTrue(all(pf_config.effect_state(journal, eid) == "complete" for eid in ws_ids(plan)))
+        self.assertEqual(self.pointer().get("deployment_seal_failed"), op)
+        self.assertNotIn("deployment_id", self.pointer())
+        self.assertEqual(self.blocking(), [])
 
     def test_ws20_a_superseded_stage_is_reported_and_left(self):
         self.assertEqual(self.invoke(["update", "--latest"]), 0, self.last_error)
@@ -3541,6 +3833,32 @@ class CliLifecycle(ter.Base):
         self.row("test_rs18", op, capture["effect_id"], "SIGKILL (blocked pg_dump inside the ALLOW_CONNECTIONS window)",
                  left, "cancelled")
         evidence("RESUME-CLI-1-RS-18", {"transcripts": self.transcripts})
+
+    def test_rs18b_abandon_of_a_purge_killed_inside_the_window_also_closes_the_flag_and_reopens(self):
+        # Audit F2: section 3.6 makes --abandon the "same" as resume before the deletion generation.
+        kept = "pf_keep_20261001t000000z_0c0ffe"
+        databases = self.plane_state()["databases"]
+        databases[kept] = {"heads": ["r1"], "rows": {"public.part": 2}, "allow": False, "owner": "partflow_staging",
+                           "locale": ["UTF8", "C.UTF-8", "C.UTF-8"]}
+        self.set_plane(databases=databases)
+        result, child = self.launch(["purge", "--keep-backups"], ["PURGE " + self.project],
+                                    block={"argv_contains": ["pg_dump"], "argv_match": r" -d pf_keep_", "seconds": 300},
+                                    signum=signal_module().SIGKILL)
+        self.assertEqual(result.returncode, -9, result.stderr)
+        self.end_child(child)
+        self.assertTrue(self.database(kept)["allow"])
+        op, _, journal = pfx.operations_of(self.context, "purge")[-1]
+        self.assertEqual(journal["phase"], "capturing")
+        result, _ = self.launch(["resume", "--abandon"], ["ABANDON " + op[-8:]])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Resuming operation {op} (purge, phase capturing): abandon", result.stdout)
+        self.assertEqual(self.journal(op)["phase"], "cancelled")
+        self.assertFalse(self.database(kept)["allow"])
+        self.assertEqual(self.database(kept)["rows"], {"public.part": 2})
+        state = self.fake.state()
+        self.assertEqual(sorted(item["labels"][pf.pf_docker.COMPOSE_SERVICE_LABEL] for item in state["containers"]
+                                if item["status"] == "running"), ["backend", "db", "frontend"])
+        self.assertEqual(pfx.open_operations(self.context), [])
 
     def purge_in_process(self):
         """The preceding purge (in-process, the real controller on the same fake plane; its random ERASE challenge

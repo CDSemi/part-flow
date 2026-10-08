@@ -2112,10 +2112,19 @@ class Controller:
         lines += self.retained_lines(inventory.excluded)
         return "\n".join(lines)
 
+    def preflight_record_name(self):
+        """The inventory preflight record of this process: ``inventory-preflight.json`` for a new operation; a
+        re-entered operation keeps its original record and gets the next ``inventory-preflight-resume-<n>.json``."""
+        if self.gate is None or self.gate.action != "reenter" or self.operation_dir is None:
+            return "inventory-preflight.json"
+        taken = [name for name in os.listdir(str(self.operation_dir))
+                 if re.fullmatch(r"inventory-preflight-resume-[0-9]+\.json", name)]
+        return f"inventory-preflight-resume-{len(taken) + 1}.json"
+
     def require_topology_owned(self, command):
         """Ownership preflight: refuse any blocker before Compose could adopt or recreate it (OD-A13-03)."""
         inventory = self.docker_inventory()
-        self.write_private_json("inventory-preflight.json", dict(inventory.record(), command=str(command)))
+        self.write_private_json(self.preflight_record_name(), dict(inventory.record(), command=str(command)))
         if inventory.blockers:
             lines = [f"  - {item.cls}: {item.kind} {self.resource_name(item)}" for item in inventory.blockers]
             raise Failure(
@@ -2129,7 +2138,7 @@ class Controller:
     def require_empty_target(self, command):
         """deploy / exact restore-instance: no owned or blocking container, volume or network may exist."""
         inventory = self.docker_inventory()
-        self.write_private_json("inventory-preflight.json", dict(inventory.record(), command=str(command)))
+        self.write_private_json(self.preflight_record_name(), dict(inventory.record(), command=str(command)))
         present = [item for item in inventory.blockers + inventory.owned
                    if item.kind in ("container", "volume", "network")]
         if present:
@@ -3036,6 +3045,10 @@ class Controller:
         log(f"  next (recorded at sequence {journal['sequence']}): " + (
             "; ".join(f"{command}: {description}" for _, command, description in routes) or
             f"none automatic; review it with 'pf --instance {slug} status --operation {entry.operation_id}'"))
+        if index.pair is not None and index.pair[1].operation_id == entry.operation_id:
+            backup = index.pair[0].operation_id
+            log(f"  waits: backup operation {backup} is open; run 'pf --instance {slug} resume --operation {backup}' "
+                "(or add --abandon) first, then this operation's routes apply")
         if plan["supersedes"]:
             superseded = index.entry(plan["supersedes"])
             log(f"  superseded: {plan['supersedes']} ({superseded.kind if superseded else 'unknown'}) by this "
@@ -7646,32 +7659,48 @@ class Controller:
         self.w1_stage(step)
         self.journal_update(effects={step.effect["effect_id"]: ("complete", utc(), step.evidence)})
 
-    def keep_workspace(self):
-        """``resume --keep-workspace`` (section 3.6/3.7): leave or rebind the old tree, remove the own stage, record
-        the W effects ``kept by operator`` and close."""
+    def keep_workspace_row(self):
+        """(section 3.7 reconciliation row or None when no W effect started, observation) for ``--keep-workspace``;
+        raises its refusal (bind done; a foreign change with nothing to rebind). Read-only, so ``resume`` decides it
+        before the confirmation."""
         ids = pf_config.workspace_effect_ids(self.plan)
         observed = self.workspace_observation()
+        if all(self.effect_state(effect_id) == "not_started" for effect_id in ids):
+            return None, observed
         evidence = self.workspace_evidence()
+        row = pf_config.workspace_reconcile(evidence, observed) if evidence.get("old") else "stage-incomplete"
+        if row == "bind-done":
+            raise Failure(f"keep-workspace-not-legal: operation {self.operation_id} is in "
+                          f"{self.journal['phase']}; --keep-workspace applies only to the workspace refresh. "
+                          "Nothing was changed.")
+        if row == "foreign" and observed.get("W") is None:
+            raise Failure(self.workspace_mismatch(observed))
+        return row, observed
+
+    def keep_workspace(self):
+        """``resume --keep-workspace`` (section 3.6/3.7): leave or rebind the old tree, remove the own stage, record
+        the W effects ``kept by operator`` and close. A retained generation that W2 moved but did not journal is linked
+        to the journal when the old tree stays there."""
+        ids = pf_config.workspace_effect_ids(self.plan)
         generation = self.plan["workspace"]["generation_id"]
-        started = [effect_id for effect_id in ids if self.effect_state(effect_id) != "not_started"]
+        row, observed = self.keep_workspace_row()
         rebound = False
-        if started:
-            row = pf_config.workspace_reconcile(evidence, observed) if evidence.get("old") else "stage-incomplete"
-            if row == "bind-done":
-                raise Failure(f"keep-workspace-not-legal: operation {self.operation_id} is in "
-                              f"{self.journal['phase']}; --keep-workspace applies only to the workspace refresh. "
-                              "Nothing was changed.")
+        retained = []
+        if row is not None:
             if row in ("between-renames", "stage-lost"):
                 with self.workspace_fds() as (parent_fd, container_fd):
                     pf_instance.rename_noreplace_at(container_fd, generation, parent_fd, self.root.name)
                 rebound = True
-            elif row == "foreign" and observed.get("W") is None:
-                raise Failure(self.workspace_mismatch(observed))
+            elif observed.get("CG") is not None and observed.get("CG") == self.workspace_evidence().get("old"):
+                # The old tree stays in the container as the retained generation (W2 renamed it); record it as W2's
+                # completion would have.
+                retained = [{"kind": "workspace-generation", "name": generation, "sha256": None}]
             self.remove_own_stage()
         if rebound:
             self.workspace_validation()
         note = "kept by operator" + (" (old tree rebound)" if rebound else "")
-        self.journal_update(effects={effect_id: ("complete", utc(), note) for effect_id in ids}, unresolved=None)
+        self.journal_update(effects={effect_id: ("complete", utc(), note) for effect_id in ids}, unresolved=None,
+                            retained=retained)
         log("Workspace kept: it was not refreshed (manifest unchanged; provenance as observed).")
         self.finish_operation()
 
@@ -7701,8 +7730,11 @@ class Controller:
         if not real_directory(self.deployments_dir):
             return
         index = index if index is not None else self.operation_index()
+        # A superseded operation's staging stays referenced only while its supersession chain is open (a withdrawn
+        # recovery gives it the blocking role back); once the chain ends in a closed recovery it is never reopened.
         referenced = {entry.plan["source"]["deployment_id"] for entry in index.entries
-                      if entry.plan is not None and entry.cls in ("blocking", "invalid", "superseded")}
+                      if entry.plan is not None and (entry.cls in ("blocking", "invalid") or (
+                          entry.cls == "superseded" and not pf_config.superseded_and_closed(index, entry)))}
         if self.plan is not None:
             referenced.add(self.plan["source"]["deployment_id"])
         active = None
@@ -8249,6 +8281,11 @@ class Controller:
             effect = self.plan_effect(journal["unresolved_effect"])
             observed, detail, _ = self.observe_effect(plan, journal, effect)
             log(f"observed: {effect['effect_id']} {effect['type']} {effect['target']}: {observed} ({detail})")
+            # A refusing observation (workspace-generation-mismatch, checkpoint-history-unknown) is a refusal check of
+            # section 3.1 step 7: decided before the confirmation and the attempt entry. --keep-workspace decides its
+            # own section 3.7 row below.
+            if observed == "refuse" and not keep_workspace:
+                raise Failure(detail)
         decision = pf_config.resume_decision(plan, journal, observed)
         if abandon and not decision.abandon_legal:
             reached = [effect for effect in plan["effects"]
@@ -8261,7 +8298,10 @@ class Controller:
         if keep_workspace and not decision.keep_legal:
             raise Failure(f"keep-workspace-not-legal: operation {op} is in {phase}; --keep-workspace applies only to "
                           "the workspace refresh. Nothing was changed.")
+        if keep_workspace:
+            self.keep_workspace_row()  # the bind-done and foreign-without-workspace rows refuse here (read-only)
         action = "abandon" if abandon else "keep-workspace" if keep_workspace else decision.action
+        body = self.abandon_body(decision) if action == "abandon" else None
         label = {"forward": "forward", "reopen": "reopen unchanged deployment", "withdraw": "withdraw (no reopen)",
                  "close": "close", "abandon": "abandon", "keep-workspace": "keep workspace",
                  "needs_operator": "forward"}[action]
@@ -8272,12 +8312,14 @@ class Controller:
             self.prepare_purge_resume()
         if action == "forward" and kind == "abort-deploy":
             self.prepare_abort_resume()
+        if action == "forward":
+            self.prefetch_inputs()
         if action == "abandon" and kind == "restore-instance":
             deletion_plan = self.prepare_restore_abandon()
         else:
             deletion_plan = None
-        confirm(self.resume_phrase(action), self.resume_summary(action, decision))
-        if deferred and action not in ("abandon", "keep-workspace"):
+        confirm(self.resume_phrase(action), self.resume_summary(action, decision, body=body))
+        if deferred and (action not in ("abandon", "keep-workspace") or body in ("reopen", "withdraw")):
             # Section 3.5 part (c): only the db service, after the confirmation and before any operation file
             # changes; a failing start leaves the operation unchanged (database-unavailable, no fail-closed).
             self.start_db_for_observation()
@@ -8305,7 +8347,9 @@ class Controller:
             return self.keep_workspace()
         if action == "abandon" and kind == "restore-instance":
             return self.abandon_restore_instance(deletion_plan)
-        if action in ("close", "abandon"):
+        if action == "abandon":
+            action = body
+        if action == "close":
             return self.close_abandoned()
         if action == "withdraw":
             return self.withdraw_superseding()
@@ -8313,8 +8357,48 @@ class Controller:
             return self.reopen_and_cancel()
         return self.run_plan({})
 
-    def resume_summary(self, action, decision):
+    def abandon_body(self, decision):
+        """Section 3.6 ``--abandon`` (legal rows only): what it does besides closing ``cancelled``. ``close`` (nothing
+        outside private files, a backup), ``reopen`` (owned candidates dropped, a purge's connection flags restored,
+        the unchanged deployment reopened) or ``withdraw`` (a superseding operation: owned candidates dropped,
+        services left as they are). restore-instance has its own abandon (None)."""
+        if self.plan["kind"] == "restore-instance":
+            return None
+        if self.plan["kind"] == "backup" or decision.action == "close":
+            return "close"
+        if decision.action in ("reopen", "withdraw"):
+            return decision.action
+        # The forward rows where abandon is legal (a reset-db or rollback candidate): drop it, then reopen/withdraw.
+        return "withdraw" if self.plan["supersedes"] is not None else "reopen"
+
+    def prefetch_inputs(self):
+        """Section 3.6 Inputs, before the confirmation: the strict re-read of ``plan.input_bundle`` when a remaining
+        forward step reads it (the rollback's selected checkpoint for its candidate restore and activation; the
+        restore bundle for every remaining step but the seal, the pointer and a workspace switch of the source
+        tree). A changed input refuses ``plan-input-changed`` with no operation file changed."""
+        kind = self.plan["kind"]
+        if self.plan["input_bundle"] is None or kind not in ("rollback", "restore-instance"):
+            return
+        stage = self.effects_of("workspace", type="source-stage")
+        bundle_tree = kind == "restore-instance" and bool(stage) and \
+            self.precondition(stage[0], "workspace-tree") is not None
+        for effect in self.plan["effects"]:
+            if self.effect_state(effect["effect_id"]) == "complete":
+                continue
+            role = pf_config.effect_role(effect)
+            if role in ("seal", "pointer") or (role == "workspace" and not bundle_tree):
+                continue
+            (self.op_selected if kind == "rollback" else self.op_recovery)()
+            return
+
+    def resume_summary(self, action, decision, *, body=None):
         op = self.operation_id
+        if action == "abandon" and body == "reopen":
+            return (f"Abandon operation {op}: owned candidates are dropped, the unchanged deployment is reopened and "
+                    "the operation is cancelled.")
+        if action == "abandon" and body == "withdraw":
+            return (f"Abandon operation {op}: owned candidates are dropped, its own staging is removed, application "
+                    "services stay as they are and the superseded operation's routes apply again.")
         text = {"forward": f"Continue operation {op} forward from its journal ({decision.reason}).",
                 "reopen": f"Reopen the unchanged deployment and cancel operation {op} (no data or source effect "
                           "started; owned candidates are dropped).",
@@ -8340,8 +8424,13 @@ class Controller:
         return 0
 
     def withdraw_superseding(self):
-        """Section 3.6: a superseding operation never reopens; it removes its own staging, closes cancelled and leaves
-        the application services as they are. The superseded operation's routes apply again."""
+        """Section 3.6: a superseding operation never reopens; it drops its owned candidates (a rollback abandoned in
+        its candidate restore), removes its own staging, closes cancelled and leaves the application services as they
+        are. The superseded operation's routes apply again."""
+        if any(pf_config.effect_role(effect) == "candidate" and self.effect_state(effect["effect_id"]) != "not_started"
+               for effect in self.plan["effects"]):
+            self.database_ready()
+            self.drop_owned(self.owned_candidates())
         self.close_operation("cancelled")
         superseded = self.operation_index().entry(self.plan["supersedes"])
         log(f"Operation {self.operation_id} withdrawn (cancelled); application services were left as they are.")
@@ -8495,6 +8584,11 @@ class Controller:
             role = pf_config.effect_role(effect)
             if role == "workspace":
                 self.run_workspace()
+                continue
+            if role == "seal" and self.effect_state(effect_id) == "partial":
+                # Section 3.4: a seal failure after a healthy activation is final for this operation (the pointer
+                # records deployment_seal_failed); a later resume of its workspace switch never redoes it, so the
+                # operation closes failed_preserved and the journal and deployed.json agree.
                 continue
             if role == "deletion" and self.plan["kind"] == "purge" and self.journal["deletion"] is None:
                 self.purge_approve_deletion(ctx)

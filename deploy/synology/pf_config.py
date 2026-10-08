@@ -2564,10 +2564,10 @@ def classify_operations(files, *, permissions_journal, overflow=0, validate=None
                 and entry.plan.get("supersedes") and entry.journal["phase"] != "cancelled":
             superseders.setdefault(entry.plan["supersedes"], []).append(entry.operation_id)
     for operation_id, entry in list(entries.items()):
-        # A superseding plan is created after the operation it names (same-second IDs order by kind, not time, so
-        # the plans' creation stamps decide).
-        later = sorted((entries[item].plan["created_at"], item) for item in superseders.get(operation_id, ())
-                       if entry.plan is not None and entries[item].plan["created_at"] >= entry.plan["created_at"])
+        # A superseding plan is written only while the operation it names is the single blocking one (section 3.3),
+        # so naming it is the proof; the creation stamps only order several superseders (a wall clock stepped back
+        # between the two plans must never leave both blocking). Same-second IDs order by kind, not time.
+        later = sorted((entries[item].plan["created_at"], item) for item in superseders.get(operation_id, ()))
         if entry.cls == "blocking" and later:
             entries[operation_id] = dataclasses.replace(entry, cls="superseded", superseded_by=later[-1][1])
     ordered = tuple(entries[name] for name in sorted(entries))
@@ -2596,15 +2596,34 @@ def superseding_entry(index, entry):
     return index.entry(entry.superseded_by) if entry.superseded_by else None
 
 
+def final_superseder(index, entry):
+    """The last operation of ``entry``'s supersession chain (U <- R1 <- R2 gives R2); ``entry`` itself when it is not
+    superseded, None when a link is missing or the chain loops."""
+    seen = set()
+    while entry is not None and entry.cls == "superseded":
+        if entry.operation_id in seen:
+            return None
+        seen.add(entry.operation_id)
+        entry = superseding_entry(index, entry)
+    return entry
+
+
+def superseded_and_closed(index, entry):
+    """A superseded entry whose supersession chain ends in a closed, not cancelled operation: it is reconciled and
+    never reopened (section 3.11a)."""
+    last = final_superseder(index, entry) if entry is not None and entry.cls == "superseded" else None
+    return last is not None and last.cls == "closed" and last.journal["phase"] != "cancelled"
+
+
 def runner_records_state(entry, index):
-    """Section 3.11a: ("open", None) or ("reconciled", sequence) for the runner records of one operation directory."""
+    """Section 3.11a: ("open", None) or ("reconciled", sequence) for the runner records of one operation directory.
+    A superseded operation is reconciled by the closing sequence of the last operation of its supersession chain."""
     if entry is None or entry.cls in ("blocking", "invalid", "no-journal"):
         return "open", None
     if entry.cls == "closed":
         return "reconciled", entry.journal["sequence"]
-    successor = superseding_entry(index, entry)
-    if successor is not None and successor.cls == "closed" and successor.journal["phase"] != "cancelled":
-        return "reconciled", successor.journal["sequence"]
+    if superseded_and_closed(index, entry):
+        return "reconciled", final_superseder(index, entry).journal["sequence"]
     return "open", None
 
 
@@ -2852,18 +2871,29 @@ def gate_decision(index, route, *, slug, request=None, private_state="<private_s
                                 message="nothing-to-resume: No incomplete operation exists. Nothing was changed.")
         return GateDecision("new")
     if index.pair is not None:
-        if route == "resume" and wanted is not None:
-            return GateDecision("reenter", entry=next(item for item in blocking if item.operation_id == wanted))
+        # The pending switch waits untouched while its backup is open: starting (or keeping) its W effects would end
+        # the pair, and two blocking operations that are not the pair refuse every route (audit F1).
+        backup, switch = index.pair
+        backup_resume = f"{prefix} resume --operation {backup.operation_id}"
+        legal = (f"{backup_resume}: resume the interrupted backup; {backup_resume} --abandon: close it (a partial "
+                 "capture folder is kept as bundle-attempt)")
+        if route == "resume" and wanted == backup.operation_id:
+            return GateDecision("reenter", entry=backup)
+        if route == "resume" and wanted == switch.operation_id:
+            return GateDecision("refuse", entry=switch, code="operation-open", message=(
+                f"operation-open: operation {switch.operation_id} ({switch.kind}, phase {switch.phase}) waits for "
+                f"backup operation {backup.operation_id}, which is open; its workspace refresh and --keep-workspace "
+                f"run only after the backup is closed. Legal next: {legal}. Nothing was changed."))
         listed = [f"{item.operation_id} {item.kind}/{item.phase}" for item in blocking]
         if route == "resume":
             return GateDecision("refuse", code="operation-conflict", message=(
                 f"operation-conflict: {len(listed)} operations of instance {slug} are open ({'; '.join(listed)}); "
-                f"name one with '{prefix} resume --operation <op>' (only resume --operation of either one and the "
-                "diagnostics are legal while both are open). Nothing was changed."))
-        commands = "; ".join(f"{prefix} resume --operation {item.operation_id}" for item in blocking)
+                f"name the backup with '{backup_resume}' (only that resume, its --abandon and the diagnostics are "
+                f"legal while both are open; operation {switch.operation_id} continues afterwards). Nothing was "
+                "changed."))
         return GateDecision("refuse", code="operation-open", message=(
             f"operation-open: operations {' and '.join(item.operation_id for item in blocking)} are open; "
-            f"'{_route_spelling(route)}' is not a legal next action for them. Legal next: {commands}. Nothing was "
+            f"'{_route_spelling(route)}' is not a legal next action for them. Legal next: {legal}. Nothing was "
             "changed."))
     entry = blocking[0]
     plan, journal = entry.plan, entry.journal
