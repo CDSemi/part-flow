@@ -146,12 +146,15 @@ in a rehearsal command.
 
 1. Record current application and Alembic revisions.
 2. Build/pull the target immutable images. Production stack:
-   `PARTFLOW_RELEASE=<new> $PF build` (never an existing tag), then rehearse
+   `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (never an existing tag), then rehearse
    the candidate image against the unchanged database:
    `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
    (a failing check stops the release; nothing has changed).
 3. Stop or block writes as required (production stack: `$PF stop backend`,
-   which may wait up to 200 s while an import finishes).
+   which may wait up to 200 s while an import finishes; with more than one
+   worker, requests sent meanwhile hang up to 60 s and end as a 504 or 502 with
+   an unknown outcome, so start it when no import is running — DEPLOYMENT §3.1
+   Process model).
 4. Run the production repository's explicit migration job once (production
    stack: `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`;
    P16-S3 replaces its command).

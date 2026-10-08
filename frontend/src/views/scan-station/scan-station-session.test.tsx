@@ -128,7 +128,19 @@ let badgeFailure: boolean;
 /** The sign-in loses the open-session race (the server's own 409). */
 let badgeConflict: boolean;
 /** Every badge check is refused with this answer, if set. */
-let badgeRefusal: { status: number; body: unknown } | null = null;
+let badgeRefusal: {
+  status: number;
+  body: unknown;
+  /** Runs before the refusal is answered (a commit the answer lost). */
+  before?: () => void;
+} | null = null;
+/** The `web` tier's own JSON answer when the backend is unreachable
+ * (frontend/nginx/templates/default.conf.template). */
+const WEB_502 = {
+  detail:
+    'The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.',
+  server_unavailable: true,
+};
 let previewFailure: boolean;
 /** While set, the matching reads stay pending until it resolves. */
 let contextHold: Promise<void> | null;
@@ -371,7 +383,10 @@ function handle(url: string, method: string, body: unknown): Response {
     if (badgeConflict) {
       return json({ detail: BADGE_CONFLICT }, 409);
     }
-    if (badgeRefusal) return json(badgeRefusal.body, badgeRefusal.status);
+    if (badgeRefusal) {
+      badgeRefusal.before?.();
+      return json(badgeRefusal.body, badgeRefusal.status);
+    }
     const badge = String((body as { badge: string }).badge)
       .trim()
       .toUpperCase();
@@ -569,6 +584,7 @@ beforeEach(() => {
   healthDown = false;
   badgeFailure = false;
   badgeConflict = false;
+  badgeRefusal = null;
   previewFailure = false;
   contextHold = null;
   previewHold = null;
@@ -801,7 +817,7 @@ test('a modal sign-in that switches the server session names the signed-out Work
   expect(pill()).toHaveTextContent('V. Tran');
 });
 
-test('an unknown badge, a failed check and a disconnected station keep the modal with nothing recorded', async () => {
+test('an unknown badge, a failed check and a disconnected station keep the modal', async () => {
   await renderStation();
   await waitFor(() => expect(signInModal()).not.toBeNull());
 
@@ -813,11 +829,12 @@ test('an unknown badge, a failed check and a disconnected station keep the modal
   ).toBeInTheDocument();
   expect(serverSession).toBeNull();
 
+  // A 5xx leaves the outcome unknown: no "nothing was recorded" claim.
   badgeFailure = true;
   scanBadgeInModal('100482');
   expect(
     await within(signInModal()!).findByText(
-      'Badge could not be checked — The badge check is unavailable. Nothing was recorded.',
+      'Badge could not be checked — The badge check is unavailable.',
     ),
   ).toBeInTheDocument();
   expect(signInModal()).toHaveAccessibleName('Worker sign-in required');
@@ -849,6 +866,35 @@ test('an unknown badge, a failed check and a disconnected station keep the modal
   );
   fireEvent.keyDown(badgeField(), { key: 'Enter' });
   expect(badgeRequests()).toHaveLength(3);
+});
+
+test("a badge check answered by the web tier's 502 never claims nothing was recorded and re-reads the station", async () => {
+  await renderStation();
+  await waitFor(() => expect(signInModal()).not.toBeNull());
+  const contextReads = () =>
+    requests.filter((r) => r.url === `/api/scan-stations/${STATION}/context`)
+      .length;
+  const readsBefore = contextReads();
+  badgeRefusal = { status: 502, body: WEB_502 };
+
+  scanBadgeInModal('100482');
+  expect(
+    await within(signInModal()!).findByText(
+      `Badge could not be checked — ${WEB_502.detail}`,
+    ),
+  ).toBeInTheDocument();
+  await waitFor(() => expect(contextReads()).toBeGreaterThan(readsBefore));
+  expect(signInModal()).not.toBeNull();
+});
+
+test('a badge sign-in the server committed before the web tier answered 502 lifts the modal on the re-read', async () => {
+  await renderStation();
+  await waitFor(() => expect(signInModal()).not.toBeNull());
+  badgeRefusal = { status: 502, body: WEB_502, before: () => signIn(NGUYEN) };
+
+  scanBadgeInModal('100482');
+  await waitFor(() => expect(signInModal()).toBeNull());
+  expect(pill()).toHaveTextContent('H. Nguyen');
 });
 
 test('a badge answer under a mode other than Scanned re-reads the station and lifts the modal', async () => {

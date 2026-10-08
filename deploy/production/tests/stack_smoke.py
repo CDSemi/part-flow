@@ -1,5 +1,6 @@
-"""P16-S2 stack smoke: builds the production images and runs compose.production.yaml under its own throwaway Compose
-project, then checks the running stack through `web` (P16-S2 SPEC section 6.3, cases SM-1..SM-22).
+"""P16-S2 stack smoke: builds the production images (with compose.production.build.yaml) and runs compose.production.yaml
+under its own throwaway Compose project, then checks the running stack through `web` (P16-S2 SPEC section 6.3, cases
+SM-1..SM-22, plus SM-23 from the slice audit).
 
 Usage (from any directory, on a host with the docker CLI and Compose v2):
   python deploy/production/tests/stack_smoke.py --evidence <path.json> [--keep] [--project NAME]
@@ -27,6 +28,11 @@ Spec amendments applied here (recorded in the P16-S2 evidence):
 - SM-10/SM-11 validity guard: nginx refuses request 7 only while less than one request has leaked from the bucket
   since request 1 (rate 10r/m = one per 6 s, burst 5), so the case is `invalid (host too slow)` when request 7 started
   >= 6 s after request 1 started (the spec's "after request 6" bound is weaker and could report a false failure).
+
+Added by the slice audit (F1):
+- SM-23: before anything is built, `up -d --no-deps backend web` and `run --rm --no-deps backend` with a
+  PARTFLOW_RELEASE whose images do not exist fail with "No such image" and leave no image under that tag
+  (compose.production.yaml has no build section, so a missing release is never built from the checkout).
 """
 import argparse
 import contextlib
@@ -49,6 +55,7 @@ import traceback
 
 REPO = Path(__file__).resolve().parents[3]
 COMPOSE_FILE = REPO / "compose.production.yaml"
+BUILD_FILE = REPO / "compose.production.build.yaml"
 ENV_EXAMPLE = REPO / ".env.production.example"
 DEFAULT_PROJECT = "partflow-s2-smoke"
 FORBIDDEN_PROJECTS = ("partflow", "partflow-production")
@@ -232,9 +239,9 @@ class Smoke:
                 f" Remove them first: docker compose -p {self.project} down -v --remove-orphans"
             )
 
-    def write_env(self, path, secrets_dir):
+    def write_env(self, path, secrets_dir, release=RELEASE):
         overrides = {
-            "PARTFLOW_RELEASE": RELEASE,
+            "PARTFLOW_RELEASE": release,
             "PARTFLOW_SECRETS_DIR": secrets_dir.as_posix(),
             "PARTFLOW_SITE_TIMEZONE": "UTC",
             "PARTFLOW_HTTP_PORT": str(self.port),
@@ -262,17 +269,48 @@ class Smoke:
         os.chmod(empty_file, 0o444)
         self.empty_env_file = self.workdir / "smoke-empty-secret.env"
         self.write_env(self.empty_env_file, self.empty_secrets_dir)
+        # SM-23: a release whose images were never built.
+        self.missing_release = f"s2-smoke-missing-{secrets.token_hex(4)}"
+        self.missing_env_file = self.workdir / "smoke-missing-release.env"
+        self.write_env(self.missing_env_file, self.secrets_dir, release=self.missing_release)
         self.evidence["port"] = self.port
         self.evidence["edge_subnet"] = EDGE_SUBNET
 
     def start(self):
         self.created = True
-        self.compose("build", timeout=1800)
+        self.sm23_missing_release()
+        self.compose("-f", str(BUILD_FILE), "build", timeout=1800)
         self.compose("up", "-d", "--wait", "db", timeout=300)
         self.compose("--profile", "ops", "run", "--rm", "migrate", timeout=300, record_output=True)
         # First-run setup procedure: one worker, set in the shell (overrides the env file).
         self.compose("up", "-d", "backend", "web", timeout=300, env_extra={"PARTFLOW_BACKEND_WORKERS": "1"})
         self.wait_for_health(90)
+
+    def image_exists(self, image):
+        return self.run(["docker", "image", "inspect", image], check_rc=False).returncode == 0
+
+    def sm23_missing_release(self):
+        with self.case("SM-23") as observed:
+            images = [f"partflow/{name}:{self.missing_release}" for name in ("backend", "web")]
+            if any(self.image_exists(image) for image in images):
+                raise CaseInvalid(f"an image tagged {self.missing_release} already exists")
+            attempts = {
+                "up": ("up", "-d", "--no-deps", "backend", "web"),
+                "run": ("run", "--rm", "--no-deps", "-T", "backend", "python", "--version"),
+            }
+            for label, arguments in attempts.items():
+                result = self.compose(*arguments, env_file=self.missing_env_file, check_rc=False, timeout=300)
+                output = result.stdout + result.stderr
+                observed[label] = {"rc": result.returncode, "no_such_image": "No such image" in output}
+                check(result.returncode != 0, f"`{label}` with a missing release did not fail")
+                check("No such image" in output, f"`{label}` with a missing release did not fail on the missing image")
+            left = [image for image in images if self.image_exists(image)]
+            observed["images_created"] = left
+            if left:
+                # A defective run would also have started containers; the teardown removes those with the project.
+                self.compose("down", "--remove-orphans", env_file=self.missing_env_file, check_rc=False, timeout=300)
+                self.run(["docker", "image", "rm", *left], check_rc=False)
+            check(not left, f"images were created under the missing release: {left}")
 
     def wait_for_health(self, seconds):
         deadline = time.monotonic() + seconds

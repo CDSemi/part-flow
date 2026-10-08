@@ -324,7 +324,7 @@ release checkout `repo/`.
 3. **Kiểm tra time zone.** `PARTFLOW_SITE_TIMEZONE` phải bằng `SITE_TIMEZONE` của
    staging.
 4. **Build, rồi bắt đầu từ volume mới rỗng.** `PARTFLOW_RELEASE` là release tag
-   (DEPLOYMENT §10). `$PF build`, `$PF up -d db`, rồi
+   (DEPLOYMENT §10). `$PF -f compose.production.build.yaml build`, `$PF up -d db`, rồi
    `$PF --profile ops run --rm migrate`. Volume `partflow-production_postgres_data`
    mới và rỗng: dữ liệu staging không bao giờ được promote, và restore vào
    production là quy trình P16-S5 cần owner quyết định.

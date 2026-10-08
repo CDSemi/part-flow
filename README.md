@@ -1136,20 +1136,23 @@ release checkout:
 ```bash
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF config --quiet
-$PF build
+$PF -f compose.production.build.yaml build
 $PF up -d db
 $PF --profile ops run --rm migrate
 $PF up -d backend web
 ```
 
-Never run `$PF down -v`: it deletes the production database volume. The
+Only the build uses `compose.production.build.yaml`: `compose.production.yaml`
+has no build section, so `up` or `run` with a release whose images are missing
+fails instead of building the checkout. Never run `$PF down -v`: it deletes the
+production database volume. The
 services, configuration inventory, operator commands, release sequence and
 platform proxy requirements are in
 [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Both Dockerfiles end with the `development` stage that `compose.yaml` builds,
 and also contain a `production` stage that Compose does not build by default
-(`compose.production.yaml` selects it):
+(`compose.production.build.yaml` selects it):
 
 ```bash
 docker build --target production backend
@@ -1171,7 +1174,7 @@ The production artifact checks need no running stack for their static part:
 ```bash
 python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
 PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<dir holding postgres_password> PARTFLOW_SITE_TIMEZONE=UTC \
-  docker compose -f compose.production.yaml --env-file .env.production.example build
+  docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
 ```
 
 The first runs the static tests of the Compose model, the environment example,
@@ -1190,7 +1193,7 @@ the real PostgreSQL integration test) against PostgreSQL 16; frontend
 format check, lint, typecheck, tests, and production build. A separate
 `docker` job verifies that the Docker Compose development images build
 (`docker compose build`), then builds the production images
-(`compose.production.yaml`, with throwaway release, secret and time-zone values)
+(`compose.production.build.yaml`, with throwaway release, secret and time-zone values)
 and runs the production artifact static tests
 (`deploy/production/tests`).
 
@@ -1216,6 +1219,7 @@ backend/
 frontend/nginx/    `web` image configuration (nginx templates, proxy and header snippets, trusted-proxy entrypoint)
 compose.yaml       development stack (db, backend, frontend)
 compose.production.yaml  production stack (db, backend, web, migrate); not for development
+compose.production.build.yaml  build-only companion: the production image builds of backend and web
 .env.production.example  production configuration inventory (copy to .env.production)
 deploy/production/tests/ production artifact static tests and Compose stack smoke
 docs/              canonical project documentation

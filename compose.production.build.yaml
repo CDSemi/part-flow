@@ -1,0 +1,14 @@
+# Build-only companion of compose.production.yaml (DEPLOYMENT §3.1): it adds the image build
+# of backend and web and is used for `build` only, with the candidate tag in the shell:
+#   PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build
+# Never use it with `up` or `run`: compose.production.yaml has no build section, so starting a
+# tag whose images are missing fails instead of building the checkout under that tag.
+services:
+    backend:
+        build:
+            context: ./backend
+            target: production
+    web:
+        build:
+            context: ./frontend
+            target: production

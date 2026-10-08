@@ -493,19 +493,22 @@ hay VPS (Phase 16 slice 7). Configuration là `.env.production` (sao chép
 ```bash
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF config --quiet
-$PF build
+$PF -f compose.production.build.yaml build
 $PF up -d db
 $PF --profile ops run --rm migrate
 $PF up -d backend web
 ```
 
-Không bao giờ chạy `$PF down -v`: nó xóa database volume của production. Các
+Chỉ bước build dùng `compose.production.build.yaml`: `compose.production.yaml`
+không có phần build, nên `up` hay `run` với một release thiếu image sẽ thất bại
+thay vì build checkout. Không bao giờ chạy `$PF down -v`: nó xóa database volume
+của production. Các
 service, bảng kê configuration, lệnh vận hành, release sequence và yêu cầu của
 platform proxy nằm ở [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Cả hai Dockerfile kết thúc bằng stage `development` mà `compose.yaml` build, và
 còn có stage `production` mà Compose không build mặc định
-(`compose.production.yaml` chọn nó):
+(`compose.production.build.yaml` chọn nó):
 
 ```bash
 docker build --target production backend
@@ -525,7 +528,7 @@ Phần static của các kiểm tra production artifact không cần stack đang
 
 ```bash
 python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
-PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml --env-file .env.production.example build
+PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
 ```
 
 Lệnh đầu chạy static test của Compose model, file environment example, Dockerfile
@@ -540,7 +543,7 @@ rồi xóa nó; nó cần Docker daemon và không thuộc CI.
 `.github/workflows/ci.yml` chạy cùng quality gate trên mỗi push vào `main` và
 pull request: backend format/lint/mypy/migration/pytest với PostgreSQL 16;
 frontend format/lint/typecheck/test/production build; job Docker riêng kiểm tra
-`docker compose build`, rồi build production image (`compose.production.yaml`, với
+`docker compose build`, rồi build production image (`compose.production.build.yaml`, với
 giá trị release, secret và time zone tạm) và chạy static test production artifact
 (`deploy/production/tests`).
 
@@ -566,6 +569,7 @@ backend/
 frontend/nginx/    cấu hình image `web` (nginx template, proxy/header snippet, trusted-proxy entrypoint)
 compose.yaml       development stack: db, backend, frontend
 compose.production.yaml  production stack (db, backend, web, migrate); không dành cho development
+compose.production.build.yaml  file đi kèm chỉ để build: build production image của backend và web
 .env.production.example  bảng kê configuration production (sao chép thành .env.production)
 deploy/production/tests/ static test production artifact và Compose stack smoke
 docs/              tài liệu chuẩn của project

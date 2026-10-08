@@ -51,11 +51,10 @@ services:
         logging: *logging
 
     backend:
-        build:
-            context: ./backend
-            target: production
         image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
-        # Built locally from the checked-out release only; never pulled.
+        # Built locally from the checked-out release only (compose.production.build.yaml); never
+        # pulled and never built here, so `up` or `run` with a missing tag fails instead of
+        # building the current checkout under that tag.
         pull_policy: never
         environment:
             <<: *database-environment
@@ -87,9 +86,6 @@ services:
         logging: *logging
 
     web:
-        build:
-            context: ./frontend
-            target: production
         image: partflow/web:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
         pull_policy: never
         # The only published port, on loopback only: the platform TLS proxy connects here.

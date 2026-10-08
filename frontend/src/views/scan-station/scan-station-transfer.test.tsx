@@ -93,6 +93,20 @@ let inventoryHold: Promise<void> | null;
 let healthDown: boolean;
 let inventoryReads: number;
 let resolveFailure: boolean;
+/** Every PN resolve is answered with this, if set. */
+let resolveAnswer: { status: number; body: unknown } | null;
+/** The `web` tier's own JSON answers when the backend is unreachable or
+ * slow (frontend/nginx/templates/default.conf.template). */
+const WEB_502 = {
+  detail:
+    'The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.',
+  server_unavailable: true,
+};
+const WEB_504 = {
+  detail:
+    'The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.',
+  server_unavailable: true,
+};
 let stationAreaId: number;
 
 function areaRef(areaId: number) {
@@ -420,6 +434,7 @@ function handle(url: string, method: string, body: unknown): Response {
   const resolve = /^\/api\/scan-stations\/([^/]+)\/scans\/resolve$/.exec(url);
   if (resolve && method === 'POST') {
     if (resolveFailure) throw new TypeError('Failed to fetch');
+    if (resolveAnswer) return json(resolveAnswer.body, resolveAnswer.status);
     const found = STATIONS.find(
       (s) => s.station_id === decodeURIComponent(resolve[1]),
     )!;
@@ -694,6 +709,7 @@ beforeEach(() => {
   healthDown = false;
   inventoryReads = 0;
   resolveFailure = false;
+  resolveAnswer = null;
   inventoryHold = null;
   stationAreaId = 2;
   vi.stubGlobal(
@@ -1505,6 +1521,36 @@ test('a resolution the server refuses reports the reason with nothing recorded',
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(transferRequests()).toHaveLength(0);
   await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+test.each([
+  ['web 502', 502, WEB_502],
+  ['web 504', 504, WEB_504],
+])(
+  'a resolution answered by the %s shows its detail without claiming nothing was recorded',
+  async (_label, status, body) => {
+    await renderStation();
+    resolveAnswer = { status, body };
+
+    scan('PF:PN:2027-60-8114-00');
+    const toast = await notice();
+    expect(toast).toHaveTextContent('Part Number could not be resolved');
+    expect(toast).toHaveTextContent(body.detail);
+    expect(toast).not.toHaveTextContent('No changes were recorded');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(transferRequests()).toHaveLength(0);
+  },
+);
+
+test('a resolution the server refuses (4xx) keeps its nothing-recorded sentence', async () => {
+  await renderStation();
+  resolveAnswer = { status: 404, body: { detail: 'Unknown Part Number.' } };
+
+  scan('PF:PN:2027-60-8114-00');
+  const toast = await notice();
+  expect(toast).toHaveTextContent(
+    'Unknown Part Number. No changes were recorded.',
+  );
 });
 
 test('the keyboard wedge reaches the input while nothing is focused, and Escape cancels a wizard', async () => {

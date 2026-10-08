@@ -330,7 +330,7 @@ run from the release checkout `repo/`.
 3. **Check the time zone.** `PARTFLOW_SITE_TIMEZONE` must equal the staging
    `SITE_TIMEZONE`.
 4. **Build, then start from a new empty volume.** `PARTFLOW_RELEASE` is the
-   release tag (DEPLOYMENT §10). `$PF build`, `$PF up -d db`, then
+   release tag (DEPLOYMENT §10). `$PF -f compose.production.build.yaml build`, `$PF up -d db`, then
    `$PF --profile ops run --rm migrate`. The volume
    `partflow-production_postgres_data` is new and empty: staging data is never
    promoted, and a restore into production is a P16-S5 procedure that needs an

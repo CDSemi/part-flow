@@ -7,6 +7,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { normalizeScanInput } from './barcode';
 import { DevBadgesSlot } from './scan-station-dev-badges-slot';
 import { Guidance } from './scan-station-presentation';
+import { answeredOutcomeUnknown } from './scan-station-write';
 
 const BADGE_NOT_RECOGNIZED =
   'Badge not recognized. Check the badge and scan again — nothing was recorded.';
@@ -15,12 +16,15 @@ const BADGE_NOT_RECOGNIZED =
  * Inline copy of a failed badge check. The reason keeps its own
  * "nothing was recorded/changed" sentence when it already has one (the
  * server's sign-in conflict, the unreachable-server fallback); the
- * suffix is added only when it is missing, never twice.
+ * suffix is added only when it is missing, never twice, and never to
+ * an unknown outcome (408/5xx: the badge may have signed in).
  */
 function badgeCheckFailure(error: unknown): string {
   const reason = errorMessage(error);
   const stated = /nothing was (recorded|changed)\.\s*$/i.test(reason);
-  return `Badge could not be checked — ${reason}${stated ? '' : ' Nothing was recorded.'}`;
+  const suffix =
+    stated || answeredOutcomeUnknown(error) ? '' : ' Nothing was recorded.';
+  return `Badge could not be checked — ${reason}${suffix}`;
 }
 
 /**
@@ -95,6 +99,9 @@ export function WorkerSignInDialog({
         setScanError(BADGE_NOT_RECOGNIZED);
       }
     } catch (error) {
+      // An unknown outcome may have signed the Worker in: re-read the
+      // station, whose valid session lifts this modal.
+      if (answeredOutcomeUnknown(error)) onModeChanged();
       setScanError(badgeCheckFailure(error));
     } finally {
       setChecking(false);

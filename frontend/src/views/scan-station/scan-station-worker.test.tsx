@@ -73,7 +73,20 @@ let committed: Map<string, unknown>;
 let requests: { url: string; method: string; body: any }[];
 let nextMovementId: number;
 let healthDown: boolean;
-let badgeFailure: boolean;
+/** Every badge check is answered with this, if set. */
+let badgeFailure: { status: number; body: unknown } | null;
+/** The `web` tier's own JSON answers when the backend is unreachable or
+ * slow (frontend/nginx/templates/default.conf.template). */
+const WEB_502 = {
+  detail:
+    'The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.',
+  server_unavailable: true,
+};
+const WEB_504 = {
+  detail:
+    'The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.',
+  server_unavailable: true,
+};
 /** While set, badge checks stay pending until it resolves. */
 let badgeHold: Promise<void> | null;
 /** Applied when the server commits a transfer (a concurrent Admin edit). */
@@ -225,9 +238,7 @@ function handle(url: string, method: string, body: unknown): Response {
   }
   if (url === '/api/scan-stations/DEBURR-ST-01/badge-scans') {
     if (method !== 'POST') return json({ detail: 'Method Not Allowed' }, 405);
-    if (badgeFailure) {
-      return json({ detail: 'The badge check is unavailable.' }, 503);
-    }
+    if (badgeFailure) return json(badgeFailure.body, badgeFailure.status);
     const request = body as Record<string, unknown>;
     if (
       Object.keys(request).join() !== 'badge' ||
@@ -292,7 +303,7 @@ beforeEach(() => {
   requests = [];
   nextMovementId = 500;
   healthDown = false;
-  badgeFailure = false;
+  badgeFailure = null;
   badgeHold = null;
   onTransferCommitted = null;
   contextFailure = false;
@@ -500,18 +511,46 @@ test('an unknown badge is not recognized, with the approved guidance', async () 
   expect(badgeRequests()).toHaveLength(1);
 });
 
-test('a badge check the server cannot answer reports it with nothing recorded', async () => {
+test('a badge check the server refuses (4xx) reports it with nothing recorded', async () => {
   const input = await renderStation();
-  badgeFailure = true;
+  badgeFailure = {
+    status: 409,
+    body: { detail: 'The badge check was refused.' },
+  };
 
   scan('ABC123');
   const toast = await notice();
   expect(toast).toHaveTextContent('Barcode could not be checked');
   expect(toast).toHaveTextContent(
-    'The badge check is unavailable. No changes were recorded.',
+    'The badge check was refused. No changes were recorded.',
   );
   await waitFor(() => expect(document.activeElement).toBe(input));
 });
+
+// A badge scan can sign in or switch a Worker Session: a 5xx — the
+// backend's own or the `web` tier's 502/504 — leaves its outcome
+// unknown, so the station never claims that nothing was recorded and
+// re-reads its session.
+test.each([
+  ['backend 503', 503, { detail: 'The badge check is unavailable.' }],
+  ['web 502', 502, WEB_502],
+  ['web 504', 504, WEB_504],
+])(
+  'a badge check answered by the %s never claims nothing was recorded and re-reads the station',
+  async (_label, status, body) => {
+    const input = await renderStation();
+    const readsBefore = contextReads();
+    badgeFailure = { status, body };
+
+    scan('ABC123');
+    const toast = await notice();
+    expect(toast).toHaveTextContent('Barcode could not be checked');
+    expect(toast).toHaveTextContent(body.detail);
+    expect(toast).not.toHaveTextContent('No changes were recorded');
+    await waitFor(() => expect(contextReads()).toBeGreaterThan(readsBefore));
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  },
+);
 
 test('a badge scan changes nothing: the Last Scanned PN, the Undo target and the station stay as they were', async () => {
   const input = await renderStation();

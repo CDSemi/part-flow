@@ -122,6 +122,7 @@ import {
   useWorkerSessionClock,
 } from './scan-station-session';
 import type { StationSession } from './scan-station-session';
+import { answeredOutcomeUnknown, failureDetail } from './scan-station-write';
 import { WorkerSignInDialog } from './scan-station-sign-in-dialog';
 import {
   ConfirmationSummary,
@@ -1097,7 +1098,7 @@ function StationView({
           kind: 'err',
           icon: '✕',
           title: 'Part Number could not be resolved',
-          detail: `${errorMessage(error)} No changes were recorded.`,
+          detail: failureDetail(error, 'No changes were recorded.'),
         });
       } finally {
         setResolving(false);
@@ -1166,7 +1167,7 @@ function StationView({
           kind: 'err',
           icon: '✕',
           title: 'Machine cannot be used here',
-          detail: `${errorMessage(error)} No changes were recorded.`,
+          detail: failureDetail(error, 'No changes were recorded.'),
         });
       } finally {
         setResolving(false);
@@ -1259,11 +1260,15 @@ function StationView({
           setNotice(UNRECOGNIZED_BARCODE_NOTICE);
         }
       } catch (error) {
+        // A badge scan can sign in or switch the Worker Session: after
+        // an unknown outcome (408/5xx) the station re-reads its session
+        // instead of claiming that nothing was recorded.
+        if (answeredOutcomeUnknown(error)) context.revalidate();
         setNotice({
           kind: 'err',
           icon: '✕',
           title: 'Barcode could not be checked',
-          detail: `${errorMessage(error)} No changes were recorded.`,
+          detail: failureDetail(error, 'No changes were recorded.'),
         });
       } finally {
         setResolving(false);
@@ -1877,7 +1882,7 @@ function StationView({
         kind: 'err',
         icon: '✕',
         title: 'The reversal summary could not be loaded',
-        detail: `${errorMessage(error)} No changes were recorded.`,
+        detail: failureDetail(error, 'No changes were recorded.'),
       });
     } finally {
       setResolving(false);

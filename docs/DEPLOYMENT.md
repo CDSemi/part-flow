@@ -145,8 +145,12 @@ release flow, role hardening, backups and observability remain P16-S3…S6.
 | `web` | image `partflow/web:${PARTFLOW_RELEASE}`, `production` stage | `edge` | the only published port, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (no variable for the bind address); no `depends_on`, so it keeps serving the shell while `backend` is stopped |
 | `migrate` | one-shot `alembic upgrade head` from the backend image | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm` (P16-S3 replaces the command) |
 
-Images are built locally from the checked-out release and never pulled
-(`pull_policy: never`); the tag is `PARTFLOW_RELEASE`. Every service has a
+Images are built locally from the checked-out release, through the build-only
+companion file `compose.production.build.yaml`, and never pulled
+(`pull_policy: never`); the tag is `PARTFLOW_RELEASE`. `compose.production.yaml`
+has no build section, so `up` or `run` with a tag whose images are missing fails
+with `No such image` instead of building the current checkout under that tag.
+Every service has a
 restart policy, a health check (except `migrate`), memory and CPU limits from
 the environment file (starting values, to be measured on the pilot host in
 P16-S7), and `json-file` log rotation (10 MiB, 5 files). Secrets are mounted as
@@ -174,14 +178,25 @@ content. No validation error echoes an input value. The URL is composed in the
 application, so special characters in the password need no manual encoding.
 
 **Process model.** `WEB_CONCURRENCY` sets the number of uvicorn workers and
-`FORWARDED_ALLOW_IPS` the proxy addresses uvicorn trusts for forwarded headers.
-Each worker has its own first-run setup token and its own password-hashing
-bounds, so **first-run setup runs with one worker** (`WEB_CONCURRENCY=1`) and
-the configured count is restored afterwards; with two workers a request can
+`FORWARDED_ALLOW_IPS` the proxy addresses uvicorn trusts for forwarded headers;
+Compose sets both inside the container (`WEB_CONCURRENCY` from
+`PARTFLOW_BACKEND_WORKERS`), so a `WEB_CONCURRENCY` value in the operator's
+shell has no effect. Each worker has its own first-run setup token and its own
+password-hashing bounds, so **first-run setup runs with one worker**
+(`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`) and the configured count is
+restored afterwards (`$PF up -d backend`); with two workers a request can
 reach the worker whose token was not copied and is refused `403
 setup_token_invalid` (no write). With more than one worker, a configuration
 refusal at startup stops the container with exit code `0`; the log line and the
-restart count, not the exit code, are the failure signal.
+restart count, not the exit code, are the failure signal. Stopping or
+recreating a backend with more than one worker does not refuse new connections
+at once: the uvicorn supervisor keeps the listening socket open until its last
+worker has exited (up to the 200 s stop grace while an import finishes), so a
+request sent meanwhile is accepted but never answered. It ends as `web`'s 504
+after the 60 s read timeout, or as a 502 when the supervisor exits; the backend
+never ran it, but the client must treat it as an unknown outcome. With one
+worker such a request is refused at once (502). Start a write freeze when no
+import is running.
 
 **Request limits and timeouts (`web`).**
 
@@ -217,7 +232,7 @@ detects itself; every backend response, including the application's own 401,
 | 413 | body over the location's limit | `This request is too large for PartFlow. Nothing was changed.` (`request_too_large: true`) | definite refusal |
 | 429 | rate limit exceeded (sends `Retry-After: 60`) | `Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.` (`rate_limited: true`) | definite refusal |
 | 502 | backend unreachable, or it closed the connection before answering | `The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | unknown outcome for a write |
-| 504 | no backend answer within the timeout | `The PartFlow server did not answer in time.` (`server_unavailable: true`) | unknown outcome for a write |
+| 504 | no backend answer within the timeout | `The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | unknown outcome for a write |
 
 A 502 or 504 keeps its 5xx status, so a station write that may have committed
 is shown as unknown and retried with the same `device_event_id`
@@ -322,7 +337,7 @@ the same directory.
 | --- | --- |
 | Preflight (§6, environment separation) | `docker ps -a --format '{{.Label "com.docker.compose.project"}}' \| sort -u` lists no `partflow-staging` |
 | Validate the configuration | `$PF config --quiet` |
-| Build a release (tag in the shell) | `PARTFLOW_RELEASE=<new> $PF build` |
+| Build a release (tag in the shell; the only use of the build file) | `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` |
 | Start the database | `$PF up -d db` |
 | Apply migrations (once per release) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate` (first install: the tag is already in `.env.production`) |
 | Start or recreate the application | `$PF up -d backend web` |
@@ -331,7 +346,7 @@ the same directory.
 | Reconciliation (also while `backend` is stopped) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile` |
 | Identity rehearsal of a candidate image (check (j)) | `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j` |
 | Recovery CLIs | `$PF run --rm --no-deps backend python -m app.cli reset-password …` · `… restore-correction-permission-management …` |
-| Write freeze | `$PF stop backend` (may wait up to 200 s while an import finishes) · reopen with `$PF up -d backend` |
+| Write freeze | `$PF stop backend` (may wait up to 200 s while an import finishes, and requests sent meanwhile hang up to 60 s, see Process model: start it when no import is running) · reopen with `$PF up -d backend` |
 | First-run setup | `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, read the token with `$PF logs backend \| grep "Setup token"`, complete setup, then `$PF up -d backend` |
 
 **Release sequence (manual form; P16-S3 automates it).** `.env.production`
@@ -341,7 +356,7 @@ switch uses the current image against the current schema.
 
 1. With the current tag: the pre-maintenance reconcile and any recovery CLI
    (`deployment/OPERATIONS_RUNBOOK.md` §5).
-2. `PARTFLOW_RELEASE=<new> $PF build` (never an existing tag).
+2. `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (never an existing tag).
 3. `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`:
    the candidate image against the unchanged database. A failing check stops
    the release here; nothing has changed.
@@ -351,7 +366,10 @@ switch uses the current image against the current schema.
    then health and reconcile.
 
 Rollback of application code with no schema change: restore the previous tag in
-`.env.production` and `$PF up -d backend web`. A schema rollback is the restore
+`.env.production` and `$PF up -d backend web`. It needs the previous release's
+images on the host, so keep them (no `docker image prune -a`) through the
+rollback window; when they are gone, `up` fails with `No such image` and starts
+nothing. A schema rollback is the restore
 path of the runbook (P16-S3/S5), never a down-migration here. **Never run
 `down -v`, or remove a volume, on the `partflow-production` project**: it
 deletes `partflow-production_postgres_data`; `$PF down` without `-v` is the
@@ -510,10 +528,11 @@ Every platform follows the same release order:
 6. Enter the approved maintenance mode/window when required.
 7. Run Alembic migration once and capture its output.
 8. Start the target application release. On a database with no
-   Administrator, start the backend with one worker (`WEB_CONCURRENCY=1`, so
-   there is a single setup token, §3.1), complete first-run setup (the setup
-   token is in the backend log) before opening access, then restart it with the
-   configured worker count. Then enroll each Scan Station device
+   Administrator, start the backend with one worker
+   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, so there is a single setup
+   token, §3.1), complete first-run setup (the setup token is in the backend
+   log) before opening access, then restart it with the configured worker count
+   (`$PF up -d backend`). Then enroll each Scan Station device
    (Administration → Scan Stations).
 9. Run health, API, UI, authorization, scan-focus, and write/read-back smoke
    checks using designated test data.

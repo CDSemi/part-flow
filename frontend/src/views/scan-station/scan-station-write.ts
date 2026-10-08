@@ -34,7 +34,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { ApiError, errorMessage } from '../../api/client';
 import { newDeviceEventId } from '../../api/production-release';
 import {
   badgeGateRefusal,
@@ -58,6 +58,30 @@ import {
   useStationDeviceRefused,
   useTrackOutcomeUnknown,
 } from './scan-station-session';
+
+/**
+ * Whether a failed station request is an answer whose outcome is
+ * unknown: a 408 or 5xx — including the `web` tier's own 502/504,
+ * whose detail asks the operator to check whether the change was
+ * saved. A transport failure keeps the client's own "could not be
+ * reached" sentence and is not covered here.
+ */
+export function answeredOutcomeUnknown(error: unknown): boolean {
+  return error instanceof ApiError && writeOutcomeUnknown(error);
+}
+
+/**
+ * The message of a failed station request followed by its "nothing
+ * was recorded" sentence — except for an unknown outcome
+ * (`answeredOutcomeUnknown`), which never claims that nothing was
+ * recorded: the message then stands alone.
+ */
+export function failureDetail(error: unknown, nothingRecorded: string): string {
+  const message = errorMessage(error);
+  return answeredOutcomeUnknown(error)
+    ? message
+    : `${message} ${nothingRecorded}`;
+}
 
 export interface OneShotWrite<T> {
   /** A request is in flight. */

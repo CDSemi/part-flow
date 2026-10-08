@@ -149,12 +149,14 @@ diễn tập.
 
 1. Ghi application và Alembic revision hiện tại.
 2. Build/pull target image bất biến. Production stack:
-   `PARTFLOW_RELEASE=<new> $PF build` (không bao giờ dùng tag đã có), rồi
+   `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (không bao giờ dùng tag đã có), rồi
    rehearsal candidate image trên database chưa đổi:
    `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
    (check thất bại thì dừng release; chưa có gì thay đổi).
 3. Stop hoặc block write nếu cần (production stack: `$PF stop backend`, có thể
-   chờ đến 200 s khi một import đang chạy).
+   chờ đến 200 s khi một import đang chạy; với hơn một worker, request gửi trong
+   lúc đó treo đến 60 s rồi kết thúc bằng 504 hoặc 502 với kết quả không rõ, nên
+   bắt đầu khi không có import nào đang chạy — DEPLOYMENT §3.1 Process model).
 4. Chạy production repository job migration rõ ràng đúng một lần (production
    stack: `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`; P16-S3 thay
    lệnh của nó).

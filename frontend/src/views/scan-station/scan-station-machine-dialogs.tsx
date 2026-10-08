@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { errorMessage } from '../../api/client';
 import {
   areaRefColor,
   recordMachineAction,
@@ -30,7 +29,11 @@ import {
 } from './scan-station-presentation';
 import { BadgeGateDialog } from './scan-station-badge-gate';
 import { useWorkerSessionSource } from './scan-station-session';
-import { useFinalGate, useOneShotWrite } from './scan-station-write';
+import {
+  failureDetail,
+  useFinalGate,
+  useOneShotWrite,
+} from './scan-station-write';
 import {
   enterKeyHandler,
   operationLabel,
@@ -286,7 +289,7 @@ export function AssignToMachineDialog({
           );
         }
       } catch (error) {
-        setScanError(`${errorMessage(error)} Nothing was changed.`);
+        setScanError(failureDetail(error, 'Nothing was changed.'));
       } finally {
         setScanning(false);
         scanRef.current?.focus();

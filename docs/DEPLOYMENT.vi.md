@@ -136,8 +136,11 @@ observability vẫn là P16-S3…S6.
 | `web` | image `partflow/web:${PARTFLOW_RELEASE}`, stage `production` | `edge` | port publish duy nhất, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (không có biến cho bind address); không có `depends_on`, nên nó vẫn phục vụ shell khi `backend` đang dừng |
 | `migrate` | `alembic upgrade head` one-shot từ image backend | `internal` | profile `ops`: không bao giờ được `up` khởi động; chạy bằng `--profile ops run --rm` (P16-S3 thay lệnh này) |
 
-Image được build cục bộ từ release đã checkout và không bao giờ pull
-(`pull_policy: never`); tag là `PARTFLOW_RELEASE`. Mỗi service có restart policy,
+Image được build cục bộ từ release đã checkout, qua file đi kèm chỉ để build
+`compose.production.build.yaml`, và không bao giờ pull (`pull_policy: never`); tag
+là `PARTFLOW_RELEASE`. `compose.production.yaml` không có phần build, nên `up` hay
+`run` với một tag thiếu image sẽ thất bại với `No such image` thay vì build
+checkout hiện tại dưới tag đó. Mỗi service có restart policy,
 health check (trừ `migrate`), giới hạn memory và CPU lấy từ file môi trường (giá
 trị khởi đầu, sẽ đo trên host pilot ở P16-S7) và log rotation `json-file` (10 MiB,
 5 file). Secret được mount dạng file dưới `/run/secrets`; không secret nào là
@@ -166,13 +169,23 @@ không cần encode thủ công.
 
 **Process model.** `WEB_CONCURRENCY` đặt số uvicorn worker và
 `FORWARDED_ALLOW_IPS` đặt các địa chỉ proxy mà uvicorn tin cậy cho forwarded
-header. Mỗi worker có setup token first-run riêng và giới hạn password-hashing
-riêng, nên **first-run setup chạy với một worker** (`WEB_CONCURRENCY=1`) và số
-worker cấu hình được khôi phục sau đó; với hai worker, một request có thể đến
+header; Compose đặt cả hai bên trong container (`WEB_CONCURRENCY` lấy từ
+`PARTFLOW_BACKEND_WORKERS`), nên giá trị `WEB_CONCURRENCY` trong shell của
+operator không có tác dụng. Mỗi worker có setup token first-run riêng và giới hạn
+password-hashing riêng, nên **first-run setup chạy với một worker**
+(`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`) và số worker cấu hình được khôi
+phục sau đó (`$PF up -d backend`); với hai worker, một request có thể đến
 worker không giữ token đã được copy và bị từ chối `403 setup_token_invalid`
 (không write). Với hơn một worker, việc từ chối cấu hình lúc startup dừng
 container với exit code `0`; tín hiệu lỗi là dòng log và số lần restart, không
-phải exit code.
+phải exit code. Dừng hoặc tạo lại backend có hơn một worker không từ chối kết
+nối mới ngay: uvicorn supervisor giữ listening socket mở cho đến khi worker cuối
+cùng thoát (đến 200 s stop grace khi một import đang hoàn tất), nên request gửi
+trong lúc đó được nhận nhưng không bao giờ được trả lời. Nó kết thúc bằng 504 của
+`web` sau read timeout 60 s, hoặc bằng 502 khi supervisor thoát; backend chưa
+chạy request đó, nhưng client phải coi nó là kết quả không rõ. Với một worker,
+request như vậy bị từ chối ngay (502). Bắt đầu write freeze khi không có import
+nào đang chạy.
 
 **Request limit và timeout (`web`).**
 
@@ -207,7 +220,7 @@ application, đi qua không đổi.
 | 413 | body vượt giới hạn của location | `This request is too large for PartFlow. Nothing was changed.` (`request_too_large: true`) | từ chối dứt khoát |
 | 429 | vượt rate limit (gửi `Retry-After: 60`) | `Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.` (`rate_limited: true`) | từ chối dứt khoát |
 | 502 | backend không với tới được, hoặc nó đóng kết nối trước khi trả lời | `The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | kết quả write không rõ |
-| 504 | backend không trả lời trong timeout | `The PartFlow server did not answer in time.` (`server_unavailable: true`) | kết quả write không rõ |
+| 504 | backend không trả lời trong timeout | `The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | kết quả write không rõ |
 
 502 hoặc 504 giữ nguyên status 5xx, nên một station write có thể đã commit được
 hiển thị là không rõ và retry với cùng `device_event_id`
@@ -309,7 +322,7 @@ maintenance vào cùng thư mục.
 | --- | --- |
 | Preflight (§6, tách biệt môi trường) | `docker ps -a --format '{{.Label "com.docker.compose.project"}}' \| sort -u` không liệt kê `partflow-staging` |
 | Validate configuration | `$PF config --quiet` |
-| Build một release (tag trong shell) | `PARTFLOW_RELEASE=<new> $PF build` |
+| Build một release (tag trong shell; cách dùng duy nhất của file build) | `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` |
 | Khởi động database | `$PF up -d db` |
 | Áp dụng migration (một lần mỗi release) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate` (cài đặt đầu tiên: tag đã nằm trong `.env.production`) |
 | Khởi động hoặc tạo lại application | `$PF up -d backend web` |
@@ -318,7 +331,7 @@ maintenance vào cùng thư mục.
 | Reconciliation (cả khi `backend` đang dừng) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile` |
 | Rehearsal identity của candidate image (check (j)) | `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j` |
 | CLI recovery | `$PF run --rm --no-deps backend python -m app.cli reset-password …` · `… restore-correction-permission-management …` |
-| Write freeze | `$PF stop backend` (có thể chờ đến 200 s khi một import đang chạy) · mở lại bằng `$PF up -d backend` |
+| Write freeze | `$PF stop backend` (có thể chờ đến 200 s khi một import đang chạy, và request gửi trong lúc đó treo đến 60 s, xem Process model: bắt đầu khi không có import nào đang chạy) · mở lại bằng `$PF up -d backend` |
 | First-run setup | `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, đọc token bằng `$PF logs backend \| grep "Setup token"`, hoàn tất setup, rồi `$PF up -d backend` |
 
 **Release sequence (dạng thủ công; P16-S3 tự động hóa).** `.env.production` luôn
@@ -328,7 +341,7 @@ schema hiện tại.
 
 1. Với tag hiện tại: reconcile trước bảo trì và mọi CLI recovery
    (`deployment/OPERATIONS_RUNBOOK.md` §5).
-2. `PARTFLOW_RELEASE=<new> $PF build` (không bao giờ dùng tag đã có).
+2. `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (không bao giờ dùng tag đã có).
 3. `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`:
    candidate image chạy trên database chưa đổi. Check thất bại thì dừng release
    ở đây; chưa có gì thay đổi.
@@ -338,7 +351,10 @@ schema hiện tại.
    rồi health và reconcile.
 
 Rollback code application khi không đổi schema: khôi phục tag trước trong
-`.env.production` và `$PF up -d backend web`. Rollback schema là đường restore
+`.env.production` và `$PF up -d backend web`. Việc này cần image của release
+trước còn trên host, nên giữ chúng (không `docker image prune -a`) trong suốt
+rollback window; nếu chúng đã mất, `up` thất bại với `No such image` và không
+khởi động gì. Rollback schema là đường restore
 của runbook (P16-S3/S5), không bao giờ là down-migration ở đây. **Không bao giờ
 chạy `down -v`, hay xóa volume, trên project `partflow-production`**: nó xóa
 `partflow-production_postgres_data`; `$PF down` không có `-v` là dạng dừng-tất-cả
@@ -488,9 +504,10 @@ Mọi nền tảng dùng cùng thứ tự release:
 6. Vào maintenance mode/window đã duyệt nếu cần.
 7. Chạy Alembic migration đúng một lần và lưu output.
 8. Khởi động target application release. Với database chưa có Administrator,
-   khởi động backend với một worker (`WEB_CONCURRENCY=1`, nên chỉ có một setup
-   token, §3.1), hoàn tất first-run setup (setup token nằm trong backend log)
-   trước khi mở truy cập, rồi khởi động lại với số worker đã cấu hình. Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations).
+   khởi động backend với một worker
+   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, nên chỉ có một setup token,
+   §3.1), hoàn tất first-run setup (setup token nằm trong backend log) trước khi
+   mở truy cập, rồi khởi động lại với số worker đã cấu hình (`$PF up -d backend`). Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations).
 9. Chạy health, API, UI, authorization, scan-focus và write/read-back smoke test
    bằng dữ liệu test được chỉ định.
 10. Chạy quantity/Movement reconciliation.

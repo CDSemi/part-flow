@@ -1,5 +1,6 @@
-"""P16-S2: static checks of the production artifacts (compose.production.yaml, .env.production.example, both
-Dockerfiles and the web tier configuration in frontend/nginx/).
+"""P16-S2: static checks of the production artifacts (compose.production.yaml, its build-only companion
+compose.production.build.yaml, .env.production.example, both Dockerfiles and the web tier configuration in
+frontend/nginx/).
 
 Case mapping (P16-S2 SPEC section 6.2):
   Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14, ST-15)
@@ -23,6 +24,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[3]
 COMPOSE_FILE = REPO / "compose.production.yaml"
+BUILD_FILE = REPO / "compose.production.build.yaml"
 ENV_EXAMPLE = REPO / ".env.production.example"
 NGINX_DIR = REPO / "frontend" / "nginx"
 TEMPLATE = NGINX_DIR / "templates" / "default.conf.template"
@@ -85,7 +87,8 @@ PROXY_BODIES = {
     ),
     "@partflow_gateway_timeout": (
         "504",
-        '{"detail":"The PartFlow server did not answer in time.","server_unavailable":true}',
+        '{"detail":"The PartFlow server did not answer in time. If you were saving a change, check whether it was'
+        ' saved before repeating it.","server_unavailable":true}',
     ),
 }
 # The backend's raw-body upload/import routes (backend tests/test_web_tier_contract.py B-W1), as nginx sees them.
@@ -158,11 +161,12 @@ def write_env(path, overrides):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_compose_config(env_file):
-    """`docker compose config --format json` of the production file, every profile active."""
+def run_compose_config(env_file, *extra_files):
+    """`docker compose config --format json` of the production file (plus `extra_files`), every profile active."""
+    files = [argument for path in (COMPOSE_FILE, *extra_files) for argument in ("-f", str(path))]
     return subprocess.run(
         [
-            "docker", "compose", "-f", str(COMPOSE_FILE), "--env-file", str(env_file),
+            "docker", "compose", *files, "--env-file", str(env_file),
             "--profile", "ops", "config", "--format", "json",
         ],
         cwd=REPO, env=_compose_environment(), capture_output=True, text=True, encoding="utf-8", timeout=120,
@@ -501,12 +505,28 @@ class ComposeModel(unittest.TestCase):
         self.assertRegex(self.services["db"]["image"], r"^postgres:16\.\d+$")
         self.assertEqual(self.services["backend"]["image"], f"partflow/backend:{RELEASE}")
         self.assertEqual(self.services["web"]["image"], f"partflow/web:{RELEASE}")
-        for name in ("backend", "web"):
-            self.assertEqual(self.services[name]["build"]["target"], "production", name)
         self.assertEqual(self.services["migrate"]["image"], self.services["backend"]["image"])
-        self.assertNotIn("build", self.services["migrate"])
         for name in PARTFLOW_IMAGES:
             self.assertEqual(self.services[name].get("pull_policy"), "never", name)
+        # No service of the runtime file can build: `up` or `run` with a missing PARTFLOW_RELEASE image must fail
+        # ("No such image") instead of building the checkout under that tag (audit F1).
+        for name, service in self.services.items():
+            self.assertNotIn("build", service, name)
+
+    # ST-12 (build-only companion)
+    def test_st12_build_file_adds_only_the_production_builds(self):
+        result = run_compose_config(self.env_file, BUILD_FILE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(result.stdout)["services"]
+        self.assertEqual(set(merged), set(self.services))
+        for name, context in (("backend", "backend"), ("web", "frontend")):
+            build = merged[name]["build"]
+            self.assertEqual(build["target"], "production", name)
+            self.assertTrue(same_path(build["context"], REPO / context), build["context"])
+        # Apart from the two build sections the merged model is the runtime model, unchanged.
+        for name, service in merged.items():
+            stripped = {key: value for key, value in service.items() if key != "build"}
+            self.assertEqual(stripped, self.services[name], name)
 
     # ST-14
     def test_st14_inventory(self):

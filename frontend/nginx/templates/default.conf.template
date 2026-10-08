@@ -121,6 +121,6 @@ server {
         default_type application/json;
         add_header Cache-Control "no-store" always;
         include /etc/nginx/partflow/static-headers.conf;
-        return 504 '{"detail":"The PartFlow server did not answer in time.","server_unavailable":true}';
+        return 504 '{"detail":"The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.","server_unavailable":true}';
     }
 }
