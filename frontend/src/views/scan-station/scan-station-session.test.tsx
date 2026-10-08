@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
 import { STATION_PERMISSIONS } from '../../api/scan-station';
+import { ConnectivityContext } from '../../app/connectivity-context';
 import type { StationContext, TransferResult } from '../../api/scan-station';
 import { AllocationDialog } from './scan-station-allocation-dialog';
 import {
@@ -1128,32 +1129,36 @@ test('the allocation dialog treats worker_session_required the same way: modal r
   const requireSession = vi.fn();
   const onDone = vi.fn();
   render(
-    <StationSessionContext.Provider
-      value={{
-        requireSession,
-        ticket: () => 0,
-        applyWorkerSession: () => undefined,
-        deviceRefused: () => undefined,
-        trackOutcomeUnknown: () => () => undefined,
-      }}
+    <ConnectivityContext.Provider
+      value={{ status: 'connected', retry: vi.fn() }}
     >
-      <AllocationDialog
-        station={station}
-        canAdjust
-        stocked={stocked}
-        sourceArea={{
-          id: 3,
-          name: 'Cut',
-          color: null,
-          description: null,
-          isTerminal: false,
+      <StationSessionContext.Provider
+        value={{
+          requireSession,
+          ticket: () => 0,
+          applyWorkerSession: () => undefined,
+          deviceRefused: () => undefined,
+          trackOutcomeUnknown: () => () => undefined,
         }}
-        writeBlocked={false}
-        onDone={onDone}
-        onLeave={() => undefined}
-        onAbandonUnknown={() => undefined}
-      />
-    </StationSessionContext.Provider>,
+      >
+        <AllocationDialog
+          station={station}
+          canAdjust
+          stocked={stocked}
+          sourceArea={{
+            id: 3,
+            name: 'Cut',
+            color: null,
+            description: null,
+            isTerminal: false,
+          }}
+          writeBlocked={false}
+          onDone={onDone}
+          onLeave={() => undefined}
+          onAbandonUnknown={() => undefined}
+        />
+      </StationSessionContext.Provider>
+    </ConnectivityContext.Provider>,
   );
   const dialog = await screen.findByRole('dialog', {
     name: 'Allocate stocked quantity',

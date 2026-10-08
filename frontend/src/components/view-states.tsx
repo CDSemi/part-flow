@@ -34,12 +34,15 @@ export function ErrorState({
   detail,
   onRetry,
   retryRef,
+  retryLabel = 'Retry',
 }: {
   message: string;
   detail?: string;
   onRetry?: () => void;
   /** The Retry button, for an owner that restores lost focus to it. */
   retryRef?: Ref<HTMLButtonElement>;
+  /** The retry button's label (default `Retry`). */
+  retryLabel?: string;
 }) {
   return (
     <div className="state-error" role="alert">
@@ -52,7 +55,7 @@ export function ErrorState({
           style={{ marginTop: 14 }}
           onClick={onRetry}
         >
-          Retry
+          {retryLabel}
         </button>
       ) : null}
     </div>

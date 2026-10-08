@@ -393,3 +393,59 @@ test('the Retry action rail is a full-height region at the banner edge', () => {
   expect(msg).toContain('flex: 1 1 auto');
   expect(msg).toContain('min-width: 0');
 });
+
+/* ============ Release mismatch (Phase 16 slice 3) ============ */
+
+const UPDATE_NOTICE =
+  '⚠ UPDATED — PartFlow was updated on the server. Reload this page to continue. Production actions are disabled';
+
+function healthAnswer(body: unknown, status = 200) {
+  return Promise.resolve(
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  );
+}
+
+test('FR-9: a 503 not_ready health answer is OFFLINE — the OFFLINE banner, no update notice', async () => {
+  stubFetch(() =>
+    healthAnswer(
+      {
+        status: 'not_ready',
+        service: 'partflow-api',
+        database: 'connected',
+        release: 'v9.9.9',
+        schema: 'mismatch',
+        not_ready: true,
+      },
+      503,
+    ),
+  );
+  render(<App />);
+  expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: 'Retry connection' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(UPDATE_NOTICE)).toBeNull();
+  expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
+});
+
+test('FR-6/FR-10: another server release shows the update notice; losing the connection shows the OFFLINE banner only', async () => {
+  let failing = false;
+  stubFetch(() =>
+    failing
+      ? Promise.reject(new TypeError('Failed to fetch'))
+      : healthAnswer({ status: 'ok', release: 'v9.9.9' }),
+  );
+  render(<App />);
+  expect(await screen.findByText(UPDATE_NOTICE)).toBeInTheDocument();
+  expect(screen.getByText('UPDATED')).toBeInTheDocument();
+  expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
+
+  failing = true;
+  fireEvent(window, new Event('offline'));
+  expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
+  expect(screen.queryByText(UPDATE_NOTICE)).toBeNull();
+  expect(screen.getAllByRole('alert')).toHaveLength(1);
+});

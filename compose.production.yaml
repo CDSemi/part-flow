@@ -1,7 +1,9 @@
-# PartFlow production stack (Phase 16 slice 2; DEPLOYMENT §3.1). Not for development:
+# PartFlow production stack (Phase 16 slices 2-3; DEPLOYMENT §3.1). Not for development:
 # development uses compose.yaml. Run from the release checkout with
 #   PF="docker compose -f compose.production.yaml --env-file .env.production"
-# and never `$PF down -v` (it deletes the production database volume).
+# and never `$PF down -v` (it deletes the production database volume). Releases run through
+# deploy/production/release.sh; the images carry their release identity (RELEASE_TAG/RELEASE_COMMIT), so this
+# file never sets it.
 name: partflow-production
 
 x-logging: &logging
@@ -59,6 +61,10 @@ services:
         environment:
             <<: *database-environment
             SESSION_COOKIE_SECURE: "true"
+            # Writes from a page of another release are refused (409); fixed on in production.
+            ENFORCE_CLIENT_RELEASE: "true"
+            # Rollback path 2 only (OPERATIONS_RUNBOOK §6): the one database revision this release may serve.
+            ACCEPT_SCHEMA_REVISION: ${PARTFLOW_ACCEPT_SCHEMA_REVISION:-}
             WEB_CONCURRENCY: ${PARTFLOW_BACKEND_WORKERS:-2}
             FORWARDED_ALLOW_IPS: ${PARTFLOW_EDGE_SUBNET:-172.30.250.0/24}
         secrets: [postgres_password]
@@ -72,8 +78,8 @@ services:
         # Never on-failure: with more than one worker a configuration refusal exits 0.
         restart: unless-stopped
         healthcheck:
-            # Liveness only (no HTTP, no database). P16-S3 replaces it with GET /api/health/live.
-            test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+            # Liveness only (no database, no readiness): a schema mismatch never makes it unhealthy.
+            test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live', timeout=3).close()"]
             interval: 10s
             timeout: 5s
             retries: 3
@@ -114,14 +120,15 @@ services:
                     cpus: "${PARTFLOW_WEB_CPUS:-0.5}"
         logging: *logging
 
-    # One-shot migration job: never started by `up`; run once per release with
-    # `$PF --profile ops run --rm migrate`.
+    # One-shot migration job: never started by `up`; run once per release (release.sh does) with
+    # `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`.
+    # One connection, one transaction; it refuses while backend is connected. No command: without a backup
+    # option it is a usage error (exit 2).
     migrate:
         image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
         pull_policy: never
         profiles: [ops]
-        # P16-S3 replaces this with `python -m app.cli migrate …` (CD4).
-        command: ["alembic", "upgrade", "head"]
+        entrypoint: ["python", "-m", "app.cli", "migrate"]
         environment:
             <<: *database-environment
         secrets: [postgres_password]

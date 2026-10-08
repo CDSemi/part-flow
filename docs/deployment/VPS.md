@@ -24,17 +24,21 @@ at P16-S2, implemented unless marked pending):
 - reverse proxy configuration and certificate procedure — documented (§4 and
   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1); verified on the host in P16-S7;
 - explicit migration command/job — implemented (the Compose `migrate` job,
-  profile `ops`; its command semantics are P16-S3);
+  profile `ops`, running `python -m app.cli migrate` in one transaction;
+  P16-S3, [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1);
 - secret/configuration inventory — implemented (`.env.production.example`,
   the `postgres_password` secret file; DEPLOYMENT §3.1);
 - backup and restore automation — P16-S5;
 - health and reconciliation commands — `reconcile` exists (P16-S1); its
   production invocation is implemented (P16-S2: DEPLOYMENT §3.1 commands); the
-  release automation around it is P16-S3;
+  release automation around it is implemented (P16-S3: `deploy/production/release.sh`
+  and `smoke.sh`, `revision`, the readiness and liveness endpoints), not yet
+  executed on a VPS (P16-S7);
 - logging/monitoring configuration — P16-S6 (the `web` access log is the
   request log in P16-S2);
-- release and rollback procedure tied to immutable versions — P16-S3 (the
-  manual sequence of DEPLOYMENT §3.1 exists from P16-S2).
+- release and rollback procedure tied to immutable versions — implemented
+  (P16-S3: [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5 and §6 and
+  `release.sh`; rollback path 3 waits for P16-S5).
 
 ## 3. Host baseline
 
@@ -135,7 +139,7 @@ required account/service. PostgreSQL data is never inside a Git checkout.
    staging or development data; a restore into production needs an owner
    decision, P16-S5).
 7. Run the migration once from the release backend image:
-   `$PF --profile ops run --rm migrate`.
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`.
 8. Start backend, `web` and the host reverse proxy (§4). On a database with no
    Administrator, start the backend with one worker
    (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, one setup token),

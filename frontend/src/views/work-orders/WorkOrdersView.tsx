@@ -9,6 +9,7 @@ import type { ApiDataState } from '../../api/use-api-data';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { Link } from '../../app/link';
+import { connectionReason } from '../../app/release-copy';
 import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
 import { useRouter } from '../../app/router-context';
 import { useSession } from '../../app/session-context';
@@ -390,6 +391,7 @@ function WorkOrderListPanel({
   dueSoon: ApiDataState<DueSoonPolicy>;
   onRetryDueSoon: () => void;
 }) {
+  const { status } = useConnectivity();
   // The rows come from the server — no second, local filter with its
   // own accidental semantics. While `searching`, they are the PREVIOUS
   // page kept on screen to avoid a flicker, so "there is nothing here"
@@ -438,7 +440,9 @@ function WorkOrderListPanel({
             className="btn ghost"
             disabled={writeBlocked}
             title={
-              writeBlocked ? 'Reconnect to import Work Orders.' : undefined
+              writeBlocked
+                ? connectionReason(status, 'Reconnect to import Work Orders.')
+                : undefined
             }
             onClick={onImport}
           >

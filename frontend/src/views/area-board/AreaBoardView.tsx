@@ -244,7 +244,8 @@ export function AreaBoardView() {
   // an unhealthy connection all read stale with the explicit note.
   const feedStale =
     preview === null &&
-    (connectivity !== 'connected' ||
+    (connectivity === 'connecting' ||
+      connectivity === 'unavailable' ||
       board === null ||
       (feed.state.status === 'ready' && feed.state.stale));
 

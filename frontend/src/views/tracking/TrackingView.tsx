@@ -230,7 +230,8 @@ export function TrackingView() {
   // stale with the explicit note.
   const feedStale =
     preview === null &&
-    (connectivity !== 'connected' ||
+    (connectivity === 'connecting' ||
+      connectivity === 'unavailable' ||
       page === null ||
       (feed.state.status === 'ready' && feed.state.stale));
 
@@ -661,7 +662,8 @@ function TrackingDetailPanel({
   };
   const detail = feed.state.status === 'ready' ? feed.state.data : null;
   const stale =
-    connectivity !== 'connected' ||
+    connectivity === 'connecting' ||
+    connectivity === 'unavailable' ||
     detail === null ||
     (feed.state.status === 'ready' && feed.state.stale);
   const revisions = detail === null ? NO_REVISIONS : detailRevisions(detail);

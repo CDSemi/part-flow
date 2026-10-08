@@ -540,6 +540,7 @@ test('Check file sends the raw bytes labelled by extension, never by File.type',
     expect(init.headers).toEqual({
       'Content-Type': 'text/csv',
       'X-PartFlow-CSRF': '1',
+      'X-PartFlow-Release': 'development',
     });
     const body = init.body as Blob;
     expect(body.type).toBe('text/csv');
@@ -578,6 +579,7 @@ test('Import sends the same bytes with the check token header', async () => {
   expect(init.headers).toEqual({
     'Content-Type': 'text/csv',
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
     'X-PartFlow-Import-Check': TOKEN,
   });
   expect(await blobBytes(init.body as Blob)).toEqual([1, 2, 3]);
@@ -602,6 +604,7 @@ test('FU-4: Import sends the confirmation header only when a token is given', as
   expect(init.headers).toEqual({
     'Content-Type': IMPORT_MEDIA_TYPE.XLSX,
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
     'X-PartFlow-Import-Check': TOKEN,
     'X-PartFlow-Import-Confirm': CONFIRM,
   });

@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 
+import { useConnectivity } from '../../app/connectivity-context';
+import { OUTDATED_SCAN_PLACEHOLDER } from '../../app/release-copy';
 import { ModalDialog } from '../../components/ModalDialog';
 import { normalizeScanInput } from './barcode';
 import { DevBadgesSlot } from './scan-station-dev-badges-slot';
@@ -43,6 +45,7 @@ export function BadgeGateDialog({
   onBadge: (badge: string) => void;
   onCancel: () => void;
 }) {
+  const { status } = useConnectivity();
   const fieldRef = useRef<HTMLInputElement>(null);
 
   // The badge field owns focus whenever it can take a scan: on open,
@@ -91,7 +94,9 @@ export function BadgeGateDialog({
         disabled={writeBlocked || busy}
         placeholder={
           writeBlocked
-            ? 'Disconnected — scanning disabled'
+            ? status === 'outdated'
+              ? OUTDATED_SCAN_PLACEHOLDER
+              : 'Disconnected — scanning disabled'
             : busy
               ? 'Recording…'
               : 'Scan Worker badge · Press Enter'

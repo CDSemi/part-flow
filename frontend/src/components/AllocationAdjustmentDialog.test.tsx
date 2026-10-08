@@ -670,6 +670,34 @@ test('FC-6: another user’s request id after an unknown outcome keeps the lock'
   expect(onClose).toHaveBeenCalledWith(true);
 });
 
+const RELEASE_MISMATCH =
+  'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+
+test('FR-21b: a release refusal of the resubmit keeps the unknown outcome, its lock and its key', async () => {
+  const { onClose } = renderDialog();
+  await screen.findByLabelText('Quantity to allocate (pcs)');
+  answers.push(NETWORK_FAILURE);
+  fireEvent.click(screen.getByRole('button', { name: 'Allocate' }));
+  await screen.findByText(/did not answer/);
+
+  answers.push(() =>
+    json({ detail: RELEASE_MISMATCH, release_mismatch: true }, 409),
+  );
+  const before = contextGets;
+  fireEvent.click(screen.getByRole('button', { name: 'Allocate' }));
+  expect(await screen.findByText(RELEASE_MISMATCH)).toBeInTheDocument();
+  // Still unknown: locked intent, same key, no re-read of the figures.
+  expect(qtyField()).toHaveAttribute('readonly');
+  expect(posts[1].body.device_event_id).toBe(posts[0].body.device_event_id);
+  expect(contextGets).toBe(before);
+
+  answers.push(() => json(resultWire('ALLOCATED'), 201));
+  fireEvent.click(screen.getByRole('button', { name: 'Allocate' }));
+  await waitFor(() => expect(posts).toHaveLength(3));
+  expect(posts[2].body.device_event_id).toBe(posts[0].body.device_event_id);
+  expect(onClose).not.toHaveBeenCalledWith(false);
+});
+
 test('the PN Overview lists the open lines with their figures; no open demand points at Work Order Details', async () => {
   contextWire = {
     ...completedContext([{ ...STOCKROOM_ROW, quantity: 10 }, CORRECTION_ROW]),

@@ -240,7 +240,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function renderDialog(status: 'connected' | 'unavailable' = 'connected') {
+async function renderDialog(
+  status: 'connected' | 'unavailable' | 'outdated' = 'connected',
+) {
   const onClose = vi.fn();
   render(
     <ConnectivityContext.Provider value={{ status, retry: () => {} }}>
@@ -864,6 +866,54 @@ test('FE-7: a 401 or 403 on a Retry keeps the unknown outcome and never claims n
     posts[0].body,
     posts[0].body,
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// Release mismatch (Phase 16 slice 3)
+// ---------------------------------------------------------------------------
+
+const RELEASE_MISMATCH =
+  'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+
+test('FR-21c: a release refusal of the Retry keeps the unknown outcome; closing still warns', async () => {
+  const onClose = await renderDialog();
+  editTail();
+  setReason('Mill is down');
+  postAnswers.push(() => 'network');
+  await adjust();
+
+  postAnswers.push(() =>
+    refusal(409, RELEASE_MISMATCH, { release_mismatch: true }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await act(async () => {});
+  expect(within(dialog()).getByRole('alert').textContent).toContain(
+    RELEASE_MISMATCH,
+  );
+  // Still unknown: the editor stays locked and Retry resends the same body.
+  expect(screen.getByLabelText('Step 3 Area')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+  expect(posts[1].body).toEqual(posts[0].body);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(onClose).toHaveBeenCalledWith({
+    changed: true,
+    notice:
+      "The last route adjustment may have been applied. Check the Quantity Flow's route before trying again.",
+  });
+});
+
+test('FR-31: while outdated the route dialog names the update, not the connection', async () => {
+  await renderDialog('outdated');
+  editTail();
+  setReason('Mill is down');
+  expect(reviewButton()).toBeDisabled();
+  expect(dialog().textContent).toContain(
+    'PartFlow was updated — reload the page to continue.',
+  );
+  expect(dialog().textContent).not.toContain(
+    'Changing a route needs the connection to the PartFlow server.',
+  );
 });
 
 // ---------------------------------------------------------------------------

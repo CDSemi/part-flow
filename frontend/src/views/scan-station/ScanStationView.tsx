@@ -13,6 +13,13 @@ import {
 import type { ReactNode } from 'react';
 
 import { useConnectivity } from '../../app/connectivity-context';
+import {
+  OUTDATED_BLOCKED_DETAIL,
+  OUTDATED_BLOCKED_TITLE,
+  OUTDATED_SCAN_PLACEHOLDER,
+  outdatedCannotRecord,
+  outdatedNotSent,
+} from '../../app/release-copy';
 import { useRouter } from '../../app/router-context';
 import { useStationTheme, useTheme } from '../../app/theme-context';
 import { isMockPreviewRequested } from '../../app/view-state';
@@ -1188,14 +1195,23 @@ function StationView({
   );
 
   const blockedNotice = useCallback(() => {
-    setNotice({
-      kind: 'err',
-      icon: '✕',
-      title: 'Connection lost — scanning is paused',
-      detail:
-        'Reconnect to PartFlow server before continuing. No scans or production updates will be recorded while offline.',
-    });
-  }, []);
+    setNotice(
+      status === 'outdated'
+        ? {
+            kind: 'err',
+            icon: '✕',
+            title: OUTDATED_BLOCKED_TITLE,
+            detail: OUTDATED_BLOCKED_DETAIL,
+          }
+        : {
+            kind: 'err',
+            icon: '✕',
+            title: 'Connection lost — scanning is paused',
+            detail:
+              'Reconnect to PartFlow server before continuing. No scans or production updates will be recorded while offline.',
+          },
+    );
+  }, [status]);
 
   /**
    * Apply a badge answer that signed in, switched or refreshed the
@@ -2272,13 +2288,15 @@ function StationView({
                   placeholder={
                     disconnected
                       ? 'Disconnected — scanning disabled'
-                      : status === 'connecting'
-                        ? 'Connecting…'
-                        : resolving
-                          ? checkingBadge
-                            ? 'Checking barcode…'
-                            : 'Resolving Part Number…'
-                          : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
+                      : status === 'outdated'
+                        ? OUTDATED_SCAN_PLACEHOLDER
+                        : status === 'connecting'
+                          ? 'Connecting…'
+                          : resolving
+                            ? checkingBadge
+                              ? 'Checking barcode…'
+                              : 'Resolving Part Number…'
+                            : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
                   }
                   aria-label="Scan barcode"
                   onKeyDown={(e) => {
@@ -3231,6 +3249,7 @@ function TransferDialog({
    * server never answered): the owner re-reads the Area. */
   onAbandonUnknown: () => void;
 }) {
+  const { status } = useConnectivity();
   const pn = resolution.partNumber;
   const operations = resolution.operations;
   // The destination is the Area the scan just resolved against — the
@@ -3334,7 +3353,9 @@ function TransferDialog({
     if (!valid || busy || reasonMissing) return;
     if (writeBlocked) {
       setServerError(
-        `Connection lost — the ${what} was not sent. Reconnect and confirm again; nothing was recorded.`,
+        status === 'outdated'
+          ? outdatedNotSent(what)
+          : `Connection lost — the ${what} was not sent. Reconnect and confirm again; nothing was recorded.`,
       );
       return;
     }
@@ -3709,8 +3730,14 @@ function TransferDialog({
           {serverError ? <Guidance tone="error">{serverError}</Guidance> : null}
           {writeBlocked && !serverError && !outcomeUnknown ? (
             <Guidance tone="error">
-              Disconnected — the {what} cannot be recorded until the connection
-              returns.
+              {status === 'outdated' ? (
+                outdatedCannotRecord(what)
+              ) : (
+                <>
+                  Disconnected — the {what} cannot be recorded until the
+                  connection returns.
+                </>
+              )}
             </Guidance>
           ) : null}
           {/* With the outcome unknown the intent is frozen: no Back to

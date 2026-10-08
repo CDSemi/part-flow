@@ -208,6 +208,8 @@ function seedState(): FakeState {
 }
 
 let state: FakeState;
+/** The `release` the health answer reports (absent while null). */
+let healthRelease: string | null = null;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -387,7 +389,11 @@ async function handle(
   if (url.pathname === '/api/health') {
     return state.healthDown
       ? detail('Service unavailable.', 503)
-      : json({ status: 'ok' });
+      : json(
+          healthRelease === null
+            ? { status: 'ok' }
+            : { status: 'ok', release: healthRelease },
+        );
   }
   const read = `${url.pathname}${url.search}`;
   if (method === 'GET') {
@@ -426,6 +432,7 @@ beforeEach(() => {
   window.history.replaceState({}, '', '/management/priority');
   session = signedInSession();
   state = seedState();
+  healthRelease = null;
   // The session history is module-scoped (it survives sub-view
   // switches); every test starts a fresh session.
   clearHotHistory();
@@ -1853,6 +1860,52 @@ test('FM-6: a Retry refused because the sign-in ended keeps the unknown outcome;
   expect(state.posts).toHaveLength(3);
   expect(state.posts[2]).toEqual(state.posts[0]);
   expect(screen.queryByText(/may already have been applied/)).toBeNull();
+});
+
+const RELEASE_MISMATCH =
+  'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+
+test('FR-21d: an Undo refused for another release keeps the step; it applies once the release matches again', async () => {
+  await renderPriority();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove B-200 from Hot list' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'C-300', 'D-400']));
+
+  state.nextPost = {
+    kind: 'refuse',
+    status: 409,
+    body: { detail: RELEASE_MISMATCH, release_mismatch: true },
+  };
+  fireEvent.click(undoButton());
+  await applyRanking();
+  expect(await screen.findByText(RELEASE_MISMATCH)).toBeInTheDocument();
+  expect(screen.queryByText(/removed from the history/)).toBeNull();
+
+  // The server runs this page's release again: the kept step applies.
+  healthRelease = 'development';
+  await waitFor(() => expect(undoButton()).toBeEnabled(), { timeout: 8000 });
+  fireEvent.click(undoButton());
+  await applyRanking();
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['A-100', 'B-200', 'C-300', 'D-400']),
+  );
+});
+
+test('FR-21d: a Retry refused for another release keeps the unknown outcome', async () => {
+  await leaveOutcomeUnknown();
+  state.nextPost = {
+    kind: 'refuse',
+    status: 409,
+    body: { detail: RELEASE_MISMATCH, release_mismatch: true },
+  };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  expect(await screen.findByText(RELEASE_MISMATCH)).toBeInTheDocument();
+  expect(screen.getByText(/may already have been applied/)).toBeInTheDocument();
+  expect(state.posts[1]).toEqual(state.posts[0]);
 });
 
 test('FM-6: a Retry refused for a missing permission keeps the unknown outcome and says the change may already be applied', async () => {

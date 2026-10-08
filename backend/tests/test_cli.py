@@ -382,4 +382,19 @@ def test_the_cli_reads_no_model() -> None:
             assert node.attr not in {"UserCredential", "UserSession"}
     # `errors` is the shared refusal vocabulary the CLI renders.
     assert "authentication" in application
-    assert application <= {"authentication", "errors", "reconciliation"}
+    assert application <= {"authentication", "errors", "reconciliation", "migration"}
+
+
+def test_help_lists_every_command(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--help"])
+    assert raised.value.code == 0
+    out = capsys.readouterr().out
+    for command_name in (
+        "reset-password",
+        "restore-correction-permission-management",
+        "reconcile",
+        "migrate",
+        "revision",
+    ):
+        assert command_name in out

@@ -3,7 +3,7 @@ import './planned-routes.css';
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 
-import { ApiError } from '../../api/client';
+import { ApiError, isReleaseMismatch } from '../../api/client';
 import { areaColor, listAreas, listOperations } from '../../api/environment';
 import { listMachines } from '../../api/machines';
 import {
@@ -838,6 +838,12 @@ function RouteEditDialog({
       setError(UNKNOWN_SAVE_MESSAGE);
       return;
     }
+    // PartFlow was updated while this page was open: refused before
+    // anything was checked — nothing changed, the editor stays as it is.
+    if (isReleaseMismatch(failure)) {
+      setError(failure.message);
+      return;
+    }
     // Deleted (404) or archived / changed references (409) meanwhile:
     // closing refreshes the list.
     if (saved && (failure.status === 404 || failure.status === 409)) {
@@ -938,6 +944,10 @@ function RouteEditDialog({
       } else if (failure.status === 404) {
         setConfirmEndsEditor(true);
         setConfirmError(failure.message);
+      } else if (isReleaseMismatch(failure)) {
+        // PartFlow was updated while this page was open: nothing
+        // changed and nothing is known about the Planned Route's use.
+        setConfirmError(failure.message);
       } else if (failure.status === 409) {
         // Never used after all: Delete… replaces Archive….
         wrote.current = true;
@@ -967,6 +977,10 @@ function RouteEditDialog({
       if (!(failure instanceof ApiError)) {
         setConfirmEndsEditor(true);
         setConfirmError(UNKNOWN_DELETE_MESSAGE);
+      } else if (isReleaseMismatch(failure)) {
+        // PartFlow was updated while this page was open: nothing
+        // changed and nothing is known about the Planned Route's use.
+        setConfirmError(failure.message);
       } else if (failure.status === 409) {
         // Used meanwhile: Archive… replaces Delete….
         wrote.current = true;

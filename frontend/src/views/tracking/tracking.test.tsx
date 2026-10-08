@@ -541,7 +541,7 @@ let session: SessionValue = signedInSession();
 
 /** Render the view with a healthy shared connectivity state. */
 async function renderTracking(
-  status: 'connected' | 'unavailable' = 'connected',
+  status: 'connected' | 'unavailable' | 'outdated' = 'connected',
   extra: ReactNode = null,
 ) {
   // The detail's `Change priority` navigates, so the view renders under
@@ -1003,6 +1003,17 @@ test('an unhealthy connection reads as a stale feed over the kept rows', async (
   expect(document.querySelector('.tk-feed')?.textContent).toContain(
     'Feed stale — reconnecting',
   );
+});
+
+test('FR-30: an outdated page keeps the list and detail feeds Live', async () => {
+  await renderTracking('outdated');
+  expect(document.querySelectorAll('.tk-table tbody tr').length).toBe(2);
+  expect(document.querySelector('.tk-feed')?.textContent).toContain('Live');
+  expect(document.querySelector('.tk-feed')?.textContent).not.toContain(
+    'Feed stale — reconnecting',
+  );
+  await openFirstRow();
+  expect(document.querySelector('.tk-stale')).toBeNull();
 });
 
 test('Show more widens the page to the server bound and then asks to narrow the search', async () => {

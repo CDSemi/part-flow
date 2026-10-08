@@ -4,7 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 
 import { areaRefColor } from '../../api/area-inventory';
-import { ApiError, errorMessage, refusalFlag } from '../../api/client';
+import {
+  ApiError,
+  errorMessage,
+  isReleaseMismatch,
+  refusalFlag,
+} from '../../api/client';
 import {
   applyHotListChange,
   getHotList,
@@ -409,6 +414,11 @@ export function PriorityView() {
         // The intent is frozen: the exact same request replays the
         // committed change or applies it once.
         setUnknownOutcome(submission);
+      } else if (isReleaseMismatch(error)) {
+        // PartFlow was updated while this page was open: refused before
+        // the request key was checked — an unknown outcome stays
+        // unknown and the history keeps every step.
+        setMessage({ tone: 'error', text: errorMessage(error) });
       } else if (refusalFlag(error, 'recorded_by_another_user')) {
         // Another user recorded this request: nothing more was written.
         // The step is neither dropped nor completed; the list is read

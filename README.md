@@ -615,7 +615,12 @@ docker compose up --build
 
 - Frontend: <http://localhost:5173>
 - Backend API: <http://localhost:8000>
-- Health endpoint: <http://localhost:8000/api/health> (also proxied at <http://localhost:5173/api/health>)
+- Health endpoint: <http://localhost:8000/api/health> (also proxied at <http://localhost:5173/api/health>);
+  liveness only (no database): <http://localhost:8000/api/health/live>
+
+The container health checks use the liveness route, so the stack starts
+healthy before `alembic upgrade head`; `/api/health` is readiness and answers
+503 until the database is at the migration head.
 
 The frontend serves the application shell with the real Phase 3.5,
 Phase 4 and Phase 5 views (Administration, Management → Machines,
@@ -655,6 +660,10 @@ top of the no-op repository-foundation baseline; the current head is
 ```bash
 docker compose exec backend uv run alembic upgrade head
 ```
+
+A development backend answers `/api/health` 503 (`schema: mismatch`) and
+refuses every write with 503 `not_ready` until `alembic upgrade head` has run
+(readiness); reads and `/api/health/live` keep working.
 
 ### Creating, resetting, and inspecting the development database
 
@@ -889,8 +898,14 @@ not through an anonymous client. Calls to Scan Station routes go through
 station route must declare `RequireStationDevice` and be classified in
 `route_access.py`:
 
-- `tests/test_health.py` — health-endpoint **behavior** tests that mock
-  `ping_database` (success and safe 503 responses; no database needed).
+- `tests/test_health.py` — health-endpoint **behavior** tests of readiness
+  and liveness that mock the database revision read (ready, schema mismatch,
+  accepted override, unreachable database; safe 503 responses), plus one test
+  against the real database.
+- `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
+  `tests/test_revision_cli.py` — the write gate (409 `release_mismatch`, 503
+  `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
+  `revision` report (they need the Compose `db` service).
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
 - `tests/test_password_hashing.py` and `tests/test_password_policy.py` —
@@ -1122,7 +1137,7 @@ docker compose exec frontend sh -lc "npm run format:check && npm run lint && npm
 docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
 ```
 
-## Production stack (Phase 16 slice 2)
+## Production stack (Phase 16)
 
 `compose.production.yaml` (Compose project `partflow-production`) is the
 production stack: `db`, `backend`, `web` (nginx, published on `127.0.0.1` only)
@@ -1136,11 +1151,21 @@ release checkout:
 ```bash
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF config --quiet
-$PF -f compose.production.build.yaml build
+PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
 $PF up -d db
-$PF --profile ops run --rm migrate
+$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"
 $PF up -d backend web
 ```
+
+Later releases run through `deploy/production/release.sh`, which performs the
+release sequence (build, pre-release and post-release reconcile, write freeze,
+`migrate`, the `backend` then `web` switch, `smoke.sh`) and writes a
+deployment record; `deploy/production/smoke.sh --release <tag>` runs the
+loopback checks of a running release. Both print their usage with `--help`; the
+procedure is in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1 and
+[`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
+§5 and §6. Each production image carries its release (`PARTFLOW_RELEASE`,
+`PARTFLOW_COMMIT`); the backend and `web` images both refuse a missing or malformed value (`docs/IMPLEMENTATION_ROADMAP.md`, Phase 16 slice 3).
 
 Only the build uses `compose.production.build.yaml`: `compose.production.yaml`
 has no build section, so `up` or `run` with a release whose images are missing
@@ -1173,16 +1198,21 @@ The production artifact checks need no running stack for their static part:
 
 ```bash
 python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
-PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<dir holding postgres_password> PARTFLOW_SITE_TIMEZONE=UTC \
+PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=$(git rev-parse HEAD) PARTFLOW_SECRETS_DIR=<dir holding postgres_password> PARTFLOW_SITE_TIMEZONE=UTC \
   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
 ```
 
 The first runs the static tests of the Compose model, the environment example,
-the Dockerfiles and the nginx configuration; the second builds both production
-images (the `web` build runs the production-boundary check). The Compose stack
+the Dockerfiles and the nginx configuration, plus the `release.sh` / `smoke.sh`
+tests (`test_release_scripts.py`, with fake `docker`, `git` and `curl`) and the
+`reconcile_regression.py` tests (`test_reconcile_regression.py`); the second
+builds both production images (the `web` build runs the production-boundary
+check, and a build without `PARTFLOW_COMMIT` fails). The Compose stack
 smoke (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) starts a throwaway
 `partflow-s2-smoke` project on loopback ports, drives it through `web` and
-removes it; it needs a Docker daemon and is not part of CI.
+removes it; `python3 deploy/production/tests/release_rehearsal.py` rehearses a
+release on a throwaway `partflow-s3-rehearsal` project. Both need a Docker
+daemon and are not part of CI.
 
 ## Continuous integration
 
@@ -1221,6 +1251,7 @@ compose.yaml       development stack (db, backend, frontend)
 compose.production.yaml  production stack (db, backend, web, migrate); not for development
 compose.production.build.yaml  build-only companion: the production image builds of backend and web
 .env.production.example  production configuration inventory (copy to .env.production)
-deploy/production/tests/ production artifact static tests and Compose stack smoke
+deploy/production/release.sh, smoke.sh  release flow and loopback smoke checks (reconcile_regression.py compares reconcile reports)
+deploy/production/tests/ production artifact static tests, release script tests, Compose stack smoke and release rehearsal
 docs/              canonical project documentation
 ```

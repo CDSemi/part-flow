@@ -2,6 +2,8 @@ import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 
 import { ErrorState } from '../components/view-states';
+import { isChunkLoadError } from './chunk-load-error';
+import { RELOAD_PAGE_LABEL } from './release-copy';
 
 interface ViewErrorBoundaryProps {
   /** Current route path — logged so a report names the exact URL. */
@@ -13,6 +15,8 @@ interface ViewErrorBoundaryProps {
 
 interface ViewErrorBoundaryState {
   hasError: boolean;
+  /** The view's code could not be loaded (only a reload recovers it). */
+  chunkLoad: boolean;
 }
 
 /**
@@ -30,15 +34,19 @@ interface ViewErrorBoundaryState {
  * whose state (active page, station context) must survive the switch.
  * The boundary reports failures — it never masks them: the underlying
  * error stays in the console exactly as thrown.
+ *
+ * A failed load of a lazy view's code (typically after a release)
+ * offers `Reload page` instead of Retry: `React.lazy` caches the
+ * rejected import, so re-rendering can never recover it.
  */
 export class ViewErrorBoundary extends Component<
   ViewErrorBoundaryProps,
   ViewErrorBoundaryState
 > {
-  state: ViewErrorBoundaryState = { hasError: false };
+  state: ViewErrorBoundaryState = { hasError: false, chunkLoad: false };
 
-  static getDerivedStateFromError(): ViewErrorBoundaryState {
-    return { hasError: true };
+  static getDerivedStateFromError(error: unknown): ViewErrorBoundaryState {
+    return { hasError: true, chunkLoad: isChunkLoadError(error) };
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
@@ -55,15 +63,29 @@ export class ViewErrorBoundary extends Component<
     // view renders normally; staying on the route keeps the ErrorState
     // until the user retries explicitly.
     if (this.state.hasError && prevProps.route !== this.props.route) {
-      this.setState({ hasError: false });
+      this.setState({ hasError: false, chunkLoad: false });
     }
   }
 
   private retry = () => {
-    this.setState({ hasError: false });
+    this.setState({ hasError: false, chunkLoad: false });
+  };
+
+  private reload = () => {
+    window.location.reload();
   };
 
   render() {
+    if (this.state.hasError && this.state.chunkLoad) {
+      return (
+        <ErrorState
+          message="This view could not be loaded — PartFlow may have been updated."
+          detail="Reload the page to continue. The rest of the application is still available."
+          onRetry={this.reload}
+          retryLabel={RELOAD_PAGE_LABEL}
+        />
+      );
+    }
     if (this.state.hasError) {
       return (
         <ErrorState

@@ -60,13 +60,16 @@ jobs:
               run: docker compose build
             # Phase 16: the production images (the web build runs the
             # production-boundary check). The release tag, secrets
-            # directory and time zone are throwaway values for the build.
+            # directory and time zone are throwaway values for the build;
+            # the commit is the checked-out one (both images carry it).
             - name: Build production images
               run: |
                   secrets_dir="$(mktemp -d)"
                   printf 'ci-build-only\n' > "$secrets_dir/postgres_password"
-                  PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR="$secrets_dir" PARTFLOW_SITE_TIMEZONE=UTC \
+                  PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=${{ github.sha }} PARTFLOW_SECRETS_DIR="$secrets_dir" PARTFLOW_SITE_TIMEZONE=UTC \
                       docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
+            # Also runs the release.sh/smoke.sh tests (fake docker, git and
+            # curl) and the reconcile_regression.py tests (P16-S3).
             - name: Production artifact static tests
               run: python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
 

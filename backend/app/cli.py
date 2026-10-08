@@ -30,32 +30,44 @@ Commands:
   (Phase 16 slice 1, read-only): run the reconciliation checks in one
   read-only snapshot and print one JSON report on stdout (also when it
   could not run); 0 clean, 1 mismatch, 2 could not run. Never repairs.
+- ``migrate (--pre-release-backup REF | --no-backup-reason TEXT)
+  [--lock-timeout SECONDS]`` (Phase 16 slice 3): apply this release's
+  pending Alembic revisions on one connection in one transaction, with
+  the backup reference (or the reason there is none) recorded; refused
+  while another migrate runs, the database revision is unknown to this
+  release, a pending revision cannot run in one transaction or the API is
+  still connected. Prints one JSON document on stdout (also on refusal
+  and failure); the Alembic log goes to stderr. 0 upgraded or already
+  current, 1 refused, 2 failed or its outcome is unknown.
+- ``revision`` (Phase 16 slice 3, read-only): the release identity, the
+  expected and database revisions, the pending revisions and the
+  readiness the backend would report, as one JSON document; 0 current,
+  1 any other state, 2 could not run.
 
 The CLI configures no logging on stdout: stdout carries only the
-command's outcome lines (``reconcile``: its JSON report); refusals and
-errors go to stderr.
+command's outcome lines (``reconcile``, ``migrate``, ``revision``: their
+JSON document); refusals and errors go to stderr.
 """
 
 import argparse
 import datetime
 import getpass
 import json
+import logging
 import sys
 import traceback
 from collections.abc import Callable, Sequence
-from pathlib import Path
 from typing import Any
 
-from alembic.script import ScriptDirectory
-from alembic.util.exc import CommandError
 from pydantic import ValidationError
 from sqlalchemy import Engine
 from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.application import authentication, reconciliation
+from app.application import authentication, migration, reconciliation
 from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
 from app.core.config import get_settings
+from app.infrastructure import schema_revision
 from app.infrastructure.database import build_engine
 
 _DATABASE_UNAVAILABLE = "PartFlow could not reach its database. Nothing was changed."
@@ -69,7 +81,9 @@ _PASSWORDS_DIFFER = "The passwords do not match. Nothing was changed."
 
 
 def _engine() -> Engine:
-    return build_engine(get_settings().database_url)
+    return build_engine(
+        get_settings().database_url, application_name=schema_revision.CLI_APPLICATION_NAME
+    )
 
 
 def _read_new_password() -> str | None:
@@ -230,10 +244,8 @@ def _add_reconcile_parser(subparsers: Any) -> None:
 def _code_alembic_head() -> str | None:
     """The Alembic head this code ships (None when it cannot be read)."""
     try:
-        return ScriptDirectory(
-            str(Path(__file__).resolve().parents[1] / "alembic")
-        ).get_current_head()
-    except (CommandError, OSError):
+        return schema_revision.code_head()
+    except schema_revision.MigrationScriptsError:
         return None
 
 
@@ -310,12 +322,155 @@ def _run_reconcile(args: argparse.Namespace) -> int:
     return reconciliation.result_of(report)[1]
 
 
+def _print_document(document: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(document, indent=2, ensure_ascii=True) + "\n")
+
+
+def _print_error_traceback(error: migration.RunError | None) -> None:
+    if (
+        error is not None
+        and error.code in ("internal_error", "migration_failed")
+        and error.exception is not None
+    ):
+        traceback.print_exception(error.exception, file=sys.stderr)
+
+
+def _operator_text(value: str) -> str:
+    try:
+        return migration.operator_text(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+_MIGRATE_HELP = (
+    "Apply this release's pending database migrations in one transaction and print a JSON"
+    " report. Run it only during the write freeze (backend stopped)."
+)
+
+
+def _add_migrate_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("migrate", help=_MIGRATE_HELP, description=_MIGRATE_HELP)
+    backup = parser.add_mutually_exclusive_group(required=True)
+    backup.add_argument(
+        "--pre-release-backup",
+        type=_operator_text,
+        metavar="REF",
+        help="The pre-release backup this migration can be restored from (recorded).",
+    )
+    backup.add_argument(
+        "--no-backup-reason",
+        type=_operator_text,
+        metavar="TEXT",
+        help="Why there is no pre-release backup, e.g. a first install (recorded).",
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=_bounded_int(1, 600),
+        default=migration.DEFAULT_LOCK_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help="How long a statement may wait for a table lock (1-600, default %(default)s).",
+    )
+    parser.set_defaults(handler=_run_migrate)
+
+
+def _migrate_report(args: argparse.Namespace) -> migration.MigrateReport:
+    started_at = datetime.datetime.now(datetime.UTC)
+    backup = migration.Backup(
+        reference=args.pre_release_backup, no_backup_reason=args.no_backup_reason
+    )
+    try:
+        settings = get_settings()
+        engine = _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        # No valid configuration; the report never repeats a setting.
+        report = migration.MigrateReport(
+            started_at=started_at, release=None, commit=None, backup=backup
+        )
+        report.expected_revision = _code_alembic_head()
+        return migration.migrate_failure(
+            report, "configuration_invalid", message=_CONFIGURATION_INVALID
+        )
+    try:
+        return migration.run_migrate(
+            engine,
+            backup=backup,
+            lock_timeout_seconds=args.lock_timeout,
+            release=settings.release_tag,
+            commit=settings.release_commit,
+            started_at=started_at,
+        )
+    finally:
+        engine.dispose()
+
+
+def _run_migrate(args: argparse.Namespace) -> int:
+    # The Alembic log ("Running upgrade ...") goes to stderr for this command only.
+    alembic_logger = logging.getLogger("alembic")
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)-5.5s [%(name)s] %(message)s"))
+    saved_level, saved_propagate = alembic_logger.level, alembic_logger.propagate
+    alembic_logger.addHandler(handler)
+    alembic_logger.setLevel(logging.INFO)
+    alembic_logger.propagate = False
+    try:
+        report = _migrate_report(args)
+    finally:
+        alembic_logger.removeHandler(handler)
+        alembic_logger.setLevel(saved_level)
+        alembic_logger.propagate = saved_propagate
+    _print_document(migration.migrate_document(report))
+    _print_error_traceback(report.error)
+    print(migration.migrate_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
+_REVISION_HELP = (
+    "Print this release's expected and the database's Alembic revision, the pending"
+    " revisions and the readiness as a JSON report. Never changes data."
+)
+
+
+def _add_revision_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("revision", help=_REVISION_HELP, description=_REVISION_HELP)
+    parser.set_defaults(handler=_run_revision)
+
+
+def _revision_report() -> migration.RevisionReport:
+    try:
+        settings = get_settings()
+        engine = _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        report = migration.RevisionReport(release=None, commit=None, accepted_revision=None)
+        report.expected_revision = _code_alembic_head()
+        report.error = migration.RunError("configuration_invalid", _CONFIGURATION_INVALID)
+        return report
+    try:
+        return migration.revision_report(
+            engine,
+            release=settings.release_tag,
+            commit=settings.release_commit,
+            accepted_revision=settings.accept_schema_revision,
+        )
+    finally:
+        engine.dispose()
+
+
+def _run_revision(args: argparse.Namespace) -> int:
+    report = _revision_report()
+    _print_document(migration.revision_document(report))
+    _print_error_traceback(report.error)
+    print(migration.revision_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_reset_password_parser(subparsers)
     _add_restore_correction_permission_management_parser(subparsers)
     _add_reconcile_parser(subparsers)
+    _add_migrate_parser(subparsers)
+    _add_revision_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result

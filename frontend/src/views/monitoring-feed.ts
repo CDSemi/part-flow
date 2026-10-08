@@ -94,11 +94,15 @@ export function useMonitoringFeed<T>(
   // `connecting` → `connected`) and must still count as a return. The
   // initial `connecting` → `connected` of the shared probe is not a
   // return — nothing was lost and the first load is already in flight.
+  // An outdated page (another server release) is healthy for reads.
   const lost = useRef(false);
   useEffect(() => {
     if (connectivity === 'unavailable') {
       lost.current = true;
-    } else if (connectivity === 'connected' && lost.current) {
+    } else if (
+      (connectivity === 'connected' || connectivity === 'outdated') &&
+      lost.current
+    ) {
       lost.current = false;
       if (!paused.current) reload();
     }

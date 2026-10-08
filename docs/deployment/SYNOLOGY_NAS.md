@@ -330,8 +330,9 @@ run from the release checkout `repo/`.
 3. **Check the time zone.** `PARTFLOW_SITE_TIMEZONE` must equal the staging
    `SITE_TIMEZONE`.
 4. **Build, then start from a new empty volume.** `PARTFLOW_RELEASE` is the
-   release tag (DEPLOYMENT §10). `$PF -f compose.production.build.yaml build`, `$PF up -d db`, then
-   `$PF --profile ops run --rm migrate`. The volume
+   release tag (DEPLOYMENT §10). Build with
+   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`, then `$PF up -d db`, then
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`. The volume
    `partflow-production_postgres_data` is new and empty: staging data is never
    promoted, and a restore into production is a P16-S5 procedure that needs an
    owner decision.
@@ -339,17 +340,21 @@ run from the release checkout `repo/`.
    `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, read the token with
    `$PF logs backend | grep "Setup token"`, complete setup, then `$PF up -d backend`
    so the configured worker count applies. Then the DSM reverse proxy (§5.2) and
-   enrollment of each Scan Station device.
+   enrollment of each Scan Station device. Later releases run through
+   `deploy/production/release.sh` (DEPLOYMENT §3.1, Releases;
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5).
 6. **Never run `down -v`** (or remove a volume) on the `partflow-production`
    project: it deletes the production database.
 
-Pending: release tooling and the in-image release identity (P16-S3), role
-hardening (P16-S4), backups and restore (P16-S5), observability (P16-S6), and
-the NAS host checks and pilot gates (P16-S7).
+Pending: role hardening (P16-S4), backups and restore
+(P16-S5), observability (P16-S6), and the NAS host checks and pilot gates
+(P16-S7); the release flow itself (`release.sh`, `smoke.sh`) is implemented and
+not yet executed on the NAS.
 
 - immutable production frontend and backend images — implemented (P16-S2:
-  images tagged by `PARTFLOW_RELEASE`, never pulled); release identity inside
-  the image pending (P16-S3);
+  images tagged by `PARTFLOW_RELEASE`, never pulled); the release identity is
+  inside the `web` image (P16-S3) and pending in the backend image (the open
+  P16-S3 item);
 - production Compose file with no source bind mounts, no reload/dev server, no
   published database port, and explicit restart/resource/logging policies —
   implemented (P16-S2; resource limits are starting values to measure in

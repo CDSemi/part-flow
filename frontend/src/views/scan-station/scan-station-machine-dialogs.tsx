@@ -15,6 +15,8 @@ import type {
   MachineScanResolution,
   StationContext,
 } from '../../api/scan-station';
+import { useConnectivity } from '../../app/connectivity-context';
+import { outdatedCannotRecord } from '../../app/release-copy';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -116,6 +118,7 @@ export function WriteGuidance({
   writeBlocked: boolean;
   what: string;
 }) {
+  const { status } = useConnectivity();
   return (
     <>
       {outcomeUnknown ? (
@@ -129,8 +132,14 @@ export function WriteGuidance({
       {serverError ? <Guidance tone="error">{serverError}</Guidance> : null}
       {writeBlocked && !serverError && !outcomeUnknown ? (
         <Guidance tone="error">
-          Disconnected — the {what} cannot be recorded until the connection
-          returns.
+          {status === 'outdated' ? (
+            outdatedCannotRecord(what)
+          ) : (
+            <>
+              Disconnected — the {what} cannot be recorded until the connection
+              returns.
+            </>
+          )}
         </Guidance>
       ) : null}
     </>

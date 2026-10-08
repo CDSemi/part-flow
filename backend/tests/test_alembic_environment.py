@@ -8,11 +8,14 @@ percent-encoded (the Deployment Admin encodes it, e.g. ``%40`` for
 unescaped, and the engine authenticates with the decoded credentials.
 
 The online run goes through ``alembic upgrade head`` in a subprocess
-with only DATABASE_URL set — exactly the deployment migration step —
-against a dedicated temporary database that is dropped afterwards.
-AE-1 (Phase 16 slice 2) runs the same step with the production stack's
-file-based form instead (``DATABASE_HOST`` … ``DATABASE_PASSWORD_FILE``)
-as a temporary role whose password needs percent-encoding.
+with only DATABASE_URL set — the default ``env.py`` path of development,
+tests and the OPS-lane staging — against a dedicated temporary database
+that is dropped afterwards. AE-1 (Phase 16 slice 2) runs the same step
+with the file-based configuration (``DATABASE_HOST`` …
+``DATABASE_PASSWORD_FILE``) as a temporary role whose password needs
+percent-encoding. AE-2/AE-3 (Phase 16 slice 3) cover the external
+connection path of production ``python -m app.cli migrate``: Alembic runs
+inside the caller's transaction and never commits it.
 """
 
 import io
@@ -136,7 +139,8 @@ def test_upgrade_offline_reads_the_url_back_unescaped(
 
 
 def test_upgrade_head_with_the_file_based_configuration(tmp_path: Path) -> None:
-    """AE-1: the production `migrate` form — no DATABASE_URL, the password in a file."""
+    """AE-1: the file-based configuration through the default `env.py` path — no
+    DATABASE_URL, the password in a file."""
     suffix = uuid.uuid4().hex[:10]
     role = f"partflow_test_ae_role_{suffix}"
     database = f"partflow_test_ae_db_{suffix}"
@@ -188,3 +192,64 @@ def test_upgrade_head_with_the_file_based_configuration(tmp_path: Path) -> None:
             connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))
             connection.execute(sa.text(f'DROP ROLE IF EXISTS "{role}"'))
         admin_engine.dispose()
+
+
+@pytest.fixture
+def empty_database() -> Iterator[URL]:
+    name = f"partflow_test_ae_external_{uuid.uuid4().hex[:10]}"
+    admin_engine = create_engine(make_url(os.environ["DATABASE_URL"]), isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as connection:
+        connection.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield make_url(os.environ["DATABASE_URL"]).set(database=name)
+    finally:
+        with admin_engine.connect() as connection:
+            connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin_engine.dispose()
+
+
+def _upgrade_on_external_connection(
+    url: URL, monkeypatch: pytest.MonkeyPatch, *, commit: bool
+) -> str | None:
+    """Run the upgrade inside a caller-owned transaction; the application setting unused."""
+
+    def no_settings() -> None:
+        raise AssertionError("env.py read the application settings")
+
+    monkeypatch.setattr("app.core.config.get_settings", no_settings)
+    config = Config()
+    config.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+            assert transaction.is_active
+            if commit:
+                transaction.commit()
+            else:
+                transaction.rollback()
+        with engine.connect() as connection:
+            if connection.execute(sa.text("SELECT to_regclass('public.alembic_version')")).scalar():
+                return str(
+                    connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
+                )
+            return None
+    finally:
+        engine.dispose()
+
+
+def test_external_connection_is_never_committed_by_alembic(
+    empty_database: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AE-2."""
+    assert _upgrade_on_external_connection(empty_database, monkeypatch, commit=False) is None
+
+
+def test_external_connection_committed_by_the_caller(
+    empty_database: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AE-3."""
+    revision = _upgrade_on_external_connection(empty_database, monkeypatch, commit=True)
+    assert revision == _head_revision()

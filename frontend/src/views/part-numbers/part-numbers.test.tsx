@@ -51,7 +51,9 @@ type RouteKey =
   | 'PUT image'
   | 'DELETE image';
 
-type Failure = { status: number; detail: string } | 'network';
+type Failure =
+  | { status: number; detail: string; flags?: Record<string, unknown> }
+  | 'network';
 
 interface Write {
   method: string;
@@ -159,7 +161,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   if (failure) {
     delete failures[key];
     if (failure === 'network') throw new TypeError('Failed to fetch');
-    return json({ detail: failure.detail }, failure.status);
+    return json({ detail: failure.detail, ...failure.flags }, failure.status);
   }
 
   const number = params.get('number');
@@ -861,6 +863,41 @@ test('a duplicate found by the debounced lookup disables Add Part Number; a 409 
     ).toBeEnabled(),
   );
   expect(screen.getByRole('dialog', { name: 'Edit Part Number' })).toBe(dialog);
+});
+
+test('FR-21f: a create refused for another release keeps New Part Number and its input', async () => {
+  await renderPartNumbers();
+
+  const dialog = openNew();
+  fireEvent.change(within(dialog).getByLabelText('Part Number'), {
+    target: { value: 'ab-10' },
+  });
+  fireEvent.change(within(dialog).getByLabelText(/Name \/ Description/), {
+    target: { value: 'PLATE' },
+  });
+  await waitFor(() =>
+    expect(calls).toContain('GET /api/part-numbers?number=AB-10'),
+  );
+  const detail =
+    'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+  failures.POST = {
+    status: 409,
+    detail,
+    flags: { release_mismatch: true },
+  };
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Part Number' }),
+  );
+  expect(await within(dialog).findByText(detail)).toBeInTheDocument();
+  // Never switched to Edit: no reload of the record.
+  expect(screen.getByRole('dialog', { name: 'New Part Number' })).toBe(dialog);
+  expect(within(dialog).getByLabelText('Part Number')).toHaveValue('ab-10');
+  expect(within(dialog).getByLabelText(/Name \/ Description/)).toHaveValue(
+    'PLATE',
+  );
+  expect(
+    calls.filter((call) => call === 'GET /api/part-numbers?number=AB-10'),
+  ).toHaveLength(1);
 });
 
 test('a typed-PN create answered 409 after an unknown outcome reloads into Edit, keeping only the entered values and the staged image', async () => {

@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { apiRequest, BUNDLE_RELEASE } from '../api/client';
 import { useConnectivity } from './connectivity-context';
 import { ConnectivityProvider } from './connectivity-provider';
 
@@ -9,10 +10,11 @@ import { ConnectivityProvider } from './connectivity-provider';
 // fake timers and mocked browser connectivity events — no lazy views.
 
 function Probe() {
-  const { status, retry } = useConnectivity();
+  const { status, retry, serverRelease } = useConnectivity();
   return (
     <>
       <span data-testid="status">{status}</span>
+      <span data-testid="server-release">{serverRelease ?? ''}</span>
       <button onClick={retry}>retry</button>
     </>
   );
@@ -213,4 +215,141 @@ test('unmount cleans up timers, listeners and the in-flight request', async () =
   window.dispatchEvent(new Event('focus'));
 
   expect(fetchMock.mock.calls.length).toBe(callsBefore);
+});
+
+/* ============ Release check (Phase 16 slice 3) ============ */
+
+function health(body: unknown, status = 200) {
+  return Promise.resolve(
+    new Response(body === undefined ? null : JSON.stringify(body), {
+      status,
+    }),
+  );
+}
+
+test('FR-5: a health answer naming this bundle release reads connected', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => health({ status: 'ok', release: BUNDLE_RELEASE })),
+  );
+  await renderProvider();
+  expect(statusText()).toBe('connected');
+  expect(screen.getByTestId('server-release').textContent).toBe(BUNDLE_RELEASE);
+});
+
+test('FR-6: a health answer naming another release reads outdated', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => health({ status: 'ok', release: 'v9.9.9' })),
+  );
+  await renderProvider();
+  expect(statusText()).toBe('outdated');
+  expect(screen.getByTestId('server-release').textContent).toBe('v9.9.9');
+});
+
+test('FR-7: a health answer without a body, with invalid JSON or without release reads connected', async () => {
+  for (const answer of [
+    () => health(undefined),
+    () => Promise.resolve(new Response('not json', { status: 200 })),
+    () => health({ status: 'ok' }),
+    () => health({ status: 'ok', release: 7 }),
+  ]) {
+    vi.stubGlobal('fetch', vi.fn(answer));
+    await renderProvider();
+    expect(statusText()).toBe('connected');
+    cleanup();
+  }
+});
+
+test('FR-8: a 409 release_mismatch makes a connected page outdated at once; a later health answer with this release reconnects', async () => {
+  const release = BUNDLE_RELEASE;
+  let holdHealth: (() => void) | null = null;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === '/api/health') {
+        if (holdHealth === null) return health({ status: 'ok', release });
+        // The confirming check stays pending until released below.
+        return new Promise<Response>((resolve) => {
+          const resolveHealth = () =>
+            resolve(new Response(JSON.stringify({ status: 'ok', release })));
+          holdHealth = resolveHealth;
+        });
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ detail: 'updated', release_mismatch: true }),
+          { status: 409 },
+        ),
+      );
+    }),
+  );
+  await renderProvider();
+  expect(statusText()).toBe('connected');
+
+  holdHealth = () => undefined;
+  await act(async () => {
+    await apiRequest('/api/workers', { method: 'POST', body: {} }).catch(
+      () => undefined,
+    );
+  });
+  // Outdated before any health answer confirmed it.
+  expect(statusText()).toBe('outdated');
+
+  // The confirming health answer carries this bundle's release (the
+  // server was rolled back): connected again.
+  await act(async () => {
+    holdHealth?.();
+  });
+  holdHealth = null;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  expect(statusText()).toBe('connected');
+});
+
+test('FR-9: a 503 not_ready health answer reads unavailable', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() =>
+      health(
+        {
+          status: 'not_ready',
+          release: 'v9.9.9',
+          schema: 'mismatch',
+          not_ready: true,
+        },
+        503,
+      ),
+    ),
+  );
+  await renderProvider();
+  expect(statusText()).toBe('unavailable');
+});
+
+test('FR-10: losing the connection while outdated reads unavailable', async () => {
+  let failing = false;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() =>
+      failing
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : health({ status: 'ok', release: 'v9.9.9' }),
+    ),
+  );
+  await renderProvider();
+  expect(statusText()).toBe('outdated');
+
+  failing = true;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  expect(statusText()).toBe('unavailable');
+
+  // The release judgement survives the outage.
+  failing = false;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  expect(statusText()).toBe('outdated');
 });

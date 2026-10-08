@@ -12,6 +12,8 @@ import type {
   WorkOrderImportEntry,
   WorkOrderImportReport,
 } from '../../api/work-order-import';
+import { useConnectivity } from '../../app/connectivity-context';
+import { connectionReason } from '../../app/release-copy';
 import { useSession } from '../../app/session-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
@@ -114,6 +116,7 @@ export function ImportWorkOrdersDialog({
   onBusyChange: (busy: boolean) => void;
   onClose: (wrote: boolean) => void;
 }) {
+  const { status } = useConnectivity();
   const headingId = useId();
   const helpId = useId();
   const fileInputId = useId();
@@ -299,7 +302,7 @@ export function ImportWorkOrdersDialog({
   const canImport =
     report !== null && commitAllowed(report, writeBlocked, busy, can);
   const disabledReasons: string[] = writeBlocked
-    ? ['Reconnect to check or import the file.']
+    ? [connectionReason(status, 'Reconnect to check or import the file.')]
     : report === null
       ? ['Check the file before importing it.']
       : !report.dryRun || report.commitBlocked

@@ -33,6 +33,16 @@ Added by the slice audit (F1):
 - SM-23: before anything is built, `up -d --no-deps backend web` and `run --rm --no-deps backend` with a
   PARTFLOW_RELEASE whose images do not exist fail with "No such image" and leave no image under that tag
   (compose.production.yaml has no build section, so a missing release is never built from the checkout).
+
+Amended by P16-S3 (P16-S3 SPEC section 6.4): the build passes PARTFLOW_COMMIT (git rev-parse HEAD) in the shell; the
+setup migrates with `--profile ops run --rm -T migrate --no-backup-reason "s2 smoke"`; every unsafe request carries
+`X-PartFlow-Release: s2-smoke` (the backend refuses a write from another release); new cases:
+- SM-24: POST /api/partflow-smoke-gate without the release header -> 409 release_mismatch; with it -> 404.
+- SM-25: /api/health reports release s2-smoke, the built commit and schema current; /api/health/live answers 200.
+- SM-26: the backend container probes /api/health/live and carries RELEASE_TAG=s2-smoke; both images carry the
+  version/revision labels.
+- SM-27: migrate without a backup option is a usage error (exit 2); a second run is already_current (exit 0).
+- SM-28: GET / carries <meta name="partflow-release" content="s2-smoke">.
 """
 import argparse
 import contextlib
@@ -63,7 +73,11 @@ RELEASE = "s2-smoke"
 EDGE_SUBNET = "172.30.251.0/24"
 BACKEND_IMAGE = f"partflow/backend:{RELEASE}"
 WEB_IMAGE = f"partflow/web:{RELEASE}"
-CSRF = {"X-PartFlow-CSRF": "1"}
+RELEASE_HEADER = "X-PartFlow-Release"
+# Every unsafe request of the smoke carries the release of the build (P16-S3 release gate) next to the CSRF header.
+CSRF = {"X-PartFlow-CSRF": "1", RELEASE_HEADER: RELEASE}
+LIVENESS_PATH = "/api/health/live"
+RELEASE_META = f'<meta name="partflow-release" content="{RELEASE}">'
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
     "connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
@@ -168,7 +182,7 @@ class Smoke:
         self.args = args
         self.project = args.project
         self.evidence = {
-            "slice": "P16-S2",
+            "slice": "P16-S2 (amended by P16-S3)",
             "project": self.project,
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "host": {"platform": platform.platform(), "python": platform.python_version()},
@@ -279,9 +293,12 @@ class Smoke:
     def start(self):
         self.created = True
         self.sm23_missing_release()
-        self.compose("-f", str(BUILD_FILE), "build", timeout=1800)
+        self.head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.compose("-f", str(BUILD_FILE), "build", timeout=1800, env_extra={"PARTFLOW_COMMIT": self.head})
         self.compose("up", "-d", "--wait", "db", timeout=300)
-        self.compose("--profile", "ops", "run", "--rm", "migrate", timeout=300, record_output=True)
+        self.compose(
+            "--profile", "ops", "run", "--rm", "-T", "migrate", "--no-backup-reason", "s2 smoke", timeout=300, record_output=True
+        )
         # First-run setup procedure: one worker, set in the shell (overrides the env file).
         self.compose("up", "-d", "backend", "web", timeout=300, env_extra={"PARTFLOW_BACKEND_WORKERS": "1"})
         self.wait_for_health(90)
@@ -407,6 +424,61 @@ class Smoke:
             observed["no_such_route"] = missing.summary("content-type")
             check(health.status == 200 and health.json().get("status") == "ok", "health is not 200 ok")
             check(missing.status == 404 and missing.json() == {"detail": "Not Found"}, "unknown /api route is not the backend JSON 404")
+
+    def sm24_to_sm28(self):
+        with self.case("SM-24") as observed:
+            gate = {"X-PartFlow-CSRF": "1", "Content-Type": "application/json"}
+            refused = self.client.request("POST", "/api/partflow-smoke-gate", headers=gate, body=b"{}")
+            passed = self.client.request("POST", "/api/partflow-smoke-gate", headers={**gate, RELEASE_HEADER: RELEASE}, body=b"{}")
+            observed["without_header"] = refused.summary("content-type", "cache-control")
+            observed["with_header"] = passed.summary("content-type")
+            check(refused.status == 409 and refused.json().get("release_mismatch") is True, "no 409 release_mismatch without the header")
+            check(refused.header("cache-control") == "no-store", "the 409 is cacheable")
+            check(passed.status == 404, "the gate did not pass with the release header")
+        with self.case("SM-25") as observed:
+            health = self.client.request("GET", "/api/health")
+            live = self.client.request("GET", LIVENESS_PATH)
+            observed["health"] = health.summary()
+            observed["live"] = live.summary()
+            body = health.json()
+            check(health.status == 200 and body.get("release") == RELEASE, "/api/health does not report the release")
+            check(re.fullmatch(r"[0-9a-f]{40}", str(body.get("commit"))) is not None, "/api/health has no 40-hex commit")
+            check(body.get("commit") == self.head, "/api/health commit is not the built commit")
+            check(body.get("schema") == "current", "schema is not current")
+            check(body.get("expected_revision") == body.get("database_revision"), "the revisions differ")
+            live_body = live.json() if live.status == 200 else {}
+            check(live_body.get("status") == "live" and live_body.get("release") == RELEASE, "/api/health/live answer")
+        with self.case("SM-26") as observed:
+            info = self.inspect(self.container("backend"))
+            test = " ".join(info["Config"]["Healthcheck"]["Test"])
+            environment = info["Config"]["Env"]
+            labels = {}
+            for image in (BACKEND_IMAGE, WEB_IMAGE):
+                inspected = json.loads(self.run(["docker", "image", "inspect", image]).stdout)[0]
+                found = inspected["Config"].get("Labels") or {}
+                labels[image] = {k: v for k, v in found.items() if k.startswith("org.opencontainers.image.")}
+            observed.update({"healthcheck": test, "release_env": [e for e in environment if e.startswith("RELEASE_")], "labels": labels})
+            check(LIVENESS_PATH in test, "the backend health check does not probe liveness")
+            check(f"RELEASE_TAG={RELEASE}" in environment, "the backend image does not carry RELEASE_TAG")
+            for image, found in labels.items():
+                check(found.get("org.opencontainers.image.version") == RELEASE, f"{image} version label")
+                check(found.get("org.opencontainers.image.revision") == self.head, f"{image} revision label")
+        with self.case("SM-27") as observed:
+            usage = self.compose("--profile", "ops", "run", "--rm", "-T", "migrate", check_rc=False, timeout=300)
+            again = self.compose(
+                "--profile", "ops", "run", "--rm", "-T", "migrate", "--no-backup-reason", "s2 smoke again", check_rc=False, timeout=300
+            )
+            report = json.loads(again.stdout) if again.stdout.strip().startswith("{") else {}
+            observed.update({
+                "usage_rc": usage.returncode, "usage_stdout": usage.stdout[:200], "again_rc": again.returncode,
+                "again_result": report.get("result"), "again_applied": report.get("applied_revisions"),
+            })
+            check(usage.returncode == 2 and not usage.stdout.strip(), "migrate without a backup option is not a usage error")
+            check(again.returncode == 0 and report.get("result") == "already_current", "the second migrate is not already_current")
+        with self.case("SM-28") as observed:
+            shell = self.client.request("GET", "/")
+            observed["meta_present"] = RELEASE_META.encode("utf-8") in shell.body
+            check(shell.status == 200 and RELEASE_META.encode("utf-8") in shell.body, "the shell does not carry its release meta")
 
     def sm12_sm13_sm15(self):
         with self.case("SM-12") as observed:
@@ -772,6 +844,7 @@ class Smoke:
             self.start()
             self.record_versions()
             self.sm1_to_sm5()
+            self.sm24_to_sm28()
             self.sm12_sm13_sm15()
             self.sm19()
             self.sm22()
@@ -821,7 +894,7 @@ def describe(value):
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="P16-S2 production stack smoke (throwaway Compose project).")
+    parser = argparse.ArgumentParser(description="P16-S2/S3 production stack smoke (throwaway Compose project).")
     parser.add_argument("--evidence", required=True, help="path of the evidence JSON to write")
     parser.add_argument("--keep", action="store_true", help="leave the stack running for the manual SM-20 browser check")
     parser.add_argument("--project", default=DEFAULT_PROJECT, help=f"Compose project name (default {DEFAULT_PROJECT})")

@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { errorMessage, isReleaseMismatch } from '../../api/client';
 import { scanBadge } from '../../api/scan-station';
 import type { BadgeScanResult } from '../../api/scan-station';
+import { useConnectivity } from '../../app/connectivity-context';
+import {
+  OUTDATED_SCAN_PLACEHOLDER,
+  RELOAD_PAGE_LABEL,
+} from '../../app/release-copy';
 import { ModalDialog } from '../../components/ModalDialog';
 import { normalizeScanInput } from './barcode';
 import { DevBadgesSlot } from './scan-station-dev-badges-slot';
@@ -17,13 +22,17 @@ const BADGE_NOT_RECOGNIZED =
  * "nothing was recorded/changed" sentence when it already has one (the
  * server's sign-in conflict, the unreachable-server fallback); the
  * suffix is added only when it is missing, never twice, and never to
- * an unknown outcome (408/5xx: the badge may have signed in).
+ * an unknown outcome (408/5xx: the badge may have signed in) or to a
+ * 409 `release_mismatch` (its detail already says nothing was changed
+ * by this request).
  */
 function badgeCheckFailure(error: unknown): string {
   const reason = errorMessage(error);
   const stated = /nothing was (recorded|changed)\.\s*$/i.test(reason);
   const suffix =
-    stated || answeredOutcomeUnknown(error) ? '' : ' Nothing was recorded.';
+    stated || answeredOutcomeUnknown(error) || isReleaseMismatch(error)
+      ? ''
+      : ' Nothing was recorded.';
   return `Badge could not be checked — ${reason}${suffix}`;
 }
 
@@ -35,7 +44,10 @@ function badgeCheckFailure(error: unknown): string {
  * and an open production dialog keeps its draft underneath. Escape and
  * backdrop clicks never dismiss it: a badge the SERVER accepts is the
  * only way through. A badge scan here is a write (sign-in), so it is
- * disabled while disconnected; nothing is queued.
+ * disabled while disconnected; nothing is queued. While the page is
+ * outdated (another server release) the modal offers its own `Reload
+ * page` — the only reachable control; the station never reloads
+ * itself while it is open (OD-16-07).
  */
 export function WorkerSignInDialog({
   stationId,
@@ -56,6 +68,7 @@ export function WorkerSignInDialog({
   /** The Area no longer takes badge scans: re-read the station. */
   onModeChanged: () => void;
 }) {
+  const { status } = useConnectivity();
   const fieldRef = useRef<HTMLInputElement>(null);
   const [checking, setChecking] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -134,7 +147,9 @@ export function WorkerSignInDialog({
         disabled={writeBlocked || checking}
         placeholder={
           writeBlocked
-            ? 'Disconnected — scanning disabled'
+            ? status === 'outdated'
+              ? OUTDATED_SCAN_PLACEHOLDER
+              : 'Disconnected — scanning disabled'
             : checking
               ? 'Checking badge…'
               : 'Scan Worker badge · Press Enter'
@@ -144,6 +159,18 @@ export function WorkerSignInDialog({
           if (event.key === 'Enter') void submit();
         }}
       />
+      {status === 'outdated' ? (
+        // The modal cannot be dismissed, so the update notice's own
+        // Reload page is unreachable behind it (GUI_DESIGN §3 rule 13).
+        <button
+          type="button"
+          className="bigbtn primary"
+          disabled={checking}
+          onClick={() => window.location.reload()}
+        >
+          {RELOAD_PAGE_LABEL}
+        </button>
+      ) : null}
       {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
       <DevBadgesSlot onScan={simulate} disabled={writeBlocked || checking} />
     </ModalDialog>

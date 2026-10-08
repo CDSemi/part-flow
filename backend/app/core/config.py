@@ -10,14 +10,28 @@ connection error. The connection comes from exactly one of two forms:
    ``DATABASE_PASSWORD_FILE`` plus optional ``DATABASE_PORT`` (the Phase 16
    production stack: the password is a secret file, never an environment
    value). The URL is composed from them into ``database_url``.
+
+Phase 16 slice 3 adds the release identity and the release gate:
+``RELEASE_TAG`` / ``RELEASE_COMMIT`` (set by the production image from its
+build arguments, never by Compose), ``ENFORCE_CLIENT_RELEASE`` (fixed on in
+the production Compose file) and ``ACCEPT_SCHEMA_REVISION`` (the per-revision
+readiness override of rollback path 2).
 """
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
+from pydantic import (
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -35,6 +49,24 @@ _FORM_TWO_REQUIRED = {
 }
 _FORM_TWO_NAMES = "DATABASE_HOST, DATABASE_NAME, DATABASE_USER and DATABASE_PASSWORD_FILE"
 _CONNECTION_FIELDS = frozenset({"database_url", "database_port", *_FORM_TWO_REQUIRED})
+
+DEVELOPMENT_RELEASE = "development"
+_RELEASE_TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_RELEASE_COMMIT = re.compile(r"[0-9a-f]{40}")
+_ALEMBIC_REVISION = re.compile(r"[A-Za-z0-9_]{1,32}")
+_RELEASE_TAG_INVALID = (
+    "RELEASE_TAG must be a release tag of at most 64 letters, digits, '.', '_' or '-'"
+    " (for example v1.0.0-rc.1)."
+)
+_RELEASE_COMMIT_INVALID = "RELEASE_COMMIT must be a full 40-character lowercase Git commit SHA."
+_ACCEPT_SCHEMA_REVISION_INVALID = (
+    "ACCEPT_SCHEMA_REVISION must be one Alembic revision id of at most 32 letters, digits or"
+    " underscores."
+)
+_ENFORCEMENT_NEEDS_RELEASE = (
+    'ENFORCE_CLIENT_RELEASE=true needs a release image: RELEASE_TAG is "development"'
+    " (build the image with PARTFLOW_RELEASE)."
+)
 
 
 def _present(value: object) -> bool:
@@ -90,6 +122,16 @@ class Settings(BaseSettings):
     # Whether the User session cookie carries `Secure` (Phase 14 slice 1).
     # Off for plain-HTTP development; Phase 16 turns it on behind TLS.
     session_cookie_secure: bool = False
+    # Release identity (Phase 16 slice 3): baked into the production image
+    # from its build arguments; "development" everywhere else.
+    release_tag: str = DEVELOPMENT_RELEASE
+    release_commit: str | None = None
+    # Refuse unsafe requests whose X-PartFlow-Release differs from
+    # release_tag (app.api.release_gate). Fixed on in production Compose.
+    enforce_client_release: bool = False
+    # Rollback path 2 only: the one database revision, unknown to this
+    # release, that it may serve after a verified compatibility check.
+    accept_schema_revision: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -137,6 +179,41 @@ class Settings(BaseSettings):
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError(f"SITE_TIMEZONE '{value}' is not a known IANA time zone.") from exc
+        return value
+
+    @field_validator("release_tag")
+    @classmethod
+    def _release_tag(cls, value: str) -> str:
+        if _RELEASE_TAG.fullmatch(value) is None:
+            raise ValueError(_RELEASE_TAG_INVALID)
+        return value
+
+    @field_validator("release_commit", mode="before")
+    @classmethod
+    def _release_commit(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or _RELEASE_COMMIT.fullmatch(value) is None:
+            raise ValueError(_RELEASE_COMMIT_INVALID)
+        return value
+
+    @field_validator("accept_schema_revision", mode="before")
+    @classmethod
+    def _accept_schema_revision(cls, value: object) -> object:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or _ALEMBIC_REVISION.fullmatch(value) is None:
+            raise ValueError(_ACCEPT_SCHEMA_REVISION_INVALID)
+        return value
+
+    @field_validator("enforce_client_release")
+    @classmethod
+    def _enforcement_needs_a_release(cls, value: bool, info: ValidationInfo) -> bool:
+        # A field validator (release_tag is validated before it; absent when
+        # refused): the error's input is this flag only, never the whole
+        # configuration.
+        if value and info.data.get("release_tag") == DEVELOPMENT_RELEASE:
+            raise ValueError(_ENFORCEMENT_NEEDS_RELEASE)
         return value
 
 

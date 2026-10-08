@@ -121,10 +121,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [reload]);
 
   // Regaining the connection while the state is unknown reads it again
-  // (once per regained connection — never a polling loop).
+  // (once per regained connection — never a polling loop). An outdated
+  // page reads like a connected one: reads are allowed (GUI §3 rule 13).
   useEffect(() => {
     if (
-      connectivity === 'connected' &&
+      (connectivity === 'connected' || connectivity === 'outdated') &&
       statusRef.current === 'unknown' &&
       reading.current === 0
     ) {

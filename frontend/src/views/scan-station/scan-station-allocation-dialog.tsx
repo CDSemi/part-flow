@@ -10,7 +10,7 @@ import type {
   AllocationSuggestion,
   SuggestedAllocationLine,
 } from '../../api/allocations';
-import { errorMessage } from '../../api/client';
+import { errorMessage, isReleaseMismatch } from '../../api/client';
 import {
   stationDeviceRefusal,
   stationPermissionDenied,
@@ -26,6 +26,8 @@ import type {
   StationContext,
   TransferResult,
 } from '../../api/scan-station';
+import { useConnectivity } from '../../app/connectivity-context';
+import { outdatedNotSent } from '../../app/release-copy';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
@@ -153,6 +155,7 @@ export function AllocationDialog({
   const deviceEventId = useRef(newDeviceEventId());
   const requireSession = useRequireWorkerSession();
   const deviceRefused = useStationDeviceRefused();
+  const { status } = useConnectivity();
   useTrackOutcomeUnknown(outcomeUnknown);
 
   const total = [...quantities.values()].reduce((sum, value) => sum + value, 0);
@@ -195,7 +198,9 @@ export function AllocationDialog({
     if (busy || !totalMatches) return;
     if (writeBlocked) {
       setServerError(
-        'Connection lost — the allocation was not sent. Reconnect and confirm again; nothing was recorded.',
+        status === 'outdated'
+          ? outdatedNotSent('allocation')
+          : 'Connection lost — the allocation was not sent. Reconnect and confirm again; nothing was recorded.',
       );
       return;
     }
@@ -231,6 +236,17 @@ export function AllocationDialog({
         // earlier attempt — the draft, the `device_event_id` and the
         // unknown-outcome state stay; the enrollment dialog opens above.
         deviceRefused({ outcomeUnknown });
+        setBusy(false);
+        return;
+      }
+      if (isReleaseMismatch(error)) {
+        // PartFlow was updated while this page was open: refused before
+        // the idempotency fast path, so nothing is known about an
+        // earlier attempt — the draft, the `device_event_id` and the
+        // unknown-outcome state stay, and the suggestion is not
+        // refreshed. After a reload (or a rollback to this page's
+        // release) the identical request is confirmed again.
+        setServerError(errorMessage(error));
         setBusy(false);
         return;
       }

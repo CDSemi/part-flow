@@ -29,12 +29,15 @@
 // (it replays a committed original or records it once). A refusal by
 // the role applied at Scan Stations (403 `station_permission_denied`)
 // is an ordinary rejection — and since it is judged after the fast path
-// and the post-lock re-check, it also ends an unknown outcome.
+// and the post-lock re-check, it also ends an unknown outcome. A 409
+// `release_mismatch` (PartFlow was updated while the page was open) is
+// judged before the fast path too: an ordinary rejection that keeps the
+// unknown-outcome state and its `device_event_id` as they were.
 // Production-safe: no mock data, no JSX.
 
 import { useCallback, useRef, useState } from 'react';
 
-import { ApiError, errorMessage } from '../../api/client';
+import { ApiError, errorMessage, isReleaseMismatch } from '../../api/client';
 import { newDeviceEventId } from '../../api/production-release';
 import {
   badgeGateRefusal,
@@ -47,6 +50,8 @@ import {
   stationDeviceRefusal,
   stationPermissionDenied,
 } from '../../api/station-devices';
+import { useConnectivity } from '../../app/connectivity-context';
+import { outdatedNotSent } from '../../app/release-copy';
 import type {
   BadgeGateRefusal,
   FinalGate,
@@ -74,11 +79,13 @@ export function answeredOutcomeUnknown(error: unknown): boolean {
  * The message of a failed station request followed by its "nothing
  * was recorded" sentence — except for an unknown outcome
  * (`answeredOutcomeUnknown`), which never claims that nothing was
- * recorded: the message then stands alone.
+ * recorded: the message then stands alone. So does a 409
+ * `release_mismatch`: its detail already says that nothing was changed
+ * by this request and asks to check an earlier unanswered attempt.
  */
 export function failureDetail(error: unknown, nothingRecorded: string): string {
   const message = errorMessage(error);
-  return answeredOutcomeUnknown(error)
+  return answeredOutcomeUnknown(error) || isReleaseMismatch(error)
     ? message
     : `${message} ${nothingRecorded}`;
 }
@@ -160,6 +167,7 @@ export function useOneShotWrite<T>({
 }): OneShotWrite<T> {
   const requireSession = useRequireWorkerSession();
   const deviceRefused = useStationDeviceRefused();
+  const { status } = useConnectivity();
   const deviceEventId = useRef(newDeviceEventId());
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -172,7 +180,9 @@ export function useOneShotWrite<T>({
     if (busy) return;
     if (writeBlocked) {
       setServerError(
-        'Connection lost — the action was not sent. Reconnect and confirm again; nothing was recorded.',
+        status === 'outdated'
+          ? outdatedNotSent('action')
+          : 'Connection lost — the action was not sent. Reconnect and confirm again; nothing was recorded.',
       );
       return;
     }
@@ -242,6 +252,7 @@ export function useOneShotWrite<T>({
   }, [
     busy,
     writeBlocked,
+    status,
     send,
     onDone,
     onRejected,

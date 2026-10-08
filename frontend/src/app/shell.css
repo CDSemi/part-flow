@@ -208,6 +208,14 @@ main {
   animation: none;
 }
 
+/* Updated release (GUI_DESIGN §3 rule 13): the server answers but runs
+   another release — a solid warning dot, like connecting. */
+.connchip.outdated .cdot {
+  background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
+  animation: none;
+}
+
 /* Reduced motion: a solid semantic dot without animation. */
 @media (prefers-reduced-motion: reduce) {
   .connchip .cdot {
@@ -456,6 +464,18 @@ main {
   bottom: 5px;
   width: 1px;
   background: var(--error-border);
+}
+
+/* Update notice (GUI_DESIGN §3 rule 13): the OFFLINE banner's
+   two-region layout and rail in the warning tone. */
+.offbanner.outdated {
+  background: var(--warning-surface);
+  border-bottom-color: var(--warning-border);
+  color: var(--warn-t);
+}
+
+.offbanner.outdated .retry::before {
+  background: var(--warning-border);
 }
 
 /* ============ Not-found state ============ */

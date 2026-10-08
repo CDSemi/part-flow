@@ -673,7 +673,8 @@ export function ProductionBoardView() {
   // tone with the explicit note. A board the server has never
   // delivered is never presented as a live feed.
   const feedStale =
-    connectivity !== 'connected' ||
+    connectivity === 'connecting' ||
+    connectivity === 'unavailable' ||
     board === null ||
     (feed.state.status === 'ready' && feed.state.stale);
 

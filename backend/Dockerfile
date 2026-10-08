@@ -20,6 +20,17 @@ RUN uv sync --frozen --no-dev
 # compose.production.yaml. Migrations run only as the explicit `migrate` job.
 # Same base tag as `base`, so the copied venv's interpreter path stays valid.
 FROM python:3.12-slim AS production
+# The release identity (compose.production.build.yaml passes both): baked into the image, never set by
+# Compose. A production image cannot be built without a release tag and the full commit SHA.
+ARG PARTFLOW_RELEASE
+ARG PARTFLOW_COMMIT
+RUN if ! printf '%s' "$PARTFLOW_RELEASE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' \
+        || [ "$PARTFLOW_RELEASE" = development ]; then \
+        echo "PartFlow backend: build argument PARTFLOW_RELEASE must name the release (for example v1.0.0-rc.1)." >&2; exit 1; fi \
+    && if ! printf '%s' "$PARTFLOW_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then \
+        echo "PartFlow backend: build argument PARTFLOW_COMMIT must be the full 40-character commit SHA." >&2; exit 1; fi
+ENV RELEASE_TAG=${PARTFLOW_RELEASE} RELEASE_COMMIT=${PARTFLOW_COMMIT}
+LABEL org.opencontainers.image.version=${PARTFLOW_RELEASE} org.opencontainers.image.revision=${PARTFLOW_COMMIT}
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}"

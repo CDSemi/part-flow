@@ -21,11 +21,12 @@ Users, server-side permission enforcement on every Administration and
 Management read and write, and Scan Station routes that require a station
 device enrolled by an administrator, §2) and Phase 15 — File-Based Work Order
 Import (closed 2026-10-08). Phase 16 is in progress: slice 1 (the read-only
-`reconcile` command) and slice 2 (production artifacts: the production
+`reconcile` command), slice 2 (production artifacts: the production
 backend and `web` images, `compose.production.yaml`, its configuration and
-secret inventory, and network rate limiting, §3.1) are implemented. Phase 16
-still owns the release flow, role hardening, backups, observability, host TLS
-and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
+secret inventory, and network rate limiting, §3.1) and slice 3 (the release
+flow: release identity, liveness and readiness, the backend write gate,
+`migrate`, `release.sh` and `smoke.sh`, §3.1) are implemented. Phase 16 still owns role hardening, backups, observability,
+host TLS and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
 
@@ -33,7 +34,7 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Production artifacts exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory), but the release flow, role hardening, backups, observability and the pilot gates of §5 remain (Phase 16: P16-S3…S7). |
+| Pilot or production use | Not ready | Production artifacts and a release flow exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`), but role hardening, backups, observability and the pilot gates of §5 remain (Phase 16: P16-S4…S7). |
 | Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet (P16-S7), and the §5 gates have not passed. Network rate limiting exists in `web`; `compose.yaml` still exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
@@ -124,7 +125,7 @@ Required boundaries:
 - identify every deployment by an immutable Git commit or image tag;
 - make the same backup format portable between NAS and VPS.
 
-### 3.1 Production stack (Phase 16 slice 2)
+### 3.1 Production stack (Phase 16 slices 2 and 3)
 
 **State.** Implemented (P16-S2): the `production` stages of
 `backend/Dockerfile` and `frontend/Dockerfile`, the `web` configuration in
@@ -133,8 +134,12 @@ Required boundaries:
 production static tests (`deploy/production/tests/test_production_artifacts.py`)
 and the Compose stack smoke (`deploy/production/tests/stack_smoke.py`). Evidence
 is Windows/Docker Desktop and a Linux container only; nothing in this section
-has been verified on the Synology NAS or a VPS (that is P16-S7), and the
-release flow, role hardening, backups and observability remain P16-S3…S6.
+has been verified on the Synology NAS or a VPS (that is P16-S7). Implemented
+(P16-S3): release identity, liveness and readiness, the backend write gate,
+`migrate` and `revision`, `release.sh` and `smoke.sh` with
+`reconcile_regression.py`, and the update notice in the frontend (the
+subsections below). Both production images take `PARTFLOW_RELEASE` and `PARTFLOW_COMMIT` as build arguments and carry the release identity (the backend `production` stage sets `RELEASE_TAG` and `RELEASE_COMMIT`); the production stack smoke and the release rehearsal have run (State, Evidence). Role hardening, backups and
+observability remain P16-S4…S6.
 
 **Services and networks (`compose.production.yaml`).**
 
@@ -143,15 +148,17 @@ release flow, role hardening, backups and observability remain P16-S3…S6.
 | `db` | PostgreSQL `postgres:16.14` (Debian variant, never `-alpine`: collation and reconcile check (j) depend on glibc) | `internal` (no external route) | volume `postgres_data`; no published port; 60 s stop grace |
 | `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, `production` stage | `internal`, `edge` | `SESSION_COOKIE_SECURE=true` fixed; `WEB_CONCURRENCY` from `PARTFLOW_BACKEND_WORKERS` (default 2); `FORWARDED_ALLOW_IPS` = the edge subnet; 200 s stop grace (above `web`'s longest 180 s upstream timeout); `restart: unless-stopped` (never `on-failure`: with several workers a configuration refusal exits `0`) |
 | `web` | image `partflow/web:${PARTFLOW_RELEASE}`, `production` stage | `edge` | the only published port, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (no variable for the bind address); no `depends_on`, so it keeps serving the shell while `backend` is stopped |
-| `migrate` | one-shot `alembic upgrade head` from the backend image | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm` (P16-S3 replaces the command) |
+| `migrate` | one-shot `python -m app.cli migrate` from the backend image (entrypoint; one connection, one transaction) | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)`; without a backup option it is a usage error |
 
 Images are built locally from the checked-out release, through the build-only
 companion file `compose.production.build.yaml`, and never pulled
-(`pull_policy: never`); the tag is `PARTFLOW_RELEASE`. `compose.production.yaml`
+(`pull_policy: never`); the tag is `PARTFLOW_RELEASE` and the build also needs the release commit
+(`PARTFLOW_COMMIT`, see Release identity). `compose.production.yaml`
 has no build section, so `up` or `run` with a tag whose images are missing fails
 with `No such image` instead of building the current checkout under that tag.
 Every service has a
-restart policy, a health check (except `migrate`), memory and CPU limits from
+restart policy, a health check (except `migrate`; the `backend` check is the
+liveness route, see Readiness and write gate), memory and CPU limits from
 the environment file (starting values, to be measured on the pilot host in
 P16-S7), and `json-file` log rotation (10 MiB, 5 files). Secrets are mounted as
 files under `/run/secrets`; no secret is an environment value, and none has a
@@ -197,6 +204,105 @@ after the 60 s read timeout, or as a 502 when the supervisor exits; the backend
 never ran it, but the client must treat it as an unknown outcome. With one
 worker such a request is refused at once (502). Start a write freeze when no
 import is running.
+
+**Release identity (P16-S3).** A release is the tag `PARTFLOW_RELEASE` plus the
+full 40-character commit `PARTFLOW_COMMIT`; both images of a release are built
+from one commit and carry the same identity. The build arguments
+`PARTFLOW_RELEASE` and `PARTFLOW_COMMIT` are passed by
+`compose.production.build.yaml` to `backend` and `web`; the build fails without
+a valid tag (letters, digits, `.`, `_`, `-`, at most 64, not `development`) or
+without a lowercase 40-hex commit. The `web` image stores them as the image
+labels `org.opencontainers.image.version` and
+`org.opencontainers.image.revision` and bakes the tag into the bundle
+(`VITE_PARTFLOW_RELEASE`) and into the `partflow-release` meta tag of the
+served shell; the backend reads `RELEASE_TAG` and `RELEASE_COMMIT` (default
+`development` and none outside a release image) and reports them in
+`GET /api/health` (`release`, `commit`) and `GET /api/health/live`. Compose never
+sets `RELEASE_TAG`. A page sends the release of its bundle in the request header
+`X-PartFlow-Release`; the comparison is exact string equality. An existing tag is never rebuilt. The backend `production` stage has the same build arguments, the same release and commit checks and the same labels as `web`.
+
+**Readiness and write gate (P16-S3).** `GET /api/health/live` answers
+`{"status":"live","service","release","commit"}` without touching the database
+and is what every container health check uses, so a schema mismatch never makes
+a container unhealthy. `GET /api/health` is readiness: it reads the database
+revision (this replaces the former `SELECT 1`) and answers `200` with
+`"status":"ok"` only when the schema is `current` or `accepted`, `503
+not_ready` on a `mismatch`, and `503 unavailable` with `"schema":"unknown"` when
+the database is unreachable. Its keys are `status`, `service`, `database`,
+`release`, `commit`, `schema`, `expected_revision`, `database_revision` and
+`accepted_revision`. `schema` is `current` (database revision equals the
+image's single Alembic head), `accepted` (the database is at the one revision
+named by `PARTFLOW_ACCEPT_SCHEMA_REVISION`, which the image does not know),
+`mismatch` or `unknown`. The override is per revision and honoured only for a
+revision this image does not know (rollback path 2, `deployment/OPERATIONS_RUNBOOK.md`
+§6); naming a revision the image knows is ignored with a warning, and
+`revision` reports `override_ignored`. The backend refuses every `POST`, `PUT`,
+`PATCH` and `DELETE`, on any path, before routing, CSRF or any body read, in
+two cases, both with zero writes and `Cache-Control: no-store`: `409` with
+`release_mismatch: true` when enforcement is on and the request's
+`X-PartFlow-Release` is missing or differs from `RELEASE_TAG`; `503` with
+`not_ready: true` when the schema is a `mismatch` or readiness cannot be
+confirmed (the gate fails closed). Reads and health are never gated.
+Enforcement (`ENFORCE_CLIENT_RELEASE`) is fixed on in `compose.production.yaml`
+and off in development and tests; it refuses to start with the `development`
+tag. The one write on a safe method is the `last_seen_at` bookkeeping of a
+Scan Station device (no production data); it is accepted under a mismatch. The
+client treats a 409 `release_mismatch` as a definite refusal (nothing was
+recorded by that request, and an earlier unanswered attempt stays unknown) and a
+503 as an unknown outcome; the screen state is `GUI_DESIGN.md` §3 rule 13.
+
+**Migration job and `revision` (P16-S3).** `python -m app.cli migrate` applies
+the pending migrations in one transaction on one connection, runs the
+`apply-grants` hook in the same transaction (a no-op until P16-S4) and prints
+a JSON report; it needs exactly one of `--pre-release-backup REF` or
+`--no-backup-reason TEXT` (recorded; for example `first install: empty
+database`) and accepts `--lock-timeout SECONDS` (1-600, default 30). It refuses,
+changing nothing, a revision file with non-transactional DDL
+(`autocommit_block`, `CONCURRENTLY`), a database revision this release does not
+know, a concurrent `migrate`, and (best effort, not proof that `backend` is
+stopped) a connected backend session; an at-head database answers
+`already_current`. The backend never migrates. `python -m app.cli revision`
+is read-only and prints the release identity, expected and database
+revisions, pending revisions and the readiness the backend would report; exit
+0 only when the schema is `current`.
+
+**First install (P16-S3).** From the release checkout, with the tag in
+`.env.production`: build with `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f
+compose.production.build.yaml build`; start the database (`$PF up -d db`);
+apply the schema (`$PF --profile ops run --rm -T migrate --no-backup-reason
+"first install: empty database"`); start `backend` with one worker for the
+first-run setup as the Process model describes, then `$PF up -d backend web`.
+
+**Releases (P16-S3).** `deploy/production/release.sh` runs the release
+sequence of §7 from the repository root of the release checkout with the
+release tag checked out (`deploy/production/release.sh --help` prints the usage):
+`--release TAG --operator NAME --approver NAME` and exactly one of
+`--pre-release-backup REF` or `--no-backup-reason TEXT`, optionally
+`--accept-pre-release-findings` (continue when the pre-release reconcile has
+findings and block only on findings absent from it) or `--skip-pre-reconcile
+REASON` (no image has the database revision as its head: rollback path 2 state;
+every post-release finding then blocks), `--env-file`, `--records-dir` and the
+record fields `--environment`, `--url`, `--rollback-deadline`,
+`--observation-owner` and `--known-limitations`; `--rehearsal --project NAME`
+runs on a throwaway Compose project (never `partflow-production`). Exit codes: 0
+completed; 1 stopped with nothing changed or writes reopened on the current
+release; 2 could not run; 3 `backend` left stopped (follow
+`deployment/OPERATIONS_RUNBOOK.md` §6); 4 the new release may be running and
+writable after a failed check. Each step's output and `record.json` (the
+`OPERATIONS_RUNBOOK.md` §1 record) are written to
+`<records-dir>/<UTC>-<tag>/` (default records directory
+`$HOME/partflow-deployments`, mode 0700). `deploy/production/smoke.sh --release
+TAG [--env-file …] [--project NAME] [--allow-accepted-schema]` runs the loopback
+checks (the served shell and its release, SPA fallback, health and liveness
+release identity and schema, the JSON 404 for an unknown API path, the gate's
+409 without the release header and its pass-through with it, and the running
+image identities). Nothing schedules `release.sh`; no updater runs on the
+host, and neither script removes, prunes or re-tags an image.
+
+**Rollback (P16-S3).** The decision tree, paths 1 and 2 and the schema
+override are in `deployment/OPERATIONS_RUNBOOK.md` §6; the previous release's
+images stay on the host through the rollback window. Path 3 (restore) waits
+for P16-S5.
 
 **Request limits and timeouts (`web`).**
 
@@ -305,12 +411,14 @@ database.
 
 **Configuration and secret inventory.** `.env.production` (copied from
 `.env.production.example`, git-ignored, mode 600) holds only non-secret values;
-the set of `${NAME}` references in `compose.production.yaml` equals the set of
-keys in the example (tested).
+the set of `${NAME}` references in `compose.production.yaml` and
+`compose.production.build.yaml` equals the set of keys in the example (tested).
 
 | Key | Meaning | Required / default |
 | --- | --- | --- |
 | `PARTFLOW_RELEASE` | tag of the **running** images (§10) | required |
+| `PARTFLOW_COMMIT` | full commit of the release being built; empty in the file, passed in the shell by `release.sh` at build time | required to build |
+| `PARTFLOW_ACCEPT_SCHEMA_REVISION` | rollback path 2 only: the one database revision the running release may serve (`OPERATIONS_RUNBOOK.md` §6); `release.sh` clears it | empty |
 | `PARTFLOW_SECRETS_DIR` | absolute path of the secrets directory, outside the checkout, production only (directory 0700, each file 0444) | required |
 | `PARTFLOW_SITE_TIMEZONE` | factory calendar zone, equal to staging (§6) | required |
 | `PARTFLOW_HTTP_PORT` | loopback port the platform proxy connects to | required (example `18080`) |
@@ -321,6 +429,7 @@ keys in the example (tested).
 | `PARTFLOW_{DB,BACKEND,WEB,OPS}_{MEMORY,CPUS}` | resource limits | `1g`/`1.0`, `1g`/`2.0`, `128m`/`0.5`, `512m`/`1.0` |
 
 Fixed in Compose, not configurable: `SESSION_COOKIE_SECURE=true`,
+`ENFORCE_CLIENT_RELEASE=true`,
 `DATABASE_HOST=db`, `DATABASE_PORT=5432`, the secret mount paths and the
 loopback bind. The one secret file in this slice is `postgres_password`
 (exactly one line). `db` reads it **only when a new data volume is
@@ -337,40 +446,35 @@ the same directory.
 | --- | --- |
 | Preflight (§6, environment separation) | `docker ps -a --format '{{.Label "com.docker.compose.project"}}' \| sort -u` lists no `partflow-staging` |
 | Validate the configuration | `$PF config --quiet` |
-| Build a release (tag in the shell; the only use of the build file) | `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` |
+| Build a release (tag and commit in the shell; the only use of the build file) | `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` |
 | Start the database | `$PF up -d db` |
-| Apply migrations (once per release) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate` (first install: the tag is already in `.env.production`) |
+| Apply migrations (once per release, with `backend` stopped) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)` (first install: the tag is already in `.env.production`) |
+| Release (the whole sequence of §7) | `deploy/production/release.sh --release <new> --operator … --approver … (--pre-release-backup REF \| --no-backup-reason TEXT)` |
+| Smoke checks of a running release | `deploy/production/smoke.sh --release <tag>` |
+| Expected and database revision, readiness | `$PF run --rm --no-deps -T backend python -m app.cli revision` |
 | Start or recreate the application | `$PF up -d backend web` |
 | Status and logs | `$PF ps` · `$PF logs --since=15m backend web db` |
-| Health through `web` on the host | `curl --fail --silent --show-error http://127.0.0.1:${PARTFLOW_HTTP_PORT}/api/health` |
+| Health (readiness: release, schema, revisions) through `web` on the host | `curl --fail --silent --show-error http://127.0.0.1:${PARTFLOW_HTTP_PORT}/api/health` · liveness: `…/api/health/live` |
 | Reconciliation (also while `backend` is stopped) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile` |
 | Identity rehearsal of a candidate image (check (j)) | `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j` |
 | Recovery CLIs | `$PF run --rm --no-deps backend python -m app.cli reset-password …` · `… restore-correction-permission-management …` |
-| Write freeze | `$PF stop backend` (may wait up to 200 s while an import finishes, and requests sent meanwhile hang up to 60 s, see Process model: start it when no import is running) · reopen with `$PF up -d backend` |
+| Write freeze | `$PF stop backend` (may wait up to 200 s while an import finishes, and requests sent meanwhile hang up to 60 s, see Process model: start it when no import is running) · reopen with `$PF up -d backend` on the same release; at a release switch the reopen is the `web` switch of `release.sh` (§7) |
 | First-run setup | `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, read the token with `$PF logs backend \| grep "Setup token"`, complete setup, then `$PF up -d backend` |
 
-**Release sequence (manual form; P16-S3 automates it).** `.env.production`
-always names the release that is **running**; the candidate tag lives only in
-the shell until the switch, so every recovery CLI, reconcile or `up` before the
-switch uses the current image against the current schema.
-
-1. With the current tag: the pre-maintenance reconcile and any recovery CLI
-   (`deployment/OPERATIONS_RUNBOOK.md` §5).
-2. `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (never an existing tag).
-3. `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`:
-   the candidate image against the unchanged database. A failing check stops
-   the release here; nothing has changed.
-4. Write freeze (`$PF stop backend`), then the backup step of the runbook.
-5. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`.
-6. Write `PARTFLOW_RELEASE=<new>` into `.env.production`, `$PF up -d backend web`,
-   then health and reconcile.
+**Release sequence.** `deploy/production/release.sh` performs the release
+sequence of §7; the manual equivalent, in the same order, is in
+`deployment/OPERATIONS_RUNBOOK.md` §5. `.env.production` always names the
+release that is **running**; the candidate tag lives only in the shell (or in
+the script's per-command environment) until the switch, so every recovery CLI,
+reconcile or `up` before the switch uses the current image against the current
+schema.
 
 Rollback of application code with no schema change: restore the previous tag in
 `.env.production` and `$PF up -d backend web`. It needs the previous release's
 images on the host, so keep them (no `docker image prune -a`) through the
 rollback window; when they are gone, `up` fails with `No such image` and starts
 nothing. A schema rollback is the restore
-path of the runbook (P16-S3/S5), never a down-migration here. **Never run
+path of the runbook (path 3, P16-S5), never a down-migration here. **Never run
 `down -v`, or remove a volume, on the `partflow-production` project**: it
 deletes `partflow-production_postgres_data`; `$PF down` without `-v` is the
 only stop-everything form.
@@ -383,8 +487,8 @@ the 11 mock sentinels), and a Compose stack smoke on Docker Desktop (cases
 SM-1…SM-22, including the rate limit, the proxy-generated JSON answers, the
 content security policy in a real browser, the one-worker first-run, the
 reconcile commands, and 2,000-Work-Order import timings of 18.06 s to create and
-31.33 s to change quantities, below `web`'s 180 s). Host checks on the Synology
-NAS and a VPS are not part of this evidence.
+31.33 s to change quantities, below `web`'s 180 s). P16-S3 evidence: the production static and script suite (93 tests, all passing), the 51 release-script and reconcile-regression tests passing under `dash` in a Linux container, `sh -n` on both scripts, both production images built with a full commit and the build failing without one, the Compose stack smoke passing (SM-1…SM-19 and SM-21…SM-28; SM-20 is the manual S2 browser check), the release rehearsal passing (RH-1…RH-8 and RH-10: a release with a migration, the write freeze, the two-step switch, the refused migration while a backend is connected, and `/api/health` and `/api/health/live` latency through `web`), and a browser check of the update notice and the automatic reload of the Production Board kiosk on the rehearsal stack. Not run (P16-S7): the Scan Station reload cases that need a configured Area, Operation and enrolled station, and every NAS and VPS host check. Host checks on the Synology NAS and a VPS are
+not part of this evidence.
 
 ## 4. Platform decision
 
@@ -460,8 +564,12 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   secrets directory);
 - image or release versions are immutable and retained long enough to roll back
   application code — **partly implemented** (images are tagged by
-  `PARTFLOW_RELEASE` and never pulled; the release identity inside the image and
-  the retention rule are P16-S3).
+  `PARTFLOW_RELEASE` and never pulled and an existing tag is never rebuilt; the
+  `web` image carries the release identity and the deployment record holds the
+  image IDs of every release; the backend image carries it too, §3.1; the previous release's images stay on the host through the
+  rollback window, `release.sh` refuses to start when they are missing);
+- the readiness endpoint and the backend write gate (a mismatched page or
+  schema is refused with zero writes) — **implemented** (§3.1, P16-S3).
 
 The gates above remain gates until P16-S7 records passing evidence.
 
@@ -523,11 +631,21 @@ Every platform follows the same release order:
 1. Select and record an immutable release commit/tag following §10.
 2. Confirm CI and release quality gates for that exact revision.
 3. Read the migration notes from the currently deployed revision to the target.
-4. Verify the latest backup and create a fresh pre-release backup.
-5. Build or pull the target images without replacing the running release.
-6. Enter the approved maintenance mode/window when required.
-7. Run Alembic migration once and capture its output.
-8. Start the target application release. On a database with no
+4. Verify the latest backup and create a fresh pre-release backup. Before
+   P16-S5 this is the operator's dump of `deployment/OPERATIONS_RUNBOOK.md` §3,
+   taken before the freeze and named with `--pre-release-backup`; writes made
+   after it are not in it (`OPERATIONS_RUNBOOK.md` §5 and §6).
+5. Build the target images without replacing the running release
+   (`release.sh` builds the candidate and never touches the running one).
+6. Enter the write freeze (stop `backend`, `OPERATIONS_RUNBOOK.md` §5) when a
+   migration is pending.
+7. Run the migration once and capture its output: `migrate` applies it in one
+   transaction, refuses while `backend` is connected and refuses
+   non-transactional DDL.
+8. Switch the application. `backend` starts first on the new release while
+   `web` still serves the previous bundle, so writes stay refused by the release
+   gate; after the health check passes, `web` is switched and writes reopen.
+   On a database with no
    Administrator, start the backend with one worker
    (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, so there is a single setup
    token, §3.1), complete first-run setup (the setup token is in the backend
@@ -536,12 +654,16 @@ Every platform follows the same release order:
    (Administration → Scan Stations).
 9. Run health, API, UI, authorization, scan-focus, and write/read-back smoke
    checks using designated test data.
-10. Run quantity/movement reconciliation checks.
-11. Record the deployed revision, migration head, operator, time, and results.
+10. Run quantity/movement reconciliation checks (`release.sh` runs the
+    pre-release and post-release reconcile; a failed check after the switch
+    stops `backend` again).
+11. Record the deployed revision, migration head, operator, time, and results
+    (`release.sh` writes `record.json`).
 12. Keep the previous release and pre-release backup until the observation
     window ends.
 
-Detailed commands and decision points are in
+`deploy/production/release.sh` and `smoke.sh` implement steps 5 to 11 (§3.1,
+Releases). Detailed commands and decision points are in
 [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md).
 
 ## 8. Platform guides
@@ -579,6 +701,9 @@ Use one application release for the frontend, backend, and migrations from
 the same commit. Record its Git tag and full commit SHA. Alembic revisions
 identify the database schema separately; package metadata is not release
 history.
+
+The release identity is baked into both production images and reported by
+`GET /api/health` (`release`, `commit`) (§3.1).
 
 Create a release for a version selected for testing or deployment, not for
 every commit. Redeploying the same version does not require a new release.
@@ -696,8 +821,9 @@ not publish release images or deploy to Synology when a tag/release is created.
 GitHub source archives are not prebuilt production images. A fixed source tag
 also does not guarantee identical later rebuilds when base images can change.
 
-Manual releases are sufficient for this stage. When production image publication
-is implemented, record the image digests alongside the release tag and retain
+Manual releases are sufficient for this stage. The deployment record holds the
+local image IDs of every release (P16-S3); when production image publication is
+implemented, record the registry digests alongside the release tag and retain
 the deployed artifacts. Do not introduce a separate version service, release
 branch hierarchy, or automatic publisher solely to apply this convention.
 

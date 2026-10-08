@@ -4,10 +4,13 @@ import {
   ApiError,
   apiRequest,
   apiUpload,
+  BUNDLE_RELEASE,
+  isReleaseMismatch,
   RATE_LIMITED_MESSAGE,
   refusalFlag,
   REQUEST_TOO_LARGE_MESSAGE,
   setAuthFailureListener,
+  setReleaseMismatchListener,
   setStationDeviceRefusalListener,
 } from './client';
 import { writeOutcomeUnknown } from './scan-station';
@@ -53,6 +56,7 @@ test('apiUpload sends the blob as the raw body labelled with its own type', asyn
   expect(init.headers).toEqual({
     'Content-Type': 'image/png',
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
   });
   expect(init.body).toBe(image);
 });
@@ -93,11 +97,13 @@ test('FU-3: apiUpload with POST adds extra headers after Content-Type and the re
   expect(init.headers).toEqual({
     'Content-Type': 'text/csv',
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
     'X-PartFlow-Import-Check': 'f'.repeat(64),
   });
   expect(Object.keys(init.headers as object)).toEqual([
     'Content-Type',
     'X-PartFlow-CSRF',
+    'X-PartFlow-Release',
     'X-PartFlow-Import-Check',
   ]);
   expect(init.body).toBe(file);
@@ -135,6 +141,7 @@ test('the JSON path is unchanged: JSON body out, parsed JSON or ApiError back', 
   expect(init.headers).toEqual({
     'Content-Type': 'application/json',
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
   });
   expect(init.body).toBe('{"name":"Alex Tran","badge_barcode":"ABC1"}');
 
@@ -150,7 +157,10 @@ test('a body-less GET carries only the request-origin header', async () => {
   await apiRequest('/api/workers');
   const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
   expect(init.method).toBe('GET');
-  expect(init.headers).toEqual({ 'X-PartFlow-CSRF': '1' });
+  expect(init.headers).toEqual({
+    'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
+  });
   expect(init.body).toBeUndefined();
   // The browser default (same-origin) sends the sign-in cookie.
   expect(init.credentials).toBeUndefined();
@@ -265,6 +275,7 @@ test('promptSignIn: false still tells the listener about an ended sign-in, witho
     expect(init.headers).toEqual({
       'Content-Type': 'application/json',
       'X-PartFlow-CSRF': '1',
+      'X-PartFlow-Release': 'development',
     });
     expect(init.body).toBe('{"theme_preference":"LIGHT"}');
   } finally {
@@ -287,11 +298,13 @@ test('FS-1: extra headers follow Content-Type and the request-origin header, nev
   expect(init.headers).toEqual({
     'Content-Type': 'application/json',
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
     'X-PartFlow-Station-Device': 'tok-1',
   });
   expect(Object.keys(init.headers as object)).toEqual([
     'Content-Type',
     'X-PartFlow-CSRF',
+    'X-PartFlow-Release',
     'X-PartFlow-Station-Device',
   ]);
 });
@@ -480,4 +493,109 @@ test('FC-4: a 502 HTML body keeps the generic copy; web JSON 502 keeps its detai
   expect(webFailure.message).toBe(detail);
   expect(refusalFlag(webFailure, 'server_unavailable')).toBe(true);
   expect(writeOutcomeUnknown(webFailure)).toBe(true);
+});
+
+const RELEASE_MISMATCH_DETAIL =
+  'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+
+test('FR-1: every request names the bundle release beside the request-origin header; callers never override either', async () => {
+  expect(BUNDLE_RELEASE).toBe('development');
+  fetchMock.mockImplementation(() => Promise.resolve(json({})));
+
+  await apiRequest('/api/workers');
+  await apiRequest('/api/workers', {
+    method: 'POST',
+    body: {},
+    headers: { 'X-PartFlow-Release': 'v0.0.1', 'X-PartFlow-CSRF': '0' },
+  });
+  await apiUpload(
+    '/api/workers/3/avatar',
+    new Blob(['x'], { type: 'image/png' }),
+    'PUT',
+    { 'X-PartFlow-Release': 'v0.0.1' },
+  );
+
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  for (const [, init] of fetchMock.mock.calls as [string, RequestInit][]) {
+    expect(init.headers).toMatchObject({
+      'X-PartFlow-CSRF': '1',
+      'X-PartFlow-Release': 'development',
+    });
+  }
+});
+
+test('FR-2: a 409 release_mismatch reaches the listener once and stays a definite refusal', async () => {
+  const listener = vi.fn();
+  setReleaseMismatchListener(listener);
+  try {
+    fetchMock.mockResolvedValueOnce(
+      json({ detail: RELEASE_MISMATCH_DETAIL, release_mismatch: true }, 409),
+    );
+    const failure = await failureOf(
+      apiRequest('/api/workers', { method: 'POST', body: {} }),
+    );
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(failure.status).toBe(409);
+    expect(failure.message).toBe(RELEASE_MISMATCH_DETAIL);
+    expect(writeOutcomeUnknown(failure)).toBe(false);
+    expect(isReleaseMismatch(failure)).toBe(true);
+
+    // Neither a 409 without the flag nor a 503 is a release mismatch.
+    expect(isReleaseMismatch(new ApiError(409, 'x', { detail: 'x' }))).toBe(
+      false,
+    );
+    expect(
+      isReleaseMismatch(new ApiError(503, 'x', { release_mismatch: true })),
+    ).toBe(false);
+    expect(isReleaseMismatch(new Error('x'))).toBe(false);
+  } finally {
+    setReleaseMismatchListener(null);
+  }
+});
+
+test('FR-3: a release-flow 409 confirmation_required never reaches the release listener', async () => {
+  const listener = vi.fn();
+  setReleaseMismatchListener(listener);
+  try {
+    fetchMock.mockResolvedValueOnce(
+      json(
+        {
+          detail: 'Confirm the release.',
+          confirmation_required: true,
+          existing_active_quantity: 3,
+        },
+        409,
+      ),
+    );
+    const failure = await failureOf(
+      apiRequest('/api/scan-stations/S1/releases', {
+        method: 'POST',
+        body: {},
+      }),
+    );
+    expect(failure.status).toBe(409);
+    expect(isReleaseMismatch(failure)).toBe(false);
+    expect(listener).not.toHaveBeenCalled();
+  } finally {
+    setReleaseMismatchListener(null);
+  }
+});
+
+test('FR-4: a 503 not_ready stays an unknown outcome', async () => {
+  fetchMock.mockResolvedValueOnce(
+    json(
+      {
+        detail:
+          'PartFlow is not ready for changes: the database does not match this release. Nothing was changed. An administrator must complete or roll back the release.',
+        not_ready: true,
+      },
+      503,
+    ),
+  );
+  const failure = await failureOf(
+    apiRequest('/api/workers', { method: 'POST', body: {} }),
+  );
+  expect(failure.status).toBe(503);
+  expect(isReleaseMismatch(failure)).toBe(false);
+  expect(writeOutcomeUnknown(failure)).toBe(true);
 });

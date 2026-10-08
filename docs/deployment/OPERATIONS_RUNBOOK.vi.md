@@ -7,10 +7,12 @@
 > **Trạng thái:** Mẫu quy trình vận hành chuẩn cho Phase 16. Production Compose
 > file đã có (P16-S2): `PF` bên dưới là
 > `docker compose -f compose.production.yaml --env-file .env.production`, chạy từ
-> release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Các command phụ
-> thuộc slice sau (release automation P16-S3, backup P16-S5, monitoring P16-S6)
-> phải được thay bằng tên cuối cùng do repo cung cấp trước khi dùng cho
-> production.
+> release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Các command
+> release, migration, write freeze và rollback (path 1 và 2) đã là thật (P16-S3:
+> `deploy/production/release.sh`, `smoke.sh`, `migrate`, `revision`); các command
+> backup, restore và rollback path 3 (P16-S5) và các command monitoring (P16-S6)
+> vẫn là placeholder và phải được thay bằng tên cuối cùng do repo cung cấp trước
+> khi dùng cho production.
 >
 > **Quyền chuẩn:** Tiếng Anh là source of truth.
 
@@ -32,6 +34,18 @@ Ghi cho mỗi environment và release:
 | Rollback deadline và observation owner |  |
 | Giới hạn đã biết |  |
 
+`deploy/production/release.sh` ghi record này thành `record.json` (cùng output của
+mọi bước) trong `<records-dir>/<UTC>-<tag>/`, và các trường ánh xạ vào các dòng
+trên: `environment` và `url` (dòng 1), `host` (dòng 2), `release` (tag, commit,
+tag trước và image ID cục bộ của `backend` và `web`; dòng 3), `alembic`
+(`before`, `after`, `expected`; dòng 4), `operator`, `approver` (dòng 5),
+`started_at`, `finished_at` (dòng 6), `backup` (dòng 7; `verified` là `false` cho
+đến P16-S5), `migration` (các file `migrate.json` và `migrate.log`; dòng 8),
+`reconcile` và `smoke` (dòng 9), `rollback_deadline` và `observation_owner`
+(dòng 10), `known_limitations` (dòng 11); `outcome`, `writes_reopened_at` và
+`refrozen` nêu cách lần chạy kết thúc. Một thao tác thủ công (ví dụ rollback) ghi
+bổ sung vào cùng thư mục với cùng các trường.
+
 ## 2. Health và chẩn đoán
 
 Kiểm tra tối thiểu (development và staging stack):
@@ -48,7 +62,16 @@ Production stack (`PF` như trên; health qua hostname):
 $PF ps
 $PF logs --since=15m backend web db
 curl --fail --silent --show-error https://<partflow-host>/api/health
+curl --fail --silent --show-error https://<partflow-host>/api/health/live
+$PF run --rm --no-deps -T backend python -m app.cli revision
 ```
+
+`/api/health` là readiness: nó báo `release`, `commit`, `schema` (`current`,
+`accepted`, `mismatch` hoặc `unknown`), `expected_revision`, `database_revision` và
+`accepted_revision`, và trả 503 khi schema không khớp hoặc không kết nối được
+database. `/api/health/live` chỉ là liveness (container health check dùng nó): nó
+vẫn khỏe khi readiness là 503 trong lúc schema mismatch. `revision` in cùng các
+thông tin từ một container one-off và chạy được khi `backend` đang dừng.
 
 Trong production stack, access log của `web` là request log (client address,
 method, path không có query string, status, bytes, duration, user agent); nó
@@ -142,58 +165,137 @@ diễn tập.
   mọi finding; trong production stack chạy nó, và mọi CLI recovery, với tag
   **hiện tại**, trước khi tag candidate được ghi vào `.env.production` (candidate
   chỉ nằm trong shell cho đến lúc switch);
-- quyết định có cần dừng write hay không;
-- thông báo window và deadline quyết định rollback.
+- quyết định có cần dừng write hay không (migration đang chờ luôn cần write
+  freeze bên dưới);
+- thông báo window và deadline quyết định rollback, và nhắc các station hoàn tất
+  dialog đang mở;
+- lấy pre-release dump càng muộn càng tốt và ghi lại thời điểm: cho đến P16-S5 nó
+  được lấy trước freeze, nên write xảy ra giữa dump và freeze **không** nằm trong
+  đó; đặt tên nó bằng `--pre-release-backup`.
+
+### Write freeze
+
+Write freeze là **dừng `backend`** (`$PF stop backend`); không có application mode
+nào khác. `uvicorn` hoàn tất các request đang chạy, kể cả import, và lệnh dừng chờ
+đến 200 s; với hơn một worker, supervisor giữ socket mở cho đến khi worker cuối
+thoát, nên request gửi trong lúc đó treo và kết thúc bằng 504 hoặc 502 của `web`
+(DEPLOYMENT §3.1 Process model): bắt đầu freeze khi không có import nào đang chạy.
+Khi `backend` đang dừng, `web` vẫn phục vụ shell và trả `/api/*` bằng JSON 504 rồi
+502, mọi client chuyển sang OFFLINE banner trong khoảng một giây và mọi write
+control bị chặn. Dialog đang mở giữ draft; một write va vào lúc dừng là unknown
+outcome, giữ `device_event_id` của nó và được retry bằng chính nó sau khi mở lại
+trên **cùng** release. Sau khi mở lại trên release **mới**, page cũ không gửi được
+nó (bị từ chối 409); operator reload và kiểm tra Area hoặc Work Order trước khi lặp
+lại action. Một import bị cắt chỉ để lại các Work Order đã commit nguyên vẹn.
+`reconcile`, `revision`, `migrate` và backup chạy từ container one-off trên `db`
+khi đang freeze. **Mở lại** bằng `$PF up -d backend` trên cùng release, chỉ sau các
+check của bước bên dưới; ở một release switch, việc mở lại là bước chuyển `web`.
 
 ### Thực hiện
 
-1. Ghi application và Alembic revision hiện tại.
-2. Build/pull target image bất biến. Production stack:
-   `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (không bao giờ dùng tag đã có), rồi
-   rehearsal candidate image trên database chưa đổi:
+Chạy `deploy/production/release.sh` từ repository root của release checkout, với
+release tag đã checkout:
+
+```bash
+deploy/production/release.sh --release <new-tag> --operator "<name>" --approver "<name>" \
+    --pre-release-backup "<dump reference>"
+```
+
+(`--no-backup-reason "<text>"` thay cho dump reference khi không có, ví dụ
+rehearsal; `deploy/production/release.sh --help` in mọi option.) Nó chạy, ghi lại
+từng bước: preflight (tool, environment file, dạng tag, build input sạch); revision
+hiện tại và reconcile pre-release với release đang chạy; build candidate (tag đã có
+không bao giờ build lại); check (j) và revision của candidate; write freeze khi có
+migration đang chờ; `migrate`; reconcile post-release; chuyển `backend` trong khi
+`web` vẫn phục vụ bundle trước (write vẫn bị từ chối, mọi page đã tải gửi release
+trước và nhận 409), chờ health của release mới và schema `current`; chuyển `web`,
+việc này mở lại write; và `smoke.sh`. Một check thất bại sau switch sẽ dừng
+`backend` lại.
+
+| Exit | Ý nghĩa | Làm gì |
+| --- | --- | --- |
+| 0 | hoàn tất | quan sát (bên dưới) |
+| 1 | dừng khi chưa đổi gì, hoặc write đã mở lại trên release hiện tại | đọc lý do được in và `record.json`; sửa; chạy lại |
+| 2 | không chạy được (cú pháp, tool, environment) | chưa đổi gì; sửa và chạy lại |
+| 3 | `backend` bị để dừng | làm theo §6; đọc `regression.txt` hoặc so sánh `pre-reconcile.json` và `post-reconcile.json` |
+| 4 | release mới có thể đang chạy và ghi được sau một check thất bại, và re-freeze cũng thất bại | tự chạy `$PF stop backend`, rồi làm theo §6 |
+
+`--accept-pre-release-findings` tiếp tục khi reconcile pre-release có finding và chỉ
+chặn với finding không có trong đó (`deploy/production/reconcile_regression.py` so
+sánh hai report). `--skip-pre-reconcile REASON` dành cho trạng thái rollback path 2
+mà không image nào có database revision làm head: lý do được ghi lại và mọi finding
+sau release đều chặn.
+
+Dạng thủ công tương đương, cùng thứ tự, với tag hiện tại trong `.env.production`:
+
+1. Ghi application và Alembic revision hiện tại
+   (`$PF run --rm --no-deps -T backend python -m app.cli revision`) và chạy
+   reconcile pre-release với tag hiện tại (§7).
+2. Build: `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`
+   (không bao giờ dùng tag đã có), rồi rehearsal candidate image trên database chưa
+   đổi:
    `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
    (check thất bại thì dừng release; chưa có gì thay đổi).
-3. Stop hoặc block write nếu cần (production stack: `$PF stop backend`, có thể
-   chờ đến 200 s khi một import đang chạy; với hơn một worker, request gửi trong
-   lúc đó treo đến 60 s rồi kết thúc bằng 504 hoặc 502 với kết quả không rõ, nên
-   bắt đầu khi không có import nào đang chạy — DEPLOYMENT §3.1 Process model).
-4. Chạy production repository job migration rõ ràng đúng một lần (production
-   stack: `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`; P16-S3 thay
-   lệnh của nó).
-5. Lưu migration output và revision mới.
-6. Start/recreate application service ở target release (production stack: ghi
-   `PARTFLOW_RELEASE=<new>` vào `.env.production`, rồi `$PF up -d backend web`).
-   Với database chưa có Administrator, hoàn tất first-run setup (setup token nằm
-   trong backend log) trước khi mở truy cập; trong production stack hãy start
-   backend với một worker cho bước này
+3. Freeze khi có migration đang chờ: `$PF stop backend`, rồi xác nhận
+   `$PF ps --status running -q backend` không in gì.
+4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`;
+   lưu JSON output của nó và revision mới.
+5. Chạy reconcile post-release với tag mới (§7) và so sánh với report pre-release:
+   chỉ finding không có trong đó mới chặn bước 7; finding đã có từ trước vẫn là
+   incident mở theo quyết định của owner.
+6. Ghi `PARTFLOW_RELEASE=<new>` vào `.env.production` (và xóa
+   `PARTFLOW_ACCEPT_SCHEMA_REVISION`), rồi `$PF up -d --no-deps backend`; check
+   health: `release` là tag mới và `schema` là `current`. Với database chưa có
+   Administrator, hoàn tất first-run setup (setup token nằm trong backend log)
+   trước khi mở truy cập; start backend với một worker cho bước này
    (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, rồi `$PF up -d backend`). Sau
    đó enroll từng thiết bị Scan Station (Administration → Scan Stations →
    `Devices…`).
-7. Check health nội bộ và qua HTTPS.
-8. Chạy smoke test authorization, SPA route, `/api`, scan-focus/connectivity và
-   designated write/read-back.
-9. Chạy reconciliation (§7) và giữ JSON report. So sánh với report trước release:
-   chỉ finding không có trong đó mới chặn bước 10; finding đã có từ trước vẫn là
-   incident mở theo quyết định của owner.
-10. Chỉ mở lại write khi mọi kiểm tra bắt buộc pass.
+7. `$PF up -d --no-deps web`: việc này mở lại write. Chạy
+   `deploy/production/smoke.sh --release <new>` và các check authorization,
+   scan-focus/connectivity và write/read-back được chỉ định.
+8. Chỉ mở lại write khi mọi kiểm tra bắt buộc pass; nếu không, `$PF stop backend`
+   lại và làm theo §6. Khi `release.sh` exit 3, đọc `regression.txt` (hoặc so sánh
+   hai report) rồi mở lại như bước 6 và 7 hoặc làm theo §6.
 
 ### Quan sát
 
 Monitor error, latency, lock, restart, disk và phản hồi operator trong observation
-window đã định. Giữ previous release cùng backup.
+window đã định. Giữ previous release cùng backup. Các page đang mở trong lúc switch
+hiện update notice và reload (GUI_DESIGN §3 rule 13); một Scan Station hoặc
+Production Board không người trực tự reload khi không còn dialog nào mở.
 
 ## 6. Cây quyết định rollback
 
-1. **Không có schema migration:** redeploy previous immutable application
-   release rồi chạy smoke test.
+1. **Không có schema migration:** redeploy previous immutable application release:
+   đặt tag trước vào `.env.production`, `$PF up -d backend web`, rồi
+   `deploy/production/smoke.sh --release <previous>`. Nó cần image của release
+   trước còn trên host: giữ chúng trong suốt rollback window và không bao giờ chạy
+   `docker image prune -a`; `release.sh` từ chối bắt đầu khi chúng thiếu.
 2. **Schema đã migrate và backward-compatible:** chỉ deploy release trước nếu
-   compatibility đã được verify rõ trước migration.
+   compatibility đã được verify rõ và ghi lại. Đọc `database_revision` từ
+   `$PF run --rm --no-deps -T backend python -m app.cli revision` (chạy với release
+   mới), đặt `PARTFLOW_RELEASE=<previous>` và
+   `PARTFLOW_ACCEPT_SCHEMA_REVISION=<database_revision>` trong `.env.production`,
+   `$PF up -d backend web`, rồi
+   `deploy/production/smoke.sh --release <previous> --allow-accepted-schema`.
+   Override nêu đúng một revision mà release trước không biết (revision nó biết thì
+   bị bỏ qua, `revision` hiện `override_ignored`, và readiness vẫn là `mismatch`),
+   nó không bao giờ khớp revision nào khác, và release forward kế tiếp xóa nó. Trước
+   khi override được đặt, release trước từ chối mọi thay đổi; station read vẫn ghi
+   thời điểm last-seen của thiết bị (device bookkeeping, không có dữ liệu
+   production). Release forward từ trạng thái này dùng candidate image cho
+   reconcile pre-release (`release.sh` làm vậy) hoặc `--skip-pre-reconcile REASON`.
 3. **Schema đã migrate nhưng không backward-compatible hoặc chưa rõ:** stop
    write; restore pre-migration database vào instance sạch và deploy previous
-   application release tương ứng.
+   application release tương ứng. Thủ tục restore là placeholder của P16-S5; việc
+   restore pre-release dump không bao giờ bỏ các write sau nó nếu chưa qua
+   escalation của path 4.
 4. **Đã có production write mới sau migration:** không blindly restore đè lên.
    Escalate; bảo toàn cả current database và pre-release backup, xác định forward
    fix hoặc audited data-recovery plan và giữ application ở write-blocked.
+
+CLI recovery chạy với release khớp database.
 
 Không mặc định `alembic downgrade` an toàn. PartFlow chủ động bảo vệ append-only
 history và downgrade có thể bị từ chối hoặc làm mất loại dữ liệu mới.
@@ -306,7 +408,7 @@ Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự 
 
 ### Áp lực database hoặc storage
 
-- block write mới trước khi hết disk;
+- block write mới trước khi hết disk (write freeze, §5);
 - giữ log và metric;
 - không xóa tùy tiện PostgreSQL file, volume, Movement row hoặc backup;
 - mở rộng storage hoặc theo verified archive/purge maintenance path Phase 16;

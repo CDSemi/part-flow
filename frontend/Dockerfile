@@ -4,12 +4,22 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-# Runs tsc, vite build and the production-boundary check (fails on any mock sentinel).
-RUN npm run build
+# The release this bundle is built for (compose.production.build.yaml passes it); never `development`.
+ARG PARTFLOW_RELEASE
+RUN if ! printf '%s' "$PARTFLOW_RELEASE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' \
+        || [ "$PARTFLOW_RELEASE" = development ]; then \
+        echo "PartFlow web: build argument PARTFLOW_RELEASE must name the release." >&2; exit 1; fi
+# Runs tsc, vite build and the production-boundary check; the bundle carries its release.
+RUN VITE_PARTFLOW_RELEASE="$PARTFLOW_RELEASE" npm run build
 
 # Official nginx stable line, pinned (1.30.5-alpine, digest
 # sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94 on 2026-10-08).
 FROM nginx:1.30.5-alpine AS production
+ARG PARTFLOW_RELEASE
+ARG PARTFLOW_COMMIT
+RUN if ! printf '%s' "$PARTFLOW_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then \
+        echo "PartFlow web: build argument PARTFLOW_COMMIT must be the full 40-character commit SHA." >&2; exit 1; fi
+LABEL org.opencontainers.image.version=${PARTFLOW_RELEASE} org.opencontainers.image.revision=${PARTFLOW_COMMIT}
 ENV NGINX_ENVSUBST_FILTER=^PARTFLOW_
 COPY nginx/templates/ /etc/nginx/templates/
 COPY nginx/partflow/ /etc/nginx/partflow/

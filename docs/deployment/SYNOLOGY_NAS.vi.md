@@ -324,25 +324,29 @@ release checkout `repo/`.
 3. **Kiểm tra time zone.** `PARTFLOW_SITE_TIMEZONE` phải bằng `SITE_TIMEZONE` của
    staging.
 4. **Build, rồi bắt đầu từ volume mới rỗng.** `PARTFLOW_RELEASE` là release tag
-   (DEPLOYMENT §10). `$PF -f compose.production.build.yaml build`, `$PF up -d db`, rồi
-   `$PF --profile ops run --rm migrate`. Volume `partflow-production_postgres_data`
+   (DEPLOYMENT §10). Build bằng
+   `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`, rồi `$PF up -d db`, rồi
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`. Volume `partflow-production_postgres_data`
    mới và rỗng: dữ liệu staging không bao giờ được promote, và restore vào
    production là quy trình P16-S5 cần owner quyết định.
 5. **First-run setup với một worker.**
    `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, đọc token bằng
    `$PF logs backend | grep "Setup token"`, hoàn tất setup, rồi
    `$PF up -d backend` để áp dụng số worker đã cấu hình. Sau đó là DSM reverse
-   proxy (§5.2) và enroll từng thiết bị Scan Station.
+   proxy (§5.2) và enroll từng thiết bị Scan Station. Các release sau chạy qua
+   `deploy/production/release.sh` (DEPLOYMENT §3.1, Release;
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5).
 6. **Không bao giờ chạy `down -v`** (hay xóa volume) trên project
    `partflow-production`: nó xóa database production.
 
-Còn lại: công cụ release và release identity trong image (P16-S3), role
-hardening (P16-S4), backup và restore (P16-S5), observability (P16-S6), và các
-host check trên NAS cùng pilot gate (P16-S7).
+Còn lại: role hardening (P16-S4), backup và restore (P16-S5),
+observability (P16-S6), và các host check trên NAS cùng pilot gate (P16-S7); bản
+thân release flow (`release.sh`, `smoke.sh`) đã triển khai và chưa được thực thi
+trên NAS.
 
 - frontend/backend image production bất biến — đã triển khai (P16-S2: image gắn
-  tag bằng `PARTFLOW_RELEASE`, không bao giờ pull); release identity trong image
-  còn lại (P16-S3);
+  tag bằng `PARTFLOW_RELEASE`, không bao giờ pull); release identity nằm trong image
+  `web` (P16-S3) và còn lại ở image backend (mục P16-S3 còn mở);
 - production Compose không source bind mount, không reload/dev server, không
   publish database port, có restart/resource/logging policy rõ — đã triển khai
   (P16-S2; resource limit là giá trị khởi đầu, đo ở P16-S7);

@@ -28,17 +28,21 @@ Không triển khai production từ `compose.yaml`. Release phải cung cấp (t
 - reverse proxy configuration và quy trình certificate — đã ghi tài liệu (§4 và
   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1); xác minh trên host ở P16-S7;
 - migration command/job rõ ràng — đã triển khai (job `migrate` của Compose,
-  profile `ops`; ngữ nghĩa command là P16-S3);
+  profile `ops`, chạy `python -m app.cli migrate` trong một transaction; P16-S3,
+  [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1);
 - danh mục secret/configuration — đã triển khai (`.env.production.example`, secret
   file `postgres_password`; DEPLOYMENT §3.1);
 - automation backup và restore — P16-S5;
 - command health và reconciliation — `reconcile` đã có (P16-S1); production
   invocation của nó đã triển khai (P16-S2: các lệnh ở DEPLOYMENT §3.1); phần
-  automation release quanh nó là P16-S3;
+  automation release quanh nó đã triển khai (P16-S3: `deploy/production/release.sh`
+  và `smoke.sh`, `revision`, endpoint readiness và liveness), chưa được thực thi
+  trên VPS (P16-S7);
 - logging/monitoring configuration — P16-S6 (access log của `web` là request log
   trong P16-S2);
-- quy trình release và rollback gắn với version bất biến — P16-S3 (chuỗi thủ công
-  ở DEPLOYMENT §3.1 có từ P16-S2).
+- quy trình release và rollback gắn với version bất biến — đã triển khai (P16-S3:
+  [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5 và §6 và `release.sh`;
+  rollback path 3 chờ P16-S5).
 
 ## 3. Baseline của host
 
@@ -135,7 +139,7 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
    từ dữ liệu staging hay development; restore vào production cần owner quyết
    định, P16-S5).
 7. Chạy migration đúng một lần từ release backend image:
-   `$PF --profile ops run --rm migrate`.
+   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`.
 8. Start backend, `web` và host reverse proxy (§4). Với database chưa có
    Administrator, start backend với một worker
    (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, một setup token), hoàn tất

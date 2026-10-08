@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ApiError, errorMessage, refusalFlag } from '../../api/client';
+import {
+  ApiError,
+  errorMessage,
+  isReleaseMismatch,
+  refusalFlag,
+} from '../../api/client';
 import { listAreas, listOperations } from '../../api/environment';
 import { listMachines } from '../../api/machines';
 import { newDeviceEventId } from '../../api/production-release';
@@ -17,6 +22,7 @@ import type {
 } from '../../api/route-adjustments';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { connectionReason } from '../../app/release-copy';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ModalDialog } from '../../components/ModalDialog';
 import { useUiClock } from '../../components/ui-clock';
@@ -309,6 +315,12 @@ export function EditAssignedRouteDialog({
       return;
     }
     const detail = errorMessage(error);
+    if (isReleaseMismatch(error)) {
+      // PartFlow was updated while this page was open: refused before
+      // the key check, so an unknown outcome stays unknown.
+      setServerError(detail);
+      return;
+    }
     if (afterUnknown && error.status === 401) {
       setServerError(`${detail} ${RETRY_SIGN_IN}`);
       return;
@@ -586,7 +598,11 @@ export function EditAssignedRouteDialog({
     body = (
       <>
         <ErrorState
-          message={writeBlocked ? DISCONNECTED : data.state.message}
+          message={
+            writeBlocked
+              ? connectionReason(status, DISCONNECTED)
+              : data.state.message
+          }
           onRetry={data.reload}
         />
         <div className="row">
@@ -659,7 +675,7 @@ export function EditAssignedRouteDialog({
           </div>
         ) : null}
         {writeBlocked && flow !== null ? (
-          <p className="ear-note">{DISCONNECTED}</p>
+          <p className="ear-note">{connectionReason(status, DISCONNECTED)}</p>
         ) : null}
         {renderActions()}
       </div>

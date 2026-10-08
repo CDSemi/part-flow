@@ -37,7 +37,9 @@ type RouteKey =
   | 'GET operations'
   | 'GET machines';
 
-type Failure = { status: number; detail: string } | 'network';
+type Failure =
+  | { status: number; detail: string; flags?: Record<string, unknown> }
+  | 'network';
 
 interface Write {
   method: string;
@@ -351,7 +353,9 @@ async function handle(
   if (hold) await hold;
   const failure = failures[key];
   if (failure === 'network') throw new TypeError('Failed to fetch');
-  if (failure) return json({ detail: failure.detail }, failure.status);
+  if (failure) {
+    return json({ detail: failure.detail, ...failure.flags }, failure.status);
+  }
 
   switch (key) {
     case 'GET list':
@@ -1294,6 +1298,78 @@ test('a route used meanwhile cannot be deleted: Archive… replaces Delete…', 
     within(dialog).getByRole('button', { name: 'Archive…' }),
   ).toBeEnabled();
   expect(within(dialog).queryByRole('button', { name: 'Delete…' })).toBeNull();
+});
+
+const RELEASE_MISMATCH: Failure = {
+  status: 409,
+  detail:
+    'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.',
+  flags: { release_mismatch: true },
+};
+
+test('FR-21e: a release refusal of Delete or Archive flips nothing and keeps the confirmation', async () => {
+  await renderPlannedRoutes();
+  const unused = openEdit('Lathe trial');
+  failures.DELETE = RELEASE_MISMATCH;
+  fireEvent.click(within(unused).getByRole('button', { name: 'Delete…' }));
+  const deleteConfirm = screen.getByRole('dialog', {
+    name: 'Delete Planned Route',
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Delete route' }));
+  expect(
+    (await within(deleteConfirm).findByRole('alert')).textContent,
+  ).toContain('PartFlow was updated while this page was open');
+  // Still never used: Delete… stays, Archive… does not replace it.
+  expect(
+    screen.getByRole('dialog', { name: 'Delete Planned Route' }),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(deleteConfirm).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(within(unused).getByRole('button', { name: 'Delete…' })).toBeEnabled();
+  expect(within(unused).queryByRole('button', { name: 'Archive…' })).toBeNull();
+  fireEvent.keyDown(unused, { key: 'Escape' });
+  await dialogClosed();
+  // Closing reloads nothing: nothing was written.
+  expect(listCalls()).toBe(1);
+
+  const used = openEdit('Bracket std v3');
+  failures.ARCHIVE = RELEASE_MISMATCH;
+  fireEvent.click(within(used).getByRole('button', { name: 'Archive…' }));
+  const archiveConfirm = screen.getByRole('dialog', {
+    name: 'Archive Planned Route',
+  });
+  fireEvent.change(within(archiveConfirm).getByLabelText(/to confirm$/), {
+    target: { value: 'Bracket std v3' },
+  });
+  fireEvent.click(
+    within(archiveConfirm).getByRole('button', { name: 'Archive route' }),
+  );
+  expect(
+    (await within(archiveConfirm).findByRole('alert')).textContent,
+  ).toContain('PartFlow was updated while this page was open');
+  fireEvent.click(
+    within(archiveConfirm).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(within(used).getByRole('button', { name: 'Archive…' })).toBeEnabled();
+  expect(within(used).queryByRole('button', { name: 'Delete…' })).toBeNull();
+});
+
+test('FR-21e: a release refusal of a save marks nothing as written', async () => {
+  await renderPlannedRoutes();
+  const dialog = openEdit('Bracket std v3');
+  fireEvent.change(within(dialog).getByLabelText('Route name'), {
+    target: { value: 'Bracket std v4' },
+  });
+  failures.PUT = RELEASE_MISMATCH;
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save route' }));
+  expect((await within(dialog).findByRole('alert')).textContent).toContain(
+    'PartFlow was updated while this page was open',
+  );
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+  await dialogClosed();
+  expect(listCalls()).toBe(1);
 });
 
 test('a refused archive keeps its confirmation open without reloading', async () => {

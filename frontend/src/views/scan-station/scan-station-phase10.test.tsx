@@ -76,6 +76,11 @@ let stockFailure: null | 'lost-response' | { status: number; body: unknown };
 let allocationFailure:
   null | 'lost-response' | { status: number; body: unknown };
 let healthDown: boolean;
+/** The `release` the health answer reports (absent while null). */
+let healthRelease: string | null;
+/** The release gate refuses every unsafe request (409 `release_mismatch`,
+ * before routing — ahead of any idempotent replay). */
+let releaseGate: boolean;
 /** Active allocation not tracked per line: the PN-level stock taken by
  * "someone else" meanwhile (the stale-stock scenario). */
 let allocatedElsewhere: Map<string, number>;
@@ -210,7 +215,11 @@ function handle(url: string, method: string, body: unknown): Response {
   if (url === '/api/health') {
     return healthDown
       ? json({ status: 'unavailable' }, 503)
-      : json({ status: 'ok' });
+      : json(
+          healthRelease === null
+            ? { status: 'ok' }
+            : { status: 'ok', release: healthRelease },
+        );
   }
   if (url === '/api/scan-stations') {
     return json(STATIONS.map((s) => ({ ...s, is_active: true })));
@@ -620,6 +629,8 @@ beforeEach(() => {
   stockFailure = null;
   allocationFailure = null;
   healthDown = false;
+  healthRelease = null;
+  releaseGate = false;
   allocatedElsewhere = new Map();
   vi.stubGlobal(
     'fetch',
@@ -629,6 +640,9 @@ beforeEach(() => {
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       if (!url.endsWith('/api/health') && url !== '/api/policies/due-soon')
         requests.push({ url, method, body });
+      if (releaseGate && method !== 'GET') {
+        return Promise.resolve(json(RELEASE_MISMATCH, 409));
+      }
       return Promise.resolve(handle(url, method, body));
     }),
   );
@@ -1378,4 +1392,139 @@ test('with the adjust permission an adjusted line is sent as a changed suggestio
   );
   await waitFor(() => expect(allocationRequests()).toHaveLength(1));
   expect(allocationRequests()[0].body.suggestion_unchanged).toBe(false);
+});
+
+/* ============ Release mismatch (Phase 16 slice 3) ============ */
+
+const RELEASE_MISMATCH = {
+  detail:
+    'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.',
+  release_mismatch: true,
+};
+
+test('FR-19: an outdated station shows the update copy on the scan input and the blocked-scan notice', async () => {
+  healthRelease = 'v9.9.9';
+  const input = await renderStation();
+  await waitFor(() =>
+    expect(input).toHaveAttribute(
+      'placeholder',
+      'PartFlow was updated — reload to continue scanning',
+    ),
+  );
+  expect(input).toBeDisabled();
+  expect(
+    screen.getByText(
+      '⚠ UPDATED — PartFlow was updated on the server. Reload this page to continue. Production actions are disabled',
+    ),
+  ).toBeInTheDocument();
+
+  fireEvent.keyDown(input, { key: 'Enter' });
+  const toast = await notice();
+  expect(toast).toHaveTextContent('PartFlow was updated — scanning is paused');
+  expect(toast).toHaveTextContent(
+    'Reload this page before continuing. No scans or production updates are recorded until then.',
+  );
+  expect(stockingRequests()).toHaveLength(0);
+});
+
+test('FR-20: a dialog confirmed while outdated shows the update copy and sends nothing', async () => {
+  await renderStation();
+  scan('PF:PN:PN-A');
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive into Stockroom',
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  healthRelease = 'v9.9.9';
+  await waitFor(
+    () =>
+      expect(
+        within(box).getByRole('button', { name: 'Confirm stocking' }),
+      ).toBeDisabled(),
+    { timeout: 8000 },
+  );
+  expect(box).toHaveTextContent(
+    'PartFlow was updated — the stocking cannot be recorded until this page is reloaded.',
+  );
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(box).toHaveTextContent(
+    'PartFlow was updated — the stocking was not sent and nothing was recorded. Reload the page to continue.',
+  );
+  expect(stockingRequests()).toHaveLength(0);
+});
+
+test('FR-21: a release refusal of the retry keeps the unknown outcome and its device_event_id', async () => {
+  await renderStation();
+  stockFailure = 'lost-response';
+  scan('PF:PN:PN-A');
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive into Stockroom',
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm stocking' }),
+  );
+  await within(box).findByText(/may or may not have been recorded/);
+
+  releaseGate = true;
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Retry the same stocking' }),
+  );
+  await within(box).findByText(RELEASE_MISMATCH.detail);
+  expect(stockingRequests()).toHaveLength(2);
+  expect(stockingRequests()[1].body.device_event_id).toBe(
+    stockingRequests()[0].body.device_event_id,
+  );
+  // Still unknown: the frozen notice and the way out stay.
+  expect(box).toHaveTextContent('may or may not have been recorded');
+  expect(
+    within(box).getByRole('button', { name: 'Leave — check the Area' }),
+  ).toBeInTheDocument();
+  // The page knows it is outdated at once.
+  expect(screen.getByText('UPDATED')).toBeInTheDocument();
+});
+
+test('FR-21a/FR-32: a release refusal of the allocation retry keeps its key and suggestion; after the release returns the original key is resent', async () => {
+  await renderStation();
+  const allocation = await stockPnA(12);
+  const suggestionsBefore = suggestionRequests().length;
+  allocationFailure = 'lost-response';
+  fireEvent.click(
+    within(allocation).getByRole('button', { name: 'Confirm allocation' }),
+  );
+  const box = await screen.findByRole('dialog', {
+    name: 'Allocate stocked quantity',
+  });
+  await within(box).findByText(/may or may not have been recorded/);
+
+  releaseGate = true;
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Retry the same allocation' }),
+  );
+  await within(box).findByText(RELEASE_MISMATCH.detail);
+  expect(allocationRequests()).toHaveLength(2);
+  expect(allocationRequests()[1].body).toEqual(allocationRequests()[0].body);
+  // No refreshed suggestion, still frozen, still unknown.
+  expect(suggestionRequests()).toHaveLength(suggestionsBefore);
+  expect(box).toHaveTextContent('may or may not have been recorded');
+  expect(lineQuantity(box, '007003')).toBeDisabled();
+  expect(
+    within(box).getByRole('button', { name: 'Leave — check the Area' }),
+  ).toBeInTheDocument();
+  expect(screen.getByText('UPDATED')).toBeInTheDocument();
+
+  // The server runs this page's release again (rolled back): connected.
+  releaseGate = false;
+  healthRelease = 'development';
+  const retry = within(box).getByRole('button', {
+    name: 'Retry the same allocation',
+  });
+  await waitFor(() => expect(retry).toBeEnabled(), { timeout: 8000 });
+  fireEvent.click(retry);
+  await waitFor(() => expect(allocationRequests()).toHaveLength(3));
+  expect(allocationRequests()[2].body).toEqual(allocationRequests()[0].body);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  const toast = await notice();
+  expect(toast).toHaveTextContent(
+    'already recorded by the server — nothing was recorded twice',
+  );
 });

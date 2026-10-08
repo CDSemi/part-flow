@@ -6,6 +6,7 @@ import { ApiError } from '../api/client';
 import { signIn, signInWriteOutcomeUnknown } from '../api/session';
 import type { SessionState } from '../api/session';
 import { useConnectivity } from '../app/connectivity-context';
+import { connectionReason } from '../app/release-copy';
 import { ModalDialog } from './ModalDialog';
 
 const UNREACHABLE = 'The PartFlow server could not be reached. Try again.';
@@ -137,7 +138,10 @@ export function SignInDialog({
         ) : null}
         {offline ? (
           <p className="sub disabled-reason">
-            Signing in needs the connection to the PartFlow server.
+            {connectionReason(
+              status,
+              'Signing in needs the connection to the PartFlow server.',
+            )}
           </p>
         ) : null}
         <div className="row">

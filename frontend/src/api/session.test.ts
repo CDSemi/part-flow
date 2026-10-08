@@ -203,6 +203,7 @@ test('saveOwnThemePreference sends the exact request without a sign-in prompt an
   expect(init.headers).toEqual({
     'Content-Type': 'application/json',
     'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Release': 'development',
   });
 
   fetchMock.mockResolvedValueOnce(json({ theme_preference: 'DARK' }));

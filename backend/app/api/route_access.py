@@ -116,6 +116,7 @@ _STATION_COMMANDS: Final = (
 ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     # --- PUBLIC -------------------------------------------------------------
     ("GET", "/api/health"): _PUBLIC,
+    ("GET", "/api/health/live"): _PUBLIC,
     ("GET", "/api/session"): _PUBLIC,
     ("POST", "/api/session"): _PUBLIC,
     ("DELETE", "/api/session"): _PUBLIC,

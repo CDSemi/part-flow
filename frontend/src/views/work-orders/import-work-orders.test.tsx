@@ -72,6 +72,8 @@ let uploads: Upload[];
 let listRows: Wire[];
 let listCalls: number;
 let healthDown: boolean;
+/** The `release` the health answer reports (absent while null). */
+let healthRelease: string | null;
 let nextPreviewFailure: Response | 'network' | null;
 let nextCommitFailure: Response | 'network' | null;
 let holdCommit: Promise<void> | null;
@@ -416,7 +418,11 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   if (url === '/api/health') {
     return healthDown
       ? detail('Service unavailable.', 503)
-      : json({ status: 'ok' });
+      : json(
+          healthRelease === null
+            ? { status: 'ok' }
+            : { status: 'ok', release: healthRelease },
+        );
   }
   if (url === '/api/policies/due-soon') {
     return json({
@@ -442,6 +448,7 @@ beforeEach(() => {
   listRows = [summaryWire(1, '007201')];
   listCalls = 0;
   healthDown = false;
+  healthRelease = null;
   nextPreviewFailure = null;
   nextCommitFailure = null;
   holdCommit = null;
@@ -680,6 +687,37 @@ test('FV-3: disconnected disables Check file and Import, with the reason', async
   expect(
     screen.getByRole('button', { name: 'Import from file…' }),
   ).toHaveAttribute('title', 'Reconnect to import Work Orders.');
+});
+
+test('FR-6/FR-31: an outdated page blocks Check file, Import and its toolbar entry with the update reason', async () => {
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(importButton(dialog)).toBeEnabled();
+
+  // The server now runs another release than this bundle.
+  healthRelease = 'v9.9.9';
+  await waitFor(() => expect(importButton(dialog)).toBeDisabled(), {
+    timeout: 8000,
+  });
+  expect(checkButton(dialog)).toBeDisabled();
+  expect(
+    within(dialog).getByText(
+      'PartFlow was updated — reload the page to continue.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).queryByText('Reconnect to check or import the file.'),
+  ).toBeNull();
+  const opener = screen.getByRole('button', { name: 'Import from file…' });
+  expect(opener).toBeDisabled();
+  expect(opener).toHaveAttribute(
+    'title',
+    'PartFlow was updated — reload the page to continue.',
+  );
+  // Reading continues: the list is still on screen.
+  expect(screen.getByText('007201')).toBeInTheDocument();
+  expect(uploadsTo(COMMIT)).toHaveLength(0);
 });
 
 test('FV-3: nothing to create or change keeps Import disabled', async () => {

@@ -26,6 +26,11 @@
 // In production the `web` tier answers 413/429/502/504 itself with the
 // same `{"detail": ...}` shape, so those answers read like any other.
 //
+// Every request also carries `X-PartFlow-Release` (the release this
+// bundle was built for): the production server refuses a change sent
+// from a page of another release with 409 `release_mismatch` (nothing
+// was changed by it), and a third listener hears that refusal.
+//
 // Production-safe: no mock data, no framework imports.
 
 /** One failed API call: HTTP status plus the user-facing message. */
@@ -48,10 +53,54 @@ export class ApiError extends Error {
   }
 }
 
-/** Marks a request as sent by the PartFlow application. */
+/**
+ * The release this bundle was built for (`VITE_PARTFLOW_RELEASE`, a
+ * production build argument); `development` on the dev server and in
+ * tests.
+ */
+export const BUNDLE_RELEASE: string =
+  import.meta.env.VITE_PARTFLOW_RELEASE || 'development';
+
+/** The header carrying the bundle release on every request. */
+export const RELEASE_HEADER = 'X-PartFlow-Release';
+
+/**
+ * Marks a request as sent by the PartFlow application, and names the
+ * release of the page that sent it.
+ */
 const CSRF_HEADERS: Readonly<Record<string, string>> = {
   'X-PartFlow-CSRF': '1',
+  [RELEASE_HEADER]: BUNDLE_RELEASE,
 };
+
+let releaseMismatchListener: (() => void) | null = null;
+
+/**
+ * Register (or clear, with null) the one listener told about a 409
+ * `release_mismatch` answer: PartFlow was updated on the server while
+ * this page was open. No other refusal calls it.
+ */
+export function setReleaseMismatchListener(
+  listener: (() => void) | null,
+): void {
+  releaseMismatchListener = listener;
+}
+
+/**
+ * Whether a failed call was refused because the page belongs to another
+ * release (409 `release_mismatch`). The refusal is definite and judged
+ * before any idempotency fast path: nothing was changed by this
+ * request, but it proves nothing about an earlier unanswered attempt —
+ * a write site handles it first and keeps its draft, any unknown
+ * outcome and its idempotency key.
+ */
+export function isReleaseMismatch(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    refusalFlag(error, 'release_mismatch')
+  );
+}
 
 /** The header carrying a Scan Station's enrolled-device token. */
 export const STATION_DEVICE_HEADER = 'X-PartFlow-Station-Device';
@@ -277,6 +326,14 @@ async function readResponse<T>(
         kind,
         kind === 'authentication_required' ? promptSignIn : true,
       );
+    }
+    if (
+      response.status === 409 &&
+      body &&
+      typeof body === 'object' &&
+      (body as Record<string, unknown>).release_mismatch === true
+    ) {
+      releaseMismatchListener?.();
     }
     const deviceRefusal = stationDeviceRefusalKind(response.status, body);
     if (deviceRefusal !== null) {

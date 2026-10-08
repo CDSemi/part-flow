@@ -1906,7 +1906,9 @@ test('scaling is one uniform zoom — the stylesheet keeps fixed baseline sizes'
 
 /* ============ The real feed (Phase 11) ============ */
 
-function connectivityTree(status: 'connected' | 'unavailable' | 'connecting') {
+function connectivityTree(
+  status: 'connected' | 'unavailable' | 'connecting' | 'outdated',
+) {
   return (
     <ThemeProvider>
       <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
@@ -2136,6 +2138,31 @@ test('lost connectivity shows the stale feed on the loaded rows, and its return 
   expect(document.querySelector('.pb-head h1.live')?.className).not.toContain(
     'stale',
   );
+});
+
+test('FR-30: an outdated page keeps the live feed healthy — a return from offline refreshes at once', async () => {
+  const fetchImpl = stubFetch();
+  window.history.replaceState({}, '', '/production-board');
+  const view = render(connectivityTree('outdated'));
+  await act(async () => {});
+  const boardCalls = () =>
+    fetchImpl.mock.calls.filter(([input]) =>
+      String(input).startsWith('/api/production-board'),
+    ).length;
+  expect(boardCalls()).toBe(1);
+  const live = () => document.querySelector('.pb-head h1.live');
+  expect(live()?.className).not.toContain('stale');
+  expect(live()?.querySelector('.stalenote')).toBeNull();
+
+  // Offline still reads stale; the return (outdated) refreshes at once.
+  view.rerender(connectivityTree('unavailable'));
+  expect(live()?.querySelector('.stalenote')?.textContent).toBe(
+    'Feed stale — reconnecting',
+  );
+  view.rerender(connectivityTree('outdated'));
+  await act(async () => {});
+  expect(boardCalls()).toBe(2);
+  expect(live()?.className).not.toContain('stale');
 });
 
 test('a return through the probe’s connecting state (the OFFLINE banner’s Retry) also refreshes at once', async () => {

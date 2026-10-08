@@ -2,9 +2,10 @@
 
 Exercises GET /api/health through the full application wiring -- lifespan
 engine creation from the configured DATABASE_URL, route dispatch, and a
-real SELECT 1 -- without mocking ping_database. It requires the
-PostgreSQL service from Docker Compose or CI to be reachable, performs no
-writes, and touches no domain data.
+real read of the database revision -- without mocking the revision read.
+It requires the PostgreSQL service from Docker Compose or CI to be
+reachable with the database at the Alembic head, performs no writes, and
+touches no domain data.
 """
 
 from fastapi.testclient import TestClient
@@ -24,8 +25,10 @@ def test_health_endpoint_reports_connected_against_real_database() -> None:
         f"Health endpoint reported an unhealthy database (HTTP {response.status_code}: "
         f"{response.text}). Is PostgreSQL running and DATABASE_URL correct?"
     )
-    assert response.json() == {
+    body = response.json()
+    assert {key: body[key] for key in ("status", "service", "database", "schema")} == {
         "status": "ok",
         "service": "partflow-api",
         "database": "connected",
+        "schema": "current",
     }

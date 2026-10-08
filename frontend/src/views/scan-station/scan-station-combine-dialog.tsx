@@ -9,6 +9,8 @@ import type {
   MachineRef,
   StationContext,
 } from '../../api/scan-station';
+import { useConnectivity } from '../../app/connectivity-context';
+import { outdatedCannotRecord } from '../../app/release-copy';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -75,6 +77,7 @@ export function CombineQuantitiesDialog({
   onRejected?: () => void;
   onAbandonUnknown: () => void;
 }) {
+  const { status } = useConnectivity();
   const [step, setStep] = useState<'select' | 'confirm'>('select');
   // Every portion of the group starts selected — the operator narrows
   // the selection; at least two portions make a combine.
@@ -246,8 +249,9 @@ export function CombineQuantitiesDialog({
           ) : null}
           {writeBlocked && !write.serverError && !write.outcomeUnknown ? (
             <Guidance tone="error">
-              Disconnected — the combine cannot be recorded until the connection
-              returns.
+              {status === 'outdated'
+                ? outdatedCannotRecord('combine')
+                : 'Disconnected — the combine cannot be recorded until the connection returns.'}
             </Guidance>
           ) : null}
           <StepButtons

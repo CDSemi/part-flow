@@ -27,10 +27,12 @@ import {
 } from './app/management-access';
 import { isChromeHidden, MANAGEMENT_NAV_ORDER } from './app/router-core';
 import type { ManagementSubview, Route } from './app/router-core';
+import { ReleaseNotice } from './app/ReleaseNotice';
 import { RouterProvider } from './app/router-provider';
 import { useSession } from './app/session-context';
 import { SessionProvider } from './app/session-provider';
 import { SignInGate } from './app/SignInGate';
+import { ViewErrorBoundary } from './app/ViewErrorBoundary';
 import { ThemeProvider } from './app/theme-provider';
 import { UserThemeBinding } from './app/user-theme-binding';
 import { ThemeToggle } from './components/ThemeToggle';
@@ -104,6 +106,12 @@ function OfflineBanner() {
       </button>
     </div>
   );
+}
+
+/** The view key the view boundary logs for `route`. */
+function viewKeyOf(route: Route): string {
+  if (route.view === 'not-found') return 'not-found';
+  return route.view === 'management' ? route.subview : route.view;
 }
 
 function ViewForRoute({ route }: { route: Route }) {
@@ -315,6 +323,7 @@ function AppShell() {
         </nav>
       )}
       <OfflineBanner />
+      <ReleaseNotice />
       <main ref={mainRef}>
         {/* The sub-nav lives INSIDE the scrolling content area and
             sticks to its top, so Management view content actually
@@ -345,15 +354,20 @@ function AppShell() {
             ))}
           </nav>
         )}
-        <Suspense fallback={<LoadingState label="Loading view" />}>
-          {route.view === 'management' ? (
-            <SignInGate area="Management" onSignedIn={requestManagementFocus}>
-              <ManagementSubviewContent route={route} />
-            </SignInGate>
-          ) : (
-            <ViewForRoute route={route} />
-          )}
-        </Suspense>
+        {/* One boundary for every view: a view crash or a failed view
+            chunk load renders inside <main> while the shell stays
+            interactive (navigation, banners, chip). */}
+        <ViewErrorBoundary route={path} viewKey={viewKeyOf(route)}>
+          <Suspense fallback={<LoadingState label="Loading view" />}>
+            {route.view === 'management' ? (
+              <SignInGate area="Management" onSignedIn={requestManagementFocus}>
+                <ManagementSubviewContent route={route} />
+              </SignInGate>
+            ) : (
+              <ViewForRoute route={route} />
+            )}
+          </Suspense>
+        </ViewErrorBoundary>
       </main>
     </>
   );

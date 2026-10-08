@@ -1542,6 +1542,26 @@ test.each([
   },
 );
 
+test('FR-33: a resolution refused for another release shows the refusal alone — no nothing-recorded suffix, not an unknown outcome', async () => {
+  await renderStation();
+  const detail =
+    'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+  resolveAnswer = {
+    status: 409,
+    body: { detail, release_mismatch: true },
+  };
+
+  scan('PF:PN:2027-60-8114-00');
+  const toast = await notice();
+  expect(toast).toHaveTextContent('Part Number could not be resolved');
+  expect(toast).toHaveTextContent(detail);
+  expect(toast).not.toHaveTextContent('No changes were recorded');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(transferRequests()).toHaveLength(0);
+  // The page is outdated at once (the 409 listener).
+  expect(await screen.findByText('UPDATED')).toBeInTheDocument();
+});
+
 test('a resolution the server refuses (4xx) keeps its nothing-recorded sentence', async () => {
   await renderStation();
   resolveAnswer = { status: 404, body: { detail: 'Unknown Part Number.' } };

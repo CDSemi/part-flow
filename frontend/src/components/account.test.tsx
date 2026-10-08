@@ -357,6 +357,24 @@ test('Sign in succeeds over the current view: the dialog closes and the view kee
   expect(window.location.pathname).toBe('/administration');
 });
 
+test('FR-31: Sign in while outdated is disabled with the update reason', async () => {
+  await renderShell('outdated');
+  const dialog = openSignIn();
+  expect(
+    within(dialog).getByText(
+      'PartFlow was updated — reload the page to continue.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).queryByText(
+      'Signing in needs the connection to the PartFlow server.',
+    ),
+  ).toBeNull();
+  expect(
+    within(dialog).getByRole('button', { name: 'Sign in' }),
+  ).toBeDisabled();
+});
+
 test('Sign in offline is disabled with a note; Escape closes, but not while signing in', async () => {
   await renderShell('unavailable');
   let dialog = openSignIn();

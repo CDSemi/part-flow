@@ -5,7 +5,9 @@ the file-based form ``DATABASE_HOST`` / ``DATABASE_NAME`` /
 ``DATABASE_USER`` / ``DATABASE_PASSWORD_FILE`` (+ optional
 ``DATABASE_PORT``) of the production stack. The password file must hold
 exactly one line, the way ``initdb`` reads it, and no refusal ever
-repeats an input value. No database: ``Settings`` is constructed only.
+repeats an input value. Phase 16 slice 3 adds the release identity and
+release-gate settings (C-1 … C-5). No database: ``Settings`` is
+constructed only.
 """
 
 from pathlib import Path
@@ -18,12 +20,13 @@ from app.core.config import Settings
 
 _FORM_TWO = ("DATABASE_HOST", "DATABASE_PORT", "DATABASE_NAME", "DATABASE_USER")
 _SECRET = "S3cr3tValue"
+_RELEASE = ("RELEASE_TAG", "RELEASE_COMMIT", "ENFORCE_CLIENT_RELEASE", "ACCEPT_SCHEMA_REVISION")
 
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every case with no connection setting (the suite's DATABASE_URL removed)."""
-    for name in ("DATABASE_URL", *_FORM_TWO, "DATABASE_PASSWORD_FILE", "SITE_TIMEZONE"):
+    for name in ("DATABASE_URL", *_FORM_TWO, "DATABASE_PASSWORD_FILE", "SITE_TIMEZONE", *_RELEASE):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -198,3 +201,98 @@ def test_password_file_must_hold_one_line(
     # The path itself may contain "word" (the test's temporary directory).
     for fragment in ("line1", "line2", "word"):
         assert fragment not in message.replace(str(path), "")
+
+
+# ---------------------------------------------------------------------------
+# Phase 16 slice 3: release identity and release-gate settings
+# ---------------------------------------------------------------------------
+
+_TAG_REFUSED = (
+    "RELEASE_TAG must be a release tag of at most 64 letters, digits, '.', '_' or '-'"
+    " (for example v1.0.0-rc.1)."
+)
+_COMMIT_REFUSED = "RELEASE_COMMIT must be a full 40-character lowercase Git commit SHA."
+_REVISION_REFUSED = (
+    "ACCEPT_SCHEMA_REVISION must be one Alembic revision id of at most 32 letters, digits or"
+    " underscores."
+)
+_ENFORCEMENT_REFUSED = (
+    'ENFORCE_CLIENT_RELEASE=true needs a release image: RELEASE_TAG is "development"'
+    " (build the image with PARTFLOW_RELEASE)."
+)
+_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture
+def database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"postgresql+psycopg://u:{_SECRET}@h/d")
+
+
+@pytest.mark.usefixtures("database_url")
+def test_release_defaults() -> None:
+    """C-1."""
+    settings = _settings()
+    assert settings.release_tag == "development"
+    assert settings.release_commit is None
+    assert settings.enforce_client_release is False
+    assert settings.accept_schema_revision is None
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("tag", ["bad tag", "-x", "v" * 65])
+def test_release_tag(monkeypatch: pytest.MonkeyPatch, tag: str) -> None:
+    """C-2."""
+    monkeypatch.setenv("RELEASE_TAG", "v1.0.0-rc.1")
+    assert _settings().release_tag == "v1.0.0-rc.1"
+    monkeypatch.setenv("RELEASE_TAG", tag)
+    message = _refusal()
+    assert _TAG_REFUSED in message
+    assert tag not in message
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("commit", [_COMMIT[:39], _COMMIT.upper()])
+def test_release_commit(monkeypatch: pytest.MonkeyPatch, commit: str) -> None:
+    """C-3."""
+    monkeypatch.setenv("RELEASE_COMMIT", _COMMIT)
+    assert _settings().release_commit == _COMMIT
+    monkeypatch.setenv("RELEASE_COMMIT", "")
+    assert _settings().release_commit is None
+    monkeypatch.setenv("RELEASE_COMMIT", commit)
+    message = _refusal()
+    assert _COMMIT_REFUSED in message
+    assert commit not in message
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("revision", ["a-b", "r" * 33])
+def test_accept_schema_revision(monkeypatch: pytest.MonkeyPatch, revision: str) -> None:
+    """C-4."""
+    monkeypatch.setenv("ACCEPT_SCHEMA_REVISION", "0032_phase14_route_adjusted")
+    assert _settings().accept_schema_revision == "0032_phase14_route_adjusted"
+    monkeypatch.setenv("ACCEPT_SCHEMA_REVISION", "")
+    assert _settings().accept_schema_revision is None
+    monkeypatch.setenv("ACCEPT_SCHEMA_REVISION", revision)
+    message = _refusal()
+    assert _REVISION_REFUSED in message
+    assert revision not in message
+
+
+@pytest.mark.usefixtures("database_url")
+def test_enforcement_needs_a_release_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C-5: the refusal carries the flag only, never another setting's value."""
+    monkeypatch.setenv("ENFORCE_CLIENT_RELEASE", "true")
+    with pytest.raises(ValidationError) as raised:
+        _settings()
+    assert _ENFORCEMENT_REFUSED in str(raised.value)
+    assert _SECRET not in str(raised.value)
+    assert _SECRET not in repr(raised.value.errors())
+    monkeypatch.setenv("RELEASE_TAG", "v1.0.0")
+    settings = _settings()
+    assert settings.enforce_client_release is True
+    assert settings.release_tag == "v1.0.0"
+    # An invalid tag is reported once, not also as a missing release.
+    monkeypatch.setenv("RELEASE_TAG", "bad tag")
+    with pytest.raises(ValidationError) as invalid:
+        _settings()
+    assert [error["loc"] for error in invalid.value.errors()] == [("release_tag",)]

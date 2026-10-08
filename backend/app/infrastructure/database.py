@@ -1,16 +1,12 @@
-"""Database engine lifecycle and connectivity checks.
+"""Database engine lifecycle.
 
-This module owns the SQLAlchemy engine and the health-check ping used by
-the operational health endpoint. The domain schema mappings live in
+This module owns the SQLAlchemy engine. The health endpoint's database
+read is ``app.infrastructure.schema_revision.read_database_revision``
+(Phase 16 slice 3). The domain schema mappings live in
 app/infrastructure/models.py and are migrated by Alembic.
 """
 
-import logging
-
-from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
-
-logger = logging.getLogger(__name__)
+from sqlalchemy import Engine, create_engine
 
 
 class DatabaseUnavailableError(Exception):
@@ -21,19 +17,13 @@ class DatabaseUnavailableError(Exception):
     """
 
 
-def build_engine(database_url: str) -> Engine:
+def build_engine(database_url: str, *, application_name: str | None = None) -> Engine:
+    """The engine; ``application_name`` names its sessions in ``pg_stat_activity``.
+
+    ``migrate`` refuses while a session named ``partflow-api`` is
+    connected (Phase 16 slice 3), so the API and the CLI name theirs.
+    """
+    connect_args = {} if application_name is None else {"application_name": application_name}
     # pool_pre_ping avoids handing out stale connections after a database
     # restart, which matters for a long-running development stack.
-    return create_engine(database_url, pool_pre_ping=True)
-
-
-def ping_database(engine: Engine) -> None:
-    """Execute a real SELECT 1 against the configured database."""
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-    except SQLAlchemyError as exc:
-        # Log operational context (exception type/chain) for diagnosis.
-        # The URL is not logged because it contains credentials.
-        logger.error("Database health check failed: %s", type(exc).__name__, exc_info=exc)
-        raise DatabaseUnavailableError() from exc
+    return create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)

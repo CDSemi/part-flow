@@ -2,7 +2,12 @@ import './AllocationAdjustmentDialog.css';
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
-import { ApiError, errorMessage, refusalFlag } from '../api/client';
+import {
+  ApiError,
+  errorMessage,
+  isReleaseMismatch,
+  refusalFlag,
+} from '../api/client';
 import {
   allocateBeyondDemand,
   allocateFromStock,
@@ -327,6 +332,13 @@ export function AllocationAdjustmentDialog({
     }
     const detail = errorMessage(error);
     setErrorFocus((value) => value + 1);
+    if (isReleaseMismatch(error)) {
+      // PartFlow was updated while this page was open: refused before
+      // the key check, so it proves nothing about an earlier attempt —
+      // the intent, its key and any unknown outcome stay as they were.
+      setServerError(detail);
+      return;
+    }
     if (error.status === 401) {
       // Authorization precedes the key check: the intent and its key
       // stay for the resubmit after signing in again.

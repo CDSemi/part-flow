@@ -3,7 +3,7 @@ import './EditPartNumberDialog.css';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ApiError, errorMessage } from '../api/client';
+import { ApiError, errorMessage, isReleaseMismatch } from '../api/client';
 import {
   createPartNumber,
   deletePartNumber,
@@ -398,6 +398,10 @@ export function EditPartNumberDialog({
         // kept — `Add Part Number` re-creates the record.
         exists.current = false;
         setRecord(null);
+        setServerError(error.message);
+      } else if (step === 'details' && isReleaseMismatch(error)) {
+        // PartFlow was updated while this page was open: nothing was
+        // changed, the dialog keeps its mode and input.
         setServerError(error.message);
       } else if (step === 'details' && error.status === 409) {
         // Someone created the details meanwhile, or a retried create

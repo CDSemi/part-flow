@@ -231,7 +231,12 @@ docker compose up --build
 - Frontend: <http://localhost:5173>
 - Backend API: <http://localhost:8000>
 - Health: <http://localhost:8000/api/health> hoặc qua frontend proxy tại
-  <http://localhost:5173/api/health>
+  <http://localhost:5173/api/health>; chỉ liveness (không database):
+  <http://localhost:8000/api/health/live>
+
+Health check của container dùng route liveness, nên stack khởi động healthy trước
+`alembic upgrade head`; `/api/health` là readiness và trả 503 cho đến khi database
+ở migration head.
 
 Dừng bằng `Ctrl+C`, sau đó:
 
@@ -256,6 +261,10 @@ docker compose up --build -V
 ```bash
 docker compose exec backend uv run alembic upgrade head
 ```
+
+Backend development trả `/api/health` 503 (`schema: mismatch`) và từ chối mọi write
+bằng 503 `not_ready` cho đến khi `alembic upgrade head` đã chạy (readiness); read
+và `/api/health/live` vẫn hoạt động.
 
 ### Tạo, reset và kiểm tra development database
 
@@ -417,7 +426,7 @@ docker compose exec backend uv run alembic upgrade head
 
 Test backend gồm:
 
-- behavior test cho `/api/health`;
+- behavior test cho readiness và liveness của `/api/health` (`tests/test_health.py`, mock lần đọc database revision: sẵn sàng, schema không khớp, override accepted, database không kết nối được; response 503 an toàn, cùng một test với database thật), write gate (`tests/test_release_gate_api.py`: 409 `release_mismatch`, 503 `not_ready`), job `migrate` (`tests/test_migrate_cli.py`: một transaction, các lần từ chối, lock) và báo cáo `revision` (`tests/test_revision_cli.py`); ba file sau cần service `db` của Compose;
 - unit test của route registry `app/api/route_access.py` (`tests/test_route_access.py`): test fail với mọi route registry chưa phân loại, nên route mới phải được thêm vào đó; test gọi route cần sign-in hoặc permission qua `client_as` / `admin_of` của `tests/auth_harness.py`, không qua client ẩn danh; lệnh gọi route Scan Station đi qua `station_device_client` (thiết bị đã enroll cho station được nhắm tới), và route station mới phải khai báo `RequireStationDevice` và được phân loại trong `route_access.py`;
 - unit test normalization PN và badge Worker (`tests/test_worker_badge_normalization.py`);
 - unit test hash mật khẩu scrypt và password policy (`tests/test_password_hashing.py`, `tests/test_password_policy.py`);
@@ -480,7 +489,7 @@ Quality gate backend đầy đủ:
 docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
 ```
 
-## Production stack (Phase 16 slice 2)
+## Production stack (Phase 16)
 
 `compose.production.yaml` (Compose project `partflow-production`) là production
 stack: `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và job
@@ -493,11 +502,21 @@ hay VPS (Phase 16 slice 7). Configuration là `.env.production` (sao chép
 ```bash
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF config --quiet
-$PF -f compose.production.build.yaml build
+PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
 $PF up -d db
-$PF --profile ops run --rm migrate
+$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"
 $PF up -d backend web
 ```
+
+Các release sau chạy qua `deploy/production/release.sh`, thực hiện release
+sequence (build, reconcile pre-release và post-release, write freeze, `migrate`,
+chuyển `backend` rồi `web`, `smoke.sh`) và ghi deployment record;
+`deploy/production/smoke.sh --release <tag>` chạy các loopback check của release
+đang chạy. Cả hai in cách dùng với `--help`; quy trình nằm ở
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1 và
+[`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
+§5 và §6. Mỗi production image mang release của nó (`PARTFLOW_RELEASE`,
+`PARTFLOW_COMMIT`); image backend và `web` đều từ chối giá trị thiếu hoặc sai dạng (`docs/IMPLEMENTATION_ROADMAP.md`, Phase 16 slice 3).
 
 Chỉ bước build dùng `compose.production.build.yaml`: `compose.production.yaml`
 không có phần build, nên `up` hay `run` với một release thiếu image sẽ thất bại
@@ -528,15 +547,20 @@ Phần static của các kiểm tra production artifact không cần stack đang
 
 ```bash
 python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
-PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
+PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=$(git rev-parse HEAD) PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
 ```
 
 Lệnh đầu chạy static test của Compose model, file environment example, Dockerfile
-và cấu hình nginx; lệnh thứ hai build cả hai production image (build `web` chạy
-production-boundary check). Compose stack smoke
+và cấu hình nginx, cùng test của `release.sh` / `smoke.sh` (`test_release_scripts.py`,
+với `docker`, `git` và `curl` giả) và test của `reconcile_regression.py`
+(`test_reconcile_regression.py`); lệnh thứ hai build cả hai production image (build
+`web` chạy production-boundary check, và build thiếu `PARTFLOW_COMMIT` thì fail).
+Compose stack smoke
 (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) khởi
 động một project `partflow-s2-smoke` tạm trên loopback port, kiểm tra qua `web`
-rồi xóa nó; nó cần Docker daemon và không thuộc CI.
+rồi xóa nó; `python3 deploy/production/tests/release_rehearsal.py` diễn tập một
+release trên project tạm `partflow-s3-rehearsal`. Cả hai cần Docker daemon và không
+thuộc CI.
 
 ## Continuous integration
 
@@ -571,6 +595,7 @@ compose.yaml       development stack: db, backend, frontend
 compose.production.yaml  production stack (db, backend, web, migrate); không dành cho development
 compose.production.build.yaml  file đi kèm chỉ để build: build production image của backend và web
 .env.production.example  bảng kê configuration production (sao chép thành .env.production)
-deploy/production/tests/ static test production artifact và Compose stack smoke
+deploy/production/release.sh, smoke.sh  release flow và loopback smoke check (reconcile_regression.py so sánh các report reconcile)
+deploy/production/tests/ static test production artifact, test release script, Compose stack smoke và release rehearsal
 docs/              tài liệu chuẩn của project
 ```

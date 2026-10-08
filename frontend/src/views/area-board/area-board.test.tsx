@@ -592,6 +592,32 @@ test('a failed refresh keeps the last complete board and marks the feed stale', 
   expect(feed.textContent).toBe('Feed stale — reconnecting');
 });
 
+test('FR-30: an outdated page keeps the feed Live; unavailable still reads stale', async () => {
+  stubFetch(
+    () => new Response(JSON.stringify(boardPayload()), { status: 200 }),
+  );
+  const view = render(
+    <ConnectivityContext.Provider
+      value={{ status: 'outdated', retry: () => {} }}
+    >
+      <AreaBoardView />
+    </ConnectivityContext.Provider>,
+  );
+  await act(async () => {});
+  expect(document.querySelector('.ab-feed')?.textContent).toBe('Live');
+
+  view.rerender(
+    <ConnectivityContext.Provider
+      value={{ status: 'unavailable', retry: () => {} }}
+    >
+      <AreaBoardView />
+    </ConnectivityContext.Provider>,
+  );
+  expect(document.querySelector('.ab-feed')?.textContent).toBe(
+    'Feed stale — reconnecting',
+  );
+});
+
 test('a Department without active Areas is an explicit empty state', async () => {
   stubFetch(
     () =>

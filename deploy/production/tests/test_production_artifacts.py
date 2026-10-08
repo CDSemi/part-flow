@@ -1,10 +1,11 @@
-"""P16-S2: static checks of the production artifacts (compose.production.yaml, its build-only companion
+"""P16-S2/S3: static checks of the production artifacts (compose.production.yaml, its build-only companion
 compose.production.build.yaml, .env.production.example, both Dockerfiles and the web tier configuration in
 frontend/nginx/).
 
-Case mapping (P16-S2 SPEC section 6.2):
-  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14, ST-15)
+Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2):
+  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17)
   Dockerfiles and the development default              -> Dockerfiles (ST-13)
+  Liveness probes and the release meta (P16-S3)        -> ReleaseArtifacts (ST-18, ST-19)
   nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-12)
 
 Run from anywhere on a host with the docker CLI (Compose v2) and git:
@@ -24,6 +25,8 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[3]
 COMPOSE_FILE = REPO / "compose.production.yaml"
+DEVELOPMENT_COMPOSE_FILE = REPO / "compose.yaml"
+VITE_CONFIG = REPO / "frontend" / "vite.config.ts"
 BUILD_FILE = REPO / "compose.production.build.yaml"
 ENV_EXAMPLE = REPO / ".env.production.example"
 NGINX_DIR = REPO / "frontend" / "nginx"
@@ -35,6 +38,8 @@ PROXY_API_INCLUDE = "/etc/nginx/partflow/proxy-api.conf"
 
 DOCKER_REQUIRED = "docker compose is required for the production artifact tests"
 RELEASE = "static-test"
+# The commit the generated env passes to the build file (ST-12); any 40-hex value.
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
 LONG_RUNNING = {"db", "backend", "web"}
 PARTFLOW_IMAGES = ("backend", "web", "migrate")
 # Variables that must stop `config` when empty (ST-1).
@@ -47,8 +52,19 @@ REQUIRED_VARIABLES = (
     "POSTGRES_DB",
 )
 # Site-specific values (and the optional trusted-proxy override) the example leaves empty (ST-14).
-EMPTY_IN_EXAMPLE = ("PARTFLOW_RELEASE", "PARTFLOW_SECRETS_DIR", "PARTFLOW_SITE_TIMEZONE", "PARTFLOW_TRUSTED_PROXY")
+EMPTY_IN_EXAMPLE = (
+    "PARTFLOW_RELEASE",
+    "PARTFLOW_SECRETS_DIR",
+    "PARTFLOW_SITE_TIMEZONE",
+    "PARTFLOW_TRUSTED_PROXY",
+    "PARTFLOW_COMMIT",
+    "PARTFLOW_ACCEPT_SCHEMA_REVISION",
+)
 SECRET_LIKE = ("PASSWORD", "SECRET", "TOKEN", "DSN")
+# Any health route a probe may name; a container health check names liveness only (P16-S3 ST-6, ST-18).
+HEALTH_PATH = re.compile(r"/api/health(?:/[A-Za-z0-9_-]+)*")
+LIVENESS_PATH = "/api/health/live"
+DATABASE_CLIENTS = ("psql", "pg_isready", "psycopg", "sqlalchemy", "asyncpg")
 # A URL that carries a credential (user:password@).
 CREDENTIAL_URL = re.compile(r"://[^/\s]*:[^/\s]*@")
 # Shell variables that would override the generated env file (Compose precedence) or change the model.
@@ -345,6 +361,7 @@ class ComposeModel(unittest.TestCase):
             "PARTFLOW_RELEASE": RELEASE,
             "PARTFLOW_SECRETS_DIR": cls.secrets_dir.as_posix(),
             "PARTFLOW_SITE_TIMEZONE": "UTC",
+            "PARTFLOW_COMMIT": COMMIT,
         }
         cls.env_file = root / "env"
         write_env(cls.env_file, cls.base_overrides)
@@ -435,9 +452,11 @@ class ComposeModel(unittest.TestCase):
             check = self.services[name].get("healthcheck")
             self.assertTrue(check and check.get("test"), f"{name} has no health check")
             self.assertFalse(check.get("disable"), name)
+        # P16-S3: liveness only (GET /api/health/live: no readiness, no database client).
         backend_test = " ".join(self.services["backend"]["healthcheck"]["test"])
-        self.assertNotIn("/api/health", backend_test)
-        self.assertNotIn("http", backend_test)
+        self.assertEqual(HEALTH_PATH.findall(backend_test), [LIVENESS_PATH])
+        for client in DATABASE_CLIENTS:
+            self.assertNotIn(client, backend_test.lower())
         for name in self.ops_services():
             self.assertIs(self.services[name]["healthcheck"].get("disable"), True, name)
 
@@ -476,6 +495,9 @@ class ComposeModel(unittest.TestCase):
                     self.assertIsNone(CREDENTIAL_URL.search(str(value or "")), f"{name}.{key} carries a credential")
         backend = self.services["backend"]["environment"]
         self.assertEqual(backend["SESSION_COOKIE_SECURE"], "true")
+        # P16-S3: the release gate is fixed on; the readiness override is empty unless the env sets it.
+        self.assertEqual(backend["ENFORCE_CLIENT_RELEASE"], "true")
+        self.assertEqual(backend["ACCEPT_SCHEMA_REVISION"], "")
         self.assertEqual(backend["WEB_CONCURRENCY"], "2")
         self.assertEqual(backend["FORWARDED_ALLOW_IPS"], example_values()["PARTFLOW_EDGE_SUBNET"])
         self.assertEqual(self.services["web"]["environment"], {"PARTFLOW_TRUSTED_PROXY": ""})
@@ -486,6 +508,10 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(override.returncode, 0, override.stderr)
         web = json.loads(override.stdout)["services"]["web"]
         self.assertEqual(web["environment"], {"PARTFLOW_TRUSTED_PROXY": "192.0.2.10"})
+        accepted = self.variant("accept-revision", PARTFLOW_ACCEPT_SCHEMA_REVISION="9999_unknown_to_this_image")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        accepted_backend = json.loads(accepted.stdout)["services"]["backend"]["environment"]
+        self.assertEqual(accepted_backend["ACCEPT_SCHEMA_REVISION"], "9999_unknown_to_this_image")
 
     # ST-11
     def test_st11_networks(self):
@@ -523,6 +549,8 @@ class ComposeModel(unittest.TestCase):
             build = merged[name]["build"]
             self.assertEqual(build["target"], "production", name)
             self.assertTrue(same_path(build["context"], REPO / context), build["context"])
+            # P16-S3: the release identity is a build argument of both images.
+            self.assertEqual(build.get("args"), {"PARTFLOW_RELEASE": RELEASE, "PARTFLOW_COMMIT": COMMIT}, name)
         # Apart from the two build sections the merged model is the runtime model, unchanged.
         for name, service in merged.items():
             stripped = {key: value for key, value in service.items() if key != "build"}
@@ -530,11 +558,16 @@ class ComposeModel(unittest.TestCase):
 
     # ST-14
     def test_st14_inventory(self):
-        text = "\n".join(line for line in COMPOSE_FILE.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#"))
-        text = text.replace("$$", "")
-        referenced = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", text))
+        def references(path):
+            text = "\n".join(line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#"))
+            return set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", text.replace("$$", "")))
+
+        # P16-S3: the inventory is the union of both Compose files; PARTFLOW_COMMIT is a build-only variable.
+        runtime, build = references(COMPOSE_FILE), references(BUILD_FILE)
+        self.assertNotIn("PARTFLOW_COMMIT", runtime)
+        self.assertIn("PARTFLOW_COMMIT", build)
         values = example_values()
-        self.assertEqual(referenced, set(values))
+        self.assertEqual(runtime | build, set(values))
         for key in EMPTY_IN_EXAMPLE:
             self.assertEqual(values[key], "", key)
         for key, value in values.items():
@@ -542,6 +575,20 @@ class ComposeModel(unittest.TestCase):
             if not key.endswith(("_DIR", "_FILE")):
                 self.assertFalse(any(word in key for word in SECRET_LIKE), f"secret-like key {key}")
             self.assertNotIn("://", value, key)
+
+    # ST-16 (P16-S3)
+    def test_st16_migrate_entrypoint(self):
+        migrate = self.services["migrate"]
+        self.assertEqual(migrate.get("entrypoint"), ["python", "-m", "app.cli", "migrate"])
+        # Compose resolves an entrypoint override with `command: null`: no default arguments, so a run without a
+        # backup option is a usage error (exit 2).
+        self.assertIsNone(migrate.get("command"))
+
+    # ST-17 (P16-S3)
+    def test_st17_release_identity_comes_from_the_image(self):
+        for name, service in self.services.items():
+            for key in service.get("environment") or {}:
+                self.assertNotIn(key, ("RELEASE_TAG", "RELEASE_COMMIT"), f"{name} sets {key}")
 
     # ST-15
     def test_st15_git_ignore(self):
@@ -603,6 +650,12 @@ class Dockerfiles(unittest.TestCase):
         self.assertIsNotNone(source, "production does not copy a locked venv")
         _, _, deps = self.stage(stages, source.group(1))
         self.assertIn("RUN uv sync --frozen --no-dev", deps)
+        # P16-S3: the release identity is baked into the image and checked at build.
+        for line in ("ARG PARTFLOW_RELEASE", "ARG PARTFLOW_COMMIT", "ENV RELEASE_TAG=${PARTFLOW_RELEASE} RELEASE_COMMIT=${PARTFLOW_COMMIT}"):
+            self.assertIn(line, body)
+        self.assert_identity_labels_and_commit_check(body)
+        self.assertLess(body.index("ARG PARTFLOW_COMMIT"), body.index("USER 10001:10001"))
+        self.assert_no_release_args(stages, "development")
 
     def test_st13_frontend(self):
         stages = dockerfile_stages(REPO / "frontend" / "Dockerfile")
@@ -610,10 +663,76 @@ class Dockerfiles(unittest.TestCase):
         base, _, body = self.stage(stages, "production")
         self.assertRegex(base, r"^nginx:\d+\.\d+\.\d+-alpine$")
         self.assertIn("ENV NGINX_ENVSUBST_FILTER=^PARTFLOW_", body)
+        # P16-S3: the bundle is built for its release; the image carries the identity labels.
+        _, _, build = self.stage(stages, "build")
+        self.assertIn("ARG PARTFLOW_RELEASE", build)
+        self.assertIn('RUN VITE_PARTFLOW_RELEASE="$PARTFLOW_RELEASE" npm run build', build)
+        self.assertNotIn("RUN npm run build", build)
+        for line in ("ARG PARTFLOW_RELEASE", "ARG PARTFLOW_COMMIT"):
+            self.assertIn(line, body)
+        self.assert_identity_labels_and_commit_check(body)
+        self.assert_no_release_args(stages, "development")
+
+    def assert_identity_labels_and_commit_check(self, body):
+        self.assertIn(
+            "LABEL org.opencontainers.image.version=${PARTFLOW_RELEASE} org.opencontainers.image.revision=${PARTFLOW_COMMIT}",
+            body,
+        )
+        checks = [line for line in body if line.startswith("RUN") and "PARTFLOW_COMMIT" in line]
+        self.assertTrue(any("^[0-9a-f]{40}$" in line and "exit 1" in line for line in checks), "no commit check")
+
+    def assert_no_release_args(self, stages, name):
+        _, _, body = self.stage(stages, name)
+        self.assertFalse([line for line in body if re.match(r"ARG\s+PARTFLOW_", line)], f"{name} takes a release arg")
 
     def test_st13_development_default_unchanged(self):
         for line in (REPO / "compose.yaml").read_text(encoding="utf-8").splitlines():
             self.assertIsNone(re.match(r"\s*target\s*:", line), "compose.yaml selects a build target")
+
+
+# ---------------------------------------------------------------------------
+# ST-18, ST-19 (P16-S3)
+# ---------------------------------------------------------------------------
+
+
+class ReleaseArtifacts(unittest.TestCase):
+    """Container health checks probe liveness only, so a schema mismatch (readiness 503) never makes a container
+    unhealthy or keeps a dependant from starting (CD2). compose.nas.yaml (OPS lane) is the recorded hand-off of
+    P16-S3 SPEC section 8.5 and is deliberately not asserted here."""
+
+    def health_tests(self, path):
+        if not docker_compose_available():
+            raise AssertionError(DOCKER_REQUIRED)
+        with tempfile.TemporaryDirectory(prefix="pf-s3-static-") as tmp:
+            secrets_dir = Path(tmp) / "secrets"
+            secrets_dir.mkdir()
+            (secrets_dir / "postgres_password").write_text("static-test-password\n", encoding="utf-8")
+            env_file = Path(tmp) / "env"
+            write_env(env_file, {"PARTFLOW_RELEASE": RELEASE, "PARTFLOW_SECRETS_DIR": secrets_dir.as_posix(), "PARTFLOW_SITE_TIMEZONE": "UTC"})
+            arguments = ["--env-file", str(env_file), "--profile", "ops"] if path == COMPOSE_FILE else []
+            result = subprocess.run(
+                ["docker", "compose", "-f", str(path), *arguments, "config", "--format", "json"],
+                cwd=REPO, env=_compose_environment(), capture_output=True, text=True, encoding="utf-8", timeout=120,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)["services"]
+        return {name: " ".join(s["healthcheck"]["test"]) for name, s in services.items() if (s.get("healthcheck") or {}).get("test")}
+
+    # ST-18
+    def test_st18_health_checks_probe_liveness_only(self):
+        for path, probing in ((DEVELOPMENT_COMPOSE_FILE, {"backend", "frontend"}), (COMPOSE_FILE, {"backend"})):
+            tests = self.health_tests(path)
+            named = {name for name, test in tests.items() if HEALTH_PATH.search(test)}
+            self.assertEqual(named, probing, path.name)
+            for name in named:
+                with self.subTest(file=path.name, service=name):
+                    self.assertEqual(set(HEALTH_PATH.findall(tests[name])), {LIVENESS_PATH})
+
+    # ST-19
+    def test_st19_release_meta_plugin(self):
+        text = VITE_CONFIG.read_text(encoding="utf-8")
+        self.assertIn("partflowReleaseMeta", text)
+        self.assertIn('meta name="partflow-release"', text)
 
 
 # ---------------------------------------------------------------------------

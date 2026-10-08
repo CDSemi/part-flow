@@ -6,6 +6,11 @@ import {
   activateStationDevice,
   storeStationDeviceToken,
 } from '../../api/station-devices';
+import { useConnectivity } from '../../app/connectivity-context';
+import {
+  OUTDATED_ENROLL_REASON,
+  RELOAD_PAGE_LABEL,
+} from '../../app/release-copy';
 import { useRouter } from '../../app/router-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import { Guidance } from './scan-station-presentation';
@@ -41,6 +46,9 @@ function leadOf(reason: EnrollmentReason, stationId: string): string {
  *   the server accepts is the only way through. After enrolling, the
  *   operator confirms the same action again: it is recorded once.
  * Enrolling is a write: disabled while disconnected, nothing queued.
+ * While the page is outdated (another server release) both forms offer
+ * their own `Reload page`; the station never reloads itself while the
+ * dialog is open (OD-16-07).
  */
 export function StationEnrollment({
   stationId,
@@ -66,6 +74,8 @@ export function StationEnrollment({
   onEnrolled: (result: { persisted: boolean }) => void;
 }) {
   const { navigate } = useRouter();
+  const { status } = useConnectivity();
+  const outdated = status === 'outdated';
   const fieldRef = useRef<HTMLInputElement>(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -151,7 +161,9 @@ export function StationEnrollment({
       ) : null}
       {writeBlocked ? (
         <Guidance tone="warn">
-          Enrolling needs the connection to the PartFlow server.
+          {outdated
+            ? OUTDATED_ENROLL_REASON
+            : 'Enrolling needs the connection to the PartFlow server.'}
         </Guidance>
       ) : null}
       <div className="row">
@@ -163,6 +175,17 @@ export function StationEnrollment({
             onClick={() => navigate('/scan-station')}
           >
             Station Selector
+          </button>
+        ) : null}
+        {outdated ? (
+          // The dialog cannot be dismissed, so the update notice's own
+          // Reload page is unreachable behind it (GUI_DESIGN §3 rule 13).
+          <button
+            className="bigbtn ghost"
+            disabled={busy}
+            onClick={() => window.location.reload()}
+          >
+            {RELOAD_PAGE_LABEL}
           </button>
         ) : null}
         <button

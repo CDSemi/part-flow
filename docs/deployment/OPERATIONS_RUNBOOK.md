@@ -3,10 +3,12 @@
 > **Status:** Canonical operational procedure template for Phase 16. The
 > production Compose file exists (P16-S2): `PF` below is
 > `docker compose -f compose.production.yaml --env-file .env.production`, run
-> from the release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Commands
-> that depend on later slices (release automation P16-S3, backups P16-S5,
-> monitoring P16-S6) must be replaced by their final repository-provided names
-> before production use.
+> from the release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). The
+> release, migration, write-freeze and rollback commands (paths 1 and 2) are
+> real (P16-S3: `deploy/production/release.sh`, `smoke.sh`, `migrate`,
+> `revision`); the backup, restore and rollback path 3 commands (P16-S5) and the
+> monitoring commands (P16-S6) are still placeholders and must be replaced by
+> their final repository-provided names before production use.
 >
 > **Language:** English is the source of truth. [Tiếng Việt](./OPERATIONS_RUNBOOK.vi.md).
 
@@ -28,6 +30,19 @@ Record for every environment and release:
 | Rollback deadline and observation owner |  |
 | Known limitations |  |
 
+`deploy/production/release.sh` writes this record as `record.json` (with the
+output of every step) in `<records-dir>/<UTC>-<tag>/`, and the fields map to the
+rows above: `environment` and `url` (row 1), `host` (row 2), `release` (tag,
+commit, previous tag and the local image IDs of `backend` and `web`; row 3),
+`alembic` (`before`, `after`, `expected`; row 4), `operator`, `approver`
+(row 5), `started_at`, `finished_at` (row 6), `backup` (row 7; `verified` is
+`false` until P16-S5), `migration` (the `migrate.json` and `migrate.log`
+files; row 8), `reconcile` and `smoke` (rows 9), `rollback_deadline` and
+`observation_owner` (row 10), `known_limitations` (row 11); `outcome`,
+`writes_reopened_at` and `refrozen` state how the run ended. A manual
+operation (for example a rollback) appends to the same directory with the same
+fields.
+
 ## 2. Health and diagnosis
 
 Minimum checks (development and staging stack):
@@ -44,7 +59,17 @@ Production stack (`PF` as above; health through the hostname):
 $PF ps
 $PF logs --since=15m backend web db
 curl --fail --silent --show-error https://<partflow-host>/api/health
+curl --fail --silent --show-error https://<partflow-host>/api/health/live
+$PF run --rm --no-deps -T backend python -m app.cli revision
 ```
+
+`/api/health` is readiness: it reports `release`, `commit`, `schema`
+(`current`, `accepted`, `mismatch` or `unknown`), `expected_revision`,
+`database_revision` and `accepted_revision`, and answers 503 on a schema
+mismatch or an unreachable database. `/api/health/live` is liveness only (the
+container health checks use it): it stays healthy while readiness is 503 during
+a schema mismatch. `revision` prints the same facts from a one-off container
+and works while `backend` is stopped.
 
 In the production stack `web`'s access log is the request log (client address,
 method, path without query string, status, bytes, duration, user agent); it
@@ -139,60 +164,147 @@ in a rehearsal command.
   incidents for any findings; in the production stack run it, and any recovery
   CLI, with the **current** tag, before the candidate tag is written to
   `.env.production` (the candidate lives only in the shell until the switch);
-- decide whether writes must be stopped;
-- announce the window and rollback decision deadline.
+- decide whether writes must be stopped (a pending migration always needs the
+  write freeze below);
+- announce the window and rollback decision deadline, and ask stations to
+  finish their open dialogs;
+- take the pre-release dump as late as possible and record its time: until
+  P16-S5 it is taken before the freeze, so writes made between the dump and the
+  freeze are **not** in it; name it with `--pre-release-backup`.
+
+### Write freeze
+
+The write freeze is **stopping `backend`** (`$PF stop backend`); there is no
+other application mode. `uvicorn` finishes in-flight requests, an import
+included, and the stop waits up to 200 s; with more than one worker the
+supervisor keeps the socket open until the last worker exits, so requests sent
+meanwhile hang and end as a 504 or 502 (DEPLOYMENT §3.1 Process model): start
+the freeze when no import is running. While `backend` is stopped `web` still
+serves the shell and answers `/api/*` with its JSON 504 and then 502, every
+client turns to the OFFLINE banner within about a second and every write control
+is blocked. Open dialogs keep their drafts; a write that raced the stop is an
+unknown outcome that keeps its `device_event_id` and is retried with it after a
+reopen on the **same** release. After a reopen on a **new** release the old page
+cannot send it (it is refused with 409); the operator reloads and checks the
+Area or Work Order before repeating the action. A cut import leaves only whole
+committed Work Orders. `reconcile`, `revision`, `migrate` and the backup run from
+one-off containers against `db` while frozen. **Reopen** with
+`$PF up -d backend` on the same release, only after the checks of the step
+below; at a release switch the reopen is the `web` switch.
 
 ### Execute
 
-1. Record current application and Alembic revisions.
-2. Build/pull the target immutable images. Production stack:
-   `PARTFLOW_RELEASE=<new> $PF -f compose.production.build.yaml build` (never an existing tag), then rehearse
-   the candidate image against the unchanged database:
+Run `deploy/production/release.sh` from the repository root of the release
+checkout, with the release tag checked out:
+
+```bash
+deploy/production/release.sh --release <new-tag> --operator "<name>" --approver "<name>" \
+    --pre-release-backup "<dump reference>"
+```
+
+(`--no-backup-reason "<text>"` instead of the dump reference when there is none,
+for example a rehearsal; `deploy/production/release.sh --help` prints every
+option.) It runs, recording each step: preflight (tools, the environment file,
+the tag form, clean build inputs); the current revision and the pre-release
+reconcile with the running release; the candidate build (an existing tag is
+never rebuilt); the candidate's check (j) and revision; the write freeze when a
+migration is pending; `migrate`; the post-release reconcile; the `backend`
+switch while `web` still serves the previous bundle (writes stay refused, every
+loaded page sends the previous release and gets 409), the health wait for the
+new release and a `current` schema; the `web` switch, which reopens writes; and
+`smoke.sh`. A failed check after the switch stops `backend` again.
+
+| Exit | Meaning | Do |
+| --- | --- | --- |
+| 0 | completed | observe (below) |
+| 1 | stopped with nothing changed, or writes reopened on the current release | read the printed reason and `record.json`; fix; rerun |
+| 2 | could not run (usage, tools, environment) | nothing changed; fix and rerun |
+| 3 | `backend` left stopped | follow §6; read `regression.txt` or compare `pre-reconcile.json` and `post-reconcile.json` |
+| 4 | the new release may be running and writable after a failed check, and the re-freeze failed | run `$PF stop backend` yourself, then follow §6 |
+
+`--accept-pre-release-findings` continues when the pre-release reconcile has
+findings and blocks only on findings absent from it
+(`deploy/production/reconcile_regression.py` compares the two reports).
+`--skip-pre-reconcile REASON` is for the rollback path 2 state in which no
+image has the database revision as its head: the reason is recorded and every
+post-release finding blocks.
+
+The manual equivalent, in the same order, with the current tag in
+`.env.production`:
+
+1. Record the current application and Alembic revisions
+   (`$PF run --rm --no-deps -T backend python -m app.cli revision`) and run the
+   pre-release reconcile with the current tag (§7).
+2. Build: `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`
+   (never an existing tag), then rehearse the candidate image against the
+   unchanged database:
    `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
    (a failing check stops the release; nothing has changed).
-3. Stop or block writes as required (production stack: `$PF stop backend`,
-   which may wait up to 200 s while an import finishes; with more than one
-   worker, requests sent meanwhile hang up to 60 s and end as a 504 or 502 with
-   an unknown outcome, so start it when no import is running — DEPLOYMENT §3.1
-   Process model).
-4. Run the production repository's explicit migration job once (production
-   stack: `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`;
-   P16-S3 replaces its command).
-5. Capture migration output and new revision.
-6. Start/recreate application services at the target release (production
-   stack: write `PARTFLOW_RELEASE=<new>` into `.env.production`, then
-   `$PF up -d backend web`). On a database with no Administrator, complete
-   first-run setup (the setup token is in the backend log) before opening
-   access; in the production stack start the backend with one worker for it
-   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, then `$PF up -d backend`).
-   Then enroll each Scan Station device (Administration → Scan Stations →
-   `Devices…`).
-7. Check health internally and through HTTPS.
-8. Run authorization, SPA-route, `/api`, scan-focus/connectivity, and designated
-   write/read-back smoke tests.
-9. Run reconciliation (§7) and keep the JSON report. Compare it with the
-   pre-release report: only findings absent from it block step 10;
-   pre-existing findings stay open incidents under the owner's decision.
-10. Reopen writes only when every required check passes.
+3. Freeze when a migration is pending: `$PF stop backend`, then confirm
+   `$PF ps --status running -q backend` prints nothing.
+4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`;
+   capture its JSON output and the new revision.
+5. Run the post-release reconcile with the new tag (§7) and compare it with the
+   pre-release report: only findings absent from it block step 7; pre-existing
+   findings stay open incidents under the owner's decision.
+6. Write `PARTFLOW_RELEASE=<new>` into `.env.production` (and clear
+   `PARTFLOW_ACCEPT_SCHEMA_REVISION`), then `$PF up -d --no-deps backend`;
+   check health: `release` is the new tag and `schema` is `current`. On a
+   database with no Administrator, complete first-run setup (the setup token is
+   in the backend log) before opening access; start the backend with one worker
+   for it (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, then
+   `$PF up -d backend`). Then enroll each Scan Station device (Administration
+   → Scan Stations → `Devices…`).
+7. `$PF up -d --no-deps web`: this reopens writes. Run
+   `deploy/production/smoke.sh --release <new>` and the designated
+   authorization, scan-focus/connectivity and write/read-back checks.
+8. Reopen writes only when every required check passes; otherwise
+   `$PF stop backend` again and follow §6. On exit 3 of `release.sh`, read
+   `regression.txt` (or compare both reports) and then either reopen as in step
+   6 and 7 or follow §6.
 
 ### Observe
 
 Monitor errors, latency, locks, restarts, disk, and operator feedback through the
-defined observation window. Retain the previous release and backup.
+defined observation window. Retain the previous release and backup. Pages that
+were open during the switch show the update notice and reload (GUI_DESIGN §3
+rule 13); an unattended Scan Station or Production Board reloads itself once no
+dialog is open.
 
 ## 6. Rollback decision tree
 
 1. **No schema migration occurred:** redeploy the previous immutable application
-   release and run smoke checks.
+   release: set the previous tag in `.env.production`, `$PF up -d backend web`,
+   then `deploy/production/smoke.sh --release <previous>`. It needs the previous
+   release's images on the host: keep them through the rollback window and never
+   run `docker image prune -a`; `release.sh` refuses to start when they are
+   missing.
 2. **Schema migrated and is backward-compatible:** deploy the previous release
-   only if compatibility was explicitly verified before migration.
+   only if compatibility was explicitly verified and recorded. Read
+   `database_revision` from `$PF run --rm --no-deps -T backend python -m app.cli revision`
+   (run with the new release), set `PARTFLOW_RELEASE=<previous>` and
+   `PARTFLOW_ACCEPT_SCHEMA_REVISION=<database_revision>` in `.env.production`,
+   `$PF up -d backend web`, then
+   `deploy/production/smoke.sh --release <previous> --allow-accepted-schema`.
+   The override names exactly one revision that the previous release does not
+   know (a revision it knows is ignored, `revision` shows `override_ignored`,
+   and readiness stays `mismatch`), it never matches any other revision, and the
+   next forward release clears it. Before the override is set the previous
+   release refuses every change; station reads still record the device's
+   last-seen time (device bookkeeping, no production data). Releasing forward
+   from this state uses the candidate image for the pre-release reconcile
+   (`release.sh` does) or `--skip-pre-reconcile REASON`.
 3. **Schema migrated and is not backward-compatible, or compatibility is
    unknown:** stop writes; restore the pre-migration database into a clean
-   instance and deploy the matching previous application release.
+   instance and deploy the matching previous application release. The restore
+   procedure is a P16-S5 placeholder; a restore of the pre-release dump never
+   discards writes made after it without the path 4 escalation.
 4. **New production writes occurred after migration:** do not blindly restore
    over them. Escalate; preserve both the current database and pre-release
    backup, determine a forward fix or audited data-recovery plan, and keep the
    application write-blocked.
+
+Recovery CLIs run with the release that matches the database.
 
 Never assume `alembic downgrade` is safe. PartFlow intentionally protects
 append-only history, and a downgrade may refuse or would discard newly supported
@@ -309,7 +421,7 @@ not trigger an automatic repair.
 
 ### Database or storage pressure
 
-- block new writes before disk is exhausted;
+- block new writes before disk is exhausted (the write freeze, §5);
 - preserve logs and metrics;
 - do not delete PostgreSQL files, volumes, Movement rows, or backups ad hoc;
 - expand storage or follow the Phase 16 verified archive/purge maintenance path;
