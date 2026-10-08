@@ -278,6 +278,31 @@ def test_usage_and_unreachable_database(
     assert "secret-pw" not in out + err and "127.0.0.1" not in out + err
 
 
+def test_an_invalid_configuration_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Phase 16 slice 2: both recovery commands name the two configuration forms."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL")
+    monkeypatch.setenv("DATABASE_HOST", "db")
+    monkeypatch.setenv("DATABASE_NAME", "partflow")
+    monkeypatch.setenv("DATABASE_USER", "owner")
+    monkeypatch.setenv("DATABASE_PASSWORD_FILE", str(tmp_path / "missing"))
+    for arguments in (
+        ["reset-password", "--login-name", "anyone"],
+        ["restore-correction-permission-management", "--role-name", "Administrator"],
+    ):
+        get_settings.cache_clear()
+        monkeypatch.setattr("sys.stdin", io.StringIO(_RESET + "\n"))
+        assert cli.main(arguments) == 2
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert err.strip() == (
+            "PartFlow is not configured: check DATABASE_URL, or DATABASE_HOST, DATABASE_NAME,"
+            " DATABASE_USER and DATABASE_PASSWORD_FILE. Nothing was changed."
+        )
+
+
 def test_an_undecodable_stdin_byte_is_refused(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

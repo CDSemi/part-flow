@@ -10,12 +10,16 @@ unescaped, and the engine authenticates with the decoded credentials.
 The online run goes through ``alembic upgrade head`` in a subprocess
 with only DATABASE_URL set — exactly the deployment migration step —
 against a dedicated temporary database that is dropped afterwards.
+AE-1 (Phase 16 slice 2) runs the same step with the production stack's
+file-based form instead (``DATABASE_HOST`` … ``DATABASE_PASSWORD_FILE``)
+as a temporary role whose password needs percent-encoding.
 """
 
 import io
 import os
 import subprocess
 import sys
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -129,3 +133,58 @@ def test_upgrade_offline_reads_the_url_back_unescaped(
         assert base in output.getvalue()
     finally:
         get_settings.cache_clear()
+
+
+def test_upgrade_head_with_the_file_based_configuration(tmp_path: Path) -> None:
+    """AE-1: the production `migrate` form — no DATABASE_URL, the password in a file."""
+    suffix = uuid.uuid4().hex[:10]
+    role = f"partflow_test_ae_role_{suffix}"
+    database = f"partflow_test_ae_db_{suffix}"
+    password = "pa%ss@w:rd/1"
+    admin_url = make_url(os.environ["DATABASE_URL"])
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    password_file = tmp_path / "postgres_password"
+    password_file.write_text(password + "\n", encoding="utf-8")
+    # No DATABASE_URL (nor any other DATABASE_ setting) is inherited.
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("DATABASE_")
+    }
+    environment.update(
+        DATABASE_HOST=str(admin_url.host),
+        DATABASE_PORT=str(admin_url.port or 5432),
+        DATABASE_NAME=database,
+        DATABASE_USER=role,
+        DATABASE_PASSWORD_FILE=str(password_file),
+    )
+    try:
+        with admin_engine.connect() as connection:
+            literal = connection.execute(sa.text("SELECT quote_literal(:p)"), {"p": password})
+            connection.execute(
+                sa.text(f'CREATE ROLE "{role}" LOGIN PASSWORD {literal.scalar_one()}')
+            )
+            connection.execute(sa.text(f'CREATE DATABASE "{database}" OWNER "{role}"'))
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=_BACKEND_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr.replace(password, "<PASSWORD>")
+
+        engine = create_engine(admin_url.set(database=database))
+        try:
+            with engine.connect() as connection:
+                revision = connection.execute(
+                    sa.text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+        finally:
+            engine.dispose()
+        assert revision == _head_revision()
+    finally:
+        with admin_engine.connect() as connection:
+            connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))
+            connection.execute(sa.text(f'DROP ROLE IF EXISTS "{role}"'))
+        admin_engine.dispose()

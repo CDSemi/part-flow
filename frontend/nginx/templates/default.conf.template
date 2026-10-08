@@ -1,0 +1,126 @@
+# PartFlow web (production): serves the immutable frontend build and forwards /api
+# to the backend. Rendered by the official nginx entrypoint (envsubst, filter
+# ^PARTFLOW_) to /etc/nginx/conf.d/default.conf, which nginx.conf includes inside
+# its http block. The trusted proxy address is resolved at start by
+# /docker-entrypoint.d/15-partflow-trusted-proxy.envsh.
+
+server_tokens off;
+
+# Rate-limit keys: only the limited methods get a key; an empty key is never
+# limited (GET /api/session and the sign-out DELETE stay unlimited).
+map $request_method $partflow_sign_in_client { POST $binary_remote_addr; default ""; }
+map $request_method $partflow_password_client { POST $binary_remote_addr; PUT $binary_remote_addr; default ""; }
+
+# X-Forwarded-Proto is honoured only from the one trusted hop, exactly like X-Forwarded-For.
+# $realip_remote_addr is the TCP peer before the realip module rewrites $remote_addr.
+geo $realip_remote_addr $partflow_from_trusted_proxy { default 0; ${PARTFLOW_TRUSTED_PROXY} 1; }
+map $partflow_from_trusted_proxy$http_x_forwarded_proto $partflow_forwarded_proto { 1https https; default $scheme; }
+
+limit_req_zone $partflow_sign_in_client zone=partflow_sign_in:1m rate=10r/m;
+limit_req_zone $partflow_password_client zone=partflow_password:1m rate=5r/m;
+limit_req_status 429;
+limit_req_log_level warn;
+
+# Request log of record: real client address, method, path without query string,
+# status, bytes, duration. Never cookies, PartFlow headers or request bodies.
+log_format partflow '$remote_addr [$time_iso8601] "$request_method $uri $server_protocol" '
+                    '$status $body_bytes_sent $request_time "$http_user_agent"';
+
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    access_log /var/log/nginx/access.log partflow;
+
+    # The real client address is the last X-Forwarded-For entry, and only when
+    # the TCP peer is the one trusted hop; otherwise the TCP peer itself.
+    set_real_ip_from ${PARTFLOW_TRUSTED_PROXY};
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive off;
+
+    # Docker's embedded DNS, resolved per request: nginx starts without a
+    # running backend and follows a recreated backend within 10 s.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $partflow_backend http://backend:8000;
+
+    client_max_body_size 1m;
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+    # One client request is at most one backend execution: never re-send.
+    proxy_next_upstream off;
+
+    # Security headers. Every location that sets its own add_header includes
+    # this file again (nginx would otherwise drop the inherited lines).
+    include /etc/nginx/partflow/static-headers.conf;
+
+    # Refusals web generates itself answer in the backend's {"detail": ...} shape.
+    # Backend responses (its own 413, 503, ...) pass through unchanged.
+    error_page 413 = @partflow_too_large;
+    error_page 429 = @partflow_rate_limited;
+    error_page 502 = @partflow_bad_gateway;
+    error_page 504 = @partflow_gateway_timeout;
+
+    location = /web-health { access_log off; default_type text/plain; return 200 "live\n"; }
+
+    # Hashed build assets: cached forever; a missing chunk is a plain 404, never the app shell.
+    location /assets/ {
+        try_files $uri =404;
+        gzip on;
+        gzip_types application/javascript text/css image/svg+xml;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        include /etc/nginx/partflow/static-headers.conf;
+    }
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+        include /etc/nginx/partflow/static-headers.conf;
+    }
+    # SPA fallback: every non-file path is the app shell (served by = /index.html).
+    location / { try_files $uri /index.html; }
+
+    location /api/ { include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/health { access_log off; include /etc/nginx/partflow/proxy-api.conf; }
+
+    # Network rate limits per client address (sign-in; password routes).
+    location = /api/session { limit_req zone=partflow_sign_in burst=5 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/session/password { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/setup/administrator { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+    location ~ ^/api/users/[^/]+/password$ { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+
+    # Upload and import routes: above the backend's own limits so its JSON 413 wins.
+    location ~ ^/api/(workers|users)/[^/]+/avatar$ { client_max_body_size 4m; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/part-numbers/image { client_max_body_size 4m; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/work-orders/import/preview { client_max_body_size 4m; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/work-orders/import {
+        client_max_body_size 4m;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
+        include /etc/nginx/partflow/proxy-api.conf;
+    }
+
+    location @partflow_too_large {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        include /etc/nginx/partflow/static-headers.conf;
+        return 413 '{"detail":"This request is too large for PartFlow. Nothing was changed.","request_too_large":true}';
+    }
+    location @partflow_rate_limited {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        add_header Retry-After "60" always;
+        include /etc/nginx/partflow/static-headers.conf;
+        return 429 '{"detail":"Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.","rate_limited":true}';
+    }
+    location @partflow_bad_gateway {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        include /etc/nginx/partflow/static-headers.conf;
+        return 502 '{"detail":"The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.","server_unavailable":true}';
+    }
+    location @partflow_gateway_timeout {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        include /etc/nginx/partflow/static-headers.conf;
+        return 504 '{"detail":"The PartFlow server did not answer in time.","server_unavailable":true}';
+    }
+}

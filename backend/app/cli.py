@@ -61,7 +61,10 @@ from app.infrastructure.database import build_engine
 _DATABASE_UNAVAILABLE = "PartFlow could not reach its database. Nothing was changed."
 _DATABASE_ERROR = "The database refused the reset (internal error). Nothing was changed."
 _RESTORE_DATABASE_ERROR = "The database refused the grant (internal error). Nothing was changed."
-_CONFIGURATION_INVALID = "PartFlow is not configured: check DATABASE_URL. Nothing was changed."
+_CONFIGURATION_INVALID = (
+    "PartFlow is not configured: check DATABASE_URL, or DATABASE_HOST, DATABASE_NAME,"
+    " DATABASE_USER and DATABASE_PASSWORD_FILE. Nothing was changed."
+)
 _PASSWORDS_DIFFER = "The passwords do not match. Nothing was changed."
 
 
@@ -268,8 +271,9 @@ def _reconcile_report(
         try:
             engine = _engine()
         except (ValidationError, ArgumentError, ValueError):
-            # DATABASE_URL missing or malformed (an unknown dialect, an
-            # unparseable URL or port). The report never repeats the URL.
+            # No valid database configuration (DATABASE_URL missing or
+            # malformed — an unknown dialect, an unparseable URL or port — or
+            # an invalid file-based form). The report never repeats the URL.
             return reconciliation.error_report(
                 "configuration_invalid", started_at=started_at, **options
             )

@@ -194,7 +194,7 @@ test('FC-3: Allocate from stock offers the routine limit and refuses beyond it b
     screen.getByRole('heading', { name: 'Allocate from stock' }),
   ).toBeInTheDocument();
   expect(qtyField().value).toBe('4');
-  expect(document.activeElement).toBe(qtyField());
+  await waitFor(() => expect(document.activeElement).toBe(qtyField()));
   const facts = dialog().querySelector('.aad-facts') as HTMLElement;
   expect(facts).toHaveTextContent('Still needed4 pcs');
   expect(facts).toHaveTextContent('Available in stock6 pcs');
@@ -415,7 +415,7 @@ test('FC-5: a reverse start with one active allocation opens the Reverse step wi
   expect(
     screen.getByRole('heading', { name: 'Reverse allocation' }),
   ).toBeInTheDocument();
-  expect(document.activeElement).toBe(reason);
+  await waitFor(() => expect(document.activeElement).toBe(reason));
   expect(dialog()).toHaveTextContent(
     '10 pcs allocated to Work Order 007201 on',
   );
@@ -699,7 +699,7 @@ test('the PN Overview lists the open lines with their figures; no open demand po
     name: 'Allocate from stock…',
   });
   expect(blocks).toHaveLength(2);
-  expect(document.activeElement).toBe(blocks[0]);
+  await waitFor(() => expect(document.activeElement).toBe(blocks[0]));
   expect(dialog()).toHaveTextContent(
     'A-100 · stocked 12 pcs · allocated 10 · available 2',
   );

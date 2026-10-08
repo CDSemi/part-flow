@@ -197,6 +197,11 @@ From an allowed workstation:
 
 ## 5. DSM Reverse Proxy for internal HTTPS
 
+This section has two cases: restricted staging on the development stack (§5.1)
+and the production `web` tier (§5.2).
+
+### 5.1 Staging (development stack)
+
 For an internal DNS name, create a DSM reverse-proxy rule whose source is HTTPS
 and whose destination is the local frontend service. Route the entire origin to
 the frontend; the frontend's current Vite proxy forwards `/api` to the backend.
@@ -213,6 +218,43 @@ Controls:
 
 This improves transport protection but does not make the development servers or
 unauthenticated application production-ready.
+
+### 5.2 Production `web` (Phase 16)
+
+The production `web` tier is published on the NAS loopback address only, so the
+DSM reverse proxy is the only HTTPS entry point. The settings below are the
+required values from [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; they are
+**documented in P16-S2 and executed and verified on the NAS in P16-S7**. The
+production Compose file that publishes `web` is not yet in the repository
+(remainder of P16-S2), so this procedure cannot be run yet.
+
+- Control Panel → Login Portal → Advanced → Reverse Proxy: source HTTPS, the
+  PartFlow hostname, port 443; destination HTTP, host `127.0.0.1` (never
+  `localhost`, which may resolve to IPv6 first), port = the loopback port the
+  production Compose project publishes;
+- Custom Header: confirm or add `X-Forwarded-For` = `$proxy_add_x_forwarded_for`
+  and `X-Forwarded-Proto` = `$scheme`, so the client address arrives last and
+  `web` can rate-limit per client; if DSM cannot supply it, every client shares
+  one rate-limit bucket (record it for the owner);
+- Advanced Settings: proxy send and read timeouts of 300 s (above `web`'s
+  180 s import timeout); request body of at least 5 MiB (above `web`'s 4 MiB);
+- redirect HTTP to HTTPS; never log cookies, `X-PartFlow-Station-Device` or
+  `X-PartFlow-CSRF`; DSM firewall and upstream rules admit only the approved
+  LAN or VPN sources; do not expose DSM administration through the PartFlow
+  hostname.
+
+**Certificate (DSM).** The certificate follows the common rules of
+[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1 (names the hostname, issued by a
+public ACME CA or the company's internal CA, never accepted per workstation
+past a warning). Control Panel → Security → Certificate → **Add** → import the
+certificate, its private key and the intermediate chain (internal CA), or **Get
+a certificate from Let's Encrypt** (public name; DSM renews it automatically).
+Then **Settings** → assign the certificate to the PartFlow reverse-proxy
+entry's hostname. DSM does not renew an imported certificate: import the new one
+before expiry and re-assign it. Distribute the internal CA to workstations and
+barcode terminals through the company's device management, and check expiry
+with the `openssl s_client` command in DEPLOYMENT §3.1 (monitoring: P16-S6).
+Executed and verified in P16-S7.
 
 ## 6. Backup staging data
 
@@ -260,12 +302,26 @@ system.
 ## 8. Production conversion after Phase 16
 
 Do not convert by merely changing the URL. Replace the development stack with
-the Phase 16 production artifacts and verify all production gates:
+the Phase 16 production artifacts and verify all production gates. State at
+P16-S2 (partially implemented): the production images exist
+(`backend/Dockerfile` and `frontend/Dockerfile`, `production` stages, and the
+`web` configuration in `frontend/nginx/`); `compose.production.yaml` and
+`.env.production.example` are **not yet in the repository**, so the numbered
+conversion procedure (remove staging from the pilot daemon, create the secrets
+directory and `postgres_password`, check `SITE_TIMEZONE`, start from a new empty
+database volume, migrate, one-worker first-run setup) is written when they
+land. The rules it must follow are already fixed in
+[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1: staging is not co-hosted on the
+pilot daemon, production data starts from a new empty volume (staging data is
+never promoted), and `down -v` is never run on the production project.
 
-- immutable production frontend and backend images;
+- immutable production frontend and backend images — images exist (P16-S2),
+  tagging and release identity pending (Compose file, P16-S3);
 - production Compose file with no source bind mounts, no reload/dev server, no
-  published database port, and explicit restart/resource/logging policies;
-- private backend/database networks and one reverse-proxy entry point;
+  published database port, and explicit restart/resource/logging policies —
+  pending (remainder of P16-S2);
+- private backend/database networks and one reverse-proxy entry point
+  (§5.2; host-verified in P16-S7);
 - Phase 14 authentication/authorization;
 - secret handling and separate least-privilege database roles;
 - scheduled logical backups, encrypted off-NAS replication, retention alerts,

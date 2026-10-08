@@ -4,9 +4,13 @@ import {
   ApiError,
   apiRequest,
   apiUpload,
+  RATE_LIMITED_MESSAGE,
+  refusalFlag,
+  REQUEST_TOO_LARGE_MESSAGE,
   setAuthFailureListener,
   setStationDeviceRefusalListener,
 } from './client';
+import { writeOutcomeUnknown } from './scan-station';
 
 // The API client core: the JSON path and the one raw-body upload path
 // share the same response handling — the backend's `{"detail": ...}`
@@ -365,4 +369,115 @@ test('FS-1: the station-device listener hears exactly the two device refusals, w
     setStationDeviceRefusalListener(null);
     setAuthFailureListener(null);
   }
+});
+
+// Answers the production `web` tier (nginx) generates itself: the same
+// `{"detail": ...}` shape as the backend, plus a status fallback for a
+// 413/429 whose body carries no usable detail (an HTML proxy page).
+
+function html(status: number): Response {
+  return new Response(
+    `<html><body><h1>${status}</h1><hr><center>nginx</center></body></html>`,
+    { status, headers: { 'Content-Type': 'text/html' } },
+  );
+}
+
+async function failureOf(call: Promise<unknown>): Promise<ApiError> {
+  const failure = await call.catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(ApiError);
+  return failure as ApiError;
+}
+
+test('FC-1: a web 429 keeps its detail and flag and is a definite refusal', async () => {
+  fetchMock.mockResolvedValue(
+    json(
+      {
+        detail:
+          'Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.',
+        rate_limited: true,
+      },
+      429,
+    ),
+  );
+
+  const failure = await failureOf(
+    apiRequest('/api/session', {
+      method: 'POST',
+      body: { login: 'mai', password: 'x' },
+    }),
+  );
+
+  expect(failure.status).toBe(429);
+  expect(failure.message).toBe(
+    'Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.',
+  );
+  expect(refusalFlag(failure, 'rate_limited')).toBe(true);
+  expect(writeOutcomeUnknown(failure)).toBe(false);
+});
+
+test('FC-2: a 429 with an HTML body falls back to the rate-limit copy', async () => {
+  fetchMock.mockResolvedValue(html(429));
+
+  const failure = await failureOf(
+    apiRequest('/api/session', { method: 'POST', body: {} }),
+  );
+
+  expect(failure.status).toBe(429);
+  expect(failure.message).toBe(RATE_LIMITED_MESSAGE);
+  expect(RATE_LIMITED_MESSAGE).toBe(
+    'Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.',
+  );
+  expect(writeOutcomeUnknown(failure)).toBe(false);
+});
+
+test('FC-3: a 413 HTML body falls back to the too-large copy; a backend JSON 413 keeps its detail', async () => {
+  fetchMock.mockResolvedValueOnce(html(413));
+  const proxyRefusal = await failureOf(
+    apiUpload('/api/users/4/avatar', new Blob(['x'], { type: 'image/png' })),
+  );
+  expect(proxyRefusal.status).toBe(413);
+  expect(proxyRefusal.message).toBe(REQUEST_TOO_LARGE_MESSAGE);
+  expect(REQUEST_TOO_LARGE_MESSAGE).toBe(
+    'This request is too large for PartFlow. Nothing was changed.',
+  );
+  expect(writeOutcomeUnknown(proxyRefusal)).toBe(false);
+
+  fetchMock.mockResolvedValueOnce(
+    json(
+      { detail: 'The image is larger than 2 MB. Choose a smaller image.' },
+      413,
+    ),
+  );
+  const appRefusal = await failureOf(
+    apiUpload('/api/users/4/avatar', new Blob(['x'], { type: 'image/png' })),
+  );
+  expect(appRefusal.status).toBe(413);
+  expect(appRefusal.message).toBe(
+    'The image is larger than 2 MB. Choose a smaller image.',
+  );
+  expect(refusalFlag(appRefusal, 'request_too_large')).toBe(false);
+  expect(writeOutcomeUnknown(appRefusal)).toBe(false);
+});
+
+test('FC-4: a 502 HTML body keeps the generic copy; web JSON 502 keeps its detail; both are unknown outcomes', async () => {
+  fetchMock.mockResolvedValueOnce(html(502));
+  const htmlFailure = await failureOf(
+    apiRequest('/api/workers', { method: 'POST', body: {} }),
+  );
+  expect(htmlFailure.status).toBe(502);
+  expect(htmlFailure.message).toBe('The request failed (HTTP 502).');
+  expect(writeOutcomeUnknown(htmlFailure)).toBe(true);
+
+  const detail =
+    'The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.';
+  fetchMock.mockResolvedValueOnce(
+    json({ detail, server_unavailable: true }, 502),
+  );
+  const webFailure = await failureOf(
+    apiRequest('/api/workers', { method: 'POST', body: {} }),
+  );
+  expect(webFailure.status).toBe(502);
+  expect(webFailure.message).toBe(detail);
+  expect(refusalFlag(webFailure, 'server_unavailable')).toBe(true);
+  expect(writeOutcomeUnknown(webFailure)).toBe(true);
 });

@@ -13,16 +13,21 @@ and Admin Maintenance** in `IMPLEMENTATION_ROADMAP.md`. Phase 16 covers backups,
 migrations, HTTPS/internal access, observability, rollback, reconciliation,
 pilot deployment, and administrative archive/purge maintenance.
 
-The repository has Phases 1–13 implemented end to end, including Phase 10.5 —
-Scan Station Receive Quantity, the Phase 11 monitoring views, Priority
-Management (Phase 12) and Full Administration (Phase 13). Phase 14 —
-Authentication, Role Enforcement, and Authorized Management Corrections has
-every planned slice (1–8) implemented: sign-in for application Users,
-server-side permission enforcement on every Administration and Management read
-and write, and Scan Station routes that require a station device enrolled by an
-administrator (§2). Phase 16 still owns TLS, the `Secure` session cookie by
-default, network rate limiting, and the production deployment artifacts and
-gates; it is in progress (§5 and `IMPLEMENTATION_ROADMAP.md`).
+The repository has Phases 1–15 closed, including Phase 10.5 — Scan Station
+Receive Quantity, the Phase 11 monitoring views, Priority Management
+(Phase 12), Full Administration (Phase 13), Phase 14 — Authentication, Role
+Enforcement, and Authorized Management Corrections (sign-in for application
+Users, server-side permission enforcement on every Administration and
+Management read and write, and Scan Station routes that require a station
+device enrolled by an administrator, §2) and Phase 15 — File-Based Work Order
+Import (closed 2026-10-08). Phase 16 is in progress: slice 1 (the read-only
+`reconcile` command) is implemented, and slice 2 (production artifacts) is
+partially implemented — the production backend image, the `web` image with its
+request limits and network rate limiting, and database settings read from a
+secret file (§3.1). The production Compose file, its configuration inventory
+and the operator commands that depend on them are not yet in the repository,
+and Phase 16 still owns the release flow, role hardening, backups,
+observability, host TLS and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
 
@@ -30,15 +35,18 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Wait for the Phase 16 production artifacts and gates in §5. |
-| Internet exposure | Prohibited now | No TLS, reverse proxy, rate limiting or production hardening exists yet (Phase 16), and the current Compose stack exposes development services (§2). |
+| Pilot or production use | Not ready | Production images and the `web` tier exist (§3.1), but the production Compose file, the release flow, role hardening, backups, observability and the pilot gates of §5 remain (Phase 16: the remainder of P16-S2, then P16-S3…S7). |
+| Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet, and the §5 gates have not passed. Network rate limiting exists in `web`, but the current Compose stack still exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
 
 ## 2. Why the current Compose stack is development-only
 
-The repository itself labels `compose.yaml` and both Dockerfiles as development
-artifacts. Observed constraints include:
+The repository itself labels `compose.yaml` as a development artifact, and the
+default (last) `development` stage of each Dockerfile with it; both Dockerfiles
+now also hold a `production` stage that Compose does not build (§3.1).
+`compose.yaml` is unchanged and remains development-only. Observed constraints
+include:
 
 - backend starts Uvicorn with `--reload`;
 - frontend runs the Vite development server instead of serving an immutable
@@ -82,22 +90,27 @@ Administration; after deploying, run
 ## 3. Target portable topology
 
 The Phase 16 production package should keep one topology across Synology and a
-future VPS:
+future VPS. TLS ends at the platform proxy (DSM reverse proxy, or Caddy on a
+VPS); the in-stack `web` (nginx) serves the immutable build and `/api` and is
+published on the host loopback address only (owner decision OD-16-02):
 
 ```text
 Browser / barcode workstation
             |
           HTTPS
             |
-Reverse proxy (only public/LAN entry point)
-       |                    |
-       | /                  | /api
-       v                    v
-Static frontend         FastAPI backend
-                             |
-                     private container network
-                             |
-                         PostgreSQL
+Platform TLS proxy (DSM reverse proxy | Caddy on a VPS)
+            |   http://127.0.0.1:<port>  (loopback only)
+            v
+web (nginx): static build, SPA fallback, request limits, rate limits
+            |
+          /api
+            v
+FastAPI backend
+            |
+    private container network
+            |
+        PostgreSQL
 ```
 
 Required boundaries:
@@ -112,6 +125,159 @@ Required boundaries:
   side effect of every application replica starting;
 - identify every deployment by an immutable Git commit or image tag;
 - make the same backup format portable between NAS and VPS.
+
+### 3.1 Production stack (Phase 16 slice 2)
+
+**State.** Partially implemented. In the repository: the `production` stages of
+`backend/Dockerfile` and `frontend/Dockerfile`, the `web` configuration in
+`frontend/nginx/`, and the backend database settings below. Not yet in the
+repository (the remainder of P16-S2): `compose.production.yaml`,
+`.env.production.example`, the production static tests and Compose stack smoke,
+and the operator commands that need them. Until they exist no production stack
+can be started from the repository, and every rule below that names a Compose
+service describes the design the Compose file must carry. Nothing in this
+section has been verified on a host (that is P16-S7).
+
+**Images.** `backend` (`production` stage): Python 3.12 slim, the locked
+non-development dependencies, no `tests/`, no `.env`, no reload server, runs as
+user `10001:10001`; start command `uvicorn app.main:app --host 0.0.0.0
+--port 8000 --no-access-log`. It never runs migrations on start. `web`
+(`production` stage): the pinned official `nginx:1.30.5-alpine` with the
+immutable build from `npm run build` (which includes the production-boundary
+check). Both default `development` stages are unchanged.
+
+**Backend database configuration.** The backend takes its connection from
+exactly one of: `DATABASE_URL` (development, tests, CI, staging), or
+`DATABASE_HOST`, `DATABASE_NAME`, `DATABASE_USER` and `DATABASE_PASSWORD_FILE`
+plus optional `DATABASE_PORT` (default 5432). Both forms present, or neither
+complete, is refused at startup. The password file must hold exactly one line
+(trailing line breaks are ignored), because PostgreSQL's `initdb` takes a new
+role's password from the first line only; a multi-line, empty, unreadable or
+non-UTF-8 file is refused with a message naming the file path and never its
+content. No validation error echoes an input value. The URL is composed in the
+application, so special characters in the password need no manual encoding.
+
+**Process model.** `WEB_CONCURRENCY` sets the number of uvicorn workers and
+`FORWARDED_ALLOW_IPS` the proxy addresses uvicorn trusts for forwarded headers.
+Each worker has its own first-run setup token and its own password-hashing
+bounds, so **first-run setup runs with one worker** (`WEB_CONCURRENCY=1`) and
+the configured count is restored afterwards; with two workers a request can
+reach the worker whose token was not copied and is refused `403
+setup_token_invalid` (no write). With more than one worker, a configuration
+refusal at startup stops the container with exit code `0`; the log line and the
+restart count, not the exit code, are the failure signal.
+
+**Request limits and timeouts (`web`).**
+
+| Route | Body limit | Upstream timeout |
+| --- | --- | --- |
+| Default for every `/api` route | 1 MiB | 60 s |
+| `PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image` | 4 MiB | 60 s |
+| `POST /api/work-orders/import/preview` | 4 MiB | 60 s |
+| `POST /api/work-orders/import` | 4 MiB | 180 s (read and send) |
+
+The 4 MiB limit is above the application's own limits (2 MiB images, 1 MiB
+import files), so the application's JSON 413 wins for an oversized but
+plausible file; `web` answers first only for a clearly larger body. `web` never
+retries a request upstream: one client request is at most one backend
+execution.
+
+**Rate limits (`web`, per forwarded client IP).** `POST /api/session` 10 per
+minute with burst 5 (six attempts at once, then one more every 6 s); `PUT
+/api/session/password`, `POST /api/setup/administrator` and `PUT
+/api/users/{user_id}/password` 5 per minute with burst 4 (five at once, then
+one every 12 s). Reads such as `GET /api/session` and sign-out are never
+limited. A 429 from `web` never reaches the application, so it never counts as
+a failed sign-in and never locks an account; the per-account lockout and the
+per-IP limit are independent layers. Device-activation codes are not rate
+limited (50 bits of entropy, 15-minute lifetime).
+
+**Responses generated by `web`.** These appear only for conditions `web`
+detects itself; every backend response, including the application's own 401,
+403, 409, 413, 422 and 503, passes through unchanged.
+
+| Status | When | Body `detail` | Client meaning |
+| --- | --- | --- | --- |
+| 413 | body over the location's limit | `This request is too large for PartFlow. Nothing was changed.` (`request_too_large: true`) | definite refusal |
+| 429 | rate limit exceeded (sends `Retry-After: 60`) | `Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.` (`rate_limited: true`) | definite refusal |
+| 502 | backend unreachable, or it closed the connection before answering | `The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | unknown outcome for a write |
+| 504 | no backend answer within the timeout | `The PartFlow server did not answer in time.` (`server_unavailable: true`) | unknown outcome for a write |
+
+A 502 or 504 keeps its 5xx status, so a station write that may have committed
+is shown as unknown and retried with the same `device_event_id`
+(`deployment/OPERATIONS_RUNBOOK.md` §2). The frontend shows a built-in message
+for a 413 or 429 that carries no JSON `detail` (for example one from a platform
+proxy). `web` adds no CORS headers and rewrites nothing else.
+
+**Caching and headers.** `index.html` and every single-page-app fallback are
+`no-cache`; `/assets/*` are immutable for one year, and a missing asset is a
+plain 404, never the application shell. Every response carries
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and a
+baseline `Content-Security-Policy` (same-origin scripts, styles, connections
+and frames; `blob:` and `data:` images for the local image previews; no inline
+script). Whoever adds a feature that needs another source amends the policy in
+the same change. HSTS belongs to the platform proxy and is reviewed in P16-S7.
+
+**Real client address.** `web` trusts forwarded headers from exactly one hop,
+detected when the container starts as its default gateway on the edge network
+(the address host-loopback connections arrive from), or set explicitly with
+`PARTFLOW_TRUSTED_PROXY` (one IPv4 address). If neither yields an address the
+container refuses to start. From that hop `web` takes the **last**
+`X-Forwarded-For` address as the client and replaces the header it sends the
+backend with that single address; `X-Forwarded-Proto` is honoured only from the
+same hop. `web` publishes no certificate and reads no TLS configuration.
+
+**Request log.** The `web` access log (client address, method, path without
+query string, status, bytes, duration, user agent) is the request log in this
+slice; it never contains cookies, query strings or any PartFlow header, and the
+health probes are excluded. uvicorn's own access log is off.
+
+**Platform proxy requirements.** The DSM reverse proxy (or Caddy) must:
+terminate HTTPS with a certificate that company workstations trust; send HTTP
+only as a redirect to HTTPS; forward to `http://127.0.0.1:<port>` (the literal
+`127.0.0.1`, never `localhost`, which can resolve to `::1` first while `web` is
+published on IPv4 loopback only) with `Host`, `X-Forwarded-For` (the client
+address appended last) and `X-Forwarded-Proto: https`; accept request bodies of
+at least 5 MiB and use send and read timeouts of at least 300 s, so that `web`'s
+or the application's JSON answer wins; never log cookies,
+`X-PartFlow-Station-Device` or `X-PartFlow-CSRF`; and admit only the approved
+LAN or VPN sources, together with the host firewall. If the proxy cannot supply
+the client address, every client shares one rate-limit bucket; record it and let
+the owner decide. DSM settings are in
+[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §5 and the Caddy
+example in [`deployment/VPS.md`](./deployment/VPS.md) §4. These requirements are
+documented here; the host settings are **executed and verified in P16-S7**.
+
+**Certificate procedure.** The certificate names the PartFlow hostname (SAN)
+and is issued by a public ACME CA (public DNS name) or by the company's internal
+CA (internal-only name); never self-signed per host and never accepted
+workstation by workstation past a browser warning. The issuing CA of an internal
+certificate is distributed to workstations and barcode terminals by the
+company's device management. The deployment administrator owns renewal; expiry
+monitoring is P16-S6. Check expiry from any client: `openssl s_client -connect
+<host>:443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout
+-subject -enddate`. Platform steps are in SYNOLOGY_NAS §5 and VPS §4. Executed
+and verified in P16-S7.
+
+**Environment separation (OD-16-01).** Production uses its own Compose project,
+database volume, secrets directory, hostname and (P16-S5) backup location; none
+is shared with or pointed at a staging or development stack. Production starts
+from a new, empty database volume, then migrations, then first-run setup;
+staging or development data is never attached, reused or copied into it, and a
+deliberate restore into production is a P16-S5 procedure that needs an owner
+decision. During the pilot, pf-managed staging is not installed on the pilot
+Docker daemon, and the manual `compose.yaml` staging of SYNOLOGY_NAS §4 is
+stopped, with its containers removed and **without** deleting volumes, before
+production starts. `SITE_TIMEZONE` equals the staging value (§6). Never run
+`down -v` (or remove a volume) on the production project: it deletes the
+database.
+
+**Pending in the remainder of P16-S2:** the production Compose file (services
+`db`, `backend`, `web`, the one-shot `migrate`; restart, health, resource and
+logging policies; secrets as files; `SESSION_COOKIE_SECURE=true` fixed), the
+configuration and secret inventory (`.env.production.example`), the static
+tests and stack smoke, the CI steps, and the operator command table and release
+sequence built on them.
 
 ## 4. Platform decision
 
@@ -151,12 +317,14 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
 
 - production backend image has no reload server and uses a documented process
   model (each backend process announces its own first-run setup token while no
-  Administrator exists; the first creation closes setup for all of them);
+  Administrator exists; the first creation closes setup for all of them) —
+  **implemented** (`backend/Dockerfile` `production` stage; process model in
+  §3.1);
 - production frontend is an immutable Vite build served by a production web
-  server;
+  server — **implemented** (`web`, §3.1);
 - production Compose configuration has restart policies, health checks,
   private networks, persistent volumes, conservative resource limits, and no
-  development bind mounts;
+  development bind mounts — **pending** (remainder of P16-S2);
 - reverse proxy configuration owns TLS, SPA fallback, request limits, and
   `/api` routing — the proxy must accept request bodies of at least 3 MiB on the
   image upload routes (`PUT /api/workers/{id}/avatar`,
@@ -173,11 +341,20 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   Work Orders changes a quantity (PF-2) took 27.23 s to import (2.45 s to
   check; replaying the same file, now all as saved, took 2.48 s to check and
   2.45 s to import); a read timeout of at least
-  120 s is still recommended. The proxy configuration itself belongs to Phase 16;
+  120 s is still recommended. `web` implements these limits with the values in
+  §3.1 (4 MiB on those five routes, 1 MiB elsewhere, a 180 s import read
+  timeout) — **implemented**; the platform proxy in front of it must accept at
+  least 5 MiB and use timeouts of at least 300 s, and TLS is terminated there —
+  documented in §3.1, **executed and verified in P16-S7**;
 - required configuration is validated at startup and secrets have no committed
-  defaults;
+  defaults — **implemented** for the database settings (§3.1); the cookie and
+  time-zone settings are fixed or required by the production Compose file
+  (pending);
 - image or release versions are immutable and retained long enough to roll back
-  application code.
+  application code — **pending** (tagged images by the Compose file; the
+  release identity inside the image is P16-S3).
+
+The gates above remain gates until P16-S7 records passing evidence.
 
 ### Data safety and operations
 
@@ -242,8 +419,10 @@ Every platform follows the same release order:
 6. Enter the approved maintenance mode/window when required.
 7. Run Alembic migration once and capture its output.
 8. Start the target application release. On a database with no
-   Administrator, complete first-run setup (the setup token is in the backend
-   log) before opening access. Then enroll each Scan Station device
+   Administrator, start the backend with one worker (`WEB_CONCURRENCY=1`, so
+   there is a single setup token, §3.1), complete first-run setup (the setup
+   token is in the backend log) before opening access, then restart it with the
+   configured worker count. Then enroll each Scan Station device
    (Administration → Scan Stations).
 9. Run health, API, UI, authorization, scan-focus, and write/read-back smoke
    checks using designated test data.

@@ -33,6 +33,9 @@ const S1 = 'PartFlow already has an administrator. Sign in instead.';
 const S2 =
   'The setup token is not correct. Copy the current token from the PartFlow server log.';
 const UNREACHABLE = 'The PartFlow server could not be reached. Try again.';
+/** The production `web` tier's own 429 copy (spec P16-S2 §4.6). */
+const RATE_LIMITED =
+  'Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.';
 const CHANGE_UNKNOWN =
   'The server did not answer — your password may or may not have been changed. If signing in with the new password fails, use the old one.';
 const PASSWORD = 'correct horse battery';
@@ -416,6 +419,26 @@ test('Sign in: a busy check is a definite refusal; no answer re-reads the sign-i
   ).toBeInTheDocument();
   expect(sent('GET', '/api/session')).toHaveLength(2);
   expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('FA-1: Sign in: the web rate limit (429) is a definite refusal shown as sent', async () => {
+  await renderShell();
+  const dialog = openSignIn();
+  failures['POST /api/session'] = {
+    status: 429,
+    body: { detail: RATE_LIMITED, rate_limited: true },
+  };
+  fillSignIn(dialog, 'jdoe', PASSWORD);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    RATE_LIMITED,
+  );
+  expect(screen.getByRole('dialog', { name: 'Sign in' })).toBe(dialog);
+  expect(within(dialog).getByRole('button', { name: 'Sign in' })).toBeEnabled();
+  expect(within(dialog).queryByText(UNREACHABLE)).toBeNull();
+  // A definite refusal never re-reads the sign-in.
+  expect(sent('POST', '/api/session')).toHaveLength(1);
+  expect(sent('GET', '/api/session')).toHaveLength(1);
 });
 
 test('Sign in: no answer and still signed out keeps the dialog with the unreachable text', async () => {

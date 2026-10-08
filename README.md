@@ -1107,6 +1107,28 @@ docker compose exec frontend sh -lc "npm run format:check && npm run lint && npm
 docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
 ```
 
+## Production images (Phase 16 slice 2, partial)
+
+Both Dockerfiles end with the `development` stage that `compose.yaml` builds,
+and also contain a `production` stage that Compose does not build:
+
+```bash
+docker build --target production backend
+docker build --target production frontend
+```
+
+The backend `production` image runs as a non-root user without a reload server
+and without migrations on start. The frontend `production` image is the pinned
+official nginx (`web`) serving the immutable build and proxying `/api`, with the
+request limits, rate limits and generated JSON answers described in
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1. For these images the backend
+can read its database connection from `DATABASE_HOST`, `DATABASE_NAME`,
+`DATABASE_USER` and `DATABASE_PASSWORD_FILE` (plus optional `DATABASE_PORT`)
+instead of `DATABASE_URL`; setting both forms is refused. The production
+Compose file and its configuration inventory are not yet in the repository
+(remainder of P16-S2), so there is no supported way to start a production stack
+yet; do not use `compose.yaml` for production.
+
 ## Continuous integration
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the same quality gates
@@ -1135,6 +1157,8 @@ backend/
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
   alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening + Phase 8 quantity lineage + Phase 9 corrections widening + Phase 10 Stockroom and allocation)
+  Dockerfile       `production` and `development` (default) stages
+frontend/nginx/    `web` image configuration (nginx templates, proxy and header snippets, trusted-proxy entrypoint)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

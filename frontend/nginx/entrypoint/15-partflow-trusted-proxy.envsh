@@ -1,0 +1,45 @@
+#!/bin/sh
+# PartFlow web: resolve the one trusted proxy address before the templates are rendered.
+# Sourced by the official nginx entrypoint (/docker-entrypoint.d/*.envsh), so the exported
+# value reaches 20-envsubst-on-templates.sh.
+#
+# - PARTFLOW_TRUSTED_PROXY set (operator override): it must be one IPv4 address.
+# - Empty or unset (default): the container's default IPv4 gateway, i.e. the edge network
+#   gateway that host loopback connections arrive from.
+# Either failure stops the container from starting (fail closed).
+# Safe under the `set -eu` that earlier sourced entrypoint scripts leave active.
+
+partflow_is_ipv4() {
+    case $1 in
+        '' | *[!0-9.]*) return 1 ;;
+    esac
+    printf '%s\n' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
+partflow_default_gateway() {
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 route show 2>/dev/null | awk '$1 == "default" && $2 == "via" { print $3; exit }'
+        return
+    fi
+    # Fallback: /proc/net/route holds the default route's gateway as little-endian hex.
+    awk '$2 == "00000000" && $3 != "00000000" { print $3; exit }' /proc/net/route 2>/dev/null |
+        sed 's/\(..\)\(..\)\(..\)\(..\)/0x\4 0x\3 0x\2 0x\1/' |
+        while read -r a b c d; do printf '%d.%d.%d.%d\n' "$a" "$b" "$c" "$d"; done
+}
+
+PARTFLOW_TRUSTED_PROXY=${PARTFLOW_TRUSTED_PROXY:-}
+if [ -n "$PARTFLOW_TRUSTED_PROXY" ]; then
+    if ! partflow_is_ipv4 "$PARTFLOW_TRUSTED_PROXY"; then
+        echo 'PartFlow web: PARTFLOW_TRUSTED_PROXY must be one IPv4 address.' >&2
+        exit 1
+    fi
+else
+    PARTFLOW_TRUSTED_PROXY=$(partflow_default_gateway || true)
+    if ! partflow_is_ipv4 "$PARTFLOW_TRUSTED_PROXY"; then
+        echo 'PartFlow web: cannot determine the trusted proxy address (the container has no default IPv4 route). Set PARTFLOW_TRUSTED_PROXY.' >&2
+        exit 1
+    fi
+fi
+
+export PARTFLOW_TRUSTED_PROXY
+unset -f partflow_is_ipv4 partflow_default_gateway

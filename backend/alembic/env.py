@@ -1,6 +1,6 @@
 """Alembic migration environment.
 
-Uses the same DATABASE_URL configuration as the backend application so
+Uses the same database configuration as the backend application so
 migrations always target the database the API runs against. A caller may
 pre-set `sqlalchemy.url` on the Alembic config (the test suite does, to
 migrate an isolated temporary database); only then is the application

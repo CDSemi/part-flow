@@ -56,6 +56,10 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEMPLATE_DATABASE = "partflow_test_reconciliation"
 _CASE_DATABASE = "partflow_test_reconciliation_case"
 _DB_URL_ENV = "DATABASE_URL"
+_CONFIGURATION_INVALID_MESSAGE = (
+    "The database connection is not configured or is invalid (DATABASE_URL, or DATABASE_HOST,"
+    " DATABASE_NAME, DATABASE_USER and DATABASE_PASSWORD_FILE). Nothing was checked."
+)
 
 _PN_A = "PN-A"
 _PN_B = "PN-B"
@@ -2189,9 +2193,30 @@ def test_missing_configuration(
     assert result.exit_code == 2
     assert result.report["error"] == {
         "code": "configuration_invalid",
-        "message": "DATABASE_URL is not set or the configuration is invalid. Nothing was checked.",
+        "message": _CONFIGURATION_INVALID_MESSAGE,
     }
     assert result.report["checks"] == []
+
+
+def test_unreadable_password_file_configuration(
+    run: Callable[..., Run], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """N-6c (Phase 16 slice 2): the file-based form with a missing password
+    file is a configuration error report (exit 2) that never repeats the path."""
+    monkeypatch.chdir(tmp_path)
+    missing = tmp_path / "no-such-secret-dir" / "postgres_password"
+    monkeypatch.setenv("DATABASE_HOST", "db")
+    monkeypatch.setenv("DATABASE_NAME", "partflow")
+    monkeypatch.setenv("DATABASE_USER", "owner")
+    monkeypatch.setenv("DATABASE_PASSWORD_FILE", str(missing))
+    result = run(None)
+    assert result.exit_code == 2
+    assert result.report["error"] == {
+        "code": "configuration_invalid",
+        "message": _CONFIGURATION_INVALID_MESSAGE,
+    }
+    assert result.report["checks"] == []
+    assert "no-such-secret-dir" not in json.dumps(result.report) + result.stderr
 
 
 @pytest.mark.parametrize(

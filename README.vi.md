@@ -465,6 +465,27 @@ Quality gate backend đầy đủ:
 docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
 ```
 
+## Production image (Phase 16 slice 2, một phần)
+
+Cả hai Dockerfile kết thúc bằng stage `development` mà `compose.yaml` build, và
+còn có stage `production` mà Compose không build:
+
+```bash
+docker build --target production backend
+docker build --target production frontend
+```
+
+Image backend `production` chạy bằng user non-root, không có reload server và
+không chạy migration khi start. Image frontend `production` là nginx chính thức
+đã pin (`web`) phục vụ build bất biến và proxy `/api`, với request limit, rate
+limit và các response JSON tự sinh được mô tả ở
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1. Với các image này, backend có
+thể đọc kết nối database từ `DATABASE_HOST`, `DATABASE_NAME`, `DATABASE_USER` và
+`DATABASE_PASSWORD_FILE` (cùng `DATABASE_PORT` tùy chọn) thay cho `DATABASE_URL`;
+đặt cả hai dạng bị từ chối. Production Compose file và bảng kê configuration chưa
+có trong repo (phần còn lại của P16-S2), nên chưa có cách được hỗ trợ để start
+production stack; không dùng `compose.yaml` cho production.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` chạy cùng quality gate trên mỗi push vào `main` và
@@ -490,6 +511,8 @@ backend/
   app/infrastructure/ database engine, connectivity và SQLAlchemy mapping
   tests/           pytest suite
   alembic/         migration environment và revisions
+  Dockerfile       stage `production` và `development` (mặc định)
+frontend/nginx/    cấu hình image `web` (nginx template, proxy/header snippet, trusted-proxy entrypoint)
 compose.yaml       development stack: db, backend, frontend
 docs/              tài liệu chuẩn của project
 ```

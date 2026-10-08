@@ -194,6 +194,11 @@ Từ workstation được phép:
 
 ## 5. DSM Reverse Proxy cho HTTPS nội bộ
 
+Mục này có hai trường hợp: staging có giới hạn trên development stack (§5.1) và
+tầng `web` production (§5.2).
+
+### 5.1 Staging (development stack)
+
 Với internal DNS name, tạo DSM reverse-proxy rule có source HTTPS và destination
 là frontend local. Route toàn bộ origin về frontend; Vite proxy hiện tại sẽ
 chuyển `/api` sang backend.
@@ -209,6 +214,41 @@ Kiểm soát:
 
 Điều này bảo vệ transport tốt hơn nhưng không biến development server hoặc ứng
 dụng chưa authentication thành production-ready.
+
+### 5.2 `web` production (Phase 16)
+
+Tầng `web` production chỉ được publish trên địa chỉ loopback của NAS, nên DSM
+reverse proxy là điểm vào HTTPS duy nhất. Các thiết lập dưới đây là giá trị bắt
+buộc từ [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; chúng **được ghi tài liệu
+ở P16-S2 và được thực hiện, xác minh trên NAS ở P16-S7**. Production Compose file
+publish `web` chưa có trong repo (phần còn lại của P16-S2), nên quy trình này
+chưa thể chạy.
+
+- Control Panel → Login Portal → Advanced → Reverse Proxy: source HTTPS, hostname
+  PartFlow, port 443; destination HTTP, host `127.0.0.1` (không bao giờ
+  `localhost`, vì có thể resolve ra IPv6 trước), port = loopback port mà
+  production Compose project publish;
+- Custom Header: xác nhận hoặc thêm `X-Forwarded-For` = `$proxy_add_x_forwarded_for`
+  và `X-Forwarded-Proto` = `$scheme`, để client address đến ở cuối và `web` có thể
+  rate-limit theo client; nếu DSM không cung cấp được, mọi client dùng chung một
+  rate-limit bucket (ghi lại cho owner);
+- Advanced Settings: proxy send và read timeout 300 s (cao hơn import timeout 180 s
+  của `web`); request body tối thiểu 5 MiB (cao hơn 4 MiB của `web`);
+- redirect HTTP sang HTTPS; không bao giờ log cookie, `X-PartFlow-Station-Device`
+  hay `X-PartFlow-CSRF`; DSM firewall và upstream rule chỉ cho nguồn LAN hoặc VPN
+  đã duyệt; không expose DSM administration qua PartFlow hostname.
+
+**Certificate (DSM).** Certificate theo các quy tắc chung ở
+[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1 (nêu hostname, do CA ACME công khai hoặc
+CA nội bộ của công ty cấp, không bao giờ được chấp nhận theo từng workstation bằng
+cách bỏ qua cảnh báo). Control Panel → Security → Certificate → **Add** → import
+certificate, private key và intermediate chain (CA nội bộ), hoặc **Get a
+certificate from Let's Encrypt** (tên public; DSM tự gia hạn). Sau đó **Settings**
+→ gán certificate cho hostname của mục reverse-proxy PartFlow. DSM không gia hạn
+certificate đã import: import cái mới trước khi hết hạn và gán lại. Phân phối CA
+nội bộ đến workstation và barcode terminal qua device management của công ty, và
+kiểm tra hạn dùng bằng lệnh `openssl s_client` ở DEPLOYMENT §3.1 (giám sát:
+P16-S6). Thực hiện và xác minh ở P16-S7.
 
 ## 6. Backup dữ liệu staging
 
@@ -256,12 +296,26 @@ database.
 ## 8. Chuyển sang production sau Phase 16
 
 Không chuyển production chỉ bằng cách đổi URL. Thay development stack bằng
-artifact production Phase 16 và verify toàn bộ gate:
+artifact production Phase 16 và verify toàn bộ gate. Trạng thái ở P16-S2 (mới
+triển khai một phần): production image đã có (`backend/Dockerfile` và
+`frontend/Dockerfile`, stage `production`, và cấu hình `web` trong
+`frontend/nginx/`); `compose.production.yaml` và `.env.production.example`
+**chưa có trong repo**, nên quy trình chuyển đổi có đánh số (gỡ staging khỏi
+daemon pilot, tạo thư mục secret và `postgres_password`, kiểm tra
+`SITE_TIMEZONE`, bắt đầu từ database volume mới và rỗng, migrate, first-run setup
+một worker) sẽ được viết khi chúng có. Các quy tắc nó phải theo đã được cố định
+ở [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1: staging không đặt chung trên
+daemon pilot, dữ liệu production bắt đầu từ volume mới rỗng (dữ liệu staging
+không bao giờ được promote), và không bao giờ chạy `down -v` trên production
+project.
 
-- frontend/backend image production bất biến;
+- frontend/backend image production bất biến — image đã có (P16-S2), tagging và
+  release identity còn lại (Compose file, P16-S3);
 - production Compose không source bind mount, không reload/dev server, không
-  publish database port, có restart/resource/logging policy rõ;
-- private backend/database network và một reverse-proxy entry point;
+  publish database port, có restart/resource/logging policy rõ — còn lại (phần
+  còn lại của P16-S2);
+- private backend/database network và một reverse-proxy entry point (§5.2; xác
+  minh trên host ở P16-S7);
 - authentication/authorization Phase 14;
 - secret handling và database role tách biệt theo least privilege;
 - logical backup theo lịch, replicate off-NAS có mã hóa, retention alert và

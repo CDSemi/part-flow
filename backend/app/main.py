@@ -39,8 +39,10 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # get_settings() validates required configuration; a missing
-    # DATABASE_URL aborts startup here instead of failing per-request.
+    # get_settings() validates required configuration; a missing or invalid
+    # database connection (DATABASE_URL, or the file-based DATABASE_HOST,
+    # DATABASE_NAME, DATABASE_USER and DATABASE_PASSWORD_FILE form) aborts
+    # startup here instead of failing per-request.
     settings = get_settings()
     app.state.engine = build_engine(settings.database_url)
     # Phase 14 slice 1: while no administrator exists, print the

@@ -156,7 +156,9 @@ _REPLAY_CHECKS: Final = frozenset({"a", "c", "d"})
 
 RUN_ERROR_MESSAGES: Final[Mapping[str, str]] = {
     "configuration_invalid": (
-        "DATABASE_URL is not set or the configuration is invalid. Nothing was checked."
+        "The database connection is not configured or is invalid (DATABASE_URL, or"
+        " DATABASE_HOST, DATABASE_NAME, DATABASE_USER and DATABASE_PASSWORD_FILE)."
+        " Nothing was checked."
     ),
     "database_unavailable": "The PartFlow database could not be reached. Nothing was checked.",
     "not_read_only": "The reconciliation transaction is not read-only. Nothing was checked.",

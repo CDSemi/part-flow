@@ -23,6 +23,9 @@
 // station (any more), or it is enrolled for another one — with the
 // device header value that request actually sent.
 //
+// In production the `web` tier answers 413/429/502/504 itself with the
+// same `{"detail": ...}` shape, so those answers read like any other.
+//
 // Production-safe: no mock data, no framework imports.
 
 /** One failed API call: HTTP status plus the user-facing message. */
@@ -151,9 +154,19 @@ export function errorMessage(error: unknown): string {
   return 'The PartFlow server could not be reached. Nothing was changed.';
 }
 
+/** A 429 without a usable `detail` (identical to `web`'s JSON copy). */
+export const RATE_LIMITED_MESSAGE =
+  'Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.';
+
+/** A 413 without a usable `detail` (identical to `web`'s JSON copy). */
+export const REQUEST_TOO_LARGE_MESSAGE =
+  'This request is too large for PartFlow. Nothing was changed.';
+
 /**
  * FastAPI's `detail` may be a string (application errors) or an array
  * of field issues (request validation). Reduce both to one sentence.
+ * Only a body with no usable `detail` (for example an HTML 413/429 from
+ * a platform proxy) falls back to a status sentence.
  */
 function detailToMessage(detail: unknown, status: number): string {
   if (typeof detail === 'string' && detail.trim()) return detail;
@@ -161,6 +174,8 @@ function detailToMessage(detail: unknown, status: number): string {
     const first = detail[0] as { msg?: unknown } | undefined;
     if (first && typeof first.msg === 'string') return first.msg;
   }
+  if (status === 429) return RATE_LIMITED_MESSAGE;
+  if (status === 413) return REQUEST_TOO_LARGE_MESSAGE;
   return `The request failed (HTTP ${status}).`;
 }
 

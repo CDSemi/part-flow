@@ -14,16 +14,20 @@ and Admin Maintenance** trong `IMPLEMENTATION_ROADMAP.md`. Phase 16 bao gồm
 backup, migration, HTTPS/truy cập nội bộ, observability, rollback,
 reconciliation, pilot deployment và bảo trì archive/purge dành cho Admin.
 
-Repo đã triển khai end to end từ Phase 1 đến Phase 13, gồm cả Phase 10.5 —
-Scan Station Receive Quantity, các view giám sát của Phase 11, Priority
-Management (Phase 12) và Administration đầy đủ (Phase 13). Phase 14 —
-Authentication, Role Enforcement, and Authorized Management Corrections đã
-triển khai mọi slice đã lập kế hoạch (1–8): sign-in cho application User,
+Repo đã đóng Phase 1 đến Phase 15, gồm cả Phase 10.5 — Scan Station Receive
+Quantity, các view giám sát của Phase 11, Priority Management (Phase 12),
+Administration đầy đủ (Phase 13), Phase 14 — Authentication, Role Enforcement,
+and Authorized Management Corrections (sign-in cho application User,
 permission enforcement phía server trên mọi đọc và write Administration và
 Management, và các route Scan Station yêu cầu thiết bị station do administrator
-enroll (§2). Phase 16 vẫn sở hữu TLS, session cookie `Secure` mặc định, network
-rate limiting, cùng artifact và gate triển khai production; phase này đang được
-thực hiện (§5 và `IMPLEMENTATION_ROADMAP.md`).
+enroll, §2) và Phase 15 — File-Based Work Order Import (đóng 2026-10-08).
+Phase 16 đang thực hiện: slice 1 (lệnh `reconcile` chỉ đọc) đã triển khai, và
+slice 2 (production artifact) mới triển khai một phần — image backend
+production, image `web` cùng request limit và network rate limiting, và database
+setting đọc từ secret file (§3.1). Production Compose file, bảng kê configuration
+và các lệnh vận hành phụ thuộc chúng chưa có trong repo, và Phase 16 vẫn sở hữu
+release flow, role hardening, backup, observability, TLS trên host và các gate
+(§5 và `IMPLEMENTATION_ROADMAP.md`).
 
 Vì vậy:
 
@@ -31,15 +35,17 @@ Vì vậy:
 | --- | --- | --- |
 | Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
 | Synology staging/test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong LAN, dùng dữ liệu giả/không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot hoặc production | Chưa sẵn sàng | Chờ artifact và gate production của Phase 16 ở §5. |
-| Mở ra Internet | Hiện tại bị cấm | Chưa có TLS, reverse proxy, rate limiting hay production hardening (Phase 16), và Compose hiện tại đang expose các service development (§2). |
+| Pilot hoặc production | Chưa sẵn sàng | Production image và tầng `web` đã có (§3.1), nhưng production Compose file, release flow, role hardening, backup, observability và các pilot gate ở §5 vẫn còn lại (Phase 16: phần còn lại của P16-S2, rồi P16-S3…S7). |
+| Mở ra Internet | Hiện tại bị cấm | TLS do platform proxy kết thúc, và chưa host nào cấu hình hay xác minh nó; các gate §5 chưa đạt. Network rate limiting đã có trong `web`, nhưng Compose hiện tại vẫn expose các service development (§2). |
 
 Triển khai staging nội bộ không có nghĩa Phase 16 đã hoàn thành.
 
 ## 2. Vì sao Compose hiện tại chỉ dành cho development
 
-Repo tự ghi rõ `compose.yaml` và hai Dockerfile là artifact development. Các
-giới hạn đã quan sát được gồm:
+Repo tự ghi rõ `compose.yaml` là artifact development, cùng với stage
+`development` mặc định (cuối cùng) của mỗi Dockerfile; cả hai Dockerfile nay còn
+có stage `production` mà Compose không build (§3.1). `compose.yaml` không đổi và
+vẫn chỉ dành cho development. Các giới hạn đã quan sát được gồm:
 
 - backend chạy Uvicorn với `--reload`;
 - frontend chạy Vite development server thay vì phục vụ production build bất
@@ -72,22 +78,28 @@ Thiếu row nghĩa là không có holder. Kỳ vọng cả hai số đếm ít n
 
 ## 3. Topology portable đích
 
-Gói production Phase 16 nên giữ cùng một topology trên Synology và VPS sau này:
+Gói production Phase 16 nên giữ cùng một topology trên Synology và VPS sau này.
+TLS kết thúc tại platform proxy (DSM reverse proxy, hoặc Caddy trên VPS);
+`web` (nginx) nằm trong stack phục vụ build bất biến và `/api`, và chỉ được
+publish trên địa chỉ loopback của host (quyết định của owner OD-16-02):
 
 ```text
 Browser / barcode workstation
             |
           HTTPS
             |
-Reverse proxy (điểm vào LAN/public duy nhất)
-       |                    |
-       | /                  | /api
-       v                    v
-Static frontend         FastAPI backend
-                             |
-                     private container network
-                             |
-                         PostgreSQL
+Platform TLS proxy (DSM reverse proxy | Caddy on a VPS)
+            |   http://127.0.0.1:<port>  (loopback only)
+            v
+web (nginx): static build, SPA fallback, request limits, rate limits
+            |
+          /api
+            v
+FastAPI backend
+            |
+    private container network
+            |
+        PostgreSQL
 ```
 
 Các ranh giới bắt buộc:
@@ -103,6 +115,155 @@ Các ranh giới bắt buộc:
   không kiểm soát mỗi khi replica khởi động;
 - định danh mỗi lần triển khai bằng Git commit hoặc image tag bất biến;
 - dùng cùng một format backup portable giữa NAS và VPS.
+
+### 3.1 Production stack (Phase 16 slice 2)
+
+**Trạng thái.** Mới triển khai một phần. Có trong repo: các stage `production`
+của `backend/Dockerfile` và `frontend/Dockerfile`, cấu hình `web` trong
+`frontend/nginx/`, và các database setting của backend bên dưới. Chưa có trong
+repo (phần còn lại của P16-S2): `compose.production.yaml`,
+`.env.production.example`, các static test production và Compose stack smoke, và
+các lệnh vận hành cần chúng. Cho đến khi chúng có, không thể khởi động production
+stack từ repo, và mọi quy tắc dưới đây nhắc đến Compose service là mô tả thiết kế
+mà Compose file phải mang. Không có gì trong mục này đã được xác minh trên host
+(đó là P16-S7).
+
+**Image.** `backend` (stage `production`): Python 3.12 slim, dependency không
+phải development đã lock, không có `tests/`, không có `.env`, không có reload
+server, chạy bằng user `10001:10001`; lệnh start là `uvicorn app.main:app --host
+0.0.0.0 --port 8000 --no-access-log`. Nó không bao giờ chạy migration khi start.
+`web` (stage `production`): official `nginx:1.30.5-alpine` đã pin cùng build bất
+biến từ `npm run build` (gồm production-boundary check). Hai stage `development`
+mặc định không đổi.
+
+**Cấu hình database của backend.** Backend lấy kết nối từ đúng một trong: `DATABASE_URL`
+(development, test, CI, staging), hoặc `DATABASE_HOST`, `DATABASE_NAME`,
+`DATABASE_USER` và `DATABASE_PASSWORD_FILE` cùng `DATABASE_PORT` tùy chọn (mặc
+định 5432). Có cả hai dạng, hoặc không dạng nào đầy đủ, đều bị từ chối lúc
+startup. File password phải có đúng một dòng (line break ở cuối được bỏ qua), vì
+`initdb` của PostgreSQL chỉ lấy password của role mới từ dòng đầu; file nhiều
+dòng, rỗng, không đọc được hoặc không phải UTF-8 bị từ chối với thông báo nêu
+đường dẫn file và không bao giờ nêu nội dung. Không validation error nào echo giá
+trị input. URL được ghép trong application, nên ký tự đặc biệt trong password
+không cần encode thủ công.
+
+**Process model.** `WEB_CONCURRENCY` đặt số uvicorn worker và
+`FORWARDED_ALLOW_IPS` đặt các địa chỉ proxy mà uvicorn tin cậy cho forwarded
+header. Mỗi worker có setup token first-run riêng và giới hạn password-hashing
+riêng, nên **first-run setup chạy với một worker** (`WEB_CONCURRENCY=1`) và số
+worker cấu hình được khôi phục sau đó; với hai worker, một request có thể đến
+worker không giữ token đã được copy và bị từ chối `403 setup_token_invalid`
+(không write). Với hơn một worker, việc từ chối cấu hình lúc startup dừng
+container với exit code `0`; tín hiệu lỗi là dòng log và số lần restart, không
+phải exit code.
+
+**Request limit và timeout (`web`).**
+
+| Route | Giới hạn body | Upstream timeout |
+| --- | --- | --- |
+| Mặc định cho mọi route `/api` | 1 MiB | 60 s |
+| `PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image` | 4 MiB | 60 s |
+| `POST /api/work-orders/import/preview` | 4 MiB | 60 s |
+| `POST /api/work-orders/import` | 4 MiB | 180 s (read và send) |
+
+Giới hạn 4 MiB cao hơn giới hạn của chính application (ảnh 2 MiB, file import
+1 MiB), nên JSON 413 của application thắng với file quá cỡ nhưng hợp lý; `web`
+chỉ trả lời trước với body lớn hơn rõ rệt. `web` không bao giờ retry request
+lên upstream: một request của client là nhiều nhất một lần thực thi ở backend.
+
+**Rate limit (`web`, theo client IP đã forward).** `POST /api/session` 10 mỗi
+phút, burst 5 (sáu lần thử cùng lúc, rồi thêm một lần mỗi 6 s); `PUT
+/api/session/password`, `POST /api/setup/administrator` và `PUT
+/api/users/{user_id}/password` 5 mỗi phút, burst 4 (năm lần cùng lúc, rồi thêm
+một lần mỗi 12 s). Các lệnh đọc như `GET /api/session` và sign-out không bao giờ
+bị giới hạn. Mã 429 từ `web` không bao giờ đến application, nên không bao giờ
+được tính là sign-in thất bại và không bao giờ khóa account; khóa theo account
+và giới hạn theo IP là hai lớp độc lập. Mã kích hoạt thiết bị không bị rate
+limit (50 bit entropy, hiệu lực 15 phút).
+
+**Response do `web` sinh ra.** Chúng chỉ xuất hiện với điều kiện `web` tự phát
+hiện; mọi response của backend, gồm 401, 403, 409, 413, 422 và 503 của chính
+application, đi qua không đổi.
+
+| Status | Khi nào | `detail` của body | Ý nghĩa với client |
+| --- | --- | --- | --- |
+| 413 | body vượt giới hạn của location | `This request is too large for PartFlow. Nothing was changed.` (`request_too_large: true`) | từ chối dứt khoát |
+| 429 | vượt rate limit (gửi `Retry-After: 60`) | `Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.` (`rate_limited: true`) | từ chối dứt khoát |
+| 502 | backend không với tới được, hoặc nó đóng kết nối trước khi trả lời | `The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | kết quả write không rõ |
+| 504 | backend không trả lời trong timeout | `The PartFlow server did not answer in time.` (`server_unavailable: true`) | kết quả write không rõ |
+
+502 hoặc 504 giữ nguyên status 5xx, nên một station write có thể đã commit được
+hiển thị là không rõ và retry với cùng `device_event_id`
+(`deployment/OPERATIONS_RUNBOOK.md` §2). Frontend hiển thị thông báo built-in
+cho 413 hoặc 429 không mang JSON `detail` (ví dụ từ một platform proxy). `web`
+không thêm CORS header và không viết lại gì khác.
+
+**Caching và header.** `index.html` và mọi single-page-app fallback là
+`no-cache`; `/assets/*` immutable một năm, và asset thiếu là 404 thuần, không
+bao giờ là application shell. Mọi response mang `X-Content-Type-Options:
+nosniff`, `Referrer-Policy: same-origin` và `Content-Security-Policy` nền tảng
+(script, style, connection và frame cùng origin; ảnh `blob:` và `data:` cho
+preview ảnh cục bộ; không inline script). Ai thêm tính năng cần nguồn khác thì
+sửa policy trong cùng thay đổi. HSTS thuộc platform proxy và được xem xét ở
+P16-S7.
+
+**Client address thật.** `web` chỉ tin cậy forwarded header từ đúng một hop, được
+phát hiện khi container khởi động là default gateway của nó trên edge network
+(địa chỉ mà kết nối loopback của host đi đến), hoặc đặt tường minh bằng
+`PARTFLOW_TRUSTED_PROXY` (một địa chỉ IPv4). Nếu không có địa chỉ nào, container
+từ chối khởi động. Từ hop đó `web` lấy địa chỉ `X-Forwarded-For` **cuối cùng** làm
+client và thay header gửi cho backend bằng đúng địa chỉ đó; `X-Forwarded-Proto`
+chỉ được chấp nhận từ cùng hop. `web` không publish certificate và không đọc cấu
+hình TLS.
+
+**Request log.** Access log của `web` (client address, method, path không có
+query string, status, bytes, duration, user agent) là request log trong slice
+này; nó không bao giờ chứa cookie, query string hay header PartFlow nào, và các
+health probe bị loại. Access log của chính uvicorn tắt.
+
+**Yêu cầu với platform proxy.** DSM reverse proxy (hoặc Caddy) phải: kết thúc
+HTTPS bằng certificate mà workstation công ty tin cậy; chỉ gửi HTTP dưới dạng
+redirect sang HTTPS; forward đến `http://127.0.0.1:<port>` (đúng literal
+`127.0.0.1`, không bao giờ `localhost`, vì có thể resolve ra `::1` trước trong
+khi `web` chỉ publish trên IPv4 loopback) cùng `Host`, `X-Forwarded-For` (client
+address được append ở cuối) và `X-Forwarded-Proto: https`; nhận request body tối
+thiểu 5 MiB và dùng send/read timeout tối thiểu 300 s, để JSON của `web` hoặc của
+application thắng; không bao giờ log cookie, `X-PartFlow-Station-Device` hay
+`X-PartFlow-CSRF`; và chỉ cho phép các nguồn LAN hoặc VPN đã duyệt, cùng với
+firewall của host. Nếu proxy không cung cấp được client address, mọi client dùng
+chung một rate-limit bucket; ghi lại và để owner quyết định. Thiết lập DSM nằm ở
+[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §5 và ví dụ Caddy ở
+[`deployment/VPS.md`](./deployment/VPS.md) §4. Các yêu cầu này đã được ghi tại
+đây; thiết lập trên host **được thực hiện và xác minh ở P16-S7**.
+
+**Quy trình certificate.** Certificate nêu hostname PartFlow (SAN) và do CA ACME
+công khai (tên DNS public) hoặc CA nội bộ của công ty (tên chỉ dùng nội bộ) cấp;
+không bao giờ self-signed theo từng host và không bao giờ được chấp nhận theo
+từng workstation bằng cách bỏ qua cảnh báo của browser. CA cấp certificate nội bộ
+được phân phối đến workstation và barcode terminal bằng device management của
+công ty. Deployment administrator sở hữu việc gia hạn; giám sát hạn dùng là
+P16-S6. Kiểm tra hạn dùng từ bất kỳ client nào: `openssl s_client -connect
+<host>:443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout
+-subject -enddate`. Các bước theo nền tảng nằm ở SYNOLOGY_NAS §5 và VPS §4. Thực
+hiện và xác minh ở P16-S7.
+
+**Tách biệt environment (OD-16-01).** Production dùng Compose project, database
+volume, thư mục secret, hostname và (P16-S5) vị trí backup riêng; không cái nào
+được dùng chung hay trỏ vào stack staging hoặc development. Production bắt đầu từ
+database volume mới, rỗng, rồi migration, rồi first-run setup; dữ liệu
+staging hoặc development không bao giờ được attach, tái sử dụng hay copy vào đó,
+và việc restore có chủ đích vào production là quy trình P16-S5 cần owner quyết
+định. Trong thời gian pilot, pf-managed staging không được cài trên Docker daemon
+của pilot, và staging thủ công bằng `compose.yaml` ở SYNOLOGY_NAS §4 được dừng,
+container được xóa và **không** xóa volume, trước khi production khởi động.
+`SITE_TIMEZONE` bằng giá trị của staging (§6). Không bao giờ chạy `down -v` (hay
+xóa volume) trên production project: nó xóa database.
+
+**Còn lại trong phần còn lại của P16-S2:** production Compose file (service `db`,
+`backend`, `web`, `migrate` one-shot; restart, health, resource và logging
+policy; secret dạng file; `SESSION_COOKIE_SECURE=true` cố định), bảng kê
+configuration và secret (`.env.production.example`), static test và stack smoke,
+các bước CI, và bảng lệnh vận hành cùng release sequence xây trên chúng.
 
 ## 4. Chọn nền tảng
 
@@ -137,11 +298,13 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
 
 - backend image production không chạy reload server và có process model được
   ghi rõ (mỗi process backend thông báo setup token first-run riêng của nó khi chưa
-  có Administrator; lần tạo đầu tiên đóng setup cho tất cả);
-- frontend production là Vite build bất biến do production web server phục vụ;
+  có Administrator; lần tạo đầu tiên đóng setup cho tất cả) — **đã triển khai**
+  (stage `production` của `backend/Dockerfile`; process model ở §3.1);
+- frontend production là Vite build bất biến do production web server phục vụ —
+  **đã triển khai** (`web`, §3.1);
 - production Compose có restart policy, health check, private network,
   persistent volume, resource limit thận trọng và không có development bind
-  mount;
+  mount — **còn lại** (phần còn lại của P16-S2);
 - reverse proxy chịu trách nhiệm TLS, SPA fallback, request limit và route
   `/api` — proxy phải nhận request body tối thiểu 3 MiB trên các route upload ảnh
   (`PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image?number=…`), vì
@@ -155,11 +318,19 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   transaction) mất 26,03 s để import (0,3 s để check, 7,48 s để replay thành
   đã-import), và một lần chạy trong đó mỗi Work Order trong số đó đổi quantity
   (PF-2) mất 27,23 s để import (2,45 s để check; replay lại chính file đó, khi
-  tất cả đã như đã lưu, mất 2,48 s để check và 2,45 s để import); vẫn khuyến nghị read timeout tối thiểu 120 s. Bản thân cấu hình proxy
-  thuộc Phase 16;
+  tất cả đã như đã lưu, mất 2,48 s để check và 2,45 s để import); vẫn khuyến nghị read timeout tối thiểu 120 s. `web` triển khai các giới hạn này với giá trị ở §3.1 (4 MiB trên
+  năm route đó, 1 MiB ở nơi khác, read timeout import 180 s) — **đã triển khai**;
+  platform proxy phía trước nó phải nhận tối thiểu 5 MiB và dùng timeout tối
+  thiểu 300 s, và TLS kết thúc ở đó — đã ghi ở §3.1, **thực hiện và xác minh ở
+  P16-S7**;
 - configuration bắt buộc được validate lúc startup và secret không có default
-  đã commit;
-- image hoặc release version bất biến và được giữ đủ lâu để rollback code.
+  đã commit — **đã triển khai** cho database setting (§3.1); cookie và time-zone
+  setting được production Compose file cố định hoặc bắt buộc (còn lại);
+- image hoặc release version bất biến và được giữ đủ lâu để rollback code —
+  **còn lại** (image có tag do Compose file; release identity bên trong image là
+  P16-S3).
+
+Các gate ở trên vẫn là gate cho đến khi P16-S7 ghi nhận bằng chứng đạt.
 
 ### An toàn dữ liệu và vận hành
 
@@ -225,7 +396,9 @@ Mọi nền tảng dùng cùng thứ tự release:
 6. Vào maintenance mode/window đã duyệt nếu cần.
 7. Chạy Alembic migration đúng một lần và lưu output.
 8. Khởi động target application release. Với database chưa có Administrator,
-   hoàn tất first-run setup (setup token nằm trong backend log) trước khi mở truy cập. Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations).
+   khởi động backend với một worker (`WEB_CONCURRENCY=1`, nên chỉ có một setup
+   token, §3.1), hoàn tất first-run setup (setup token nằm trong backend log)
+   trước khi mở truy cập, rồi khởi động lại với số worker đã cấu hình. Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations).
 9. Chạy health, API, UI, authorization, scan-focus và write/read-back smoke test
    bằng dữ liệu test được chỉ định.
 10. Chạy quantity/Movement reconciliation.
