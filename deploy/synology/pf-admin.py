@@ -249,6 +249,29 @@ def fingerprint(value):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+NOT_A_CHECKPOINT = "not a checkpoint"  # a displaced-history entry pf cannot match against the active history
+
+
+def acknowledgement_session_scope(records):
+    """PF-A3.3 section 3.10 (c): the databases whose client sessions the acknowledgement probe counts. None when no
+    runner record names a database effect (a ``database`` effect, or a mutating program in the ``db`` service); a
+    sorted list of the named databases; [] (every client session) when a database effect names no valid database."""
+    named, unnamed = set(), False
+    for record in records:
+        effect = record.get("effect") if isinstance(record.get("effect"), dict) else {}
+        if not (effect.get("kind") == "database" or (effect.get("kind") == "compose-exec"
+                                                      and effect.get("service") == "db")):
+            continue
+        database = effect.get("database")
+        if isinstance(database, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", database):
+            named.add(database)
+        else:
+            unnamed = True
+    if not named and not unnamed:
+        return None
+    return [] if unnamed else sorted(named)
+
+
 def quote_identifier(value):
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", value):
         raise Failure("Database/role names must use 1-63 ASCII letters, digits or underscores.")
@@ -3027,8 +3050,29 @@ class Controller:
         outcome = {"completed": "succeeded", "cancelled": "cancelled", "failed_preserved": "failed_preserved"}[phase]
         if phase == "cancelled":
             self.remove_own_staging()
+        self.remove_private_temporaries()
         self.journal_update(phase=phase, result={"outcome": outcome, "deployment_id": deployment_id},
                             unresolved=None, last_error=last_error)
+
+    PRIVATE_TEMPORARY_PREFIXES = ("isolation-preflight-", "verify-source-")
+
+    def remove_private_temporaries(self):
+        """Section 3.17: the call-scoped private temporaries of this operation (``isolation-preflight-*``,
+        ``verify-source-*``) are removed in ``finally``; one a killed process left behind is removed when the operation
+        closes (descriptor-relative; nothing else of the operation directory is touched)."""
+        if self.operation_dir is None or not real_directory(self.operation_dir):
+            return
+        fd = os.open(str(self.operation_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for name in sorted(os.listdir(fd)):
+                if not name.startswith(self.PRIVATE_TEMPORARY_PREFIXES):
+                    continue
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    pf_instance.remove_private_tree_at(fd, name)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _append_attempt(self, action, route=None):
         """Section 3.1 step 7: one entry per process that opens or re-enters the operation."""
@@ -6935,8 +6979,9 @@ class Controller:
             self.render_back(topology, expectation)
             return topology
         values = self.topology_values(view)
-        if os.path.lexists(str(directory / "app.env")):
-            os.unlink(str(directory / "app.env"))  # a crash between app.env and compose.json: new values
+        # A crash between app.env and compose.json, or between compose.json and topology.json: no resource was created
+        # from these files (Compose runs only after topology.json), so both are discarded and written with new values.
+        self.discard_topology_files(project, mark_removed=False)
         pf_instance.write_once(directory, "app.env", pf_config.render_app_env(values))
         model, expectation = self.isolated_model(project, topology_uuid, directory, values, images)
         data = pf_instance.normalize_json(model)
@@ -7048,6 +7093,33 @@ class Controller:
             network = None
         return containers, network, pf_docker.isolation_findings(containers, network, project=topology.project,
                                                                  topology_uuid=topology.uuid)
+
+    def discard_topology_files(self, project, *, mark_removed=True):
+        """Section 3.17: ``compose.json`` and ``app.env`` (the throwaway password) of a topology that has no Docker
+        resource are unlinked descriptor-relatively; with ``mark_removed`` a recorded ``topology.json`` not yet
+        ``removed`` is marked ``removed``. The caller has established that no resource of the project + UUID exists."""
+        directory = self.topology_directory(project)
+        if not real_directory(directory):
+            return
+        fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for item in ("compose.json", "app.env"):
+                if pf_instance.identity_at(fd, item) is not None:
+                    os.unlink(item, dir_fd=fd)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if mark_removed:
+            record = self.topology_record(project)
+            if record is not None and record.get("state") != "removed":
+                self.update_topology_record(project, state="removed", removed_at=utc(), container_ids=[])
+
+    def discard_unused_topologies(self):
+        """An in-process pre-deletion failure of a purge: every topology of this operation with no Docker resource
+        loses its files (a topology with resources is kept for ``pf cleanup``)."""
+        for project, value in self.operation_topologies():
+            if not self.topology_resources(project, value):
+                self.discard_topology_files(project)
 
     def teardown_topology(self, project, *, final):
         """Section 3.1 step 9: a write-once A1.3 deletion plan of the topology's own project and UUID, recorded in
@@ -9441,8 +9513,10 @@ class Controller:
 
     # ------------------------------------------- authority, decisions and resume (sections 3.6, 3.8)
 
-    def check_authority(self, plan):
-        """Section 3.8: the plan's authorities equal the current protected state, else plan-authority-changed."""
+    def check_authority(self, plan, *, abandon=False):
+        """Section 3.8: the plan's authorities equal the current protected state, else plan-authority-changed. The
+        operation's own registry state writes are accepted (``own_state_write``); a record already written back by an
+        interrupted abandon is accepted for ``--abandon`` only."""
         context = self.context
         producer = plan["producer"]
         permission = self.permission_policy_ref()
@@ -9458,8 +9532,14 @@ class Controller:
             ("daemon engine", plan["instance"]["daemon_engine_id"], context.daemon.engine_id),
         )
         for field, recorded, current in compared:
-            if recorded != current and field == "instance record" and self.own_state_write(plan):
-                continue  # OD-A33-08: the operation's own registry state write is the only accepted change
+            own = recorded != current and field == "instance record" and self.own_state_write(plan)
+            if own == "abandon" and not abandon:
+                raise Failure(f"abandon-in-progress: operation {plan['operation_id']} ({plan['kind']}) was being "
+                              "abandoned and its record was already written back; only 'pf --instance "
+                              f"{self.context.slug} resume --operation {plan['operation_id']} --abandon' continues it. "
+                              "Nothing was changed.")
+            if own:
+                continue  # OD-A33-08: the operation's own registry state writes are the only accepted changes
             if recorded != current:
                 short = lambda value: pf_instance.sha256_bytes(str(value).encode("utf-8"))[:12]  # noqa: E731
                 raise Failure(f"plan-authority-changed: {field} changed after operation {plan['operation_id']} was "
@@ -9470,7 +9550,10 @@ class Controller:
     def own_state_write(self, plan):
         """OD-A33-08: the record changed only by this operation's registry state effect (started): the current record
         with its state set back to the effect's ``record-state`` precondition and its revision decremented hashes to
-        the plan's record hash. Any other change stays ``plan-authority-changed``."""
+        the plan's record hash (True). An abandon of a restore writes the precondition state back (one more revision):
+        when ``attempts.json`` records an abandon, the current record in the precondition state with its revision
+        decremented by two hashing to the plan's record hash is that write-back (``"abandon"``; a crash between it and
+        the ``cancelled`` generation). Any other change stays ``plan-authority-changed`` (False)."""
         effects = [effect for effect in plan["effects"] if pf_config.effect_role(effect) == "registry"]
         if not effects or self.journal is None:
             return False
@@ -9483,11 +9566,23 @@ class Controller:
         except (OSError, pf_instance.ContextError):
             return False
         before = self.precondition(effect, "record-state")
-        if not isinstance(record, dict) or not before or record.get("state") != effect["target"].split("=", 1)[1] \
-                or not isinstance(record.get("record_revision"), int) or record["record_revision"] < 2:
+        if not isinstance(record, dict) or not before or not isinstance(record.get("record_revision"), int):
             return False
-        original = dict(record, state=before, record_revision=record["record_revision"] - 1)
-        return pf_instance.sha256_bytes(pf_instance.normalize_json(original)) == plan["instance"]["record_sha256"]
+        wanted = plan["instance"]["record_sha256"]
+        if record.get("state") == effect["target"].split("=", 1)[1] and record["record_revision"] >= 2:
+            original = dict(record, state=before, record_revision=record["record_revision"] - 1)
+            return pf_instance.sha256_bytes(pf_instance.normalize_json(original)) == wanted
+        if record.get("state") == before and record["record_revision"] >= 3 and self.operation_dir is not None:
+            try:
+                attempts = pf_instance.read_private_list(self.operation_dir / "attempts.json")
+            except (OSError, pf_instance.ContextError):
+                return False
+            if not any(isinstance(entry, dict) and entry.get("action") == "abandon" for entry in attempts):
+                return False
+            original = dict(record, record_revision=record["record_revision"] - 2)
+            if pf_instance.sha256_bytes(pf_instance.normalize_json(original)) == wanted:
+                return "abandon"
+        return False
 
     def resume_phrase(self, action):
         op8 = self.operation_id[-8:]
@@ -9519,7 +9614,7 @@ class Controller:
         entry = self.gate.entry
         plan, journal = self.plan, self.journal
         kind, phase, op = plan["kind"], journal["phase"], self.operation_id
-        self.check_authority(plan)
+        self.check_authority(plan, abandon=abandon)
         if kind == "restore-instance" and journal["deletion"] is not None and not abandon:
             raise Failure(f"abandon-in-progress: operation {op} (restore-instance) is being abandoned with a frozen "
                           f"deletion plan; only 'pf --instance {self.context.slug} resume --operation {op} --abandon' "
@@ -9749,6 +9844,7 @@ class Controller:
             record = self.topology_record(project)
             if record is None:
                 if not self.topology_resources(project, value):
+                    self.discard_topology_files(project)
                     continue
                 # Created by Compose before topology.json was written: the plan's pre-assigned identity proves it.
                 self.write_topology_record(project, {
@@ -9993,6 +10089,8 @@ class Controller:
             _, current, prepared, retained = target.split(":")
             return lambda step: self.swap_database(prepared, retained, current=current)
         if etype == "image-load":
+            if self.plan["kind"] == "restore-side-by-side":
+                return lambda step: self.act_side_by_side_image_load(step)
             return lambda step: self.act_image_load(step)
         if etype == "image-tag":
             return lambda step: self.act_image_tag(step, effect)
@@ -10444,15 +10542,7 @@ class Controller:
             images["db"] = db_image
         absent = [service for service in pf_docker.SERVICES if not self.image_present(images[service])]
         if absent:
-            proof = self.prove_bundle_images(view, [images[service] for service in absent])
-            for tag, image_id in proof.repo_tags:
-                local = self.local_image_id(tag)
-                if local is not None and local != image_id:
-                    exc = Failure(f"image-load-would-retag: images.tar of bundle {view.bundle_id} tags {tag} as "
-                                  f"{image_id[7:19]}, but that tag already names {local[7:19]} on this daemon; loading "
-                                  "would re-point it. Nothing was changed.")
-                    exc.code = "image-load-would-retag"
-                    raise exc
+            self.refuse_image_retag(view, self.prove_bundle_images(view, [images[service] for service in absent]))
         self.isolation_preflight(view, images)
         project, topology_uuid = self.new_topology("pfrecover-")
         self.capacity_preflight("restore-side-by-side", view=view, load=bool(absent))
@@ -10484,6 +10574,35 @@ class Controller:
             source={"provenance": "not_applicable", "commit": None, "entries_sha256": None, "deployment_id": None},
             input_bundle={"bundle_id": view.bundle_id, "manifest_sha256": view.manifest_sha256})
         return self.run_plan({})
+
+    def refuse_image_retag(self, view, proof):
+        """Section 3.6 retag check: every RepoTags entry of ``images.tar`` that already exists locally must name the
+        same ID, else ``image-load-would-retag`` (a load would re-point it)."""
+        for tag, image_id in proof.repo_tags:
+            local = self.local_image_id(tag)
+            if local is not None and local != image_id:
+                exc = Failure(f"image-load-would-retag: images.tar of bundle {view.bundle_id} tags {tag} as "
+                              f"{image_id[7:19]}, but that tag already names {local[7:19]} on this daemon; loading "
+                              "would re-point it. Nothing was changed.")
+                exc.code = "image-load-would-retag"
+                raise exc
+
+    def act_side_by_side_image_load(self, step):
+        """Section 3.6 (R2-13) side-by-side ``image-load images:<bundle>``: load-only. The bundle's ``images.tar`` is
+        re-proven and the retag check re-run right before ``docker image load``; then every image ID the topology uses
+        must be present (``docker image inspect <id>``). The live instance's override is never written and no tag is
+        verified against it."""
+        view = self.op_recovery()
+        images = self.topology_images(view, self.side_by_side_effect("database-restore"))
+        absent = [images[service] for service in pf_docker.SERVICES if not self.image_present(images[service])]
+        if absent:
+            self.refuse_image_retag(view, self.prove_bundle_images(view, absent))
+            self.docker("image", "load", "-i", view.folder / "images.tar")
+        missing = [service for service in pf_docker.SERVICES if not self.image_present(images[service])]
+        if missing:
+            raise Failure(f"images.tar of bundle {view.bundle_id} did not provide the {', '.join(missing)} image ID; "
+                          "the recovery target was not started.")
+        step.evidence = "images:" + ",".join(images[service][7:19] for service in pf_docker.SERVICES)
 
     def run_side_by_side(self, ctx):
         """The side-by-side runner: a failed verification closes failed_preserved with the target kept; a lost target
@@ -10640,6 +10759,7 @@ class Controller:
         for project, value in self.operation_topologies():
             if self.topology_record(project) is None:
                 if not self.topology_resources(project, value):
+                    self.discard_topology_files(project)
                     continue
                 self.write_topology_record(project, {
                     "schema_version": 1, "project": project, "topology_uuid": value, "purpose": "side-by-side",
@@ -10727,7 +10847,7 @@ class Controller:
                 total = sum(db.values())
                 recovery = self.recovery_root if real_directory(self.recovery_root) else self.recovery_root.parent
                 needs.append(("capturing", "recovery", recovery, total + source + self.tree_bytes(self.backups_dir)
-                              + self.tree_bytes(self.state)))
+                              + self.tree_bytes(self.state) + self.purge_image_bytes()))
                 needs.append(("capturing", "docker-root", docker, pf_config.restored_estimate(live_bytes=live)))
                 needs.append(("verifying", "docker-root", docker, pf_config.restored_estimate(live_bytes=total)))
                 needs.append(("verifying", "private-state", private, source * 4 + ARCHIVE_MARGIN))
@@ -10753,6 +10873,39 @@ class Controller:
                 needs.append(("capturing", "backups", backups,
                               self.tree_bytes(pf_instance.generation_container(self.context) / gen)))
         return needs
+
+    def purge_image_bytes(self):
+        """Section 3.8 purge ``capturing``/``recovery`` row: the sum of ``docker image inspect`` Size of the distinct
+        images ``images.tar`` holds (the retained tags of every readable checkpoint, the running backend/frontend
+        images and the db image). An over-estimate: layers shared by several images are saved once."""
+        references = set()
+        for item in self.snapshots():
+            if isinstance(item, InvalidBundle):
+                continue
+            references.update(value["reference"] for value in item.images.values() if value)
+        for service in pf_docker.SERVICES:
+            try:
+                references.add(self.inspect(service)["Image"])
+            except DaemonFailure:
+                raise
+            except (Failure, KeyError, TypeError):
+                continue
+        sizes = {}
+        for reference in sorted(references):
+            try:
+                found = json.loads(self.docker("image", "inspect", reference))[0]
+            except DaemonFailure:
+                raise
+            except Failure:
+                continue  # an absent retained tag is not saved (the capture reports it)
+            size = found.get("Size") if isinstance(found, dict) else None
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                exc = Failure(f"capacity-unmeasurable: the size of image {reference} cannot be measured (docker image "
+                              "inspect reports no Size). Nothing was changed.")
+                exc.code = "capacity-unmeasurable"
+                raise exc
+            sizes[found["Id"]] = size
+        return sum(sizes.values())
 
     def docker_root(self):
         observation = self.verify_daemon()
@@ -10857,7 +11010,9 @@ class Controller:
 
     def history_duplicated(self, name):
         """Whether every checkpoint of the displaced history ``name`` exists in the active history with the same bundle
-        ID and manifest hash (read-only). Returns (duplicated, [(checkpoint, level, present)])."""
+        ID and manifest hash, and its active copy reads strictly (payload hashes; read-only). Any entry that is not a
+        checkpoint is unique (its removal could delete the only copy). Returns (duplicated, [(entry, level,
+        present)])."""
         listing = []
         displaced = self.revisions_root / name
         duplicated = True
@@ -10866,7 +11021,9 @@ class Controller:
         except OSError:
             return False, listing
         for item in names:
-            if not BACKUP_RE.fullmatch(item):
+            if not BACKUP_RE.fullmatch(item) or not real_directory(displaced / item):
+                duplicated = False
+                listing.append((item, NOT_A_CHECKPOINT, False))
                 continue
             try:
                 data = pf_instance.read_bytes_nofollow(displaced / item / "manifest.json")
@@ -10879,6 +11036,11 @@ class Controller:
             except OSError:
                 active = None
             present = active is not None and pf_instance.sha256_bytes(active) == pf_instance.sha256_bytes(data)
+            if present:
+                try:
+                    self.read_bundle("checkpoint", self.backups_dir / item, quiet=True)
+                except (Failure, OSError, pf_instance.ContextError):
+                    present = False  # the active copy does not read strictly: the displaced one may be the only one
             level, _ = self.verification_level(item, pf_instance.sha256_bytes(data), quiet=True)
             listing.append((item, LEVEL_NAMES.get(level, level), present))
             duplicated = duplicated and present
@@ -11027,10 +11189,12 @@ class Controller:
                     raise unknown(selector, name, "not recorded by a closed operation or no longer present")
                 if cls == "checkpoint-history" and item.detail != "duplicated":
                     _, listing = self.history_duplicated(name)
-                    unique = next((entry[0] for entry in listing if not entry[2]), "?")
-                    exc = Failure(f"cleanup-history-unique-checkpoint: {name} holds checkpoint {unique} that is not in "
-                                  "the active history (or differs from it); removing it would delete the only copy. "
-                                  "Nothing was changed.")
+                    unique = next((entry for entry in listing if not entry[2]), ("?", None, False))
+                    what = f"entry {unique[0]} that is not a checkpoint" if unique[1] == NOT_A_CHECKPOINT else \
+                        f"checkpoint {unique[0]} that is not in the active history (or differs from it, or its " \
+                        "active copy does not read strictly)"
+                    exc = Failure(f"cleanup-history-unique-checkpoint: {name} holds {what}; removing it would delete "
+                                  "the only copy. Nothing was changed.")
                     exc.code = "cleanup-history-unique-checkpoint"
                     raise exc
                 chosen.append(item)
@@ -11378,6 +11542,18 @@ class Controller:
         checked = utc()
         first = pf_source.entries_digest(pf_source.build_manifest(source, source={"kind": "unknown"}, excludes=()))
         folder = self.seal_path(gen)
+        earlier = self.read_seal(gen)
+        if earlier is not None:
+            # A valid seal of an earlier cleanup is never removed: after an interrupted removal or an edit it can be
+            # the only complete copy of the generation. Same content -> it is this cleanup's seal; else both are kept.
+            if earlier["entries_sha256"] == first:
+                step.evidence = "sealed " + first[:12] + " (earlier seal)"
+                step.retained.append({"kind": "generation-seal", "name": gen, "sha256": None})
+                return None
+            return keep("generation-seal-exists", f"generation-seal-exists: {gen} already has a valid seal from "
+                        f"{earlier['sealed_by_operation']} with other content ({earlier['entries_sha256'][:12]} vs "
+                        f"{first[:12]}); the seal and the generation were kept; cleanup {op} continues and closes "
+                        "failed_preserved.")
         for directory in (self.backups_root, self.backups_root / "generations",
                           self.backups_root / "generations" / self.context.compose_project):
             if not real_directory(directory):
@@ -11506,11 +11682,16 @@ class Controller:
         if oneoffs:
             running = {line.strip() for line in self.docker("ps", "-q", "--no-trunc").splitlines() if line.strip()}
             hits += [f"one-off container {item[:12]}" for item in sorted(oneoffs & running)]
-        if self.db_running():
+        scope = acknowledgement_session_scope(records)
+        if scope is not None and self.db_running():
+            # Section 3.10 (c), as A3.2 section 3.5: only when a record names a database effect, and only on the
+            # databases the records name (the application's own sessions on the live database are not a pf effect).
+            where = " AND datname IN (" + ", ".join(f"'{name}'" for name in scope) + ")" if scope else ""
             count = self.sql("postgres", "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' "
-                                         "AND pid <> pg_backend_pid();")
+                                         f"AND pid <> pg_backend_pid(){where};")
             if count.strip() not in ("0", ""):
-                hits.append(f"{count.strip()} database session(s)")
+                hits.append(f"{count.strip()} database session(s)"
+                            + (f" on {', '.join(scope)}" if scope else " (a record names an unidentified database)"))
         if hits:
             raise Failure(f"effect-still-running: operation {operation_id} still has a running {hits[0]}; an "
                           "acknowledgement needs a quiet instance. Nothing was changed.")
@@ -12511,6 +12692,12 @@ class Controller:
                     or self.journal["phase"] in pf_config.TERMINAL_PHASES:
                 raise
             # No destructive deletion has happened yet: reopen the exact current application in-process.
+            try:
+                self.discard_unused_topologies()
+            except (Failure, OSError, pf_instance.ContextError) as discard_exc:
+                log("note: isolated-topology-files-kept: the files of an unused isolated topology of operation "
+                    f"{self.operation_id} could not be removed ({(str(discard_exc).splitlines() or ['?'])[0][:200]}); "
+                    "they hold only the throwaway password of a topology that never ran.")
             reopen = not (isinstance(exc, PlanChanged) and exc.checkpoint is None)
             if reopen and self.effect_state(self.effects_of("stop")[0]["effect_id"]) != "not_started":
                 try:

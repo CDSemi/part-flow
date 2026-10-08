@@ -785,6 +785,68 @@ class PurgeIntegrated(Plane):
                 self.assertTrue(self.state()["volumes"])
                 self.assertEqual(json.loads(self.context.record_path.read_bytes())["state"], "registered")
 
+    def test_pz5_coverage_of_the_final_bundle(self):
+        """PZ-5: an extra instance-labelled volume outside the topology is retained (listed, never a candidate, never
+        deleted); a foreign ``<project>_``-prefixed volume is never in any plan; a bind mount is listed as an exclusion
+        of the final bundle and never deleted. The gate's coverage rule (pure) refuses every uncovered deletion
+        candidate, and a coverage problem at the gate is coverage-incomplete: nothing deleted, reopened, cancelled."""
+        state = self.state()
+        labels = dict(pfx.labels_for(self.context), **{pf_docker.COMPOSE_VOLUME_LABEL: "uploads"})
+        state["volumes"].append(pfx.volume(self.project + "_uploads", labels))
+        state["volumes"].append(pfx.volume(self.project + "_foreign", {"other": "x"}))
+        for item in state["containers"]:
+            if item["labels"].get(pf_docker.COMPOSE_SERVICE_LABEL) == "backend":
+                item["mounts"].append({"Type": "bind", "Source": "/volume1/partflow-uploads", "Destination": "/bind",
+                                       "RW": True, "Mode": "", "Propagation": "rprivate"})
+        self.fake.write_state(state)
+        code, out, err, phrases = self.purge()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("retained: owned-outside-topology volume " + self.project + "_uploads", out)
+        op, plan, journal = self.operation("purge")
+        binding = json.loads((self.context.operations_dir / op / "deletion-plan.json").read_bytes())
+        keys = [item["key"] for item in binding["candidates"]]
+        self.assertEqual([key for key in keys if key.startswith(self.project + "_") and "postgres_data" not in key
+                          and "default" not in key], [])
+        remaining = [item["name"] for item in self.state()["volumes"]]
+        self.assertIn(self.project + "_uploads", remaining)
+        self.assertIn(self.project + "_foreign", remaining)
+        self.assertFalse([argv for argv in self.fake.argvs() if "/volume1/partflow-uploads" in argv])
+        bundle = self.purged_bundle()["name"]
+        manifest = json.loads((self.context.paths.recovery / self.project / bundle / "manifest.json").read_bytes())
+        rows = {"partflow_staging": {}}
+        self.assertEqual(pf_config.purge_coverage(manifest, binding, rows), [])
+        volume = next(item for item in binding["candidates"] if item["kind"] == "volume")
+        cases = {
+            "database outside the bundle": (manifest, binding, dict(rows, other={})),
+            "another volume candidate": (manifest, dict(binding, candidates=binding["candidates"] + [
+                dict(volume, key=self.project + "_uploads")]), rows),
+            "shared volume": (manifest, dict(binding, candidates=[dict(item, users=list(item.get("users") or [])
+                                                                        + ["f" * 64]) if item is volume else item
+                                                                   for item in binding["candidates"]]), rows),
+            "external volume": (manifest, dict(binding, candidates=[
+                dict(item, identity=dict(item["identity"], driver="nfs")) if item is volume else item
+                for item in binding["candidates"]]), rows),
+            "unrecorded bind path": (manifest, dict(binding, bind_paths=list(binding.get("bind_paths") or [])
+                                                    + ["/volume1/elsewhere"]), rows)}
+        for label, arguments in cases.items():
+            with self.subTest(label):
+                self.assertTrue(pf_config.purge_coverage(*arguments), label)
+        # The gate wiring: a coverage problem refuses the deletion.
+        self.tearDown()
+        self.setUp()
+        with mock.patch.object(pf_config, "purge_coverage", return_value=[("volumes", "a deletion candidate other "
+                                                                           "than " + self.project + "_postgres_data")]):
+            code, out, err, phrases = self.purge()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("coverage-incomplete: volumes: a deletion candidate other than", err)
+        journal = self.operation("purge")[2]
+        self.assertIsNone(journal["deletion"])
+        self.assertEqual(journal["phase"], "cancelled")
+        self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["volume", "rm"]
+                          and any(word.startswith(self.project) for word in argv)])
+        self.assertIn(self.project + "_postgres_data", [item["name"] for item in self.state()["volumes"]])
+        self.assertEqual(json.loads(self.context.record_path.read_bytes())["state"], "registered")
+
     def test_pz7_crash_in_verifying_resumes_by_teardown_and_reopen(self):
         for when in ("after-intent", "inside"):
             with self.subTest(when):
@@ -946,6 +1008,54 @@ class PurgeIntegrated(Plane):
         self.assertEqual(code, 1, out + err)
         self.assertIn("plan-authority-changed: instance record changed", err)
 
+    def test_tb5_a_crash_between_the_abandon_write_back_and_its_close_is_resumable(self):
+        """Audit finding: the restore's abandon writes ``purged`` back, then dies before the cancelled generation; the
+        abandon is completed by ``resume --abandon`` (a forward resume refuses, the record is never changed again)."""
+        code, out, err, _ = self.purge()
+        self.assertEqual(code, 0, out + err)
+        bundle = self.purged_bundle()["name"]
+        with self.crashing(("registry:state=registered", "after-effect")):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("restore-instance", bundle)
+        original = pf.Controller.close_operation
+
+        def dying(controller, phase, *args, **kwargs):
+            if phase == "cancelled" and controller.plan["kind"] == "restore-instance":
+                raise pf.SimulatedCrash("power loss before the cancelled generation")
+            return original(controller, phase, *args, **kwargs)
+
+        with mock.patch.object(pf.Controller, "close_operation", dying):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("resume", "--abandon")
+        record = self.context.record_path.read_bytes()
+        self.assertEqual(json.loads(record)["state"], "purged")
+        code, out, err, _ = self.main("resume")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("abandon-in-progress:", err)
+        self.assertEqual(self.operation("restore-instance")[2]["phase"], "preparing-target")
+        code, out, err, phrases = self.main("resume", "--abandon")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.operation("restore-instance")[2]["phase"], "cancelled")
+        self.assertEqual(self.context.record_path.read_bytes(), record)  # written once, not again
+        # Another change of the record after the write-back still refuses the abandon.
+        self.tearDown()
+        self.setUp()
+        code, out, err, _ = self.purge()
+        bundle = self.purged_bundle()["name"]
+        with self.crashing(("registry:state=registered", "after-effect")):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("restore-instance", bundle)
+        with mock.patch.object(pf.Controller, "close_operation", dying):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("resume", "--abandon")
+        changed = json.loads(self.context.record_path.read_bytes())
+        changed["approved_config_revision"] += 1
+        os.chmod(self.context.record_path, 0o600)
+        self.context.record_path.write_bytes(pf_instance.normalize_json(changed))
+        code, out, err, _ = self.main("resume", "--abandon")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("plan-authority-changed: instance record changed", err)
+
 
 class IsolatedTopology(Plane):
     """IT-3..IT-8, PZ-7 (teardown blocker), PZ-10 and RQ-8 through the instance purge: the real topology code on the
@@ -970,6 +1080,56 @@ class IsolatedTopology(Plane):
         for argv in self.fake.argvs():
             if argv[:1] == ["compose"] and "-p" in argv and argv[argv.index("-p") + 1].startswith("pfverify-"):
                 self.assertNotIn("up", argv)
+        # Audit finding (section 3.17): the throwaway password files of the topology that never ran are gone.
+        op = self.operation("purge")[0]
+        self.assertEqual(self.topology_files(op), [])
+        topology = next((self.context.operations_dir / op / "isolated").iterdir())
+        self.assertEqual(json.loads((topology / "topology.json").read_bytes())["state"], "removed")
+
+    def topology_files(self, op):
+        return sorted(str(path.relative_to(self.context.operations_dir)) for path in
+                      (self.context.operations_dir / op / "isolated").rglob("*")
+                      if path.name in ("app.env", "compose.json"))
+
+    def test_it_a_crash_between_compose_json_and_topology_json_is_recoverable(self):
+        """Audit finding: compose.json written, topology.json not: the next run discards both files and writes new
+        ones (never a raw FileExistsError); an abandon leaves no throwaway password file."""
+        bundle = SideBySide.bundle(self)
+        original = pf.Controller.write_topology_record
+        calls = {"n": 0}
+
+        def dying(controller, project, record):
+            if record.get("state") == "created" and calls["n"] == 0:
+                calls["n"] += 1
+                raise pf.SimulatedCrash("before topology.json")
+            return original(controller, project, record)
+
+        for action in ("resume", "abandon"):
+            with self.subTest(action):
+                if action == "abandon":
+                    self.tearDown()
+                    self.setUp()
+                    bundle = SideBySide.bundle(self)
+                    calls["n"] = 0
+                with mock.patch.object(pf.Controller, "write_topology_record", dying):
+                    with self.assertRaises(pf.SimulatedCrash):
+                        self.main("restore-instance", bundle, "--side-by-side")
+                op = self.operation("restore-side-by-side")[0]
+                self.assertEqual([name.rsplit("/", 1)[-1] for name in self.topology_files(op)],
+                                 ["app.env", "compose.json"])
+                temporary = self.context.operations_dir / op / "isolation-preflight-killed"
+                temporary.mkdir(mode=0o700)
+                (temporary / "app.env").write_text("POSTGRES_PASSWORD=left-by-a-killed-process\n")
+                if action == "resume":
+                    code, out, err, _ = self.main("resume")
+                    self.assertEqual(code, 0, out + err)
+                    self.assertEqual(self.operation("restore-side-by-side")[2]["phase"], "completed")
+                else:
+                    code, out, err, _ = self.main("resume", "--abandon")
+                    self.assertEqual(code, 0, out + err)
+                    self.assertEqual(self.operation("restore-side-by-side")[2]["phase"], "cancelled")
+                    self.assertEqual(self.topology_files(op), [])
+                self.assertFalse(temporary.exists())
 
     def test_it4_a_generated_name_in_use_is_refused_before_the_confirmation(self):
         project = "pfverify-" + self.FIXED
@@ -1084,6 +1244,41 @@ class IsolatedTopology(Plane):
         self.assertTrue(self.isolated_resources(project)["volumes"])
         topology = json.loads((self.context.operations_dir / op / "isolated" / project / "topology.json").read_bytes())
         self.assertIn("refused", [entry["state"] for entry in topology["teardowns"]])
+
+    def test_fv3_a_refused_teardown_after_passed_checks_never_reaches_the_deletion(self):
+        """FV-3: every check passed, then the teardown is refused (a foreign container holds the topology volume): the
+        record is passed with removed false, the verification effect fails isolated-topology-kept, the instance is
+        reopened, the purge closes cancelled, and no second-stage (deletion) approval is ever asked."""
+        harness = self
+
+        def seam(label, when):
+            if when == "inside" and label == pf.INSIDE_PREFIX + "before-teardown":
+                state = harness.state()
+                project = next(item["name"] for item in state["volumes"] if item["name"].startswith("pfverify-"))
+                state["containers"].append(pfx.container("f" * 64, "foreign-user", {"other": "x"},
+                                                         volumes=[project], status="exited"))
+                harness.fake.write_state(state)
+
+        with self.crashing(seam):
+            code, out, err, phrases = self.main("purge", "--keep-backups")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("isolated-topology-kept", out + err)
+        op, plan, journal = self.operation("purge")
+        self.assertEqual(journal["phase"], "cancelled")
+        self.assertIsNone(journal["deletion"])
+        self.assertFalse([phrase for phrase in phrases if phrase.startswith(("ERASE ", "DELETE ", "RESET "))], phrases)
+        bundle = next(item for item in journal["retained_artifacts"] if item["kind"] == "purge-bundle")
+        record = [item for item in self.records(bundle["name"]) if item["level"] == "functional_recovery_verified"][0]
+        self.assertEqual((record["result"], record["target"]["removed"]), ("passed", False))
+        self.assertIn("isolated-topology", [item["kind"] for item in journal["retained_artifacts"]])
+        verification = next(e for e in plan["effects"] if e["target"] == "bundle:purge")
+        self.assertNotEqual(pf_config.effect_state(journal, verification["effect_id"]), "complete")
+        self.assertFalse([argv for argv in self.fake.argvs() if argv[:1] == ["compose"] and "down" in argv
+                          and self.project in argv])
+        self.assertEqual(json.loads(self.context.record_path.read_bytes())["state"], "registered")
+        for container in self.state()["containers"]:
+            if container["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project:
+                self.assertEqual(container["status"], "running", container["name"])
 
     def test_pz10_resume_in_deleting_runs_the_gate_without_a_new_verification(self):
         with self.crashing(("deletion-plan", "after-intent")):
@@ -1331,6 +1526,38 @@ class SideBySide(Plane):
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.operation("restore-side-by-side")[2]["phase"], "completed")
 
+    def test_sb6_absent_images_are_loaded_without_touching_the_live_override(self):
+        """SB-6 (audit finding, R2-13): the side-by-side image-load is load-only. The live instance meanwhile runs other
+        images, so its override differs from the bundle: it stays byte-identical and no existing tag is re-pointed."""
+        bundle = self.bundle()
+        state = self.state()
+        backend = pfx.topology_image_id("a", "backend")
+        state["images"] = [image for image in state["images"] if image["id"] != backend]
+        self.fake.write_state(state)
+        override = self.context.state_dir / "active-images.yaml"
+        override.write_bytes(override.read_bytes().replace(b"backup-", b"livenew-"))
+        before = self.live_hashes()
+        code, out, err, phrases = self.main("restore-instance", bundle, "--side-by-side")
+        self.assertEqual(code, 0, out + err)
+        op, plan, journal = self.operation("restore-side-by-side")
+        self.assertEqual(journal["phase"], "completed")
+        load = [effect for effect in plan["effects"] if effect["type"] == "image-load"]
+        self.assertEqual([effect["target"] for effect in load], ["images:" + bundle])
+        self.assertEqual(len([argv for argv in self.fake.argvs() if argv[:2] == ["image", "load"]]), 1)
+        self.assertTrue(self.image_present(backend))
+        after = self.live_hashes()
+        self.assertEqual(after["override"], before["override"])
+        for key in ("env", "pointer", "databases", "workspace", "containers"):
+            self.assertEqual(after[key], before[key], key)
+        # The load may add the bundle's own tags back; no tag that existed before names another image now.
+        self.assertEqual(sorted(set(before["tags"]) - set(after["tags"])), [])
+        loaded = next(item for item in journal["effects"] if item["effect_id"] == load[0]["effect_id"])
+        self.assertEqual(loaded["state"], "complete")
+        self.assertIn(backend[7:19], loaded["evidence"])
+
+    def image_present(self, image_id):
+        return any(image["id"] == image_id for image in self.state()["images"])
+
     def test_sb10_a_load_that_would_retag_is_refused(self):
         bundle = self.bundle()
         state = self.state()
@@ -1427,6 +1654,68 @@ class Cleanup(Plane):
         self.assertFalse(attempt.exists())  # the next item was still processed
         self.assertEqual(self.operation("cleanup")[2]["phase"], "failed_preserved")
 
+    def test_cu13_no_dead_end(self):
+        """CU-13 (subset): a per-item failure keeps that item and the next is processed (failed_preserved): an OSError
+        on a folder removal, a drop the daemon reports done while the database stays (plan-effect-unconfirmed). An
+        unreachable daemon mid-deleting leaves the cleanup open: resume continues it; --abandon closes it
+        failed_preserved listing what was not removed."""
+        original_remove = pf_instance.remove_private_tree_at
+
+        def failing_remove(fd, name, *args, **kwargs):
+            if name == pfx.CHECKPOINT_ID:
+                raise OSError(5, "Input/output error")
+            return original_remove(fd, name, *args, **kwargs)
+
+        name, attempt = self.closed_backup_with_leftover()
+        with mock.patch.object(pf_instance, "remove_private_tree_at", failing_remove):
+            code, out, err, _ = self.main("cleanup", "--apply")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"cleanup-item-failed: remove:bundle-attempt:{pfx.CHECKPOINT_ID}: os-error", out)
+        self.assertTrue(attempt.exists())
+        self.assertNotIn(name, self.state()["plane"]["databases"])
+        self.assertEqual(self.operation("cleanup")[2]["phase"], "failed_preserved")
+
+        self.tearDown()
+        self.setUp()
+        name, attempt = self.closed_backup_with_leftover()
+        with mock.patch.object(pf.Controller, "drop_database", lambda controller, database: None):
+            code, out, err, _ = self.main("cleanup", "--apply")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"cleanup-item-failed: database:{name}: plan-effect-unconfirmed", out)
+        self.assertIn(name, self.state()["plane"]["databases"])
+        self.assertFalse(attempt.exists())
+        self.assertEqual(self.operation("cleanup")[2]["phase"], "failed_preserved")
+
+        for action in ("resume", "abandon"):
+            with self.subTest(action):
+                self.tearDown()
+                self.setUp()
+                name, attempt = self.closed_backup_with_leftover()
+
+                def unreachable(controller, database):
+                    raise pf.DaemonFailure("daemon-unreachable", "daemon-unreachable: the Docker daemon is not "
+                                                                 "reachable")
+
+                with mock.patch.object(pf.Controller, "drop_database", unreachable):
+                    code, out, err, _ = self.main("cleanup", "--apply")
+                self.assertEqual(code, 1, out + err)
+                op, plan, journal = self.operation("cleanup")
+                self.assertNotIn(journal["phase"], pf_config.TERMINAL_PHASES)
+                if action == "resume":
+                    code, out, err, _ = self.main("resume")
+                    self.assertEqual(code, 0, out + err)
+                    self.assertEqual(self.operation("cleanup")[2]["phase"], "completed")
+                    self.assertNotIn(name, self.state()["plane"]["databases"])
+                    self.assertFalse(attempt.exists())
+                else:
+                    code, out, err, _ = self.main("resume", "--abandon")
+                    self.assertEqual(code, 0, out + err)
+                    journal = self.operation("cleanup")[2]
+                    self.assertEqual(journal["phase"], "failed_preserved")
+                    self.assertIn("cleanup-abandoned: not removed: ", journal["last_error"]["message"])
+                    self.assertIn(name, journal["last_error"]["message"])
+                    self.assertIn(name, self.state()["plane"]["databases"])
+
     def test_cu9_an_open_cleanup_is_re_entered_only_with_equal_selectors(self):
         name, attempt = self.closed_backup_with_leftover()
         with self.crashing(self.crash_before("e0002")):
@@ -1449,15 +1738,22 @@ class Cleanup(Plane):
 
     def displaced_history(self, *, unique):
         """A closed restore-instance that displaced the checkpoint history to ``<project>.pre-restore-<8 hex>``; its
-        one checkpoint is also in the active history unless ``unique``."""
+        one checkpoint is also in the active history (a real checkpoint of ``pf backup``, copied) unless ``unique``
+        (a synthetic one only there)."""
         name = self.project + ".pre-restore-0badcafe"
-        displaced = self.context.paths.backups / "revisions" / name / pfx.CHECKPOINT_ID
-        displaced.mkdir(parents=True)
-        (displaced / "manifest.json").write_bytes(b'{"synthetic": "manifest"}')
-        if not unique:
-            active = self.context.paths.backups / "revisions" / self.project / pfx.CHECKPOINT_ID
-            active.mkdir(parents=True)
-            (active / "manifest.json").write_bytes(b'{"synthetic": "manifest"}')
+        if unique:
+            displaced = self.context.paths.backups / "revisions" / name / pfx.CHECKPOINT_ID
+            displaced.mkdir(parents=True)
+            (displaced / "manifest.json").write_bytes(b'{"synthetic": "manifest"}')
+        else:
+            code, out, err, _ = self.main("backup")
+            self.assertEqual(code, 0, out + err)
+            active = self.context.paths.backups / "revisions" / self.project
+            checkpoint = next(path for path in active.iterdir() if pf.BACKUP_RE.fullmatch(path.name))
+            displaced = self.context.paths.backups / "revisions" / name / checkpoint.name
+            displaced.parent.mkdir()
+            shutil.copytree(str(checkpoint), str(displaced))
+            self.fake.clear_calls()
         plan = pfx.lifecycle_plan(self.context, "restore-instance")
         journal = pfx.lifecycle_journal(plan, phase="completed",
                                         states={effect["effect_id"]: "complete" for effect in plan["effects"]},
@@ -1480,9 +1776,12 @@ class Cleanup(Plane):
 
     def test_cu7_a_duplicated_history_is_removed_with_its_selector_and_phrase(self):
         name, folder = self.displaced_history(unique=False)
+        checkpoint = next(iter(os.listdir(str(folder))))
         code, out, err, phrases = self.main("cleanup")
         self.assertEqual(code, 0, out + err)
         self.assertIn(name, out)
+        self.assertIn(f"{checkpoint} [", out)
+        self.assertIn("also in the active history (same manifest)", out)
         code, out, err, phrases = self.main("cleanup", "--apply")
         self.assertIn("cleanup-nothing:", err)  # selector-only: never part of the default set
         self.assertTrue(folder.exists())
@@ -1490,7 +1789,46 @@ class Cleanup(Plane):
         self.assertEqual(code, 0, out + err)
         self.assertIn("DELETE CHECKPOINT HISTORY " + name, phrases)
         self.assertFalse(folder.exists())
-        self.assertTrue((self.context.paths.backups / "revisions" / self.project / pfx.CHECKPOINT_ID).exists())
+        self.assertTrue((self.context.paths.backups / "revisions" / self.project / checkpoint).exists())
+
+    def test_cu12_an_entry_that_is_not_a_checkpoint_or_a_damaged_active_copy_is_unique(self):
+        """Audit finding: the displaced tree is removed as a whole, so every entry must be proven duplicated: an entry
+        that is not a checkpoint, or a checkpoint whose active copy no longer reads strictly, refuses before the
+        confirmation and nothing changes."""
+        name, folder = self.displaced_history(unique=False)
+        checkpoint = next(iter(os.listdir(str(folder))))
+        for case in ("stray-file", "stray-directory", "damaged-active-copy"):
+            with self.subTest(case):
+                stray = None
+                if case == "stray-file":
+                    stray = folder / "legacy-dump-2025-12-01.sql.gz"
+                    stray.write_bytes(b"only copy of a legacy dump")
+                elif case == "stray-directory":
+                    stray = folder / "notes"
+                    stray.mkdir()
+                    (stray / "why.txt").write_text("operator notes")
+                else:
+                    active = self.context.paths.backups / "revisions" / self.project / checkpoint
+                    dump = next(path for path in sorted(active.rglob("*")) if path.is_file()
+                                and path.name != "manifest.json")
+                    original = dump.read_bytes()
+                    os.chmod(str(dump), 0o600)
+                    dump.write_bytes(original + b"bit rot")
+                before = pfx.snapshot_tree(self.context.paths.backups)
+                code, out, err, phrases = self.main("cleanup", "--apply", "--checkpoint-history", name)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"cleanup-history-unique-checkpoint: {name} holds ", err)
+                self.assertIn("legacy-dump" if case == "stray-file" else "notes" if case == "stray-directory"
+                              else checkpoint, err)
+                self.assertEqual(phrases, [])
+                self.assertEqual(pfx.snapshot_tree(self.context.paths.backups), before)
+                if stray is not None:
+                    shutil.rmtree(str(stray)) if stray.is_dir() else stray.unlink()
+                else:
+                    dump.write_bytes(original)
+        code, out, err, phrases = self.main("cleanup", "--apply", "--checkpoint-history", name)
+        self.assertEqual(code, 0, out + err)
+        self.assertFalse(folder.exists())
 
     def test_cu11_nothing_and_unknown_change_nothing(self):
         before = sorted(os.listdir(str(self.context.operations_dir)))
@@ -1571,6 +1909,55 @@ class Cleanup(Plane):
         self.assertTrue((container / generation / "late.txt").exists())
         self.assertTrue((self.paths["backups"] / "generations" / self.project / generation / "seal.json").exists())
 
+    def sealed_members(self, generation):
+        seal = self.paths["backups"] / "generations" / self.project / generation
+        with tarfile.open(str(seal / "workspace.tar.gz")) as archive:
+            return sorted(member.name.rsplit("/", 1)[-1] for member in archive.getmembers() if member.isfile())
+
+    def test_cu5_cu6_a_second_cleanup_never_discards_an_earlier_valid_seal(self):
+        """Audit finding: an interrupted removal leaves a partial tree; the earlier seal is then the only complete copy.
+        A second cleanup keeps it and the partial tree (generation-seal-exists), never re-seals over it."""
+        generation, container = self.retained_generation()
+        (container / generation / "precious.txt").write_bytes(b"only complete copy after the removal\n")
+
+        def seam(label, when):  # a removal interrupted part-way (OSError or power loss) leaves a partial tree
+            if when == "inside" and label == pf.INSIDE_PREFIX + "before-remove":
+                if (container / generation / "precious.txt").exists():
+                    (container / generation / "precious.txt").unlink()
+
+        with self.crashing(seam):
+            code, out, err, _ = self.main("cleanup", "--apply", "--generation", generation)
+        self.assertEqual(code, 1, out + err)
+        seal = self.paths["backups"] / "generations" / self.project / generation
+        record = (seal / "seal.json").read_bytes()
+        self.assertIn("precious.txt", self.sealed_members(generation))
+        code, out, err, _ = self.main("cleanup", "--apply", "--generation", generation)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"generation-seal-exists: {generation} already has a valid seal", out)
+        self.assertEqual((seal / "seal.json").read_bytes(), record)
+        self.assertIn("precious.txt", self.sealed_members(generation))
+        self.assertTrue((container / generation / "app-version.txt").exists())
+        self.assertEqual(self.operation("cleanup")[2]["phase"], "failed_preserved")
+
+    def test_cu6_a_second_cleanup_adopts_an_earlier_seal_of_the_same_content(self):
+        generation, container = self.retained_generation()
+
+        def seam(label, when):
+            if when == "inside" and label == pf.INSIDE_PREFIX + "before-remove":
+                (container / generation / "late.txt").write_text("written after the seal")
+
+        with self.crashing(seam):
+            code, out, err, _ = self.main("cleanup", "--apply", "--generation", generation)
+        self.assertEqual(code, 1, out + err)
+        seal = self.paths["backups"] / "generations" / self.project / generation
+        record = (seal / "seal.json").read_bytes()
+        (container / generation / "late.txt").unlink()  # the operator reverts the late write
+        code, out, err, _ = self.main("cleanup", "--apply", "--generation", generation)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual((seal / "seal.json").read_bytes(), record)
+        self.assertFalse((container / generation).exists())
+        self.assertEqual(self.sealed_members(generation), ["app-version.txt"])
+
 
 class Acknowledge(Plane):
     """AK-1..AK-6: the attended acknowledgement of runner records in a no-journal directory."""
@@ -1645,6 +2032,45 @@ class Acknowledge(Plane):
         self.assertIn("effect-still-running:", err)
         self.assertEqual(sorted(path.name for path in other.iterdir()), ["unresolved-effects.json"])
 
+    def test_ak7_the_running_application_sessions_do_not_block_the_acknowledgement(self):
+        """Audit finding: the probe counts sessions only on the databases the records' database effects name; the live
+        application's pooled sessions on its own database never block it. A session on a named database does."""
+        op, directory = self.no_journal()
+
+        def sessions(found):
+            state = self.state()
+            state["plane"].update(client_backends=sum(found.values()), sessions=found)
+            self.fake.write_state(state)
+
+        before = sorted(path.name for path in directory.iterdir())
+        sessions({"partflow_staging": 3, "pf_verify_" + "c" * 20: 1})
+        code, out, err, phrases = self.main("resume", "--operation", op, "--acknowledge")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"effect-still-running: operation {op} still has a running 1 database session(s) on pf_verify_",
+                      err)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), before)
+        sessions({"partflow_staging": 4})
+        code, out, err, phrases = self.main("resume", "--operation", op, "--acknowledge")
+        self.assertEqual(code, 0, out + err)
+        # A record that names no database effect is never probed for sessions; one whose database is unidentified
+        # counts every client session (the strict rule: stop the application first).
+        records = json.loads((directory / "unresolved-effects.json").read_text())
+        for name, effect, wanted in (
+                ("20261007T032000Z-backup-emergency-2c3d4e5f", {"kind": "compose", "verb": "build",
+                                                                 "project": self.project, "targets": []}, 0),
+                ("20261007T032500Z-backup-emergency-3d4e5f60", {"kind": "compose-exec", "verb": "pg_restore",
+                                                                 "project": self.project, "service": "db",
+                                                                 "targets": []}, 1)):
+            other = self.context.operations_dir / name
+            other.mkdir(mode=0o700)
+            (other / "unresolved-effects.json").write_text(json.dumps([dict(records[0], effect=effect)]) + "\n")
+            os.chmod(other / "unresolved-effects.json", 0o600)
+            code, out, err, _ = self.main("resume", "--operation", name, "--acknowledge")
+            self.assertEqual(code, wanted, out + err)
+            if wanted:
+                self.assertIn("4 database session(s) (a record names an unidentified database)", err)
+        self.assertEqual(pf.acknowledgement_session_scope([]), None)
+
 
 class ResetRollback(Plane):
     """RP-1, RP-2, RP-4, RP-6, RP-7: current-data protection of reset-db on the real plane."""
@@ -1691,6 +2117,66 @@ class ResetRollback(Plane):
         capture = next(effect for effect in journal["effects"] if effect["effect_id"] == "e0002")
         self.assertIn("emergency", capture["evidence"] or "")
         self.assertEqual(pf_config.rollback_target(plan, journal), "<checkpoint>")
+
+    def test_rp8_a_healthy_attempt_folder_gives_the_emergency_capture_a_fallback_id(self):
+        """RP-8: the healthy attempt fails after creating its folder; the emergency preservation gets its own ID, and
+        the journal, status and the activation read that retained ID, never the pre-assigned one (an emergency
+        before-reset is never a rollback target). An emergency capture with an unidentified frontend image refuses
+        reset-images-unidentified after the capture: the preservation is kept and no candidate is created."""
+        original = pf.Controller._capture
+
+        def healthy_fails(controller, reason, **kwargs):
+            if kwargs.get("capture_class") == "healthy_checkpoint" and kwargs.get("bundle_id"):
+                (controller.backups_dir / kwargs["bundle_id"]).mkdir(parents=True)
+                raise pf.Failure("simulated: the healthy restore test failed")
+            return original(controller, reason, **kwargs)
+
+        with mock.patch.object(pf.Controller, "_capture", healthy_fails):
+            code, out, err, phrases = self.reset()
+        self.assertEqual(code, 0, out + err)
+        op, plan, journal = self.operation("reset-db")
+        self.assertEqual(journal["phase"], "completed")
+        capture = next(effect for effect in plan["effects"] if effect["target"] == "checkpoint:before-reset")
+        assigned = self.precondition(capture, "bundle")
+        retained = [item["name"] for item in journal["retained_artifacts"] if item["kind"] == "checkpoint"]
+        self.assertEqual(len(retained), 1)
+        self.assertNotEqual(retained[0], assigned)
+        self.assertTrue((self.context.paths.backups / "revisions" / self.project / retained[0]).exists())
+        evidence_text = next(item for item in journal["effects"] if item["effect_id"] == capture["effect_id"])
+        self.assertIn("bundle:" + retained[0], evidence_text["evidence"])
+        self.assertIn("emergency", evidence_text["evidence"])
+        self.assertEqual(pf_config.rollback_target(plan, journal), "<checkpoint>")
+        code, out, err, _ = self.main("status", "--operation", op)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(retained[0], out)
+
+        self.tearDown()
+        self.setUp()
+        state = self.state()
+        state["plane"]["databases"]["partflow_staging"]["heads"] = ["r0"]  # emergency preservation
+        self.fake.write_state(state)
+        retain = pf.Controller.retain_image
+
+        def unidentified(controller, service, backup_id):
+            if service == "frontend" and controller.journal is not None:  # the capture, not the preview
+                raise pf.Failure("the running frontend image cannot be identified")
+            return retain(controller, service, backup_id)
+
+        with mock.patch.object(pf.Controller, "retain_image", unidentified):
+            code, out, err, phrases = self.reset()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("reset-images-unidentified:", out + err)
+        op, plan, journal = self.operation("reset-db")
+        retained = [item["name"] for item in journal["retained_artifacts"] if item["kind"] == "checkpoint"]
+        self.assertEqual(len(retained), 1)
+        self.assertTrue((self.context.paths.backups / "revisions" / self.project / retained[0]).exists())
+        self.assertFalse([name for name in self.state()["plane"]["databases"] if name.startswith("pf_reset_")
+                          or name.startswith("pf_clean_")])
+        self.assertEqual(self.state()["plane"]["databases"]["partflow_staging"]["heads"], ["r0"])
+
+    @staticmethod
+    def precondition(effect, key):
+        return next((item.split(":", 1)[1] for item in effect["preconditions"] if item.startswith(key + ":")), None)
 
     def test_rp7_an_unreadable_contract_is_refused_before_the_confirmation(self):
         state = self.state()
@@ -1782,7 +2268,40 @@ class AbortDeploy(Plane):
 
 
 class CapacityIntegrated(Plane):
-    """CP-3, CP-6, CP-7: the Docker root and the real statvfs."""
+    """CP-2 (purge row), CP-3, CP-6, CP-7: the Docker root and the real statvfs."""
+
+    def test_cp2_the_purge_recovery_need_counts_the_image_archive(self):
+        """Audit finding (section 3.8 purge row): images.tar (Σ docker image inspect Size of the saved refs and the db
+        image) is part of the capturing/recovery need, so a recovery device without room for it refuses before the
+        confirmation instead of failing in docker image save after the stop."""
+        info = os.statvfs(str(self.paths["recovery"]))
+        free = info.f_bavail * info.f_frsize
+        state = self.state()
+        for image in state["images"]:
+            image["size"] = free  # each distinct image alone fills the device
+        self.fake.write_state(state)
+        before = pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"])
+        code, out, err, phrases = self.main("purge", "--keep-backups")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("capacity-insufficient:", err)
+        line = err.split("capacity-insufficient:", 1)[1].split("\n", 1)[0]
+        self.assertIn("recovery", line)
+        self.assertEqual(phrases, [])
+        self.assertEqual(pfx.snapshot_tree(self.paths["backups"], self.paths["recovery"]), before)
+        self.assertFalse([argv for argv in self.fake.argvs() if argv[:2] == ["image", "save"]])
+        # The need grows with the image sizes (distinct IDs; an image without a size is unmeasurable).
+        state = self.state()
+        for image in state["images"]:
+            image["size"] = 0
+        self.fake.write_state(state)
+        controller = self.controller()
+        controller.staging()
+        small = controller.purge_image_bytes()
+        state = self.state()
+        for image in state["images"]:
+            image["size"] = 1 << 20
+        self.fake.write_state(state)
+        self.assertGreaterEqual(controller.purge_image_bytes() - small, 3 << 20)  # backend, frontend, db at least
 
     def test_cp3_an_unknown_docker_root_refuses_the_backup_with_the_emergency_route(self):
         state = self.state()

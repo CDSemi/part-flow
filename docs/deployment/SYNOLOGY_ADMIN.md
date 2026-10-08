@@ -1424,7 +1424,9 @@ starts them in between.
 3. The bundle is restored into a throwaway Compose project `pfverify-<12 hex>`: its own data volume and internal
    network, **no published port** (not even loopback), `restart: "no"`, images by ID from the bundle, and a
    **generated database password** that exists only in `operations/<op>/isolated/<project>/app.env` and
-   `compose.json` until the final teardown. The bundle's own password is never written into an operation file.
+   `compose.json` until the final teardown (a topology that never got a container, for example after a refused
+   render-back, loses both files when the purge stops). The bundle's own password is never written into an operation
+   file.
 4. Checks (all recorded in a `functional_recovery_verified` record): isolation as the daemon reports it (internal
    network, no host port binding, own volume, restart policy), every store (heads, locale, owner, extensions, row
    counts), backend and frontend health, the running image IDs, the image archive proof, the source digest, the
@@ -1449,7 +1451,10 @@ instance may register that project. `pf status` prints `Lifecycle: purged by ins
 re-checks the claim under the registry lock before the first write); `pf abort-deploy` of that incomplete deployment, and
 `pf resume --abandon` of a restore that had already registered the record again, return it to `state: purged`. The
 state write needs the registry lock; while an installation transaction holds it the operation stops with
-`registry-busy` (nothing is changed) and `pf resume` continues it.
+`registry-busy` (nothing is changed) and `pf resume` continues it. If that abandon is interrupted after the record is
+back at `state: purged` but before the restore is closed, only `pf resume --abandon` continues it (`resume` refuses
+with `abandon-in-progress`); it closes the restore `cancelled` without writing the record again. Any other change of
+the record still refuses with `plan-authority-changed`.
 
 ### Backup retention during purge
 
@@ -1559,8 +1564,8 @@ Since PF-A3.3 the restore target is decided by **identity**, before any confirma
 
 - a bundle restores only into the instance whose UUID it records; another instance's bundle (including one carried
   over from a lost host) is refused with `restore-target-mismatch` for the exact and the side-by-side restore alike, and
-  is not restorable by `pf` in this checkpoint (owner decision OD-A33-09). A legacy bundle without a UUID is accepted
-  only for the same Compose project;
+  is not restorable by `pf` in this checkpoint (OD-A33-09: a declared deviation from design r3 LIFECYCLE §9, awaiting
+  owner approval). A legacy bundle without a UUID is accepted only for the same Compose project;
 - the workspace, repository and home paths recorded in the bundle are **provenance only**: the restore always writes
   the paths of the selected instance and prints `note: bundle-workspace-differs` when they differ; nothing is written
   under the recorded paths;
@@ -1587,7 +1592,10 @@ Since PF-A3.3 this creates a kept **recovery target**: a separate Compose projec
 data volume and internal network, **no listener (not even loopback)**, no scheduler and a generated database password.
 The exact bundle is restored into it and functionally verified as in the instance purge (the record keeps
 `removed: false`). The running instance, its data, listener, image override (`active-images.yaml`), image tags,
-workspace and deployment pointer are not changed. Confirm with `RESTORE COPY <bundle-id>`; it is journaled as a
+workspace and deployment pointer are not changed. When an image of the bundle is no longer on the daemon, the
+`image-load` effect only loads `images.tar` (the archive proof and the retag check run again right before the load)
+and then requires every image ID of the target; it never writes the image override and verifies no tag against it.
+The load may add the bundle's own tags back; it never re-points an existing tag (`image-load-would-retag`). Confirm with `RESTORE COPY <bundle-id>`; it is journaled as a
 `restore-side-by-side` operation, `pf resume` continues it, the same command with the same bundle re-enters it, and
 `pf resume --abandon` (`ABANDON RECOVERY TARGET <project>`) tears the target down. A target whose data volume or
 data checks changed while the operation was interrupted is removed and reported as `recovery-target-lost`. The former
@@ -1801,8 +1809,11 @@ sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
   `compose build`, the `compose run` contract checks of `deploy`, `update` and `rollback`, or
   `ensure_local_contract`): inspect them with `pf status`, confirm that nothing of them still runs, and keep the
   directory. Since PF-A3.3 acknowledge them with `sudo pf resume --operation <op> --acknowledge`
-  (`ACKNOWLEDGE <op8>`): pf first refuses while a recorded process group or an owned one-off container still runs
-  (`effect-still-running`), prints what it observes (identities only), and writes
+  (`ACKNOWLEDGE <op8>`): pf first refuses while an owned one-off container still runs, or, when a record names a
+  database effect, while a client session is open on a database the records name (every client session when such a
+  record names no database; then stop the application before acknowledging) (`effect-still-running`). The running
+  application's own sessions on its database never block a record without a database effect. pf then prints what it
+  observes (identities only), and writes
   `operations/<op>/acknowledgement-<hash12>.json` (0600, exclusive create) bound to the hash of the current records. The
   records then no longer block `pf install`; `pf status` counts them as acknowledged. A record appended later is open
   again. A journaled operation, a directory without records or one already acknowledged is refused with
@@ -2211,7 +2222,8 @@ Codes:
   use the printed recovery route (`rollback <checkpoint> --restore-db` for an update, rollback or reset, `abort-deploy`
   for a first deployment, `backup --emergency` to preserve data first).
 - `effect-still-running` — a recorded child process group, an owned one-off container or a database session still
-  runs; `resume` never stops it. Wait, then run `resume` again. `effect-probe-unavailable` — processes were recorded
+  runs; `resume` never stops it. Wait, then run `resume` again. For `resume --operation <op> --acknowledge` only owned
+  one-off containers and the sessions on the databases its records name count (section 15). `effect-probe-unavailable` — processes were recorded
   but `/proc` or the boot ID cannot be read here; nothing is decided without that probe.
 - `database-unavailable` — `resume` could not start the database service to observe an effect; the operation is
   unchanged.
@@ -2280,7 +2292,9 @@ Codes:
 safety floor` names every role that shares the short device. Free space on that device (an old `.pre-restore-*`
 history, exported files, or `pf cleanup --apply` leftovers); never delete the last healthy checkpoint or a purge
 bundle to make room. The Docker root is shared by every instance on the daemon, so another instance's images and
-volumes count there. `capacity-unmeasurable` means the daemon reported no usable `DockerRootDir` or it cannot be
+volumes count there. The instance purge's recovery-device need includes the image archive of the final bundle (the
+`docker image inspect` sizes of the saved tags and the database image); an image without a size refuses with
+`capacity-unmeasurable`. `capacity-unmeasurable` means the daemon reported no usable `DockerRootDir` or it cannot be
 measured; `pf backup --emergency` still preserves the database. Lowering `minimum_free_mb` is an admin
 configuration change, not a recommended route.
 
@@ -2297,7 +2311,9 @@ Selector-only items need their selector and phrase:
 
 - `--recovery-target <project>` (`REMOVE RECOVERY TARGET <project>`);
 - `--checkpoint-history <name>` (`DELETE CHECKPOINT HISTORY <name>`): a displaced `.pre-restore-*` history, only when
-  every checkpoint in it is also in the active history (`cleanup-history-unique-checkpoint` otherwise);
+  every checkpoint in it is also in the active history with the same manifest and that active copy reads strictly
+  (payload hashes), and the history holds nothing else (`cleanup-history-unique-checkpoint` otherwise, naming the
+  checkpoint or the other entry; the folder is removed as a whole);
 - `--generation <wsg-…>`: a retained workspace generation (next subsection).
 
 Never cleaned: `pf_keep_*` retained databases, `pf_recovery_*` databases of the former side-by-side mode, the live
@@ -2311,7 +2327,10 @@ session that has files open in it first (an open handle refuses with `generation
 `generation-handles-unverifiable`). The tree is archived to `backups/generations/<project>/<generation>/workspace.tar.gz`
 with `seal.json` (hashes of the tree and the archive); a link or special file inside refuses with
 `generation-unsupported-entry`, a tree that changes while it is sealed with `generation-unstable`, and a write after
-the seal keeps the tree (`cleanup-item-changed`). To get a file back, extract it from the archive as root to a
+the seal keeps the tree (`cleanup-item-changed`). A valid seal of an earlier cleanup is never replaced: when the tree
+still has the sealed content it is reused and the tree removed; when the tree changed since (for example after an
+interrupted removal) both are kept with `generation-seal-exists` — the earlier archive may be the only complete copy.
+Compare the two and remove the generation folder by hand only once nothing of it is needed. To get a file back, extract it from the archive as root to a
 location outside `repo/`, for example `sudo tar -xzf <archive> -C /tmp/restore-<generation> <path>`.
 
 ## 17. Command reference
@@ -2486,9 +2505,13 @@ real Docker daemon or PostgreSQL):
   (internal network, port bindings, restart policy, mounts); real network, port and egress behaviour is unobserved;
 - the application invariant oracle is `app.cli reconcile` of the deployed image; an image without it is recorded as
   `unavailable`, and the reconcile output itself is never stored;
-- owner decisions: a recovery target has no listener and is not a registered instance (OD-A33-06/07); the instance
-  purge writes the registry tombstone `state: purged` and releases the project claim (OD-A33-08, applied); another
-  instance's bundle, including one from a lost host, is refused (`restore-target-mismatch`, OD-A33-09);
+- owner decision, applied: the instance purge writes the registry tombstone `state: purged` and releases the project
+  claim (OD-A33-08, design-conforming);
+- declared deviations from design r3 LIFECYCLE §9, **awaiting owner approval** (each fails closed): a recovery target
+  has no listener and is reached only with `docker exec` as root (OD-A33-06); it is recorded by its own
+  `restore-side-by-side` operation, not as a registered instance (OD-A33-07); another instance's bundle, including one
+  from a lost host, is refused before any confirmation (`restore-target-mismatch`, OD-A33-09). PF-A3.3 acceptance is
+  conditional on that approval;
 - the dispositions replace three PF-A3.2 limits above: `abort-deploy` after the frontend opened preserves first,
   emergency preservation covers `reset-db` and `abort-deploy` (the instance purge stays healthy-gated because its
   final bundle must be functionally verifiable; `restore-instance` has no current data to preserve, its target is

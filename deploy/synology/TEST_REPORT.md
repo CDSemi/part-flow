@@ -661,6 +661,34 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > shares the runner's ten-minute limit. Proposed verdict for the PF-A3.3 audit: `PASS_WITH_DECLARED_LIMITS` only if the
 > audit accepts the `partial` offline parts; not production-ready, no finding is closed overall.
 
+> **PF-A3.3 audit addendum (2026-10-08) — fixes for `_claude_outputs/ops/PF-A3.3/audit-findings.json`.** The audit of
+> `d2d99bf..3f0da91` found that the side-by-side `image-load` effect ran the exact restore's action and rewrote the live
+> `active-images.yaml`; it is now load-only (re-proof and retag check right before `docker image load`, then the
+> topology's image IDs; no override write, no tag verification). Further fixes: a valid earlier generation seal is never
+> deleted (`generation-seal-exists` keeps both when the tree changed); an abandon interrupted after its `purged`
+> write-back is completed by `resume --abandon` (`abandon-in-progress` for a forward resume); the acknowledgement counts
+> sessions only on the databases its records' database effects name; the instance purge's recovery need includes the
+> image archive (`docker image inspect` Size); a displaced checkpoint history with a non-checkpoint entry or an active
+> copy that does not read strictly is unique; the throwaway password files of a topology without Docker resources are
+> removed (pre-deletion failure, orphan files after a crash before `topology.json`, stale `isolation-preflight-*` /
+> `verify-source-*` at close). OD-A33-06/07/09 are documented as declared deviations awaiting owner approval. New
+> tests in `test_integrated.py` (73 → 85): SB-6, TB-5, CU-5/CU-6 re-seal (2), CU-12 variants, CU-13 subset, FV-3, PZ-5,
+> RP-8, CP-2 purge row, AK-7, IT crash window; IT-3 and CU-7 extended (CU-7 now uses a real `pf backup` checkpoint).
+> Fixture changes, no assertion weakened: `fake_docker` reports image `Size` and answers the database-scoped
+> acknowledgement query; the `test_pf_admin` FakeController reports `Size`; the SS-3c allowlist names
+> `discard_topology_files` instead of `isolated_topology` for the topology-file unlink. Each code fix's regression test
+> fails with the `3f0da91` product modules and passes after the fix
+> (`_claude_outputs/ops/PF-A3.3/evidence/audit-before-fix-python3.12.log`: 9 of the 14 named tests fail with the
+> HEAD modules, the 5 coverage-only tests pass; `audit-after-fix-python3.12.log`: 14 OK). Executed with the canonical
+> command on the final tree: **1028 tests OK, 1 skipped (RO-14)** on `python:3.12` (1973.718 s) and `python:3.9`
+> (1972.783 s), `evidence/audit-suite-python3.*.log`; RO-14 with `docs/deployment` copied passes on both
+> (`evidence/audit-ro14-docs-python3.*.log`); `ast.parse(..., feature_version=(3, 9))` and pyflakes are clean on the
+> changed files (`evidence/audit-pyflakes.log`).
+> `CRASH_MATRIX.json` (210 in-process rows for the new effects) found NF-1, not fixed here: a `reset-db` of a
+> schema/image-mismatched instance interrupted in `preserving` can be neither resumed nor abandoned (both reopen and
+> refuse on the head mismatch); see `IMPLEMENTATION_REPORT.md` §8. Acceptance stays conditional on the owner approving
+> OD-A33-06, OD-A33-07 and OD-A33-09.
+
 ## Executed checks
 
 | Check | Actual result |

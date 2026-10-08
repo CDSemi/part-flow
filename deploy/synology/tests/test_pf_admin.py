@@ -286,7 +286,8 @@ class FakeController(pf.Controller):
                 found = args[2]
             else:
                 raise pf.Failure("image missing")
-            return json.dumps([{"Id": found, "Os": "linux", "Architecture": "amd64", "RepoDigests": []}])
+            # Docker always reports Size; PF-A3.3's purge capacity row sums it (audit finding).
+            return json.dumps([{"Id": found, "Os": "linux", "Architecture": "amd64", "RepoDigests": [], "Size": 0}])
         if args[:2] == ("ps", "-q"):
             return ""
         raise AssertionError(("docker", args))

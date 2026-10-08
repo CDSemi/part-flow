@@ -281,7 +281,8 @@ def dispatch(state, argv, env):
         # PF-A3.1: the platform and digest fields a $defs.image identity reads.
         return Result(0, json.dumps([{"Id": image["id"], "RepoTags": image["repo_tags"],
                                       "Os": image.get("os", "linux"), "Architecture": image.get("architecture", "amd64"),
-                                      "RepoDigests": image.get("repo_digests", [])} for image in found]) + "\n")
+                                      "RepoDigests": image.get("repo_digests", []), "Size": image.get("size", 0)}
+                                     for image in found]) + "\n")
     if verb == "image" and argv[1:2] == ["rm"]:
         if any(word in ("-f", "--force") for word in argv):
             return violation(state, "image rm with force")
@@ -946,6 +947,11 @@ def plane_sql(state, name, statement, plane=None):
         return Result(0, "partflow_staging|f|f|t|t|f|f\n")
     if statement.startswith("SELECT name FROM pg_available_extensions"):
         return Result(0, "plpgsql\n")
+    match = re.fullmatch(r"SELECT count\(\*\) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> "
+                         r"pg_backend_pid\(\) AND datname IN \(([A-Za-z0-9_', ]+)\);", statement)
+    if match:  # PF-A3.3 acknowledgement: the sessions of the named databases only
+        names = [name.strip().strip("'") for name in match.group(1).split(",")]
+        return Result(0, str(sum(plane.get("sessions", {}).get(name, 0) for name in names)) + "\n")
     if statement.startswith("SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'"):
         return Result(0, str(plane.get("client_backends", 0)) + "\n")
     match = re.fullmatch(r"SELECT count\(\*\) FROM pg_stat_activity WHERE datname = '([A-Za-z0-9_]+)';", statement)

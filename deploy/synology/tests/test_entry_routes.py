@@ -1977,11 +1977,11 @@ class StaticScan(unittest.TestCase):
             # PF-A3.2: the restore abandon removes the .env its own file-write effect wrote (hash-matched), and the
             # abort-deploy file-write effect removes the active-images override (section 3.6).
             ("os.unlink", "Controller.abandon_restore_instance"), ("os.unlink", "Controller.act_file"),
-            # PF-A3.3: the isolated topology's own files: an app.env left by a crash before compose.json was written
-            # (removed before new values are written once), compose.json and app.env after the final teardown, and
-            # the same two files of a kept topology removed by `cleanup --apply` (descriptor-relative), all inside the
-            # operation's lock.
-            ("os.unlink", "Controller.isolated_topology"), ("os.unlink", "Controller.teardown_topology"),
+            # PF-A3.3: the isolated topology's own files: app.env/compose.json left by a crash before topology.json
+            # was written, or of a topology that never got a Docker resource (discard_topology_files, audit finding),
+            # compose.json and app.env after the final teardown, and the same two files of a kept topology removed by
+            # `cleanup --apply` (descriptor-relative), all inside the operation's lock.
+            ("os.unlink", "Controller.discard_topology_files"), ("os.unlink", "Controller.teardown_topology"),
             ("os.unlink", "Controller.cleanup_delete"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
