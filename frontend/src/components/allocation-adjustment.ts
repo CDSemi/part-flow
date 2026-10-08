@@ -18,7 +18,7 @@ import type {
   ContextLine,
   ManagementAllocationResult,
 } from '../api/management-allocations';
-import { formatIsoDateShort, formatTimeOfDay } from '../views/dates';
+import { formatTimestampShort } from '../views/dates';
 
 // ---------------------------------------------------------------------------
 // Copy
@@ -152,9 +152,9 @@ export function sourceLabel(source: 'STOCKROOM' | 'MANAGEMENT'): string {
   return source === 'STOCKROOM' ? 'Stockroom' : 'Management';
 }
 
-/** The Tracking history timestamp (`Jul 24 08:12`). */
+/** The local Tracking history timestamp (`Jul 24 08:12`). */
 export function allocationTimestamp(iso: string): string {
-  return `${formatIsoDateShort(iso.slice(0, 10))} ${formatTimeOfDay(iso)}`;
+  return formatTimestampShort(iso);
 }
 
 /** The line after a beyond-demand correction of `quantity` pcs. */

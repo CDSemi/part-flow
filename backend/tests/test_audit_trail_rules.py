@@ -225,14 +225,23 @@ def test_priority_and_completion_payloads() -> None:
         "removed": [{"work_order_demand_id": 5, "reason": "FULLY_ALLOCATED"}],
     }
     metadata = {"hot_list_change": {"action": "AUTO_REMOVE", "cause": cause}}
-    assert audit_trail.trail_priority(metadata, 5) == (
+    removed, closed_gap = {"priority_rank": None}, {"priority_rank": 2}
+    assert audit_trail.trail_priority(metadata, 5, {"priority_rank": 1}, removed) == (
         "AUTO_REMOVE",
         "ALLOCATION",
         "FULLY_ALLOCATED",
+        False,
     )
-    assert audit_trail.trail_priority(metadata, 6) == ("AUTO_REMOVE", "ALLOCATION", None)
+    assert audit_trail.trail_priority(metadata, 6, {"priority_rank": 3}, closed_gap) == (
+        "AUTO_REMOVE",
+        "ALLOCATION",
+        None,
+        True,
+    )
     manual = {"hot_list_change": {"action": "MOVE_UP", "device_event_id": "x", "fingerprint": "y"}}
-    assert audit_trail.trail_priority(manual, 5) == ("MOVE_UP", None, None)
+    up, down = {"priority_rank": 1}, {"priority_rank": 2}
+    assert audit_trail.trail_priority(manual, 5, down, up) == ("MOVE_UP", None, None, False)
+    assert audit_trail.trail_priority(manual, 6, up, down) == ("MOVE_UP", None, None, True)
     assert audit_trail.completion_trigger({"completion": {"trigger": "DEMAND_LINE_REMOVAL"}}) == (
         "DEMAND_LINE_REMOVAL"
     )
@@ -297,3 +306,37 @@ def test_the_wire_field_literal_is_every_displayed_field() -> None:
     literal = typing.get_args(AuditTrailChangeResponse.model_fields["field"].annotation)
     displayed = {field for fields in TRAIL_FIELDS.values() for field in fields}
     assert set(literal) == displayed
+
+
+@pytest.mark.parametrize(
+    ("action", "before", "after", "shifted"),
+    [
+        # The target of the action.
+        ("ADD", None, 4, False),
+        ("REMOVE", 2, None, False),
+        ("AUTO_REMOVE", 2, None, False),
+        ("LINE_DELETE", 2, None, False),
+        ("MOVE_UP", 3, 2, False),
+        ("MOVE_DOWN", 2, 3, False),
+        # A line that only closed a gap or was displaced.
+        ("ADD", 2, 3, True),
+        ("REMOVE", 3, 2, True),
+        ("AUTO_REMOVE", 3, 2, True),
+        ("LINE_DELETE", 3, 2, True),
+        ("MOVE_UP", 2, 3, True),
+        ("MOVE_DOWN", 3, 2, True),
+        # Whole-reorder actions never name their target on a row.
+        ("DRAG", 4, 1, False),
+        ("DRAG", 1, 2, False),
+        ("UNDO", None, 2, False),
+        ("REDO", 2, None, False),
+        ("SOMETHING_NEW", 1, 2, False),
+        (None, 1, 2, False),
+    ],
+)
+def test_a_line_that_only_shifted(
+    action: str | None, before: int | None, after: int | None, shifted: bool
+) -> None:
+    """BT-13: a rank row of a line the action did not target is marked
+    shifted, whatever the action the whole change carries."""
+    assert audit_trail.shifted_by_another_entry(action, before, after) is shifted

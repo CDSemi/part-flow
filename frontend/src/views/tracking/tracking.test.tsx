@@ -17,7 +17,7 @@ import { useRouter } from '../../app/router-context';
 import { RouterProvider } from '../../app/router-provider';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
-import { formatIsoDateShort, formatTimeOfDay } from '../dates';
+import { formatTimestampShort } from '../dates';
 import {
   clearPriorityFocus,
   peekPriorityFocus,
@@ -2573,7 +2573,7 @@ function routeAdjustment(id: number, overrides: Record<string, unknown> = {}) {
 }
 
 function noteTime(iso: string): string {
-  return `${formatIsoDateShort(iso.slice(0, 10))} ${formatTimeOfDay(iso)}`;
+  return formatTimestampShort(iso);
 }
 
 /** QF-140's assigned route as the editor reads it: at Lathe (step 30),

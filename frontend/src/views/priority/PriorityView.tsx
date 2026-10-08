@@ -301,6 +301,21 @@ export function PriorityView() {
     if (!active || active === document.body) addButton.current?.focus();
   }, [inFlight, unknownOutcome]);
 
+  // The Add dialog the arrival opened has no opener in this view (the
+  // Tracking button unmounted), so closing it would leave focus on the
+  // page body: lost focus returns to "+ Add to Hot list".
+  const addWasOpen = useRef(false);
+  useEffect(() => {
+    if (addOpen) {
+      addWasOpen.current = true;
+      return;
+    }
+    if (!addWasOpen.current) return;
+    addWasOpen.current = false;
+    const active = document.activeElement;
+    if (!active || active === document.body) addButton.current?.focus();
+  }, [addOpen]);
+
   const loaded = listData.state.status === 'ready' ? listData.state.data : null;
   // A command's committed entries apply to the read they were made
   // against; a fresh read (reload) supersedes them.

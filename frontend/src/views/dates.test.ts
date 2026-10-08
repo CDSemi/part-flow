@@ -11,6 +11,7 @@ import {
   formatElapsedSince,
   formatIsoDate,
   formatIsoDateShort,
+  formatTimestampShort,
   isDueSoonPolicy,
   todayIso,
 } from './dates';
@@ -26,6 +27,24 @@ test('formatIsoDate / short render business dates without timezone shifts', () =
   expect(formatIsoDateShort('2026-07-24')).toBe('Jul 24');
   expect(formatIsoDate(null)).toBe('—');
   expect(formatIsoDate('not-a-date')).toBe('not-a-date');
+});
+
+test('formatTimestampShort takes the date and the time from the local clock', () => {
+  const zone = process.env.TZ;
+  try {
+    // 18:00 on Oct 7 in Los Angeles is already Oct 8 in UTC.
+    process.env.TZ = 'America/Los_Angeles';
+    expect(formatTimestampShort('2026-10-08T01:00:00Z')).toBe('Oct 07 18:00');
+    // 06:30 on Oct 8 in a UTC+7 shop is still Oct 7 in UTC.
+    process.env.TZ = 'Asia/Ho_Chi_Minh';
+    expect(formatTimestampShort('2026-10-07T23:30:00Z')).toBe('Oct 08 06:30');
+  } finally {
+    if (zone === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = zone;
+    }
+  }
 });
 
 test('todayIso derives the local ISO date from an explicit instant', () => {

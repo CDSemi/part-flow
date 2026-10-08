@@ -1,3 +1,5 @@
+import type { Ref } from 'react';
+
 /** Deterministic loading representation: labelled skeleton panels. */
 export function LoadingState({ label }: { label: string }) {
   return (
@@ -31,10 +33,13 @@ export function ErrorState({
   message,
   detail,
   onRetry,
+  retryRef,
 }: {
   message: string;
   detail?: string;
   onRetry?: () => void;
+  /** The Retry button, for an owner that restores lost focus to it. */
+  retryRef?: Ref<HTMLButtonElement>;
 }) {
   return (
     <div className="state-error" role="alert">
@@ -42,6 +47,7 @@ export function ErrorState({
       {detail ? <div className="detail">{detail}</div> : null}
       {onRetry ? (
         <button
+          ref={retryRef}
           className="btn ghost"
           style={{ marginTop: 14 }}
           onClick={onRetry}

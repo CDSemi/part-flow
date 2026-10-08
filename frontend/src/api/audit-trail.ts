@@ -106,6 +106,9 @@ export interface AuditTrailPriority {
   action: string | null;
   trigger: string | null;
   removalReason: string | null;
+  /** This line only shifted: the action added, removed or moved another
+   * entry (every row of one Hot change carries the same action). */
+  shifted: boolean;
 }
 
 export interface AuditTrailAllocation {
@@ -207,6 +210,7 @@ interface EntryWire {
     action: string | null;
     trigger: string | null;
     removal_reason: string | null;
+    shifted: boolean;
   } | null;
   completion_trigger: string | null;
   allocation: {
@@ -348,6 +352,7 @@ function toEntry(wire: EntryWire): AuditTrailEntry {
           action: wire.priority.action,
           trigger: wire.priority.trigger,
           removalReason: wire.priority.removal_reason,
+          shifted: wire.priority.shifted,
         }
       : null,
     completionTrigger: wire.completion_trigger,

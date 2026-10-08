@@ -905,6 +905,8 @@ class AuditTrailPriorityResponse(BaseModel):
     trigger: str | None
     # FULLY_ALLOCATED, WORK_ORDER_COMPLETED, LINE_DELETED, …
     removal_reason: str | None
+    # The line only shifted: the action added, removed or moved another entry.
+    shifted: bool
 
 
 class AuditTrailAllocationResponse(BaseModel):

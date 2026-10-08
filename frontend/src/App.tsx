@@ -36,6 +36,7 @@ import { ThemeToggle } from './components/ThemeToggle';
 import { LoadingState } from './components/view-states';
 import { PERMISSION_LABELS } from './views/administration/permissions';
 import { useHotHistoryOwnerReset } from './views/priority/hot-history';
+import { usePriorityFocusReset } from './views/priority/priority-focus';
 
 const TOP_NAV: {
   to: string;
@@ -157,6 +158,7 @@ function AppShell() {
   const { route, path, setManagementReadable } = useRouter();
   const session = useSession();
   useHotHistoryOwnerReset();
+  usePriorityFocusReset();
   // The Management sub views the signed-in user may open; null while
   // nobody is known to be signed in (or a new password is still to be
   // chosen) — navigation is never authorization, so then all are listed.

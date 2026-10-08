@@ -221,13 +221,14 @@ test('the Hot rank line carries the Hot list cause', () => {
     action: string | null,
     removalReason: string | null,
     trigger: string | null,
-  ) => ({ action, removalReason, trigger });
+    shifted = false,
+  ) => ({ action, removalReason, trigger, shifted });
   expect(priorityText(priority('ADD', null, null))).toBe(' · Hot list: added');
   const actions: [string, string][] = [
     ['REMOVE', 'removed'],
     ['MOVE_UP', 'moved up'],
     ['MOVE_DOWN', 'moved down'],
-    ['DRAG', 'dragged to a new position'],
+    ['DRAG', 'reordered by a drag'],
     ['UNDO', 'previous ranking restored'],
     ['REDO', 'ranking reapplied'],
     ['AUTO_REMOVE', 'removed automatically'],
@@ -262,10 +263,36 @@ test('the Hot rank line carries the Hot list cause', () => {
   expect(priorityText(priority('AUTO_REMOVE', 'OTHER', 'OTHER'))).toBe(
     ' · Hot list: removed automatically — no longer active (after another change)',
   );
-  // A shifted line: the cause without a removal reason.
-  expect(priorityText(priority('AUTO_REMOVE', null, 'ALLOCATION'))).toBe(
-    ' · Hot list: removed automatically (after an allocation)',
+  // A line that only shifted is never said to be moved or removed.
+  expect(priorityText(priority('AUTO_REMOVE', null, 'ALLOCATION', true))).toBe(
+    ' · Hot list: shifted because another entry was removed automatically (after an allocation)',
   );
+  const shifts: [string | null, string][] = [
+    ['ADD', 'another entry was added'],
+    ['REMOVE', 'another entry was removed'],
+    ['MOVE_UP', 'another entry was moved up'],
+    ['MOVE_DOWN', 'another entry was moved down'],
+    ['LINE_DELETE', "another entry's demand line was deleted"],
+    ['SOMETHING_NEW', 'another entry changed'],
+    [null, 'another entry changed'],
+  ];
+  for (const [action, cause] of shifts) {
+    expect(priorityText(priority(action, null, null, true))).toBe(
+      ` · Hot list: shifted because ${cause}`,
+    );
+  }
+  // The displaced neighbour of a Move Up: #1 → #2.
+  expect(
+    changeLines(
+      entry({
+        kind: 'PRIORITY_CHANGED',
+        changes: [{ field: 'priorityRank', before: 1, after: 2 }],
+        priority: priority('MOVE_UP', null, null, true),
+      }),
+    ),
+  ).toEqual([
+    'Hot rank: #1 → #2 · Hot list: shifted because another entry was moved up',
+  ]);
 
   expect(
     changeLines(

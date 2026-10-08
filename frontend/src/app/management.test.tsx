@@ -16,6 +16,11 @@ import { PERMISSIONS } from '../api/roles';
 import type { Permission } from '../api/roles';
 import { AREA_BOARD_REFRESH_MS } from '../views/area-board/area-board-feed';
 import { clearHotHistory, recordChange } from '../views/priority/hot-history';
+import {
+  clearPriorityFocus,
+  peekPriorityFocus,
+  requestPriorityFocus,
+} from '../views/priority/priority-focus';
 
 // Management access (Phase 14 slice 3), through the real application
 // shell, router and sign-in provider against a fake server: the
@@ -106,6 +111,7 @@ function json(body: unknown, status = 200): Promise<Response> {
 
 beforeEach(() => {
   clearHotHistory();
+  clearPriorityFocus();
   sessionUser = null;
   setupOpen = false;
   nextSignIn = ADA;
@@ -539,4 +545,44 @@ test('FM-1: the Priority Undo/Redo history is never offered to another user', as
   nextSignIn = ADA;
   await signInFromDialog();
   await waitFor(async () => expect(await undoButton()).toBeDisabled());
+});
+
+/* ============ FT-7: an unread Change priority hand-off ends ============ */
+
+test('FT-7: a Change priority hand-off Priority never read reaches no other user and no later visit', async () => {
+  sessionUser = ADA;
+  renderAt('/management/work-orders');
+  await screen.findByRole('heading', { name: 'Work Orders', level: 1 });
+  // Priority never mounted (its view failed to load, say): still pending.
+  act(() => requestPriorityFocus('A-100'));
+
+  // An ended sign-in renewed by the same user keeps it.
+  await expireSignIn();
+  nextSignIn = { ...ADA };
+  await signInFromDialog();
+  expect(peekPriorityFocus()).toBe('A-100');
+
+  // Another user signing in after an ended sign-in never receives it.
+  await expireSignIn();
+  nextSignIn = BEN;
+  await signInFromDialog();
+  expect(peekPriorityFocus()).toBeNull();
+
+  // An explicit sign-out ends it.
+  act(() => requestPriorityFocus('A-100'));
+  fireEvent.click(screen.getByRole('button', { name: 'Account: Ben Boss' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+  await screen.findByText("Sign in to use PartFlow's Management screens.");
+  expect(peekPriorityFocus()).toBeNull();
+});
+
+test('FT-7: leaving Priority before it read the hand-off ends it', async () => {
+  sessionUser = ADA;
+  renderAt('/management/priority');
+  await undoButton();
+  // Requested after Priority read its hand-off at mount: unread.
+  act(() => requestPriorityFocus('A-100'));
+  fireEvent.click(screen.getByRole('link', { name: 'Work Orders' }));
+  await screen.findByRole('heading', { name: 'Work Orders', level: 1 });
+  expect(peekPriorityFocus()).toBeNull();
 });

@@ -2095,6 +2095,27 @@ test('FT-6b: typing searches as before; clearing the input lists the PN again', 
   expect(dialog.querySelectorAll('.hotadd-item')).toHaveLength(2);
 });
 
+test('FT-6b: closing the arrival’s Add dialog returns focus to + Add to Hot list', async () => {
+  await arriveFor('F-600');
+  let dialog = await focusDialog();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(
+    screen.getByRole('button', { name: '+ Add to Hot list' }),
+  ).toHaveFocus();
+
+  cleanup();
+  state.reads = [];
+  await arriveFor('F-600');
+  dialog = await focusDialog();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(
+    screen.getByRole('button', { name: '+ Add to Hot list' }),
+  ).toHaveFocus();
+  expect(state.posts).toEqual([]);
+});
+
 test('FT-6c: a user who may only reorder is told the PN is not on the Hot list; no dialog', async () => {
   requestPriorityFocus('F-600');
   await renderPriorityAs(['REORDER_HOT_ITEMS']);

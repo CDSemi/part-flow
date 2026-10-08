@@ -85,6 +85,13 @@ export function formatTimeOfDay(iso: string): string {
   return `${hours}:${minutes}`;
 }
 
+/** Local date and time of an ISO instant as `Jul 24 08:15`: the date
+ * and the time of day come from the same local clock, so an instant
+ * whose UTC date differs from the local one shows the local date. */
+export function formatTimestampShort(iso: string): string {
+  return `${formatIsoDateShort(todayIso(new Date(iso).getTime()))} ${formatTimeOfDay(iso)}`;
+}
+
 /** Elapsed duration since an ISO timestamp, in the shared language. */
 export function formatElapsedSince(sinceIso: string, nowMs: number): string {
   return formatDuration(nowMs - new Date(sinceIso).getTime());

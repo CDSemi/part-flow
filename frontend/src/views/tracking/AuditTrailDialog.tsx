@@ -130,11 +130,13 @@ export function AuditTrailDialog({
   const [olderError, setOlderError] = useState<string | null>(null);
   // Only the latest request may present its answer.
   const generation = useRef(0);
-  // After an older page arrives focus stays on `Show older entries`, or
-  // moves to `Close` once the last page removed that button.
+  // After an older page settles focus stays on `Show older entries`
+  // (also after a failed page), or moves to `Close` once the last page
+  // removed that button.
   const [arrivals, setArrivals] = useState(0);
   const olderButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
 
   const readFirst = useCallback(() => {
     const requested = ++generation.current;
@@ -172,7 +174,9 @@ export function AuditTrailDialog({
 
   function showOlder() {
     const before = trail.next;
-    if (before === null) return;
+    // The button stays focusable while its page loads (aria-disabled),
+    // so a second press is ignored here.
+    if (before === null || olderLoading) return;
     const requested = ++generation.current;
     setOlderLoading(true);
     setOlderError(null);
@@ -198,6 +202,7 @@ export function AuditTrailDialog({
         if (generation.current !== requested) return;
         setOlderLoading(false);
         setOlderError(errorMessage(error));
+        setArrivals((count) => count + 1);
       },
     );
   }
@@ -207,6 +212,20 @@ export function AuditTrailDialog({
     (olderButton.current ?? closeButton.current)?.focus();
   }, [arrivals]);
 
+  // Retry swaps the focused button for the loading state, so focus would
+  // fall out of the dialog (and out of its Escape and Tab handling).
+  // Once the first page settles, lost focus returns inside: to the new
+  // Retry, or to `Show older entries` / `Close`.
+  useEffect(() => {
+    if (first.status === 'loading') return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    (first.status === 'error'
+      ? retryButton.current
+      : (olderButton.current ?? closeButton.current)
+    )?.focus();
+  }, [first.status]);
+
   const shown = trail.entries.length;
   const hasOlder = trail.next !== null;
 
@@ -214,7 +233,13 @@ export function AuditTrailDialog({
   if (first.status === 'loading') {
     body = <LoadingState label="Loading the audit trail…" />;
   } else if (first.status === 'error') {
-    body = <ErrorState message={first.message} onRetry={retry} />;
+    body = (
+      <ErrorState
+        message={first.message}
+        onRetry={retry}
+        retryRef={retryButton}
+      />
+    );
   } else if (trail.total === 0 && shown === 0) {
     body = <p className="tk-trail-empty">No recorded changes for {pn} yet.</p>;
   } else {
@@ -237,7 +262,7 @@ export function AuditTrailDialog({
               ref={olderButton}
               className="btn ghost"
               onClick={showOlder}
-              disabled={olderLoading}
+              aria-disabled={olderLoading}
             >
               {olderLoading ? 'Loading…' : 'Show older entries'}
             </button>

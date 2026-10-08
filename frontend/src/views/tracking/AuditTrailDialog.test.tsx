@@ -205,11 +205,25 @@ test('a failed first page shows its error with Retry; Retry reads it again', asy
   expect(within(dialog).getByRole('alert')).toHaveTextContent(
     'The PartFlow server could not be reached. Nothing was changed.',
   );
+  // Retry again while still unreachable: focus moves to the new Retry
+  // (the pressed one was replaced by the loading state).
+  const firstRetry = within(dialog).getByRole('button', { name: 'Retry' });
+  firstRetry.focus();
+  fireEvent.click(firstRetry);
+  await act(async () => {});
+  expect(document.activeElement).toBe(
+    within(dialog).getByRole('button', { name: 'Retry' }),
+  );
   fail = false;
+  within(dialog).getByRole('button', { name: 'Retry' }).focus();
   fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
   await act(async () => {});
   expect(entryTexts()).toHaveLength(1);
-  expect(requests).toHaveLength(2);
+  expect(requests).toHaveLength(3);
+  // The page arrived: focus is back inside the dialog, never on the body.
+  expect(document.activeElement).toBe(
+    within(dialog).getByRole('button', { name: 'Close' }),
+  );
 });
 
 test('Show older entries appends the next page below the cursor; the count follows the latest total', async () => {
@@ -301,7 +315,9 @@ test('a failed older page keeps the entries and the button for a retry', async (
     return json(page([entryWire(1)], 2));
   };
   await renderTrail();
-  fireEvent.click(screen.getByRole('button', { name: 'Show older entries' }));
+  const older = screen.getByRole('button', { name: 'Show older entries' });
+  older.focus();
+  fireEvent.click(older);
   await act(async () => {});
   expect(entryTexts()).toHaveLength(1);
   expect(document.querySelector('.tk-paging [role="alert"]')).toHaveTextContent(
@@ -309,11 +325,39 @@ test('a failed older page keeps the entries and the button for a retry', async (
   );
   const retry = screen.getByRole('button', { name: 'Show older entries' });
   expect(retry).toBeEnabled();
+  expect(document.activeElement).toBe(retry);
   fail = false;
   fireEvent.click(retry);
   await act(async () => {});
   expect(entryTexts()).toHaveLength(2);
   expect(document.querySelector('.tk-paging [role="alert"]')).toBeNull();
+});
+
+test('Show older entries keeps focus while its page loads and ignores a second press', async () => {
+  let release: (response: Response) => void = () => {};
+  answer = (url) =>
+    url.searchParams.get('before_id') === null
+      ? json(page([entryWire(2)], 2, { source: 'AUDIT', id: 2 }))
+      : new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+  await renderTrail();
+  const older = screen.getByRole('button', { name: 'Show older entries' });
+  older.focus();
+  fireEvent.click(older);
+  await act(async () => {});
+  const loading = screen.getByRole('button', { name: 'Loading…' });
+  // Never `disabled`: a disabled button drops focus to the page body,
+  // outside the dialog's Escape and Tab handling.
+  expect(loading).toBeEnabled();
+  expect(loading).toHaveAttribute('aria-disabled', 'true');
+  expect(document.activeElement).toBe(loading);
+  fireEvent.click(loading);
+  expect(requests).toHaveLength(2);
+  await act(async () => {
+    release(json(page([entryWire(1)], 2)));
+  });
+  expect(entryTexts()).toHaveLength(2);
 });
 
 test('only the latest request presents its answer', async () => {

@@ -206,11 +206,23 @@ const HOT_ACTIONS: ReadonlyMap<string, string> = new Map([
   ['REMOVE', 'removed'],
   ['MOVE_UP', 'moved up'],
   ['MOVE_DOWN', 'moved down'],
-  ['DRAG', 'dragged to a new position'],
+  // A drag row never says which line was dragged (an adjacent drag
+  // looks the same from either line): the whole reorder is named.
+  ['DRAG', 'reordered by a drag'],
   ['UNDO', 'previous ranking restored'],
   ['REDO', 'ranking reapplied'],
   ['AUTO_REMOVE', 'removed automatically'],
   ['LINE_DELETE', 'demand line deleted'],
+]);
+
+// What another entry went through, for a line that only shifted.
+const SHIFT_CAUSES: ReadonlyMap<string, string> = new Map([
+  ['ADD', 'another entry was added'],
+  ['REMOVE', 'another entry was removed'],
+  ['MOVE_UP', 'another entry was moved up'],
+  ['MOVE_DOWN', 'another entry was moved down'],
+  ['AUTO_REMOVE', 'another entry was removed automatically'],
+  ['LINE_DELETE', "another entry's demand line was deleted"],
 ]);
 
 const REMOVAL_REASONS: ReadonlyMap<string, string> = new Map([
@@ -229,8 +241,19 @@ function triggerText(trigger: string): string {
   return ` (after ${TRIGGERS.get(trigger) ?? 'another change'})`;
 }
 
-/** The Hot list cause appended to the `Hot rank` line. */
+/** The Hot list cause appended to the `Hot rank` line. A line that
+ * only shifted names what happened to the other entry, never the
+ * action as its own move or removal. */
 export function priorityText(priority: AuditTrailPriority): string {
+  const trigger =
+    priority.trigger === null ? '' : triggerText(priority.trigger);
+  if (priority.shifted) {
+    const cause =
+      (priority.action === null
+        ? undefined
+        : SHIFT_CAUSES.get(priority.action)) ?? 'another entry changed';
+    return ` · Hot list: shifted because ${cause}${trigger}`;
+  }
   const action =
     priority.action === null
       ? 'changed'
@@ -239,8 +262,6 @@ export function priorityText(priority: AuditTrailPriority): string {
     priority.removalReason === null
       ? ''
       : ` — ${REMOVAL_REASONS.get(priority.removalReason) ?? 'no longer active'}`;
-  const trigger =
-    priority.trigger === null ? '' : triggerText(priority.trigger);
   return ` · Hot list: ${action}${removal}${trigger}`;
 }
 

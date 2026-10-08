@@ -161,6 +161,9 @@ class TrailPriority(NamedTuple):
     action: str | None
     trigger: str | None
     removal_reason: str | None
+    # True when this line's rank changed only because the action added,
+    # removed or moved ANOTHER entry (``shifted_by_another_entry``).
+    shifted: bool
 
 
 class TrailAllocation(NamedTuple):
@@ -341,10 +344,49 @@ def field_changes(
     return changes
 
 
-def trail_priority(metadata: Mapping[str, Any] | None, demand_id: int | None) -> TrailPriority:
+# Actions that take one entry off the list: every other row they wrote
+# is a line that closed the gap.
+_REMOVAL_ACTIONS: Final = frozenset({"REMOVE", "AUTO_REMOVE", "LINE_DELETE"})
+
+
+def _rank(data: Mapping[str, Any] | None) -> int | None:
+    value = (data or {}).get("priority_rank")
+    return int(value) if value is not None else None
+
+
+def shifted_by_another_entry(action: str | None, before: int | None, after: int | None) -> bool:
+    """Whether a rank row records a line that only shifted because the
+    action targeted another entry. Every row a Hot change writes carries
+    the same action, so the row's own rank change tells them apart: an
+    ADD lists only the added line (None → n) and a removal only the
+    removed one (n → None); a MOVE_UP target's rank number falls and a
+    MOVE_DOWN target's rises, the displaced neighbour going the other
+    way. DRAG, UNDO and REDO describe the whole reorder and never name
+    their target here (an adjacent drag looks the same from either
+    line), so they are never marked shifted."""
+    if action == "ADD":
+        return before is not None
+    if action in _REMOVAL_ACTIONS:
+        return after is not None
+    if before is None or after is None:
+        return False
+    if action == "MOVE_UP":
+        return after > before
+    if action == "MOVE_DOWN":
+        return after < before
+    return False
+
+
+def trail_priority(
+    metadata: Mapping[str, Any] | None,
+    demand_id: int | None,
+    before_data: Mapping[str, Any] | None = None,
+    after_data: Mapping[str, Any] | None = None,
+) -> TrailPriority:
     """The Hot list cause of a rank row: the action, the trigger of a rank
-    change made outside the Hot command, and the removal reason of the
-    line it removed (None on a line that only shifted)."""
+    change made outside the Hot command, the removal reason of the line
+    it removed (None on a line that only shifted) and whether the line
+    only shifted because another entry was added, removed or moved."""
     block = _block(metadata, HOT_LIST_CHANGE_KEY) or {}
     cause = block.get("cause")
     trigger: str | None = None
@@ -356,7 +398,9 @@ def trail_priority(metadata: Mapping[str, Any] | None, demand_id: int | None) ->
             for item in removed:
                 if isinstance(item, dict) and item.get("work_order_demand_id") == demand_id:
                     removal_reason = _text(item.get("reason"))
-    return TrailPriority(_text(block.get("action")), trigger, removal_reason)
+    action = _text(block.get("action"))
+    shifted = shifted_by_another_entry(action, _rank(before_data), _rank(after_data))
+    return TrailPriority(action, trigger, removal_reason, shifted)
 
 
 def completion_trigger(metadata: Mapping[str, Any] | None) -> str | None:
@@ -434,12 +478,20 @@ def _audit_predicate(scope: TrailScope) -> ColumnElement[bool]:
     return or_(*terms)
 
 
-def _allocation_predicate(pn: str) -> ColumnElement[bool]:
+def _allocation_predicate(scope: TrailScope) -> ColumnElement[bool]:
     # Every Management-recorded row and every reversal ever recorded;
     # routine Stockroom confirmations stay in the allocation history.
-    return (WorkOrderAllocation.part_number == pn) & or_(
-        WorkOrderAllocation.source == AllocationSource.MANAGEMENT,
-        WorkOrderAllocation.reverses_allocation_id.is_not(None),
+    # Bounded by the scope's demand lines like the audit branch: a line
+    # created after the scope was read (each statement reads its own
+    # snapshot) is left to a later read, never hydrated without its
+    # Work Order.
+    return (
+        (WorkOrderAllocation.part_number == scope.part_number)
+        & WorkOrderAllocation.work_order_demand_id.in_(sorted(scope.demand_work_order))
+        & or_(
+            WorkOrderAllocation.source == AllocationSource.MANAGEMENT,
+            WorkOrderAllocation.reverses_allocation_id.is_not(None),
+        )
     )
 
 
@@ -463,7 +515,7 @@ def _cursor_key(
     else:
         at = session.scalar(
             select(WorkOrderAllocation.allocated_at).where(
-                WorkOrderAllocation.id == cursor.id, _allocation_predicate(scope.part_number)
+                WorkOrderAllocation.id == cursor.id, _allocation_predicate(scope)
             )
         )
     if at is None:
@@ -493,7 +545,7 @@ def audit_trail_of(
     pn = tracking.require_tracked(session, part_number)
     scope = _scope(session, pn)
     audit_predicate = _audit_predicate(scope)
-    allocation_predicate = _allocation_predicate(pn)
+    allocation_predicate = _allocation_predicate(scope)
     audit_rank = literal(_SOURCE_RANK[AuditTrailSource.AUDIT], Integer)
     allocation_rank = literal(_SOURCE_RANK[AuditTrailSource.ALLOCATION], Integer)
     audit_branch = select(
@@ -755,7 +807,7 @@ def _audit_entry(row: AuditEvent, scope: TrailScope, refs: _References) -> Trail
         subject=subject,
         changes=field_changes(row.entity_type, row.event_type, row.before_data, row.after_data),
         priority=(
-            trail_priority(row.metadata_, demand_id)
+            trail_priority(row.metadata_, demand_id, row.before_data, row.after_data)
             if kind is AuditTrailKind.PRIORITY_CHANGED
             else None
         ),

@@ -212,6 +212,7 @@ test('the payloads convert: completion, priority, allocation, route, actor and s
             action: 'AUTO_REMOVE',
             trigger: 'ALLOCATION',
             removal_reason: 'FULLY_ALLOCATED',
+            shifted: false,
           },
         }),
         entryWire({
@@ -283,6 +284,7 @@ test('the payloads convert: completion, priority, allocation, route, actor and s
     action: 'AUTO_REMOVE',
     trigger: 'ALLOCATION',
     removalReason: 'FULLY_ALLOCATED',
+    shifted: false,
   });
   expect(priority.changes).toEqual([
     { field: 'priorityRank', before: 2, after: null },
