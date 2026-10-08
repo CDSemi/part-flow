@@ -110,6 +110,17 @@ function changeCount(entry: WorkOrderImportEntry): string {
   return `${k} ${changeNoun(k)}`;
 }
 
+/** An Open or Released Work Order this import never compared with the
+ * file: the commit found it created after the check (the server leaves
+ * `linesNotInFile` null), so "nothing to change" would be untrue. */
+function existingNotCompared(entry: WorkOrderImportEntry): boolean {
+  return (
+    entry.outcome === 'EXISTS' &&
+    entry.existingStatus !== 'COMPLETED' &&
+    entry.linesNotInFile === null
+  );
+}
+
 /** The result label of one Work Order (the only place the number of
  * changes appears). */
 export function outcomeLabel(entry: WorkOrderImportEntry): string {
@@ -123,7 +134,7 @@ export function outcomeLabel(entry: WorkOrderImportEntry): string {
     case 'UPDATED':
       return `Changed — ${changeCount(entry)}`;
     case 'EXISTS':
-      return entry.existingStatus === 'COMPLETED'
+      return entry.existingStatus === 'COMPLETED' || existingNotCompared(entry)
         ? 'Already in PartFlow — not changed by this import'
         : 'Already in PartFlow — nothing to change';
     case 'REFUSED':
@@ -174,6 +185,12 @@ export function outcomeNotes(entry: WorkOrderImportEntry): string[] {
       if (entry.differsFromFile === true) {
         notes.push(
           'Differs from this file — this Work Order is completed and is never changed.',
+        );
+      }
+    } else if (existingNotCompared(entry)) {
+      if (entry.differsFromFile === true) {
+        notes.push(
+          'Differs from this file — check the file again to see the changes.',
         );
       }
     } else {

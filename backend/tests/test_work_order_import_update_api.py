@@ -1422,6 +1422,85 @@ def test_an_allocation_waits_for_the_import_and_neither_deadlocks(
     assert _demand(db_engine, unedited)["allocated_quantity"] == 2
 
 
+def test_a_change_while_the_import_waits_for_its_locks_refuses_that_work_order(
+    client: TestClient, both: IdentityClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CC-U2 (lock wait): the state token is compared under the save's
+    locks. The import is held inside ``update_work_order`` after its
+    unlocked read and before its first lock is requested; a manual save
+    of the very Job Numbers it plans to append commits there. A token
+    compared before the locks would pass and overwrite the manual value."""
+    pn, other_pn = _unique("PN"), _unique("PN")
+    edited = _seed(client, {"part_number": pn, "requested_quantity": 5, "job_numbers": ["J1"]})
+    other = _seed(client, (other_pn, 5))
+    (demand_id,) = edited.demand_ids
+    body = _csv((edited.number, pn, "5", "J2", ""), (other.number, other_pn, "8", "", ""))
+    token = _ok(_preview(both, body))["update_token"]
+    pause = _Seam(part_numbers.acquire_part_number_locks)
+    monkeypatch.setattr(work_orders, "acquire_part_number_locks", pause)
+    thread, result = _in_thread(lambda: _commit(both, body, confirm=token))
+    try:
+        assert pause.inside.wait(timeout=20)
+        # The manual save runs the same seam (call 2: not held).
+        patched = admin_of(client).patch(
+            f"/api/work-orders/{edited.id}",
+            json={"line_edits": [{"id": demand_id, "job_numbers": ["J1", "MANUAL"]}]},
+        )
+        assert patched.status_code == 200, patched.text
+        assert "value" not in result  # the import is still held
+    finally:
+        pause.let_go.set()
+    thread.join(timeout=60)
+    assert "error" not in result, result
+    report = _ok(result["value"])
+    assert _outcomes(report) == {edited.number: "REFUSED", other.number: "UPDATED"}
+    assert _refusal(report, edited.number) == _general(_U3)
+    assert _demand(db_engine, demand_id)["job_numbers"] == ["J1", "MANUAL"]
+    assert _intake_rows(db_engine, demand_id) == 0
+    assert _quantity(db_engine, other.demand_ids[0]) == 8
+
+
+def test_an_allocation_waits_on_the_work_order_lock_of_an_import_without_the_hot_lock(
+    client: TestClient,
+    shop: _Shop,
+    both: IdentityClient,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CC-U7 (Work Order lock): the import edits only a Job Number, so it
+    takes no Hot lock, and the allocation of an UNEDITED line of the same
+    Work Order needs none of the import's PN or demand locks — it can
+    only wait on the import's Work Order row lock."""
+    edited_pn, unedited_pn = _unique("PN"), _unique("PN")
+    work_order = _seed(client, (edited_pn, 10), (unedited_pn, 5))
+    edited, unedited = work_order.demand_ids
+    _stocked(client, shop, work_order, unedited, unedited_pn, 2)
+    body = _csv(
+        (work_order.number, edited_pn, "10", "J9", ""),
+        (work_order.number, unedited_pn, "5", "", ""),
+    )
+    token = _ok(_preview(both, body))["update_token"]
+    held = _Seam(work_orders._require_active, after=True)
+    monkeypatch.setattr(work_orders, "_require_active", held)
+    importer, imported = _in_thread(lambda: _commit(both, body, confirm=token))
+    try:
+        assert held.inside.wait(timeout=20)
+        allocator, allocated = _in_thread(
+            lambda: _allocate_response(client, unedited_pn, unedited, 2)
+        )
+        allocator.join(timeout=1)
+        assert allocator.is_alive(), allocated  # waits on the Work Order row lock
+    finally:
+        held.let_go.set()
+    importer.join(timeout=60)
+    allocator.join(timeout=60)
+    assert "error" not in imported and "error" not in allocated, (imported, allocated)
+    assert _outcomes(_ok(imported["value"])) == {work_order.number: "UPDATED"}
+    assert allocated["value"].status_code == 201, allocated["value"].text
+    assert _demand(db_engine, edited)["job_numbers"] == ["J9"]
+    assert _demand(db_engine, unedited)["allocated_quantity"] == 2
+
+
 def test_hot_list_changes_after_the_plan(
     client: TestClient, both: IdentityClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

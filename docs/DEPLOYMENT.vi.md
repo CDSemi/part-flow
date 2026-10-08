@@ -154,8 +154,8 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   file lớn nhất được phép (2.000 Work Order một line, mỗi Work Order một
   transaction) mất 26,03 s để import (0,3 s để check, 7,48 s để replay thành
   đã-import), và một lần chạy trong đó mỗi Work Order trong số đó đổi quantity
-  (PF-2) mất 27,23 s để import (2,45 s để check, 2,45 s để replay thành
-  đã-như-đã-lưu); vẫn khuyến nghị read timeout tối thiểu 120 s. Bản thân cấu hình proxy
+  (PF-2) mất 27,23 s để import (2,45 s để check; replay lại chính file đó, khi
+  tất cả đã như đã lưu, mất 2,48 s để check và 2,45 s để import); vẫn khuyến nghị read timeout tối thiểu 120 s. Bản thân cấu hình proxy
   thuộc Phase 16;
 - configuration bắt buộc được validate lúc startup và secret không có default
   đã commit;

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useRef, useState } from 'react';
 
-import { ApiError, errorMessage } from '../../api/client';
+import { ApiError, errorMessage, refusalFlag } from '../../api/client';
 import {
   IMPORT_TEMPLATE_URLS,
   checkWorkOrderFile,
@@ -69,6 +69,25 @@ function accessRefusal(error: unknown): boolean {
     error instanceof ApiError && (error.status === 401 || error.status === 403)
   );
 }
+
+/** The Import's content permission refusal (403 `permission_denied`
+ * without `any_permission`): the commit planned the file again and its
+ * content now needs a key the check did not ask for (e.g. a number
+ * created since the check is now a change), so the report no longer
+ * stands. */
+function contentPermissionRefusal(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 403 &&
+    refusalFlag(error, 'permission_denied') &&
+    !refusalFlag(error, 'any_permission')
+  );
+}
+
+/** Shown instead of the generic denial for a content permission
+ * refusal on Import. */
+const CONTENT_PERMISSION_CHANGED =
+  'Nothing was imported: this file now needs a permission your account does not have. Check the file again to see what it needs.';
 
 /**
  * Import Work Orders from a file (GUI_DESIGN §11.7): choose a CSV or
@@ -240,8 +259,14 @@ export function ImportWorkOrdersDialog({
         setPhase('unknown');
         return;
       }
-      setAlert(errorMessage(error));
       setAlertFocus({ target: 'alert' });
+      if (contentPermissionRefusal(error)) {
+        setAlert(CONTENT_PERMISSION_CHANGED);
+        showReport(null);
+        setPhase('chosen');
+        return;
+      }
+      setAlert(errorMessage(error));
       if (accessRefusal(error)) {
         setPhase('checked');
         return;

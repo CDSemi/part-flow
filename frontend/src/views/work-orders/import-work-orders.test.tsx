@@ -80,6 +80,10 @@ let sessionPermissions: readonly Permission[];
 /** Work Order Numbers whose update the commit refuses as changed after
  * the check (U3), as a concurrent edit would. */
 let changedAfterCheck: Set<string>;
+/** Work Order Numbers someone else creates between the check and the
+ * Import: the commit's create falls back to the never-compared EXISTS
+ * entry (`lines_not_in_file` null), as the server does. */
+let createdAfterCheck: Set<string>;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -388,6 +392,17 @@ async function importRoute(
       return { ...e, outcome: 'UPDATED' };
     }
     if (e.outcome !== 'WILL_CREATE') return e;
+    if (createdAfterCheck.has(e.work_order_number as string)) {
+      return {
+        ...e,
+        outcome: 'EXISTS',
+        new_part_numbers: [],
+        lines_without_due_date: 0,
+        work_order_id: nextWorkOrderId++,
+        existing_status: 'OPEN',
+        differs_from_file: true,
+      };
+    }
     const id = nextWorkOrderId++;
     listRows.push(summaryWire(id, e.work_order_number as string));
     return { ...e, outcome: 'CREATED', work_order_id: id };
@@ -433,6 +448,7 @@ beforeEach(() => {
   nextWorkOrderId = 50;
   sessionPermissions = PERMISSIONS;
   changedAfterCheck = new Set();
+  createdAfterCheck = new Set();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -917,7 +933,8 @@ for (const [name, body] of [
     {
       detail: A3,
       permission_denied: true,
-      required_permissions: ['MANAGE_WORK_ORDERS'],
+      required_permissions: ['EDIT_WORK_ORDER_DEMAND', 'MANAGE_WORK_ORDERS'],
+      any_permission: true,
     },
   ],
   ['a refused CSRF check', { detail: A3, csrf_rejected: true }],
@@ -1595,6 +1612,80 @@ test('FV-11: a 422 refused confirmation shows the message and Check file again',
   );
   await within(dialog).findByRole('heading', { name: 'Check result' });
   expect(importButton(dialog)).toBeEnabled();
+});
+
+test('FV-11: a Work Order created by someone else after the check is never reported as "nothing to change"', async () => {
+  scenario.entries = [
+    entryWire('WO-RACE', 'WILL_CREATE', {
+      lines: [lineWire(2, 'Y-100', 10, '2026-07-24')],
+    }),
+  ];
+  createdAfterCheck.add('WO-RACE');
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  fireEvent.click(importButton(dialog));
+  await within(dialog).findByRole('heading', { name: 'Import result' });
+
+  expect(
+    within(dialog).getByText(
+      'Already in PartFlow — not changed by this import',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).queryByText('Already in PartFlow — nothing to change'),
+  ).toBeNull();
+  expect(
+    within(dialog).getByText(
+      'Differs from this file — check the file again to see the changes.',
+    ),
+  ).toBeInTheDocument();
+});
+
+test('FV-11: a content permission refusal on Import drops the outdated report and offers Check file again', async () => {
+  // Checked as two new Work Orders by a creator without Edit Work Order
+  // Demand; before Import someone else creates WO-1, so the commit's own
+  // plan now changes it and needs that key.
+  scenario.entries = [
+    entryWire('WO-1', 'WILL_CREATE', {
+      lines: [lineWire(2, 'A-100', 2, '2026-07-24')],
+    }),
+    entryWire('WO-2', 'WILL_CREATE', {
+      rows: [3],
+      lines: [lineWire(3, 'B-200', 3, '2026-07-24')],
+    }),
+  ];
+  sessionPermissions = ['MANAGE_WORK_ORDERS'];
+  const dialog = await openImport();
+  pick(dialog, importFile('orders.csv').file);
+  await checkFile(dialog);
+  expect(importButton(dialog)).toBeEnabled();
+  scenario.entries = [...updateScenario().slice(0, 1), scenario.entries[1]];
+  fireEvent.click(importButton(dialog));
+
+  const alert = await within(dialog).findByRole('alert');
+  expect(alert).toHaveTextContent(
+    'Nothing was imported: this file now needs a permission your account does not have. Check the file again to see what it needs.',
+  );
+  await waitFor(() => expect(alert).toHaveFocus());
+  expect(
+    within(dialog).queryByRole('heading', { name: 'Check result' }),
+  ).toBeNull();
+  expect(within(dialog).queryByText(UNKNOWN_COPY)).toBeNull();
+  expect(uploadsTo(COMMIT)).toHaveLength(1);
+
+  // Checking again shows what the file now needs; Import stays disabled.
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Check file again' }),
+  );
+  await within(dialog).findByRole('heading', { name: 'Check result' });
+  expect(uploadsTo(PREVIEW)).toHaveLength(2);
+  expect(importButton(dialog)).toBeDisabled();
+  expect(
+    within(dialog).getByText(
+      'Changing existing Work Orders needs the "Edit Work Order Demand" permission.',
+    ),
+  ).toBeInTheDocument();
 });
 
 test('FV-12: Import is disabled with one line per missing permission', async () => {

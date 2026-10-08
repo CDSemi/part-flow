@@ -217,12 +217,33 @@ test('outcomeLabel, outcomeIcon and outcomeNotes name every outcome', () => {
   expect(
     outcomeLabel(entry('A', 'EXISTS', { existingStatus: 'COMPLETED' })),
   ).toBe('Already in PartFlow — not changed by this import');
-  expect(outcomeLabel(entry('A', 'EXISTS', { existingStatus: 'OPEN' }))).toBe(
-    'Already in PartFlow — nothing to change',
-  );
+  // Compared with the file: the server lists the kept lines (maybe none).
   expect(
-    outcomeLabel(entry('A', 'EXISTS', { existingStatus: 'RELEASED' })),
+    outcomeLabel(
+      entry('A', 'EXISTS', { existingStatus: 'OPEN', linesNotInFile: [] }),
+    ),
   ).toBe('Already in PartFlow — nothing to change');
+  expect(
+    outcomeLabel(
+      entry('A', 'EXISTS', {
+        existingStatus: 'RELEASED',
+        linesNotInFile: ['K-1'],
+      }),
+    ),
+  ).toBe('Already in PartFlow — nothing to change');
+  // Created after the check (the commit's create fallback): never
+  // compared, so never "nothing to change".
+  for (const existingStatus of ['OPEN', 'RELEASED'] as const) {
+    expect(
+      outcomeLabel(
+        entry('A', 'EXISTS', {
+          existingStatus,
+          differsFromFile: true,
+          linesNotInFile: null,
+        }),
+      ),
+    ).toBe('Already in PartFlow — not changed by this import');
+  }
   expect(outcomeLabel(entry('A', 'REFUSED'))).toBe(
     'Not imported — fix the rows listed',
   );
@@ -264,6 +285,26 @@ test('outcomeLabel, outcomeIcon and outcomeNotes name every outcome', () => {
         existingStatus: 'RELEASED',
         differsFromFile: false,
         linesNotInFile: [],
+      }),
+    ),
+  ).toEqual([]);
+  expect(
+    outcomeNotes(
+      entry('A', 'EXISTS', {
+        existingStatus: 'OPEN',
+        differsFromFile: true,
+        linesNotInFile: null,
+      }),
+    ),
+  ).toEqual([
+    'Differs from this file — check the file again to see the changes.',
+  ]);
+  expect(
+    outcomeNotes(
+      entry('A', 'EXISTS', {
+        existingStatus: 'RELEASED',
+        differsFromFile: false,
+        linesNotInFile: null,
       }),
     ),
   ).toEqual([]);
