@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), làm rõ §8.2 và §21 của Phase 14 slice 5 (allocation action trên Completed Work Orders) và các câu §8.10, §8.11, §17 của Phase 14 slice 6 (AssignedRoute adjustment, OD-P11), nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`), đoạn §20 mới của Phase 14 slice 2 và các đoạn §15 và §20 mới của Phase 14 slice 4 (thiết bị Scan Station), làm rõ §8.2 và §21 của Phase 14 slice 5 (allocation action trên Completed Work Orders) và các câu §8.10, §8.11, §17 của Phase 14 slice 6 (AssignedRoute adjustment, OD-P11) và đoạn §13 *File import* cùng các câu §21 và §28 của Phase 15 slice 1, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
@@ -703,6 +703,8 @@ Nguồn có thể là manual, file import hoặc ERP sync tương lai. Với Wor
 
 Terminal Area không bao giờ là starting Area.
 
+**File import (Phase 15 — đã quyết định 2026-10-06):** file CSV (UTF-8) hoặc Excel (.xlsx, worksheet đầu tiên, chỉ đọc stored value — formula không bao giờ được evaluate) đã chuẩn bị sẵn, có header row gọi tên các cột cố định Work Order Number, Part Number, Requested Quantity (bắt buộc), Job Number và Due Date (`YYYY-MM-DD`, tùy chọn). File chính là phần chọn dòng: cột BOM của source system (ví dụ Type, Ref Designator, Issued, Shelf, Cost) làm file bị từ chối, và mọi cột khác ngoài template bị bỏ qua và được liệt kê trong báo cáo. Mọi dòng đều cần Work Order Number; các dòng được nhóm theo số đó, số được lưu đúng như đã viết (số có khoảng trắng hai đầu bị từ chối), và một dòng không có số sẽ chặn toàn bộ import. Một Work Order là một transaction: Work Order có bất kỳ dòng không hợp lệ nào bị từ chối nguyên Work Order, các Work Order còn lại vẫn được import. File được kiểm tra (check) trước khi import, và import validate lại đúng file đó. Một Work Order Number đã tồn tại không bao giờ bị tạo trùng — import lại cùng file không tạo gì — và import không bao giờ thay đổi một Work Order đã completed. Demand được import có Request Type `NEW`, không có Work Order due date, không release và không priority. Cột Revision không được import — Revision vẫn thuộc quản lý Part Numbers (owner decision OD-15-11). Việc cập nhật Work Order active đang tồn tại từ file đã được quyết định (owner, 2026-10-06) và đến cùng Phase 15 slice 2; cho tới khi được triển khai, một Work Order Number đã tồn tại chỉ được báo cáo và không bị thay đổi.
+
 **Partial/repeated release:** Demand 50 có thể release 20, 12, 18; mỗi release tạo
 Flow riêng và không auto-merge. Released quantity là tổng release Movement;
 remaining là hard cap. Vượt cap hoặc remaining zero thì zero write.
@@ -1201,7 +1203,7 @@ Không ngụ ý cả PN ở một step.
 
 ## Work Orders
 
-Management view cho manual intake. List full width, toolbar search + New, row mở
+Management view cho manual intake và file import (§13 *File import*). List full width, toolbar search + New, row mở
 details. Hỗ trợ create/locate WO, Demand lines, PN create-on-use/barcode, nullable
 WO/due, default NEW, quantity/Job/requester/reason/notes; Save chỉ business demand;
 `Release to production` là action riêng xác nhận quantity/route/starting context
@@ -1317,7 +1319,7 @@ Movement history và completion Allocation.
 
 # 28. Audit và data integrity
 
-Audit đầy đủ cho WO/Demand, priority, route, split/merge, transfer/assignment,
+Audit đầy đủ cho WO/Demand (import ghi lại intake channel của nó), priority, route, split/merge, transfer/assignment,
 Stockroom, Allocation/correction, quantity adjustment, Repair, Scrap, Undo, Worker
 Session, config và archive/purge. Production runtime append-only.
 

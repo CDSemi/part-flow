@@ -4457,3 +4457,43 @@ test('FC-8: an over-allocated line saves its other fields — its unchanged Qty 
     },
   ]);
 });
+
+/* ============ Phase 15 slice 1 — Import from file… ============ */
+
+test('FV-8: Import from file… sits in the toolbar for Create and edit Work Orders and offers both templates', async () => {
+  await renderWorkOrders();
+  const opener = screen.getByRole('button', { name: 'Import from file…' });
+  expect(opener.closest('.wo-tools')).not.toBeNull();
+  // Between the completed-history link and ＋ New Work Order.
+  const tools = Array.from(
+    opener.closest('.wo-tools')!.querySelectorAll('a, button'),
+  ).map((el) => el.textContent);
+  expect(tools).toEqual([
+    'Completed Work Orders ›',
+    'Import from file…',
+    '＋ New Work Order',
+  ]);
+
+  await waitFor(() => expect(opener).toBeEnabled());
+  fireEvent.click(opener);
+  const dialog = screen.getByRole('dialog', { name: 'Import Work Orders' });
+  expect(within(dialog).getByRole('link', { name: 'CSV' })).toHaveAttribute(
+    'href',
+    '/api/work-orders/import/template.csv',
+  );
+  expect(within(dialog).getByRole('link', { name: 'Excel' })).toHaveAttribute(
+    'href',
+    '/api/work-orders/import/template.xlsx',
+  );
+  expect(within(dialog).getByRole('link', { name: 'CSV' })).toHaveAttribute(
+    'download',
+  );
+});
+
+test('FV-8: without Create and edit Work Orders the import entry is hidden, not disabled', async () => {
+  sessionPermissions = ['EDIT_WORK_ORDER_DEMAND', 'MANAGE_PART_NUMBER_MASTER'];
+  await renderWorkOrders();
+  expect(
+    screen.queryByRole('button', { name: 'Import from file…' }),
+  ).toBeNull();
+});

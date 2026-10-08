@@ -7,8 +7,8 @@
 // carrying the safe, user-facing message. No caching, no retries, no
 // business rules — validation and transactions live in the backend
 // Application layer. The one binary path is `apiUpload`: a raw image
-// body labelled with its own media type (no multipart), answered with
-// JSON like every other call.
+// or import-file body labelled with its own media type (no multipart),
+// answered with JSON like every other call.
 //
 // Every request carries `X-PartFlow-CSRF: 1`: the server refuses a
 // state-changing request that carries the user sign-in cookie without
@@ -208,21 +208,28 @@ export async function apiRequestWithStatus<T>(
 }
 
 /**
- * Upload one raw binary body (an image) labelled with the blob's own
- * media type, and parse the JSON response body. The caller makes sure
- * `blob.type` matches the bytes; the server re-checks both.
+ * Upload one raw binary body (an image, a Work Order import file)
+ * labelled with the blob's own media type, and parse the JSON response
+ * body. The caller makes sure `blob.type` matches the bytes; the server
+ * re-checks both. Extra `headers` (the import's check token) are added
+ * after `Content-Type` and the request-origin header, never overriding
+ * either.
  */
 export async function apiUpload<T>(
   path: string,
   blob: Blob,
-  method: 'PUT' = 'PUT',
+  method: 'PUT' | 'POST' = 'PUT',
+  headers?: Readonly<Record<string, string>>,
 ): Promise<T> {
-  const response = await fetch(path, {
-    method,
-    headers: { 'Content-Type': blob.type, ...CSRF_HEADERS },
-    body: blob,
-  });
-  return (await readResponse<T>(response, {}, true)).data;
+  const sent: Record<string, string> = {
+    'Content-Type': blob.type,
+    ...CSRF_HEADERS,
+  };
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (!(name in sent)) sent[name] = value;
+  }
+  const response = await fetch(path, { method, headers: sent, body: blob });
+  return (await readResponse<T>(response, sent, true)).data;
 }
 
 /**

@@ -28,6 +28,7 @@ import { dueCountdown, formatIsoDate } from '../dates';
 import type { DueSoonPolicy } from '../dates';
 import { partNumbersPreview, workOrderStatusLabel } from './demand-lines';
 import { CompletedWorkOrdersView } from './CompletedWorkOrdersView';
+import { ImportWorkOrdersDialog } from './ImportWorkOrdersDialog';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
@@ -76,8 +77,8 @@ const LONG_PREVIEW_WORK_ORDERS: WorkOrderSummary[] = import.meta.env.DEV
     ]
   : [];
 
-// Management sub view for manual Work Order entry and explicit
-// production release, wired to the real /api/work-orders surface
+// Management sub view for manual Work Order entry, file import and
+// explicit production release, wired to the real /api/work-orders surface
 // (Phase 4): saving persists business demand transactionally, and
 // Release to production is the separate explicit action of §11.4.
 //
@@ -170,36 +171,41 @@ function ActiveWorkOrdersView() {
   const [newWorkOrderOpen, setNewWorkOrderOpen] = useState(false);
   const [newWorkOrderDirty, setNewWorkOrderDirty] = useState(false);
   const [detailDirty, setDetailDirty] = useState(false);
+  // The Import Work Orders dialog (GUI_DESIGN §11.7); `importBusy`
+  // while its Import request is in flight.
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
 
   const dirty =
     (newWorkOrderOpen && newWorkOrderDirty) ||
     (detailId !== null && detailDirty);
+  const guarded = dirty || importBusy;
 
   // Unsaved-change protection for top-level navigation, Management
   // sub-navigation and browser back/forward (the router consults the
-  // guard), plus reload / tab close via beforeunload.
+  // guard), plus reload / tab close via beforeunload. A running import
+  // is guarded the same way — leaving does not stop it on the server.
   useEffect(() => {
-    if (!dirty) {
+    if (!guarded) {
       setNavigationGuard(null);
       return;
     }
-    setNavigationGuard(() =>
-      window.confirm(
-        'Work Orders has unsaved changes. Discard them and leave this view?',
-      ),
-    );
+    const message = importBusy
+      ? 'An import is in progress. Leave anyway? The import continues on the server.'
+      : 'Work Orders has unsaved changes. Discard them and leave this view?';
+    setNavigationGuard(() => window.confirm(message));
     return () => setNavigationGuard(null);
-  }, [dirty, setNavigationGuard]);
+  }, [guarded, importBusy, setNavigationGuard]);
 
   useEffect(() => {
-    if (!dirty) return;
+    if (!guarded) return;
     const handler = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
-  }, [dirty]);
+  }, [guarded]);
 
   const handleDetailDirtyChange = useCallback(
     (value: boolean) => setDetailDirty(value),
@@ -279,6 +285,8 @@ function ActiveWorkOrdersView() {
         onSearch={setSearch}
         onOpen={openWorkOrder}
         onNew={canCreate ? () => setNewWorkOrderOpen(true) : undefined}
+        onImport={canCreate ? () => setImportOpen(true) : undefined}
+        writeBlocked={writeBlocked}
         viewOnly={viewOnly}
         dueSoon={dueSoonData.state}
         onRetryDueSoon={dueSoonData.reload}
@@ -324,6 +332,18 @@ function ActiveWorkOrdersView() {
         />
       )}
 
+      {importOpen && (
+        <ImportWorkOrdersDialog
+          writeBlocked={writeBlocked}
+          onBusyChange={setImportBusy}
+          onClose={(wrote) => {
+            setImportOpen(false);
+            setImportBusy(false);
+            if (wrote) workOrdersData.reload();
+          }}
+        />
+      )}
+
       {noticeElement}
     </section>
   );
@@ -337,6 +357,8 @@ function WorkOrderListPanel({
   onSearch,
   onOpen,
   onNew,
+  onImport,
+  writeBlocked,
   viewOnly,
   dueSoon,
   onRetryDueSoon,
@@ -354,6 +376,11 @@ function WorkOrderListPanel({
   onOpen: (id: number) => void;
   /** Absent for a user who may not create Work Orders. */
   onNew?: () => void;
+  /** Opens the file import; absent for a user who may not create Work
+   * Orders. */
+  onImport?: () => void;
+  /** Disconnected: the import needs the server. */
+  writeBlocked: boolean;
   /** The user may change nothing here: the view-only note shows. */
   viewOnly: boolean;
   /** The Due Soon warning policy read: the table renders only with it. */
@@ -403,6 +430,18 @@ function WorkOrderListPanel({
         >
           Completed Work Orders ›
         </Link>
+        {onImport ? (
+          <button
+            className="btn ghost"
+            disabled={writeBlocked}
+            title={
+              writeBlocked ? 'Reconnect to import Work Orders.' : undefined
+            }
+            onClick={onImport}
+          >
+            Import from file…
+          </button>
+        ) : null}
         {onNew ? (
           <button className="btn primary" onClick={onNew}>
             ＋ New Work Order

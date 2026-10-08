@@ -31,21 +31,31 @@ class UploadedImage:
     content_type: str | None
 
 
-async def read_image_body(request: Request) -> UploadedImage:
-    """Read a bounded raw image body (``Depends`` target of upload routes)."""
+async def read_bounded_body(request: Request, *, limit: int, too_large_message: str) -> bytes:
+    """Read a raw request body of at most ``limit`` bytes.
+
+    A declared ``Content-Length`` above the limit is refused before
+    anything is read; a streamed body is refused as soon as it passes
+    the limit. Shared by the image uploads and (Phase 15 slice 1) the
+    Work Order file import.
+    """
     declared_length = request.headers.get("content-length")
-    if (
-        declared_length is not None
-        and declared_length.isdigit()
-        and int(declared_length) > MAX_IMAGE_BYTES
-    ):
-        raise PayloadTooLargeError(IMAGE_TOO_LARGE_MESSAGE)
+    if declared_length is not None and declared_length.isdigit() and int(declared_length) > limit:
+        raise PayloadTooLargeError(too_large_message)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > MAX_IMAGE_BYTES:
-            raise PayloadTooLargeError(IMAGE_TOO_LARGE_MESSAGE)
-    return UploadedImage(data=bytes(body), content_type=request.headers.get("content-type"))
+        if len(body) > limit:
+            raise PayloadTooLargeError(too_large_message)
+    return bytes(body)
+
+
+async def read_image_body(request: Request) -> UploadedImage:
+    """Read a bounded raw image body (``Depends`` target of upload routes)."""
+    data = await read_bounded_body(
+        request, limit=MAX_IMAGE_BYTES, too_large_message=IMAGE_TOO_LARGE_MESSAGE
+    )
+    return UploadedImage(data=data, content_type=request.headers.get("content-type"))
 
 
 def image_etag(updated_at: datetime.datetime) -> str:

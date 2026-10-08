@@ -820,6 +820,11 @@ _MANAGEMENT_WRITES = {
     # Phase 14 slice 6: the AssignedRoute adjustment and its editor read.
     ("POST", "/api/quantity-flows/{quantity_flow_id}/route-adjustments"),
     ("GET", "/api/tracking/assigned-routes"),
+    # Phase 15 slice 1: the Work Order file import and its templates.
+    ("POST", "/api/work-orders/import/preview"),
+    ("POST", "/api/work-orders/import"),
+    ("GET", "/api/work-orders/import/template.csv"),
+    ("GET", "/api/work-orders/import/template.xlsx"),
 }
 
 

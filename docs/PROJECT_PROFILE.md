@@ -1275,6 +1275,8 @@ For a newly received Work Order:
 6. Save the business demand. Saving Work Order Demand never automatically creates production quantity.
 7. Confirm the Route Mode (Floating by default) — and the Planned Route where chosen — when production is released.
 
+**File import (Phase 15 — decided 2026-10-06):** a prepared CSV (UTF-8) or Excel (.xlsx, first worksheet, stored values — formulas are never evaluated) whose header row names the fixed columns Work Order Number, Part Number, Requested Quantity (required), Job Number and Due Date (`YYYY-MM-DD`, optional). The file is the row selection: source BOM columns (for example Type, Ref Designator, Issued, Shelf, Cost) refuse the file, and every other non-template column is ignored and listed in the report. Every row needs a Work Order Number; rows group by it, it is stored exactly as written (a number with spaces around it is refused), and a row without one blocks the whole import. One Work Order is one transaction: a Work Order with any invalid row is refused whole, and the other Work Orders import. The file is checked before it is imported, and the import re-validates the same file. An existing Work Order Number is never duplicated — importing the same file again creates nothing — and a completed Work Order is never changed by an import. Imported demand is Request Type `NEW`, with no Work Order due date, no release and no priority. A Revision column is not imported — Revision stays with Part Numbers management (owner decision OD-15-11). Updating existing active Work Orders from a file is decided (owner, 2026-10-06) and arrives with Phase 15 slice 2; until it is implemented, an existing Work Order Number is reported and not changed.
+
 Production release is a separate, explicit action. On production release:
 
 1. Confirm the release quantity.
@@ -1946,7 +1948,7 @@ It must not imply that the entire PN is at one Route Step.
 
 ## Work Orders
 
-Work Orders is the management view for manual Work Order entry (the Work Order Intake workflow, §12). It is a light-theme management view. The Work Order list spans the full view width, its search and the New Work Order action share one toolbar row, and selecting a Work Order row opens the Work Order Details dialog.
+Work Orders is the management view for manual Work Order entry and file import (the Work Order Intake workflow, §12; §13 *File import*). It is a light-theme management view. The Work Order list spans the full view width, its search and the New Work Order action share one toolbar row, and selecting a Work Order row opens the Work Order Details dialog.
 
 The view must support the minimum confirmed workflow:
 
@@ -2212,7 +2214,7 @@ Reports must distinguish:
 
 The system must preserve a complete audit trail for:
 
-- Work Order creation and edits,
+- Work Order creation and edits (an import records its intake channel),
 - Work Order Demand creation and edits,
 - priority changes,
 - Route assignment,

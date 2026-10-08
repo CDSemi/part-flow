@@ -54,6 +54,7 @@ test('the wide Management tables collapse to stacked rows with inline captions',
     ['views/machines/machines.css', 'mg-table'],
     ['views/tracking/tracking.css', 'tk-table'],
     ['views/work-orders/work-orders.css', 'wolist'],
+    ['views/work-orders/work-orders.css', 'wo-import-table'],
     ['views/planned-routes/planned-routes.css', 'rt-table'],
     ['views/administration/administration.css', 'ad-table'],
   ] as const;

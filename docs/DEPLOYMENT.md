@@ -162,7 +162,15 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   image upload routes (`PUT /api/workers/{id}/avatar`,
   `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image?number=…`), because the application accepts images up to 2 MiB; a
   proxy-generated 413 carries no JSON `detail`, so the UI could only show a
-  generic failure;
+  generic failure; likewise the proxy must accept request bodies of at least
+  2 MiB on the Work Order import routes (`POST /api/work-orders/import/preview`
+  and `POST /api/work-orders/import`), because the application accepts files up
+  to 1 MiB and its JSON 413 must win, and the read timeout on
+  `POST /api/work-orders/import` must exceed the measured worst case — a
+  development-environment run of the largest allowed file (2,000 single-line
+  Work Orders, one transaction each) took 26.03 s to import (0.3 s to check,
+  7.48 s to replay as already imported); a read timeout of at least 120 s is
+  recommended. The proxy configuration itself belongs to Phase 16;
 - required configuration is validated at startup and secrets have no committed
   defaults;
 - image or release versions are immutable and retained long enough to roll back

@@ -146,7 +146,15 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   `/api` — proxy phải nhận request body tối thiểu 3 MiB trên các route upload ảnh
   (`PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image?number=…`), vì
   application nhận ảnh đến 2 MiB; mã 413 do proxy tự sinh không có JSON `detail`,
-  nên UI chỉ có thể hiện lỗi chung;
+  nên UI chỉ có thể hiện lỗi chung; tương tự, proxy phải nhận request body tối
+  thiểu 2 MiB trên các route import Work Order (`POST /api/work-orders/import/preview`
+  và `POST /api/work-orders/import`), vì application nhận file đến 1 MiB và JSON
+  413 của nó phải thắng, và read timeout trên `POST /api/work-orders/import` phải
+  vượt trường hợp xấu nhất đã đo — một lần chạy trên môi trường development với
+  file lớn nhất được phép (2.000 Work Order một line, mỗi Work Order một
+  transaction) mất 26,03 s để import (0,3 s để check, 7,48 s để replay thành
+  đã-import); khuyến nghị read timeout tối thiểu 120 s. Bản thân cấu hình proxy
+  thuộc Phase 16;
 - configuration bắt buộc được validate lúc startup và secret không có default
   đã commit;
 - image hoặc release version bất biến và được giữ đủ lâu để rollback code.

@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
 > Baseline upstream: commit `f96bf09` (Production Board — merged quantity theo mọi nhánh lineage).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station), slice 5 (Management allocation và correction beyond-demand) và slice 6 (AssignedRoute adjustment) và slice 7 (audit trail theo PN, `Change priority`) và slice 8 (tier theme của User) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station), slice 5 (Management allocation và correction beyond-demand) và slice 6 (AssignedRoute adjustment) và slice 7 (audit trail theo PN, `Change priority`) và slice 8 (tier theme của User) và Phase 15 slice 1 (file import, §11.7) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
@@ -23,7 +23,7 @@ Mười GUI view được duyệt:
 3. Area Board — All Areas + per-Area detail.
 4. Machines.
 5. PN Tracking.
-6. Work Orders.
+6. Work Orders (nhập Work Order thủ công, file import và production release).
 7. Planned Routes.
 8. Part Numbers.
 9. Priority Management.
@@ -835,7 +835,7 @@ authorization (màn hình Management do Phase 14 slice 5 giao, §11.6). Admin v�
 
 # 11. Work Orders
 
-Management UI cho manual demand + explicit release, không ERP customer/pricing/
+Management UI cho manual demand, file import (§11.7) + explicit release, không ERP customer/pricing/
 invoice/shipping/accounting. Routes: active list `/management/work-orders`, completed
 history `/management/work-orders/completed`; both keep Work Orders subnav active.
 Details/New là modal trên list, URL không đổi. Native `<input type="date">`, ISO
@@ -850,7 +850,7 @@ theo completion.
 Row: WO number, received/due, demand count/PN preview, Open/Released. Completed không
 ở active list. Server-side number search + bound 100 newest; search before bound;
 exact duplicate lookup whole history. Toolbar full-width: search, quiet Completed
-link, primary New. Internal null WO hiển thị `—` + label. Whole-row opens details,
+link, secondary `Import from file…` (Phase 15 — điểm vào §11.7; ẩn, không disable, khi thiếu Create and edit Work Orders), primary New. Internal null WO hiển thị `—` + label. Whole-row opens details,
 focus return khi close.
 
 ## 11.2 Work Order Details — modal với demand lines
@@ -948,6 +948,19 @@ Dialog dùng chung **`Adjust WO Allocation`** là bề mặt Management duy nh�
 - **Offline.** Khi mất kết nối, các action submit bị chặn; không có gì được xếp hàng.
 
 Được tham chiếu từ §7.2 mục 8, §7.3, §10, §11.2 và §11.5.
+
+## 11.7 Import Work Orders từ file (Phase 15)
+
+Dialog **`Import Work Orders`** tạo Work Order từ file CSV hoặc Excel đã chuẩn bị (PROJECT_PROFILE §13 *File import*). Nó chỉ lưu business demand — không có gì được release sang production — và chỉ hiện cho user giữ Create and edit Work Orders (`MANAGE_WORK_ORDERS`); những người khác không thấy **`Import from file…`** (ẩn, không disable, §1.1 *Access to Management*).
+
+- **Vị trí và luồng.** **`Import from file…`** nằm trong hàng toolbar §11.1, giữa `Completed Work Orders ›` và `＋ New Work Order`. Dialog (extra-wide) đi qua: chọn file `.csv` hoặc `.xlsx` → **Check file** → báo cáo theo từng Work Order → **Import N Work Orders** → báo cáo kết quả. Check file là bắt buộc trước Import; import validate lại đúng file đó, và server từ chối file không phải file đã check (dialog khi đó đề nghị `Check file again`). Chọn file khác xóa báo cáo. Hai link template (`CSV`, `Excel`) tải template chỉ có header.
+- **Help (một chỗ).** Cột bắt buộc Work Order Number, Part Number, Requested Quantity; tùy chọn Job Number và Due Date (`YYYY-MM-DD`); mỗi Part Number một dòng; format các cột Work Order Number, Part Number và Job Number là Text để giữ số 0 đầu. File Excel: worksheet đầu tiên được đọc và phải visible, cột A–BL, formula được đọc là giá trị lưu lần cuối trong Excel (formula chưa từng được tính được đọc là rỗng), và mọi dòng đều được import, kể cả dòng hidden hoặc filtered. Giới hạn: 1 MB, 2.000 dòng, 500 line mỗi Work Order, 200 ký tự mỗi text cell.
+- **Báo cáo.** Một dòng tóm tắt `Will create {a} · Already in PartFlow {b} · Not imported {c}` (sau import: `Created …`), `Worksheet read: {name}` cho file Excel, số dòng đã đọc, số dòng trống bị bỏ qua và các cột bị bỏ qua. Bảng `WO Number | Rows | Lines | Result` liệt kê Work Order REFUSED trước; mỗi dòng mở ra các line của nó (`Row · PN · Qty · Due · Job`; ngày dạng `Jul 24, 2026`, ngày hoặc Job Number vắng là `—`) và, khi bị từ chối, từng lỗi dạng `Row {r} · {column} — {message}`. Nhãn kết quả: `Will be created` (kèm số Part Number mới), `Created`, `Already in PartFlow — not changed by this import` (kèm `Differs from this file — open the Work Order to apply changes.`, hoặc với Work Order completed `… this Work Order is completed and is never changed.`; due date và Job Number không được so sánh và dialog nói rõ điều này), và `Not imported — fix the rows listed`. Trạng thái không bao giờ chỉ dựa vào màu.
+- **Câu nêu điều bị bỏ qua.** Mỗi preview sẽ tạo Work Order đều nêu `Imported Work Orders get no Work Order due date — they stay unscheduled.`, và `{n} lines have no due date and sort after dated demand.` khi có line không có due date. **Import N** là sự xác nhận các điều bỏ qua này (như §11.3).
+- **Chặn.** Các dòng không có Work Order Number dùng được được liệt kê dưới `Rows without a usable Work Order Number` và làm Import bị disable; N = 0 hiện `Nothing new to import.`
+- **Offline và đang chạy.** Khi mất kết nối, Check file và Import bị disable (`Reconnect to check or import the file.`; không có gì được xếp hàng). Trong lúc import, dialog không thể đóng hay cancel, hiện `Importing… Keep this page open.`, và rời trang sẽ hỏi xác nhận. Kết quả bị mất hiện `The import may be partly saved. Check the file again: Work Orders already in PartFlow are never duplicated.` và không bao giờ tự động retry.
+- **Focus và viewport hẹp.** Focus ban đầu ở file control; báo cáo mới chuyển focus tới heading của nó; lỗi được thông báo dạng alert; đóng dialog trả focus về **`Import from file…`**. Ở viewport hẹp, bảng thành các card có nhãn với footer sticky.
+- **Ranh giới triển khai.** Dialog chỉ tạo Work Order mới. Việc cập nhật Work Order active đang tồn tại từ file (owner đã duyệt, kèm cảnh báo liệt kê mọi thay đổi và typed confirmation) là Phase 15 slice 2 và sẽ mở rộng mục này.
 
 ---
 

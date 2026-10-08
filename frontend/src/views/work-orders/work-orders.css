@@ -1292,3 +1292,304 @@
     color: var(--faint);
   }
 }
+
+/* ================================================================
+   Import Work Orders dialog (GUI_DESIGN §11.7): choose a file, Check
+   file, read the per-Work-Order report, Import. Status always carries
+   a text label and an icon — never color alone.
+   ================================================================ */
+.wo-import .wo-sub {
+  margin-bottom: 8px;
+}
+
+.wo-import-help {
+  margin: 0 2px 4px;
+}
+
+.wo-import-templates {
+  margin: 0 2px 14px;
+}
+
+.wo-import-templates a {
+  color: var(--info-t);
+  font-weight: 700;
+}
+
+.wo-import-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel2);
+}
+
+.wo-import-file label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.wo-import-file input[type='file'] {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.wo-import-chosen {
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wo-import-file .btn {
+  margin-left: auto;
+}
+
+.wo-import-alert {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius-sm);
+  background: var(--error-surface-weak);
+  color: var(--err-t);
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.wo-import-report {
+  margin-top: 16px;
+}
+
+.wo-import-report h3:focus-visible {
+  outline: 2px solid var(--info-ring);
+  outline-offset: 2px;
+}
+
+.wo-import-summary {
+  font-size: 15px;
+  font-weight: 750;
+  margin-bottom: 6px;
+}
+
+.wo-import-facts,
+.wo-import-omissions {
+  list-style: none;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+
+.wo-import-omissions {
+  color: var(--text);
+}
+
+.wo-import-unassigned {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-sm);
+  background: var(--warning-surface-weak);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.wo-import-unassigned h4 {
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+
+.wo-import-unassigned ul {
+  margin: 0 0 8px 18px;
+}
+
+.wo-import-warn {
+  color: var(--warn-t);
+  font-weight: 700;
+}
+
+.wo-import-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.wo-import-table > thead th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.wo-import-table > tbody > tr > td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 13.5px;
+  vertical-align: top;
+}
+
+.wo-import-table > tbody > tr:last-child > td {
+  border-bottom: none;
+}
+
+.wo-import-wo,
+.wo-import-pn {
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.wo-import-outcome {
+  font-weight: 750;
+}
+
+.wo-import-outcome.will-create,
+.wo-import-outcome.created {
+  color: var(--ok-t);
+}
+
+.wo-import-outcome.exists {
+  color: var(--muted);
+}
+
+.wo-import-outcome.refused {
+  color: var(--err-t);
+}
+
+.wo-import-note {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.wo-import-errors {
+  margin: 6px 0 0 18px;
+  font-size: 12.5px;
+  color: var(--err-t);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.wo-import-toggle {
+  display: block;
+  margin-top: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--info-t);
+  min-height: 32px;
+}
+
+.wo-import-linesrow > td {
+  background: var(--panel2);
+}
+
+.wo-import-lines {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.wo-import-lines th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--faint);
+  text-align: left;
+  padding: 4px 8px;
+}
+
+.wo-import-lines td {
+  padding: 4px 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.wo-import-actions .bigbtn:disabled {
+  cursor: not-allowed;
+}
+
+.wo-import-reason {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: right;
+}
+
+/* Narrow viewports (GUI_DESIGN §11 responsive rule): the report table
+   becomes labeled card blocks — header row hidden, every cell carrying
+   its column caption via data-label; long WO Numbers and PNs wrap; the
+   footer actions stay sticky at the dialog's bottom edge. */
+@media (max-width: 880px) {
+  .wo-import-table,
+  .wo-import-table > tbody,
+  .wo-import-table > tbody > tr,
+  .wo-import-table > tbody > tr > td,
+  .wo-import-lines,
+  .wo-import-lines tbody,
+  .wo-import-lines tr,
+  .wo-import-lines td {
+    display: block;
+    width: 100%;
+  }
+
+  .wo-import-table thead {
+    display: none;
+  }
+
+  .wo-import-table > tbody > tr {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 0;
+  }
+
+  .wo-import-table > tbody > tr > td {
+    border-bottom: none;
+    padding: 3px 12px;
+  }
+
+  .wo-import-table td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  .wo-import-lines tr {
+    padding: 6px 0;
+    border-top: 1px solid var(--hair);
+  }
+
+  .wo-import-lines td {
+    border-top: none;
+    padding: 1px 8px;
+  }
+
+  .wo-import-file .btn {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .wo-import-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--panel);
+    padding-top: 10px;
+    z-index: 1;
+  }
+}

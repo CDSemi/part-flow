@@ -418,6 +418,7 @@ def _recorded_by_another(response: Any) -> None:
 # ---------------------------------------------------------------------------
 
 _Prepared = tuple[str, dict[str, Any], tuple[str, str, object] | None]
+_CSV_FILE = {"Content-Type": "text/csv"}
 
 
 @dataclass(frozen=True)
@@ -429,8 +430,9 @@ class _Write:
     # Builds (path, request kwargs, target row) against fresh set-up data.
     prepare: Callable[[TestClient, _Shop], _Prepared]
     status: int = 200
-    # False for the demand line delete (no audit row of its own, F13) and
-    # for the allocation context read (Phase 14 slice 5: a static-key GET).
+    # False for the demand line delete (no audit row of its own, F13), for
+    # the allocation context read (Phase 14 slice 5: a static-key GET) and
+    # for the Work Order import's Check file and templates (Phase 15 slice 1).
     records: bool = True
 
 
@@ -745,6 +747,31 @@ def _p_assigned_routes(client: TestClient, shop: _Shop) -> _Prepared:
     return f"/api/tracking/assigned-routes?part_number={pn}", {}, None
 
 
+def _import_file(work_order_number: str) -> bytes:
+    return (
+        "Work Order Number,Part Number,Requested Quantity\r\n"
+        f"{work_order_number},{_unique('PN')},3\r\n"
+    ).encode()
+
+
+def _p_import_preview(client: TestClient, shop: _Shop) -> _Prepared:
+    body = _import_file(_unique("WO"))
+    return "/api/work-orders/import/preview", {"content": body, "headers": _CSV_FILE}, None
+
+
+def _p_import(client: TestClient, shop: _Shop) -> _Prepared:
+    body = _import_file(_unique("WO"))
+    headers = {**_CSV_FILE, "X-PartFlow-Import-Check": hashlib.sha256(body).hexdigest()}
+    return "/api/work-orders/import", {"content": body, "headers": headers}, None
+
+
+def _p_import_template(extension: str) -> Callable[[TestClient, _Shop], _Prepared]:
+    def prepare(client: TestClient, shop: _Shop) -> _Prepared:
+        return f"/api/work-orders/import/template.{extension}", {}, None
+
+    return prepare
+
+
 def _keys(*keys: Permission) -> frozenset[Permission]:
     return frozenset(keys)
 
@@ -792,6 +819,33 @@ _WRITES: list[_Write] = [
         204,
     ),
     _Write("wo-create", "POST", "/api/work-orders", _keys(MWO), _p_work_order_create, 201),
+    # Phase 15 slice 1: the Work Order file import; Check file and the
+    # templates record nothing.
+    _Write(
+        "wo-import-check",
+        "POST",
+        "/api/work-orders/import/preview",
+        _keys(MWO),
+        _p_import_preview,
+        records=False,
+    ),
+    _Write("wo-import", "POST", "/api/work-orders/import", _keys(MWO), _p_import),
+    _Write(
+        "wo-import-csv-template",
+        "GET",
+        "/api/work-orders/import/template.csv",
+        _keys(MWO),
+        _p_import_template("csv"),
+        records=False,
+    ),
+    _Write(
+        "wo-import-xlsx-template",
+        "GET",
+        "/api/work-orders/import/template.xlsx",
+        _keys(MWO),
+        _p_import_template("xlsx"),
+        records=False,
+    ),
     _Write(
         "wo-header", "PATCH", "/api/work-orders/{work_order_id}", _keys(MWO), _p_work_order_header
     ),

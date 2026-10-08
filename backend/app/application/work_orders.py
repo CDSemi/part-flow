@@ -103,7 +103,7 @@ from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.application import allocations, audit, hot_ranks, production_release
-from app.application.common import UNSET, UnsetType, commit, flush, optional_text
+from app.application.common import MAX_ROW_ID, UNSET, UnsetType, commit, flush, optional_text
 from app.application.errors import (
     ConflictError,
     HotDemandRemovalConfirmationRequiredError,
@@ -151,11 +151,16 @@ def _normalized_work_order_number(value: object) -> str | None:
     return value
 
 
-def _validated_quantity(value: object) -> int:
+def validated_quantity(value: object) -> int:
+    """A requested quantity: a positive whole number the ``integer``
+    column can hold (Phase 15 slice 1 — refused before the write instead
+    of failing in the driver; the file import shares this rule)."""
     # bool is an int subclass — an explicit true/false is never a
     # quantity.
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise InvalidInputError("Requested quantity must be a positive whole number.")
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= MAX_ROW_ID:
+        raise InvalidInputError(
+            "Requested quantity must be a positive whole number no greater than 2,147,483,647."
+        )
     return value
 
 
@@ -481,7 +486,7 @@ def _stage_new_line(
         work_order_id=work_order.id,
         part_number=master.part_number,
         request_type=_validated_request_type(draft.get("request_type")),
-        requested_quantity=_validated_quantity(draft.get("requested_quantity")),
+        requested_quantity=validated_quantity(draft.get("requested_quantity")),
         due_date=draft.get("due_date"),
         job_numbers=_validated_job_numbers(draft.get("job_numbers")),
         requester=optional_text(draft.get("requester")),
@@ -518,7 +523,7 @@ def _apply_line_edit(demand: WorkOrderDemand, edit: Mapping[str, Any]) -> bool:
             demand.request_type = request_type
             changed = True
     if "requested_quantity" in edit:
-        quantity = _validated_quantity(edit["requested_quantity"])
+        quantity = validated_quantity(edit["requested_quantity"])
         if quantity != demand.requested_quantity:
             demand.requested_quantity = quantity
             changed = True
@@ -617,7 +622,7 @@ def _guard_released_line_edit(
         )
     if "requested_quantity" not in edit:
         return
-    quantity = _validated_quantity(edit["requested_quantity"])
+    quantity = validated_quantity(edit["requested_quantity"])
     if quantity == demand.requested_quantity:
         return
     committed = max(released_quantity, demand.allocated_quantity)
@@ -647,6 +652,7 @@ def create_work_order(
     due_date: datetime.date | None = None,
     lines: Sequence[Mapping[str, Any]],
     actor_user_id: int,
+    audit_metadata: Mapping[str, Any] | None = None,
 ) -> WorkOrderDetail:
     """Create a Work Order with its demand draft as ONE transaction.
 
@@ -661,6 +667,10 @@ def create_work_order(
     therefore takes the shared PN-level lock of every PN it introduces
     BEFORE any row lock or write, so a receipt of one of those PNs
     either sees this demand or waits for it — never commits beside it.
+
+    ``audit_metadata`` goes only onto the Work Order's ``CREATED`` audit
+    row (Phase 15 slice 1: the file import records its intake channel
+    there); the manual save passes none, so its rows stay unchanged.
     """
     number = _normalized_work_order_number(work_order_number)
     if number is not None:
@@ -697,6 +707,7 @@ def create_work_order(
         before_data=None,
         after_data=work_order_snapshot(work_order),
         actor_user_id=actor_user_id,
+        metadata=dict(audit_metadata) if audit_metadata is not None else None,
     )
     for demand in demands:
         audit.append_audit_event(

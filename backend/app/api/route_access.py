@@ -201,6 +201,11 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/route-templates/{template_id}/archive"): _permission(_MRT),
     ("DELETE", "/api/route-templates/{template_id}"): _permission(_MRT),
     ("POST", "/api/work-orders"): _permission(_MWO),
+    # Phase 15 slice 1: the Work Order file import and its templates.
+    ("POST", "/api/work-orders/import/preview"): _permission(_MWO),
+    ("POST", "/api/work-orders/import"): _permission(_MWO),
+    ("GET", "/api/work-orders/import/template.csv"): _permission(_MWO),
+    ("GET", "/api/work-orders/import/template.xlsx"): _permission(_MWO),
     ("POST", "/api/work-orders/{work_order_id}/demands/{demand_id}/release"): _permission(_MWO),
     ("DELETE", "/api/work-orders/{work_order_id}/demands/{demand_id}"): _permission(_EWOD),
     ("POST", "/api/allocations/management"): _permission(_EWOA),

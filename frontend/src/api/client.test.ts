@@ -73,6 +73,52 @@ test('apiUpload turns a rejected upload into an ApiError with the server message
   );
 });
 
+test('FU-3: apiUpload with POST adds extra headers after Content-Type and the request-origin header, never replacing them', async () => {
+  fetchMock.mockResolvedValue(json({ dry_run: false }));
+  const file = new Blob(['a,b\r\n'], { type: 'text/csv' });
+
+  await apiUpload('/api/work-orders/import', file, 'POST', {
+    'X-PartFlow-Import-Check': 'f'.repeat(64),
+    'Content-Type': 'application/octet-stream',
+    'X-PartFlow-CSRF': '0',
+  });
+
+  const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(path).toBe('/api/work-orders/import');
+  expect(init.method).toBe('POST');
+  expect(init.headers).toEqual({
+    'Content-Type': 'text/csv',
+    'X-PartFlow-CSRF': '1',
+    'X-PartFlow-Import-Check': 'f'.repeat(64),
+  });
+  expect(Object.keys(init.headers as object)).toEqual([
+    'Content-Type',
+    'X-PartFlow-CSRF',
+    'X-PartFlow-Import-Check',
+  ]);
+  expect(init.body).toBe(file);
+});
+
+test('FU-3: an ended sign-in on an upload still reaches the auth-failure listener', async () => {
+  const listener = vi.fn();
+  setAuthFailureListener(listener);
+  try {
+    fetchMock.mockResolvedValue(
+      json({ detail: 'Sign in.', authentication_required: true }, 401),
+    );
+    await expect(
+      apiUpload(
+        '/api/work-orders/import/preview',
+        new Blob(['x'], { type: 'text/csv' }),
+        'POST',
+      ),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(listener).toHaveBeenCalledWith('authentication_required', true);
+  } finally {
+    setAuthFailureListener(null);
+  }
+});
+
 test('the JSON path is unchanged: JSON body out, parsed JSON or ApiError back', async () => {
   fetchMock.mockResolvedValueOnce(json({ id: 1, name: 'Alex Tran' }, 201));
   const created = await apiRequest<{ id: number }>('/api/workers', {

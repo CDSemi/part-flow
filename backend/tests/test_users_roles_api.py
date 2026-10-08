@@ -1203,6 +1203,8 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/api/scan_station.py",
     # Phase 14 slice 6: the AssignedRoute adjustment routes.
     "app/api/route_adjustments.py",
+    # Phase 15 slice 1: the Work Order import routes.
+    "app/api/work_order_import.py",
 }
 
 
@@ -1331,6 +1333,7 @@ def test_the_permission_rules_stay_plain_and_out_of_the_configuration_services()
         "tracking",
         "route_adjustments",
         "audit_trail",
+        "work_order_import",
     ):
         tree = trees[f"app/application/{service}.py"]
         assert not _reads(tree, "app.domain.enums", {"Permission"}), service
