@@ -305,6 +305,21 @@ báo token mới khi chưa có Administrator. Token là bảo vệ duy nhất c�
 setup, nên hãy hoàn tất trước khi service truy cập được bởi người khác và hạn
 chế quyền đọc log cho đến lúc đó. Mỗi process backend thông báo token riêng của nó.
 
+Trong production stack (`compose.production.yaml`, xem bên dưới) các bước tương
+tự dùng dạng lệnh production. Start backend với một worker để chỉ có một token,
+rồi khôi phục số worker đã cấu hình khi setup xong:
+
+```bash
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend
+$PF logs backend | grep "Setup token"
+$PF up -d backend
+```
+
+Lệnh recovery chạy cùng kiểu, ví dụ
+`$PF run --rm --no-deps backend python -m app.cli reset-password --login-name <name>`
+(image production không có `uv run`).
+
 **Nâng cấp lên Phase 14 slice 2.** Trước và sau khi deploy nó, chạy lệnh sau trong database shell (`docker compose exec db psql -U <POSTGRES_USER> -d partflow`) để đếm các active user có mật khẩu mà role giữ từng permission-management key:
 
 ```sql
@@ -465,10 +480,32 @@ Quality gate backend đầy đủ:
 docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
 ```
 
-## Production image (Phase 16 slice 2, một phần)
+## Production stack (Phase 16 slice 2)
+
+`compose.production.yaml` (Compose project `partflow-production`) là production
+stack: `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và job
+`migrate` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
+có gì trong repo này tự khởi động nó, và nó chưa được xác minh trên Synology NAS
+hay VPS (Phase 16 slice 7). Configuration là `.env.production` (sao chép
+`.env.production.example`, git bỏ qua) cùng secret file `postgres_password` trong
+`PARTFLOW_SECRETS_DIR`. Build và start, từ release checkout:
+
+```bash
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF config --quiet
+$PF build
+$PF up -d db
+$PF --profile ops run --rm migrate
+$PF up -d backend web
+```
+
+Không bao giờ chạy `$PF down -v`: nó xóa database volume của production. Các
+service, bảng kê configuration, lệnh vận hành, release sequence và yêu cầu của
+platform proxy nằm ở [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Cả hai Dockerfile kết thúc bằng stage `development` mà `compose.yaml` build, và
-còn có stage `production` mà Compose không build:
+còn có stage `production` mà Compose không build mặc định
+(`compose.production.yaml` chọn nó):
 
 ```bash
 docker build --target production backend
@@ -482,16 +519,30 @@ limit và các response JSON tự sinh được mô tả ở
 [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1. Với các image này, backend có
 thể đọc kết nối database từ `DATABASE_HOST`, `DATABASE_NAME`, `DATABASE_USER` và
 `DATABASE_PASSWORD_FILE` (cùng `DATABASE_PORT` tùy chọn) thay cho `DATABASE_URL`;
-đặt cả hai dạng bị từ chối. Production Compose file và bảng kê configuration chưa
-có trong repo (phần còn lại của P16-S2), nên chưa có cách được hỗ trợ để start
-production stack; không dùng `compose.yaml` cho production.
+đặt cả hai dạng bị từ chối. Không dùng `compose.yaml` cho production.
+
+Phần static của các kiểm tra production artifact không cần stack đang chạy:
+
+```bash
+python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
+PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml --env-file .env.production.example build
+```
+
+Lệnh đầu chạy static test của Compose model, file environment example, Dockerfile
+và cấu hình nginx; lệnh thứ hai build cả hai production image (build `web` chạy
+production-boundary check). Compose stack smoke
+(`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) khởi
+động một project `partflow-s2-smoke` tạm trên loopback port, kiểm tra qua `web`
+rồi xóa nó; nó cần Docker daemon và không thuộc CI.
 
 ## Continuous integration
 
 `.github/workflows/ci.yml` chạy cùng quality gate trên mỗi push vào `main` và
 pull request: backend format/lint/mypy/migration/pytest với PostgreSQL 16;
 frontend format/lint/typecheck/test/production build; job Docker riêng kiểm tra
-`docker compose build`.
+`docker compose build`, rồi build production image (`compose.production.yaml`, với
+giá trị release, secret và time zone tạm) và chạy static test production artifact
+(`deploy/production/tests`).
 
 ## Cấu trúc repository
 
@@ -514,5 +565,8 @@ backend/
   Dockerfile       stage `production` và `development` (mặc định)
 frontend/nginx/    cấu hình image `web` (nginx template, proxy/header snippet, trusted-proxy entrypoint)
 compose.yaml       development stack: db, backend, frontend
+compose.production.yaml  production stack (db, backend, web, migrate); không dành cho development
+.env.production.example  bảng kê configuration production (sao chép thành .env.production)
+deploy/production/tests/ static test production artifact và Compose stack smoke
 docs/              tài liệu chuẩn của project
 ```

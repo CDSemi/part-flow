@@ -21,13 +21,11 @@ Users, server-side permission enforcement on every Administration and
 Management read and write, and Scan Station routes that require a station
 device enrolled by an administrator, §2) and Phase 15 — File-Based Work Order
 Import (closed 2026-10-08). Phase 16 is in progress: slice 1 (the read-only
-`reconcile` command) is implemented, and slice 2 (production artifacts) is
-partially implemented — the production backend image, the `web` image with its
-request limits and network rate limiting, and database settings read from a
-secret file (§3.1). The production Compose file, its configuration inventory
-and the operator commands that depend on them are not yet in the repository,
-and Phase 16 still owns the release flow, role hardening, backups,
-observability, host TLS and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
+`reconcile` command) and slice 2 (production artifacts: the production
+backend and `web` images, `compose.production.yaml`, its configuration and
+secret inventory, and network rate limiting, §3.1) are implemented. Phase 16
+still owns the release flow, role hardening, backups, observability, host TLS
+and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
 
@@ -35,8 +33,8 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Production images and the `web` tier exist (§3.1), but the production Compose file, the release flow, role hardening, backups, observability and the pilot gates of §5 remain (Phase 16: the remainder of P16-S2, then P16-S3…S7). |
-| Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet, and the §5 gates have not passed. Network rate limiting exists in `web`, but the current Compose stack still exposes development services (§2). |
+| Pilot or production use | Not ready | Production artifacts exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory), but the release flow, role hardening, backups, observability and the pilot gates of §5 remain (Phase 16: P16-S3…S7). |
+| Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet (P16-S7), and the §5 gates have not passed. Network rate limiting exists in `web`; `compose.yaml` still exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
 
@@ -128,15 +126,33 @@ Required boundaries:
 
 ### 3.1 Production stack (Phase 16 slice 2)
 
-**State.** Partially implemented. In the repository: the `production` stages of
+**State.** Implemented (P16-S2): the `production` stages of
 `backend/Dockerfile` and `frontend/Dockerfile`, the `web` configuration in
-`frontend/nginx/`, and the backend database settings below. Not yet in the
-repository (the remainder of P16-S2): `compose.production.yaml`,
-`.env.production.example`, the production static tests and Compose stack smoke,
-and the operator commands that need them. Until they exist no production stack
-can be started from the repository, and every rule below that names a Compose
-service describes the design the Compose file must carry. Nothing in this
-section has been verified on a host (that is P16-S7).
+`frontend/nginx/`, the backend database settings below, `compose.production.yaml`
+(Compose project `partflow-production`), `.env.production.example`, the
+production static tests (`deploy/production/tests/test_production_artifacts.py`)
+and the Compose stack smoke (`deploy/production/tests/stack_smoke.py`). Evidence
+is Windows/Docker Desktop and a Linux container only; nothing in this section
+has been verified on the Synology NAS or a VPS (that is P16-S7), and the
+release flow, role hardening, backups and observability remain P16-S3…S6.
+
+**Services and networks (`compose.production.yaml`).**
+
+| Service | Role | Network | Notes |
+| --- | --- | --- | --- |
+| `db` | PostgreSQL `postgres:16.14` (Debian variant, never `-alpine`: collation and reconcile check (j) depend on glibc) | `internal` (no external route) | volume `postgres_data`; no published port; 60 s stop grace |
+| `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, `production` stage | `internal`, `edge` | `SESSION_COOKIE_SECURE=true` fixed; `WEB_CONCURRENCY` from `PARTFLOW_BACKEND_WORKERS` (default 2); `FORWARDED_ALLOW_IPS` = the edge subnet; 200 s stop grace (above `web`'s longest 180 s upstream timeout); `restart: unless-stopped` (never `on-failure`: with several workers a configuration refusal exits `0`) |
+| `web` | image `partflow/web:${PARTFLOW_RELEASE}`, `production` stage | `edge` | the only published port, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (no variable for the bind address); no `depends_on`, so it keeps serving the shell while `backend` is stopped |
+| `migrate` | one-shot `alembic upgrade head` from the backend image | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm` (P16-S3 replaces the command) |
+
+Images are built locally from the checked-out release and never pulled
+(`pull_policy: never`); the tag is `PARTFLOW_RELEASE`. Every service has a
+restart policy, a health check (except `migrate`), memory and CPU limits from
+the environment file (starting values, to be measured on the pilot host in
+P16-S7), and `json-file` log rotation (10 MiB, 5 files). Secrets are mounted as
+files under `/run/secrets`; no secret is an environment value, and none has a
+committed default. Until P16-S4 provisions least-privilege roles, `backend` and
+`migrate` use the PostgreSQL bootstrap (owner) role.
 
 **Images.** `backend` (`production` stage): Python 3.12 slim, the locked
 non-development dependencies, no `tests/`, no `.env`, no reload server, runs as
@@ -272,12 +288,85 @@ production starts. `SITE_TIMEZONE` equals the staging value (§6). Never run
 `down -v` (or remove a volume) on the production project: it deletes the
 database.
 
-**Pending in the remainder of P16-S2:** the production Compose file (services
-`db`, `backend`, `web`, the one-shot `migrate`; restart, health, resource and
-logging policies; secrets as files; `SESSION_COOKIE_SECURE=true` fixed), the
-configuration and secret inventory (`.env.production.example`), the static
-tests and stack smoke, the CI steps, and the operator command table and release
-sequence built on them.
+**Configuration and secret inventory.** `.env.production` (copied from
+`.env.production.example`, git-ignored, mode 600) holds only non-secret values;
+the set of `${NAME}` references in `compose.production.yaml` equals the set of
+keys in the example (tested).
+
+| Key | Meaning | Required / default |
+| --- | --- | --- |
+| `PARTFLOW_RELEASE` | tag of the **running** images (§10) | required |
+| `PARTFLOW_SECRETS_DIR` | absolute path of the secrets directory, outside the checkout, production only (directory 0700, each file 0444) | required |
+| `PARTFLOW_SITE_TIMEZONE` | factory calendar zone, equal to staging (§6) | required |
+| `PARTFLOW_HTTP_PORT` | loopback port the platform proxy connects to | required (example `18080`) |
+| `POSTGRES_USER`, `POSTGRES_DB` | bootstrap (owner) role and database | required (example `partflow_owner`, `partflow`) |
+| `PARTFLOW_BACKEND_WORKERS` | uvicorn workers | `2` |
+| `PARTFLOW_EDGE_SUBNET` | subnet of the `edge` network; also the uvicorn trusted proxies | `172.30.250.0/24` |
+| `PARTFLOW_TRUSTED_PROXY` | one IPv4 address `web` trusts for forwarded headers; empty = auto-detect | empty |
+| `PARTFLOW_{DB,BACKEND,WEB,OPS}_{MEMORY,CPUS}` | resource limits | `1g`/`1.0`, `1g`/`2.0`, `128m`/`0.5`, `512m`/`1.0` |
+
+Fixed in Compose, not configurable: `SESSION_COOKIE_SECURE=true`,
+`DATABASE_HOST=db`, `DATABASE_PORT=5432`, the secret mount paths and the
+loopback bind. The one secret file in this slice is `postgres_password`
+(exactly one line). `db` reads it **only when a new data volume is
+initialized**; `backend` and `migrate` read it at every start. To change it on
+an existing database, run `ALTER ROLE <POSTGRES_USER> PASSWORD …` first, then
+replace the file and recreate `backend`; replacing the file alone breaks the
+backend's login. P16-S4 adds the application and maintenance role passwords to
+the same directory.
+
+**Operator commands.** Run from the release checkout, with
+`PF="docker compose -f compose.production.yaml --env-file .env.production"`.
+
+| Purpose | Command |
+| --- | --- |
+| Preflight (§6, environment separation) | `docker ps -a --format '{{.Label "com.docker.compose.project"}}' \| sort -u` lists no `partflow-staging` |
+| Validate the configuration | `$PF config --quiet` |
+| Build a release (tag in the shell) | `PARTFLOW_RELEASE=<new> $PF build` |
+| Start the database | `$PF up -d db` |
+| Apply migrations (once per release) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate` (first install: the tag is already in `.env.production`) |
+| Start or recreate the application | `$PF up -d backend web` |
+| Status and logs | `$PF ps` · `$PF logs --since=15m backend web db` |
+| Health through `web` on the host | `curl --fail --silent --show-error http://127.0.0.1:${PARTFLOW_HTTP_PORT}/api/health` |
+| Reconciliation (also while `backend` is stopped) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile` |
+| Identity rehearsal of a candidate image (check (j)) | `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j` |
+| Recovery CLIs | `$PF run --rm --no-deps backend python -m app.cli reset-password …` · `… restore-correction-permission-management …` |
+| Write freeze | `$PF stop backend` (may wait up to 200 s while an import finishes) · reopen with `$PF up -d backend` |
+| First-run setup | `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, read the token with `$PF logs backend \| grep "Setup token"`, complete setup, then `$PF up -d backend` |
+
+**Release sequence (manual form; P16-S3 automates it).** `.env.production`
+always names the release that is **running**; the candidate tag lives only in
+the shell until the switch, so every recovery CLI, reconcile or `up` before the
+switch uses the current image against the current schema.
+
+1. With the current tag: the pre-maintenance reconcile and any recovery CLI
+   (`deployment/OPERATIONS_RUNBOOK.md` §5).
+2. `PARTFLOW_RELEASE=<new> $PF build` (never an existing tag).
+3. `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`:
+   the candidate image against the unchanged database. A failing check stops
+   the release here; nothing has changed.
+4. Write freeze (`$PF stop backend`), then the backup step of the runbook.
+5. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`.
+6. Write `PARTFLOW_RELEASE=<new>` into `.env.production`, `$PF up -d backend web`,
+   then health and reconcile.
+
+Rollback of application code with no schema change: restore the previous tag in
+`.env.production` and `$PF up -d backend web`. A schema rollback is the restore
+path of the runbook (P16-S3/S5), never a down-migration here. **Never run
+`down -v`, or remove a volume, on the `partflow-production` project**: it
+deletes `partflow-production_postgres_data`; `$PF down` without `-v` is the
+only stop-everything form.
+
+**Evidence.** 29 static tests in `deploy/production/tests` (Compose model,
+environment example, Dockerfiles and the nginx configuration; run by CI and
+checked against 21 deliberate mutations of the artifacts), the production image
+builds (the `web` build runs the production-boundary check: 59 assets, none of
+the 11 mock sentinels), and a Compose stack smoke on Docker Desktop (cases
+SM-1…SM-22, including the rate limit, the proxy-generated JSON answers, the
+content security policy in a real browser, the one-worker first-run, the
+reconcile commands, and 2,000-Work-Order import timings of 18.06 s to create and
+31.33 s to change quantities, below `web`'s 180 s). Host checks on the Synology
+NAS and a VPS are not part of this evidence.
 
 ## 4. Platform decision
 
@@ -324,7 +413,8 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   server — **implemented** (`web`, §3.1);
 - production Compose configuration has restart policies, health checks,
   private networks, persistent volumes, conservative resource limits, and no
-  development bind mounts — **pending** (remainder of P16-S2);
+  development bind mounts — **implemented** (`compose.production.yaml`, §3.1;
+  resource limits are starting values measured in P16-S7);
 - reverse proxy configuration owns TLS, SPA fallback, request limits, and
   `/api` routing — the proxy must accept request bodies of at least 3 MiB on the
   image upload routes (`PUT /api/workers/{id}/avatar`,
@@ -347,12 +437,13 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   least 5 MiB and use timeouts of at least 300 s, and TLS is terminated there —
   documented in §3.1, **executed and verified in P16-S7**;
 - required configuration is validated at startup and secrets have no committed
-  defaults — **implemented** for the database settings (§3.1); the cookie and
-  time-zone settings are fixed or required by the production Compose file
-  (pending);
+  defaults — **implemented** (§3.1: the database settings are validated by the
+  backend; Compose fixes the cookie setting and requires the time zone and the
+  secrets directory);
 - image or release versions are immutable and retained long enough to roll back
-  application code — **pending** (tagged images by the Compose file; the
-  release identity inside the image is P16-S3).
+  application code — **partly implemented** (images are tagged by
+  `PARTFLOW_RELEASE` and never pulled; the release identity inside the image and
+  the retention rule are P16-S3).
 
 The gates above remain gates until P16-S7 records passing evidence.
 

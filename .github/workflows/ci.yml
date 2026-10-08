@@ -58,6 +58,17 @@ jobs:
             - uses: actions/checkout@v5
             - name: Build images
               run: docker compose build
+            # Phase 16: the production images (the web build runs the
+            # production-boundary check). The release tag, secrets
+            # directory and time zone are throwaway values for the build.
+            - name: Build production images
+              run: |
+                  secrets_dir="$(mktemp -d)"
+                  printf 'ci-build-only\n' > "$secrets_dir/postgres_password"
+                  PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR="$secrets_dir" PARTFLOW_SITE_TIMEZONE=UTC \
+                      docker compose -f compose.production.yaml --env-file .env.production.example build
+            - name: Production artifact static tests
+              run: python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
 
     frontend:
         runs-on: ubuntu-latest

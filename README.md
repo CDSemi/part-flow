@@ -713,6 +713,21 @@ Administrator exists. The token is the only protection of first-run setup, so
 complete it before the service is reachable by anyone else and restrict access
 to the log until then. Each backend process announces its own token.
 
+In the production stack (`compose.production.yaml`, see below) the same steps
+use the production command form. Start the backend with one worker so there is a
+single token, then restore the configured worker count once setup is complete:
+
+```bash
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend
+$PF logs backend | grep "Setup token"
+$PF up -d backend
+```
+
+Recovery commands run the same way, for example
+`$PF run --rm --no-deps backend python -m app.cli reset-password --login-name <name>`
+(no `uv run` in the production image).
+
 **Upgrading to Phase 14 slice 2.** Before and after deploying it, run this in
 the database shell (`docker compose exec db psql -U <POSTGRES_USER> -d partflow`)
 to count the active users with a password whose role holds each
@@ -1107,10 +1122,34 @@ docker compose exec frontend sh -lc "npm run format:check && npm run lint && npm
 docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
 ```
 
-## Production images (Phase 16 slice 2, partial)
+## Production stack (Phase 16 slice 2)
+
+`compose.production.yaml` (Compose project `partflow-production`) is the
+production stack: `db`, `backend`, `web` (nginx, published on `127.0.0.1` only)
+and a one-shot `migrate` job. **It is not for development** (use `compose.yaml`),
+it is not started by anything in this repository, and it has not been verified
+on a Synology NAS or a VPS yet (Phase 16 slice 7). Configuration is
+`.env.production` (copy `.env.production.example`, git-ignored) plus the secret
+file `postgres_password` in `PARTFLOW_SECRETS_DIR`. Build and start, from the
+release checkout:
+
+```bash
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF config --quiet
+$PF build
+$PF up -d db
+$PF --profile ops run --rm migrate
+$PF up -d backend web
+```
+
+Never run `$PF down -v`: it deletes the production database volume. The
+services, configuration inventory, operator commands, release sequence and
+platform proxy requirements are in
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Both Dockerfiles end with the `development` stage that `compose.yaml` builds,
-and also contain a `production` stage that Compose does not build:
+and also contain a `production` stage that Compose does not build by default
+(`compose.production.yaml` selects it):
 
 ```bash
 docker build --target production backend
@@ -1124,10 +1163,23 @@ request limits, rate limits and generated JSON answers described in
 [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1. For these images the backend
 can read its database connection from `DATABASE_HOST`, `DATABASE_NAME`,
 `DATABASE_USER` and `DATABASE_PASSWORD_FILE` (plus optional `DATABASE_PORT`)
-instead of `DATABASE_URL`; setting both forms is refused. The production
-Compose file and its configuration inventory are not yet in the repository
-(remainder of P16-S2), so there is no supported way to start a production stack
-yet; do not use `compose.yaml` for production.
+instead of `DATABASE_URL`; setting both forms is refused. Do not use
+`compose.yaml` for production.
+
+The production artifact checks need no running stack for their static part:
+
+```bash
+python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
+PARTFLOW_RELEASE=s2-check PARTFLOW_SECRETS_DIR=<dir holding postgres_password> PARTFLOW_SITE_TIMEZONE=UTC \
+  docker compose -f compose.production.yaml --env-file .env.production.example build
+```
+
+The first runs the static tests of the Compose model, the environment example,
+the Dockerfiles and the nginx configuration; the second builds both production
+images (the `web` build runs the production-boundary check). The Compose stack
+smoke (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) starts a throwaway
+`partflow-s2-smoke` project on loopback ports, drives it through `web` and
+removes it; it needs a Docker daemon and is not part of CI.
 
 ## Continuous integration
 
@@ -1137,7 +1189,10 @@ lint, mypy, Alembic migration, and pytest (mocked behavior tests plus
 the real PostgreSQL integration test) against PostgreSQL 16; frontend
 format check, lint, typecheck, tests, and production build. A separate
 `docker` job verifies that the Docker Compose development images build
-(`docker compose build`).
+(`docker compose build`), then builds the production images
+(`compose.production.yaml`, with throwaway release, secret and time-zone values)
+and runs the production artifact static tests
+(`deploy/production/tests`).
 
 ## Repository layout
 
@@ -1160,5 +1215,8 @@ backend/
   Dockerfile       `production` and `development` (default) stages
 frontend/nginx/    `web` image configuration (nginx templates, proxy and header snippets, trusted-proxy entrypoint)
 compose.yaml       development stack (db, backend, frontend)
+compose.production.yaml  production stack (db, backend, web, migrate); not for development
+.env.production.example  production configuration inventory (copy to .env.production)
+deploy/production/tests/ production artifact static tests and Compose stack smoke
 docs/              canonical project documentation
 ```

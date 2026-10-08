@@ -19,23 +19,26 @@ React/FastAPI/PostgreSQL hiện có.
 ## 2. Artifact Phase 16 bắt buộc
 
 Không triển khai production từ `compose.yaml`. Release phải cung cấp (trạng thái
-ở P16-S2, mới triển khai một phần):
+ở P16-S2, đã triển khai trừ mục ghi còn lại):
 
 - Dockerfile/image frontend và backend production — đã triển khai (stage
   `production`; cấu hình `web` là `frontend/nginx/`);
-- production Compose configuration — còn lại (phần còn lại của P16-S2);
+- production Compose configuration — đã triển khai (`compose.production.yaml`,
+  [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1);
 - reverse proxy configuration và quy trình certificate — đã ghi tài liệu (§4 và
   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1); xác minh trên host ở P16-S7;
-- migration command/job rõ ràng — còn lại (job `migrate` của Compose là phần còn
-  lại của P16-S2; ngữ nghĩa command là P16-S3);
-- danh mục secret/configuration — còn lại (phần còn lại của P16-S2); contract
-  file password database nằm ở DEPLOYMENT §3.1;
+- migration command/job rõ ràng — đã triển khai (job `migrate` của Compose,
+  profile `ops`; ngữ nghĩa command là P16-S3);
+- danh mục secret/configuration — đã triển khai (`.env.production.example`, secret
+  file `postgres_password`; DEPLOYMENT §3.1);
 - automation backup và restore — P16-S5;
 - command health và reconciliation — `reconcile` đã có (P16-S1); production
-  invocation của nó còn lại (phần còn lại của P16-S2, P16-S3);
+  invocation của nó đã triển khai (P16-S2: các lệnh ở DEPLOYMENT §3.1); phần
+  automation release quanh nó là P16-S3;
 - logging/monitoring configuration — P16-S6 (access log của `web` là request log
   trong P16-S2);
-- quy trình release và rollback gắn với version bất biến — P16-S3.
+- quy trình release và rollback gắn với version bất biến — P16-S3 (chuỗi thủ công
+  ở DEPLOYMENT §3.1 có từ P16-S2).
 
 ## 3. Baseline của host
 
@@ -82,7 +85,7 @@ partflow.company.example {
 }
 ```
 
-`18080` đại diện cho loopback port mà production Compose project publish. Caddy
+`18080` đại diện cho `PARTFLOW_HTTP_PORT`, loopback port mà production Compose project publish. Caddy
 đặt `X-Forwarded-For` thành client address và đặt `X-Forwarded-Proto`, và tự
 redirect HTTP sang HTTPS. Destination là đúng literal `127.0.0.1`, không bao giờ
 `localhost`. Body 5 MiB và timeout 300 s cao hơn 4 MiB và 180 s của `web` để JSON
@@ -121,19 +124,24 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
 1. Hoàn tất mọi gate ở [`DEPLOYMENT.md`](../DEPLOYMENT.md) §5.
 2. Provision và harden host.
 3. Cài đúng release file/image; ghi digest/commit.
-4. Tạo production secret và database role theo least privilege. File secret
-   `postgres_password` (một dòng, [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1) đến
-   cùng production Compose file (phần còn lại của P16-S2); role least-privilege là
-   P16-S4, và cho đến lúc đó backend sẽ dùng bootstrap owner role.
-5. Start PostgreSQL ở private.
+4. Tạo production secret và database role theo least privilege. Tạo
+   `PARTFLOW_SECRETS_DIR/postgres_password` (một dòng,
+   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; P16-S2) và `.env.production` từ
+   `.env.production.example`. Database role least-privilege là P16-S4
+   (`provision-roles`); cho đến lúc đó backend dùng bootstrap owner role. `PF` bên
+   dưới là `docker compose -f compose.production.yaml --env-file .env.production`.
+5. Start PostgreSQL ở private: `$PF up -d db`.
 6. Tạo database trống trong volume mới (dữ liệu production không bao giờ bắt đầu
    từ dữ liệu staging hay development; restore vào production cần owner quyết
    định, P16-S5).
-7. Chạy `alembic upgrade head` đúng một lần từ release backend image.
-8. Start backend, frontend và reverse proxy. Với database chưa có Administrator,
-   start backend với một worker (`WEB_CONCURRENCY=1`, một setup token), hoàn tất
-   first-run setup (setup token nằm trong backend log) trước khi mở truy cập, rồi
-   khởi động lại với số worker đã cấu hình.
+7. Chạy migration đúng một lần từ release backend image:
+   `$PF --profile ops run --rm migrate`.
+8. Start backend, `web` và host reverse proxy (§4). Với database chưa có
+   Administrator, start backend với một worker
+   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, một setup token), hoàn tất
+   first-run setup (setup token nằm trong backend log:
+   `$PF logs backend | grep "Setup token"`) trước khi mở truy cập, rồi khởi động
+   lại với số worker đã cấu hình (`$PF up -d backend`).
    Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations → `Devices…`).
 9. Chạy smoke test và reconciliation qua HTTPS theo runbook.
 10. Bật lịch monitoring/backup rồi chạy backup ngay.

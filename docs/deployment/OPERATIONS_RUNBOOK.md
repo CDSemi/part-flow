@@ -1,8 +1,12 @@
 # PartFlow Operations Runbook
 
-> **Status:** Canonical operational procedure template for Phase 16. Commands
-> that depend on future production Compose artifacts must be replaced by their
-> final repository-provided names before production use.
+> **Status:** Canonical operational procedure template for Phase 16. The
+> production Compose file exists (P16-S2): `PF` below is
+> `docker compose -f compose.production.yaml --env-file .env.production`, run
+> from the release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Commands
+> that depend on later slices (release automation P16-S3, backups P16-S5,
+> monitoring P16-S6) must be replaced by their final repository-provided names
+> before production use.
 >
 > **Language:** English is the source of truth. [Tiếng Việt](./OPERATIONS_RUNBOOK.vi.md).
 
@@ -26,13 +30,27 @@ Record for every environment and release:
 
 ## 2. Health and diagnosis
 
-Minimum checks:
+Minimum checks (development and staging stack):
 
 ```bash
 docker compose ps
 docker compose logs --since=15m backend frontend db
 curl --fail --silent --show-error https://<partflow-host>/api/health
 ```
+
+Production stack (`PF` as above; health through the hostname):
+
+```bash
+$PF ps
+$PF logs --since=15m backend web db
+curl --fail --silent --show-error https://<partflow-host>/api/health
+```
+
+In the production stack `web`'s access log is the request log (client address,
+method, path without query string, status, bytes, duration, user agent); it
+never contains query strings, cookies or PartFlow headers. A 502 or 504 JSON
+answer comes from `web` (`server_unavailable`) and means the outcome of a write
+is unknown: resolve it with the original `device_event_id` (below).
 
 Then check:
 
@@ -118,21 +136,34 @@ in a rehearsal command.
 - verify off-site backup health and make a fresh pre-release dump;
 - verify the previous release remains available;
 - run reconciliation (§7) on the current release, keep the report, and open
-  incidents for any findings;
+  incidents for any findings; in the production stack run it, and any recovery
+  CLI, with the **current** tag, before the candidate tag is written to
+  `.env.production` (the candidate lives only in the shell until the switch);
 - decide whether writes must be stopped;
 - announce the window and rollback decision deadline.
 
 ### Execute
 
 1. Record current application and Alembic revisions.
-2. Build/pull the target immutable images.
-3. Stop or block writes as required.
-4. Run the production repository's explicit `alembic upgrade head` job once.
+2. Build/pull the target immutable images. Production stack:
+   `PARTFLOW_RELEASE=<new> $PF build` (never an existing tag), then rehearse
+   the candidate image against the unchanged database:
+   `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
+   (a failing check stops the release; nothing has changed).
+3. Stop or block writes as required (production stack: `$PF stop backend`,
+   which may wait up to 200 s while an import finishes).
+4. Run the production repository's explicit migration job once (production
+   stack: `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`;
+   P16-S3 replaces its command).
 5. Capture migration output and new revision.
-6. Start/recreate application services at the target release. On a database
-   with no Administrator, complete first-run setup (the setup token is in the
-   backend log) before opening access. Then enroll each Scan Station device
-   (Administration → Scan Stations → `Devices…`).
+6. Start/recreate application services at the target release (production
+   stack: write `PARTFLOW_RELEASE=<new>` into `.env.production`, then
+   `$PF up -d backend web`). On a database with no Administrator, complete
+   first-run setup (the setup token is in the backend log) before opening
+   access; in the production stack start the backend with one worker for it
+   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, then `$PF up -d backend`).
+   Then enroll each Scan Station device (Administration → Scan Stations →
+   `Devices…`).
 7. Check health internally and through HTTPS.
 8. Run authorization, SPA-route, `/api`, scan-focus/connectivity, and designated
    write/read-back smoke tests.
@@ -195,7 +226,19 @@ docker compose exec -T backend uv run python -m app.cli reconcile --check j     
   start without them and writes no report. A wrong `DEPLOY_ADMIN_INSTANCE_ID`
   mislabels every resource Compose creates (§14); `exec` itself creates no
   container, volume or network.
-- **Production:** the invocation arrives with the Phase 16 production artifacts.
+- **Production:** run it from the release checkout with the running tag; it
+  also runs while `backend` is stopped (`--no-deps` starts no other service,
+  and the database must be up):
+
+  ```sh
+  f="reconcile-$(date -u +%Y%m%dT%H%M%SZ).json"
+  $PF run --rm --no-deps -T backend python -m app.cli reconcile > "$f"; rc=$?
+  ```
+
+  then apply the same report check as above. The candidate-image form for check
+  (j), before the switch of a release, is
+  `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
+  (§5, Execute step 2).
 - **Options:** `--check ID` (repeatable, `a` to `j`; the others are `skipped`),
   `--statement-timeout SECONDS` (1-3600, default 300), `--max-findings N`
   (1-10000, default 100 findings listed per check; `finding_count` stays full).

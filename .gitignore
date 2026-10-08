@@ -8,6 +8,7 @@ _claude_outputs/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Node.js
 node_modules/

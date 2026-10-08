@@ -21,13 +21,11 @@ and Authorized Management Corrections (sign-in cho application User,
 permission enforcement phía server trên mọi đọc và write Administration và
 Management, và các route Scan Station yêu cầu thiết bị station do administrator
 enroll, §2) và Phase 15 — File-Based Work Order Import (đóng 2026-10-08).
-Phase 16 đang thực hiện: slice 1 (lệnh `reconcile` chỉ đọc) đã triển khai, và
-slice 2 (production artifact) mới triển khai một phần — image backend
-production, image `web` cùng request limit và network rate limiting, và database
-setting đọc từ secret file (§3.1). Production Compose file, bảng kê configuration
-và các lệnh vận hành phụ thuộc chúng chưa có trong repo, và Phase 16 vẫn sở hữu
-release flow, role hardening, backup, observability, TLS trên host và các gate
-(§5 và `IMPLEMENTATION_ROADMAP.md`).
+Phase 16 đang thực hiện: slice 1 (lệnh `reconcile` chỉ đọc) và slice 2
+(production artifact: image backend và `web` production, `compose.production.yaml`,
+bảng kê configuration và secret, và network rate limiting, §3.1) đã triển khai.
+Phase 16 vẫn sở hữu release flow, role hardening, backup, observability, TLS trên
+host và các gate (§5 và `IMPLEMENTATION_ROADMAP.md`).
 
 Vì vậy:
 
@@ -35,8 +33,8 @@ Vì vậy:
 | --- | --- | --- |
 | Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
 | Synology staging/test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong LAN, dùng dữ liệu giả/không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot hoặc production | Chưa sẵn sàng | Production image và tầng `web` đã có (§3.1), nhưng production Compose file, release flow, role hardening, backup, observability và các pilot gate ở §5 vẫn còn lại (Phase 16: phần còn lại của P16-S2, rồi P16-S3…S7). |
-| Mở ra Internet | Hiện tại bị cấm | TLS do platform proxy kết thúc, và chưa host nào cấu hình hay xác minh nó; các gate §5 chưa đạt. Network rate limiting đã có trong `web`, nhưng Compose hiện tại vẫn expose các service development (§2). |
+| Pilot hoặc production | Chưa sẵn sàng | Production artifact đã có (§3.1: image, `web`, `compose.production.yaml`, bảng kê configuration), nhưng release flow, role hardening, backup, observability và các pilot gate ở §5 vẫn còn lại (Phase 16: P16-S3…S7). |
+| Mở ra Internet | Hiện tại bị cấm | TLS do platform proxy kết thúc, và chưa host nào cấu hình hay xác minh nó (P16-S7); các gate §5 chưa đạt. Network rate limiting đã có trong `web`; `compose.yaml` vẫn expose các service development (§2). |
 
 Triển khai staging nội bộ không có nghĩa Phase 16 đã hoàn thành.
 
@@ -118,15 +116,34 @@ Các ranh giới bắt buộc:
 
 ### 3.1 Production stack (Phase 16 slice 2)
 
-**Trạng thái.** Mới triển khai một phần. Có trong repo: các stage `production`
-của `backend/Dockerfile` và `frontend/Dockerfile`, cấu hình `web` trong
-`frontend/nginx/`, và các database setting của backend bên dưới. Chưa có trong
-repo (phần còn lại của P16-S2): `compose.production.yaml`,
-`.env.production.example`, các static test production và Compose stack smoke, và
-các lệnh vận hành cần chúng. Cho đến khi chúng có, không thể khởi động production
-stack từ repo, và mọi quy tắc dưới đây nhắc đến Compose service là mô tả thiết kế
-mà Compose file phải mang. Không có gì trong mục này đã được xác minh trên host
-(đó là P16-S7).
+**Trạng thái.** Đã triển khai (P16-S2): các stage `production` của
+`backend/Dockerfile` và `frontend/Dockerfile`, cấu hình `web` trong
+`frontend/nginx/`, các database setting của backend bên dưới,
+`compose.production.yaml` (Compose project `partflow-production`),
+`.env.production.example`, các static test production
+(`deploy/production/tests/test_production_artifacts.py`) và Compose stack smoke
+(`deploy/production/tests/stack_smoke.py`). Bằng chứng chỉ gồm Windows/Docker
+Desktop và một Linux container; không có gì trong mục này đã được xác minh trên
+Synology NAS hay VPS (đó là P16-S7), và release flow, role hardening, backup và
+observability vẫn là P16-S3…S6.
+
+**Service và network (`compose.production.yaml`).**
+
+| Service | Vai trò | Network | Ghi chú |
+| --- | --- | --- | --- |
+| `db` | PostgreSQL `postgres:16.14` (biến thể Debian, không bao giờ `-alpine`: collation và reconcile check (j) phụ thuộc glibc) | `internal` (không có route ra ngoài) | volume `postgres_data`; không publish port; stop grace 60 s |
+| `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, stage `production` | `internal`, `edge` | `SESSION_COOKIE_SECURE=true` cố định; `WEB_CONCURRENCY` lấy từ `PARTFLOW_BACKEND_WORKERS` (mặc định 2); `FORWARDED_ALLOW_IPS` = edge subnet; stop grace 200 s (cao hơn upstream timeout dài nhất 180 s của `web`); `restart: unless-stopped` (không bao giờ `on-failure`: với nhiều worker, một lần từ chối configuration thoát với mã `0`) |
+| `web` | image `partflow/web:${PARTFLOW_RELEASE}`, stage `production` | `edge` | port publish duy nhất, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (không có biến cho bind address); không có `depends_on`, nên nó vẫn phục vụ shell khi `backend` đang dừng |
+| `migrate` | `alembic upgrade head` one-shot từ image backend | `internal` | profile `ops`: không bao giờ được `up` khởi động; chạy bằng `--profile ops run --rm` (P16-S3 thay lệnh này) |
+
+Image được build cục bộ từ release đã checkout và không bao giờ pull
+(`pull_policy: never`); tag là `PARTFLOW_RELEASE`. Mỗi service có restart policy,
+health check (trừ `migrate`), giới hạn memory và CPU lấy từ file môi trường (giá
+trị khởi đầu, sẽ đo trên host pilot ở P16-S7) và log rotation `json-file` (10 MiB,
+5 file). Secret được mount dạng file dưới `/run/secrets`; không secret nào là
+giá trị environment và không secret nào có default đã commit. Cho đến khi P16-S4
+cấp role đặc quyền tối thiểu, `backend` và `migrate` dùng role bootstrap (owner)
+của PostgreSQL.
 
 **Image.** `backend` (stage `production`): Python 3.12 slim, dependency không
 phải development đã lock, không có `tests/`, không có `.env`, không có reload
@@ -259,11 +276,84 @@ container được xóa và **không** xóa volume, trước khi production kh�
 `SITE_TIMEZONE` bằng giá trị của staging (§6). Không bao giờ chạy `down -v` (hay
 xóa volume) trên production project: nó xóa database.
 
-**Còn lại trong phần còn lại của P16-S2:** production Compose file (service `db`,
-`backend`, `web`, `migrate` one-shot; restart, health, resource và logging
-policy; secret dạng file; `SESSION_COOKIE_SECURE=true` cố định), bảng kê
-configuration và secret (`.env.production.example`), static test và stack smoke,
-các bước CI, và bảng lệnh vận hành cùng release sequence xây trên chúng.
+**Bảng kê configuration và secret.** `.env.production` (sao chép từ
+`.env.production.example`, bị git bỏ qua, mode 600) chỉ chứa giá trị không phải
+secret; tập các tham chiếu `${NAME}` trong `compose.production.yaml` bằng tập key
+của file example (có test).
+
+| Key | Ý nghĩa | Bắt buộc / mặc định |
+| --- | --- | --- |
+| `PARTFLOW_RELEASE` | tag của image **đang chạy** (§10) | bắt buộc |
+| `PARTFLOW_SECRETS_DIR` | đường dẫn tuyệt đối của thư mục secret, ngoài checkout, chỉ cho production (thư mục 0700, mỗi file 0444) | bắt buộc |
+| `PARTFLOW_SITE_TIMEZONE` | múi giờ lịch nhà máy, bằng staging (§6) | bắt buộc |
+| `PARTFLOW_HTTP_PORT` | loopback port mà platform proxy kết nối | bắt buộc (ví dụ `18080`) |
+| `POSTGRES_USER`, `POSTGRES_DB` | role bootstrap (owner) và database | bắt buộc (ví dụ `partflow_owner`, `partflow`) |
+| `PARTFLOW_BACKEND_WORKERS` | số uvicorn worker | `2` |
+| `PARTFLOW_EDGE_SUBNET` | subnet của network `edge`; cũng là trusted proxy của uvicorn | `172.30.250.0/24` |
+| `PARTFLOW_TRUSTED_PROXY` | một địa chỉ IPv4 mà `web` tin cho forwarded header; rỗng = tự phát hiện | rỗng |
+| `PARTFLOW_{DB,BACKEND,WEB,OPS}_{MEMORY,CPUS}` | giới hạn tài nguyên | `1g`/`1.0`, `1g`/`2.0`, `128m`/`0.5`, `512m`/`1.0` |
+
+Cố định trong Compose, không cấu hình được: `SESSION_COOKIE_SECURE=true`,
+`DATABASE_HOST=db`, `DATABASE_PORT=5432`, các đường mount secret và loopback bind.
+Secret file duy nhất trong slice này là `postgres_password` (đúng một dòng). `db`
+chỉ đọc nó **khi một data volume mới được khởi tạo**; `backend` và `migrate` đọc
+nó ở mỗi lần start. Để đổi nó trên database đã có, chạy `ALTER ROLE
+<POSTGRES_USER> PASSWORD …` trước, rồi thay file và tạo lại `backend`; chỉ thay
+file sẽ làm hỏng đăng nhập của backend. P16-S4 thêm mật khẩu role application và
+maintenance vào cùng thư mục.
+
+**Lệnh vận hành.** Chạy từ release checkout, với
+`PF="docker compose -f compose.production.yaml --env-file .env.production"`.
+
+| Mục đích | Lệnh |
+| --- | --- |
+| Preflight (§6, tách biệt môi trường) | `docker ps -a --format '{{.Label "com.docker.compose.project"}}' \| sort -u` không liệt kê `partflow-staging` |
+| Validate configuration | `$PF config --quiet` |
+| Build một release (tag trong shell) | `PARTFLOW_RELEASE=<new> $PF build` |
+| Khởi động database | `$PF up -d db` |
+| Áp dụng migration (một lần mỗi release) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate` (cài đặt đầu tiên: tag đã nằm trong `.env.production`) |
+| Khởi động hoặc tạo lại application | `$PF up -d backend web` |
+| Trạng thái và log | `$PF ps` · `$PF logs --since=15m backend web db` |
+| Health qua `web` trên host | `curl --fail --silent --show-error http://127.0.0.1:${PARTFLOW_HTTP_PORT}/api/health` |
+| Reconciliation (cả khi `backend` đang dừng) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile` |
+| Rehearsal identity của candidate image (check (j)) | `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j` |
+| CLI recovery | `$PF run --rm --no-deps backend python -m app.cli reset-password …` · `… restore-correction-permission-management …` |
+| Write freeze | `$PF stop backend` (có thể chờ đến 200 s khi một import đang chạy) · mở lại bằng `$PF up -d backend` |
+| First-run setup | `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, đọc token bằng `$PF logs backend \| grep "Setup token"`, hoàn tất setup, rồi `$PF up -d backend` |
+
+**Release sequence (dạng thủ công; P16-S3 tự động hóa).** `.env.production` luôn
+ghi release **đang chạy**; tag candidate chỉ nằm trong shell cho đến lúc switch,
+nên mọi CLI recovery, reconcile hay `up` trước switch đều dùng image hiện tại với
+schema hiện tại.
+
+1. Với tag hiện tại: reconcile trước bảo trì và mọi CLI recovery
+   (`deployment/OPERATIONS_RUNBOOK.md` §5).
+2. `PARTFLOW_RELEASE=<new> $PF build` (không bao giờ dùng tag đã có).
+3. `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`:
+   candidate image chạy trên database chưa đổi. Check thất bại thì dừng release
+   ở đây; chưa có gì thay đổi.
+4. Write freeze (`$PF stop backend`), rồi bước backup của runbook.
+5. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`.
+6. Ghi `PARTFLOW_RELEASE=<new>` vào `.env.production`, `$PF up -d backend web`,
+   rồi health và reconcile.
+
+Rollback code application khi không đổi schema: khôi phục tag trước trong
+`.env.production` và `$PF up -d backend web`. Rollback schema là đường restore
+của runbook (P16-S3/S5), không bao giờ là down-migration ở đây. **Không bao giờ
+chạy `down -v`, hay xóa volume, trên project `partflow-production`**: nó xóa
+`partflow-production_postgres_data`; `$PF down` không có `-v` là dạng dừng-tất-cả
+duy nhất.
+
+**Bằng chứng.** 29 static test trong `deploy/production/tests` (Compose model,
+file environment example, Dockerfile và cấu hình nginx; CI chạy, và đã được kiểm
+tra bằng 21 đột biến có chủ đích của artifact), các lần build production image
+(build `web` chạy production-boundary check: 59 asset, không có sentinel nào
+trong 11 mock sentinel), và Compose stack smoke trên Docker Desktop (các case
+SM-1…SM-22, gồm rate limit, các câu trả lời JSON do proxy sinh, content security
+policy trong trình duyệt thật, first-run một worker, các lệnh reconcile, và thời
+gian import 2.000 Work Order là 18,06 s để tạo và 31,33 s để đổi quantity, thấp
+hơn 180 s của `web`). Các host check trên Synology NAS và VPS không thuộc bằng
+chứng này.
 
 ## 4. Chọn nền tảng
 
@@ -304,7 +394,8 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   **đã triển khai** (`web`, §3.1);
 - production Compose có restart policy, health check, private network,
   persistent volume, resource limit thận trọng và không có development bind
-  mount — **còn lại** (phần còn lại của P16-S2);
+  mount — **đã triển khai** (`compose.production.yaml`, §3.1; resource limit là
+  giá trị khởi đầu, đo ở P16-S7);
 - reverse proxy chịu trách nhiệm TLS, SPA fallback, request limit và route
   `/api` — proxy phải nhận request body tối thiểu 3 MiB trên các route upload ảnh
   (`PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image?number=…`), vì
@@ -324,10 +415,11 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   thiểu 300 s, và TLS kết thúc ở đó — đã ghi ở §3.1, **thực hiện và xác minh ở
   P16-S7**;
 - configuration bắt buộc được validate lúc startup và secret không có default
-  đã commit — **đã triển khai** cho database setting (§3.1); cookie và time-zone
-  setting được production Compose file cố định hoặc bắt buộc (còn lại);
+  đã commit — **đã triển khai** (§3.1: backend validate database setting; Compose
+  cố định cookie setting và bắt buộc time zone cùng thư mục secret);
 - image hoặc release version bất biến và được giữ đủ lâu để rollback code —
-  **còn lại** (image có tag do Compose file; release identity bên trong image là
+  **đã triển khai một phần** (image được gắn tag bằng `PARTFLOW_RELEASE` và không
+  bao giờ pull; release identity bên trong image và quy tắc retention là
   P16-S3).
 
 Các gate ở trên vẫn là gate cho đến khi P16-S7 ghi nhận bằng chứng đạt.

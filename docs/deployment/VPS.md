@@ -15,23 +15,26 @@ the existing React/FastAPI/PostgreSQL architecture intact.
 ## 2. Required Phase 16 artifacts
 
 Do not deploy production from `compose.yaml`. The release must provide (state
-at P16-S2, partially implemented):
+at P16-S2, implemented unless marked pending):
 
 - production frontend and backend Dockerfiles/images — implemented (`production`
   stages; the `web` configuration is `frontend/nginx/`);
-- production Compose configuration — pending (remainder of P16-S2);
+- production Compose configuration — implemented (`compose.production.yaml`,
+  [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1);
 - reverse proxy configuration and certificate procedure — documented (§4 and
   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1); verified on the host in P16-S7;
-- explicit migration command/job — pending (the Compose `migrate` job is the
-  remainder of P16-S2; its command semantics are P16-S3);
-- secret/configuration inventory — pending (remainder of P16-S2); the database
-  password file contract is in DEPLOYMENT §3.1;
+- explicit migration command/job — implemented (the Compose `migrate` job,
+  profile `ops`; its command semantics are P16-S3);
+- secret/configuration inventory — implemented (`.env.production.example`,
+  the `postgres_password` secret file; DEPLOYMENT §3.1);
 - backup and restore automation — P16-S5;
 - health and reconciliation commands — `reconcile` exists (P16-S1); its
-  production invocation is pending (remainder of P16-S2, P16-S3);
+  production invocation is implemented (P16-S2: DEPLOYMENT §3.1 commands); the
+  release automation around it is P16-S3;
 - logging/monitoring configuration — P16-S6 (the `web` access log is the
   request log in P16-S2);
-- release and rollback procedure tied to immutable versions — P16-S3.
+- release and rollback procedure tied to immutable versions — P16-S3 (the
+  manual sequence of DEPLOYMENT §3.1 exists from P16-S2).
 
 ## 3. Host baseline
 
@@ -79,7 +82,8 @@ partflow.company.example {
 }
 ```
 
-`18080` stands for the loopback port the production Compose project publishes.
+`18080` stands for `PARTFLOW_HTTP_PORT`, the loopback port the production
+Compose project publishes.
 Caddy sets `X-Forwarded-For` to the client address and `X-Forwarded-Proto`, and
 redirects HTTP to HTTPS automatically. The destination is the literal
 `127.0.0.1`, never `localhost`. The 5 MiB body size and 300 s timeout sit above
@@ -119,21 +123,25 @@ required account/service. PostgreSQL data is never inside a Git checkout.
 1. Complete all gates in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §5.
 2. Provision and harden the host.
 3. Install the exact release files/images; record their digest/commit.
-4. Create production secrets and least-privilege database roles. The
-   `postgres_password` secret file (one line, [`../DEPLOYMENT.md`](../DEPLOYMENT.md)
-   §3.1) arrives with the production Compose file (remainder of P16-S2);
-   least-privilege roles are P16-S4, and until then the backend would use the
-   bootstrap owner role.
-5. Start PostgreSQL privately.
+4. Create production secrets and least-privilege database roles. Create
+   `PARTFLOW_SECRETS_DIR/postgres_password` (one line,
+   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; P16-S2) and `.env.production`
+   from `.env.production.example`. Least-privilege database roles are P16-S4
+   (`provision-roles`); until then the backend uses the bootstrap owner role.
+   `PF` below is `docker compose -f compose.production.yaml --env-file
+   .env.production`.
+5. Start PostgreSQL privately: `$PF up -d db`.
 6. Create an empty database in a new volume (production data never starts from
    staging or development data; a restore into production needs an owner
    decision, P16-S5).
-7. Run `alembic upgrade head` once from the release backend image.
-8. Start backend, frontend, and reverse proxy. On a database with no
-   Administrator, start the backend with one worker (`WEB_CONCURRENCY=1`, one
-   setup token), complete first-run setup (the setup token is in the backend
-   log) before opening access, then restart it with the configured worker
-   count. Then enroll each Scan Station device
+7. Run the migration once from the release backend image:
+   `$PF --profile ops run --rm migrate`.
+8. Start backend, `web` and the host reverse proxy (§4). On a database with no
+   Administrator, start the backend with one worker
+   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, one setup token),
+   complete first-run setup (the setup token is in the backend log:
+   `$PF logs backend | grep "Setup token"`) before opening access, then
+   restart it with the configured worker count (`$PF up -d backend`). Then enroll each Scan Station device
    (Administration → Scan Stations → `Devices…`).
 9. Run the runbook smoke and reconciliation checks through HTTPS.
 10. Enable monitoring and backup schedules, then run a backup immediately.

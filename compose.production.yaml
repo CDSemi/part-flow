@@ -1,0 +1,159 @@
+# PartFlow production stack (Phase 16 slice 2; DEPLOYMENT §3.1). Not for development:
+# development uses compose.yaml. Run from the release checkout with
+#   PF="docker compose -f compose.production.yaml --env-file .env.production"
+# and never `$PF down -v` (it deletes the production database volume).
+name: partflow-production
+
+x-logging: &logging
+    driver: json-file
+    options:
+        max-size: "10m"
+        max-file: "5"
+
+# Backend database connection in the file-based form (backend/app/core/config.py):
+# the password is read from the secret file, never set in an environment value.
+x-database-environment: &database-environment
+    DATABASE_HOST: db
+    DATABASE_PORT: "5432"
+    DATABASE_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
+    DATABASE_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.production}
+    DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+    SITE_TIMEZONE: ${PARTFLOW_SITE_TIMEZONE:?Set PARTFLOW_SITE_TIMEZONE in .env.production}
+
+services:
+    db:
+        # Debian variant pinned to the development minor: collation and the
+        # reconcile check (j) depend on glibc, so never an -alpine image.
+        image: postgres:16.14
+        environment:
+            POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.production}
+            POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
+            # Read only when a new data volume is initialized.
+            POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+        secrets: [postgres_password]
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        networks: [internal]
+        shm_size: 256m
+        stop_grace_period: 60s
+        restart: unless-stopped
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+            interval: 10s
+            timeout: 5s
+            retries: 6
+            start_period: 30s
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_DB_MEMORY:-1g}
+                    cpus: "${PARTFLOW_DB_CPUS:-1.0}"
+        logging: *logging
+
+    backend:
+        build:
+            context: ./backend
+            target: production
+        image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        # Built locally from the checked-out release only; never pulled.
+        pull_policy: never
+        environment:
+            <<: *database-environment
+            SESSION_COOKIE_SECURE: "true"
+            WEB_CONCURRENCY: ${PARTFLOW_BACKEND_WORKERS:-2}
+            FORWARDED_ALLOW_IPS: ${PARTFLOW_EDGE_SUBNET:-172.30.250.0/24}
+        secrets: [postgres_password]
+        networks: [internal, edge]
+        depends_on:
+            db:
+                condition: service_healthy
+        # Above web's longest upstream timeout (180 s, POST /api/work-orders/import) so a stop or
+        # recreate lets an in-flight import finish instead of killing the worker partway.
+        stop_grace_period: 200s
+        # Never on-failure: with more than one worker a configuration refusal exits 0.
+        restart: unless-stopped
+        healthcheck:
+            # Liveness only (no HTTP, no database). P16-S3 replaces it with GET /api/health/live.
+            test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+            interval: 10s
+            timeout: 5s
+            retries: 3
+            start_period: 30s
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_BACKEND_MEMORY:-1g}
+                    cpus: "${PARTFLOW_BACKEND_CPUS:-2.0}"
+        logging: *logging
+
+    web:
+        build:
+            context: ./frontend
+            target: production
+        image: partflow/web:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        pull_policy: never
+        # The only published port, on loopback only: the platform TLS proxy connects here.
+        # There is deliberately no variable for the bind address.
+        ports:
+            - "127.0.0.1:${PARTFLOW_HTTP_PORT:?Set PARTFLOW_HTTP_PORT in .env.production}:80"
+        environment:
+            # Empty = auto-detect the edge gateway (DEPLOYMENT §3.1); set only when a host check (P16-S7) requires it.
+            PARTFLOW_TRUSTED_PROXY: ${PARTFLOW_TRUSTED_PROXY:-}
+        networks: [edge]
+        # No depends_on: nginx resolves backend per request, so web keeps serving the
+        # shell while backend is stopped and follows a recreated backend.
+        # nginx stops gracefully (SIGQUIT) and waits for in-flight requests, including a 180 s import.
+        stop_grace_period: 200s
+        restart: unless-stopped
+        healthcheck:
+            test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/web-health"]
+            interval: 10s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_WEB_MEMORY:-128m}
+                    cpus: "${PARTFLOW_WEB_CPUS:-0.5}"
+        logging: *logging
+
+    # One-shot migration job: never started by `up`; run once per release with
+    # `$PF --profile ops run --rm migrate`.
+    migrate:
+        image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        pull_policy: never
+        profiles: [ops]
+        # P16-S3 replaces this with `python -m app.cli migrate …` (CD4).
+        command: ["alembic", "upgrade", "head"]
+        environment:
+            <<: *database-environment
+        secrets: [postgres_password]
+        networks: [internal]
+        depends_on:
+            db:
+                condition: service_healthy
+        restart: "no"
+        healthcheck:
+            disable: true
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_OPS_MEMORY:-512m}
+                    cpus: "${PARTFLOW_OPS_CPUS:-1.0}"
+        logging: *logging
+
+networks:
+    internal:
+        internal: true
+    edge:
+        ipam:
+            config:
+                - subnet: ${PARTFLOW_EDGE_SUBNET:-172.30.250.0/24}
+
+volumes:
+    postgres_data:
+
+secrets:
+    postgres_password:
+        file: ${PARTFLOW_SECRETS_DIR:?Set PARTFLOW_SECRETS_DIR in .env.production}/postgres_password

@@ -46,12 +46,16 @@ the actual volume selected by the administrator. Example:
 
 ```text
 <NAS_VOLUME>/docker/partflow/
-  repo/                 checked-out release
+  repo/                 checked-out release (.env.production lives here, mode 600)
+  secrets/              production only, mode 0700 (PARTFLOW_SECRETS_DIR)
   backups/
     database/
     manifests/
   restore-tests/
 ```
+
+`secrets/` is outside the checkout, holds only the production secret files
+(`postgres_password` in P16-S2) and is never shared with staging.
 
 Permissions:
 
@@ -224,9 +228,9 @@ unauthenticated application production-ready.
 The production `web` tier is published on the NAS loopback address only, so the
 DSM reverse proxy is the only HTTPS entry point. The settings below are the
 required values from [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; they are
-**documented in P16-S2 and executed and verified on the NAS in P16-S7**. The
-production Compose file that publishes `web` is not yet in the repository
-(remainder of P16-S2), so this procedure cannot be run yet.
+**documented in P16-S2 and executed and verified on the NAS in P16-S7**.
+`compose.production.yaml` publishes `web` on `127.0.0.1:${PARTFLOW_HTTP_PORT}`
+only; nothing in this section has been run on a Synology NAS yet.
 
 - Control Panel → Login Portal → Advanced → Reverse Proxy: source HTTPS, the
   PartFlow hostname, port 443; destination HTTP, host `127.0.0.1` (never
@@ -303,23 +307,53 @@ system.
 
 Do not convert by merely changing the URL. Replace the development stack with
 the Phase 16 production artifacts and verify all production gates. State at
-P16-S2 (partially implemented): the production images exist
-(`backend/Dockerfile` and `frontend/Dockerfile`, `production` stages, and the
-`web` configuration in `frontend/nginx/`); `compose.production.yaml` and
-`.env.production.example` are **not yet in the repository**, so the numbered
-conversion procedure (remove staging from the pilot daemon, create the secrets
-directory and `postgres_password`, check `SITE_TIMEZONE`, start from a new empty
-database volume, migrate, one-worker first-run setup) is written when they
-land. The rules it must follow are already fixed in
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1: staging is not co-hosted on the
-pilot daemon, production data starts from a new empty volume (staging data is
-never promoted), and `down -v` is never run on the production project.
+P16-S2 (implemented): `compose.production.yaml`, `.env.production.example`,
+`backend/Dockerfile` and `frontend/Dockerfile` (`production` stages) and
+`frontend/nginx/`; the commands below are the real ones
+([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1) but have **not been run on a
+Synology NAS** (P16-S7). Items still pending are named with their slice below.
+`PF` is `docker compose -f compose.production.yaml --env-file .env.production`,
+run from the release checkout `repo/`.
 
-- immutable production frontend and backend images — images exist (P16-S2),
-  tagging and release identity pending (Compose file, P16-S3);
+1. **Remove staging from the pilot daemon.** pf-managed staging is not installed
+   on this Docker daemon during the pilot (owner decision OD-16-01). Stop the
+   manual `compose.yaml` staging project and remove its containers **without**
+   `-v` (`docker compose -p partflow-staging down`); its volume is kept or
+   deleted only by owner decision and is never attached to production. Prove it:
+   `docker ps -a --format '{{.Label "com.docker.compose.project"}}' | sort -u`
+   lists no `partflow-staging`.
+2. **Create the configuration.** Copy `.env.production.example` to
+   `.env.production` (mode 600) and fill every empty value. Create the secrets
+   directory (`PARTFLOW_SECRETS_DIR`, mode 0700) and the one-line file
+   `postgres_password` (mode 0444). Least-privilege database roles are P16-S4:
+   until then the backend uses the bootstrap owner role. Run `$PF config --quiet`.
+3. **Check the time zone.** `PARTFLOW_SITE_TIMEZONE` must equal the staging
+   `SITE_TIMEZONE`.
+4. **Build, then start from a new empty volume.** `PARTFLOW_RELEASE` is the
+   release tag (DEPLOYMENT §10). `$PF build`, `$PF up -d db`, then
+   `$PF --profile ops run --rm migrate`. The volume
+   `partflow-production_postgres_data` is new and empty: staging data is never
+   promoted, and a restore into production is a P16-S5 procedure that needs an
+   owner decision.
+5. **First-run setup with one worker.**
+   `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, read the token with
+   `$PF logs backend | grep "Setup token"`, complete setup, then `$PF up -d backend`
+   so the configured worker count applies. Then the DSM reverse proxy (§5.2) and
+   enrollment of each Scan Station device.
+6. **Never run `down -v`** (or remove a volume) on the `partflow-production`
+   project: it deletes the production database.
+
+Pending: release tooling and the in-image release identity (P16-S3), role
+hardening (P16-S4), backups and restore (P16-S5), observability (P16-S6), and
+the NAS host checks and pilot gates (P16-S7).
+
+- immutable production frontend and backend images — implemented (P16-S2:
+  images tagged by `PARTFLOW_RELEASE`, never pulled); release identity inside
+  the image pending (P16-S3);
 - production Compose file with no source bind mounts, no reload/dev server, no
   published database port, and explicit restart/resource/logging policies —
-  pending (remainder of P16-S2);
+  implemented (P16-S2; resource limits are starting values to measure in
+  P16-S7);
 - private backend/database networks and one reverse-proxy entry point
   (§5.2; host-verified in P16-S7);
 - Phase 14 authentication/authorization;

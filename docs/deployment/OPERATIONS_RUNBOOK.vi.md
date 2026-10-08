@@ -4,9 +4,13 @@
 > được tạo trong gói tài liệu này trên baseline upstream
 > `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 >
-> **Trạng thái:** Mẫu quy trình vận hành chuẩn cho Phase 16. Các command phụ
-> thuộc production Compose tương lai phải được thay bằng tên cuối cùng do repo
-> cung cấp trước khi dùng cho production.
+> **Trạng thái:** Mẫu quy trình vận hành chuẩn cho Phase 16. Production Compose
+> file đã có (P16-S2): `PF` bên dưới là
+> `docker compose -f compose.production.yaml --env-file .env.production`, chạy từ
+> release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Các command phụ
+> thuộc slice sau (release automation P16-S3, backup P16-S5, monitoring P16-S6)
+> phải được thay bằng tên cuối cùng do repo cung cấp trước khi dùng cho
+> production.
 >
 > **Quyền chuẩn:** Tiếng Anh là source of truth.
 
@@ -30,13 +34,27 @@ Ghi cho mỗi environment và release:
 
 ## 2. Health và chẩn đoán
 
-Kiểm tra tối thiểu:
+Kiểm tra tối thiểu (development và staging stack):
 
 ```bash
 docker compose ps
 docker compose logs --since=15m backend frontend db
 curl --fail --silent --show-error https://<partflow-host>/api/health
 ```
+
+Production stack (`PF` như trên; health qua hostname):
+
+```bash
+$PF ps
+$PF logs --since=15m backend web db
+curl --fail --silent --show-error https://<partflow-host>/api/health
+```
+
+Trong production stack, access log của `web` là request log (client address,
+method, path không có query string, status, bytes, duration, user agent); nó
+không bao giờ chứa query string, cookie hay header PartFlow. Một câu trả lời JSON
+502 hoặc 504 đến từ `web` (`server_unavailable`) và nghĩa là kết quả của write
+chưa rõ: xử lý bằng `device_event_id` gốc (bên dưới).
 
 Sau đó kiểm tra:
 
@@ -120,21 +138,35 @@ diễn tập.
 - ước lượng lock/time/disk impact bằng staging data;
 - verify off-site backup và tạo pre-release dump mới;
 - xác nhận previous release còn dùng được;
-- chạy reconciliation (§7) trên release hiện tại, giữ report, và mở incident cho mọi finding;
+- chạy reconciliation (§7) trên release hiện tại, giữ report, và mở incident cho
+  mọi finding; trong production stack chạy nó, và mọi CLI recovery, với tag
+  **hiện tại**, trước khi tag candidate được ghi vào `.env.production` (candidate
+  chỉ nằm trong shell cho đến lúc switch);
 - quyết định có cần dừng write hay không;
 - thông báo window và deadline quyết định rollback.
 
 ### Thực hiện
 
 1. Ghi application và Alembic revision hiện tại.
-2. Build/pull target image bất biến.
-3. Stop hoặc block write nếu cần.
-4. Chạy production repository job `alembic upgrade head` rõ ràng đúng một lần.
+2. Build/pull target image bất biến. Production stack:
+   `PARTFLOW_RELEASE=<new> $PF build` (không bao giờ dùng tag đã có), rồi
+   rehearsal candidate image trên database chưa đổi:
+   `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
+   (check thất bại thì dừng release; chưa có gì thay đổi).
+3. Stop hoặc block write nếu cần (production stack: `$PF stop backend`, có thể
+   chờ đến 200 s khi một import đang chạy).
+4. Chạy production repository job migration rõ ràng đúng một lần (production
+   stack: `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm migrate`; P16-S3 thay
+   lệnh của nó).
 5. Lưu migration output và revision mới.
-6. Start/recreate application service ở target release. Với database chưa có
-   Administrator, hoàn tất first-run setup (setup token nằm trong backend log)
-   trước khi mở truy cập. Sau đó enroll từng thiết bị Scan Station
-   (Administration → Scan Stations → `Devices…`).
+6. Start/recreate application service ở target release (production stack: ghi
+   `PARTFLOW_RELEASE=<new>` vào `.env.production`, rồi `$PF up -d backend web`).
+   Với database chưa có Administrator, hoàn tất first-run setup (setup token nằm
+   trong backend log) trước khi mở truy cập; trong production stack hãy start
+   backend với một worker cho bước này
+   (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, rồi `$PF up -d backend`). Sau
+   đó enroll từng thiết bị Scan Station (Administration → Scan Stations →
+   `Devices…`).
 7. Check health nội bộ và qua HTTPS.
 8. Chạy smoke test authorization, SPA route, `/api`, scan-focus/connectivity và
    designated write/read-back.
@@ -196,7 +228,19 @@ docker compose exec -T backend uv run python -m app.cli reconcile --check j     
   chối khởi động và không ghi report nào. `DEPLOY_ADMIN_INSTANCE_ID` sai sẽ gắn
   nhầm label mọi resource mà Compose tạo ra (§14); bản thân `exec` không tạo
   container, volume hay network nào.
-- **Production:** cách gọi sẽ có cùng các production artifact của Phase 16.
+- **Production:** chạy từ release checkout với tag đang chạy; nó cũng chạy khi
+  `backend` đang dừng (`--no-deps` không start service nào khác, và database phải
+  đang chạy):
+
+  ```sh
+  f="reconcile-$(date -u +%Y%m%dT%H%M%SZ).json"
+  $PF run --rm --no-deps -T backend python -m app.cli reconcile > "$f"; rc=$?
+  ```
+
+  rồi áp dụng cùng bước kiểm tra report như trên. Dạng candidate-image cho check
+  (j), trước lúc switch một release, là
+  `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
+  (§5, Thực hiện, bước 2).
 - **Option:** `--check ID` (lặp lại được, `a` đến `j`; các check còn lại là
   `skipped`), `--statement-timeout SECONDS` (1-3600, mặc định 300),
   `--max-findings N` (1-10000, mặc định liệt kê 100 finding mỗi check;

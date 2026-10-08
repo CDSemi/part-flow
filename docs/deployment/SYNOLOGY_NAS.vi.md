@@ -47,12 +47,16 @@ volume thật do administrator chọn. Ví dụ:
 
 ```text
 <NAS_VOLUME>/docker/partflow/
-  repo/                 release đã checkout
+  repo/                 release đã checkout (.env.production nằm ở đây, mode 600)
+  secrets/              chỉ production, mode 0700 (PARTFLOW_SECRETS_DIR)
   backups/
     database/
     manifests/
   restore-tests/
 ```
+
+`secrets/` nằm ngoài checkout, chỉ chứa các secret file production
+(`postgres_password` ở P16-S2) và không bao giờ dùng chung với staging.
 
 Permission:
 
@@ -220,9 +224,9 @@ dụng chưa authentication thành production-ready.
 Tầng `web` production chỉ được publish trên địa chỉ loopback của NAS, nên DSM
 reverse proxy là điểm vào HTTPS duy nhất. Các thiết lập dưới đây là giá trị bắt
 buộc từ [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; chúng **được ghi tài liệu
-ở P16-S2 và được thực hiện, xác minh trên NAS ở P16-S7**. Production Compose file
-publish `web` chưa có trong repo (phần còn lại của P16-S2), nên quy trình này
-chưa thể chạy.
+ở P16-S2 và được thực hiện, xác minh trên NAS ở P16-S7**.
+`compose.production.yaml` chỉ publish `web` trên `127.0.0.1:${PARTFLOW_HTTP_PORT}`;
+chưa có gì trong mục này được chạy trên Synology NAS.
 
 - Control Panel → Login Portal → Advanced → Reverse Proxy: source HTTPS, hostname
   PartFlow, port 443; destination HTTP, host `127.0.0.1` (không bao giờ
@@ -296,24 +300,52 @@ database.
 ## 8. Chuyển sang production sau Phase 16
 
 Không chuyển production chỉ bằng cách đổi URL. Thay development stack bằng
-artifact production Phase 16 và verify toàn bộ gate. Trạng thái ở P16-S2 (mới
-triển khai một phần): production image đã có (`backend/Dockerfile` và
-`frontend/Dockerfile`, stage `production`, và cấu hình `web` trong
-`frontend/nginx/`); `compose.production.yaml` và `.env.production.example`
-**chưa có trong repo**, nên quy trình chuyển đổi có đánh số (gỡ staging khỏi
-daemon pilot, tạo thư mục secret và `postgres_password`, kiểm tra
-`SITE_TIMEZONE`, bắt đầu từ database volume mới và rỗng, migrate, first-run setup
-một worker) sẽ được viết khi chúng có. Các quy tắc nó phải theo đã được cố định
-ở [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1: staging không đặt chung trên
-daemon pilot, dữ liệu production bắt đầu từ volume mới rỗng (dữ liệu staging
-không bao giờ được promote), và không bao giờ chạy `down -v` trên production
-project.
+artifact production Phase 16 và verify toàn bộ gate. Trạng thái ở P16-S2 (đã
+triển khai): `compose.production.yaml`, `.env.production.example`,
+`backend/Dockerfile` và `frontend/Dockerfile` (stage `production`) và
+`frontend/nginx/`; các lệnh dưới đây là lệnh thật
+([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1) nhưng **chưa được chạy trên
+Synology NAS** (P16-S7). Các mục còn lại được nêu tên cùng slice bên dưới. `PF` là
+`docker compose -f compose.production.yaml --env-file .env.production`, chạy từ
+release checkout `repo/`.
 
-- frontend/backend image production bất biến — image đã có (P16-S2), tagging và
-  release identity còn lại (Compose file, P16-S3);
+1. **Gỡ staging khỏi daemon pilot.** pf-managed staging không được cài trên Docker
+   daemon này trong thời gian pilot (quyết định owner OD-16-01). Dừng project
+   staging thủ công dùng `compose.yaml` và xóa container của nó **không** dùng
+   `-v` (`docker compose -p partflow-staging down`); volume của nó chỉ được giữ
+   hoặc xóa theo quyết định của owner và không bao giờ được gắn vào production.
+   Chứng minh: `docker ps -a --format '{{.Label "com.docker.compose.project"}}' | sort -u`
+   không liệt kê `partflow-staging`.
+2. **Tạo configuration.** Sao chép `.env.production.example` thành
+   `.env.production` (mode 600) và điền mọi giá trị còn rỗng. Tạo thư mục secret
+   (`PARTFLOW_SECRETS_DIR`, mode 0700) và file một dòng `postgres_password` (mode
+   0444). Database role đặc quyền tối thiểu là P16-S4: cho đến lúc đó backend dùng
+   role bootstrap owner. Chạy `$PF config --quiet`.
+3. **Kiểm tra time zone.** `PARTFLOW_SITE_TIMEZONE` phải bằng `SITE_TIMEZONE` của
+   staging.
+4. **Build, rồi bắt đầu từ volume mới rỗng.** `PARTFLOW_RELEASE` là release tag
+   (DEPLOYMENT §10). `$PF build`, `$PF up -d db`, rồi
+   `$PF --profile ops run --rm migrate`. Volume `partflow-production_postgres_data`
+   mới và rỗng: dữ liệu staging không bao giờ được promote, và restore vào
+   production là quy trình P16-S5 cần owner quyết định.
+5. **First-run setup với một worker.**
+   `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, đọc token bằng
+   `$PF logs backend | grep "Setup token"`, hoàn tất setup, rồi
+   `$PF up -d backend` để áp dụng số worker đã cấu hình. Sau đó là DSM reverse
+   proxy (§5.2) và enroll từng thiết bị Scan Station.
+6. **Không bao giờ chạy `down -v`** (hay xóa volume) trên project
+   `partflow-production`: nó xóa database production.
+
+Còn lại: công cụ release và release identity trong image (P16-S3), role
+hardening (P16-S4), backup và restore (P16-S5), observability (P16-S6), và các
+host check trên NAS cùng pilot gate (P16-S7).
+
+- frontend/backend image production bất biến — đã triển khai (P16-S2: image gắn
+  tag bằng `PARTFLOW_RELEASE`, không bao giờ pull); release identity trong image
+  còn lại (P16-S3);
 - production Compose không source bind mount, không reload/dev server, không
-  publish database port, có restart/resource/logging policy rõ — còn lại (phần
-  còn lại của P16-S2);
+  publish database port, có restart/resource/logging policy rõ — đã triển khai
+  (P16-S2; resource limit là giá trị khởi đầu, đo ở P16-S7);
 - private backend/database network và một reverse-proxy entry point (§5.2; xác
   minh trên host ở P16-S7);
 - authentication/authorization Phase 14;
