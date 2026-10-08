@@ -49,6 +49,7 @@ interface WireUser {
   permissions: string[];
   must_change_password: boolean;
   session_expires_at: string | null;
+  theme_preference: 'DARK' | 'LIGHT' | null;
 }
 
 const JANE: WireUser = {
@@ -61,6 +62,7 @@ const JANE: WireUser = {
   permissions: ['VIEW_PRODUCTION_DATA'],
   must_change_password: false,
   session_expires_at: '2026-11-05T08:00:00Z',
+  theme_preference: null,
 };
 
 interface Fake {

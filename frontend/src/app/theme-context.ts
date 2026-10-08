@@ -27,6 +27,29 @@ export interface StationThemeBinding {
   save: (theme: Theme) => Promise<unknown>;
   /** Called with the theme on screen when a save fails while writable. */
   onSaveFailed: (displayed: Theme) => void;
+  /** Shows a theme warning in the station's own floating notice (a
+   * failed save of the signed-in User's preference). */
+  showWarning?: (title: string, detail: string) => void;
+}
+
+/** The signed-in User's theme tier (GUI_DESIGN §2.1 ①). */
+export interface UserThemeBinding {
+  userId: number;
+  /** The User's saved preference as read by the session read that bound it. */
+  preference: Theme | null;
+  /** Signed in, not forced to change the password, and connected: the toggle saves. */
+  writable: boolean;
+  save: (theme: Theme) => Promise<unknown>;
+  /** A save failed. `stationWarning` is set when a loaded, writable station is
+   * bound: the failure must then be shown through the station's floating notice.
+   * `released` = this binding was released while the save was in flight (the
+   * caller reports only an ended sign-in then). */
+  onSaveFailed: (
+    displayed: Theme,
+    error: unknown,
+    stationWarning: ((title: string, detail: string) => void) | undefined,
+    released: boolean,
+  ) => void;
 }
 
 export interface ThemeValue {
@@ -41,6 +64,15 @@ export interface ThemeValue {
   bindStation: (binding: StationThemeBinding) => void;
   /** Unbinds when that station is the bound one; the theme stays. */
   releaseStation: (stationId: string) => void;
+  /** Registers the signed-in User's tier, or refreshes it for the same
+   * User (a later read never changes the screen). */
+  bindUser: (binding: UserThemeBinding) => void;
+  /** Unbinds when that User is the bound one; the screen returns to the
+   * Scan Station preference or Dark. */
+  releaseUser: (userId: number) => void;
+  /** Whether the Scan Station tier may be saved: only while the browser
+   * knows nobody is signed in. */
+  setStationSaves: (allowed: boolean) => void;
 }
 
 export const ThemeContext = createContext<ThemeValue | null>(null);
@@ -55,6 +87,8 @@ export interface StationThemeOptions {
   writable: boolean;
   save: (theme: Theme) => Promise<unknown>;
   onSaveFailed: (displayed: Theme) => void;
+  /** The station's floating warning, for a failed User-tier save. */
+  showWarning?: (title: string, detail: string) => void;
 }
 
 /** Bind the current station route's theme tier. `read` undefined = the
@@ -78,6 +112,7 @@ export function useStationTheme(
   const preference = read?.preference ?? null;
   const epoch = read?.epoch ?? 0;
   const writable = options.writable && !unread;
+  const warns = options.showWarning !== undefined;
   useEffect(() => {
     bindStation({
       stationId,
@@ -85,6 +120,49 @@ export function useStationTheme(
       writable,
       save: (theme) => latest.current.save(theme),
       onSaveFailed: (theme) => latest.current.onSaveFailed(theme),
+      showWarning: warns
+        ? (title, detail) => latest.current.showWarning?.(title, detail)
+        : undefined,
     });
-  }, [bindStation, stationId, unread, preference, epoch, writable]);
+  }, [bindStation, stationId, unread, preference, epoch, writable, warns]);
+}
+
+export interface UserThemeOptions {
+  writable: boolean;
+  save: (theme: Theme) => Promise<unknown>;
+  onSaveFailed: UserThemeBinding['onSaveFailed'];
+}
+
+/** Bind the signed-in User's theme tier; `user` null = nobody bound. */
+export function useUserTheme(
+  user: { id: number; themePreference: Theme | null } | null,
+  options: UserThemeOptions,
+): void {
+  const { bindUser, releaseUser } = useTheme();
+  // The latest callbacks, read only when a save starts or settles.
+  const latest = useRef(options);
+  useEffect(() => {
+    latest.current = options;
+  });
+
+  const userId = user?.id ?? null;
+  const preference = user?.themePreference ?? null;
+  const writable = options.writable;
+
+  useEffect(() => {
+    if (userId === null) return;
+    return () => releaseUser(userId);
+  }, [userId, releaseUser]);
+
+  useEffect(() => {
+    if (userId === null) return;
+    bindUser({
+      userId,
+      preference,
+      writable,
+      save: (theme) => latest.current.save(theme),
+      onSaveFailed: (displayed, error, stationWarning, released) =>
+        latest.current.onSaveFailed(displayed, error, stationWarning, released),
+    });
+  }, [bindUser, userId, preference, writable]);
 }

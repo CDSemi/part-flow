@@ -95,16 +95,18 @@ function stationDeviceRefusalKind(
 export type AuthFailureKind =
   'authentication_required' | 'password_change_required';
 
-let authFailureListener: ((kind: AuthFailureKind) => void) | null = null;
+let authFailureListener:
+  ((kind: AuthFailureKind, prompt: boolean) => void) | null = null;
 
 /**
  * Register (or clear, with null) the one listener told about a 401
  * `authentication_required` or a 403 `password_change_required`
  * answer. Every other refusal (a failed sign-in, a missing permission,
- * a refused request origin) never calls it.
+ * a refused request origin) never calls it. `prompt` is false only for
+ * an ended sign-in refused on a request sent with `promptSignIn: false`.
  */
 export function setAuthFailureListener(
-  listener: ((kind: AuthFailureKind) => void) | null,
+  listener: ((kind: AuthFailureKind, prompt: boolean) => void) | null,
 ): void {
   authFailureListener = listener;
 }
@@ -170,6 +172,15 @@ export interface ApiRequestInit {
    * after `Content-Type` and the request-origin header, never
    * overriding either. */
   headers?: Readonly<Record<string, string>>;
+  /**
+   * Pass `promptSignIn: false` for a background save whose caller
+   * reports an ended sign-in itself (the theme preference). The listener
+   * still records that the sign-in ended, but it opens no Sign-in
+   * dialog: a theme click never raises one, and Scan Station routes and
+   * the Production Board never ask for sign-in. A required password
+   * change is unaffected. Default true.
+   */
+  promptSignIn?: boolean;
 }
 
 /**
@@ -193,7 +204,7 @@ export async function apiRequestWithStatus<T>(
     headers,
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
-  return readResponse<T>(response, headers);
+  return readResponse<T>(response, headers, init?.promptSignIn ?? true);
 }
 
 /**
@@ -211,18 +222,20 @@ export async function apiUpload<T>(
     headers: { 'Content-Type': blob.type, ...CSRF_HEADERS },
     body: blob,
   });
-  return (await readResponse<T>(response, {})).data;
+  return (await readResponse<T>(response, {}, true)).data;
 }
 
 /**
  * Shared response handling of every call: a non-2xx answer becomes an
  * `ApiError` carrying the backend's message, a 2xx answer is parsed as
  * JSON (204 has no body). `sentHeaders` are the headers the request
- * carried (the station-device listener is told the token it sent).
+ * carried (the station-device listener is told the token it sent);
+ * `promptSignIn` is the request's option (`ApiRequestInit`).
  */
 async function readResponse<T>(
   response: Response,
   sentHeaders: Readonly<Record<string, string>>,
+  promptSignIn: boolean,
 ): Promise<{ status: number; data: T }> {
   if (!response.ok) {
     let body: unknown;
@@ -236,7 +249,13 @@ async function readResponse<T>(
         ? (body as { detail?: unknown }).detail
         : undefined;
     const kind = authFailureKind(response.status, body);
-    if (kind !== null) authFailureListener?.(kind);
+    if (kind !== null) {
+      // A required password change always prompts (the forced dialog).
+      authFailureListener?.(
+        kind,
+        kind === 'authentication_required' ? promptSignIn : true,
+      );
+    }
     const deviceRefusal = stationDeviceRefusalKind(response.status, body);
     if (deviceRefusal !== null) {
       stationDeviceRefusalListener?.(

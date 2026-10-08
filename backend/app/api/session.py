@@ -15,6 +15,9 @@ HTTP surface of ``app.application.authentication``:
 - ``PUT /session/password`` — change the signed-in User's own password
   (allowed while a change is required); every other sign-in of the User
   ends and the cookie rotates.
+- ``PUT /session/theme-preference`` — save the signed-in User's own
+  Dark/Light preference (the GUI_DESIGN §2.1 User tier; Phase 14 slice
+  8); not audited (OD-P16), only the caller's own row.
 
 Every response carries ``Cache-Control: no-store`` and the CSRF header
 rule applies (``app.api.csrf``). Passwords travel as ``SecretStr`` and
@@ -30,10 +33,12 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.api.authorization import (
     CurrentUserDep,
+    SignedInDep,
     clear_session_cookie,
     set_session_cookie,
 )
 from app.api.dependencies import SessionDep, SetupGateDep
+from app.api.scan_station import ThemePreferenceLiteral
 from app.application import authentication, first_run
 from app.application.authentication import SESSION_COOKIE, Principal, SessionGrant
 from app.domain.enums import Permission
@@ -57,6 +62,8 @@ class SessionUserResponse(BaseModel):
     must_change_password: bool
     # null = the sign-in never expires.
     session_expires_at: datetime.datetime | None
+    # The signed-in User's saved theme (GUI_DESIGN §2.1 User tier); null = no preference.
+    theme_preference: ThemePreferenceLiteral | None
 
 
 class SessionStateResponse(BaseModel):
@@ -78,6 +85,16 @@ class OwnPasswordChangeRequest(BaseModel):
     new_password: Secret
 
 
+class OwnThemePreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    theme_preference: ThemePreferenceLiteral
+
+
+class OwnThemePreferenceResponse(BaseModel):
+    theme_preference: ThemePreferenceLiteral
+
+
 def session_user_response(principal: Principal) -> SessionUserResponse:
     return SessionUserResponse(
         id=principal.user_id,
@@ -89,6 +106,9 @@ def session_user_response(principal: Principal) -> SessionUserResponse:
         permissions=sorted(principal.permissions),
         must_change_password=principal.must_change_password,
         session_expires_at=principal.session_expires_at,
+        theme_preference=(
+            None if principal.theme_preference is None else principal.theme_preference.value
+        ),
     )
 
 
@@ -159,3 +179,19 @@ def change_own_password(
     )
     grant_session(response, grant)
     return session_state(grant.principal, first_run.is_setup_open(session, gate))
+
+
+@router.put("/session/theme-preference")
+def set_own_theme_preference(
+    body: OwnThemePreferenceRequest, principal: SignedInDep, session: SessionDep
+) -> OwnThemePreferenceResponse:
+    """The signed-in User's own Dark/Light preference: the User tier of GUI_DESIGN §2.1.
+
+    A display preference, not configuration, so it is not audited (OD-P16). Only the
+    caller's own row. Absolute value: a repeat is a no-op. The response echoes the value
+    this request saved or kept.
+    """
+    value = authentication.set_own_theme_preference(
+        session, principal, theme_preference=body.theme_preference
+    )
+    return OwnThemePreferenceResponse(theme_preference=value.value)

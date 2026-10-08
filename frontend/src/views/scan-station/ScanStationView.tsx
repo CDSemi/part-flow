@@ -721,10 +721,26 @@ function StationView({
       setNotice({ kind: 'info', title: message });
     };
   }, [reloadContext]);
+  // The titles of the theme warnings this station has shown (its own and
+  // the signed-in User's): only these may replace a warning on screen.
+  const themeNoticeTitles = useRef(new Set([THEME_NOT_CONFIRMED]));
+  const showThemeWarning = useCallback((title: string, detail: string) => {
+    themeNoticeTitles.current.add(title);
+    // A display preference never replaces a production warning or
+    // error still on screen (e.g. an outcome-unknown notice).
+    setNotice((current) =>
+      current !== null &&
+      (current.kind === 'warn' || current.kind === 'err') &&
+      !themeNoticeTitles.current.has(current.title)
+        ? current
+        : { kind: 'warn', icon: '⚠', title, detail },
+    );
+  }, []);
   // The station tier of the theme (GUI_DESIGN §2.1, Phase 13): the saved
   // preference applies when the context loads; the toggle saves it only
   // while the context is loaded and the connection is up (session-only
-  // otherwise, nothing queued).
+  // otherwise, nothing queued). A failed save of the signed-in User's
+  // preference (Phase 14) shows in this station's floating notice.
   useStationTheme(
     stationId,
     ready
@@ -736,21 +752,12 @@ function StationView({
       onSaveFailed: (theme) => {
         const shown = theme === 'dark' ? 'Dark' : 'Light';
         const other = theme === 'dark' ? 'Light' : 'Dark';
-        // A display preference never replaces a production warning or
-        // error still on screen (e.g. an outcome-unknown notice).
-        setNotice((current) =>
-          current !== null &&
-          (current.kind === 'warn' || current.kind === 'err') &&
-          current.title !== THEME_NOT_CONFIRMED
-            ? current
-            : {
-                kind: 'warn',
-                icon: '⚠',
-                title: THEME_NOT_CONFIRMED,
-                detail: `${shown} mode applies to this browser session only — ${stationId} did not confirm saving it. To save ${shown} for this station, switch to ${other} and back.`,
-              },
+        showThemeWarning(
+          THEME_NOT_CONFIRMED,
+          `${shown} mode applies to this browser session only — ${stationId} did not confirm saving it. To save ${shown} for this station, switch to ${other} and back.`,
         );
       },
+      showWarning: showThemeWarning,
     },
   );
   const [flow, setFlow] = useState<Flow | null>(null);

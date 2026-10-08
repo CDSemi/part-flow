@@ -21,6 +21,7 @@ const SIGNED_IN = {
     permissions: PERMISSIONS,
     must_change_password: false,
     session_expires_at: null,
+    theme_preference: null,
   },
   setup_open: false,
 };

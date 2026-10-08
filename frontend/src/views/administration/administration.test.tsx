@@ -1241,6 +1241,7 @@ function signedInUser(
     permissions,
     mustChangePassword: false,
     sessionExpiresAt: null,
+    themePreference: null,
     ...overrides,
   };
 }

@@ -32,6 +32,7 @@ import { useSession } from './app/session-context';
 import { SessionProvider } from './app/session-provider';
 import { SignInGate } from './app/SignInGate';
 import { ThemeProvider } from './app/theme-provider';
+import { UserThemeBinding } from './app/user-theme-binding';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LoadingState } from './components/view-states';
 import { PERMISSION_LABELS } from './views/administration/permissions';
@@ -365,6 +366,7 @@ export function App() {
         <RouterProvider>
           <SessionProvider>
             <AppShell />
+            <UserThemeBinding />
           </SessionProvider>
         </RouterProvider>
       </ConnectivityProvider>

@@ -126,7 +126,7 @@ test('the auth-failure listener hears an ended sign-in and a required password c
     expect(ended).toBeInstanceOf(ApiError);
     expect((ended as ApiError).status).toBe(401);
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(listener).toHaveBeenLastCalledWith('authentication_required');
+    expect(listener).toHaveBeenLastCalledWith('authentication_required', true);
 
     fetchMock.mockResolvedValueOnce(
       json(
@@ -141,7 +141,7 @@ test('the auth-failure listener hears an ended sign-in and a required password c
       ApiError,
     );
     expect(listener).toHaveBeenCalledTimes(2);
-    expect(listener).toHaveBeenLastCalledWith('password_change_required');
+    expect(listener).toHaveBeenLastCalledWith('password_change_required', true);
 
     // Every other refusal leaves the listener alone.
     for (const [body, status] of [
@@ -163,6 +163,60 @@ test('the auth-failure listener hears an ended sign-in and a required password c
       ).rejects.toBeInstanceOf(ApiError);
     }
     expect(listener).toHaveBeenCalledTimes(2);
+  } finally {
+    setAuthFailureListener(null);
+  }
+});
+
+test('promptSignIn: false still tells the listener about an ended sign-in, without a prompt; a required password change always prompts', async () => {
+  const listener = vi.fn();
+  setAuthFailureListener(listener);
+  try {
+    const ended = { detail: 'Sign in.', authentication_required: true };
+    const forced = {
+      detail: 'Choose a new password before you continue.',
+      password_change_required: true,
+    };
+
+    fetchMock.mockResolvedValueOnce(json(ended, 401));
+    const error = await apiRequest('/api/session/theme-preference', {
+      method: 'PUT',
+      body: { theme_preference: 'LIGHT' },
+      promptSignIn: false,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect(listener).toHaveBeenLastCalledWith('authentication_required', false);
+
+    fetchMock.mockResolvedValueOnce(json(ended, 401));
+    await expect(
+      apiRequest('/api/policies/sign-in', { promptSignIn: true }),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(listener).toHaveBeenLastCalledWith('authentication_required', true);
+
+    for (const promptSignIn of [false, true, undefined]) {
+      fetchMock.mockResolvedValueOnce(json(forced, 403));
+      await expect(
+        apiRequest('/api/session/theme-preference', {
+          method: 'PUT',
+          body: { theme_preference: 'DARK' },
+          promptSignIn,
+        }),
+      ).rejects.toBeInstanceOf(ApiError);
+      expect(listener).toHaveBeenLastCalledWith(
+        'password_change_required',
+        true,
+      );
+    }
+    expect(listener).toHaveBeenCalledTimes(5);
+
+    // The option never travels as a header or in the body.
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.headers).toEqual({
+      'Content-Type': 'application/json',
+      'X-PartFlow-CSRF': '1',
+    });
+    expect(init.body).toBe('{"theme_preference":"LIGHT"}');
   } finally {
     setAuthFailureListener(null);
   }
@@ -257,7 +311,10 @@ test('FS-1: the station-device listener hears exactly the two device refusals, w
     expect(listener).toHaveBeenCalledTimes(3);
     // The device refusals never reach the sign-in listener.
     expect(authListener).toHaveBeenCalledTimes(1);
-    expect(authListener).toHaveBeenLastCalledWith('authentication_required');
+    expect(authListener).toHaveBeenLastCalledWith(
+      'authentication_required',
+      true,
+    );
   } finally {
     setStationDeviceRefusalListener(null);
     setAuthFailureListener(null);

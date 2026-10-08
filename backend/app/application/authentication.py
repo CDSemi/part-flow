@@ -71,7 +71,13 @@ from app.application.errors import (
     UnknownLoginError,
 )
 from app.application.user_access import Principal as Principal
-from app.domain.enums import AuditEntityType, AuditEventType, Permission, UserSessionEndReason
+from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
+    Permission,
+    ThemePreference,
+    UserSessionEndReason,
+)
 from app.domain.password_policy import (
     InvalidPasswordError,
     is_encodable,
@@ -491,6 +497,38 @@ def change_own_password(
     grant = _grant(session, token)
     commit(session, {})
     return grant
+
+
+def set_own_theme_preference(
+    session: Session, principal: Principal, *, theme_preference: object
+) -> ThemePreference:
+    """Save the signed-in User's own Dark/Light preference (GUI_DESIGN §2.1, User tier).
+
+    A display preference, not configuration (OD-P16): no audit row, ``users.updated_at``
+    unchanged, never part of the User audit snapshot. Only the caller's own row: the id
+    comes from the session principal, never from the request. Absolute value: a repeat
+    performs no UPDATE, so a retry after an unknown outcome is safe. Returns the value
+    written or kept, never re-read after COMMIT (the station theme precedent). Worker
+    Sessions never call it.
+
+    One lock, taken first and held to COMMIT: the User row FOR NO KEY UPDATE (the mode
+    every User write uses). Not under the User-administration advisory lock: the write
+    changes no grant, role, credential or activity. As a transaction's only lock it
+    cannot be part of a deadlock.
+    """
+    # Wire vocabulary, case-sensitive; the shape is judged before any lock
+    # (the Scan Station theme rule and copy).
+    if not isinstance(theme_preference, str) or theme_preference not in ThemePreference:
+        raise InvalidInputError("Theme preference must be DARK or LIGHT.")
+    value = ThemePreference(theme_preference)
+    user = users.lock_user(session, principal.user_id)
+    # After the lock: a deactivation, a session end or a forced change committed
+    # by a writer that held this row while the request waited refuses (A1/A3).
+    user_access.recheck_actor(session, principal)
+    if user.theme_preference != value.value:
+        user.theme_preference = value.value
+        commit(session, {})
+    return value
 
 
 def set_user_password(

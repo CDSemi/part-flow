@@ -1324,9 +1324,11 @@ class User(Base):
     User holds exactly one role; Users are deactivated, never deleted.
     The optional avatar is stored on the row (CD1) with the Worker
     avatar CHECKs; its bytes are mapped deferred. `theme_preference` is
-    the User tier of GUI_DESIGN §2.1, stored only (OD-19): Phase 13 has
-    no writer and no reader for it; Phase 14 adds both with the
-    signed-in User.
+    the User tier of GUI_DESIGN §2.1 (NULL = no preference). It is
+    written only by the User's own toggle through `PUT
+    /api/session/theme-preference` (Phase 14 slice 8). It is a display
+    preference: never audited, never part of the `User` audit snapshot,
+    and it does not change `updated_at`.
     """
 
     __tablename__ = "users"

@@ -61,6 +61,7 @@ function wireUser(
     permissions,
     must_change_password: false,
     session_expires_at: null,
+    theme_preference: null,
     ...overrides,
   };
 }

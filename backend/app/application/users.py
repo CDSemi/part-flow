@@ -34,8 +34,10 @@ Rules owned here (owner decision OD-8; slice 12 decisions):
 - Users are deactivated, never deleted: no delete service exists.
 - The optional avatar is stored on the row (CD1/OD-10) after the shared
   image validation (``app.application.images``) — the Worker protocol.
-- ``users.theme_preference`` (OD-19) is stored only: no service here
-  writes or reads it (Phase 14 adds both with the signed-in User).
+- ``users.theme_preference`` (OD-19) is never written or read here: the
+  signed-in User's own toggle writes it
+  (``authentication.set_own_theme_preference``, Phase 14 slice 8) and
+  the session principal reads it.
 - Every effective write appends exactly one ``audit_events`` row in the
   SAME transaction (entity ``User``; ``actor_user_id`` is the signed-in
   User since Phase 14 slice 2; ``actor_reference`` is legacy and stays

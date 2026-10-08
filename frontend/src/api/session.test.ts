@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-import { ApiError } from './client';
+import { ApiError, setAuthFailureListener } from './client';
 import {
   changeOwnPassword,
   getSession,
   isPasswordCheckBusy,
+  saveOwnThemePreference,
   signIn,
   signInWriteOutcomeUnknown,
   signOut,
@@ -32,6 +33,7 @@ const WIRE_USER = {
   permissions: ['MANAGE_USERS_AND_ROLES', 'VIEW_PRODUCTION_DATA'],
   must_change_password: true,
   session_expires_at: '2026-11-05T08:00:00Z',
+  theme_preference: null,
 };
 
 beforeEach(() => {
@@ -65,6 +67,7 @@ test('getSession maps the signed-in user and the setup state', async () => {
       permissions: ['MANAGE_USERS_AND_ROLES', 'VIEW_PRODUCTION_DATA'],
       mustChangePassword: true,
       sessionExpiresAt: '2026-11-05T08:00:00Z',
+      themePreference: null,
     },
     setupOpen: false,
   });
@@ -157,4 +160,75 @@ test('a busy password check is a definite refusal; other 5xx and no answer are u
       new ApiError(401, 'Sign-in failed.', { sign_in_failed: true }),
     ),
   ).toBe(false);
+});
+
+test('themePreference maps DARK, LIGHT and null; any other value or a missing key throws', async () => {
+  for (const [wire, mapped] of [
+    ['DARK', 'dark'],
+    ['LIGHT', 'light'],
+    [null, null],
+  ] as const) {
+    fetchMock.mockResolvedValueOnce(
+      json({
+        user: { ...WIRE_USER, theme_preference: wire },
+        setup_open: false,
+      }),
+    );
+    expect((await getSession()).user?.themePreference).toBe(mapped);
+  }
+  const missing: Record<string, unknown> = { ...WIRE_USER };
+  delete missing.theme_preference;
+  for (const user of [
+    missing,
+    { ...WIRE_USER, theme_preference: 'dark' },
+    { ...WIRE_USER, theme_preference: 'AUTO' },
+    { ...WIRE_USER, theme_preference: 1 },
+  ]) {
+    fetchMock.mockResolvedValueOnce(json({ user, setup_open: false }));
+    await expect(getSession()).rejects.toThrow(
+      'The server answered a malformed user sign-in state.',
+    );
+  }
+});
+
+test('saveOwnThemePreference sends the exact request without a sign-in prompt and maps the echo', async () => {
+  fetchMock.mockResolvedValueOnce(json({ theme_preference: 'LIGHT' }));
+  await expect(saveOwnThemePreference('light')).resolves.toBe('light');
+  expect(sent()).toEqual({
+    path: '/api/session/theme-preference',
+    method: 'PUT',
+    body: { theme_preference: 'LIGHT' },
+  });
+  const [, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+  expect(init.headers).toEqual({
+    'Content-Type': 'application/json',
+    'X-PartFlow-CSRF': '1',
+  });
+
+  fetchMock.mockResolvedValueOnce(json({ theme_preference: 'DARK' }));
+  await expect(saveOwnThemePreference('dark')).resolves.toBe('dark');
+  expect(sent().body).toEqual({ theme_preference: 'DARK' });
+
+  fetchMock.mockResolvedValueOnce(json({ theme_preference: 'BLUE' }));
+  await expect(saveOwnThemePreference('dark')).rejects.toThrow(
+    'The server answered a malformed user sign-in state.',
+  );
+
+  // An ended sign-in is reported to the session listener without a prompt.
+  const listener = vi.fn();
+  setAuthFailureListener(listener);
+  try {
+    fetchMock.mockResolvedValueOnce(
+      json({ detail: 'Sign in.', authentication_required: true }, 401),
+    );
+    await expect(saveOwnThemePreference('light')).rejects.toBeInstanceOf(
+      ApiError,
+    );
+    expect(listener).toHaveBeenCalledExactlyOnceWith(
+      'authentication_required',
+      false,
+    );
+  } finally {
+    setAuthFailureListener(null);
+  }
 });

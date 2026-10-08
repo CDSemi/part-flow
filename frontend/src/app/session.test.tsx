@@ -33,6 +33,7 @@ const WIRE_USER = {
   permissions: ['MANAGE_USERS_AND_ROLES'],
   must_change_password: false,
   session_expires_at: null,
+  theme_preference: null,
 };
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -110,6 +111,15 @@ function Probe() {
       </button>
       <button
         onClick={() => {
+          apiRequest('/api/policies/sign-in', { promptSignIn: false }).catch(
+            () => undefined,
+          );
+        }}
+      >
+        ended quietly
+      </button>
+      <button
+        onClick={() => {
           apiRequest('/api/policies/due-soon').catch(() => undefined);
         }}
       >
@@ -160,6 +170,7 @@ test('an explicit test value supplies the session', () => {
     permissions: [],
     mustChangePassword: false,
     sessionExpiresAt: null,
+    themePreference: null,
   } satisfies SessionUser;
   renderWithSession(
     <ConnectivityContext.Provider
@@ -241,6 +252,24 @@ test('an ended sign-in signs out and opens the Sign-in dialog', async () => {
   expect(sessionReads()).toBe(1);
 });
 
+test('an ended sign-in of a request sent without a prompt signs out as expired and opens no dialog', async () => {
+  sessionAnswer = () => json({ user: WIRE_USER, setup_open: false });
+  render(tree());
+  await waitFor(() => expect(status()).toBe('signed-in'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'ended quietly' }));
+  await waitFor(() => expect(status()).toBe('signed-out'));
+  expect(screen.getByTestId('ended-by').textContent).toBe('expired');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(sessionReads()).toBe(1);
+
+  // A later refusal with the prompt opens the dialog as usual.
+  fireEvent.click(screen.getByRole('button', { name: 'ended' }));
+  expect(
+    await screen.findByRole('dialog', { name: 'Sign in' }),
+  ).toBeInTheDocument();
+});
+
 test('a required password change re-reads the sign-in and opens the forced dialog', async () => {
   sessionAnswer = () => json({ user: WIRE_USER, setup_open: false });
   render(tree());
@@ -307,6 +336,7 @@ test('hasPermission: no user holds nothing; a user holds exactly the role keys',
     permissions: ['CONFIGURE_SYSTEM_SETTINGS'],
     mustChangePassword: false,
     sessionExpiresAt: null,
+    themePreference: null,
   } satisfies SessionUser;
   expect(hasPermission(null, 'CONFIGURE_SYSTEM_SETTINGS')).toBe(false);
   expect(hasPermission(user, 'CONFIGURE_SYSTEM_SETTINGS')).toBe(true);

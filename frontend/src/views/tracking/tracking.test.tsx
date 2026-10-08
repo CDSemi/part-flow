@@ -520,6 +520,7 @@ function signedInSession(
     permissions: [...permissions],
     mustChangePassword: false,
     sessionExpiresAt: null,
+    themePreference: null,
   };
   return {
     status: 'signed-in',

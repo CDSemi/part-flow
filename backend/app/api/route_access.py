@@ -157,6 +157,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/sign-in"): _SIGNED_IN,
     ("GET", "/api/scan-station-devices"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
+    ("PUT", "/api/session/theme-preference"): _SIGNED_IN,
     # Read by Administration and by Management → Machines (OD-S2-2).
     ("GET", "/api/barcode-configuration/machine-asset-tag-format"): _SIGNED_IN,
     # --- PERMISSION (static) ------------------------------------------------

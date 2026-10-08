@@ -203,6 +203,7 @@ test('FE-13: the used Planned Route note names Tracking â†’ Edit assigned Routeâ
     permissions: [...PERMISSIONS],
     mustChangePassword: false,
     sessionExpiresAt: null,
+    themePreference: null,
   };
   const session: SessionValue = {
     status: 'signed-in',

@@ -316,6 +316,8 @@ test('no production module reaches src/mocks/', () => {
   ]) {
     expect(graph).toContain(module);
   }
+  // The theme's User tier (Phase 14 slice 8) ships in every build.
+  expect(graph).toContain(join('app', 'user-theme-binding.tsx'));
 
   expect(mockOffenders(graph)).toEqual([]);
 });

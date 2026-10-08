@@ -56,6 +56,7 @@ test('createFirstAdministrator posts the exact body and maps the sign-in', async
           permissions: ['MANAGE_USERS_AND_ROLES'],
           must_change_password: false,
           session_expires_at: null,
+          theme_preference: null,
         },
         setup_open: false,
       },

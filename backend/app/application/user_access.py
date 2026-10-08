@@ -56,7 +56,7 @@ from app.application.errors import (
     PasswordChangeRequiredError,
     PermissionDeniedError,
 )
-from app.domain.enums import Permission, SignInState, UserSessionEndReason
+from app.domain.enums import Permission, SignInState, ThemePreference, UserSessionEndReason
 from app.domain.permissions import PERMISSION_MANAGEMENT, holds_protected
 from app.infrastructure.models import (
     ApplicationPolicy,
@@ -98,6 +98,8 @@ class Principal(NamedTuple):
     must_change_password: bool
     # None = the session never expires.
     session_expires_at: datetime.datetime | None
+    # The User's saved theme (GUI_DESIGN §2.1 User tier); None = no preference.
+    theme_preference: ThemePreference | None
 
 
 def acquire_user_administration_lock(session: Session) -> None:
@@ -133,6 +135,7 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
             User.role_id,
             Role.name,
             User.avatar_image_updated_at,
+            User.theme_preference,
             UserCredential.password_is_temporary,
             ApplicationPolicy.require_password_change,
             expires_at,
@@ -159,6 +162,7 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
         role_id,
         role_name,
         avatar_updated_at,
+        theme_preference,
         temporary,
         require_change,
         session_expires_at,
@@ -174,11 +178,17 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
         permissions=role_permissions(session, role_id),
         must_change_password=bool(temporary and require_change),
         session_expires_at=session_expires_at,
+        # The column reads as ``str``: convert, so the principal never
+        # carries an unchecked value.
+        theme_preference=(
+            ThemePreference(theme_preference) if theme_preference is not None else None
+        ),
     )
 
 
 def recheck_actor(session: Session, actor: Principal) -> Principal:
-    """Under the User-administration lock: the actor's own sign-in, re-read.
+    """Under a lock the caller holds (the User-administration lock, or the
+    User's own row for the theme save): the actor's own sign-in, re-read.
 
     A fresh read (READ COMMITTED) of what the route checked at request
     start: the session is not ended or expired under the current policy,

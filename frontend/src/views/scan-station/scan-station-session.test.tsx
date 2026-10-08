@@ -121,6 +121,7 @@ const SIGNED_IN_USER_WIRE = {
   avatar_updated_at: null,
   must_change_password: false,
   session_expires_at: null,
+  theme_preference: null,
 };
 let userPermissions: string[] | null;
 let badgeFailure: boolean;

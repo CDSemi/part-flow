@@ -1,6 +1,6 @@
 // User sign-in API (the account chip and its dialogs): the current
 // user sign-in of this browser, signing in and out, and changing the
-// signed-in user's own password. Users are application accounts, never
+// signed-in user's own password and saved theme. Users are application accounts, never
 // Workers — the Scan Station badge sign-in is a different thing with
 // its own API.
 //
@@ -32,6 +32,8 @@ export interface SessionUser {
   mustChangePassword: boolean;
   /** When this sign-in ends (ISO 8601); null = it never expires. */
   sessionExpiresAt: string | null;
+  /** Saved theme (GUI_DESIGN §2.1 User tier); null = no preference. */
+  themePreference: 'dark' | 'light' | null;
 }
 
 export interface SessionState {
@@ -51,6 +53,14 @@ function malformed(): Error {
   return new Error('The server answered a malformed user sign-in state.');
 }
 
+/** Map a saved theme from the wire (`DARK` / `LIGHT`); anything else,
+ * including a missing value, is malformed. */
+function toTheme(wire: unknown): 'dark' | 'light' {
+  if (wire === 'DARK') return 'dark';
+  if (wire === 'LIGHT') return 'light';
+  throw malformed();
+}
+
 function toSessionUser(wire: unknown): SessionUser {
   if (!isRecord(wire)) throw malformed();
   const {
@@ -63,6 +73,7 @@ function toSessionUser(wire: unknown): SessionUser {
     permissions,
     must_change_password,
     session_expires_at,
+    theme_preference,
   } = wire;
   if (
     typeof id !== 'number' ||
@@ -96,6 +107,8 @@ function toSessionUser(wire: unknown): SessionUser {
     }),
     mustChangePassword: must_change_password,
     sessionExpiresAt: session_expires_at,
+    themePreference:
+      theme_preference === null ? null : toTheme(theme_preference),
   };
 }
 
@@ -148,6 +161,22 @@ export async function changeOwnPassword(
       body: { current_password: currentPassword, new_password: newPassword },
     }),
   );
+}
+
+/** Save the signed-in User's own Dark/Light preference. Not audited; an
+ * absolute value, so resending is safe. An ended sign-in never opens the
+ * Sign-in dialog (the caller handles it). */
+export async function saveOwnThemePreference(
+  theme: 'dark' | 'light',
+): Promise<'dark' | 'light'> {
+  const wire = await apiRequest<unknown>(`${SESSION_PATH}/theme-preference`, {
+    method: 'PUT',
+    body: { theme_preference: theme === 'dark' ? 'DARK' : 'LIGHT' },
+    promptSignIn: false,
+  });
+  if (!isRecord(wire)) throw malformed();
+  // The server echoes the value this request saved or kept.
+  return toTheme(wire.theme_preference);
 }
 
 /**

@@ -25,6 +25,10 @@ import { STATION_PERMISSIONS } from '../../api/scan-station';
 // session-only toggles offline / with the context in error / elsewhere,
 // the failed-save warning, stale and overlapping reads, standard ↔
 // production switching, Worker Session events (R62) and focus.
+// Phase 14 slice 8 adds a signed-in User to the same fake: the station tier
+// is never saved for them, station reads change the screen only while
+// the User tier is empty, and a failed User save never replaces a
+// production warning (the other User-tier cases: app/user-theme.test.tsx).
 
 const STATION = 'S1';
 const MINUTE = 60_000;
@@ -87,6 +91,9 @@ let contextHolds: Promise<void>[];
 let putPlans: PutPlan[];
 /** The status every transfer POST answers with while set (no write). */
 let transferFailure: number | null;
+/** The User signed in on this browser (Phase 14 slice 8); null = nobody.
+ * Its theme preference is the User tier. */
+let signedInUser: { theme_preference: 'DARK' | 'LIGHT' | null } | null;
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -148,6 +155,22 @@ function flowWire(flow: Flow) {
   };
 }
 
+function sessionUserWire() {
+  if (signedInUser === null) return null;
+  return {
+    id: 41,
+    login_name: 'jdoe',
+    display_name: 'Jane Doe',
+    role_id: 2,
+    role_name: 'Manager',
+    avatar_updated_at: null,
+    permissions: [],
+    must_change_password: false,
+    session_expires_at: null,
+    theme_preference: signedInUser.theme_preference,
+  };
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
 }
@@ -163,6 +186,20 @@ function handle(
   body: unknown,
   plan: PutPlan | undefined,
 ): Response {
+  // Nobody is signed in unless a case signs a User in (Phase 14 slice 8:
+  // the station tier is saved only while nobody is signed in).
+  if (url === '/api/session') {
+    return json({ user: sessionUserWire(), setup_open: false });
+  }
+  if (url === '/api/session/theme-preference' && method === 'PUT') {
+    if (plan?.status !== undefined) {
+      return json({ detail: 'The server is restarting.' }, plan.status);
+    }
+    const value = (body as { theme_preference: 'DARK' | 'LIGHT' })
+      .theme_preference;
+    signedInUser!.theme_preference = value;
+    return json({ theme_preference: value });
+  }
   if (url === '/api/policies/due-soon') {
     return json({
       due_soon_min_days: 2,
@@ -478,6 +515,7 @@ beforeEach(() => {
   contextHolds = [];
   putPlans = [];
   transferFailure = null;
+  signedInUser = null;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1067,81 +1105,169 @@ test('FE-9b: when that save fails, the next fresh read applies the stored theme'
 
 /* ============ Worker Sessions never affect the theme (R62) ============ */
 
-test('FE-10: badge sign-in, switch, session expiry and a badge-gated confirmation leave the theme alone', async () => {
-  mode = 'SCANNED';
-  undoGate = 'BADGE';
+test.each([
+  ['nobody', false],
+  ['a User (FU-14)', true],
+])(
+  'FE-10: with %s signed in, badge sign-in, switch, session expiry and a badge-gated confirmation leave the theme alone',
+  async (_who, userSignedIn) => {
+    if (userSignedIn) signedInUser = { theme_preference: null };
+    mode = 'SCANNED';
+    undoGate = 'BADGE';
+    themePreference = 'LIGHT';
+    await renderStation();
+    await waitFor(() => expect(shown()).toBe('light'));
+
+    // Sign-in through the blocking modal.
+    await waitFor(() => expect(signInModal()).not.toBeNull());
+    scanBadgeInModal(NGUYEN.badge);
+    await waitFor(() => expect(signInModal()).toBeNull());
+    expect(shown()).toBe('light');
+
+    // A switch to another Worker on the main input.
+    scan(TRAN.badge);
+    await waitFor(async () =>
+      expect(await toast()).toHaveTextContent('Worker signed in: V. Tran'),
+    );
+    expect(shown()).toBe('light');
+
+    // The server ended the session: the command is refused with
+    // worker_session_required, the expiry modal takes a badge, and the
+    // unchanged request is confirmed again.
+    const box = await openTransferSummary('PN-W');
+    serverSession = null;
+    fireEvent.click(
+      within(box).getByRole('button', { name: 'Confirm transfer' }),
+    );
+    await waitFor(() =>
+      expect(signInModal()).toHaveAccessibleName('Worker session expired'),
+    );
+    expect(shown()).toBe('light');
+    scanBadgeInModal(NGUYEN.badge);
+    await waitFor(() => expect(signInModal()).toBeNull());
+    fireEvent.click(
+      within(box).getByRole('button', { name: 'Confirm transfer' }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'Receive from another Area' }),
+      ).toBeNull(),
+    );
+    expect(shown()).toBe('light');
+
+    // An Undo confirmed through the badge gate.
+    const undo = document.querySelector('button.ss-undo') as HTMLButtonElement;
+    await waitFor(() => expect(undo).toBeEnabled());
+    fireEvent.click(undo);
+    const reversal = await screen.findByRole('dialog', {
+      name: 'Reverse this Part Number action?',
+    });
+    const confirm = within(reversal).getByRole('button', {
+      name: 'Confirm reversal',
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    const gate = await screen.findByRole('dialog', {
+      name: 'Scan badge to confirm the reversal',
+    });
+    const field = within(gate).getByLabelText('Scan Worker badge');
+    fireEvent.change(field, { target: { value: TRAN.badge } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', {
+          name: 'Reverse this Part Number action?',
+        }),
+      ).toBeNull(),
+    );
+    expect(
+      requests.filter((r) => r.url.endsWith('/undos'))[0].body.confirming_badge,
+    ).toBe(TRAN.badge);
+    await settle();
+    expect(shown()).toBe('light');
+    // Neither the station's nor the User's preference was saved.
+    expect(puts()).toHaveLength(0);
+  },
+);
+
+/* ============ A signed-in User at the station (Phase 14 slice 8) ============ */
+
+function sessionPutBodies() {
+  return puts()
+    .filter((r) => r.url === '/api/session/theme-preference')
+    .map((r) => r.body.theme_preference as string);
+}
+
+function stationPutCount() {
+  return puts().filter((r) => r.url.startsWith('/api/scan-stations/')).length;
+}
+
+test('FU-4a: with no User preference, the station tier governs: a fresh changed read applies', async () => {
+  signedInUser = { theme_preference: null };
   themePreference = 'LIGHT';
   await renderStation();
   await waitFor(() => expect(shown()).toBe('light'));
 
-  // Sign-in through the blocking modal.
-  await waitFor(() => expect(signInModal()).not.toBeNull());
-  scanBadgeInModal(NGUYEN.badge);
-  await waitFor(() => expect(signInModal()).toBeNull());
-  expect(shown()).toBe('light');
+  themePreference = 'DARK';
+  await completeTransfer('PN-W');
+  await waitFor(() => expect(shown()).toBe('dark'));
+  await settle();
+  expect(puts()).toHaveLength(0);
+});
 
-  // A switch to another Worker on the main input.
-  scan(TRAN.badge);
-  await waitFor(async () =>
-    expect(await toast()).toHaveTextContent('Worker signed in: V. Tran'),
-  );
-  expect(shown()).toBe('light');
+test('FU-4b: once the User saved a preference, a fresh changed station read changes nothing; only the User tier is saved', async () => {
+  signedInUser = { theme_preference: null };
+  themePreference = 'LIGHT';
+  await renderStation();
+  await waitFor(() => expect(shown()).toBe('light'));
 
-  // The server ended the session: the command is refused with
-  // worker_session_required, the expiry modal takes a badge, and the
-  // unchanged request is confirmed again.
-  const box = await openTransferSummary('PN-W');
-  serverSession = null;
-  fireEvent.click(
-    within(box).getByRole('button', { name: 'Confirm transfer' }),
-  );
-  await waitFor(() =>
-    expect(signInModal()).toHaveAccessibleName('Worker session expired'),
-  );
-  expect(shown()).toBe('light');
-  scanBadgeInModal(NGUYEN.badge);
-  await waitFor(() => expect(signInModal()).toBeNull());
-  fireEvent.click(
-    within(box).getByRole('button', { name: 'Confirm transfer' }),
-  );
-  await waitFor(() =>
-    expect(
-      screen.queryByRole('dialog', { name: 'Receive from another Area' }),
-    ).toBeNull(),
-  );
-  expect(shown()).toBe('light');
-
-  // An Undo confirmed through the badge gate.
-  const undo = document.querySelector('button.ss-undo') as HTMLButtonElement;
-  await waitFor(() => expect(undo).toBeEnabled());
-  fireEvent.click(undo);
-  const reversal = await screen.findByRole('dialog', {
-    name: 'Reverse this Part Number action?',
-  });
-  const confirm = within(reversal).getByRole('button', {
-    name: 'Confirm reversal',
-  });
-  await waitFor(() => expect(confirm).toBeEnabled());
-  fireEvent.click(confirm);
-  const gate = await screen.findByRole('dialog', {
-    name: 'Scan badge to confirm the reversal',
-  });
-  const field = within(gate).getByLabelText('Scan Worker badge');
-  fireEvent.change(field, { target: { value: TRAN.badge } });
-  fireEvent.keyDown(field, { key: 'Enter' });
-  await waitFor(() =>
-    expect(
-      screen.queryByRole('dialog', {
-        name: 'Reverse this Part Number action?',
-      }),
-    ).toBeNull(),
-  );
-  expect(
-    requests.filter((r) => r.url.endsWith('/undos'))[0].body.confirming_badge,
-  ).toBe(TRAN.badge);
+  toggle();
+  toggle();
+  await waitFor(() => expect(sessionPutBodies()).toEqual(['DARK', 'LIGHT']));
   await settle();
   expect(shown()).toBe('light');
-  expect(puts()).toHaveLength(0);
+  expect(stationPutCount()).toBe(0);
+
+  themePreference = 'DARK';
+  const reads = contextReads();
+  await completeTransfer('PN-W');
+  await waitFor(() => expect(contextReads()).toBeGreaterThan(reads));
+  await settle();
+  expect(shown()).toBe('light');
+  expect(stationPutCount()).toBe(0);
+  expect(themePreference).toBe('DARK');
+  expect(signedInUser?.theme_preference).toBe('LIGHT');
+});
+
+test('PU-8: a failed User save never replaces an unresolved production warning', async () => {
+  signedInUser = { theme_preference: null };
+  await renderStation();
+  const { hold, release } = holdUntilReleased();
+  putPlans.push({ hold, status: 500 });
+  toggle();
+  await waitFor(() => expect(sessionPutBodies()).toEqual(['LIGHT']));
+
+  // A transfer whose answer is lost leaves the outcome-unknown warning.
+  transferFailure = 503;
+  const box = await openTransferSummary('PN-W');
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await waitFor(() =>
+    expect(box).toHaveTextContent('may or may not have been recorded'),
+  );
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Leave — check the Area' }),
+  );
+  expect(await toast()).toHaveTextContent('Transfer outcome unknown');
+
+  release();
+  await settle();
+  expect(await toast()).toHaveTextContent('Transfer outcome unknown');
+  expect(themeNotice()).toBeNull();
+  expect(document.querySelector('.toast')).toBeNull();
+  expect(shown()).toBe('light');
+  expect(puts()).toHaveLength(1);
 });
 
 /* ============ The context in error ============ */

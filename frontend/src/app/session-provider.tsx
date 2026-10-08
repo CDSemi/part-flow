@@ -28,7 +28,9 @@ import type {
 // retried on its own. `checking` says a read is in flight; `endedBy`
 // says whether the last sign-in ended by signing out or because the
 // server refused it as ended (Administration keeps open work for the
-// latter).
+// latter). A refusal of a request sent with `promptSignIn: false` (the
+// theme save) records the ended sign-in without opening the Sign-in
+// dialog.
 //
 // The sign-in, change-password and first-run setup dialogs render AFTER
 // the routed view, so they stack above any view dialog and the view
@@ -131,11 +133,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [connectivity, reload]);
 
   useEffect(() => {
-    setAuthFailureListener((kind) => {
+    setAuthFailureListener((kind, prompt) => {
       if (kind === 'authentication_required') {
         applySignedOut('expired');
-        setSignInNotice(null);
-        setDialog('sign-in');
+        if (prompt) {
+          setSignInNotice(null);
+          setDialog('sign-in');
+        }
       } else {
         // The server requires a new password first: the re-read state
         // opens the forced change dialog.
