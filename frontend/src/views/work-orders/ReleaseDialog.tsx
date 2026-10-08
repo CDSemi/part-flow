@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 
-import { errorMessage, refusalFlag } from '../../api/client';
+import { errorMessage, isReleaseMismatch, refusalFlag } from '../../api/client';
 import { areaColor, listAreas, listOperations } from '../../api/environment';
 import {
   activeQuantityConfirmation,
@@ -232,6 +232,15 @@ export function ReleaseDialog({
         // distribution shown and an explicit confirmation required.
         setDistribution(entries);
         setConfirmActive(false);
+        return;
+      }
+      if (isReleaseMismatch(error)) {
+        // PartFlow was updated while this page was open: refused before
+        // the key check, so it proves nothing about an earlier attempt.
+        // The server's detail (reload; check an unanswered attempt) shows
+        // alone — the retry promise does not survive a reload — and the
+        // submission keeps its key.
+        setServerError(errorMessage(error));
         return;
       }
       // An ended sign-in refused the release before it ran: the dialog

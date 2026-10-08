@@ -270,7 +270,8 @@ trạng thái rollback path 2; khi đó mọi finding sau release đều chặn)
 `partflow-production`). Exit code: 0 hoàn tất; 1 dừng khi chưa đổi gì hoặc write
 đã mở lại trên release hiện tại; 2 không chạy được; 3 `backend` bị để dừng (làm
 theo `deployment/OPERATIONS_RUNBOOK.md` §6); 4 release mới có thể đang chạy và
-ghi được sau một check thất bại. Output của từng bước và `record.json` (record ở
+ghi được sau một check thất bại; 130 hoặc 143 bị ngắt bởi Ctrl-C hoặc TERM (record
+ghi tên bước; `migrate` bị ngắt có kết quả không rõ). Output của từng bước và `record.json` (record ở
 `OPERATIONS_RUNBOOK.md` §1) được ghi vào `<records-dir>/<UTC>-<tag>/` (records
 directory mặc định `$HOME/partflow-deployments`, mode 0700).
 `deploy/production/smoke.sh --release TAG [--env-file …] [--project NAME]

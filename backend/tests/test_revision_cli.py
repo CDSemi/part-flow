@@ -17,11 +17,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg.errors
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
 from sqlalchemy import Connection, create_engine
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import OperationalError
 
 from alembic import command
 from app import cli
@@ -218,6 +220,36 @@ def test_the_transaction_is_read_only(
     monkeypatch.setattr(schema_revision, "read_revision", spy)
     assert run(at_head)[0] == 0
     assert seen == [("on", "5s", "30s")]
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (psycopg.errors.OutOfMemory("out of memory"), "internal_error"),
+        (
+            psycopg.errors.CannotConnectNow("the database system is starting up"),
+            "database_unavailable",
+        ),
+    ],
+)
+def test_a_statement_failure_is_never_a_lost_connection(
+    at_head: URL,
+    run: Callable[..., tuple[int, dict[str, Any], str]],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    code: str,
+) -> None:
+    """Only a real connection loss is "could not reach"; anything else prints its traceback."""
+
+    def failing(connection: Connection) -> str | None:
+        raise OperationalError("SELECT version_num", {}, failure)
+
+    monkeypatch.setattr(schema_revision, "read_revision", failing)
+    exit_code, document, output = run(at_head)
+    assert exit_code == 2
+    assert document["state"] is None
+    assert document["error"]["code"] == code
+    assert ("Traceback" in output) is (code == "internal_error")
 
 
 def test_an_unreachable_database(

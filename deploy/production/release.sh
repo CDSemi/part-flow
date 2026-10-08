@@ -326,6 +326,12 @@ write_record() {
     host=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._-') || host=
     after=$REVISION_AFTER
     [ -n "$after" ] || after=$REVISION_BEFORE
+    # A migrate with an unknown outcome (or no valid report) leaves the database revision unknown: never "before".
+    if [ -n "$MIGRATE_REACHED" ]; then
+        case "$MIGRATE_RESULT" in
+            '' | outcome_unknown) after= ;;
+        esac
+    fi
     {
         printf '{\n'
         printf '  "record_version": 1,\n'
@@ -382,8 +388,23 @@ finish() {
 
 on_signal() {
     trap - INT TERM
+    # The trap can run while a step's output is redirected to its file (migrate.json, switch-backend.log, ...):
+    # report on the script's own stdout and stderr, never into the step's file.
+    exec 1>&8 2>&9
     echo "release: interrupted during step ${STEP_NAME:-preflight}; no service was started or stopped by the" \
-        "interruption. Check the state with: $PF_TEXT ps; then OPERATIONS_RUNBOOK §6." >&2
+        "interruption." >&2
+    if [ -n "$MIGRATE_REACHED" ] && [ -z "$MIGRATE_RESULT" ]; then
+        # The trap runs before migrate.json is read: the migration may or may not have been committed.
+        MIGRATE_RESULT=outcome_unknown
+        echo "release: the migrate outcome is unknown. Run '$PF_TEXT run --rm --no-deps -T backend python -m app.cli" \
+            "revision' before anything else." >&2
+    fi
+    if [ -n "$SWITCHED" ]; then
+        echo "release: $ENV_FILE already names $TAG (the previous file is $RECORD_DIR/env-before.txt)." >&2
+    elif [ -n "$FROZEN" ]; then
+        echo "release: writes stay FROZEN: backend is stopped and nothing reopens automatically." >&2
+    fi
+    echo "release: check the state with: $PF_TEXT ps; then OPERATIONS_RUNBOOK §5 (exit $1) and §6." >&2
     [ -z "$STEP_NAME" ] || step_end "$1"
     finish interrupted "$1"
 }
@@ -401,6 +422,8 @@ on_exit() {
         finish stopped_unchanged 1
     fi
 }
+# fds 8 and 9: the script's own stdout and stderr, for on_signal.
+exec 8>&1 9>&2
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 trap on_exit EXIT
@@ -598,7 +621,18 @@ if [ -z "$present" ]; then
     step_end "$rc"
     [ "$rc" -eq 0 ] || stop_unchanged "the build failed ($BUILD_LOG)."
 elif [ "$present" = "backend web " ] && [ "$labels" = "$HEAD_COMMIT $HEAD_COMMIT " ]; then
-    echo "reused: both images exist with org.opencontainers.image.revision $HEAD_COMMIT" >>"$BUILD_LOG"
+    # The release identity is baked in at build time: a re-tagged image keeps the release it was built as.
+    versions=
+    for service in backend web; do
+        version=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+            "partflow/$service:$TAG" 2>>"$BUILD_LOG") || version=
+        versions="$versions${version:-?} "
+    done
+    if [ "$versions" != "$TAG $TAG " ]; then
+        step_end 1
+        stop_unchanged "images tagged $TAG were built as release(s) ${versions% } (org.opencontainers.image.version), not $TAG: an image carries the release it was built as, so a re-tagged image is never reused."
+    fi
+    echo "reused: both images exist with org.opencontainers.image.revision $HEAD_COMMIT and version $TAG" >>"$BUILD_LOG"
     step_end 0
     echo "release: both images of $TAG already exist from this commit: reused."
 else
@@ -624,6 +658,11 @@ case "$RC:$candidate_state" in
     1:upgrade_available) PENDING=1 ;;
     *) stop_unchanged "the candidate cannot migrate this database (state ${candidate_state:-unknown}, exit $RC; $RECORD_DIR/candidate-revision.json)." ;;
 esac
+candidate_release=$(json_field "$RECORD_DIR/candidate-revision.json" release)
+candidate_commit=$(json_field "$RECORD_DIR/candidate-revision.json" commit)
+if [ "$candidate_release" != "$TAG" ] || [ "$candidate_commit" != "$HEAD_COMMIT" ]; then
+    stop_unchanged "the candidate image reports release ${candidate_release:-unknown} at commit ${candidate_commit:-unknown}, not $TAG at $HEAD_COMMIT ($RECORD_DIR/candidate-revision.json): /api/health would never show $TAG after the switch."
+fi
 
 if [ "$baseline" = candidate ] && [ -z "$SKIP_REASON" ]; then
     if [ -n "$PENDING" ]; then

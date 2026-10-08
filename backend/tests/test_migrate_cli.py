@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg.errors
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
@@ -235,6 +236,37 @@ def test_a_failure_after_the_upgrade_rolls_everything_back(
     assert "Traceback" in err
     assert _scalar(database, "SELECT to_regclass('public.alembic_version')") is None
     assert _scalar(database, "SELECT to_regclass('public.part_movements')") is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "code", "traceback"),
+    [
+        (psycopg.errors.DiskFull("could not extend file"), "migration_failed", True),
+        (psycopg.errors.ProgramLimitExceeded("index row size exceeds"), "migration_failed", True),
+        (psycopg.errors.AdminShutdown("terminating connection"), "database_unavailable", False),
+    ],
+)
+def test_a_statement_failure_during_the_upgrade_is_never_a_lost_connection(
+    database: URL,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    code: str,
+    traceback: bool,
+) -> None:
+    """M-4: psycopg raises a full disk or a program limit as an
+    ``OperationalError``; only a real connection loss is "could not reach"."""
+
+    def failing_upgrade(connection: Connection) -> None:
+        raise OperationalError("CREATE INDEX", {}, failure)
+
+    monkeypatch.setattr(schema_revision, "upgrade_to_head", failing_upgrade)
+    exit_code, document, err = _migrate(capsys, "--no-backup-reason", "first install")
+    assert exit_code == 2
+    assert document["result"] == "failed"
+    assert document["error"] == {"code": code, "message": migration.MIGRATE_MESSAGES[code]}
+    assert ("Traceback" in err) is traceback
+    assert _scalar(database, "SELECT to_regclass('public.alembic_version')") is None
 
 
 def _at_previous(url: URL) -> None:

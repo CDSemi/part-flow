@@ -207,7 +207,9 @@ for example a rehearsal; `deploy/production/release.sh --help` prints every
 option.) It runs, recording each step: preflight (tools, the environment file,
 the tag form, clean build inputs); the current revision and the pre-release
 reconcile with the running release; the candidate build (an existing tag is
-never rebuilt); the candidate's check (j) and revision; the write freeze when a
+never rebuilt, and is reused only when both images were built from this commit
+as this release); the candidate's check (j) and revision (which must report this
+release and commit); the write freeze when a
 migration is pending; `migrate`; the post-release reconcile; the `backend`
 switch while `web` still serves the previous bundle (writes stay refused, every
 loaded page sends the previous release and gets 409), the health wait for the
@@ -221,6 +223,7 @@ new release and a `current` schema; the `web` switch, which reopens writes; and
 | 2 | could not run (usage, tools, environment) | nothing changed; fix and rerun |
 | 3 | `backend` left stopped | follow §6; read `regression.txt` or compare `pre-reconcile.json` and `post-reconcile.json` |
 | 4 | the new release may be running and writable after a failed check, and the re-freeze failed | run `$PF stop backend` yourself, then follow §6 |
+| 130, 143 | interrupted by Ctrl-C or TERM (record `outcome: interrupted`, the last step names where); no service was started or stopped by the interruption | interrupted during `migrate`: the outcome is unknown (record `migration.result: outcome_unknown`, `alembic.after: null`), so run `$PF run --rm --no-deps -T backend python -m app.cli revision` before anything else; then `$PF ps` and §6 (after `switch_backend`, `.env.production` already names the new tag; `env-before.txt` in the record directory is the previous file) |
 
 `--accept-pre-release-findings` continues when the pre-release reconcile has
 findings and blocks only on findings absent from it

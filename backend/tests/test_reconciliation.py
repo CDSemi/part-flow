@@ -2117,6 +2117,20 @@ def test_run_level_database_errors_are_classified_by_their_origin() -> None:
     ):
         assert not reconciliation._is_connection_failure(wrapped(refusal)), refusal
         assert reconciliation._is_connection_failure(wrapped(refusal, invalidated=True))
+    for failure in (
+        psycopg.errors.DiskFull("disk full"),
+        psycopg.errors.OutOfMemory("out of memory"),
+        psycopg.errors.ProgramLimitExceeded("limit"),
+        psycopg.errors.ObjectInUse("in use"),
+    ):
+        assert not reconciliation._is_connection_failure(wrapped(failure)), failure
+    for lost in (
+        psycopg.errors.AdminShutdown("terminating"),
+        psycopg.errors.CannotConnectNow("starting up"),
+        psycopg.errors.ConnectionFailure("connection failure"),
+        psycopg.errors.TooManyConnections("too many clients"),
+    ):
+        assert reconciliation._is_connection_failure(wrapped(lost)), lost
     assert reconciliation._is_connection_failure(wrapped(psycopg.OperationalError("refused")))
     assert reconciliation._is_connection_failure(
         sa.exc.InterfaceError("SELECT 1", {}, psycopg.InterfaceError("closed"))

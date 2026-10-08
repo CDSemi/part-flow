@@ -564,6 +564,78 @@ test('the forced dialog signs out', async () => {
   expect(sent('DELETE', '/api/session')).toHaveLength(1);
 });
 
+test('FR-27: the forced dialog while outdated offers its own Reload page (the notice is behind it) and reloads once', async () => {
+  const reload = vi.fn();
+  const location = Object.getOwnPropertyDescriptor(window, 'location')!;
+  const real = window.location;
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    get: () => ({
+      reload,
+      get pathname() {
+        return real.pathname;
+      },
+      get search() {
+        return real.search;
+      },
+      get href() {
+        return real.href;
+      },
+    }),
+  });
+  try {
+    fake.user = { ...JANE, must_change_password: true };
+    await renderShell('connected');
+    let dialog = await screen.findByRole('dialog', {
+      name: 'Choose a new password',
+    });
+    expect(
+      within(dialog).queryByRole('button', { name: 'Reload page' }),
+    ).toBeNull();
+    cleanup();
+
+    requests = [];
+    await renderShell('outdated');
+    dialog = await screen.findByRole('dialog', {
+      name: 'Choose a new password',
+    });
+    expect(
+      within(dialog).getByText(
+        'PartFlow was updated — reload the page to continue.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole('button', { name: 'Sign out' }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByRole('button', { name: 'Change password' }),
+    ).toBeDisabled();
+    const button = within(dialog).getByRole('button', { name: 'Reload page' });
+    expect(button).toBeEnabled();
+    expect(within(dialog).getByLabelText('Current password')).toHaveFocus();
+    fireEvent.click(button);
+    expect(reload).toHaveBeenCalledTimes(1);
+  } finally {
+    Object.defineProperty(window, 'location', location);
+  }
+});
+
+test('the voluntary dialog offers no Reload page while outdated: it can be cancelled', async () => {
+  fake.user = JANE;
+  await renderShell('outdated');
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  );
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change password…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Change password' });
+  expect(
+    within(dialog).queryByRole('button', { name: 'Reload page' }),
+  ).toBeNull();
+  expect(
+    within(dialog).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeEnabled();
+});
+
 test('the voluntary dialog cancels; server refusals (P3, P7, B1) show in place', async () => {
   const chip = await signInAsJane();
   fireEvent.click(chip);

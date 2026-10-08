@@ -101,12 +101,13 @@ RevisionState = Literal[
 ]
 _Phase = Literal["checks", "upgrade", "grants", "verify"]
 
-# Statement-level refusals that are not a lost connection.
-_STATEMENT_REFUSALS: Final = (
-    psycopg.errors.QueryCanceled,
-    psycopg.errors.LockNotAvailable,
-    psycopg.errors.DeadlockDetected,
-)
+#: The SQLSTATEs (besides class 08, connection exception) psycopg raises
+#: as ``OperationalError`` that mean the connection is gone or was refused:
+#: admin/crash shutdown, cannot connect now, too many connections. Every
+#: other ``OperationalError`` SQLSTATE (a statement refusal such as a lock
+#: or statement timeout or a deadlock, or a statement failure such as a
+#: full disk or a program limit) leaves the database reachable.
+_CONNECTION_SQLSTATES: Final = frozenset({"57P01", "57P02", "57P03", "53300"})
 
 
 def operator_text(value: str) -> str:
@@ -289,7 +290,11 @@ def _is_connection_failure(exc: BaseException) -> bool:
         return True
     if isinstance(exc, InterfaceError):
         return True
-    return isinstance(exc, OperationalError) and not isinstance(exc.orig, _STATEMENT_REFUSALS)
+    if not isinstance(exc, OperationalError):
+        return False
+    # A client-side failure (refused, closed by the server) carries no SQLSTATE.
+    sqlstate = getattr(exc.orig, "sqlstate", None)
+    return sqlstate is None or sqlstate.startswith("08") or sqlstate in _CONNECTION_SQLSTATES
 
 
 def _discard(transaction: RootTransaction) -> None:

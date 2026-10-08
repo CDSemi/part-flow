@@ -7,6 +7,7 @@ import { changeOwnPassword, signInWriteOutcomeUnknown } from '../api/session';
 import type { SessionState } from '../api/session';
 import { useConnectivity } from '../app/connectivity-context';
 import { newPasswordError } from '../app/password-rules';
+import { OUTDATED_REASON, RELOAD_PAGE_LABEL } from '../app/release-copy';
 import { ModalDialog } from './ModalDialog';
 
 const UNKNOWN_OUTCOME =
@@ -16,7 +17,10 @@ const UNKNOWN_OUTCOME =
  * The signed-in user's own password change. Voluntary (from the account
  * menu) it can be cancelled; forced (an administrator set the password
  * and Settings requires a new one) it cannot — Escape and the backdrop
- * are ignored and the only other way out is signing out.
+ * are ignored and the only other way out is signing out. While the page
+ * is outdated (another server release) the forced dialog offers its own
+ * `Reload page`: the update notice's control is unreachable behind it
+ * (GUI_DESIGN §3 rule 13).
  *
  * An unanswered change is never resent: a committed change ended this
  * sign-in, so a resend would be refused or counted as a failed attempt.
@@ -184,7 +188,22 @@ export function ChangePasswordDialog({
             {error}
           </div>
         ) : null}
+        {forced && status === 'outdated' ? (
+          <p className="acct-help">{OUTDATED_REASON}</p>
+        ) : null}
         <div className="row">
+          {forced && status === 'outdated' ? (
+            // Not dismissable, so the update notice's own Reload page is
+            // unreachable behind the dialog.
+            <button
+              type="button"
+              className="bigbtn primary"
+              disabled={busy}
+              onClick={() => window.location.reload()}
+            >
+              {RELOAD_PAGE_LABEL}
+            </button>
+          ) : null}
           {forced ? (
             <button
               type="button"

@@ -288,7 +288,8 @@ runs on a throwaway Compose project (never `partflow-production`). Exit codes: 0
 completed; 1 stopped with nothing changed or writes reopened on the current
 release; 2 could not run; 3 `backend` left stopped (follow
 `deployment/OPERATIONS_RUNBOOK.md` §6); 4 the new release may be running and
-writable after a failed check. Each step's output and `record.json` (the
+writable after a failed check; 130 or 143 interrupted by Ctrl-C or TERM (the
+record names the step; an interrupted `migrate` has an unknown outcome). Each step's output and `record.json` (the
 `OPERATIONS_RUNBOOK.md` §1 record) are written to
 `<records-dir>/<UTC>-<tag>/` (default records directory
 `$HOME/partflow-deployments`, mode 0700). `deploy/production/smoke.sh --release

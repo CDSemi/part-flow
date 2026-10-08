@@ -10,7 +10,7 @@ import type { ConnectivityStatus } from './connectivity-context';
 export const RELEASE_NOTICE_MESSAGE =
   '⚠ UPDATED — PartFlow was updated on the server. Reload this page to continue. Production actions are disabled';
 
-/** The manual reload control of the notice and the two modals. */
+/** The manual reload control of the notice and the non-dismissable modals. */
 export const RELOAD_PAGE_LABEL = 'Reload page';
 
 /** Scan inputs (main input, badge gate, Worker sign-in) while outdated. */

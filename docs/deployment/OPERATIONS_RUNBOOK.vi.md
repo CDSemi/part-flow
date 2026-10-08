@@ -205,7 +205,9 @@ deploy/production/release.sh --release <new-tag> --operator "<name>" --approver 
 rehearsal; `deploy/production/release.sh --help` in mọi option.) Nó chạy, ghi lại
 từng bước: preflight (tool, environment file, dạng tag, build input sạch); revision
 hiện tại và reconcile pre-release với release đang chạy; build candidate (tag đã có
-không bao giờ build lại); check (j) và revision của candidate; write freeze khi có
+không bao giờ build lại, và chỉ được dùng lại khi cả hai image được build từ commit này
+với đúng release này); check (j) và revision của candidate (phải báo đúng release và
+commit này); write freeze khi có
 migration đang chờ; `migrate`; reconcile post-release; chuyển `backend` trong khi
 `web` vẫn phục vụ bundle trước (write vẫn bị từ chối, mọi page đã tải gửi release
 trước và nhận 409), chờ health của release mới và schema `current`; chuyển `web`,
@@ -219,6 +221,7 @@ việc này mở lại write; và `smoke.sh`. Một check thất bại sau switc
 | 2 | không chạy được (cú pháp, tool, environment) | chưa đổi gì; sửa và chạy lại |
 | 3 | `backend` bị để dừng | làm theo §6; đọc `regression.txt` hoặc so sánh `pre-reconcile.json` và `post-reconcile.json` |
 | 4 | release mới có thể đang chạy và ghi được sau một check thất bại, và re-freeze cũng thất bại | tự chạy `$PF stop backend`, rồi làm theo §6 |
+| 130, 143 | bị ngắt bởi Ctrl-C hoặc TERM (record `outcome: interrupted`, bước cuối cho biết bị ngắt ở đâu); việc ngắt không start hay stop service nào | bị ngắt trong `migrate`: kết quả không rõ (record `migration.result: outcome_unknown`, `alembic.after: null`), nên chạy `$PF run --rm --no-deps -T backend python -m app.cli revision` trước mọi việc khác; rồi `$PF ps` và §6 (sau `switch_backend`, `.env.production` đã ghi tag mới; `env-before.txt` trong record directory là file trước đó) |
 
 `--accept-pre-release-findings` tiếp tục khi reconcile pre-release có finding và chỉ
 chặn với finding không có trong đó (`deploy/production/reconcile_regression.py` so

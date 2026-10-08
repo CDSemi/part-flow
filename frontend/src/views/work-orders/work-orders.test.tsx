@@ -4241,6 +4241,41 @@ test('FM-6: a release recorded by another user shows the server detail and keeps
   expect(state.committedReleases.size).toBe(0);
 });
 
+test('F19: a release refused for another server release shows the detail alone, never the retry promise, and keeps the key', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500');
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+  const MISMATCH =
+    'PartFlow was updated while this page was open, so this request was refused and nothing was changed by it. Reload the page to continue. If an earlier attempt had no answer, check whether it was recorded before repeating it.';
+  // An earlier attempt without an answer (its outcome is unknown).
+  state.dropNextReleaseResponse = true;
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  await within(release).findByText(/The PartFlow server could not be reached/);
+  nextReleaseRefusal = {
+    status: 409,
+    body: { detail: MISMATCH, release_mismatch: true },
+  };
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Retry release' }),
+  );
+  expect(await within(release).findByText(MISMATCH)).toBeInTheDocument();
+  expect(release).not.toHaveTextContent(
+    /can never create a second Quantity Flow/,
+  );
+  expect(state.releaseAttempts).toHaveLength(2);
+  expect(state.releaseAttempts[1].device_event_id).toBe(
+    state.releaseAttempts[0].device_event_id,
+  );
+  expect(state.committedReleases.size).toBe(1);
+});
+
 /* ============ Phase 14 slice 5 — allocation in Work Order Details ============ */
 
 const WITHOUT_ALLOCATION = PERMISSIONS.filter(

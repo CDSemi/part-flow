@@ -1,10 +1,11 @@
 """P16-S3: deploy/production/release.sh and smoke.sh against fake `docker`, `git`, `curl` and `sleep` executables
-(P16-S3 SPEC section 6.3, cases RS-1..RS-24 and SS-1..SS-8).
+(P16-S3 SPEC section 6.3, cases RS-1..RS-24 and SS-1..SS-8; RS-25 covers Ctrl-C/TERM while a step runs).
 
 A temporary directory holds a fake repository root (copies of both production Compose files and an env file) and a
-`bin` directory placed first on PATH. Each fake is a POSIX `sh` wrapper that execs this interpreter (sys.executable) on
+`bin` directory placed first on PATH. Each fake is a POSIX `sh` wrapper that runs this interpreter (sys.executable) on
 fake_tool.py, which appends its argv and the PARTFLOW_* variables of its environment to calls.jsonl and answers from
-the case's rule table (exit code, stdout, stderr; for curl the HTTP status, headers and body). A `python3` wrapper of
+the case's rule table (exit code, stdout, stderr; for curl the HTTP status, headers and body); an answer may also ask
+the wrapper to send a signal to the calling script once it has answered. A `python3` wrapper of
 this interpreter is placed there too, so the real reconcile_regression.py runs under `python3` on every host (the
 Windows Store alias is not an interpreter). The scripts run under the real `sh` (dash on the CI runner); a missing `sh`
 fails the run, never skips it. Nothing touches Docker, git or the network.
@@ -133,6 +134,9 @@ if tool == "curl":
         sys.stdout.write(options["-w"].replace("%{http_code}", "%03d" % status))
     sys.exit(0)
 
+if answer.get("signal"):
+    with open(os.path.join(state_dir, "signal"), "w", encoding="utf-8") as handle:
+        handle.write(answer["signal"])
 sys.stdout.write(answer.get("stdout", ""))
 sys.stderr.write(answer.get("stderr", ""))
 sys.exit(answer.get("rc", 0))
@@ -153,19 +157,24 @@ def rule(match, *responses, env=None, not_match=None):
     return entry
 
 
-def out(stdout="", rc=0, stderr=""):
-    return {"stdout": stdout, "rc": rc, "stderr": stderr}
+def out(stdout="", rc=0, stderr="", signal=None):
+    """A docker/git answer; `signal` (TERM, INT) is sent to the calling script once the fake has answered."""
+    answer = {"stdout": stdout, "rc": rc, "stderr": stderr}
+    if signal is not None:
+        answer["signal"] = signal
+    return answer
 
 
 def http(status, body="", **headers):
     return {"status": status, "body": body, "headers": {k.replace("_", "-"): v for k, v in headers.items()}}
 
 
-def revision_doc(state, exit_code, database=DB_REVISION, expected=DB_REVISION, readiness="current", accepted=None, pending=()):
+def revision_doc(state, exit_code, database=DB_REVISION, expected=DB_REVISION, readiness="current", accepted=None, pending=(),
+                 release=TAG, commit=HEAD):
     return json.dumps(
         {
-            "report_version": 1, "command": "revision", "state": state, "exit_code": exit_code, "release": "x",
-            "commit": None, "expected_revision": expected, "database_revision": database, "accepted_revision": accepted,
+            "report_version": 1, "command": "revision", "state": state, "exit_code": exit_code, "release": release,
+            "commit": commit, "expected_revision": expected, "database_revision": database, "accepted_revision": accepted,
             "override_ignored": False, "readiness": readiness, "pending_revisions": list(pending),
             "non_transactional_revisions": [], "error": None,
         },
@@ -216,6 +225,7 @@ RECONCILE = r"run --rm --no-deps -T backend python -m app\.cli reconcile --max-f
 CHECK_J = r"run --rm --no-deps -T backend python -m app\.cli reconcile --check j$"
 MIGRATE = r"--profile ops run --rm -T migrate "
 LABEL_INSPECT = r"^image inspect --format \{\{index \.Config\.Labels \"org\.opencontainers\.image\.revision\"\}\} partflow/(backend|web):"
+VERSION_INSPECT = r"^image inspect --format \{\{index \.Config\.Labels \"org\.opencontainers\.image\.version\"\}\} partflow/(backend|web):"
 GIT_STATUS = "status --porcelain --untracked-files=all -- backend frontend compose.production.yaml compose.production.build.yaml deploy/production"
 GIT_IGNORED = "ls-files --others --ignored --exclude-standard -- frontend :!frontend/node_modules :!frontend/dist :!frontend/coverage"
 
@@ -314,8 +324,12 @@ class Harness(unittest.TestCase):
         fake = self.tmp / "fake_tool.py"
         fake.write_text(FAKE_TOOL, encoding="utf-8")
         python = Path(sys.executable).as_posix()
+        state = self.state.as_posix()
         for tool in ("docker", "git", "curl", "sleep"):
-            self.wrapper(tool, f'exec "{python}" "{fake.as_posix()}" "{self.state.as_posix()}" {tool} "$@"')
+            self.wrapper(tool, f'"{python}" "{fake.as_posix()}" "{state}" {tool} "$@"\nrc=$?\n'
+                               f'if [ -f "{state}/signal" ]; then\n'
+                               f'    signal=$(cat "{state}/signal"); rm -f "{state}/signal"; kill -s "$signal" "$PPID"\n'
+                               f'fi\nexit $rc')
         self.wrapper("python3", f'exec "{python}" "$@"')
         self.rules = default_rules()
 
@@ -676,12 +690,22 @@ class ReleasePreflight(Harness):
     # RS-8
     def test_rs8_existing_candidate_images(self):
         label = lambda service, value: rule(LABEL_INSPECT.replace("(backend|web)", service), out(value + "\n"))  # noqa: E731
+        version = lambda service, value: rule(VERSION_INSPECT.replace("(backend|web)", service), out(value + "\n"))  # noqa: E731
+        from_head = [label("backend", HEAD), label("web", HEAD)]
         cases = {
-            "both with another revision": ([label("backend", OTHER_COMMIT), label("web", OTHER_COMMIT)], 1),
-            "only one present": ([label("backend", HEAD)], 1),
-            "both from HEAD": ([label("backend", HEAD), label("web", HEAD)], 0),
+            "both with another revision": ([label("backend", OTHER_COMMIT), label("web", OTHER_COMMIT)], 1, "never rebuild an existing tag"),
+            "only one present": ([label("backend", HEAD)], 1, "never rebuild an existing tag"),
+            "both from HEAD": ([*from_head, version("backend", TAG), version("web", TAG)], 0, None),
+            # An rc image re-tagged as the final release: its baked identity is still the rc.
+            "both from HEAD, re-tagged from another release": (
+                [*from_head, version("backend", "v1.1.0-rc.1"), version("web", "v1.1.0-rc.1")], 1,
+                "built as release(s) v1.1.0-rc.1 v1.1.0-rc.1"),
+            "both from HEAD, one re-tagged": ([*from_head, version("backend", TAG), version("web", "v1.1.0-rc.1")], 1,
+                                              "re-tagged image is never reused"),
+            "both from HEAD, no version label": ([*from_head, version("backend", ""), version("web", "")], 1,
+                                                 "built as release(s) ? ?"),
         }
-        for name, (rules, code) in cases.items():
+        for name, (rules, code, message) in cases.items():
             with self.subTest(case=name):
                 self.reset()
                 self.prepend("docker", *rules)
@@ -689,10 +713,29 @@ class ReleasePreflight(Harness):
                 self.assertExit(code)
                 self.assertNoDocker(r" build backend web$")
                 if code:
-                    self.assertIn("never rebuild an existing tag", self.result.stderr)
-                    self.assertNoDocker(RUN_CHECK_J, MIGRATE)
+                    self.assertExit(1, "stopped_unchanged")
+                    self.assertIn(message, self.result.stderr)
+                    self.assertNoDocker(RUN_CHECK_J, MIGRATE, r"stop backend", r"^up ")
                 else:
                     self.assertIn("reused", (self.record_dir() / "build.log").read_text(encoding="utf-8"))
+
+    # RS-8: the candidate image must report the release and commit it is released as, before any freeze.
+    def test_rs8_candidate_reports_another_release(self):
+        cases = {
+            "another release": (dict(release="v1.1.0-rc.1"), "reports release v1.1.0-rc.1 at commit " + HEAD),
+            "another commit": (dict(commit=OTHER_COMMIT), f"reports release {TAG} at commit {OTHER_COMMIT}"),
+            "no commit": (dict(commit=None), f"reports release {TAG} at commit unknown"),
+        }
+        for name, (identity, message) in cases.items():
+            with self.subTest(case=name):
+                self.reset()
+                self.prepend("docker", rule(REVISION, out(revision_doc("upgrade_available", 1, expected=NEW_REVISION, readiness="mismatch",
+                                                                       pending=[NEW_REVISION], **identity), rc=1), env=CANDIDATE_ENV))
+                self.release()
+                self.assertExit(1, "stopped_unchanged")
+                self.assertIn(message, self.result.stderr)
+                self.assertNoDocker(r"stop backend", MIGRATE, r"^up ")
+                self.assertEqual(self.env_text(), "\n".join(self.env_lines) + "\n")
 
     # RS-10
     def test_rs10_rehearsal_arguments(self):
@@ -806,6 +849,54 @@ class ReleaseAfterSwitch(Harness):
                 self.assertExit(3, "stopped_frozen")
                 self.assertNoDocker(r"^up ")
                 self.assertIn(code, self.result.stderr)
+
+
+class ReleaseInterrupted(Harness):
+    # RS-25: a signal while migrate runs: the trap fires before migrate.json is read, so the outcome is unknown.
+    def test_rs25_interrupted_during_migrate(self):
+        for signal, code in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=signal):
+                self.reset()
+                self.prepend("docker", rule(MIGRATE, out(migrate_doc("upgraded", 0, after=NEW_REVISION, applied=[NEW_REVISION]),
+                                                         signal=signal)))
+                self.release()
+                self.assertExit(code, "interrupted")
+                self.assertNoDocker(r"^up ")
+                self.assertEqual(self.docker()[-1], f"--profile ops run --rm -T migrate --pre-release-backup {BACKUP_REF}")
+                record = self.record()
+                self.assertEqual(record["migration"], {"result": "outcome_unknown", "file": "migrate.json", "log": "migrate.log"})
+                self.assertEqual(record["alembic"], {"before": DB_REVISION, "after": None, "expected": NEW_REVISION})
+                self.assertEqual(record["steps"][-1]["name"], "migrate")
+                self.assertEqual(record["steps"][-1]["exit_code"], code)
+                self.assertIsNone(record["writes_reopened_at"])
+                self.assertIn("the migrate outcome is unknown", self.result.stderr)
+                self.assertIn("python -m app.cli revision' before anything else", self.result.stderr)
+                self.assertIn("writes stay FROZEN", self.result.stderr)
+                self.assertIn(f"OPERATIONS_RUNBOOK §5 (exit {code})", self.result.stderr)
+                self.assertEqual(self.env_text(), "\n".join(self.env_lines) + "\n")
+                self.assertFalse((self.records / ".release.lock").exists())
+                # The trap reports on the terminal, never into the step's redirected output.
+                migrate = self.record_dir() / "migrate.json"
+                self.assertEqual(migrate.read_text(encoding="utf-8"),
+                                 migrate_doc("upgraded", 0, after=NEW_REVISION, applied=[NEW_REVISION]))
+                self.assertIn("release: interrupted (exit", self.result.stdout)
+
+    # RS-25: a signal during the backend switch: the env file already names the new release.
+    def test_rs25_interrupted_during_the_backend_switch(self):
+        self.prepend("docker", rule(r"up -d --no-deps backend$", out(signal="TERM")))
+        self.release()
+        self.assertExit(143, "interrupted")
+        self.assertEqual(self.docker()[-1], "up -d --no-deps backend")
+        record = self.record()
+        self.assertEqual(record["migration"]["result"], "upgraded")
+        self.assertEqual(record["alembic"]["after"], NEW_REVISION)
+        self.assertEqual(record["steps"][-1]["name"], "switch_backend")
+        self.assertEqual(record["steps"][-1]["exit_code"], 143)
+        self.assertIsNone(record["writes_reopened_at"])
+        self.assertIn(f"PARTFLOW_RELEASE={TAG}\n", self.env_text())
+        self.assertIn(f"already names {TAG}", self.result.stderr)
+        self.assertNotIn("release:", (self.record_dir() / "switch-backend.log").read_text(encoding="utf-8"))
+        self.assertNotIn("migrate outcome is unknown", self.result.stderr)
 
 
 class ReleaseFindings(Harness):
