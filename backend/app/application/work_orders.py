@@ -837,7 +837,10 @@ def create_work_order(
 
     work_order = WorkOrder(
         work_order_number=number,
-        received_date=received_date if received_date is not None else datetime.date.today(),
+        # An omitted received date is today on the site calendar (the
+        # SITE_TIMEZONE rule the Scan Station receipt also follows) —
+        # never the server's own date, which runs in UTC.
+        received_date=received_date if received_date is not None else site_today(),
         due_date=due_date,
         status=WorkOrderStatus.OPEN,
     )

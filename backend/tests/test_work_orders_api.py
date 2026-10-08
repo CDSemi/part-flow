@@ -35,6 +35,7 @@ The API commits real transactions, so tests isolate through unique
 numbers/PNs; the module database is dropped afterwards.
 """
 
+import datetime
 import os
 import threading
 import time
@@ -234,6 +235,27 @@ def test_due_dates_are_nullable_valid_data(client: TestClient) -> None:
     )
     assert cleared.status_code == 200, cleared.text
     assert [line["due_date"] for line in cleared.json()["demands"]] == [None, None]
+
+
+def test_omitted_received_date_defaults_to_today_on_the_site_calendar(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A create without a received date (the file import never sends
+    one) takes today on the site calendar (`SITE_TIMEZONE`), the same
+    calendar a Scan Station receipt uses — never the server's own date.
+    20:00 UTC on 4 March is already 5 March in Ho Chi Minh City (a
+    pinned clock far from the real one, so the server date can never
+    coincide with the expected day)."""
+    instant = datetime.datetime(2031, 3, 4, 20, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(work_orders, "site_timezone", lambda: "Asia/Ho_Chi_Minh")
+    monkeypatch.setattr(work_orders, "now", lambda: instant)
+
+    body = _create_work_order(client)
+
+    assert body["received_date"] == "2031-03-05"
+    # An explicit received date is kept as entered.
+    entered = _create_work_order(client, received_date="2026-10-01")
+    assert entered["received_date"] == "2026-10-01"
 
 
 # ---------------------------------------------------------------------------

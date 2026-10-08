@@ -147,6 +147,19 @@ def _ok(response: Any, status: int = 200) -> dict[str, Any]:
     return cast(dict[str, Any], response.json())
 
 
+def _changed_policy_value(c: TestClient, route: str, field: str, low: int, span: int) -> int:
+    """A value in ``[low, low + span)`` that differs from the stored one.
+
+    A policy PUT that changes nothing writes and audits nothing, so a
+    prepared value equal to the stored one would turn the authorized
+    write into a no-op and the audit assertion into a false failure.
+    """
+    current = _ok(admin_of(c).get(route))[field]
+    if not isinstance(current, int) or not low <= current < low + span:
+        return low
+    return low + (current - low + 1) % span
+
+
 def _count(engine: Engine, sql: str, **params: object) -> int:
     with engine.connect() as connection:
         return int(connection.execute(sa.text(sql), params).scalar_one())
@@ -591,7 +604,17 @@ _WRITES: list[_Write] = [
         _key(MWSP),
         lambda c: (
             "/api/policies/worker-sessions",
-            {"json": {"worker_session_timeout_minutes": int(uuid.uuid4().int % 700) + 10}},
+            {
+                "json": {
+                    "worker_session_timeout_minutes": _changed_policy_value(
+                        c,
+                        "/api/policies/worker-sessions",
+                        "worker_session_timeout_minutes",
+                        10,
+                        700,
+                    )
+                }
+            },
         ),
         "application_policy",
     ),
@@ -623,7 +646,9 @@ _WRITES: list[_Write] = [
             "/api/policies/due-soon",
             {
                 "json": {
-                    "due_soon_min_days": 1 + int(uuid.uuid4().int % 5),
+                    "due_soon_min_days": _changed_policy_value(
+                        c, "/api/policies/due-soon", "due_soon_min_days", 1, 5
+                    ),
                     "due_soon_lead_time_percent": 20 + int(uuid.uuid4().int % 50),
                     "due_soon_max_days": 30,
                 }
@@ -639,7 +664,13 @@ _WRITES: list[_Write] = [
         _key(CSS),
         lambda c: (
             "/api/policies/data-retention",
-            {"json": {"retention_period_months": 12 + int(uuid.uuid4().int % 1000)}},
+            {
+                "json": {
+                    "retention_period_months": _changed_policy_value(
+                        c, "/api/policies/data-retention", "retention_period_months", 12, 1000
+                    )
+                }
+            },
         ),
         "application_policy",
     ),
@@ -651,7 +682,13 @@ _WRITES: list[_Write] = [
         _key(CSS),
         lambda c: (
             "/api/policies/sign-in",
-            {"json": {"sign_in_lockout_attempts": 3 + int(uuid.uuid4().int % 90)}},
+            {
+                "json": {
+                    "sign_in_lockout_attempts": _changed_policy_value(
+                        c, "/api/policies/sign-in", "sign_in_lockout_attempts", 3, 90
+                    )
+                }
+            },
         ),
         "application_policy",
     ),

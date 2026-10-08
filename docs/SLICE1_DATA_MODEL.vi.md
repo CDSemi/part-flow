@@ -3,7 +3,7 @@
 > **Bản gốc chuẩn:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md).
 > Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > **Trạng thái đồng bộ:** các thay đổi Phase 13 của bản EN đã được dịch theo từng slice đến bản
-> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) và slice 5 (Management allocation và correction beyond-demand) và slice 6 (AssignedRoute adjustment) và slice 7 (audit trail theo PN) và slice 8 (tier theme của User) và Phase 15 slice 1 (file import) đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
+> đóng Phase 13 (sau commit `dbd42ee`) và các thay đổi Phase 14 slice 1 (sign-in), slice 2 (Administration enforcement) và slice 3 (Management enforcement) và slice 4 (thiết bị Scan Station) và slice 5 (Management allocation và correction beyond-demand) và slice 6 (AssignedRoute adjustment) và slice 7 (audit trail theo PN) và slice 8 (tier theme của User) và Phase 15 slice 1 và 2 (file import; thay đổi Work Order hiện có) cùng các chỉnh sửa khi đóng Phase 15 đã được dịch theo đúng các đoạn thay đổi, nhưng chưa review diff đầy đủ so với baseline `f96bf09`
 > theo TRANSLATION_POLICY §4, nên baseline chưa được nâng; nếu hai bản khác nhau, bản EN đúng.
 > File EN là source of truth.
 >
@@ -119,7 +119,7 @@ không sở hữu Movement; Allocation slice sau vẫn tách cả hai.
   lưu `NULL`, UI hiển thị `—`, có thể audited-edit sau; multiple NULL được phép,
   non-null unique bằng partial index. Không temporary number; giữ nguyên entered
   string. Existing non-null number mở existing Work Order, không duplicate; file import (Phase 15) idempotent theo cùng rule: Work Order Number bắt buộc trên mọi dòng import, nên Work Order NULL-number chỉ có thể tạo thủ công.
-- `received_date` required, default current date; `work_orders.due_date` nullable
+- `received_date` required, default current date theo lịch site (`SITE_TIMEZONE`) khi không nhập (tạo thủ công và file import); `work_orders.due_date` nullable
   và chỉ làm default cho demand-line due date.
 - Demand cần canonical PN, `request_type IN ('NEW','MODIFY')`,
   `requested_quantity > 0`; line due date nullable. Manual default NEW; Scan
