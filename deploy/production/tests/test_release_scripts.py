@@ -373,6 +373,23 @@ def sh_path(path):
     return text
 
 
+def fail_lock_mkdir(case):
+    """A `mkdir` first on CASE's PATH that fails like a full file system for <dir>/.backup.lock (any other path: the real
+    mkdir). Also used by the release.sh cases (BS-18, RS-38)."""
+    real = shutil.which("mkdir")
+    if real is None:
+        case.skipTest("no mkdir executable on PATH")
+    path = case.bin / "mkdir"
+    path.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "    */.backup.lock) echo \"mkdir: cannot create directory '$1': No space left on device\" >&2; exit 1 ;;\n"
+        "esac\n"
+        f'exec "{sh_path(real)}" "$@"\n',
+        encoding="utf-8", newline="\n")
+    os.chmod(path, 0o755)
+
+
 BASE_ENV_LINES = (
     f"PARTFLOW_RELEASE={CURRENT}",
     "PARTFLOW_SECRETS_DIR=/srv/partflow/secrets",
@@ -1188,7 +1205,7 @@ class ReleaseFindings(Harness):
 
 
 class ReleaseBackup(Harness):
-    """P16-S5: the pre-release backup and the backup lock (RS-27..RS-37)."""
+    """P16-S5: the pre-release backup and the backup lock (RS-27..RS-37; the P16-S5 audit adds RS-38)."""
 
     def call_index(self, tool, pattern):
         for index, entry in enumerate(self.calls()):
@@ -1439,6 +1456,41 @@ class ReleaseBackup(Harness):
                 self.assertIn("PARTFLOW_BACKUP_DIR" if name != "missing directory" else "does not exist", self.result.stderr)
                 self.assertEqual(self.calls(), [])
                 self.assertFalse(self.records.exists())
+
+    # RS-38 (P16-S5 audit): a backup lock that cannot be created is could_not_run, never "a backup is running".
+    def test_rs38_backup_lock_cannot_be_created(self):
+        for name, backup in (("default backup", AUTO_BACKUP), ("--no-backup-reason", NO_BACKUP)):
+            with self.subTest(case=name):
+                self.reset()
+                bd = sh_path(self.backup_dir)
+                message = (f"release: the backup lock {bd}/.backup.lock cannot be created (mkdir: cannot create directory"
+                           f" '{bd}/.backup.lock': No space left on device). Nothing was changed.")
+                auto_backup(self)
+                fail_lock_mkdir(self)
+                self.release(backup=backup)
+                self.assertExit(2, "could_not_run")
+                self.assertIn(message, self.result.stderr)
+                self.assertNotIn("a backup is running", self.result.stderr)
+                self.assertNoDocker(r"stop backend", MIGRATE, r"pg_stat_activity")
+                self.assertEqual(self.calls("backup.sh"), [])
+                self.assertFalse(self.lock_owner.parent.exists())
+                self.assertEqual(self.record()["steps"][-1]["name"], "freeze")
+                self.assertEqual(self.record()["steps"][-1]["exit_code"], 2)
+        with self.subTest(case="backup directory not writable (default backup)"):
+            if os.name == "nt" or os.geteuid() == 0:
+                self.skipTest("needs a POSIX account that file modes apply to")
+            self.reset()
+            bd = sh_path(self.backup_dir)
+            os.chmod(self.backup_dir, 0o500)
+            try:
+                self.release(backup=AUTO_BACKUP)
+            finally:
+                os.chmod(self.backup_dir, 0o700)
+            self.assertEqual(self.result.returncode, 2, self.result.stderr)
+            self.assertIn(f"release: The backup directory {bd} is not writable by this account. Nothing was changed.",
+                          self.result.stderr)
+            self.assertEqual(self.calls(), [])
+            self.assertFalse(self.records.exists())
 
 
 # ---------------------------------------------------------------------------

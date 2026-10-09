@@ -213,10 +213,13 @@ P16-S5; các unit và task dưới đây được cài và chạy trên VPS ở 
 
 **Schedule (systemd).** `partflow-backup.service`, `Type=oneshot`,
 `User=<deploy account>`, `WorkingDirectory=/srv/partflow/current`,
-`ExecStart=deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env`
+`ExecStart=/srv/partflow/current/deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env`
 (14 và 8 là placeholder: owner đặt giá trị thật, và các option là bắt buộc),
 `OnFailure=` một unit gửi mail cho administrator; và `partflow-backup.timer` với
-`OnCalendar=*-*-* 02:00:00` và `Persistent=true`. Một exit khác 0, kể cả daily không
+`OnCalendar=*-*-* 02:00:00` và `Persistent=true`. `ExecStart=` cần đường dẫn
+tuyệt đối (`WorkingDirectory=` không resolve đường dẫn tương đối, và systemd từ
+chối unit); kiểm tra cả hai unit bằng
+`systemd-analyze verify partflow-backup.service partflow-backup.timer`. Một exit khác 0, kể cả daily không
 qua verify, làm unit thất bại. Giữ schedule ngoài maintenance window (một release
 giữ backup lock).
 

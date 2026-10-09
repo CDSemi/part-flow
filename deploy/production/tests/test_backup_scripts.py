@@ -1,5 +1,6 @@
 """P16-S5: deploy/production/backup.sh and restore-test.sh against fake `docker`, `df`, `ps`, `uname`, `id`, `curl` and
-`sleep` executables (P16-S5 SPEC section 6.3: SB-1, SB-2, BS-1..BS-17, RT-1..RT-19).
+`sleep` executables (P16-S5 SPEC section 6.3: SB-1, SB-2, BS-1..BS-17, RT-1..RT-19;
+the P16-S5 audit adds BS-18 and RT-20).
 
 The harness of test_release_scripts.py is reused: a temporary fake repository root (a copy of compose.production.yaml,
 compose.production.build.yaml and an env file whose PARTFLOW_BACKUP_DIR is a temporary directory), a `bin` directory
@@ -13,6 +14,7 @@ state is read or changed). Nothing touches a Docker daemon, a database or the ne
 Run with the other production tests:
   python -B -m unittest discover -s deploy/production/tests -p 'test*.py'
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,7 +28,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_release_scripts import (  # noqa: E402
-    FAKE_TOOL, HOST_VARIABLE_PREFIXES, SH_REQUIRED, find_sh, health_body, out, rule, sh_path,
+    FAKE_TOOL, HOST_VARIABLE_PREFIXES, SH_REQUIRED, fail_lock_mkdir, find_sh, health_body, out, rule, sh_path,
 )
 
 REPO = Path(__file__).resolve().parents[3]
@@ -83,6 +85,7 @@ def report(command, result, exit_code, **fields):
 
 def df_answer(available_kib):
     return out(f"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/fake 999999999 1 {available_kib} 1% /\n")
+
 
 
 class ScriptHarness(unittest.TestCase):
@@ -257,7 +260,7 @@ class Static(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# backup.sh (BS-1..BS-17)
+# backup.sh (BS-1..BS-18)
 # ---------------------------------------------------------------------------
 
 
@@ -612,6 +615,22 @@ class Backup(ScriptHarness):
                 self.assertNoDocker(r"sh -c pg_dump")
                 self.assertEqual(self.lock.exists(), name != "no lock")
 
+    # BS-18
+    def test_bs18_lock_cannot_be_created(self):
+        # The directory passed the -d/-w preflight, but the lock's mkdir fails (no space or inodes left): could not run,
+        # never "a backup is running".
+        fail_lock_mkdir(self)
+        self.backup()
+        self.assertExit(2)
+        bd = sh_path(self.backup_dir)
+        self.assertIn(f"backup: the backup lock {bd}/.backup.lock cannot be created (mkdir: cannot create directory"
+                      f" '{bd}/.backup.lock': No space left on device). Nothing was written.", self.result.stderr)
+        self.assertNotIn("a backup is running", self.result.stderr)
+        self.assertNoDocker(DB_SIZE, PG_STAT, r"sh -c pg_dump", r"backup-tools ")
+        self.assertFalse(self.lock.exists())
+        self.assertEqual(self.partial_entries(), [])
+        self.assertEqual(self.published(), [])
+
     def test_env_and_checkout_checks(self):
         cases = {
             "relative backup dir": [line if not line.startswith("PARTFLOW_BACKUP_DIR=") else "PARTFLOW_BACKUP_DIR=backups"
@@ -697,6 +716,7 @@ class RestoreDrill(ScriptHarness):
         backup = self.backup_dir / BACKUP_NAME
         backup.mkdir()
         (backup / "partflow.dump").write_bytes(b"PGDMP drill test dump bytes")
+        self.write_manifest_major(16)
         records = self.records.as_posix()
         self.rules["docker"] = [
             rule(r"^ps -a -q --filter label=com\.docker\.compose\.project="),
@@ -722,6 +742,11 @@ class RestoreDrill(ScriptHarness):
                        f".write(str(bool(glob.glob(os.path.join({records!r}, '*', 'evidence.json')))))"}),
         ]
         self.rules["curl"] = [rule(r"^GET /api/health$", {"status": 200, "body": health_body(release=RELEASE), "headers": {}})]
+
+    def write_manifest_major(self, major):
+        """The manifest's database.server_major (the only manifest field restore-test.sh reads itself)."""
+        text = json.dumps({"database": {"name": "partflow", "server_version": f"{major}.4", "server_major": major}}) + "\n"
+        (self.backup_dir / BACKUP_NAME / "manifest.json").write_text(text, encoding="utf-8", newline="\n")
 
     def drill(self, *arguments, project=DRILL_PROJECT, backup=BACKUP_NAME):
         base = ["--backup", backup, "--operator", "Ops Person", "--records-dir", sh_path(self.records)]
@@ -794,6 +819,9 @@ class RestoreDrill(ScriptHarness):
                                              "database": "partflow_restore_test", "http_port": 18090,
                                              "edge_subnet": "172.30.254.0/24"})
         self.assertEqual(evidence["server"]["collation_version_actual"], "2.41")
+        self.assertEqual((evidence["server"]["backup_server_major"], evidence["server"]["server_major"],
+                          evidence["server"]["server_major_match"]), (16, 16, True))
+        self.assertNotIn("WARNING", self.result.stderr)
         self.assertEqual(set(evidence["timings_ms"]), {"verify", "db_start", "restore", "roles_and_grants",
                                                        "app_start_to_ready", "reconcile", "smoke", "restore_to_ready", "total"})
         self.assertTrue(all(isinstance(v, int) for v in evidence["timings_ms"].values()), evidence["timings_ms"])
@@ -1078,6 +1106,31 @@ class RestoreDrill(ScriptHarness):
             env = (self.evidence_dir() / "work" / "restore-test.env").read_text(encoding="utf-8")
             self.assertIn(f"PARTFLOW_RELEASE={TOOLS}\n", env)
 
+    # RT-20 (P16-S5 audit): the evidence states whether the drill server runs the backup's PostgreSQL major.
+    def test_rt20_server_major_is_compared(self):
+        self.write_manifest_major(15)
+        self.drill()
+        self.assertExit(0)
+        self.assertEqual((self.evidence()["server"]["backup_server_major"], self.evidence()["server"]["server_major"],
+                          self.evidence()["server"]["server_major_match"]), (15, 16, False))
+        self.assertIn("restore-test: WARNING: the backup was dumped from PostgreSQL 15, the drill server is PostgreSQL 16"
+                      " (the image compose.production.yaml pins): not a same-major restore drill", self.result.stderr)
+        with self.subTest(case="--db-image"):
+            self.reset()
+            self.write_manifest_major(15)
+            self.drill("--db-image", "postgres:16.14-bookworm")
+            self.assertExit(0)
+            self.assertIs(self.evidence()["server"]["server_major_match"], False)
+            self.assertIn("PostgreSQL 16 (postgres:16.14-bookworm)", self.result.stderr)
+        with self.subTest(case="manifest without a readable major"):
+            self.reset()
+            (self.backup_dir / BACKUP_NAME / "manifest.json").write_text("{}\n", encoding="utf-8")
+            self.drill()
+            self.assertExit(0)
+            server = self.evidence()["server"]
+            self.assertEqual((server["backup_server_major"], server["server_major"], server["server_major_match"]),
+                             (None, 16, None))
+
     def test_images_missing(self):
         self.prepend("docker", rule(r"^image inspect ", out("", rc=1, stderr="No such image\n")))
         self.drill()
@@ -1086,6 +1139,152 @@ class RestoreDrill(ScriptHarness):
         self.assertIn(f"keep or build the images of release {RELEASE}", self.result.stderr)
         self.assertNoDocker(r" up ")
         self.assertEqual(self.teardown_record()["teardown"], "not_created")
+
+
+# ---------------------------------------------------------------------------
+# RUNBOOK §6 path 3 blocks (P16-S5 audit: PR-1..PR-4)
+# ---------------------------------------------------------------------------
+
+PLACEHOLDER = re.compile(r"<[A-Za-z][A-Za-z ]*>")
+
+
+def path3_blocks():
+    """The ```sh blocks of OPERATIONS_RUNBOOK.md "### Path 3 procedure", in order (A, B1, B2, B3)."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    section = text[text.index("### Path 3 procedure"):]
+    section = section[:section.index("\n### ", 1)]
+    return re.findall(r"```sh\n(.*?)```", section, flags=re.S)
+
+
+def comparable(block):
+    """A block's lines without blank lines and REHEARSAL lines, every placeholder reduced to <>."""
+    return [PLACEHOLDER.sub("<>", line.rstrip()) for line in block.splitlines()
+            if line.strip() and "# REHEARSAL" not in line]
+
+
+class Path3Blocks(ScriptHarness):
+    """The documented path 3 scripts, run with `sh -eu` as the RUNBOOK says, against the fakes: every guard stops the
+    script before the next command."""
+
+    def setUp(self):
+        super().setUp()
+        self.blocks = path3_blocks()
+        self.assertEqual(len(self.blocks), 4, "path 3 has steps A, B1, B2 and B3")
+        self.backup = self.tmp / "bk" / BACKUP_NAME
+        self.backup.mkdir(parents=True)
+        (self.backup / "partflow.dump").write_bytes(b"PGDMP path 3 dump")
+        self.rec = self.tmp / "rec"
+        self.rec.mkdir()
+
+    def block(self, index, **values):
+        text = self.blocks[index]
+        for placeholder, value in {"<release record directory>": sh_path(self.rec), "<candidate tag>": TOOLS,
+                                   "<previous tag>": RELEASE, "<backup path printed by step A>": sh_path(self.backup),
+                                   **values}.items():
+            text = text.replace(placeholder, value)
+        path = self.tmp / f"block-{index}.sh"
+        path.write_text(text, encoding="utf-8", newline="\n")
+        (self.state / "rules.json").write_text(json.dumps(self.rules), encoding="utf-8")
+        self.result = subprocess.run(
+            [self.sh, "-eu", path.as_posix()], cwd=self.root, env=self.environment(),
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+        )
+        return self.result
+
+    # PR-1: the backup rehearsal (DR-4) runs these exact blocks; only its REHEARSAL lines differ.
+    def test_pr1_rehearsal_runs_the_documented_blocks(self):
+        import backup_rehearsal
+        a, b1, b2, b3 = (comparable(block) for block in self.blocks)
+        self.assertEqual(comparable(backup_rehearsal.STEP_A), a)
+        self.assertEqual(comparable(backup_rehearsal.STEP_B1), b1 + b2)
+        self.assertEqual(comparable(backup_rehearsal.STEP_B2), b3)
+        self.assertEqual(path3_blocks(), re.findall(r"```sh\n(.*?)```", RUNBOOK.with_suffix(".vi.md").read_text(
+            encoding="utf-8").split("### Thủ tục path 3", 1)[1].split("\n### ", 1)[0], flags=re.S))
+
+    # PR-2: step A stops when writes were reopened or backend still runs.
+    def test_pr2_step_a_guards(self):
+        record = {"writes_reopened_at": "2026-10-08T11:00:00Z", "backup": {"name": BACKUP_NAME, "path": sh_path(self.backup)}}
+        (self.rec / "record.json").write_text(json.dumps(record), encoding="utf-8")
+        self.block(0)
+        self.assertEqual(self.result.returncode, 1, self.result.stderr)
+        self.assertIn("writes were reopened: path 4, not path 3", self.result.stdout)
+        self.assertEqual(self.calls("docker"), [])
+        with self.subTest(case="backend still running"):
+            self.reset()
+            record["writes_reopened_at"] = None
+            record["backup"]["path"] = sh_path(self.backup)
+            (self.rec / "record.json").write_text(json.dumps(record), encoding="utf-8")
+            self.prepend("docker", rule(r"ps --status running -q backend$", out("cid-backend\n")))
+            self.block(0)
+            self.assertEqual(self.result.returncode, 1, self.result.stderr)
+            self.assertIn("backend is still running", self.result.stdout)
+            self.assertNoDocker(r"backup-verify")
+        with self.subTest(case="frozen, backup verified"):
+            self.reset()
+            record["backup"]["path"] = sh_path(self.backup)
+            (self.rec / "record.json").write_text(json.dumps(record), encoding="utf-8")
+            digest = hashlib.sha256((self.backup / "partflow.dump").read_bytes()).hexdigest()
+            (self.backup / "SHA256SUMS").write_text(f"{digest}  partflow.dump\n", encoding="utf-8", newline="\n")
+            self.block(0)
+            self.assertEqual(self.result.returncode, 0, self.result.stderr)
+            self.assertEqual([c for c in self.docker() if not c.startswith("--profile")], ["stop backend", "ps --status running -q backend"])
+            self.assertEqual(len(self.docker_entries(rf"backup-tools backup-verify {BACKUP_NAME}$")), 1)
+            self.assertIn(f"BPATH={sh_path(self.backup)}", self.result.stdout)
+
+    # PR-3: B1 stops before createdb when the space is short or cannot be read.
+    def test_pr3_step_b1_space_guard(self):
+        df_in_db = r"exec -T db sh -c df -Pk /var/lib/postgresql/data$"
+        need_kib = (1048576 + 2 * 17 + 1073741824) // 1024 + 1
+        for name, answer in (("short", df_answer(need_kib - 2)), ("unread", out("", rc=1, stderr="df failed\n"))):
+            with self.subTest(case=name):
+                self.reset()
+                self.prepend("docker", rule(df_in_db, answer), rule(DB_SIZE, out("1048576\n")))
+                self.block(1)
+                self.assertEqual(self.result.returncode, 1, self.result.stderr)
+                self.assertIn("not enough space (or it could not be read)", self.result.stdout)
+                self.assertNoDocker(r"createdb", r"pg_restore")
+        with self.subTest(case="enough space"):
+            self.reset()
+            self.prepend("docker", rule(df_in_db, df_answer(need_kib)), rule(DB_SIZE, out("1048576\n")),
+                         rule(r"sh -c pg_restore ", {"read_stdin": True}))
+            self.block(1)
+            self.assertEqual(self.result.returncode, 0, self.result.stderr)
+            new_db = re.search(r"NEWDB=(partflow_r[0-9]{12}) OLDDB=partflow\n", self.result.stdout).group(1)
+            self.assertEqual(self.docker()[-2:], [
+                f'exec -T db sh -c createdb -U "$POSTGRES_USER" --template=template0 "$1" sh {new_db}',
+                f'exec -T db sh -c pg_restore -U "$POSTGRES_USER" -d "$1" --single-transaction --exit-on-error'
+                f' --no-owner --no-privileges sh {new_db}'])
+        with self.subTest(case="a failed restore stops"):
+            self.reset()
+            self.prepend("docker", rule(df_in_db, df_answer(need_kib)), rule(DB_SIZE, out("1048576\n")),
+                         rule(r"sh -c pg_restore ", {**out("", rc=1), "read_stdin": True}))
+            self.block(1)
+            self.assertEqual(self.result.returncode, 1, self.result.stderr)
+
+    # PR-4: B3 switches web only after backend reports the previous release with schema current.
+    def test_pr4_step_b3_waits_for_backend(self):
+        scripts = self.root / "deploy" / "production"
+        scripts.mkdir(parents=True)
+        self.wrapper(scripts / "smoke.sh", f'exec "{self.python}" "{self.fake.as_posix()}" "{self.state.as_posix()}" smoke.sh "$@"')
+        self.rules["smoke.sh"] = [rule(r".*", out("PASS S-1 ...\n"))]
+        self.rules["curl"] = [rule(r"^GET /api/health$", {"status": 503, "body": "", "headers": {}},
+                                   {"status": 200, "body": health_body(release=RELEASE), "headers": {}})]
+        self.block(3)
+        self.assertEqual(self.result.returncode, 0, self.result.stderr)
+        self.assertEqual(self.docker(), ["up -d db backend", "up -d --no-deps web"])
+        self.assertEqual(len(self.calls("curl")), 2)
+        self.assertEqual(self.calls("smoke.sh")[0]["argv"], ["--release", RELEASE])
+        for name, body in (("schema not current", health_body(release=RELEASE, schema="mismatch")),
+                           ("another release", health_body(release=TOOLS))):
+            with self.subTest(case=name):
+                self.reset()
+                self.rules["curl"] = [rule(r"^GET /api/health$", {"status": 200, "body": body, "headers": {}})]
+                self.block(3)
+                self.assertEqual(self.result.returncode, 1, self.result.stderr)
+                self.assertIn(f"backend did not report release {RELEASE} with schema current: web not switched",
+                              self.result.stdout)
+                self.assertEqual(self.docker(), ["up -d db backend"])
+                self.assertEqual(len(self.calls("curl")), 90)
 
 
 if __name__ == "__main__":

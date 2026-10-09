@@ -340,7 +340,7 @@ if [ -n "$HELD_BY" ]; then
         && grep -qxF "release=$HELD_BY" "$LOCK_DIR/owner"; }; then
         could_not_run "--lock-held-by-release $HELD_BY: the backup lock $LOCK_DIR is not held by that release run."
     fi
-elif mkdir "$LOCK_DIR" 2>/dev/null; then
+elif lock_error=$(mkdir "$LOCK_DIR" 2>&1); then
     LOCK_OWNED=1
     {
         echo "host=$(uname -n)"
@@ -348,8 +348,11 @@ elif mkdir "$LOCK_DIR" 2>/dev/null; then
         echo "started_at=$(utc)"
         echo "by=backup.sh"
     } >"$LOCK_DIR/owner"
-else
+elif [ -e "$LOCK_DIR" ]; then
     lock_busy
+else
+    # Not busy: the lock cannot be created at all (no space or inodes left, a read-only file system, ...).
+    could_not_run "the backup lock $LOCK_DIR cannot be created ($(printf '%s' "$lock_error" | tr -d '\r' | tail -n 1))."
 fi
 WORK=$(mktemp -d)
 step_ok

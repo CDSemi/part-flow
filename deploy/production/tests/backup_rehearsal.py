@@ -15,9 +15,9 @@ PARTFLOW_COMMIT=$(git rev-parse HEAD) so release.sh --rehearsal reuses them:
 
 Cases: DR-1 install A, synthetic data, a daily backup; DR-2 restore drill (+ image read-back); DR-3 drill onto a
 candidate PostgreSQL image (postgres:16.14-bookworm, another glibc); DR-4 release F stops frozen, then rollback path 3
-exactly as documented (P16-S5 SPEC section 4.9) from a shell without PARTFLOW_*/POSTGRES_* variables, step A in F's
-checkout copy and step B in A'; DR-4b an atomic path-3 restore that fails; DR-4c the completed-release path-4 example
-(release.sh B with the automatic backup); DR-5 a stale backup refused; DR-6 a tampered backup refused; DR-7 a backup
+as documented, run with `sh -eu` (P16-S5 SPEC section 4.9; the .env.production edit is the marked REHEARSAL lines)
+from a shell without PARTFLOW_*/POSTGRES_* variables, step A in F's checkout copy and step B in A'; DR-4b an atomic
+path-3 restore that fails; DR-4c the completed-release path-4 example (release.sh B with the automatic backup); DR-5 a stale backup refused; DR-6 a tampered backup refused; DR-7 a backup
 during writes and its drill; DR-8 two concurrent backups; DR-9 second host type (not_run); DR-10 is the separate
 release_rehearsal.py / stack_smoke.py run (recorded by the caller).
 
@@ -129,56 +129,73 @@ def downgrade() -> None:
     raise RuntimeError("rehearsal-only revision")
 '''
 
-# RUNBOOK §6 path 3 (P16-S5 SPEC section 4.9) — step A, in the candidate release's checkout. Placeholders <...> are the
-# only substitution; the rehearsal stops when a guard line prints its "stop" text.
+# RUNBOOK §6 path 3 (P16-S5 SPEC section 4.9), run with `sh -eu` as documented (here `sh -eux`). Every line is the
+# RUNBOOK's except the lines marked REHEARSAL; placeholders <...> are the only substitution (test_backup_scripts.py
+# PR-1 pins this). Step A, in the candidate release's checkout:
 STEP_A = r'''
 REC=<REC>; CAND=<CAND>; PREV=<PREV>
+# Path 3 only when writes were never reopened; drop this guard only for the owner's recorded exception.
 python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["writes_reopened_at"] is not None)' "$REC/record.json" \
-    || echo "writes were reopened: path 4, not path 3"            # stop here unless the owner recorded otherwise
+    || { echo "writes were reopened: path 4, not path 3"; exit 1; }
 NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["name"])' "$REC/record.json")
 BPATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["path"])' "$REC/record.json")
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF stop backend                                                  # keep or enter the write freeze
-$PF ps --status running -q backend                                # must print nothing
+RUNNING=$($PF ps --status running -q backend)
+[ -z "$RUNNING" ] || { echo "backend is still running: the write freeze is not in place"; exit 1; }
 (cd "$BPATH" && sha256sum -c SHA256SUMS)                          # host check, independent of any image
 PARTFLOW_RELEASE="$CAND" $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" backup-tools backup-verify "$NAME"
+echo "BPATH=$BPATH"
 '''
-# Step B, part 1 (to the reconcile), in the previous release's checkout. The documented comment "Edit $ENV: ..." is
-# carried out by the three sed lines marked REHEARSAL.
+# Step B1 and B2 (to the reconcile) in the previous release's checkout. The documented manual edit of .env.production
+# between them is carried out by the sed lines marked REHEARSAL.
 STEP_B1 = r'''
-BPATH=<BPATH>; REC=<REC>; PREV=<PREV>
+BPATH=<BPATH>
 ENV=.env.production
 PF="docker compose -f compose.production.yaml --env-file $ENV"
-OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV"); PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
+OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV")
 NEWDB="${OLDDB}_r$(date -u +%Y%m%d%H%M)"                          # never the live name; createdb refuses an existing one
-# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve.
+echo "NEWDB=$NEWDB OLDDB=$OLDDB"
+# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve (a value not read stops).
 FREE_KIB=$($PF exec -T db sh -c 'df -Pk /var/lib/postgresql/data' | awk 'NR==2 {print $4}')
 DB_BYTES=$($PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT pg_database_size(current_database())"')
 DUMP_BYTES=$(wc -c < "$BPATH/partflow.dump")
-[ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
-    || echo "not enough space: expand the storage first, or follow path 4"   # stop here when printed
+[ -n "$FREE_KIB" ] && [ -n "$DB_BYTES" ] && [ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
+    || { echo "not enough space (or it could not be read): expand the storage first, or follow path 4"; exit 1; }
 $PF exec -T db sh -c 'createdb -U "$POSTGRES_USER" --template=template0 "$1"' sh "$NEWDB"
+# A failed restore stops here with nothing restored (one transaction): drop the never-live copy, fix the cause, rerun B1:
+#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh <NEWDB printed above>
 $PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$1" --single-transaction --exit-on-error --no-owner --no-privileges' sh "$NEWDB" \
     < "$BPATH/partflow.dump"
-# Edit $ENV: PARTFLOW_RELEASE=$PREV, POSTGRES_DB=$NEWDB, PARTFLOW_ACCEPT_SCHEMA_REVISION=   (empty)
+PREV=<PREV>                                                                                                           # REHEARSAL
 sed "s/^PARTFLOW_RELEASE=.*/PARTFLOW_RELEASE=$PREV/" "$ENV" > "$ENV.tmp" && mv "$ENV.tmp" "$ENV"                      # REHEARSAL
 sed "s/^POSTGRES_DB=.*/POSTGRES_DB=$NEWDB/" "$ENV" > "$ENV.tmp" && mv "$ENV.tmp" "$ENV"                              # REHEARSAL
 sed "s/^PARTFLOW_ACCEPT_SCHEMA_REVISION=.*/PARTFLOW_ACCEPT_SCHEMA_REVISION=/" "$ENV" > "$ENV.tmp" && mv "$ENV.tmp" "$ENV"  # REHEARSAL
+REC=<REC>
+PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF --profile ops run --rm -T db-roles apply-grants               # roles already exist in the cluster
-$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current"
-$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json"; echo "reconcile exit $?"
-echo "NEWDB=$NEWDB OLDDB=$OLDDB"
+$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current" (otherwise it exits non-zero: B2 stops)
+rc=0
+$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json" || rc=$?
+echo "reconcile exit $rc"
 '''
-# Step B, part 2 (after the owner's approval was recorded in rollback.json).
+# Step B3 (after the owner's approval was recorded in rollback.json).
 STEP_B2 = r'''
 PREV=<PREV>
 ENV=.env.production
 PF="docker compose -f compose.production.yaml --env-file $ENV"
 PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
 $PF up -d db backend                                              # db recreated for the new POSTGRES_DB (same volume)
-for i in $(seq 1 60); do curl -fsS "http://127.0.0.1:$PORT/api/health" && break; sleep 2; done   # REHEARSAL: wait
-curl -fsS "http://127.0.0.1:$PORT/api/health"                    # "release":"<previous>", "schema":"current"
-$PF up -d --no-deps web                                           # the reopen (S3 DV-8 order)
+# The web switch waits (up to 180 s) for backend to report the previous release with schema current.
+ready=; i=0
+while [ "$i" -lt 90 ]; do
+    i=$((i + 1))
+    body=$(curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || body=
+    case $body in *"\"release\":\"$PREV\""*) case $body in *'"schema":"current"'*) ready=1; break ;; esac ;; esac
+    sleep 2
+done
+[ -n "$ready" ] || { echo "backend did not report release $PREV with schema current: web not switched; stop backend and review"; exit 1; }
+$PF up -d --no-deps web                                           # the reopen: backend first, then web
 deploy/production/smoke.sh --release "$PREV"
 '''
 PROJECT_GUARD = r'''
@@ -356,7 +373,7 @@ class BackupRehearsal(Rehearsal):
                 "rows": self.psql(ROW_COUNTS_SQL)}
 
     def documented(self, name, block, cwd, substitutions, input_env=None):
-        """Run a documented block with `sh` from a shell without PARTFLOW_*/POSTGRES_* variables."""
+        """Run a documented block with `sh -eu` (-x for the log) from a shell without PARTFLOW_*/POSTGRES_* variables."""
         text = PROJECT_GUARD.replace("<PROJECT>", self.project) + block
         for key, value in substitutions.items():
             text = text.replace(f"<{key}>", value)
@@ -368,9 +385,9 @@ class BackupRehearsal(Rehearsal):
             env.update({k: os.environ[k] for k in WINDOWS_VARIABLES if k in os.environ})
         env.update(input_env or {})
         started = time.monotonic()
-        result = subprocess.run(["sh", "-x", path.as_posix()], cwd=cwd, env=env, capture_output=True, text=True,
+        result = subprocess.run(["sh", "-eux", path.as_posix()], cwd=cwd, env=env, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=1800)
-        self.evidence["commands"].append({"command": f"sh -x {path.name} (cwd {cwd.name}; env -i PATH HOME COMPOSE_PROJECT_NAME)",
+        self.evidence["commands"].append({"command": f"sh -eux {path.name} (cwd {cwd.name}; env -i PATH HOME COMPOSE_PROJECT_NAME)",
                                           "rc": result.returncode, "seconds": round(time.monotonic() - started, 2),
                                           "output_tail": (result.stdout + result.stderr)[-3000:]})
         self.save_log(f"{name}.log", text + "\n----- stdout -----\n" + result.stdout + "\n----- stderr -----\n" + result.stderr)
@@ -522,7 +539,7 @@ class BackupRehearsal(Rehearsal):
             migrate_start = datetime.datetime.fromisoformat(steps["migrate"]["started_at"].replace("Z", "+00:00"))
             observed["freeze_to_migrate_seconds"] = (migrate_start - freeze_start).total_seconds()
             observed["backup_duration_ms"] = record["backup"]["duration_ms"]
-            # Path 3, exactly as documented. Both checkouts get the stack's env file as .env.production.
+            # Path 3 as documented (the REHEARSAL lines aside). Both checkouts get the stack's env file as .env.production.
             source_f = self.sources["F"]
             shutil.copyfile(self.env_file, source_f / ".env.production")
             rec = posix_host_path(directory)

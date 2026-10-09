@@ -181,7 +181,7 @@ gì, theo thứ tự (`backup: <step> ok (<ms> ms)` trên stderr):
 | --- | --- | --- |
 | 0 | hoàn tất | - |
 | 1 | bị từ chối trước khi ghi (`backup_running`, `backup_lock_stale`, `insufficient_space`, `name_exists`) | đọc lý do được in; chưa ghi gì |
-| 2 | không chạy được (cú pháp, tool, environment, `db` không chạy) | sửa và chạy lại |
+| 2 | không chạy được (cú pháp, tool, environment, `db` không chạy, không tạo được backup lock) | sửa và chạy lại |
 | 3 | thất bại: không backup nào được publish, hoặc backup đã publish không qua verify | không dùng backup mà message nêu tên; xóa nó sau khi review |
 | 4 | backup đầy đủ và đã verify, nhưng rotation thất bại hoặc phát hiện một backup daily không qua verify | review báo cáo `backup-rotate` trên stderr; xem Retention |
 
@@ -277,7 +277,10 @@ nghĩa là một backup (hoặc một release đang giữ lock) đang chạy, n�
 `release.sh` giữ lock từ write freeze (hoặc bước backup) đến lúc chuyển `backend`,
 nên hãy lên lịch daily backup ngoài maintenance window: một daily đang chạy sẽ
 dừng release trước freeze mà không đổi gì, và một daily bắt đầu trong lúc release
-sẽ bị từ chối.
+sẽ bị từ chối. Lock hoàn toàn không tạo được (thư mục backup đầy, hết inode hoặc
+read-only) được báo kèm lỗi `mkdir` là không chạy được (exit 2), không bao giờ là
+`backup_running`; khi đó `release.sh` dừng với `could_not_run` trước freeze, không
+đổi gì.
 
 `backup_lock_stale` nghĩa là lock do một lần chạy không còn tồn tại để lại (bị
 kill, bị out-of-memory kill hoặc mất điện); nó không bao giờ tự bị phá. Khôi phục
@@ -309,7 +312,7 @@ production database duy nhất:
 8. ghi thời gian restore và kết quả;
 9. chỉ xóa isolated restore copy sau khi đã giữ lại bằng chứng.
 
-Khi restore vào một cluster mới, hãy provision database role trước (`provision-roles`, với password tạm trong restore drill), và chạy `apply-grants` trên database đã restore trước khi start application (bước 5): dump không chứa grant, nên database đã restore không có grant nào cho đến khi `apply-grants` derive lại, và application role không thể hoạt động nếu thiếu chúng. Reconcile check (h) phải pass trước khi application start. `restore-test.sh` làm việc này trong project riêng của nó (bên dưới).
+Khi restore vào một cluster mới, hãy provision database role trước (`provision-roles`, với password tạm trong restore drill), và chạy `apply-grants` trên database đã restore trước khi start application (bước 5): dump không chứa grant, nên database đã restore không có grant nào cho đến khi `apply-grants` derive lại, và application role không thể hoạt động nếu thiếu chúng. Reconcile check (h) phải pass trước khi một database đã restore phục vụ production: path 3 và new-instance restore (§6) chạy `reconcile` trước khi `backend` start. `restore-test.sh` restore trong project riêng của nó (bên dưới) và chạy `reconcile` đầy đủ khi application đã sẵn sàng; check (h) không `pass` làm drill thất bại.
 
 Với production stack, toàn bộ quy trình là `deploy/production/restore-test.sh`
 (P16-S5), chạy từ repository root của một release checkout:
@@ -337,8 +340,9 @@ một project đã có container hoặc volume. Nó cần `5 x` dump cộng 1 Gi
 Docker root (`--space-factor`).
 
 Script thực hiện chín bước trên và ghi từng bước vào evidence: `verify` (bước 1:
-`backup-verify`), `db_start` (bước 2 và 3: database trống trên PostgreSQL major
-của manifest, hoặc `--db-image`), `restore` (bước 4, một transaction), `roles` và
+`backup-verify`), `db_start` (bước 2 và 3: database trống trên PostgreSQL image
+mà `compose.production.yaml` của checkout pin, hoặc `--db-image`; evidence so major
+của nó với major của manifest), `restore` (bước 4, một transaction), `roles` và
 `grants` (`provision-roles`, rồi `apply-grants` trước khi application start),
 `revision` (bước 6: state `current` và revision của manifest), `app_start` (bước 5
 và health của bước 7: `backend` và `web` lên, readiness `current`), `reconcile`
@@ -358,7 +362,9 @@ của (j), đều có trong report đó (`reconcile_regression.py`), với (h) `
 trường hợp khác là `failed`. Evidence
 `<records-dir>/<UTC>-restore-test-<NAME>/evidence.json` ghi outcome, bước thất
 bại, các fact của backup và drill, version/collation/collation version của drill
-server, timing từng bước (`restore_to_ready` và `total` là input đo RTO) và các
+server, PostgreSQL major của backup và của drill server cùng `server_major_match`
+(`false` cũng được in thành warning: không phải drill cùng major; `null` khi một
+trong hai không rõ), timing từng bước (`restore_to_ready` và `total` là input đo RTO) và các
 trạng thái reconcile.
 
 | Exit | Ý nghĩa |
@@ -567,49 +573,86 @@ database đã restore; không có nó, thủ tục dừng sau `reconcile` với 
 write-blocked.
 
 Các key của `.env.production` do Compose đọc và không được export vào shell, nên
-mọi giá trị bên dưới được đặt tường minh. Bước A chạy trong checkout của release
+mọi giá trị bên dưới được đặt tường minh. Mỗi block là một script: lưu nó trong
+release record directory và chạy bằng `sh -eu <file>`, không bao giờ paste từng
+dòng. Một guard không thỏa sẽ in lý do và dừng script trước lệnh kế tiếp, và mọi
+lệnh thất bại cũng vậy (`-e`). Bước A chạy trong checkout của release
 **candidate** (`release.sh` của nó đã lấy backup, nên nó có `backup-tools` của
 P16-S5 dù release trước có trước P16-S5):
 
 ```sh
 REC=<release record directory>; CAND=<candidate tag>; PREV=<previous tag>
+# Path 3 only when writes were never reopened; drop this guard only for the owner's recorded exception.
 python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["writes_reopened_at"] is not None)' "$REC/record.json" \
-    || echo "writes were reopened: path 4, not path 3"            # stop here unless the owner recorded otherwise
+    || { echo "writes were reopened: path 4, not path 3"; exit 1; }
 NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["name"])' "$REC/record.json")
 BPATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["path"])' "$REC/record.json")
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF stop backend                                                  # keep or enter the write freeze
-$PF ps --status running -q backend                                # must print nothing
+RUNNING=$($PF ps --status running -q backend)
+[ -z "$RUNNING" ] || { echo "backend is still running: the write freeze is not in place"; exit 1; }
 (cd "$BPATH" && sha256sum -c SHA256SUMS)                          # host check, independent of any image
 PARTFLOW_RELEASE="$CAND" $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" backup-tools backup-verify "$NAME"
+echo "BPATH=$BPATH"
 ```
 
 Bước B chạy trong checkout của release **trước**, với image của nó còn trên host
-(từ đây không dùng service P16-S5 nào):
+(từ đây không dùng service P16-S5 nào), thành ba script. B1 kiểm tra dung lượng
+và restore vào một database mới:
 
 ```sh
+BPATH=<backup path printed by step A>
 ENV=.env.production
 PF="docker compose -f compose.production.yaml --env-file $ENV"
-OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV"); PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
+OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV")
 NEWDB="${OLDDB}_r$(date -u +%Y%m%d%H%M)"                          # never the live name; createdb refuses an existing one
-# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve.
+echo "NEWDB=$NEWDB OLDDB=$OLDDB"
+# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve (a value not read stops).
 FREE_KIB=$($PF exec -T db sh -c 'df -Pk /var/lib/postgresql/data' | awk 'NR==2 {print $4}')
 DB_BYTES=$($PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT pg_database_size(current_database())"')
 DUMP_BYTES=$(wc -c < "$BPATH/partflow.dump")
-[ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
-    || echo "not enough space: expand the storage first, or follow path 4"   # stop here when printed
+[ -n "$FREE_KIB" ] && [ -n "$DB_BYTES" ] && [ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
+    || { echo "not enough space (or it could not be read): expand the storage first, or follow path 4"; exit 1; }
 $PF exec -T db sh -c 'createdb -U "$POSTGRES_USER" --template=template0 "$1"' sh "$NEWDB"
+# A failed restore stops here with nothing restored (one transaction): drop the never-live copy, fix the cause, rerun B1:
+#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh <NEWDB printed above>
 $PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$1" --single-transaction --exit-on-error --no-owner --no-privileges' sh "$NEWDB" \
     < "$BPATH/partflow.dump"
-# On a restore failure (nothing was restored: one transaction) drop the never-live copy, fix the cause, restart from createdb:
-#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh "$NEWDB"
-# Edit $ENV: PARTFLOW_RELEASE=$PREV, POSTGRES_DB=$NEWDB, PARTFLOW_ACCEPT_SCHEMA_REVISION=   (empty)
+```
+
+Sau đó sửa `.env.production`: `PARTFLOW_RELEASE=<previous tag>`,
+`POSTGRES_DB=<NEWDB do B1 in ra>` và `PARTFLOW_ACCEPT_SCHEMA_REVISION=` (để
+trống). B2 kiểm tra database đã restore với release trước:
+
+```sh
+REC=<release record directory>
+PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF --profile ops run --rm -T db-roles apply-grants               # roles already exist in the cluster
-$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current"
-$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json"; echo "reconcile exit $?"
-# Owner approval recorded in $REC/rollback.json before the next line (see above).
+$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current" (otherwise it exits non-zero: B2 stops)
+rc=0
+$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json" || rc=$?
+echo "reconcile exit $rc"
+```
+
+Sự phê duyệt của owner được ghi trong `$REC/rollback.json` trước B3 (xem trên).
+B3 start release trước trên database đã restore và chỉ chuyển `web` sau khi
+`backend` báo sẵn sàng (thứ tự S3 DV-8):
+
+```sh
+PREV=<previous tag>
+ENV=.env.production
+PF="docker compose -f compose.production.yaml --env-file $ENV"
+PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
 $PF up -d db backend                                              # db recreated for the new POSTGRES_DB (same volume)
-curl -fsS "http://127.0.0.1:$PORT/api/health"                    # "release":"<previous>", "schema":"current"
+# The web switch waits (up to 180 s) for backend to report the previous release with schema current.
+ready=; i=0
+while [ "$i" -lt 90 ]; do
+    i=$((i + 1))
+    body=$(curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || body=
+    case $body in *"\"release\":\"$PREV\""*) case $body in *'"schema":"current"'*) ready=1; break ;; esac ;; esac
+    sleep 2
+done
+[ -n "$ready" ] || { echo "backend did not report release $PREV with schema current: web not switched; stop backend and review"; exit 1; }
 $PF up -d --no-deps web                                           # the reopen: backend first, then web
 deploy/production/smoke.sh --release "$PREV"
 ```
@@ -629,14 +672,14 @@ Cho host hỏng (§8) hoặc di chuyển (`SYNOLOGY_NAS.md` §10), trên host m�
 checkout khớp (release đã lấy backup, tối thiểu P16-S5) và một volume
 `postgres_data` **mới, trống**. Backup directory đã copy được kiểm tra trước
 (`sha256sum -c SHA256SUMS` và `backup-verify`, như bước A). Sau đó, với cùng `PF`,
-`BPATH` và quy tắc dung lượng như bước B (`DB_BYTES` = 0):
+`BPATH` và quy tắc dung lượng như bước B1 (`DB_BYTES=0`):
 
 1. `$PF up -d db`;
 2. kiểm tra rỗng: `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"'"'` phải in `0`, nếu không thì dừng: volume không phải mới;
-3. dòng `pg_restore` của bước B vào database của container, `$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' < "$BPATH/partflow.dump"` (thất bại thì rollback, database vẫn trống, và kiểm tra rỗng lại pass trước khi thử lại);
+3. dòng `pg_restore` của bước B1 vào database của container, `$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' < "$BPATH/partflow.dump"` (thất bại thì rollback, database vẫn trống, và kiểm tra rỗng lại pass trước khi thử lại);
 4. `$PF --profile ops run --rm -T db-roles`, rồi `… -T db-roles apply-grants`;
-5. `revision` và `reconcile` như bước B, giữ report trong records directory;
-6. sự phê duyệt của owner được ghi trong `<records-dir>/<UTC>-restore-<NAME>/restore.json` (cùng các trường như `rollback.json`), rồi `$PF up -d backend`, kiểm tra health, `$PF up -d --no-deps web` và `deploy/production/smoke.sh --release <tag>`.
+5. `revision` và `reconcile` như bước B2, giữ report trong records directory;
+6. sự phê duyệt của owner được ghi trong `<records-dir>/<UTC>-restore-<NAME>/restore.json` (cùng các trường như `rollback.json`), rồi `$PF up -d backend`, chờ health như bước B3, `$PF up -d --no-deps web` và `deploy/production/smoke.sh --release <tag>`.
 
 Ghi lại data-loss window so với RPO đã duyệt.
 

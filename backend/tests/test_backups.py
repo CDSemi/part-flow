@@ -34,7 +34,7 @@ import pytest
 
 from app import cli
 from app.application import backups
-from app.infrastructure import schema_revision
+from app.infrastructure import backup_files, schema_revision
 from app.infrastructure.database_privileges import TABLE_CLASSES
 from tests.backup_harness import (
     HEAD,
@@ -1068,6 +1068,34 @@ def test_invalid_dailies_are_kept_and_not_counted(
     assert err.strip().endswith(", 2 failed verification and were kept for review")
     for name in document["kept"]:
         assert (tmp_path / name).exists()
+
+
+def test_unreadable_dailies_are_kept_and_not_counted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BR-10 (P16-S5 audit): a daily that verification cannot read is invalid, never deleted."""
+    names = _dailies(tmp_path, utc(2026, 9, 1), 5)
+    oldest, newest = names[0], names[-1]
+    unreadable = {tmp_path / oldest / "partflow.dump", tmp_path / newest / "partflow.dump"}
+    real_digest = backup_files.digest
+
+    def digest(path: Path) -> Any:
+        if Path(path) in unreadable:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_digest(path)
+
+    monkeypatch.setattr(backup_files, "digest", digest)
+    code, document, _ = _rotate(capsys, tmp_path, 1, 0)
+    assert code == 1
+    assert document["result"] == "rotated_with_invalid"
+    assert document["invalid"] == [
+        {"name": oldest, "check": "sha256sums", "detail": "cannot be read (Permission denied)"},
+        {"name": newest, "check": "sha256sums", "detail": "cannot be read (Permission denied)"},
+    ]
+    # Not counted: the newest readable daily is kept; neither unreadable daily is deleted.
+    assert document["kept"] == [names[3]]
+    assert document["deleted"] == [names[1], names[2]]
+    assert _root(tmp_path) == [oldest, names[3], newest]
 
 
 # ---------------------------------------------------------------------------

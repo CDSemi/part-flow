@@ -208,6 +208,11 @@ case "$BACKUP_DIR" in
     *\"* | *\'* | *[[:space:]]*) could_not_run "PARTFLOW_BACKUP_DIR in $ENV_FILE must be unquoted and without spaces." ;;
 esac
 [ -d "$BACKUP_DIR" ] || could_not_run "The backup directory $BACKUP_DIR (PARTFLOW_BACKUP_DIR) does not exist."
+# The own pre-release backup writes the lock and the backup there (a pending migration also takes the lock with
+# --backup-ref: a lock that cannot be created is reported as such at the freeze, never as a running backup).
+if [ "$BACKUP_MODE" = own ] && [ ! -w "$BACKUP_DIR" ]; then
+    could_not_run "The backup directory $BACKUP_DIR is not writable by this account."
+fi
 BACKUP_DIR=${BACKUP_DIR%/}
 BACKUP_LOCK=$BACKUP_DIR/.backup.lock
 
@@ -423,7 +428,7 @@ write_record() {
 # (nothing pending) until the env file names the new release, so no scheduled backup dumps during migrate or records
 # the old release beside the new revision. Only a lock whose owner names this run's record directory is removed.
 take_backup_lock() {
-    if mkdir "$BACKUP_LOCK" 2>/dev/null; then
+    if lock_error=$(mkdir "$BACKUP_LOCK" 2>&1); then
         BACKUP_LOCK_HELD=1
         {
             echo "host=$(uname -n)"
@@ -433,6 +438,11 @@ take_backup_lock() {
             echo "release=$RECORD_DIR"
         } >"$BACKUP_LOCK/owner"
         return 0
+    fi
+    if [ ! -e "$BACKUP_LOCK" ]; then
+        # Not busy: the lock cannot be created at all (not writable, no space or inodes left, ...): return 2.
+        BACKUP_LOCK_MESSAGE="the backup lock $BACKUP_LOCK cannot be created ($(printf '%s' "$lock_error" | tr -d '\r' | tail -n 1))."
+        return 2
     fi
     # Busy: the backup.sh step-0 decision (never removes or changes the lock).
     owner=$BACKUP_LOCK/owner
@@ -468,6 +478,16 @@ take_backup_lock() {
         BACKUP_LOCK_MESSAGE="refused — the backup lock of ${o_by:-unknown} (host ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail) was left by a run that no longer exists. Check OPERATIONS_RUNBOOK §3, then remove $BACKUP_DIR/.backup.lock$paths."
     fi
     return 1
+}
+# backup_lock_refused RC: take_backup_lock returned RC (1 busy or stale: stopped_unchanged; 2 the lock cannot be
+# created: could_not_run). Nothing was changed either way.
+backup_lock_refused() {
+    step_end "$1"
+    if [ "$1" -eq 2 ]; then
+        echo "release: $BACKUP_LOCK_MESSAGE Nothing was changed." >&2
+        finish could_not_run 2
+    fi
+    stop_unchanged "$BACKUP_LOCK_MESSAGE"
 }
 release_backup_lock() {
     [ -n "$BACKUP_LOCK_HELD" ] || return 0
@@ -847,10 +867,7 @@ reopen_current() {
 
 if [ -n "$PENDING" ]; then
     step_begin freeze freeze.log "write freeze: $PF_TEXT stop backend (waits up to 200 s for in-flight requests)"
-    if ! take_backup_lock; then
-        step_end 1
-        stop_unchanged "$BACKUP_LOCK_MESSAGE"
-    fi
+    take_backup_lock || backup_lock_refused "$?"
     FROZEN=1
     rc=0
     pf stop backend >>"$RECORD_DIR/freeze.log" 2>&1 || rc=$?
@@ -870,10 +887,7 @@ fi
 
 if [ "$BACKUP_MODE" = own ]; then
     step_begin pre_release_backup pre-release-backup.out "deploy/production/backup.sh --kind pre-release --label $TAG"
-    if [ -z "$BACKUP_LOCK_HELD" ] && ! take_backup_lock; then
-        step_end 1
-        stop_unchanged "$BACKUP_LOCK_MESSAGE"
-    fi
+    [ -n "$BACKUP_LOCK_HELD" ] || take_backup_lock || backup_lock_refused "$?"
     backup_started=$(date +%s)
     rc=0
     if [ -n "$PROJECT" ]; then

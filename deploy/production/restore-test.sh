@@ -271,8 +271,11 @@ B_REVISION=
 B_RELEASE=
 B_STARTED=
 B_SHA=
+B_MAJOR=
 DB_IMAGE_ID=
 S_VERSION=
+S_MAJOR=
+MAJOR_MATCH=
 S_COLLATION=
 S_CTYPE=
 S_RECORDED=
@@ -345,7 +348,8 @@ write_evidence() {
             "$(js "$DB_IMAGE_ID")" "$DRILL_DATABASE" "$HTTP_PORT" "$EDGE_SUBNET"
         printf '  "server": {"server_version": %s, "collation": %s, "ctype": %s, "collation_version_recorded": %s,' \
             "$(js "$S_VERSION")" "$(js "$S_COLLATION")" "$(js "$S_CTYPE")" "$(js "$S_RECORDED")"
-        printf ' "collation_version_actual": %s},\n' "$(js "$S_ACTUAL")"
+        printf ' "collation_version_actual": %s, "backup_server_major": %s, "server_major": %s, "server_major_match": %s},\n' \
+            "$(js "$S_ACTUAL")" "$(num "$B_MAJOR")" "$(num "$S_MAJOR")" "$(num "$MAJOR_MATCH")"
         printf '  "timings_ms": {"verify": %s, "db_start": %s, "restore": %s, "roles_and_grants": %s,' \
             "$(num "$T_VERIFY")" "$(num "$T_DB")" "$(num "$T_RESTORE")" "$(num "$T_ROLES")"
         printf ' "app_start_to_ready": %s, "reconcile": %s, "smoke": %s, "restore_to_ready": %s, "total": %s},\n' \
@@ -545,6 +549,16 @@ B_STARTED=$(json_field "$RD/verify.json" dump_started_at)
 B_SHA=$(json_field "$RD/verify.json" manifest_sha256)
 [ "$rc" -eq 0 ] && report_valid "$RD/verify.json" 0 \
     || failed verify "the backup $BACKUP failed verification (exit $rc; $RD/verify.json). Do not use it."
+# The PostgreSQL major the backup was dumped from (the verified manifest; empty when unreadable), compared with the
+# drill server's major after the reconcile: the evidence states whether the drill ran on the same major.
+B_MAJOR=$(python3 -c '
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))["database"]["server_major"]
+except (OSError, ValueError, KeyError, TypeError):
+    value = None
+print(value if type(value) is int else "")
+' "$BACKUP_PATH/manifest.json" 2>/dev/null) || B_MAJOR=
 if [ -z "$RELEASE" ]; then
     if [ "$(json_raw "$RD/verify.json" release_matches_revision)" = false ]; then
         could_not_run verify "The backup $BACKUP was taken at revision ${B_REVISION:-none} while release ${B_RELEASE:-unknown} was recorded; name the matching release with --release."
@@ -672,6 +686,15 @@ S_COLLATION=$(printf '%s\n' "$statuses" | sed -n 4p)
 S_CTYPE=$(printf '%s\n' "$statuses" | sed -n 5p)
 S_RECORDED=$(printf '%s\n' "$statuses" | sed -n 6p)
 S_ACTUAL=$(printf '%s\n' "$statuses" | sed -n 7p)
+S_MAJOR=$(printf '%s' "$S_VERSION" | sed -n 's/^\([0-9][0-9]*\).*$/\1/p')
+if [ -n "$B_MAJOR" ] && [ -n "$S_MAJOR" ]; then
+    if [ "$B_MAJOR" = "$S_MAJOR" ]; then
+        MAJOR_MATCH=true
+    else
+        MAJOR_MATCH=false
+        echo "restore-test: WARNING: the backup was dumped from PostgreSQL $B_MAJOR, the drill server is PostgreSQL $S_MAJOR (${DB_IMAGE:-the image compose.production.yaml pins}): not a same-major restore drill (evidence server_major_match false)." >&2
+    fi
+fi
 RESULT=
 if [ "$rc" -eq 0 ] && [ "$CHECK_H" = pass ] && [ "$CHECK_J" = pass ]; then
     RESULT=passed

@@ -215,10 +215,13 @@ the VPS in P16-S7):
 
 **Schedule (systemd).** `partflow-backup.service`, `Type=oneshot`,
 `User=<deploy account>`, `WorkingDirectory=/srv/partflow/current`,
-`ExecStart=deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env`
+`ExecStart=/srv/partflow/current/deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env`
 (14 and 8 are placeholders: the owner sets the real values, and the options are
 required), `OnFailure=` a unit that mails the administrators; and
 `partflow-backup.timer` with `OnCalendar=*-*-* 02:00:00` and `Persistent=true`.
+`ExecStart=` needs the absolute path (`WorkingDirectory=` does not resolve a
+relative one, and systemd refuses the unit); check both units with
+`systemd-analyze verify partflow-backup.service partflow-backup.timer`.
 A non-zero exit, a daily that fails verification included, fails the unit. Keep
 the schedule outside maintenance windows (a release holds the backup lock).
 

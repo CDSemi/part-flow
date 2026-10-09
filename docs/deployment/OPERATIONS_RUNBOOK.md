@@ -177,7 +177,7 @@ each step does, in order (`backup: <step> ok (<ms> ms)` on stderr):
 | --- | --- | --- |
 | 0 | completed | - |
 | 1 | refused before writing (`backup_running`, `backup_lock_stale`, `insufficient_space`, `name_exists`) | read the printed reason; nothing was written |
-| 2 | could not run (usage, tools, environment, `db` not running) | fix and rerun |
+| 2 | could not run (usage, tools, environment, `db` not running, the backup lock cannot be created) | fix and rerun |
 | 3 | failed: no backup was published, or the published backup failed verification | do not use a backup the message names; remove it after review |
 | 4 | the backup is complete and verified, but the rotation failed or found a daily backup that fails verification | review the `backup-rotate` report on stderr; see Retention |
 
@@ -274,7 +274,10 @@ backup (or a release holding the lock) is in progress, so wait. `release.sh`
 holds the lock from the write freeze (or the backup step) through the `backend`
 switch, so schedule daily backups outside maintenance windows: a daily that is
 running stops a release before the freeze with nothing changed, and a daily that
-starts during a release is refused.
+starts during a release is refused. A lock that cannot be created at all (the
+backup directory is full, out of inodes or read-only) is reported with the
+`mkdir` error as could-not-run (exit 2), never as `backup_running`; `release.sh`
+then stops with `could_not_run` before the freeze, nothing changed.
 
 `backup_lock_stale` means the lock was left by a run that no longer exists (a
 kill, an out-of-memory kill or a power loss); it is never broken automatically.
@@ -307,7 +310,7 @@ only production database:
 8. record restore duration and result;
 9. destroy the isolated restore copy only after evidence is retained.
 
-In a restore into a new cluster, provision the database roles first (`provision-roles`, with throwaway passwords in a restore drill), and run `apply-grants` against the restored database before starting the application (step 5): a dump contains no grants, so a restored database has none until `apply-grants` re-derives them, and the application role cannot work without them. Reconcile check (h) must pass before the application starts. `restore-test.sh` does this in its own project (below).
+In a restore into a new cluster, provision the database roles first (`provision-roles`, with throwaway passwords in a restore drill), and run `apply-grants` against the restored database before starting the application (step 5): a dump contains no grants, so a restored database has none until `apply-grants` re-derives them, and the application role cannot work without them. Reconcile check (h) must pass before a restored database serves production: path 3 and the new-instance restore (§6) run `reconcile` before `backend` starts. `restore-test.sh` restores in its own project (below) and runs the full `reconcile` once the application is ready; a check (h) that is not `pass` fails the drill.
 
 With the production stack the whole procedure is `deploy/production/restore-test.sh`
 (P16-S5), run from the repository root of a release checkout:
@@ -337,7 +340,8 @@ needs `5 x` the dump plus 1 GiB free on the Docker root (`--space-factor`).
 
 The script performs the nine steps above and records each one in the evidence:
 `verify` (step 1: `backup-verify`), `db_start` (steps 2 and 3: an empty database
-on the manifest's PostgreSQL major, or `--db-image`), `restore` (step 4, one
+on the PostgreSQL image that the checkout's `compose.production.yaml` pins, or
+`--db-image`; the evidence compares its major with the manifest's), `restore` (step 4, one
 transaction), `roles` and `grants` (`provision-roles`, then `apply-grants` before
 the application starts), `revision` (step 6: state `current` and the manifest's
 revision), `app_start` (step 5 and the health of step 7: `backend` and `web` up,
@@ -358,7 +362,9 @@ PostgreSQL-image half of the platform-upgrade identity check, §7).
 `pass`. Anything else is `failed`. The evidence
 `<records-dir>/<UTC>-restore-test-<NAME>/evidence.json` records the outcome, the
 failed step, the backup and drill facts, the drill server's version, collation and
-collation versions, the per-step timings (`restore_to_ready` and `total` are the
+collation versions, the backup's and the drill server's PostgreSQL majors with
+`server_major_match` (`false` is also printed as a warning: not a same-major
+drill; `null` when either is unknown), the per-step timings (`restore_to_ready` and `total` are the
 RTO measurement inputs) and the reconcile statuses.
 
 | Exit | Meaning |
@@ -579,49 +585,86 @@ starts** on the restored database; without it the procedure stops after
 `reconcile` with the application write-blocked.
 
 The `.env.production` keys are read by Compose and are not exported to the shell,
-so every value below is set explicitly. Step A runs in the **candidate**
+so every value below is set explicitly. Each block is a script: save it in the
+release record directory and run it with `sh -eu <file>`, never pasted line by
+line. A guard that does not hold prints why and stops the script before the next
+command, and so does any failing command (`-e`). Step A runs in the **candidate**
 release's checkout (its `release.sh` took the backup, so it has the P16-S5
 `backup-tools` even when the previous release predates P16-S5):
 
 ```sh
 REC=<release record directory>; CAND=<candidate tag>; PREV=<previous tag>
+# Path 3 only when writes were never reopened; drop this guard only for the owner's recorded exception.
 python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["writes_reopened_at"] is not None)' "$REC/record.json" \
-    || echo "writes were reopened: path 4, not path 3"            # stop here unless the owner recorded otherwise
+    || { echo "writes were reopened: path 4, not path 3"; exit 1; }
 NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["name"])' "$REC/record.json")
 BPATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["path"])' "$REC/record.json")
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF stop backend                                                  # keep or enter the write freeze
-$PF ps --status running -q backend                                # must print nothing
+RUNNING=$($PF ps --status running -q backend)
+[ -z "$RUNNING" ] || { echo "backend is still running: the write freeze is not in place"; exit 1; }
 (cd "$BPATH" && sha256sum -c SHA256SUMS)                          # host check, independent of any image
 PARTFLOW_RELEASE="$CAND" $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" backup-tools backup-verify "$NAME"
+echo "BPATH=$BPATH"
 ```
 
 Step B runs in the **previous** release's checkout, with its images present (no
-P16-S5 service is used from here on):
+P16-S5 service is used from here on), as three scripts. B1 checks the space and
+restores into a new database:
 
 ```sh
+BPATH=<backup path printed by step A>
 ENV=.env.production
 PF="docker compose -f compose.production.yaml --env-file $ENV"
-OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV"); PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
+OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV")
 NEWDB="${OLDDB}_r$(date -u +%Y%m%d%H%M)"                          # never the live name; createdb refuses an existing one
-# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve.
+echo "NEWDB=$NEWDB OLDDB=$OLDDB"
+# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve (a value not read stops).
 FREE_KIB=$($PF exec -T db sh -c 'df -Pk /var/lib/postgresql/data' | awk 'NR==2 {print $4}')
 DB_BYTES=$($PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT pg_database_size(current_database())"')
 DUMP_BYTES=$(wc -c < "$BPATH/partflow.dump")
-[ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
-    || echo "not enough space: expand the storage first, or follow path 4"   # stop here when printed
+[ -n "$FREE_KIB" ] && [ -n "$DB_BYTES" ] && [ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
+    || { echo "not enough space (or it could not be read): expand the storage first, or follow path 4"; exit 1; }
 $PF exec -T db sh -c 'createdb -U "$POSTGRES_USER" --template=template0 "$1"' sh "$NEWDB"
+# A failed restore stops here with nothing restored (one transaction): drop the never-live copy, fix the cause, rerun B1:
+#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh <NEWDB printed above>
 $PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$1" --single-transaction --exit-on-error --no-owner --no-privileges' sh "$NEWDB" \
     < "$BPATH/partflow.dump"
-# On a restore failure (nothing was restored: one transaction) drop the never-live copy, fix the cause, restart from createdb:
-#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh "$NEWDB"
-# Edit $ENV: PARTFLOW_RELEASE=$PREV, POSTGRES_DB=$NEWDB, PARTFLOW_ACCEPT_SCHEMA_REVISION=   (empty)
+```
+
+Then edit `.env.production`: `PARTFLOW_RELEASE=<previous tag>`,
+`POSTGRES_DB=<NEWDB printed by B1>` and `PARTFLOW_ACCEPT_SCHEMA_REVISION=`
+(empty). B2 checks the restored database with the previous release:
+
+```sh
+REC=<release record directory>
+PF="docker compose -f compose.production.yaml --env-file .env.production"
 $PF --profile ops run --rm -T db-roles apply-grants               # roles already exist in the cluster
-$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current"
-$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json"; echo "reconcile exit $?"
-# Owner approval recorded in $REC/rollback.json before the next line (see above).
+$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current" (otherwise it exits non-zero: B2 stops)
+rc=0
+$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json" || rc=$?
+echo "reconcile exit $rc"
+```
+
+The owner's approval is recorded in `$REC/rollback.json` before B3 (see above).
+B3 starts the previous release on the restored database and switches `web` only
+after `backend` reports it ready (S3 DV-8 order):
+
+```sh
+PREV=<previous tag>
+ENV=.env.production
+PF="docker compose -f compose.production.yaml --env-file $ENV"
+PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
 $PF up -d db backend                                              # db recreated for the new POSTGRES_DB (same volume)
-curl -fsS "http://127.0.0.1:$PORT/api/health"                    # "release":"<previous>", "schema":"current"
+# The web switch waits (up to 180 s) for backend to report the previous release with schema current.
+ready=; i=0
+while [ "$i" -lt 90 ]; do
+    i=$((i + 1))
+    body=$(curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || body=
+    case $body in *"\"release\":\"$PREV\""*) case $body in *'"schema":"current"'*) ready=1; break ;; esac ;; esac
+    sleep 2
+done
+[ -n "$ready" ] || { echo "backend did not report release $PREV with schema current: web not switched; stop backend and review"; exit 1; }
 $PF up -d --no-deps web                                           # the reopen: backend first, then web
 deploy/production/smoke.sh --release "$PREV"
 ```
@@ -641,14 +684,14 @@ For a host failure (§8) or a move (`SYNOLOGY_NAS.md` §10), on the new host wit
 the matching release checkout (the release that took the backup, at least
 P16-S5) and a **new, empty** `postgres_data` volume. The copied backup directory
 is checked first (`sha256sum -c SHA256SUMS` and `backup-verify`, as in step A).
-Then, with the same `PF`, `BPATH` and space rule as step B (`DB_BYTES` = 0):
+Then, with the same `PF`, `BPATH` and space rule as step B1 (`DB_BYTES=0`):
 
 1. `$PF up -d db`;
 2. emptiness check: `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"'"'` must print `0`, otherwise stop: the volume is not new;
-3. the step B `pg_restore` line into the container's database, `$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' < "$BPATH/partflow.dump"` (a failure rolls back, the database stays empty, and the emptiness check passes again before a retry);
+3. the step B1 `pg_restore` line into the container's database, `$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' < "$BPATH/partflow.dump"` (a failure rolls back, the database stays empty, and the emptiness check passes again before a retry);
 4. `$PF --profile ops run --rm -T db-roles`, then `… -T db-roles apply-grants`;
-5. `revision` and `reconcile` as in step B, with the report kept in the records directory;
-6. the owner's approval recorded in `<records-dir>/<UTC>-restore-<NAME>/restore.json` (same fields as `rollback.json`), then `$PF up -d backend`, the health check, `$PF up -d --no-deps web` and `deploy/production/smoke.sh --release <tag>`.
+5. `revision` and `reconcile` as in step B2, with the report kept in the records directory;
+6. the owner's approval recorded in `<records-dir>/<UTC>-restore-<NAME>/restore.json` (same fields as `rollback.json`), then `$PF up -d backend`, the step B3 health wait, `$PF up -d --no-deps web` and `deploy/production/smoke.sh --release <tag>`.
 
 Document the data-loss window against the approved RPO.
 
