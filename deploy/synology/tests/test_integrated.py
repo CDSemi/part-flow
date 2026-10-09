@@ -638,6 +638,19 @@ class Plane(unittest.TestCase):
 class PurgeIntegrated(Plane):
     """PZ-1..PZ-15 and the OD-A33-08 registry tombstone (TB-1..TB-4)."""
 
+    def test_pz16_the_globals_archive_connects_by_database_name_never_by_a_connection_string(self):
+        """PF-A3.4 D5 regression (real LOOP-02 step 2, Engine 28.5.1, postgres:16.15): pg_dumpall's ``-d`` is a libpq
+        connection string, so ``-d postgres`` failed every real purge ("missing "=" after "postgres" in connection
+        info string") after the bundle capture started; the purge closed cancelled and nothing was deleted."""
+        code, out, err, _ = self.purge()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.operation("purge")[2]["phase"], "completed")
+        calls = [argv[argv.index("pg_dumpall"):] for argv in self.fake.argvs() if "pg_dumpall" in argv]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index("-l") + 1], "postgres")
+        self.assertNotIn("-d", calls[0])
+        self.assertIn("--globals-only", calls[0])
+
     def test_pz1_fv1_full_instance_purge_with_functional_verification_and_tombstone(self):
         record_before = self.context.record_path.read_bytes()
         code, out, err, phrases = self.purge()
@@ -1482,6 +1495,27 @@ class RestoreTarget(Plane):
         self.assertEqual(pfx.snapshot_tree(sentinel), before)
         self.assertEqual(self.operation("restore-instance")[2]["phase"], "completed")
         self.assertIn("Application invariants: clean", out)
+
+    def test_rx10_retained_candidate_named_databases_are_restored_from_the_bundle(self):
+        """PF-A3.4 D5 regression (real row R33, Engine 28.5.1): a purge bundle retains every database of the instance,
+        including a leftover ``pf_restore_*``/``pf_migrate_*`` candidate of an interrupted rollback or update. The
+        restore routed those names to the rollback/update branches (``op_selected``) and every attempt ended
+        ``plan-input-changed: checkpoint purge-… no longer reads or verifies (unreadable)``: a dead end with the instance
+        purged. They are restored from the bundle's own stores like every other retained database."""
+        leftovers = ("pf_restore_" + "c" * 20, "pf_migrate_" + "d" * 20)
+        state = self.state()
+        for name in leftovers:
+            state["plane"]["databases"][name] = {"heads": [], "rows": {}, "allow": True, "owner": "partflow_staging",
+                                                 "locale": ["UTF8", "C.UTF-8", "C.UTF-8"]}
+        self.fake.write_state(state)
+        bundle = self.purged()
+        manifest = json.loads((self.context.paths.recovery / self.project / bundle / "manifest.json").read_bytes())
+        self.assertTrue(set(leftovers) <= {store["database"] for store in manifest["stores"]})
+        code, out, err, _ = self.main("restore-instance", bundle)
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("plan-input-changed", err)
+        self.assertEqual(self.operation("restore-instance")[2]["phase"], "completed")
+        self.assertTrue(set(leftovers) <= set(self.state()["plane"]["databases"]))
 
     def test_rx2_rx8_another_instance_bundle_is_refused_before_any_confirmation(self):
         bundle = self.purged()

@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A3.3 (trên commit `e13574f`).
+> Baseline đồng bộ: package revision PF-A3.4 (chưa commit, trên `7b24d10`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -2350,7 +2350,9 @@ Giới hạn của PF-A1.3 (chỉ có bằng chứng offline; Docker-daemon gate
 - phiên bản Compose trên NAS chưa được kiểm chứng; luật envelope được hiệu chỉnh trên một lần
   render Compose v2 thật (Docker Desktop CLI);
 - JSON đã render được kiểm tra, không được dùng lại làm input `-f` khi thực thi;
-- các label marker container của Compose dùng cho ownership chưa được hiệu chỉnh trên daemon thật;
+- các label marker container của Compose dùng cho ownership chưa được hiệu chỉnh trên daemon thật *(đã được PF-A3.4 thay
+  thế trên Engine 28.5.1/Compose v2.40.3: ownership inventory của pf đã phân loại container, volume và network Compose
+  thật theo các label này trong mọi lần chạy; xem khối PF-A3.4)*;
 - việc bao phủ image theo image ID giả định daemon không có hoạt động song song giữa `image save`
   và binding inventory.
 
@@ -2360,7 +2362,9 @@ PF-A1.4 bổ sung các giới hạn sau:
   TTY); `ssh` không có `-t` được tính là không người trực;
 - không thao tác không người trực nào, kể cả scheduled backup và release check, chạy trên instance
   do pf quản lý cho tới khi có grant trong protected policy của PF-A4.3;
-- các label one-off của Compose `run` mà `fail_closed` dựa vào mới chỉ được chứng minh offline;
+- các label one-off của Compose `run` mà `fail_closed` dựa vào mới chỉ được chứng minh offline *(đã được PF-A3.4 thay
+  thế trên Engine 28.5.1/Compose v2.40.3: label `com.docker.compose.oneoff` thật của các one-off migration và contract
+  của pf đã được quan sát, và không one-off nào sống lâu hơn một lần chạy bị ngắt; xem khối PF-A3.4)*;
 - không có route managed để chạy CLI của ứng dụng trong container backend.
 
 Giới hạn của PF-A2.1:
@@ -2403,8 +2407,9 @@ quyền root trong container dùng một lần; không có khẳng định nào 
 
 Giới hạn PF-A3.1 (chỉ có bằng chứng offline và filesystem; Docker và PostgreSQL được mô phỏng):
 
-- không khẳng định hành vi Docker, Compose hay PostgreSQL thật nào; case emergency preservation A3-T03 bị blocked ở
-  mức Docker/PostgreSQL thật mà nó yêu cầu (PF-A3.4);
+- không khẳng định hành vi Docker, Compose hay PostgreSQL thật nào; case emergency preservation A3-T03 bị blocked ở mức
+  Docker/PostgreSQL thật mà nó yêu cầu (PF-A3.4) *(đã được PF-A3.4 thay thế trên Engine 28.5.1/Compose v2.40.3: A3-T03
+  passed ở mức thật)*;
 - *(đã được PF-A3.3 thay thế, xem giới hạn của nó bên dưới)* instance purge từng được gate bằng record
   `data_restore_verified` từ chính payload của purge bundle; từ PF-A3.3 nó được gate bằng record
   `functional_recovery_verified` từ một isolated topology (chỉ có bằng chứng từ daemon giả);
@@ -2420,14 +2425,17 @@ Giới hạn PF-A3.1 (chỉ có bằng chứng offline và filesystem; Docker v�
 Giới hạn PF-A3.2 (bằng chứng offline, filesystem và installed CLI với Docker daemon giả; không chạy gì trên DSM,
 btrfs, SMB, Docker daemon hay PostgreSQL thật):
 
-- A3-T04 và A3-T05 bị chặn ở mức Docker/PostgreSQL thật (PF-A3.4); phần DSM/btrfs/SMB của A3-T10 bị chặn (PF-A5.1);
-  các case restart qua installed CLI chạy trên application plane mô phỏng của Docker daemon giả, với release source
-  chỉ dùng cho test (xem `TEST_REPORT.md`);
+- A3-T04 và A3-T05 bị chặn ở mức Docker/PostgreSQL thật (PF-A3.4) *(đã được PF-A3.4 thay thế trên Engine 28.5.1/Compose
+  v2.40.3: A3-T04 và A3-T05 đã chạy ở mức thật thành crash matrix, với các finding còn mở của khối PF-A3.4)*; phần
+  DSM/btrfs/SMB của A3-T10 bị chặn (PF-A5.1); các case restart qua installed CLI chạy trên application plane mô phỏng
+  của Docker daemon giả, với release source chỉ dùng cho test (xem `TEST_REPORT.md`);
 - kết quả live migration bị mất mà heads không đổi không bao giờ được thử lại (`needs_operator`) cho tới khi profile
   khai báo upgrade có transaction (PF-A4.1);
 - một SIGKILL giữa lúc child khởi động và lúc ghi `children.json` chỉ còn probe daemon và database cho child đó; probe
   database đếm mọi client session, nên một session thoáng qua sẽ từ chối cho tới lần `resume` sau;
-- độ bền của workspace staging dựa vào `os.sync()` trước các lần rename; chưa chứng minh trường hợp mất điện (PF-A3.4);
+- độ bền của workspace staging dựa vào fsync từng thư mục và tệp đã stage cùng generation container trước các lần
+  rename (PF-A3.4: `os.sync()` toàn cục không bao giờ trả về khi một filesystem không liên quan bị treo); chưa chứng
+  minh trường hợp mất điện;
 - workspace root có ACL, workspace là mount point hoặc container không an toàn sẽ kết thúc update ở
   `workspace_sync_pending` cho tới khi dùng `--keep-workspace` hoặc sửa nguyên nhân;
 - `restore-instance` không có abandon khi data restore đã bắt đầu; `backup --emergency` vẫn không có journal
@@ -2445,9 +2453,13 @@ Giới hạn PF-A3.3 (bằng chứng offline, filesystem và installed CLI với
 Docker daemon hay PostgreSQL thật):
 
 - A3-T06, A3-T07, A3-T08, A3-T15, A3-T16 và phần Docker storage của A3-T14 bị chặn ở mức Docker/PostgreSQL thật cho tới
-  PF-A3.4; phần filesystem của A3-T14 dùng `statvfs` thật;
+  PF-A3.4 *(đã được PF-A3.4 thay thế trên Engine 28.5.1/Compose v2.40.3: A3-T06, A3-T07, A3-T08 và A3-T15 passed ở mức
+  thật; A3-T16 passed trừ R65 (F-A34-03); phần Docker storage của A3-T14 từ chối đúng, nhưng các kiểm tra no-effect của
+  nó failed (F-A34-04, F-A34-06))*; phần filesystem của A3-T14 dùng `statvfs` thật;
 - tính cách ly của topology `pfverify-*`/`pfrecover-*` chỉ được chứng minh từ cấu hình daemon báo về (internal network,
-  port binding, restart policy, mount); hành vi network, port và egress thật chưa được quan sát;
+  port binding, restart policy, mount); hành vi network, port và egress thật chưa được quan sát *(đã được PF-A3.4 thay
+  thế trên Engine 28.5.1/Compose v2.40.3: LOOP-07 đã quan sát internal network, không publish port, egress thất bại và
+  tên instance không resolve được từ bên trong một recovery target thật)*;
 - oracle application invariant là `app.cli reconcile` của image đã deploy; image không có lệnh này được ghi là
   `unavailable`, và output của reconcile không bao giờ được lưu;
 - quyết định của owner, đã áp dụng: instance purge ghi registry tombstone `state: purged` và nhả project claim
@@ -2461,6 +2473,56 @@ Docker daemon hay PostgreSQL thật):
   emergency preservation bao gồm `reset-db` và `abort-deploy` (instance purge vẫn gate bằng healthy checkpoint vì final
   bundle của nó phải kiểm tra functional được; `restore-instance` không có dữ liệu hiện tại cần bảo toàn, target của nó
   trống), và runner record không có journal đã có route acknowledgement.
+
+Kết quả và giới hạn của PF-A3.4 (Docker, Compose và PostgreSQL thật trong một container Linux generic cô lập; không
+chạy gì trên NAS, DSM, btrfs hay SMB; bằng chứng nằm trong `_claude_outputs/ops/PF-A3.4/`):
+
+- môi trường: một container `docker:28.5.1-dind` privileged (Docker Engine 28.5.1, Compose v2.40.3, PostgreSQL 16.15
+  từ `postgres:16` được pin theo digest, Alpine CPython 3.12 làm interpreter của pf) trên Docker Desktop for Windows;
+  Docker root và cây instance là các image ext4 sparse được mount qua loop device; mọi base image được pin theo digest
+  (`evidence/<run>/base-images.json`). Launcher đã cài `/usr/local/bin/pf` chạy ở terminal được script hóa với quyền
+  root của container. Container, volume, image và network riêng của daemon host được chứng minh không đổi bằng
+  inventory diff của mọi evidence run;
+- passed ở mức thật: LOOP-01/A3-T11 và LOOP-02/A3-T12 (các loop bắt buộc), LOOP-03 cùng A3-T03, LOOP-05 (không instance
+  nào khác thay đổi quanh mọi bước của alpha), LOOP-06 (phần Linux generic của A3-T10), LOOP-07/A3-T15 (cách ly
+  side-by-side được quan sát thật: internal network, không publish port, không có egress, không chia sẻ credential hay
+  job), A1-T11, A1-T12, A1-T14, A1-T13 trừ phần rootless, A2-T04 (registration và control-only upgrade không restart
+  container ứng dụng nào), A3-T06, A3-T07, A3-T08 và C-CONC-01 (writer chạy song song quanh capture và lúc dừng
+  service). Crash matrix thật (`CRASH_MATRIX.json`, row R01–R66 và boundary row B01–B34) đã ngắt các loại lifecycle
+  trước và sau các effect không đảo ngược được; mọi route đã chạy đều phục hồi với oracle dữ liệu và schema nguyên vẹn,
+  trừ các row nêu bên dưới. Ngõ cụt của R33 để instance ở trạng thái purged trong một run, nên mười một boundary row và
+  R43 của run đó không đạt được precondition (A3-T05 passed trừ R43);
+- lỗi mà các lần chạy thật tìm ra và slice này đã sửa (mỗi lỗi có regression test offline): bước kiểm tra tương thích
+  database từ chối tên extension `uuid-ossp` mà `postgres:16` liệt kê là available, nên mọi `rollback --restore-db` đều
+  lỗi (F-A34-01); archive globals của purge bundle truyền `-d postgres` cho `pg_dumpall`, mà libpq đọc như connection
+  string, nên mọi purge thật bị hủy sau capture (F-A34-02); purge bundle giữ lại mọi database của instance, và
+  `restore-instance` chuyển một database `pf_restore_*` hoặc `pf_migrate_*` còn sót được giữ lại sang nhánh
+  rollback/update, nên mọi lần thử đều kết thúc `plan-input-changed … (unreadable)` khi instance đã purge (F-A34-09, row
+  R33; được sửa sau các evidence run, nên lần chạy lại thật vẫn đang chờ);
+- finding còn mở, **cần thay đổi** (mỗi mục đều fail closed; không mục nào làm mất dữ liệu): không route nào của pf khởi
+  động container db của instance khi nó bị stop hoặc kill từ bên ngoài (`unless-stopped` không khởi động lại nó). Khi đó
+  `backup`, `update` và `rollback` từ chối với "The database container is not running.", còn `resume` forward của một
+  activation bị ngắt chỉ khởi động lại backend và lần nào cũng trượt health check, nên cách duy nhất để operator đi tiếp
+  là `docker start` container db bằng tay (F-A34-03; row R10 và R65). Các lần từ chối sau preflight chỉ đọc không hoàn
+  toàn không có tác dụng phụ: contract probe giữ lại image tag `*-inspect-*`/`*-observe-*`, chạy một probe container và
+  ghi lại `state/inspect-images.yaml`, và một `restore-instance` bị từ chối trên instance đã purge tạo thư mục `state/`
+  rỗng của nó (F-A34-04, F-A34-06; ngoài ra các lần từ chối Docker-storage của A3-T14 là đúng). Một link hoặc entry đặc
+  biệt trong workspace bị drift chỉ bị capture từ chối sau khi service đã dừng (F-A34-05, quan sát). `restore-instance`
+  lên một volume mới từng lỗi với "the database system is shutting down" hai giây sau khi container db mới báo healthy,
+  khớp với server khởi tạo tạm thời của image; `pf resume` đã hoàn tất nó (F-A34-07, R31). Verification checkpoint của
+  một purge từng lỗi vì `createdb` thoát với mã 1 trên một server healthy, và pf báo là "locale … is not available", che
+  mất lỗi thật; purge fail closed (F-A34-08, R29). `pg_dump` của `backup --emergency` là child chỉ đọc và không bao giờ
+  để lại runner record, nên acknowledgement của A12r2-F06 chỉ được chứng minh trên một runner record thật của `deploy`
+  build (R41; R66 blocked);
+- giới hạn đã khai báo: release source là test seam (một approved remote `file://` cục bộ với câu trả lời GitHub mô
+  phỏng; không liên hệ HTTPS hay GitHub); không có rootless daemon (phần rootless của A1-T13 blocked, PF-A5.1); launcher
+  chỉ chạy với quyền root của container; restart daemon không phải mất điện hay reboot host; lần dừng I8 ở lần rename
+  workspace đầu tiên quan sát được pf nằm giữa hai lần rename (R51), và một chỉnh sửa muộn qua file đang mở vẫn còn
+  (L6); OD-A33-06, OD-A33-07 và OD-A33-09 vẫn chờ owner phê duyệt, và hành vi đã ship được test nguyên trạng;
+- OD-A33-12 vẫn mở: khi db bị dừng, cả `resume` forward lẫn `rollback --restore-db` thay thế đều là ngõ cụt (R65); sau
+  khi db được khởi động bằng tay, `resume` forward hoàn tất và `pf_keep_*` được giữ lại chứa dữ liệu trước switch, nên
+  bằng chứng chỉ vào khoảng trống route F-A34-03 chứ không phải việc thiếu reverse switch;
+- không có gì ở đây là production-ready; các phần DSM/SMB (A3-T10, A1-T17; PF-A5.1) không đổi.
 
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,
 một runner, daemon binding, Compose envelope, exact inventory) và không còn route Compose catch-all;

@@ -2412,7 +2412,9 @@ PF-A1.3 limits (offline evidence only; the Docker-daemon and NAS host gates are 
 - the NAS Compose version is unverified; the envelope rules were calibrated on one real
   Compose v2 render (Docker Desktop CLI);
 - the rendered JSON is validated, not reused as the executed `-f` input;
-- the Compose container-marker labels used for ownership are not calibrated on a real daemon;
+- the Compose container-marker labels used for ownership are not calibrated on a real daemon *(superseded by PF-A3.4 on
+  Engine 28.5.1/Compose v2.40.3: pf's ownership inventory classified the real Compose containers, volumes and networks
+  by these labels in every run; see the PF-A3.4 block)*;
 - image coverage by image ID assumes a quiescent daemon between `image save` and the binding
   inventory.
 
@@ -2422,7 +2424,9 @@ PF-A1.4 adds these limits:
   counts as unattended;
 - no unattended operation, scheduled backup or release check included, runs on a pf-managed
   instance until a PF-A4.3 protected policy grant exists;
-- the Compose `run` one-off labels that `fail_closed` relies on are proven offline only;
+- the Compose `run` one-off labels that `fail_closed` relies on are proven offline only *(superseded by PF-A3.4 on
+  Engine 28.5.1/Compose v2.40.3: the real `com.docker.compose.oneoff` labels of pf's migration and contract one-offs
+  were observed, and no one-off outlived an interrupted run; see the PF-A3.4 block)*;
 - there is no managed route for an application CLI in the backend container.
 
 PF-A2.1 limits:
@@ -2465,8 +2469,9 @@ filesystem as root in a throwaway container; no DSM or SMB claim):
 
 PF-A3.1 limits (offline and filesystem evidence only; Docker and PostgreSQL are simulated):
 
-- no real Docker, Compose or PostgreSQL behaviour is claimed; the emergency-preservation case A3-T03 is blocked at
-  its required real Docker/PostgreSQL level (PF-A3.4);
+- no real Docker, Compose or PostgreSQL behaviour is claimed; the emergency-preservation case A3-T03 is blocked at its
+  required real Docker/PostgreSQL level (PF-A3.4) *(superseded by PF-A3.4 on Engine 28.5.1/Compose v2.40.3: A3-T03
+  passed at the real level)*;
 - *(superseded by PF-A3.3, see its limits below)* the instance purge was gated on a `data_restore_verified` record of
   the purge bundle's own payloads; since PF-A3.3 it is gated on a `functional_recovery_verified` record from an
   isolated topology (fake-daemon evidence only);
@@ -2482,14 +2487,17 @@ PF-A3.1 limits (offline and filesystem evidence only; Docker and PostgreSQL are 
 PF-A3.2 limits (offline, filesystem and installed-CLI evidence with a fake Docker daemon; nothing ran against DSM,
 btrfs, SMB, a real Docker daemon or PostgreSQL):
 
-- A3-T04 and A3-T05 are blocked at their real Docker/PostgreSQL level (PF-A3.4); A3-T10's DSM/btrfs/SMB part is
-  blocked (PF-A5.1); the installed-CLI restart cases run against a simulated application plane of the fake daemon
-  under a test-only release source (see `TEST_REPORT.md`);
+- A3-T04 and A3-T05 are blocked at their real Docker/PostgreSQL level (PF-A3.4) *(superseded by PF-A3.4 on Engine
+  28.5.1/Compose v2.40.3: A3-T04 and A3-T05 ran at the real level as the crash matrix, with the open findings of the
+  PF-A3.4 block)*; A3-T10's DSM/btrfs/SMB part is blocked (PF-A5.1); the installed-CLI restart cases run against a
+  simulated application plane of the fake daemon under a test-only release source (see `TEST_REPORT.md`);
 - a lost live-migration result with unchanged heads is never retried (`needs_operator`) until a profile declares
   transactional upgrades (PF-A4.1);
 - a SIGKILL between a child's start and its `children.json` record leaves only the daemon and database probes for
   that child; the database probe counts every client session, so a transient one refuses until a later `resume`;
-- workspace staging durability relies on `os.sync()` before the renames; power loss is not proven (PF-A3.4);
+- workspace staging durability relies on an fsync of every staged directory and file and of the generation
+  container before the renames (PF-A3.4: a global `os.sync()` never returned once an unrelated filesystem hung);
+  power loss is not proven;
 - an ACL-bearing workspace root, a mount-point workspace or an unsafe container ends updates in
   `workspace_sync_pending` until `--keep-workspace` or a fix;
 - `restore-instance` has no abandon once its data restore started; `backup --emergency` stays journal-less
@@ -2508,9 +2516,14 @@ PF-A3.3 limits (offline, filesystem and installed-CLI evidence with a fake Docke
 real Docker daemon or PostgreSQL):
 
 - A3-T06, A3-T07, A3-T08, A3-T15, A3-T16 and the Docker-storage part of A3-T14 are blocked at their real Docker/
-  PostgreSQL level until PF-A3.4; the filesystem part of A3-T14 uses the real `statvfs`;
+  PostgreSQL level until PF-A3.4 *(superseded by PF-A3.4 on Engine 28.5.1/Compose v2.40.3: A3-T06, A3-T07, A3-T08 and
+  A3-T15 passed at the real level; A3-T16 passed except R65 (F-A34-03); the Docker-storage part of A3-T14 refused
+  correctly, but its no-effect checks failed (F-A34-04, F-A34-06))*; the filesystem part of A3-T14 uses the real
+  `statvfs`;
 - isolation of the `pfverify-*`/`pfrecover-*` topologies is proven from the daemon's reported configuration only
-  (internal network, port bindings, restart policy, mounts); real network, port and egress behaviour is unobserved;
+  (internal network, port bindings, restart policy, mounts); real network, port and egress behaviour is unobserved
+  *(superseded by PF-A3.4 on Engine 28.5.1/Compose v2.40.3: LOOP-07 observed the internal network, no published port,
+  failed egress and unresolvable instance names from inside a real recovery target)*;
 - the application invariant oracle is `app.cli reconcile` of the deployed image; an image without it is recorded as
   `unavailable`, and the reconcile output itself is never stored;
 - owner decision, applied: the instance purge writes the registry tombstone `state: purged` and releases the project
@@ -2524,6 +2537,56 @@ real Docker daemon or PostgreSQL):
   emergency preservation covers `reset-db` and `abort-deploy` (the instance purge stays healthy-gated because its
   final bundle must be functionally verifiable; `restore-instance` has no current data to preserve, its target is
   empty), and runner records without a journal have the acknowledgement route.
+
+PF-A3.4 results and limits (real Docker, Compose and PostgreSQL in an isolated generic-Linux container; nothing ran on
+a NAS, DSM, btrfs or SMB; evidence in `_claude_outputs/ops/PF-A3.4/`):
+
+- environment: a privileged `docker:28.5.1-dind` container (Docker Engine 28.5.1, Compose v2.40.3, PostgreSQL 16.15
+  from `postgres:16` pinned by digest, Alpine CPython 3.12 as pf's interpreter) on Docker Desktop for Windows; the
+  Docker root and the instance tree were loop-mounted sparse ext4 images; every base image was pinned by digest
+  (`evidence/<run>/base-images.json`). The installed launcher `/usr/local/bin/pf` ran at a scripted terminal as
+  container root. The host daemon's own containers, volumes, images and networks were proven unchanged by an
+  inventory diff of every evidence run;
+- passed at the real level: LOOP-01/A3-T11 and LOOP-02/A3-T12 (the mandatory loops), LOOP-03 with A3-T03,
+  LOOP-05 (no other instance changed around any alpha step), LOOP-06 (the A3-T10 generic-Linux part), LOOP-07/A3-T15
+  (side-by-side isolation observed for real: internal network, no published port, no egress, no shared credentials or
+  jobs), A1-T11, A1-T12, A1-T14, A1-T13 apart from its rootless part, A2-T04 (registration and the control-only upgrade
+  restart no application container), A3-T06, A3-T07, A3-T08 and C-CONC-01 (concurrent writers around capture and
+  service stop). The real crash matrix (`CRASH_MATRIX.json`, rows R01–R66 and boundary rows B01–B34) interrupted the
+  lifecycle kinds before and after their irreversible effects; every route that ran recovered with intact data and
+  schema oracles, except the rows named below. The R33 dead end left the instance purged in one run, so eleven
+  boundary rows and R43 of that run could not reach their precondition (A3-T05 is passed except R43);
+- defects the real runs found and this slice fixed (each with an offline regression test): the database
+  compatibility check refused the extension name `uuid-ossp` that `postgres:16` lists as available, so every
+  `rollback --restore-db` failed (F-A34-01); the purge bundle's globals archive passed `-d postgres` to `pg_dumpall`,
+  which libpq reads as a connection string, so every real purge was cancelled after its capture (F-A34-02); a purge
+  bundle retains every database of the instance, and `restore-instance` routed a retained leftover `pf_restore_*` or
+  `pf_migrate_*` database to the rollback/update branch, so every attempt ended `plan-input-changed … (unreadable)`
+  with the instance purged (F-A34-09, row R33; fixed after the evidence runs, so its real re-run is pending);
+- open findings, **changes required** (each fails closed; none lost data): no pf route starts an instance's db container
+  that was stopped or killed from outside (`unless-stopped` does not restart it). `backup`, `update` and `rollback` then
+  refuse "The database container is not running.", and a forward `resume` of an interrupted activation restarts only the
+  backend and fails its health check every time, so the operator's only way on is a manual `docker start` of the db
+  container (F-A34-03; rows R10 and R65). Refusals after the read-only preflight are not effect-free: the contract probe
+  keeps `*-inspect-*`/`*-observe-*` image tags, runs a probe container and rewrites `state/inspect-images.yaml`, and a
+  refused `restore-instance` of a purged instance creates its empty `state/` directory (F-A34-04, F-A34-06; the A3-T14
+  Docker-storage refusals are otherwise correct). A link or special entry in a drifted workspace is refused only by the
+  capture after the services stopped (F-A34-05, observation). `restore-instance` onto a fresh volume once failed with
+  "the database system is shutting down" two seconds after the new db container reported healthy, consistent with the
+  image's temporary initialization server; `pf resume` completed it (F-A34-07, R31). A purge's checkpoint verification
+  once failed because `createdb` exited 1 on a healthy server, and pf reported it as "locale … is not available", which
+  hid the real error; the purge failed closed (F-A34-08, R29). The `backup --emergency` `pg_dump` is a read-only child
+  and never leaves a runner record, so the A12r2-F06 acknowledgement was proven on a real `deploy` build record only
+  (R41; R66 blocked);
+- declared limits: the release source is the test seam (a local `file://` approved remote with simulated GitHub
+  answers; no HTTPS or GitHub contact); no rootless daemon (A1-T13 rootless part blocked, PF-A5.1); the launcher ran
+  as container root only; a daemon restart is not a power loss or host reboot; an I8 stop at the first workspace
+  rename observed pf between the two renames (R51), and a late edit through an open file survived (L6); OD-A33-06,
+  OD-A33-07 and OD-A33-09 still await owner approval, and the shipped behaviour was tested as is;
+- OD-A33-12 stays open: with the db stopped, the forward resume and the superseding `rollback --restore-db` are both
+  dead ends (R65); once the db was started by hand the forward resume completed and the retained `pf_keep_*` held the
+  pre-switch data, so the evidence points at the F-A34-03 route gap rather than at a missing reverse switch;
+- nothing here is production-ready; the DSM/SMB parts (A3-T10, A1-T17; PF-A5.1) are unchanged.
 
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
 instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose

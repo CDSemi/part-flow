@@ -716,6 +716,41 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > `passed`; all stay `blocked` at their real Docker/PostgreSQL levels (PF-A3.4). Not production-ready; no NAS, DSM,
 > Docker daemon, running stack or development database was contacted.
 
+> **PF-A3.4 addendum (2026-10-09) — real Docker/Compose/PostgreSQL integration and lifecycle-loop audit.** Uncommitted
+> on top of `7b24d10` (OPS paths only; the PF-A3.3 completion delta above was committed as `181a806`, so its
+> "uncommitted" wording is historical). *Environment:* a privileged `docker:28.5.1-dind` container on Docker Desktop for
+> Windows (inner Engine 28.5.1, Compose v2.40.3, PostgreSQL 16.15, Alpine CPython 3.12, loop-mounted sparse ext4 for the
+> Docker root and the instance tree, base images pinned by digest), driven by `deploy/synology/integration/`
+> (`run-isolated.sh`, `dind-entry.sh`, `host_inventory.py`, `harness/`); the installed launcher `/usr/local/bin/pf` ran
+> at a scripted pty as container root; the release source is the fixture seam (local `file://` remote). *Evidence runs*
+> (one equality set): `20261008T230113Z-8f17ef74` (setup, L1, L2, L7, L3, cases, L6, ctl), `20261008T230114Z-b3f4216e`,
+> `20261008T230115Z-89c777fa`, `20261008T230117Z-d050aee3` (setup, L1–L3, L7 and the L4 row groups); every host
+> inventory diff is clean; package `_claude_outputs/ops/PF-A3.4/`. *Results:* LOOP-01 (A3-T11) and LOOP-02 (A3-T12)
+> passed in all four runs; LOOP-03/A3-T03, LOOP-05, LOOP-06, LOOP-07/A3-T15, A1-T11, A1-T12, A1-T14, A2-T04, A3-T06,
+> A3-T07, A3-T08 and C-CONC-01 passed; A1-T13 passed except its rootless part (blocked); the real crash matrix ran all
+> 66 R rows, 23 boundary rows and C-A3-16 (90 records): 71 passed, R10 and R65 failed (F-A34-03), R09 blocked (an update
+> never writes phase `finalizing`), R29, R31 and R33 blocked by product failures before their windows (F-A34-08,
+> F-A34-07, F-A34-09), R43 and B01–B12 blocked because the R33 dead end left the instance purged, R66 blocked; the grid
+> has no gap, and 13 phase-table entries lost their rows to that cascade. *Fixed product defects (regression first):*
+> F-A34-01 the available-extension grammar refused `uuid-ossp` (every real `rollback --restore-db` failed;
+> `test_artifacts.Postgres.test_pg10`); F-A34-02 `pg_dumpall -d postgres` is a libpq connection string (every real purge
+> cancelled; `test_integrated.PurgeIntegrated.test_pz16`, fake calibrated); F-A34-09 `restore-instance` routed a
+> retained `pf_restore_*`/`pf_migrate_*` store to the rollback/update branch (`plan-input-changed`, dead end with the
+> instance purged; `test_integrated.RestoreTarget.test_rx10`, failed with the base module) — fixed after the evidence
+> runs, its real re-run is pending. *Open (changes required):* F-A34-03 (no route starts a db container stopped from
+> outside: R10, R65; OD-A33-12 stays open), F-A34-04/F-A34-06 (refusals not effect-free: C-A3-14), F-A34-05
+> (observation, C-A1-14 (c)), F-A34-07 (first-start readiness race, R31), F-A34-08 (masked `createdb` failure, R29);
+> A12r2-F06: R41 proven, R66 blocked (a read-only `pg_dump` never has a runner record). *Offline:* D6
+> `tests/test_integration_harness.py` (28 tests) OK on `python:3.12` and `python:3.9`; `ast.parse(...,
+> feature_version=(3, 9))` and pyflakes clean on every changed or new Python file; the RX-10 regression errors with the
+> base module and passes after the fix. F-A34-10: W1's durability barrier was a global `os.sync()`, which never
+> returned once an unrelated filesystem hung (after the evidence runs the Docker Desktop VM's internal FUSE mount
+> `/run/jfs` did, and every update, rollback and suite run stopped at W1); it is now an fsync of every staged directory
+> and file and of the generation container (`test_artifacts.Emergency.test_ep10b`). The canonical suite on the final
+> bytes: 1088 tests OK, 1 skipped, on `python:3.12` and `python:3.9`. The real re-run of R33 and its loops with the
+> fixed bytes is pending. **Gate: CHANGES_REQUIRED.** Not production-ready; no NAS, DSM, SMB, real Synology host,
+> the running `partflow` stack or the development database was contacted.
+
 ## Executed checks
 
 | Check | Actual result |

@@ -127,6 +127,9 @@ ROLES_SQL = ("SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin,
 AVAILABLE_EXTENSIONS_SQL = "SELECT name FROM pg_available_extensions ORDER BY name;"
 ROW_NAME_RE = re.compile(r"[A-Za-z0-9_]+\.[A-Za-z0-9_]+\Z")
 PG_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
+# PF-A3.4: a name in pg_available_extensions (the server's extension control files) may carry a hyphen: postgres:16
+# ships ``uuid-ossp``. Only the membership check of a restore candidate reads these names; no record stores them.
+AVAILABLE_EXTENSION_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,62}\Z")
 # Compose project names (pf-config.json grammar); --project is validated by it before any selection.
 PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}\Z")
 # `pf logs --since/--until`: a relative duration or an RFC 3339 date/time; nothing else reaches Compose.
@@ -1342,6 +1345,35 @@ def copy_fresh(source, destination):
             os.close(target_parent)
     finally:
         os.close(source_parent)
+
+
+def fsync_tree_at(parent_fd, name):
+    """PF-A3.4: the durability barrier of a staged tree (W1). Every directory and regular file below ``name`` is
+    fsynced descriptor-relative and no-follow (a directory after its entries); the caller fsyncs ``parent_fd``. This
+    replaces a global sync(2), which also waits on every unrelated filesystem of the host and never returned once one
+    of them hung (PF-A3.4 real run). copy_fresh stages only directories and regular files: anything else, or an entry
+    replaced while it was opened, raises Failure before any rename."""
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISDIR(info.st_mode):
+        flags = _COPY_DIR_FLAGS
+    elif stat.S_ISREG(info.st_mode):
+        flags = _COPY_FILE_FLAGS
+    else:
+        raise Failure(f"workspace-stage-mismatch: the staged entry {name} is neither a directory nor a regular file; "
+                      "the workspace was not changed.")
+    fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) \
+                or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(info.st_mode):
+            raise Failure(f"workspace-stage-mismatch: the staged entry {name} was replaced while it was flushed; "
+                          "the workspace was not changed.")
+        if stat.S_ISDIR(info.st_mode):
+            for child in sorted(os.listdir(fd)):
+                fsync_tree_at(fd, child)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def permission_confirm(phrase, summary):
@@ -6033,7 +6065,7 @@ class Controller:
         for line in self.sql("postgres", AVAILABLE_EXTENSIONS_SQL).splitlines():
             if not line:
                 continue
-            if not PG_IDENTIFIER_RE.fullmatch(line):
+            if not AVAILABLE_EXTENSION_RE.fullmatch(line):
                 raise Failure("Unexpected PostgreSQL inventory output.")
             names.add(line)
         return names
@@ -8757,8 +8789,9 @@ class Controller:
         if digest != expected:
             raise Failure(f"workspace-stage-mismatch: the staged workspace tree {digest[:12]} is not the selected "
                           f"tree {expected[:12]}; the workspace was not changed.")
-        os.sync()
         with self.workspace_fds() as (parent_fd, container_fd):
+            fsync_tree_at(container_fd, stage)
+            os.fsync(container_fd)
             new = pf_instance.identity_at(container_fd, stage)
         step.evidence = f"old:{self.identity_text(old)} new:{self.identity_text(new)}"
 
@@ -10290,11 +10323,14 @@ class Controller:
         elif etype == "database-alter":
             self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS false;", mutation=True)
         elif etype == "database-restore":
-            if name.startswith("pf_migrate_"):
+            # PF-A3.4 (F-A34-09): a restore-instance restores every retained store from its bundle, including a
+            # leftover pf_migrate_*/pf_restore_* candidate the purge captured; the prefixes name an update's
+            # rehearsal or a rollback's candidate only in those kinds' own plans.
+            if kind != "restore-instance" and name.startswith("pf_migrate_"):
                 checkpoint = ctx.get("checkpoint") or self.verify_snapshot(
                     self.precondition(self.effects_of(type="capture")[0], "bundle"))
                 self.restore_into(name, checkpoint.folder / checkpoint.active_store["dump"])
-            elif name.startswith("pf_restore_"):
+            elif kind != "restore-instance" and name.startswith("pf_restore_"):
                 self.restore_candidate(self.op_selected(), name)
             else:
                 recovery = self.op_recovery()
@@ -12405,7 +12441,8 @@ class Controller:
 
         globals_path = folder / "postgres-globals.sql"
         with globals_path.open("xb") as output:
-            self.database_program("pg_dumpall", "-d", "postgres", "--globals-only", output=output)
+            # -l names the database to connect to; -d would be a libpq connection string (PF-A3.4 real run).
+            self.database_program("pg_dumpall", "-l", "postgres", "--globals-only", output=output)
         if not globals_path.stat().st_size:
             raise Failure("PostgreSQL globals archive is empty; purge recovery is incomplete.")
         payloads.append(self.file_payload(folder, "postgres-globals.sql", "postgres_globals", sensitive=True))

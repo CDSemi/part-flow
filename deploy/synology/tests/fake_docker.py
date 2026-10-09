@@ -914,6 +914,11 @@ def plane_compose(state, verb, words, *, project, directory, files, env, plane=N
             return Result(1, "", f'dropdb: error: database "{name}" does not exist\n')
         return Result(0)
     if program == "pg_dumpall":
+        # PF-A3.4 calibration (real postgres:16.15): -d/--dbname is a libpq connection string, never a bare name.
+        for flag in ("-d", "--dbname"):
+            value = option(flag)
+            if value is not None and "=" not in value and not value.startswith(("postgres://", "postgresql://")):
+                return Result(1, "", f'pg_dumpall: error: missing "=" after "{value}" in connection info string\n')
         return Result(0, "-- fake globals\n")
     return Result(0, state.get("compose", {}).get("exec_output", ""))
 

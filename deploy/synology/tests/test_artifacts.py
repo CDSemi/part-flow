@@ -1605,6 +1605,49 @@ class Emergency(Base):
         self.assertIn("ERROR: preservation-failed: ", self.last_error)
         self.assertEqual(events.order, [])
 
+    def test_ep10b_w1_flushes_the_staged_tree_without_a_global_sync(self):
+        """PF-A3.4 regression: the W1 barrier was a global sync(2), which never returned once an unrelated filesystem
+        of the host hung (the Docker Desktop VM's /run/jfs FUSE mount); it now fsyncs every staged directory and file
+        and the generation container, and refuses an entry that is neither."""
+        target = self.checkpoint()
+        flushed, staged, window = set(), set(), []
+        real_fsync, real_stage = os.fsync, self.c.w1_stage
+
+        def record(fd):
+            if window:
+                info = os.fstat(fd)
+                flushed.add((info.st_dev, info.st_ino))
+            return real_fsync(fd)
+
+        def stage(step):
+            window.append(True)
+            try:
+                result = real_stage(step)
+            finally:
+                window.clear()
+            container = pf_instance.generation_container(self.context)
+            root = container / ("stage-" + self.c.plan["workspace"]["generation_id"])
+            for path in [container, root] + sorted(root.rglob("*")):
+                info = os.lstat(str(path))
+                staged.add((info.st_dev, info.st_ino))
+            return result
+
+        with mock.patch.object(os, "sync", side_effect=AssertionError("global sync(2)")), \
+                mock.patch.object(os, "fsync", side_effect=record), \
+                mock.patch.object(self.c, "w1_stage", side_effect=stage):
+            self.assertEqual(self.invoke(["rollback", target.bundle_id]), 0, self.last_error)
+        self.assertGreater(len(staged), 2)
+        self.assertEqual(staged - flushed, set())
+        with tempfile.TemporaryDirectory() as temp:
+            os.mkdir(os.path.join(temp, "stage"))
+            os.symlink("/etc/passwd", os.path.join(temp, "stage", "link"))
+            fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(pf.Failure, "^workspace-stage-mismatch: the staged entry link is neither"):
+                    pf.fsync_tree_at(fd, "stage")
+            finally:
+                os.close(fd)
+
     def test_ep11_a_candidate_image_under_the_old_pointer_is_a_deployment_image_mismatch(self):
         deployed = self.deploy()
         target = self.checkpoint()
@@ -1884,6 +1927,22 @@ class Postgres(Base):
             self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 1)
         self.assertIn(f"ERROR: checkpoint-incompatible: {target.bundle_id}: row counts differ (1/1 vs 1/7). The "
                       "candidate database was dropped; the current database is unchanged.", self.last_error)
+
+    def test_pg10_the_real_postgres16_extension_catalog_is_accepted(self):
+        """PF-A3.4 D5 regression (real LOOP-01 step 5, Engine 28.5.1, postgres:16.15): pg_available_extensions lists
+        ``uuid-ossp``; the restore compatibility check refused every ``rollback --restore-db`` with "Unexpected
+        PostgreSQL inventory output." before the candidate was created."""
+        target = self.checkpoint()
+        catalog = ["amcheck", "btree_gin", "pg_trgm", "pgcrypto", "plpgsql", "uuid-ossp", "xml2"]
+        with self.candidate_answers(available=catalog):
+            self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 0, self.last_error)
+        self.assertEqual(self.c.dbs["partflow_staging"]["rows"], ["old-record"])
+        with self.candidate_answers(available=catalog), self.c.lock():
+            self.assertIn("uuid-ossp", self.c.available_extensions())
+        for garbage in (["plpgsql", "uuid ossp"], ["plpgsql", "-leading"], ["plpgsql", "a" * 64], ["x|y"]):
+            with self.candidate_answers(available=garbage), self.c.lock():
+                with self.assertRaisesRegex(pf.Failure, "^Unexpected PostgreSQL inventory output"):
+                    self.c.available_extensions()
 
     def test_pg9_createdb_carries_the_store_locale_and_legacy_uses_defaults(self):
         calls = len(self.c.calls)
