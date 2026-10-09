@@ -651,6 +651,20 @@ class PurgeIntegrated(Plane):
         self.assertNotIn("-d", calls[0])
         self.assertIn("--globals-only", calls[0])
 
+    def test_pz17_a_failed_verification_createdb_reports_the_server_answer(self):
+        """PF-A3.4 D5 regression (real row R29, F-A34-08): a checkpoint verification's ``createdb`` exited 1 on a
+        healthy server that has the store's locale, and every createdb failure with a locale was reported as "locale
+        … is not available on this server", which hid the real error. The detail now carries the server's answer."""
+        answer = 'createdb: error: database creation failed: ERROR:  simulated server answer'
+        self.update_state(plane=dict(self.state()["plane"], createdb_failure={"prefix": "pf_verify_",
+                                                                             "stderr": answer + "\n"}))
+        code, out, err, _ = self.purge()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"createdb failed: {answer} (requested locale C.UTF-8/C.UTF-8)", err)
+        self.assertNotIn("is not available on this server", err)
+        self.assertEqual(self.operation("purge")[2]["phase"], "cancelled")
+        self.assertTrue([item for item in self.state()["volumes"] if item["name"] == self.project + "_postgres_data"])
+
     def test_pz1_fv1_full_instance_purge_with_functional_verification_and_tombstone(self):
         record_before = self.context.record_path.read_bytes()
         code, out, err, phrases = self.purge()
@@ -1516,6 +1530,47 @@ class RestoreTarget(Plane):
         self.assertNotIn("plan-input-changed", err)
         self.assertEqual(self.operation("restore-instance")[2]["phase"], "completed")
         self.assertTrue(set(leftovers) <= set(self.state()["plane"]["databases"]))
+
+    def test_rx11_a_fresh_volume_waits_for_the_final_server_before_the_first_database_step(self):
+        """PF-A3.4 D5 regression (real row R31, F-A34-07, postgres:16.15): on a fresh volume the image's temporary
+        initialization server passed the health check (Unix socket) and was shutting down two seconds later; the
+        restore's first database step met "the database system is shutting down" and stopped at restoring-data. The
+        readiness wait now asks the final server over TCP (the temporary one never listens on TCP)."""
+        bundle = self.purged()
+        self.update_state(plane=dict(self.state()["plane"], init_server_answers=1))
+        self.fake.clear_calls()
+        with mock.patch.object(pf.time, "sleep"):
+            code, out, err, _ = self.main("restore-instance", bundle)
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("shutting down", err)
+        self.assertEqual(self.operation("restore-instance")[2]["phase"], "completed")
+        calls = self.fake.argvs()
+        up = next(index for index, argv in enumerate(calls) if argv[:1] == ["compose"] and "up" in argv
+                  and argv[-1] == "db")
+        probes = [index for index, argv in enumerate(calls) if index > up and "pg_isready" in argv and "-h" in argv]
+        first = next(index for index, argv in enumerate(calls) if index > up and argv[:1] == ["compose"]
+                     and "exec" in argv and "pg_isready" not in argv)
+        self.assertGreaterEqual(len(probes), 2)  # the first probe met the initialization server
+        self.assertLess(probes[-1], first)
+
+    def test_rx12_a_refused_restore_of_a_purged_instance_leaves_no_state_directory(self):
+        """PF-A3.4 D5 regression (real C-A3-14 (b), F-A34-06): a refused restore-instance of a purged instance created
+        the instance's empty private state/ before refusing; a refusal now leaves the tree as it found it."""
+        bundle = self.purged()
+        self.assertFalse(os.path.lexists(str(self.context.state_dir)))
+        self.rewrite(bundle, lambda m: m["source_instance"].update(instance_id="00000000-0000-4000-8000-0000000000aa"))
+        code, out, err, phrases = self.main("restore-instance", bundle)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("restore-target-mismatch:", err)
+        self.assertFalse(os.path.lexists(str(self.context.state_dir)))
+        # A state directory that holds anything is never removed.
+        os.mkdir(str(self.context.state_dir), 0o700)
+        os.chmod(str(self.context.state_dir), 0o700)
+        (self.context.state_dir / "keep").write_text("x")
+        os.chmod(str(self.context.state_dir / "keep"), 0o600)
+        code, out, err, phrases = self.main("restore-instance", bundle)
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue((self.context.state_dir / "keep").is_file())
 
     def test_rx2_rx8_another_instance_bundle_is_refused_before_any_confirmation(self):
         bundle = self.purged()
@@ -3153,15 +3208,18 @@ class AbortDeploy(Plane):
         self.assertFalse([item for item in self.state()["volumes"] if item["name"] == self.project + "_postgres_data"])
 
     def test_ad2_an_unreachable_database_is_refused_before_the_confirmation(self):
+        # PF-A3.4 (F-A34-03): a stopped db container is started by the route; unreachable means it cannot start.
         self.deploy(phase="activating", unknown="e0006")
         state = self.state()
         for item in state["containers"]:
             if item["labels"].get(pf_docker.COMPOSE_SERVICE_LABEL) == "db":
                 item["status"] = "exited"
+        state["plane"]["start_error"] = "Error response from daemon: simulated: the db container cannot start"
         self.fake.write_state(state)
         code, out, err, phrases = self.main("abort-deploy")
         self.assertEqual(code, 1, out + err)
         self.assertIn("preservation-failed:", err)
+        self.assertTrue([argv for argv in self.fake.argvs() if argv[:1] == ["compose"] and argv[-2:] == ["start", "db"]])
         self.assertEqual(phrases, [])
         self.assertEqual(pfx.operations_of(self.context, "abort-deploy"), [])
 
@@ -3200,6 +3258,125 @@ class AbortDeploy(Plane):
 
 
 
+class StoppedDatabase(Plane):
+    """PF-A3.4 D5 regressions for F-A34-03 (real rows R10 and R65, Engine 28.5.1): a db container stopped or killed from
+    outside is not restarted by ``unless-stopped``; every route that needs the database starts the instance's own
+    existing db container (``compose start``, never a create), so no state is left without a working route (RO-13)."""
+
+    def instance(self, slug, project):
+        # A short health bound: before the fix a resumed activation waited for a backend that never became healthy.
+        paths = pfx.data_home(self.base / slug, project=project, group=GROUP)
+        config = paths["configuration"] / "pf-config.json"
+        config.write_text(json.dumps(dict(json.loads(config.read_text()), minimum_free_mb=1,
+                                          health_timeout_seconds=4)) + "\n")
+        context = pfx.register(self.layout, slug, paths, project=project)
+        return context, paths
+
+    def db_containers(self, state=None):
+        state = state or self.state()
+        return [item for item in state["containers"]
+                if item["labels"].get(pf_docker.COMPOSE_SERVICE_LABEL) == "db"
+                and item["labels"].get(pf_docker.COMPOSE_PROJECT_LABEL) == self.project]
+
+    def stop_db(self):
+        state = self.state()
+        for item in self.db_containers(state):
+            item["status"] = "exited"
+        self.fake.write_state(state)
+
+    def db_calls(self, verb):
+        return [argv for argv in self.fake.argvs() if argv[:1] == ["compose"] and verb in argv and argv[-1] == "db"]
+
+    def test_sd1_r10_the_next_backup_starts_a_db_stopped_from_outside(self):
+        """R10: a ``docker kill`` of the db during a backup's ``pg_dump`` closes it failed_preserved; the next
+        ``pf backup`` refused "The database container is not running." and pf status named no route (dead end)."""
+        self.stop_db()
+        self.fake.clear_calls()
+        code, out, err, phrases = self.main("backup")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("note: db-started: the database container of this instance was stopped", out)
+        self.assertEqual(self.operation("backup")[2]["phase"], "completed")
+        self.assertEqual(len(self.db_calls("start")), 1)
+        self.assertEqual(self.db_calls("up"), [])  # an existing container is started, never recreated
+        self.assertEqual({item["status"] for item in self.db_containers()}, {"running"})
+        # The readiness wait asked the final server over TCP before the first database step.
+        calls = self.fake.argvs()
+        start = calls.index(self.db_calls("start")[0])
+        ready = next(index for index, argv in enumerate(calls) if "pg_isready" in argv and "-h" in argv)
+        first_sql = next(index for index, argv in enumerate(calls) if index > start and "psql" in argv)
+        self.assertLess(start, ready)
+        self.assertLess(ready, first_sql)
+
+    def test_sd2_a_missing_db_container_is_never_created_by_the_start(self):
+        state = self.state()
+        removed = self.db_containers(state)
+        state["containers"] = [item for item in state["containers"] if item not in removed]
+        self.fake.write_state(state)
+        volumes = copy.deepcopy(state["volumes"])
+        self.fake.clear_calls()
+        code, out, err, phrases = self.main("backup")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("Expected exactly one existing db container", err)
+        self.assertEqual((self.db_calls("start"), self.db_calls("up")), ([], []))
+        self.assertEqual(self.state()["volumes"], volumes)
+        self.assertEqual(self.db_containers(), [])
+
+    def interrupted_switch(self):
+        """R65's precondition on the plane: an operation whose database switch completed, interrupted at its backend
+        start; then the db container is stopped from outside. reset-db runs the same switch and activation effects
+        (``activation_specs``, ``activate_backend``) as rollback --restore-db; the superseding rollback itself is
+        test_artifacts EP-16."""
+        def crash(effect_id, point):
+            found = pfx.operations_of(self.context, "reset-db")
+            effect = next((item for item in found[-1][1]["effects"] if item["effect_id"] == effect_id),
+                          None) if found else None
+            if point == "after-intent" and effect is not None and effect["target"].startswith("service:backend:"):
+                raise pf.SimulatedCrash("after-intent " + effect_id)
+
+        with self.crashing(crash):
+            with self.assertRaises(pf.SimulatedCrash):
+                self.main("reset-db")
+        op, plan, journal = self.operation("reset-db")
+        switch = next(effect for effect in plan["effects"] if effect["type"] == "database-switch")
+        self.assertEqual(pf_config.effect_state(journal, switch["effect_id"]), "complete")
+        self.assertEqual(journal["phase"], "activating")
+        self.stop_db()
+        self.fake.clear_calls()
+        return op
+
+    def renames(self):
+        return [argv for argv in self.fake.argvs() if any(str(word).startswith("BEGIN;") and "RENAME TO" in str(word)
+                                                          for word in argv)]
+
+    def test_sd3_r65_a_forward_resume_of_the_activation_starts_the_stopped_db(self):
+        """R65 (OD-A33-12): the forward resume re-ran ``service:backend:start`` with ``--no-deps``; the backend never
+        became healthy without its database, every time."""
+        op = self.interrupted_switch()
+        code, out, err, _ = self.main("status")
+        self.assertIn(f"pf --instance staging resume --operation {op}", out)
+        code, out, err, _ = self.main("resume")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.operation("reset-db")[2]["phase"], "completed")
+        calls = self.fake.argvs()
+        start = calls.index(self.db_calls("start")[0])
+        backend = next(index for index, argv in enumerate(calls) if argv[:1] == ["compose"] and "up" in argv
+                       and argv[-1] == "backend")
+        self.assertLess(start, backend)
+        self.assertEqual(self.renames(), [])  # the completed switch is never repeated
+        databases = self.state()["plane"]["databases"]
+        self.assertEqual(len([name for name in databases if name.startswith("pf_keep_")]), 1)
+
+    def test_sd4_r65_the_emergency_backup_route_starts_the_stopped_db(self):
+        """R65: ``backup --emergency``, a route pf status offers next to the interrupted operation, needs the database
+        as well and refused "The database container is not running."."""
+        self.interrupted_switch()
+        code, out, err, phrases = self.main("backup", "--emergency")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(phrases, ["EMERGENCY BACKUP " + self.project])
+        self.assertEqual(len(self.db_calls("start")), 1)
+        self.assertEqual(self.operation("reset-db")[2]["phase"], "activating")  # unchanged; resume stays legal
+
+
 class CapacityIntegrated(Plane):
     """CP-2 (purge row), CP-3, CP-6, CP-7: the Docker root and the real statvfs."""
 
@@ -3235,6 +3412,31 @@ class CapacityIntegrated(Plane):
             image["size"] = 1 << 20
         self.fake.write_state(state)
         self.assertGreaterEqual(controller.purge_image_bytes() - small, 3 << 20)  # backend, frontend, db at least
+
+    def test_cp8_a_capacity_refusal_runs_no_contract_probe(self):
+        """PF-A3.4 D5 regression (real C-A3-14 (a), F-A34-04): the capacity refusals of purge and backup came after
+        the contract probe, which tags the running images, runs a probe container and rewrites
+        state/inspect-images.yaml (purge also wrote inventory-preliminary.json): a refused command was not effect-free.
+        The read-only capacity refusal now comes first."""
+        def measure(controller, path, role):
+            return (2, 1) if role == "docker-root" else (1, 1 << 50)  # only the Docker root is short
+
+        inspect = self.context.state_dir / "inspect-images.yaml"
+        for arguments in (("purge", "--keep-backups"), ("backup",)):
+            with self.subTest(arguments[0]):
+                before = inspect.read_bytes() if inspect.exists() else None
+                images = copy.deepcopy(self.state()["images"])
+                self.fake.clear_calls()
+                with mock.patch.object(pf.Controller, "measure", measure):
+                    code, out, err, phrases = self.main(*arguments)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("capacity-insufficient:", err)
+                calls = self.fake.argvs()
+                self.assertEqual([argv for argv in calls if argv[:1] == ["tag"]], [])
+                self.assertEqual([argv for argv in calls if argv[:1] == ["compose"] and "run" in argv], [])
+                self.assertEqual(self.state()["images"], images)
+                self.assertEqual(inspect.read_bytes() if inspect.exists() else None, before)
+                self.assertEqual(list(self.context.operations_dir.rglob("inventory-preliminary.json")), [])
 
     CP2_TABLE = {
         "backup": {("capturing", "backups"), ("verifying", "docker-root")},

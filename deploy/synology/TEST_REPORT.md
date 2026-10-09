@@ -751,6 +751,26 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > fixed bytes is pending. **Gate: CHANGES_REQUIRED.** Not production-ready; no NAS, DSM, SMB, real Synology host,
 > the running `partflow` stack or the development database was contacted.
 
+> **PF-A3.4 fix-round addendum (2026-10-09).** Uncommitted on top of `182b265` (OPS paths only). The open product
+> findings of the real runs are fixed with offline regressions that fail on the `182b265` bytes and pass after:
+> F-A34-03 (R10, R65: every route that needs the database starts the instance's own stopped db container with
+> `compose start db`, never a create, and the resumed activation does so before its `--no-deps` backend start;
+> `test_integrated.StoppedDatabase.test_sd1`/`sd3`/`sd4`, `test_artifacts.Emergency.test_ep16`, guard `test_sd2`);
+> F-A34-07 (R31: the db readiness wait also requires TCP `pg_isready` on 127.0.0.1, which the image's temporary
+> initialization server never answers; `RestoreTarget.test_rx11`); F-A34-08 (R29: a failed verification `createdb`
+> reports the server's answer instead of an assumed missing locale; `PurgeIntegrated.test_pz17`; root cause unproven);
+> F-A34-04 observed part (C-A3-14 (a): backup and purge refuse on capacity before the contract probe;
+> `CapacityIntegrated.test_cp8`; refusals after the probe still keep its tags); F-A34-06 (C-A3-14 (b): a command that
+> wrote no runtime state leaves no empty `state/`; `RestoreTarget.test_rx12`); F-A34-05 (C-A1-14 (c): a link or special
+> entry of a drifted workspace is refused in the preflight, `workspace-unsupported-entry`; EP-12 rewritten). Base-bytes
+> run: `D:/.claude-tmp/part-flow/ops/PF-A3.4/logs-fix/regressions-base-py312.log` (11 failures over 10 tests; the guard
+> passes). Correction to the PF-A3.4 addendum above: its "1088 tests OK … on `python:3.12` and `python:3.9`" is backed
+> by a complete log for `python:3.9` only (`logs/PF-A3.4-gates-3-py39.log`); the `python:3.12` log of that run has no
+> result line. *Canonical suite on the fix-round bytes:* 1097 tests OK, 1 skipped (RO-14), on `python:3.12` (2311.5 s) and `python:3.9` (2306.8 s), exit 0 (logs `D:/.claude-tmp/part-flow/ops/PF-A3.4/logs-fix/gates-4-py312.log`, `gates-4-py39.log`, copied to the package's `evidence/offline/`). `ast.parse(..., feature_version=(3, 9))` and
+> pyflakes are clean on every changed Python file. The real re-run of R10, R29, R31, R33 and R65 and their loops is
+> **pending** a Docker Desktop restart (an owner action: the VM's global `sync()` still hangs). **Gate:
+> CHANGES_REQUIRED** (unchanged until that re-run). Not production-ready.
+
 ## Executed checks
 
 | Check | Actual result |

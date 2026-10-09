@@ -1983,6 +1983,9 @@ class StaticScan(unittest.TestCase):
             # `cleanup --apply` (descriptor-relative), all inside the operation's lock.
             ("os.unlink", "Controller.discard_topology_files"), ("os.unlink", "Controller.teardown_topology"),
             ("os.unlink", "Controller.cleanup_delete"),
+            # PF-A3.4 (F-A34-06): the lock removes the private state/ directory it created itself when it is still
+            # empty at the end of the command (rmdir: an empty directory only).
+            ("os.rmdir", "Controller.lock"),
         })
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Controller")

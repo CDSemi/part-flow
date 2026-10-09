@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2.5
 
 > **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
-> Baseline đồng bộ: package revision PF-A3.4 (chưa commit, trên `7b24d10`).
+> Baseline đồng bộ: package revision PF-A3.4 fix round (chưa commit, trên `182b265`).
 >
 > Version: **2.5.0**
 > Prepared: **2026-09-11**
@@ -2095,6 +2095,11 @@ Refusal trước mọi tác động kết thúc bằng `Nothing was changed.`; r
   giờ tiếp tục khi thiếu workspace bị lệch, thứ mà một lần thay source sau đó sẽ xóa mất. Chuyển các file đó ra khỏi
   repository workspace rồi chạy lại; trong lúc đó `pf --instance <slug> backup --emergency` giữ database và ghi
   workspace là excluded.
+- `workspace-unsupported-entry` (PF-A3.4): workspace có thể sửa khác deployed source và chứa symbolic link hoặc
+  special file. Mọi capture của `pf backup`, `update`, `reset-db`, `purge` và `rollback` đều từ chối entry như vậy, nên
+  các lệnh này từ chối ngay ở preflight, trước mọi xác nhận hay pause (ứng dụng vẫn chạy). Chuyển entry đó ra khỏi
+  repository workspace rồi chạy lại; trong lúc đó `pf --instance <slug> backup --emergency` giữ database và ghi entry
+  là excluded.
 - `source-manifest-mismatch`: source đã extract khác source manifest đã ghi; dùng checkpoint khác.
 - `checkpoint-not-rollback-target`: checkpoint được chọn là emergency hay partial capture. Restore data của nó thủ
   công hoặc export từ nó; chọn healthy checkpoint cho `rollback`.
@@ -2174,6 +2179,14 @@ Các code:
   --acknowledge` chỉ one-off container của instance và session trên các database mà record nêu được tính (mục 15). `effect-probe-unavailable` — có process
   đã ghi nhận nhưng không đọc được `/proc` hoặc boot ID ở đây; không quyết định gì khi thiếu probe đó.
 - `database-unavailable` — `resume` không khởi động được database service để quan sát một effect; operation không đổi.
+- `note: db-started` (PF-A3.4) — container db của instance đã bị stop hoặc kill từ bên ngoài (stop hay kill thủ công
+  làm `unless-stopped` không còn tác dụng). Mọi route cần database (`backup`, `backup --emergency`, `update`,
+  `rollback`, `reset-db`, `purge`, `abort-deploy`, và `resume` trước khi khởi động lại backend) tự khởi động chính
+  container có sẵn đó (`compose start db`: không service nào khác, không bao giờ tạo container hay volume mới) và chờ
+  đến khi server cuối cùng nhận kết nối. Với `update`, `rollback`, `reset-db`, `purge`, `abort-deploy` và
+  `backup --emergency`, việc khởi động diễn ra trước xác nhận vì plan của chúng đọc database đang chạy; nó không đổi dữ
+  liệu nào. Khi container không khởi động được, route bị từ chối và không có gì khác thay đổi; container db bị thiếu
+  không bao giờ được tạo lại.
 - `plan-authority-changed` — instance record, policy, control release, profile hoặc daemon đã đổi sau khi duyệt; khôi
   phục trạng thái đã duyệt hoặc nhờ administrator review. `plan-input-changed` — một input đã đóng băng (bundle,
   checkpoint, `app.env` hoặc `admin-config.json` đã đóng băng, deployment đã stage) đã thay đổi; khôi phục nó đúng từng
@@ -2499,29 +2512,42 @@ chạy gì trên NAS, DSM, btrfs hay SMB; bằng chứng nằm trong `_claude_ou
   `restore-instance` chuyển một database `pf_restore_*` hoặc `pf_migrate_*` còn sót được giữ lại sang nhánh
   rollback/update, nên mọi lần thử đều kết thúc `plan-input-changed … (unreadable)` khi instance đã purge (F-A34-09, row
   R33; được sửa sau các evidence run, nên lần chạy lại thật vẫn đang chờ);
-- finding còn mở, **cần thay đổi** (mỗi mục đều fail closed; không mục nào làm mất dữ liệu): không route nào của pf khởi
-  động container db của instance khi nó bị stop hoặc kill từ bên ngoài (`unless-stopped` không khởi động lại nó). Khi đó
-  `backup`, `update` và `rollback` từ chối với "The database container is not running.", còn `resume` forward của một
-  activation bị ngắt chỉ khởi động lại backend và lần nào cũng trượt health check, nên cách duy nhất để operator đi tiếp
-  là `docker start` container db bằng tay (F-A34-03; row R10 và R65). Các lần từ chối sau preflight chỉ đọc không hoàn
-  toàn không có tác dụng phụ: contract probe giữ lại image tag `*-inspect-*`/`*-observe-*`, chạy một probe container và
-  ghi lại `state/inspect-images.yaml`, và một `restore-instance` bị từ chối trên instance đã purge tạo thư mục `state/`
-  rỗng của nó (F-A34-04, F-A34-06; ngoài ra các lần từ chối Docker-storage của A3-T14 là đúng). Một link hoặc entry đặc
-  biệt trong workspace bị drift chỉ bị capture từ chối sau khi service đã dừng (F-A34-05, quan sát). `restore-instance`
-  lên một volume mới từng lỗi với "the database system is shutting down" hai giây sau khi container db mới báo healthy,
-  khớp với server khởi tạo tạm thời của image; `pf resume` đã hoàn tất nó (F-A34-07, R31). Verification checkpoint của
-  một purge từng lỗi vì `createdb` thoát với mã 1 trên một server healthy, và pf báo là "locale … is not available", che
-  mất lỗi thật; purge fail closed (F-A34-08, R29). `pg_dump` của `backup --emergency` là child chỉ đọc và không bao giờ
-  để lại runner record, nên acknowledgement của A12r2-F06 chỉ được chứng minh trên một runner record thật của `deploy`
-  build (R41; R66 blocked);
+- các finding của lần chạy thật (mỗi mục đều fail closed; không mục nào làm mất dữ liệu), **đã sửa trong fix round của
+  PF-A3.4** với regression test offline fail trên byte cũ; lần chạy lại thật của chúng đang chờ (bên dưới): không route
+  nào của pf khởi động container db của instance khi nó bị stop hoặc kill từ bên ngoài (`unless-stopped` không khởi động
+  lại nó), nên `backup`, `update` và `rollback` từ chối với "The database container is not running." và `resume`
+  forward của một activation bị ngắt chỉ khởi động lại backend và lần nào cũng trượt health check (F-A34-03; row R10 và
+  R65); giờ mọi route cần database tự khởi động container có sẵn đó (`note: db-started`, mục 16). `restore-instance` lên
+  một volume mới từng lỗi với "the database system is shutting down" hai giây sau khi container db mới báo healthy: server
+  khởi tạo tạm thời của image trả lời health check qua Unix socket rồi mới tắt (F-A34-07, R31); giờ pf chờ đến khi server
+  nhận TCP trên 127.0.0.1, điều chỉ server cuối cùng làm. Verification checkpoint của một purge từng lỗi vì `createdb`
+  thoát với mã 1 trên một server healthy, và pf báo mọi lỗi như vậy là "locale … is not available", che mất lỗi thật
+  (F-A34-08, R29); giờ detail mang câu trả lời của server, còn nguyên nhân của lần lỗi đó vẫn chưa được chứng minh. Các
+  lần từ chối vì dung lượng của `purge` và `backup` đến sau contract probe (một probe container, image tag
+  `*-inspect-*` được giữ lại, `state/inspect-images.yaml` bị ghi lại; purge còn ghi `inventory-preliminary.json`), và
+  một `restore-instance` bị từ chối trên instance đã purge tạo thư mục `state/` rỗng (F-A34-04, F-A34-06); giờ các lần
+  từ chối vì dung lượng đến trước, và một lệnh không ghi runtime state nào không để lại `state/` rỗng. Một link hoặc
+  entry đặc biệt trong workspace bị drift chỉ bị capture từ chối sau khi service đã dừng (F-A34-05); giờ nó bị từ chối ở
+  preflight (`workspace-unsupported-entry`, mục 16);
+- vẫn còn mở: một lần từ chối đến sau contract probe (ví dụ "Migration files differ" của `update` sau khi build
+  candidate) vẫn để lại image tag được giữ lại của probe (phần còn lại của F-A34-04; đó là các PartFlow image tag được
+  bao phủ mà `purge` xóa). `pg_dump` của `backup --emergency` là child chỉ đọc và không bao giờ để lại runner record,
+  nên acknowledgement của A12r2-F06 chỉ được chứng minh trên một runner record thật của `deploy` build (R41; R66
+  blocked);
+- kiểm chứng của fix round: bộ test offline chuẩn trên cả hai image và các regression mới (xem
+  `deploy/synology/TEST_REPORT.md`). Lần chạy lại thật của R10, R29, R31, R33 và R65 cùng các loop của chúng với byte
+  cuối đang **chờ**: `sync()` toàn cục của VM Docker Desktop bị treo trên FUSE mount nội bộ, và chỉ restart Docker
+  Desktop (việc của owner) mới gỡ được;
 - giới hạn đã khai báo: release source là test seam (một approved remote `file://` cục bộ với câu trả lời GitHub mô
   phỏng; không liên hệ HTTPS hay GitHub); không có rootless daemon (phần rootless của A1-T13 blocked, PF-A5.1); launcher
   chỉ chạy với quyền root của container; restart daemon không phải mất điện hay reboot host; lần dừng I8 ở lần rename
   workspace đầu tiên quan sát được pf nằm giữa hai lần rename (R51), và một chỉnh sửa muộn qua file đang mở vẫn còn
   (L6); OD-A33-06, OD-A33-07 và OD-A33-09 vẫn chờ owner phê duyệt, và hành vi đã ship được test nguyên trạng;
-- OD-A33-12 vẫn mở: khi db bị dừng, cả `resume` forward lẫn `rollback --restore-db` thay thế đều là ngõ cụt (R65); sau
-  khi db được khởi động bằng tay, `resume` forward hoàn tất và `pf_keep_*` được giữ lại chứa dữ liệu trước switch, nên
-  bằng chứng chỉ vào khoảng trống route F-A34-03 chứ không phải việc thiếu reverse switch;
+- OD-A33-12: khi db bị dừng, cả `resume` forward lẫn `rollback --restore-db` thay thế đều là ngõ cụt (R65); sau khi db
+  được khởi động bằng tay, `resume` forward hoàn tất và `pf_keep_*` được giữ lại chứa dữ liệu trước switch. Bằng chứng
+  chỉ vào khoảng trống route F-A34-03, đã được fix round đóng lại, chứ không phải việc thiếu reverse switch: disposition
+  được khuyến nghị là "không cần abandon kiểu reverse switch", chỉ được xác nhận bởi lần chạy lại thật R65 đang chờ và
+  phê duyệt của owner;
 - không có gì ở đây là production-ready; các phần DSM/SMB (A3-T10, A1-T17; PF-A5.1) không đổi.
 
 **Đóng PF-A1 (offline).** Với PF-A1.4, mọi entry route dùng các primitive A1 (instance tường minh,

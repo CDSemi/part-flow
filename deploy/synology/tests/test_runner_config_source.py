@@ -1136,7 +1136,7 @@ class TimeoutAndCancellation(Base):
     def backup_signal_tool(self):
         """PF-A1.4: the registered tool answers at once every read-only argv `backup` issues before its first
         effect-carrying child (daemon gates, the empty inventory, `compose ps -a -q <service>`, `inspect`, the
-        psql readiness queries); the first argv the classifier marks mutating blocks (pidfile, sleep 300)."""
+        psql readiness and capacity size queries); the first argv the classifier marks mutating blocks (pidfile, sleep 300)."""
         answers = self.base / "backup-answers"
         answers.mkdir(exist_ok=True)
         (answers / "inspect.json").write_text(json.dumps([{
@@ -1150,6 +1150,9 @@ class TimeoutAndCancellation(Base):
             "  *' ps -a -q '*) echo " + "c" * 64 + "; exit 0;;\n"
             "  *' -c SELECT 1;') echo 1; exit 0;;\n"
             "  *' -c SHOW server_version_num;') echo 160000; exit 0;;\n"
+            # PF-A3.4 (F-A34-04): the capacity preflight's size query now precedes the first effect.
+            "  *' -c SELECT datname, pg_database_size(datname) FROM pg_database WHERE NOT datistemplate;') "
+            "echo 'partflow_staging|1048576'; exit 0;;\n"
             "esac\n"
             f"if [ \"$1\" = inspect ]; then cat {answers}/inspect.json; exit 0; fi\n"
             f"sleep 300 &\necho $! > {self.pidfile}\n"

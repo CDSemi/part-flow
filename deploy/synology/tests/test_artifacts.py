@@ -1668,19 +1668,27 @@ class Emergency(Base):
         self.assertEqual(preserved.manifest["compatibility"]["mismatch"]["kind"], "deployment-image-mismatch")
         self.assertEqual(preserved.manifest["compatibility"]["mismatch"]["expected_backend_image_id"], tpa.NEW_BACKEND)
 
-    def test_ep12_a_workspace_link_blocks_preservation_but_is_recorded_by_backup_emergency(self):
+    def test_ep12_a_workspace_link_is_refused_before_any_pause_but_is_recorded_by_backup_emergency(self):
+        """EP-12; PF-A3.4 D5 regression (real C-A1-14 (c), F-A34-05): every capture of these kinds refuses a link in a
+        drifted workspace, but only the capture refused it, after the services had stopped (downtime until a resume
+        reopened). The preflight refuses it before any confirmation or pause, as it does an archive limit (AF-6)."""
         target = self.checkpoint()
         os.symlink("/etc/passwd", str(self.root / "passwd-link"))
         self.c.workspace_dirty = True
         before = tree_hash(self.root)
-        self.assertEqual(self.invoke(["rollback", target.bundle_id]), 1)
-        self.assertIn("ERROR: preservation-failed: ", self.last_error)
-        self.assertIn("passwd-link", self.last_error)
+        for command in (["rollback", target.bundle_id], ["backup"]):
+            with self.subTest(command=command[0]):
+                confirm = mock.Mock()
+                self.assertEqual(self.invoke(command, confirm=confirm), 1)
+                self.assertIn("ERROR: workspace-unsupported-entry: the editable workspace differs from the deployed "
+                              "source and holds a link or special file", self.last_error)
+                self.assertIn("(passwd-link)", self.last_error)
+                self.assertIn("Nothing was changed.", self.last_error)
+                confirm.assert_not_called()
+                self.assertEqual(pfx.operations_of(self.context), [])
+                self.assertTrue(self.c.running["backend"] and self.c.running["frontend"])
         self.assertEqual(tree_hash(self.root), before)
         self.assertTrue(os.path.islink(str(self.root / "passwd-link")))
-        # PF-A3.2: the failed rollback stays open; an emergency capture is legal next to it.
-        self.assertEqual(self.open_ops(), [("rollback", "preserving-current")])
-        self.c.running.update(backend=True, frontend=True)
         self.assertEqual(self.invoke(["backup", "--emergency"]), 0, self.last_error)
         view = next(item for item in self.c.snapshots() if isinstance(item, pf.BundleView)
                     and item.reason == "emergency-manual")
@@ -1737,6 +1745,23 @@ class Emergency(Base):
         self.assertEqual(self.invoke(["resume"]), 0, self.last_error)
         self.assertEqual(self.open_ops(), [])
         self.assertEqual(pfx.operation(self.context, operation)[1]["phase"], "completed")
+
+    def test_ep16_the_superseding_rollback_starts_a_db_stopped_after_the_switch(self):
+        """PF-A3.4 D5 regression (real row R65, F-A34-03; OD-A33-12): after a completed switch the activation failed and
+        the db container was then stopped from outside; the superseding ``rollback <checkpoint> --restore-db`` refused
+        "The database container is not running." every time (a dead end with the forward resume). The route starts
+        the instance's own db container and completes."""
+        target = self.checkpoint()
+        with mock.patch.object(self.c, "activate_backend", side_effect=pf.Failure("backend did not become healthy")):
+            self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 1)
+        operation, plan, journal = tpa.latest_operation(self.c, "rollback")
+        self.assertEqual(self.open_ops(), [("rollback", "activating")])
+        self.c.running.update(db=False, backend=False)
+        self.assertEqual(self.invoke(["rollback", target.bundle_id, "--restore-db"]), 0, self.last_error)
+        self.assertNotIn("The database container is not running.", self.last_error or "")
+        self.assertIn(("compose", ("start", "db"), None), self.c.calls)
+        self.assertTrue(self.c.running["db"])
+        self.assertEqual(self.open_ops(), [])
 
 
 # ============================================================================ VR: verification records

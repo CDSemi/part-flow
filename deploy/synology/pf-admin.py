@@ -306,7 +306,7 @@ DOCKER_READ_ONLY = frozenset({
     ("image", "save"),  # writes a host file inside the operation's own folder; the daemon is unchanged
 })
 DOCKER_GROUPS = frozenset({"image", "volume", "network", "compose", "container"})
-COMPOSE_EXEC_READ_ONLY_PROGRAMS = frozenset({"pg_dump", "pg_dumpall", "wget"})
+COMPOSE_EXEC_READ_ONLY_PROGRAMS = frozenset({"pg_dump", "pg_dumpall", "pg_isready", "wget"})
 GIT_READ_ONLY = frozenset({"--version", "rev-parse", "ls-tree", "cat-file", "merge-base"})
 SQL_READ_ONLY_KEYWORDS = frozenset({"SELECT", "SHOW"})
 EFFECT_TARGET_LIMIT = 8
@@ -6197,10 +6197,21 @@ class Controller:
             return
         try:
             problem = pf_source.tree_limit_problem(self.root, excludes=SOURCE_EXCLUDES)
+            unsupported = None if problem is not None else pf_source.first_unsupported_entry(self.root,
+                                                                                          excludes=SOURCE_EXCLUDES)
         except (pf_source.SourceError, OSError) as exc:
             raise Failure("Source backup refuses this workspace: " + str(exc)) from exc
         if problem is not None:
             raise self.workspace_archive_limit(problem, changed=False)
+        if unsupported is not None:
+            # PF-A3.4 (F-A34-05): every capture of these kinds refuses a link or special entry of a drifted workspace
+            # (EP-12); refused here, before any confirmation or pause, instead of after the services stopped.
+            slug = self.context.slug
+            raise Failure(
+                f"workspace-unsupported-entry: the editable workspace differs from the deployed source and holds a "
+                f"link or special file that cannot be archived and that a source replacement would destroy "
+                f"({unsupported}). Move it out of the repository workspace and retry; 'pf --instance {slug} backup "
+                "--emergency' preserves the database and records the entry as excluded. Nothing was changed.")
 
     def capture_preflight(self, kind):
         """Read-only, before any confirmation, pause or effect of `pf backup`, update, reset-db, purge and rollback
@@ -6582,8 +6593,12 @@ class Controller:
         except DaemonFailure:
             raise
         except Failure as exc:
-            detail = (f"locale {store['collate']}/{store['ctype']} is not available on this server" if locale
-                      else (str(exc).splitlines() or ["createdb failed"])[0])
+            # PF-A3.4 (F-A34-08): the server's own answer (the first line after the runner's "docker failed" head),
+            # never an assumed cause; the requested locale is context only.
+            lines = [line.strip() for line in str(exc).splitlines() if line.strip()] or ["createdb failed"]
+            detail = "createdb failed: " + lines[min(1, len(lines) - 1)]
+            if locale:
+                detail += f" (requested locale {store['collate']}/{store['ctype']})"
             check("restore", "failed", detail)
             return self._remaining(checks, store_id, "not reached: the candidate could not be created"), False, False
         try:
@@ -7723,6 +7738,7 @@ class Controller:
             handle = pf_instance.acquire_instance_lock(self.context)
         except pf_instance.ContextError as exc:
             raise Failure(str(exc)) from exc
+        created_state = False
         try:
             # PF-A2.1: inside the lock, before the journal is read or any operation begins.
             self.require_install_binding(pending_route or "operation")
@@ -7741,11 +7757,22 @@ class Controller:
                 if not self.state.is_dir():
                     self.state.mkdir(mode=0o700)
                     os.chmod(self.state, 0o700)
+                    created_state = True
                 self.begin_operation(pending_route or "operation", freeze=freeze)
             yield handle
         finally:
             self._observe_only = False
             self.end_operation()
+            if created_state:
+                # PF-A3.4 (F-A34-06): a command that wrote no runtime state (e.g. a refused restore-instance of a
+                # purged instance) leaves no empty state/ behind. rmdir removes only an empty directory; one that
+                # holds anything stays (ENOTEMPTY), as it did before.
+                try:
+                    os.rmdir(str(self.state))
+                except OSError as exc:
+                    if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                        log(f"note: the private state directory {self.state} could not be checked for removal "
+                            f"({exc.strerror or exc}); it is kept.")
             handle.release()
 
     def gate_route(self, route, request):
@@ -7897,9 +7924,26 @@ class Controller:
             raise Failure(f"Expected exactly one existing {service} container; initialize the stack first.")
         return json.loads(self.docker("inspect", ids[0]))[0]
 
+    def ensure_db_started(self, info=None):
+        """PF-A3.4 (F-A34-03; RO-13 no dead end): the instance's own db container, stopped or killed from outside (a
+        manual stop or kill disables ``unless-stopped``), is started by the managed route that needs the database.
+        ``compose start`` starts only the existing container: it never creates or recreates one, so a missing
+        container or volume is never replaced by an empty database (``inspect`` refuses first). Then the health and
+        readiness waits. Never inside an isolated topology. Returns whether a start was needed."""
+        info = info if info is not None else self.inspect("db")
+        if info["State"].get("Running") or self._bound is not None:
+            return False
+        log("note: db-started: the database container of this instance was stopped; starting it (no other service, "
+            "no data change) because this command needs the database.")
+        self.compose("start", "db")
+        self.wait_health("db")
+        return True
+
     def database_ready(self):
         values = self.env()
         info = self.inspect("db")
+        if self.ensure_db_started(info):
+            info = self.inspect("db")
         if not info["State"].get("Running"):
             raise Failure("The database container is not running.")
         actual_env = dict(v.split("=", 1) for v in info["Config"]["Env"] if "=" in v)
@@ -8552,14 +8596,32 @@ class Controller:
         end = time.monotonic() + self.config["health_timeout_seconds"]
         while time.monotonic() < end:
             state = self.inspect(service)["State"]
-            if state.get("Running") and state.get("Health", {}).get("Status") == "healthy":
+            if state.get("Running") and state.get("Health", {}).get("Status") == "healthy" \
+                    and (service != "db" or self.db_accepts_tcp()):
                 return
             time.sleep(2)
         raise Failure(f"{service} did not become healthy within the configured timeout.")
 
+    def db_accepts_tcp(self):
+        """PF-A3.4 (F-A34-07): the db health check (``pg_isready`` on the Unix socket) also passes for the postgres
+        image's temporary initialization server of a fresh volume, which shuts down seconds later ("the database
+        system is shutting down"). That server listens on the Unix socket only (``listen_addresses=''``); the final
+        server is the one that accepts TCP on 127.0.0.1. Read-only; False while it does not answer."""
+        values = self.env()
+        try:
+            self.compose("exec", "-T", "db", "pg_isready", "-q", "-h", "127.0.0.1", "-p", "5432",
+                         "-U", values["POSTGRES_USER"], "-d", values["POSTGRES_DB"])
+        except DaemonFailure:
+            raise
+        except Failure:
+            return False
+        return True
+
     def activate_backend(self, images, expected_heads):
         """The ``service:backend:start`` effect: the selected images, the backend up and healthy on the expected
-        heads (PF-A3.2 split of the A3.1 activate())."""
+        heads (PF-A3.2 split of the A3.1 activate()). PF-A3.4 (F-A34-03): the backend starts without its
+        dependencies (``--no-deps``), so a db container stopped from outside is started first."""
+        self.ensure_db_started()
         self.verify_images(images)
         self.make_override(images, self.override)
         self.compose("up", "-d", "--no-deps", "--no-build", "--force-recreate", "backend")
@@ -12692,7 +12754,6 @@ class Controller:
         # Preliminary (advisory) plan: blockers refuse here, before any confirmation, pause or bundle.
         inventory = self.docker_inventory()
         preliminary = self.plan_for("purge", inventory, command="purge")
-        self.write_private_json("inventory-preliminary.json", inventory.record())
         summary = self.instance_summary(preliminary)
         self.log_instance_summary(summary)
         if not summary["containers"] and not summary["volumes"] and not summary["state_present"] and not summary["env_present"]:
@@ -12701,7 +12762,6 @@ class Controller:
             raise Failure("config/.env is missing. A database volume cannot be safely destroyed without first proving a recoverable database backup.")
         self.database_ready()
         self.capture_preflight("purge")
-        self.ensure_local_contract()
         rows = self.database_rows()
         closed = sorted(name for name, row in rows.items() if not row["allow_connections"])
         # PF-A3.3 section 3.4 preview: no isolated topology of this instance may hold resources (they make the
@@ -12712,6 +12772,10 @@ class Controller:
         self.isolation_preflight(None, running, values=dict(self.env()))
         project, topology_uuid = self.new_topology("pfverify-")
         self.capacity_preflight("purge")
+        # PF-A3.4 (F-A34-04): the contract probe (a probe container and retained image tags) and the preliminary
+        # inventory record follow every read-only refusal above, so a refused purge changes nothing.
+        self.ensure_local_contract()
+        self.write_private_json("inventory-preliminary.json", inventory.record())
         text = ("This is a destructive staging teardown. The selected project's exact containers, volumes, networks and "
                 "covered PartFlow image tags listed above, runtime state, and config/.env are candidates for deletion. "
                 "The writable repo, bind-mounted paths and installed control plane are retained. A verified recovery "
@@ -13771,8 +13835,10 @@ class Controller:
         (OD-A32-13; not blocking, no fail_closed); only a crash or an interrupt leaves it open for ``resume``."""
         self.database_ready()
         self.capture_preflight("backup")
-        self.ensure_local_contract()
+        # PF-A3.4 (F-A34-04): the read-only capacity refusal precedes the contract probe (its probe container and
+        # retained image tags), so a refused backup changes nothing.
         self.capacity_preflight("backup")
+        self.ensure_local_contract()
         view = self.current_deployment()
         commit = (view.record["source"]["commit"] if view is not None and view.mismatch is None
                   else self.deployed_commit()) or "0" * 40

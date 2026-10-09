@@ -362,7 +362,7 @@ def compose(state, argv, env):
     if files and files[0].endswith("/compose.json"):
         # PF-A3.3: an isolated topology executed from its validated model (no env-file, no instance value).
         return topology_compose(state, verb, rest[1:], project=project, files=files, env=env)
-    if "plane" in state and verb in ("stop", "up", "build", "run", "exec") or "plane" in state and verb == "ps" \
+    if "plane" in state and verb in ("stop", "start", "up", "build", "run", "exec") or "plane" in state and verb == "ps" \
             and "-q" in rest:
         return plane_compose(state, verb, rest[1:], project=project, directory=directory, files=files, env=env)
     if verb == "version":
@@ -522,6 +522,11 @@ def plane_inspect(state, ids):
         sequence = plane.setdefault("health", {}).get(service)
         if running and sequence:
             health = sequence.pop(0) if len(sequence) > 1 else sequence[0]
+        elif running and service == "backend" and any(item.get("status") != "running"
+                                                      for item in plane_containers(state, project, "db")):
+            # PF-A3.4 calibration (real R65): the backend's health check needs the database; with the project's db
+            # container stopped it never becomes healthy.
+            health = "unhealthy"
         objects.append({"Image": container["image"], "State": {"Running": running, "Health": {"Status": health}},
                         "Config": {"Env": list(container.get("env") or plane.get("db_env", []))
                                    if service == "db" else []}})
@@ -808,6 +813,18 @@ def plane_compose(state, verb, words, *, project, directory, files, env, plane=N
             for item in plane_containers(state, project, service):
                 item["status"] = "exited"
         return Result(0)
+    if verb == "start":
+        # PF-A3.4 calibration (Compose v2.40.3): `compose start` starts existing containers only; a service without a
+        # container is an error and nothing is created. ``start_error`` simulates a container that cannot start.
+        for service in [word for word in words if not word.startswith("-")]:
+            found = plane_containers(state, project, service)
+            if not found:
+                return Result(1, "", f'service "{service}" has no container to start\n')
+            if plane.get("start_error"):
+                return Result(1, "", plane["start_error"] + "\n")
+            for item in found:
+                item["status"] = "running"
+        return Result(0)
     if verb == "up":
         service = words[-1]
         found = plane_containers(state, project, service)
@@ -828,6 +845,10 @@ def plane_compose(state, verb, words, *, project, directory, files, env, plane=N
         found[0]["status"] = "running"
         if service == "db" and not plane.get("databases"):
             plane["databases"] = {env.get("POSTGRES_DB"): new_database(plane, env.get("POSTGRES_USER"))}
+            # PF-A3.4 calibration (real R31, postgres:16.15): on a fresh volume the image's temporary initialization
+            # server (Unix socket only) passes the health check, then shuts down; ``init_server_answers`` database
+            # connections meet it (a TCP pg_isready gets no response, a Unix-socket client "shutting down").
+            plane["init_server"] = int(plane.get("init_server_answers") or 0)
         return Result(0)
     if verb == "build":
         service = words[-1]
@@ -870,6 +891,12 @@ def plane_compose(state, verb, words, *, project, directory, files, env, plane=N
     service, program, arguments = words[1], words[2], words[3:]
     if service == "frontend":
         return Result(0, json.dumps(plane.get("api_health", {"status": "ok", "database": "connected"})) + "\n")
+    if service == "db" and plane.get("init_server"):
+        plane["init_server"] -= 1
+        if program == "pg_isready":
+            return Result(2, "", "127.0.0.1:5432 - no response\n" if "-h" in arguments else "")
+        return Result(2, "", f'{program}: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" '
+                             "failed: FATAL:  the database system is shutting down\n")
     databases = plane.setdefault("databases", {})
 
     def option(name):
@@ -902,6 +929,9 @@ def plane_compose(state, verb, words, *, project, directory, files, env, plane=N
         return Result(0)
     if program == "createdb":
         name = arguments[-1]
+        failure = plane.get("createdb_failure")  # PF-A3.4 (F-A34-08): {"prefix", "stderr"} of a refused createdb
+        if failure and name.startswith(failure["prefix"]):
+            return Result(1, "", failure["stderr"])
         if name in databases:
             return Result(1, "", f'createdb: error: database "{name}" already exists\n')
         locale = [value.split("=", 1)[1] for prefix in ("--encoding=", "--lc-collate=", "--lc-ctype=")

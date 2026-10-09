@@ -355,6 +355,10 @@ class FakeController(pf.Controller):
             for service in args[1:]:
                 self.running[service] = False
             return ""
+        if args[0] == "start":  # PF-A3.4 (F-A34-03): an existing stopped container only
+            for service in args[1:]:
+                self.running[service] = True
+            return ""
         if args[0] == "down":
             self.running = {"db": False, "backend": False, "frontend": False}
             self.dbs.pop("partflow_staging", None)

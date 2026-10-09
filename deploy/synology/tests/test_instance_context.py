@@ -441,8 +441,9 @@ class StableLocks(Base):
         self.assertTrue(self.alpha.record_path.is_file())
         self.assertTrue(self.alpha.lock_path.is_file())
         with pf.Controller(self.alpha).lock():
-            pass
-        self.assertTrue(controller.state.is_dir())
+            self.assertTrue(controller.state.is_dir())  # created inside a locked mutation route
+        # PF-A3.4 (F-A34-06): a command that wrote no runtime state leaves no empty state/ behind.
+        self.assertFalse(controller.state.exists())
 
     def test_missing_or_symlinked_lock_is_refused_not_created(self):
         self.alpha.lock_path.unlink()

@@ -2151,6 +2151,11 @@ A refusal before any effect ends with `Nothing was changed.`; a later one names 
   their capture never proceeds without the drifted workspace, which a later source replacement would destroy. Move
   the files out of the repository workspace and retry; `pf --instance <slug> backup --emergency` preserves the database meanwhile and records the
   workspace as excluded.
+- `workspace-unsupported-entry` (PF-A3.4): the editable workspace differs from the deployed source and holds a symbolic
+  link or special file. Every capture of `pf backup`, `update`, `reset-db`, `purge` and `rollback` refuses such an entry,
+  so they refuse in their preflight, before any confirmation or pause (the application keeps running). Move the entry
+  out of the repository workspace and retry; `pf --instance <slug> backup --emergency` preserves the database meanwhile
+  and records the entry as excluded.
 - `source-manifest-mismatch`: the extracted source differs from the recorded source manifest; use another
   checkpoint.
 - `checkpoint-not-rollback-target`: the selected checkpoint is an emergency or partial capture. Restore its data
@@ -2235,6 +2240,13 @@ Codes:
   but `/proc` or the boot ID cannot be read here; nothing is decided without that probe.
 - `database-unavailable` — `resume` could not start the database service to observe an effect; the operation is
   unchanged.
+- `note: db-started` (PF-A3.4) — the instance's db container was stopped or killed from outside (a manual stop or
+  kill disables `unless-stopped`). Every route that needs the database (`backup`, `backup --emergency`, `update`,
+  `rollback`, `reset-db`, `purge`, `abort-deploy`, and `resume` before it restarts the backend) starts that existing
+  container itself (`compose start db`: no other service, never a new container or volume) and waits until the final
+  server accepts connections. For `update`, `rollback`, `reset-db`, `purge`, `abort-deploy` and `backup --emergency`
+  the start precedes the confirmation, because their plan reads the live database; it changes no data. When the container
+  cannot be started, the route is refused and nothing else is changed; a missing db container is never recreated.
 - `plan-authority-changed` — the instance record, policy, control release, profile or daemon changed after the
   approval; restore the approved state or have an administrator review it. `plan-input-changed` — a frozen input (a
   bundle, a checkpoint, the frozen `app.env` or `admin-config.json`, the staged deployment) changed; restore it
@@ -2563,29 +2575,42 @@ a NAS, DSM, btrfs or SMB; evidence in `_claude_outputs/ops/PF-A3.4/`):
   bundle retains every database of the instance, and `restore-instance` routed a retained leftover `pf_restore_*` or
   `pf_migrate_*` database to the rollback/update branch, so every attempt ended `plan-input-changed … (unreadable)`
   with the instance purged (F-A34-09, row R33; fixed after the evidence runs, so its real re-run is pending);
-- open findings, **changes required** (each fails closed; none lost data): no pf route starts an instance's db container
-  that was stopped or killed from outside (`unless-stopped` does not restart it). `backup`, `update` and `rollback` then
-  refuse "The database container is not running.", and a forward `resume` of an interrupted activation restarts only the
-  backend and fails its health check every time, so the operator's only way on is a manual `docker start` of the db
-  container (F-A34-03; rows R10 and R65). Refusals after the read-only preflight are not effect-free: the contract probe
-  keeps `*-inspect-*`/`*-observe-*` image tags, runs a probe container and rewrites `state/inspect-images.yaml`, and a
-  refused `restore-instance` of a purged instance creates its empty `state/` directory (F-A34-04, F-A34-06; the A3-T14
-  Docker-storage refusals are otherwise correct). A link or special entry in a drifted workspace is refused only by the
-  capture after the services stopped (F-A34-05, observation). `restore-instance` onto a fresh volume once failed with
-  "the database system is shutting down" two seconds after the new db container reported healthy, consistent with the
-  image's temporary initialization server; `pf resume` completed it (F-A34-07, R31). A purge's checkpoint verification
-  once failed because `createdb` exited 1 on a healthy server, and pf reported it as "locale … is not available", which
-  hid the real error; the purge failed closed (F-A34-08, R29). The `backup --emergency` `pg_dump` is a read-only child
-  and never leaves a runner record, so the A12r2-F06 acknowledgement was proven on a real `deploy` build record only
-  (R41; R66 blocked);
+- findings of the real runs (each failed closed; none lost data), **fixed in the PF-A3.4 fix round** with offline
+  regression tests that fail on the earlier bytes; their real re-run is pending (below): no pf route started an
+  instance's db container that was stopped or killed from outside (`unless-stopped` does not restart it), so `backup`,
+  `update` and `rollback` refused "The database container is not running." and a forward `resume` of an interrupted
+  activation restarted only the backend and failed its health check every time (F-A34-03; rows R10 and R65); every route
+  that needs the database now starts that existing container itself (`note: db-started`, section 16). `restore-instance`
+  onto a fresh volume once failed with "the database system is shutting down" two seconds after the new db container
+  reported healthy: the image's temporary initialization server answers the Unix-socket health check before it shuts
+  down (F-A34-07, R31); pf now waits until the server accepts TCP on 127.0.0.1, which only the final server does. A
+  purge's checkpoint verification once failed because `createdb` exited 1 on a healthy server, and pf reported every
+  such failure as "locale … is not available", which hid the real error (F-A34-08, R29); the detail now carries the
+  server's answer, and the cause of that one failure stays unproven. The capacity refusals of `purge` and `backup` came
+  after the contract probe (a probe container, retained `*-inspect-*` image tags, a rewritten
+  `state/inspect-images.yaml`; purge also wrote `inventory-preliminary.json`), and a refused `restore-instance` of a
+  purged instance created its empty `state/` directory (F-A34-04, F-A34-06); the capacity refusals now come first and a
+  command that wrote no runtime state leaves no empty `state/` behind. A link or special entry in a drifted workspace
+  was refused only by the capture after the services stopped (F-A34-05); it is now refused in the preflight
+  (`workspace-unsupported-entry`, section 16);
+- still open: a refusal that comes after the contract probe (for example `update`'s "Migration files differ" after its
+  candidate build) still leaves the probe's retained image tags (F-A34-04 remainder; they are covered PartFlow image
+  tags that `purge` removes). The `backup --emergency` `pg_dump` is a read-only child and never leaves a runner record, so
+  the A12r2-F06 acknowledgement was proven on a real `deploy` build record only (R41; R66 blocked);
+- validation of the fix round: the canonical offline suite on both images and the new regressions (see
+  `deploy/synology/TEST_REPORT.md`). The real re-run of R10, R29, R31, R33 and R65 and their loops with the final bytes
+  is **pending**: the Docker Desktop VM's global `sync()` hangs on its internal FUSE mount, and only a Docker Desktop
+  restart (an owner action) clears it;
 - declared limits: the release source is the test seam (a local `file://` approved remote with simulated GitHub
   answers; no HTTPS or GitHub contact); no rootless daemon (A1-T13 rootless part blocked, PF-A5.1); the launcher ran
   as container root only; a daemon restart is not a power loss or host reboot; an I8 stop at the first workspace
   rename observed pf between the two renames (R51), and a late edit through an open file survived (L6); OD-A33-06,
   OD-A33-07 and OD-A33-09 still await owner approval, and the shipped behaviour was tested as is;
-- OD-A33-12 stays open: with the db stopped, the forward resume and the superseding `rollback --restore-db` are both
-  dead ends (R65); once the db was started by hand the forward resume completed and the retained `pf_keep_*` held the
-  pre-switch data, so the evidence points at the F-A34-03 route gap rather than at a missing reverse switch;
+- OD-A33-12: with the db stopped, the forward resume and the superseding `rollback --restore-db` were both dead ends
+  (R65); once the db was started by hand the forward resume completed and the retained `pf_keep_*` held the pre-switch
+  data. The evidence points at the F-A34-03 route gap, which the fix round closes, rather than at a missing reverse
+  switch: the recommended disposition is "no reverse-switch abandon needed", confirmed only by the pending real re-run of
+  R65 and owner approval;
 - nothing here is production-ready; the DSM/SMB parts (A3-T10, A1-T17; PF-A5.1) are unchanged.
 
 **PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit

@@ -790,6 +790,21 @@ def tree_limit_problem(root, *, excludes=DEFAULT_EXCLUDES, limits=SOURCE_LIMITS)
     return None
 
 
+def first_unsupported_entry(root, *, excludes=DEFAULT_EXCLUDES):
+    """The first link or special entry of ``root`` (archive_tree's ``unsupported="refuse"`` refusal), or None. A
+    read-only walk; no file byte is read (PF-A3.4, F-A34-05: refused before any pause, like tree_limit_problem)."""
+    walker = walk_tree(root, excludes=excludes)
+    try:
+        for relative, kind, file_fd, _ in walker:
+            if file_fd is not None:
+                os.close(file_fd)
+            if kind != "file":
+                return relative
+    finally:
+        walker.close()
+    return None
+
+
 def _archive_stream(fd):
     """A private read handle on ``fd`` from offset 0 (``os.dup``; the path is never re-opened)."""
     duplicate = os.dup(fd)
