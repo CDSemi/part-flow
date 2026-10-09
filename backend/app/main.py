@@ -19,6 +19,7 @@ from app.api.policies import router as policies_router
 from app.api.production_board import router as production_board_router
 from app.api.production_release import router as production_release_router
 from app.api.release_gate import ReleaseGate, ReleaseGateMiddleware
+from app.api.request_log import RequestLogMiddleware
 from app.api.roles import router as roles_router
 from app.api.route_adjustments import router as route_adjustments_router
 from app.api.route_templates import router as route_templates_router
@@ -95,12 +96,15 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PartFlow API", lifespan=lifespan)
     # One first-run setup token per process (in memory only).
     app.state.setup_gate = first_run.SetupGate()
-    # The last added is outermost: NoStore -> ReleaseGate -> CSRF -> routes,
-    # so a stale page gets the release refusal before a CSRF refusal and
-    # session paths keep no-store (app.api.csrf, app.api.release_gate).
+    # The last added is outermost: RequestLog -> NoStore -> ReleaseGate ->
+    # CSRF -> routes, so every request (refusals included) gets its request
+    # id and one access record, a stale page gets the release refusal
+    # before a CSRF refusal and session paths keep no-store
+    # (app.api.request_log, app.api.csrf, app.api.release_gate).
     app.add_middleware(CsrfMiddleware)
     app.add_middleware(ReleaseGateMiddleware)
     app.add_middleware(NoStoreMiddleware)
+    app.add_middleware(RequestLogMiddleware)
     app.include_router(health_router)
     app.include_router(session_router)
     app.include_router(setup_router)

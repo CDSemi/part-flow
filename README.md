@@ -1153,7 +1153,7 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 
 `compose.production.yaml` (Compose project `partflow-production`) is the
 production stack: `db`, `backend`, `web` (nginx, published on `127.0.0.1` only)
-and the one-shot `migrate`, `db-roles` and `backup-tools` jobs. **It is not for development** (use `compose.yaml`),
+and the one-shot `migrate`, `db-roles`, `backup-tools` and `status` jobs. **It is not for development** (use `compose.yaml`),
 it is not started by anything in this repository, and it has not been verified
 on a Synology NAS or a VPS yet (Phase 16 slice 7). Configuration is
 `.env.production` (copy `.env.production.example`, git-ignored) plus the secret
@@ -1223,6 +1223,27 @@ rollback path 3 and the new-instance restore are in
 [`docs/deployment/VPS.md`](./docs/deployment/VPS.md) §8). The schedule and the
 first drill on a host are Phase 16 slice 7.
 
+Monitoring (Phase 16 slice 6): the production backend writes one JSON log line
+per record and every response carries an `X-Request-ID`; `status` (the `ops`
+service, `python -m app.cli status`) reports the database size, connections,
+lock waits, Movement count, schema readiness and backup age as JSON;
+`deploy/production/check.sh` runs the host checks (HTTPS readiness, certificate,
+containers and restarts, backend errors, disk, database, schema and backup age)
+and `deploy/production/scheduled-reconcile.sh` runs `reconcile` daily:
+
+```bash
+deploy/production/check.sh --url https://<partflow host> --no-state   # manual diagnosis
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" status
+deploy/production/scheduled-reconcile.sh
+```
+
+Both scripts print their usage with `--help`. The commands, thresholds and
+schedules are in
+[`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
+§2, §7 and §9; installing the schedules and proving the failure notification on a
+host are Phase 16 slice 7.
+
 Only the build uses `compose.production.build.yaml`: `compose.production.yaml`
 has no build section, so `up` or `run` with a release whose images are missing
 fails instead of building the checkout. Never run `$PF down -v`: it deletes the
@@ -1262,7 +1283,9 @@ The first runs the static tests of the Compose model, the environment example,
 the Dockerfiles and the nginx configuration, plus the `release.sh` / `smoke.sh`
 tests (`test_release_scripts.py`, with fake `docker`, `git` and `curl`), the
 `backup.sh` / `restore-test.sh` tests (`test_backup_scripts.py`, also with fakes)
-and the `reconcile_regression.py` tests (`test_reconcile_regression.py`); the second
+the `reconcile_regression.py` tests (`test_reconcile_regression.py`) and the
+monitoring tests (`test_check_script.py`, `test_scheduled_reconcile.py` and
+`test_monitor_report.py`, with fake `docker` and `curl`); the second
 builds both production images (the `web` build runs the production-boundary
 check, and a build without `PARTFLOW_COMMIT` fails). The Compose stack
 smoke (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) starts a throwaway
@@ -1271,7 +1294,9 @@ removes it; `python3 deploy/production/tests/release_rehearsal.py` rehearses a
 release on a throwaway `partflow-s3-rehearsal` project;
 `python3 deploy/production/tests/backup_rehearsal.py --evidence <path.json>` builds
 three releases and exercises backups, the restore drill and rollback path 3 on
-throwaway `partflow-s5-*` projects. All three need a Docker daemon and are not part of CI.
+throwaway `partflow-s5-*` projects; `python3 deploy/production/tests/observability_rehearsal.py --evidence <path.json>`
+exercises the structured logs, `status`, `check.sh` and `scheduled-reconcile.sh` on a throwaway project with
+synthetic data. All four need a Docker daemon and are not part of CI.
 
 ## Continuous integration
 
@@ -1307,11 +1332,12 @@ backend/
   Dockerfile       `production` and `development` (default) stages
 frontend/nginx/    `web` image configuration (nginx templates, proxy and header snippets, trusted-proxy entrypoint)
 compose.yaml       development stack (db, backend, frontend)
-compose.production.yaml  production stack (db, backend, web, migrate, db-roles, backup-tools); not for development
+compose.production.yaml  production stack (db, backend, web, migrate, db-roles, backup-tools, status); not for development
 compose.production.build.yaml  build-only companion: the production image builds of backend and web
 .env.production.example  production configuration inventory (copy to .env.production)
 deploy/production/release.sh, smoke.sh  release flow and loopback smoke checks (reconcile_regression.py compares reconcile reports)
 deploy/production/backup.sh, restore-test.sh  backup artifact and isolated restore drill
-deploy/production/tests/ production artifact static tests, release and backup script tests, Compose stack smoke, release rehearsal and backup rehearsal
+deploy/production/check.sh, scheduled-reconcile.sh, monitor_report.py  host checks, daily reconcile and their report helper
+deploy/production/tests/ production artifact static tests, release, backup and monitoring script tests, Compose stack smoke, release, backup and observability rehearsals
 docs/              canonical project documentation
 ```

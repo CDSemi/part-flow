@@ -251,8 +251,8 @@ certificate from Let's Encrypt** (tên public; DSM tự gia hạn). Sau đó **S
 → gán certificate cho hostname của mục reverse-proxy PartFlow. DSM không gia hạn
 certificate đã import: import cái mới trước khi hết hạn và gán lại. Phân phối CA
 nội bộ đến workstation và barcode terminal qua device management của công ty, và
-kiểm tra hạn dùng bằng lệnh `openssl s_client` ở DEPLOYMENT §3.1 (giám sát:
-P16-S6). Thực hiện và xác minh ở P16-S7.
+kiểm tra hạn dùng bằng lệnh `openssl s_client` ở DEPLOYMENT §3.1 (alert hạn dùng:
+`check.sh` `certificate`, §8 Monitoring và alert). Thực hiện và xác minh ở P16-S7.
 
 ## 6. Backup dữ liệu staging
 
@@ -388,10 +388,11 @@ release checkout `repo/`.
 6. **Không bao giờ chạy `down -v`** (hay xóa volume) trên project
    `partflow-production`: nó xóa database production.
 
-Còn lại: observability (P16-S6), và các host check trên NAS cùng pilot gate
-(P16-S7); bản thân release flow (`release.sh`, `smoke.sh`) và công cụ backup và
-restore (`backup.sh`, `restore-test.sh`, P16-S5) đã triển khai và chưa được thực
-thi trên NAS.
+Còn lại: việc chạy observability (đã triển khai ở P16-S6) cùng các host check
+trên NAS và pilot gate (P16-S7); bản thân release flow (`release.sh`, `smoke.sh`),
+công cụ backup và restore (`backup.sh`, `restore-test.sh`, P16-S5) và các monitoring
+script (`check.sh`, `scheduled-reconcile.sh`, P16-S6) đã triển khai và chưa được
+thực thi trên NAS.
 
 - frontend/backend image production bất biến — đã triển khai (P16-S2: image gắn
   tag bằng `PARTFLOW_RELEASE`, không bao giờ pull); release identity nằm trong image
@@ -408,11 +409,35 @@ thi trên NAS.
 - logical backup theo lịch, replicate off-NAS có mã hóa, retention alert và
   restore drill thành công — script, manifest, verify, retention và drill đã triển
   khai (P16-S5); schedule và replication chạy trên NAS cùng một drill được đo thời
-  gian ở đó còn lại (P16-S7), và alert tuổi backup còn lại (P16-S6);
-- monitor health, log, disk, backup age, restart count và database growth;
+  gian ở đó còn lại (P16-S7), và alert tuổi backup đã triển khai (P16-S6: `check.sh`
+  `backup_age`) và được cài trên NAS ở P16-S7;
+- monitor health, log, disk, backup age, restart count và database growth — đã
+  triển khai (P16-S6: `check.sh`, `status`), chạy trên NAS ở P16-S7;
 - release, migration, rollback, reconciliation và incident runbook đã được
   administrator thật sự diễn tập;
 - RPO/RTO và pilot scope được phê duyệt.
+
+### Monitoring và alert (Phase 16)
+
+Các script đã triển khai (P16-S6) và được chạy thử trên Docker Desktop; các task
+bên dưới được **cấu hình và thực thi trên NAS ở P16-S7**, và chưa có gì ở đây được
+chạy trên Synology NAS. Cấu hình DSM Control Panel → Notification → Email trước, để
+mail báo lỗi của scheduler rời được NAS. Sau đó, trong Task Scheduler → Create →
+Scheduled Task → User-defined script, bằng account sở hữu backup directory:
+
+1. `PartFlow check`: hằng ngày từ 00:00, lặp mỗi 15 phút đến 23:45; Run command:
+   `cd <running release checkout> && deploy/production/check.sh --url https://<partflow host> --quiet`.
+2. `PartFlow reconcile`: hằng ngày lúc 04:00 (sau backup 02:00); Run command:
+   `cd <running release checkout> && deploy/production/scheduled-reconcile.sh`.
+
+Cả hai task bật "Send run details by email" **chỉ khi script kết thúc bất thường**:
+`check.sh --quiet` không in gì và thoát 0 trừ khi có một `FAIL` cần thông báo, và
+một lỗi lặp lại không đổi chỉ được báo lại sau mỗi 6 giờ. Sau mỗi release, cập nhật
+đường dẫn checkout trong cả hai task. Thêm `--resolve-to 127.0.0.1` vào task 1 khi
+NAS không resolve được tên PartFlow của chính nó. Kiểm tra notification là một lần
+chạy task 1 với `--only disk_backup --min-free-percent 100 --renotify-hours 0`
+(P16-S7 thực thi). Ngưỡng, exit code và ý nghĩa từng dòng nằm ở
+[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §2 và §9.
 
 ## 9. Capacity và reliability
 
@@ -428,7 +453,10 @@ test thực tế:
 - hành vi khi reboot NAS, restart container, gián đoạn mạng và UPS shutdown.
 
 Đặt disk alert sao cho còn đủ chỗ cho database, ít nhất một bộ image update,
-temporary migration work và local backup staging window: một backup cần `2 x` dump
+temporary migration work và local backup staging window (các disk check của
+`check.sh`, P16-S6, alert khi còn trống dưới 15 %: `disk_data` đo database volume,
+`disk_backup` đo backup directory, `disk_docker` đo Docker root, và tăng trưởng
+database là lịch sử `growth.tsv` trong state directory của check): một backup cần `2 x` dump
 mới nhất cộng 1 GiB trống trong backup directory, và một restore drill cần `5 x`
 dump cộng 1 GiB trống trên Docker root (drill chạy một backend worker).
 

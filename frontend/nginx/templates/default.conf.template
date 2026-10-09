@@ -21,10 +21,20 @@ limit_req_zone $partflow_password_client zone=partflow_password:1m rate=5r/m;
 limit_req_status 429;
 limit_req_log_level warn;
 
-# Request log of record: real client address, method, path without query string,
-# status, bytes, duration. Never cookies, PartFlow headers or request bodies.
-log_format partflow '$remote_addr [$time_iso8601] "$request_method $uri $server_protocol" '
-                    '$status $body_bytes_sent $request_time "$http_user_agent"';
+# Request id: the client's X-Request-ID when it is 1-64 characters of [A-Za-z0-9._-],
+# otherwise nginx's own 32-hex $request_id. Sent to the backend, echoed to the client, logged.
+map $http_x_request_id $partflow_request_id {
+    "~^[A-Za-z0-9._-]{1,64}$" $http_x_request_id;
+    default $request_id;
+}
+
+# Request log of record at the edge (one JSON line per request): real client address, method,
+# path without query string, status, bytes, duration, upstream status, request id.
+# Never cookies, PartFlow headers or request bodies.
+log_format partflow escape=json '{"ts":"$time_iso8601","source":"web","request_id":"$partflow_request_id",'
+    '"client":"$remote_addr","method":"$request_method","path":"$uri","status":$status,'
+    '"bytes":$body_bytes_sent,"duration_s":$request_time,"upstream_status":"$upstream_status",'
+    '"user_agent":"$http_user_agent"}';
 
 server {
     listen 80;

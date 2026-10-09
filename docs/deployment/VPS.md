@@ -36,8 +36,9 @@ at P16-S2, implemented unless marked pending):
   release automation around it is implemented (P16-S3: `deploy/production/release.sh`
   and `smoke.sh`, `revision`, the readiness and liveness endpoints), not yet
   executed on a VPS (P16-S7);
-- logging/monitoring configuration — P16-S6 (the `web` access log is the
-  request log in P16-S2);
+- logging/monitoring configuration — implemented (P16-S6: JSON logs with the HTTP
+  request id, [`check.sh`, `scheduled-reconcile.sh` and `status`](./OPERATIONS_RUNBOOK.md)
+  §2 and §7), executed on a VPS in P16-S7;
 - release and rollback procedure tied to immutable versions — implemented
   (P16-S3: [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5 and §6 and
   `release.sh`; rollback path 3 is implemented in P16-S5, §6 of the runbook).
@@ -53,7 +54,8 @@ at P16-S2, implemented unless marked pending):
 - correct NTP/timezone policy;
 - separate persistent storage for PostgreSQL and local backup staging;
 - encrypted provider/off-site backup destination;
-- resource and disk monitoring;
+- resource and disk monitoring (`check.sh` through the systemd timer of §8
+  Monitoring, CPU and RAM by `docker stats` review);
 - no unrelated experimental workloads on the production host.
 
 Never publish PostgreSQL to the internet. Prefer a private provider network for
@@ -159,8 +161,8 @@ required account/service. PostgreSQL data is never inside a Git checkout.
    (Administration → Scan Stations → `Devices…`).
 9. Run the runbook smoke and reconciliation checks through HTTPS; reconcile
    check (h) must report `pass`.
-10. Enable monitoring and the backup schedule (the systemd timer of §8), then run
-    a backup immediately:
+10. Enable the backup, check and reconcile timers of §8 (and the alert unit),
+    then run a backup immediately:
     `deploy/production/backup.sh --kind manual --operator "<name>" --reason "initial backup"`.
 11. Perform and time an isolated restore before pilot data is accepted:
     `deploy/production/restore-test.sh --backup <that backup> --operator "<name>"`.
@@ -224,6 +226,36 @@ relative one, and systemd refuses the unit); check both units with
 `systemd-analyze verify partflow-backup.service partflow-backup.timer`.
 A non-zero exit, a daily that fails verification included, fails the unit. Keep
 the schedule outside maintenance windows (a release holds the backup lock).
+
+**Monitoring (systemd).** Implemented in P16-S6, installed and executed on the
+VPS in P16-S7 (`systemd-analyze verify` all five units; absolute `ExecStart=`
+paths as above).
+`partflow-alert@.service` is the failure notifier of every unit:
+
+```ini
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'journalctl -u %i -n 60 --no-pager | mail -s "PartFlow alert: %i failed on %H" <ops address>'
+```
+
+`%i` and `%H` are systemd specifiers (systemd never runs `$(...)`). It needs a
+configured host MTA, for example msmtp, and journal read access for the unit's
+user: host configuration, P16-S7. `partflow-check.service` (`Type=oneshot`,
+`User=<deploy account>`, `WorkingDirectory=/srv/partflow/current`,
+`OnFailure=partflow-alert@%n.service`) runs
+`ExecStart=/srv/partflow/current/deploy/production/check.sh --url https://<host> --env-file /srv/partflow/env/production.env`
+and `partflow-check.timer` has `OnCalendar=*:0/15`. `partflow-reconcile.service`
+(same `User=` and `WorkingDirectory=`, `OnFailure=partflow-alert@%n.service`) runs
+`ExecStart=/srv/partflow/current/deploy/production/scheduled-reconcile.sh --env-file /srv/partflow/env/production.env`
+and `partflow-reconcile.timer` has `OnCalendar=*-*-* 04:00:00` and
+`Persistent=true`. The backup unit's `OnFailure=` is the same
+`partflow-alert@%n.service`. With cron instead, set `MAILTO=` and use `--quiet`
+on both lines, since cron mails whenever a job prints:
+
+```cron
+*/15 * * * * cd /srv/partflow/current && deploy/production/check.sh --url https://<host> --env-file /srv/partflow/env/production.env --quiet
+0 4 * * * cd /srv/partflow/current && deploy/production/scheduled-reconcile.sh --env-file /srv/partflow/env/production.env --quiet
+```
 
 **Off-VPS copy (restic).** `RESTIC_REPOSITORY` points at object storage, and
 `RESTIC_PASSWORD_FILE` at a key file of mode 0400 whose custody is kept off the

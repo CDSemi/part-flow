@@ -53,6 +53,7 @@ from sqlalchemy.orm import Session
 from app.application import policies, worker_sessions, workers
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.worker_sessions import OpenSession
+from app.core import log_context
 from app.domain.enums import WorkerIdentificationMode
 from app.domain.worker_badge import normalize_badge_barcode
 from app.infrastructure.models import (
@@ -282,11 +283,18 @@ def resolve_station_identity(
     mode = WorkerIdentificationMode(area.worker_identification_mode)
     if mode is WorkerIdentificationMode.SCANNED:
         if gate is not None and confirming_badge is not None:
-            return _badge_identity(session, station, gate, confirming_badge)
-        return _session_identity(session, station, gate=gate)
+            return _logged(_badge_identity(session, station, gate, confirming_badge))
+        return _logged(_session_identity(session, station, gate=gate))
     if confirming_badge is not None:
         raise BadgeConfirmationNotExpectedError(_BADGE_NOT_EXPECTED)
-    return _identity_for(session, mode, area.fixed_worker_id, area.name)
+    return _logged(_identity_for(session, mode, area.fixed_worker_id, area.name))
+
+
+def _logged(identity: StationIdentity) -> StationIdentity:
+    """The access record names the command's Worker by id, never the badge (Phase 16 slice 6)."""
+    if identity.worker_id is not None:
+        log_context.bind(worker_id=identity.worker_id)
+    return identity
 
 
 def _identity_for(

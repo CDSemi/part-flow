@@ -10,6 +10,9 @@ upgrade on a caller-owned connection. No readiness rule lives here
 
 import logging
 import re
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -106,6 +109,38 @@ def read_revision(connection: Connection) -> str | None:
     return ",".join(revisions) if revisions else None
 
 
+class FailureLogThrottle:
+    """At most one ERROR (with traceback) per ``interval`` seconds per process.
+
+    Every client polls ``/api/health`` (and the release gate reads on a
+    cache miss), so a database outage would otherwise write one traceback
+    per client per second (Phase 16 slice 6). The other failures are
+    logged at DEBUG without a traceback. ``clock`` is replaceable in tests.
+    """
+
+    def __init__(self, interval: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self.interval = interval
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._last: float | None = None
+
+    def loud(self) -> bool:
+        """Whether this failure is the one logged at ERROR in its interval."""
+        with self._lock:
+            now = self.clock()
+            if self._last is not None and now - self._last < self.interval:
+                return False
+            self._last = now
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._last = None
+
+
+REVISION_READ_FAILURE_THROTTLE: Final = FailureLogThrottle(60.0)
+
+
 def read_database_revision(engine: Engine) -> str | None:
     """``read_revision`` on a pooled connection; also the health connectivity proof."""
     try:
@@ -113,7 +148,10 @@ def read_database_revision(engine: Engine) -> str | None:
             return read_revision(connection)
     except SQLAlchemyError as exc:
         # The URL is not logged because it contains credentials.
-        logger.error("Database revision read failed: %s", type(exc).__name__, exc_info=exc)
+        if REVISION_READ_FAILURE_THROTTLE.loud():
+            logger.error("Database revision read failed: %s", type(exc).__name__, exc_info=exc)
+        else:
+            logger.debug("Database revision read failed: %s", type(exc).__name__)
         raise DatabaseUnavailableError() from exc
 
 

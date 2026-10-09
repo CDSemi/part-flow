@@ -28,7 +28,8 @@ flow: release identity, liveness and readiness, the backend write gate,
 `migrate`, `release.sh` and `smoke.sh`, §3.1) and slice 4 (database-role hardening: the `partflow_app` and
 `partflow_maintenance` database roles, `provision-roles`, grants applied by every `migrate` and by `apply-grants`, and
 reconcile check (h), §3.1) and slice 5 (backups: the verified backup artifact, the pre-release backup inside
-the write freeze, the isolated restore drill and rollback path 3, §3.1) are implemented. Phase 16 still owns observability,
+the write freeze, the isolated restore drill and rollback path 3, §3.1) and slice 6 (observability: structured logs with the
+HTTP request id, `status`, `check.sh` and `scheduled-reconcile.sh`, §3.1) are implemented. Phase 16 still owns
 host TLS, the execution of backups and drills on a pilot host, and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
@@ -37,7 +38,7 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Production artifacts, a release flow, database-role hardening and backups exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`, `partflow_app`, `backup.sh`, `restore-test.sh`), but observability and the pilot gates of §5 remain (Phase 16: P16-S6…S7). |
+| Pilot or production use | Not ready | Production artifacts, a release flow, database-role hardening, backups and observability exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`, `partflow_app`, `backup.sh`, `restore-test.sh`, `check.sh`, `scheduled-reconcile.sh`, `status`), but the pilot gates of §5 remain (Phase 16: P16-S7). |
 | Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet (P16-S7), and the §5 gates have not passed. Network rate limiting exists in `web`; `compose.yaml` still exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
@@ -129,7 +130,7 @@ Required boundaries:
 - make the same backup format portable between NAS and VPS (implemented: the
   P16-S5 backup artifact, `deployment/OPERATIONS_RUNBOOK.md` §3).
 
-### 3.1 Production stack (Phase 16 slices 2 to 5)
+### 3.1 Production stack (Phase 16 slices 2 to 6)
 
 **State.** Implemented (P16-S2): the `production` stages of
 `backend/Dockerfile` and `frontend/Dockerfile`, the `web` configuration in
@@ -144,7 +145,7 @@ has been verified on the Synology NAS or a VPS (that is P16-S7). Implemented
 `reconcile_regression.py`, and the update notice in the frontend (the
 subsections below). Both production images take `PARTFLOW_RELEASE` and `PARTFLOW_COMMIT` as build arguments and carry the release identity (the backend `production` stage sets `RELEASE_TAG` and `RELEASE_COMMIT`); the production stack smoke and the release rehearsal have run (State, Evidence). Implemented (P16-S4): the database roles
 `partflow_app` and `partflow_maintenance`, `provision-roles` and `apply-grants`, the `db-roles` service and reconcile check (h)
-(Database roles and grants, below). Implemented (P16-S5): `deploy/production/backup.sh` (daily, manual and pre-release backups: a custom-format `pg_dump` from inside `db`, published as one directory with a manifest and `SHA256SUMS`), the `backup-manifest`, `backup-verify` and `backup-rotate` commands of the `backup-tools` service, the verification and freshness rules `migrate` applies to the pre-release backup, the backup `release.sh` takes inside the write freeze, `deploy/production/restore-test.sh` (the isolated restore drill) and the documented rollback path 3 and new-instance restore (`deployment/OPERATIONS_RUNBOOK.md` §3, §4 and §6). Evidence is Windows/Docker Desktop and a Linux container only; the schedule, the off-host replication, the first timed drill and path 3 on a host are P16-S7. Observability remains P16-S6.
+(Database roles and grants, below). Implemented (P16-S5): `deploy/production/backup.sh` (daily, manual and pre-release backups: a custom-format `pg_dump` from inside `db`, published as one directory with a manifest and `SHA256SUMS`), the `backup-manifest`, `backup-verify` and `backup-rotate` commands of the `backup-tools` service, the verification and freshness rules `migrate` applies to the pre-release backup, the backup `release.sh` takes inside the write freeze, `deploy/production/restore-test.sh` (the isolated restore drill) and the documented rollback path 3 and new-instance restore (`deployment/OPERATIONS_RUNBOOK.md` §3, §4 and §6). Evidence is Windows/Docker Desktop and a Linux container only; the schedule, the off-host replication, the first timed drill and path 3 on a host are P16-S7. Implemented (P16-S6): structured JSON logs with the HTTP request id, the `status` command and service, `deploy/production/check.sh` and `deploy/production/scheduled-reconcile.sh` (Logging and monitoring, below); their schedules and the failure notification on a host are P16-S7.
 
 **Services and networks (`compose.production.yaml`).**
 
@@ -175,7 +176,8 @@ committed default. The owner role (`POSTGRES_USER`, a superuser) is used only by
 **Images.** `backend` (`production` stage): Python 3.12 slim, the locked
 non-development dependencies, no `tests/`, no `.env`, no reload server, runs as
 user `10001:10001`; start command `uvicorn app.main:app --host 0.0.0.0
---port 8000 --no-access-log`. It never runs migrations on start. `web`
+--port 8000 --no-access-log --log-config app/core/logging.production.json`.
+It never runs migrations on start. `web`
 (`production` stage): the pinned official `nginx:1.30.5-alpine` with the
 immutable build from `npm run build` (which includes the production-boundary
 check). Both default `development` stages are unchanged.
@@ -394,10 +396,48 @@ container refuses to start. From that hop `web` takes the **last**
 backend with that single address; `X-Forwarded-Proto` is honoured only from the
 same hop. `web` publishes no certificate and reads no TLS configuration.
 
-**Request log.** The `web` access log (client address, method, path without
-query string, status, bytes, duration, user agent) is the request log in this
-slice; it never contains cookies, query strings or any PartFlow header, and the
-health probes are excluded. uvicorn's own access log is off.
+**Request log.** `web` writes one JSON edge record per request (client address,
+method, path without query string, status, bytes, duration, upstream status,
+user agent, `request_id`) and the backend one JSON application record (logger
+`app.access`) for every write, refusal, failure and slow read; both carry the same
+HTTP request id (`X-Request-ID`), which every response returns (`web` accepts a
+client value of 1-64 characters of `A-Za-z0-9._-` or generates one, passes it to
+the backend and overrides the backend's copy of the header). Neither log contains
+cookies, query strings or any PartFlow header; the health probes are excluded from
+`web`'s log and below INFO in the backend's. uvicorn's own access log stays off.
+
+**Logging and monitoring (P16-S6).** The production backend starts with
+`--log-config app/core/logging.production.json`: every record, uvicorn's
+included, is one JSON line on stderr (`ts`, `level`, `logger`, `message`,
+`request_id`, then the record's fields; a traceback never contains a database
+exception message, so no `DETAIL` line, statement or parameter value reaches the
+log). The request id is the request's `X-Request-ID` when it is 1-64 characters
+of `A-Za-z0-9._-`, otherwise a new 32-hex id; the backend echoes exactly one
+`X-Request-ID` on every response. The `app.access` record is written at INFO for
+a write, a designed refusal (`not_ready`, `release_mismatch`,
+`password_check_busy`, validation, authorization) and a read of one second or
+more (`"slow":true`), at ERROR for a failure, and at DEBUG for a health poll or a
+routine fast read. It names the PN, QuantityFlow, Area, Operation, Machine,
+Worker (only after identity resolution), Scan Station and `device_event_id` of a
+production command and the reason of a refusal, and never a request body, query
+string, cookie, token, badge, password or scanned value; the first-run setup
+token remains the one announced exception. `db` runs with
+`log_error_verbosity=terse`. Containers rotate with the json-file driver
+(`max-size` 10m, `max-file` 5); about 1.1 MB of backend log and 0.6 MB of `web` log
+per 1,000 commands were measured in the synthetic rehearsal. The `status` ops service
+(`python -m app.cli status`, profile `ops`) is a read-only report as the
+application role with the backup directory mounted read-only; run it with
+`--no-deps -T --user "$(id -u):$(id -g)"`. `deploy/production/check.sh` evaluates
+the HTTPS readiness, certificate, containers, restarts, backend errors, disks and
+the `status` report with the OD-16-11 thresholds (backup older than 26 hours,
+disk free below 15 %, certificate expiring within 21 days, any restart-count
+increase, any backend error record) and exits non-zero to reach the host
+scheduler's failure notification; `deploy/production/scheduled-reconcile.sh`
+runs `reconcile` daily and applies its exit-code rule. Commands, schedules and
+thresholds are in `deployment/OPERATIONS_RUNBOOK.md` §2, §7 and §9 and in the
+platform guides ([`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md)
+§8, [`deployment/VPS.md`](./deployment/VPS.md) §8); installing them and proving a
+notification on the host is P16-S7.
 
 **Platform proxy requirements.** The DSM reverse proxy (or Caddy) must:
 terminate HTTPS with a certificate that company workstations trust; send HTTP
@@ -421,7 +461,8 @@ CA (internal-only name); never self-signed per host and never accepted
 workstation by workstation past a browser warning. The issuing CA of an internal
 certificate is distributed to workstations and barcode terminals by the
 company's device management. The deployment administrator owns renewal; expiry
-monitoring is P16-S6. Check expiry from any client: `openssl s_client -connect
+expiry is monitored by `check.sh` `certificate` (alert below 21 days,
+`deployment/OPERATIONS_RUNBOOK.md` §9). Check expiry from any client: `openssl s_client -connect
 <host>:443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout
 -subject -enddate`. Platform steps are in SYNOLOGY_NAS §5 and VPS §4. Executed
 and verified in P16-S7.
@@ -557,7 +598,9 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   `X-PartFlow-Station-Device` header.
 - `SESSION_COOKIE_SECURE=true` is set behind TLS. The first-run setup token
   is the only secret ever written to the backend log: complete first-run
-  setup before exposing the service and restrict log access until then.
+  setup before exposing the service and restrict log access until then (the
+  structured log keeps this exception unchanged; no other secret, cookie, device
+  token, badge or request body is logged — P16-S6 tests).
 - Every production view in the intended pilot scope uses real APIs; no mock or
   explicit unconnected placeholder is mistaken for an operational feature.
 - Production writes remain blocked while disconnected and are never queued
@@ -619,8 +662,8 @@ The gates above remain gates until P16-S7 records passing evidence.
 - automated PostgreSQL logical backups run on a documented schedule, are
   encrypted off-host/off-NAS, have retention, and are monitored — implemented by
   `backup.sh`, `backup-rotate` and the platform-tool tasks (P16-S5; the
-  schedule, the replication and the backup-age alert are executed on the pilot
-  host in P16-S7 and added by P16-S6); see `deployment/OPERATIONS_RUNBOOK.md` §3;
+  backup-age alert is `check.sh` `backup_age`, P16-S6; the schedule, the
+  replication and the alert are executed on the pilot host in P16-S7); see `deployment/OPERATIONS_RUNBOOK.md` §3;
 - a restore into an isolated database has been tested and timed — implemented by
   `restore-test.sh` (P16-S5); the first timed drill on the pilot host is P16-S7
   (`deployment/OPERATIONS_RUNBOOK.md` §4);
@@ -632,8 +675,10 @@ The gates above remain gates until P16-S7 records passing evidence.
   implemented (P16-S5; `deployment/OPERATIONS_RUNBOOK.md` §6), evidence on the
   pilot host: P16-S7;
 - health, logs, disk use, backup age, database growth, and container restarts
-  are monitored;
-- movement/quantity reconciliation checks run and alert without mutating data;
+  are monitored — implemented by `check.sh` and `status` with the OD-16-11
+  thresholds (P16-S6); installed and proven on the pilot host: P16-S7;
+- movement/quantity reconciliation checks run and alert without mutating data —
+  `scheduled-reconcile.sh` daily (P16-S6); host schedule P16-S7;
 - the backend connects as `partflow_app`, which holds no UPDATE, DELETE or TRUNCATE privilege on append-only history (UPDATE only on `worker_sessions`, DELETE only on `assigned_route_steps`) — evidenced by the privilege probe (§3.1) and a clean reconcile check (h) on the production database; the raise-on-write triggers stay as the first layer; a superuser (the owner role) who disables triggers is outside detection — accepted (owner decision OD-16-09);
 - a database that ran the unreleased Phase 12 commits (`80f7925` … `b9785d2`)
   passes this read-only check before the Hot list is relied on — it must return
@@ -655,7 +700,9 @@ The gates above remain gates until P16-S7 records passing evidence.
 - NAS/VPS time synchronization is correct;
 - the host has UPS coverage or a documented power-loss strategy;
 - capacity alerts leave enough disk headroom for PostgreSQL, image updates,
-  temporary migration space, and backups.
+  temporary migration space, and backups — the `disk_data`, `disk_backup`,
+  `disk_docker` and `disk_archive` checks of `check.sh` alert below 15 % free
+  (P16-S6).
 
 ## 6. Environment separation
 

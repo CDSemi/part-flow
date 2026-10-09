@@ -76,6 +76,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.authorization import RequireAnyPermission, RequirePermission, StationDeviceDep
 from app.api.dependencies import SessionDep
+from app.api.request_log import bind_command, bind_result
 from app.api.user_refs import UserRefResponse, user_ref_response
 from app.application import allocations, station_devices
 from app.application.authentication import Principal
@@ -278,6 +279,7 @@ def _response(result: allocations.AllocationResult) -> AllocationResponse:
 def confirm_allocation(
     device: StationDeviceDep, body: AllocationRequest, session: SessionDep, response: Response
 ) -> AllocationResponse:
+    bind_command(body)
     station_devices.require_station_binding(device, body.station_id)
     result = allocations.confirm_station_allocation(
         session,
@@ -289,6 +291,7 @@ def confirm_allocation(
         device_event_id=body.device_event_id,
         suggestion_unchanged=body.suggestion_unchanged,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _response(result)
 
@@ -300,6 +303,7 @@ def allocate_from_stock(
     session: SessionDep,
     response: Response,
 ) -> AllocationResponse:
+    bind_command(body)
     result = allocations.allocate_from_stock(
         session,
         actor_user_id=principal.user_id,
@@ -309,6 +313,7 @@ def allocate_from_stock(
         reason=body.reason,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _response(result)
 
@@ -328,6 +333,7 @@ def reverse_allocation(
     session: SessionDep,
     response: Response,
 ) -> AllocationResponse:
+    bind_command(body, allocation_id=allocation_id)
     result = allocations.reverse_allocation(
         session,
         allocation_id=allocation_id,
@@ -335,6 +341,7 @@ def reverse_allocation(
         device_event_id=body.device_event_id,
         actor_user_id=principal.user_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _response(result)
 
@@ -358,6 +365,7 @@ def allocate_beyond_demand(
     session: SessionDep,
     response: Response,
 ) -> AllocationResponse:
+    bind_command(body)
     result = allocations.allocate_beyond_demand(
         session,
         actor_user_id=principal.user_id,
@@ -367,6 +375,7 @@ def allocate_beyond_demand(
         reason=body.reason,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _response(result)
 

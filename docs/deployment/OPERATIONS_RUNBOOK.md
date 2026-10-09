@@ -10,8 +10,10 @@
 > (P16-S5: `deploy/production/backup.sh`, `deploy/production/restore-test.sh`,
 > `backup-manifest`, `backup-verify`, `backup-rotate`), though no schedule,
 > off-host replication, drill or path 3 has been executed on a pilot host yet
-> (P16-S7); only the monitoring commands (P16-S6) are still placeholders and must
-> be replaced by their final repository-provided names before production use.
+> (P16-S7); the monitoring commands are real (P16-S6:
+> `deploy/production/check.sh`, `deploy/production/scheduled-reconcile.sh` and
+> `python -m app.cli status`), though their schedules, the failure notification
+> and every pilot-host execution belong to P16-S7.
 >
 > **Language:** English is the source of truth. [Tiếng Việt](./OPERATIONS_RUNBOOK.vi.md).
 
@@ -69,6 +71,98 @@ curl --fail --silent --show-error https://<partflow-host>/api/health/live
 $PF run --rm --no-deps -T backend python -m app.cli revision
 ```
 
+Production monitoring commands (P16-S6; run from the running release's checkout
+as the account that owns `PARTFLOW_BACKUP_DIR`; the schedules are installed on
+the pilot host in P16-S7):
+
+```bash
+# manual diagnosis: the same checks as the scheduled run, without touching its state
+deploy/production/check.sh --url https://<partflow-host> --no-state
+# database size, connections, lock waits, Movement rows and size, schema readiness, backup age
+$PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" status
+docker stats --no-stream
+```
+
+`check.sh` prints one line per check, `PASS|FAIL|SKIP <id> <reason>`, in this
+order: `https` (`/api/health` answers 200 with `schema` current and the release
+of `.env.production`), `certificate` (not expiring within 21 days), `containers`
+(exactly one `running` `db`, `backend` and `web`, healthy), `restarts` (no
+restart-count increase since the previous full run), `errors` (no `ERROR` or
+`CRITICAL` backend record since the previous full run, with up to three request
+ids), `disk_data` (the database volume), `disk_backup` (the backup directory),
+`disk_docker` (the Docker root: images and container logs), `disk_archive` (the
+archive directory; `SKIP` until one is configured, P16-S8), then `database`,
+`schema`, `backup_age` and `archival_proposal` from one `status` run (the last
+is `SKIP` until P16-S10). A disk is a `FAIL` below 15 % free and `backup_age` a
+`FAIL` when the newest published backup of any kind is older than 26 hours. Exit
+codes: 0 nothing to notify, 1 at least one `FAIL` to notify, 2 the check could not
+run (also notifies). An unchanged failing set is notified again only after 6
+hours (`--renotify-hours`; the output then says `already reported`). State lives
+in `~/partflow-monitoring` (`--state-dir`, mode 0700): `restarts` (restart
+baseline), `errors-since` (log cursor), `alert-state` (re-notification),
+`last-check.txt` (every run), `status.json`, `status.err` and `growth.tsv` (one
+dated line per day: database bytes, Movement rows and Movement bytes). **Always
+add `--no-state` to a manual run:** without it the manual run advances the error
+cursor and the restart baseline, so the next scheduled run would miss the errors
+and restarts the manual run already saw.
+
+`status` prints one JSON document (`result` `ok`, `attention` or `error`) with
+the exit code 0, 1 (a finding such as `backup_stale` or `schema_not_ready`) or 2
+(`configuration_invalid`, `database_unavailable`, `lock_timeout`,
+`statement_timeout`, `database_error`, `internal_error`). `database.locks`
+holds `waiting` and `longest_wait_seconds`, the lock-wait figure of the checklist
+below; it is reported, never a threshold. It runs one read-only transaction as
+the application role with a 5 s lock timeout; keep `--statement-timeout` (default
+20 s) below 30 s so a release's `migrate` is never aborted by it.
+
+Logs. In the production stack the backend writes one JSON object per line
+(`ts`, `level`, `logger`, `message`, `request_id`, then the record's own fields).
+Every response, refusals and failures included, carries the **HTTP request id**
+in the `X-Request-ID` header (a client's own value is kept when it is 1-64
+characters of `A-Za-z0-9._-`, otherwise the backend generates one), and every
+backend record of that request carries it as `request_id`. To find a request:
+
+```bash
+$PF logs --no-log-prefix backend | grep '"request_id":"<id>"'
+```
+
+The HTTP request id changes on every resubmit. A production command is therefore
+always correlated and retried by its `device_event_id` (the GUI's "request
+identity"), never by `request_id`. To follow a command or a Station, filter the
+`app.access` records by the fields they carry:
+
+```bash
+$PF logs --no-log-prefix backend | grep '"device_event_id":"<id>"'
+$PF logs --no-log-prefix backend | grep '"part_number":"<PN>"'
+$PF logs --no-log-prefix backend | grep '"quantity_flow_id":<n>'
+$PF logs --no-log-prefix backend | grep '"area_id":<n>'
+$PF logs --no-log-prefix backend | grep '"station_id":"<id>"'
+```
+
+An `app.access` record holds `event`, `method`, `route` (the route template;
+`path` only when no route matched), `status`, `duration_ms`, `client`, `outcome`
+(`ok`, `created`, `replayed`, `refused` or `error`), `slow`, `refusal` (`type`,
+`code`, `message`) and `context`: the PN, QuantityFlow, quantity, Area,
+Operation, Machine, Work Order, `device_event_id`, Scan Station, `user_id` and
+`worker_id` that the request named. `worker_id` appears only on records of a
+command that reached identity resolution (a created command or an identity
+refusal): the Worker of a replayed command is in its Movement. Never logged:
+request or response bodies, query strings, cookies, device tokens, CSRF tokens,
+badges, passwords, scanned values and PostgreSQL `DETAIL` lines (the database
+runs with `log_error_verbosity=terse`). The first-run setup token is the one
+exception: it is printed once, until setup is complete. Routine reads below 1
+second and every health poll are not written at `INFO` (`"slow":true` marks a
+read of 1 second or more); designed refusals (`not_ready`, `release_mismatch`,
+`password_check_busy`, a rejected request) are `INFO`, and only a real failure is
+`ERROR`. Measured backend volume in the rehearsal: about 1.1 MB per 1,000
+commands, so the 10 MB x 5 json-file rotation of the stack holds about 9 days of
+log at 5,000 commands per day; the rehearsal was synthetic, so P16-S7 re-measures
+it on the pilot host. `web` writes one JSON edge record per request with the same
+`request_id` (and the upstream status), so a `502` or `504` from `web` is found by
+its `request_id` in the `web` log like any other request; measured `web` volume in
+the same rehearsal: about 0.6 MB per 1,000 commands (about 18 days of rotation at
+5,000 commands per day).
+
 `/api/health` is readiness: it reports `release`, `commit`, `schema`
 (`current`, `accepted`, `mismatch` or `unknown`), `expected_revision`,
 `database_revision` and `accepted_revision`, and answers 503 on a schema
@@ -77,9 +171,11 @@ container health checks use it): it stays healthy while readiness is 503 during
 a schema mismatch. `revision` prints the same facts from a one-off container
 and works while `backend` is stopped.
 
-In the production stack `web`'s access log is the request log (client address,
-method, path without query string, status, bytes, duration, user agent); it
-never contains query strings, cookies or PartFlow headers. A 502 or 504 JSON
+`web` writes the edge record of every request (JSON: client address, method, path
+without query string, status, bytes, duration, upstream status, user agent,
+`request_id`) and the backend the application record of every write, refusal,
+failure and slow read; neither contains query strings, cookies or PartFlow
+headers. A 502 or 504 JSON
 answer comes from `web` (`server_unavailable`) and means the outcome of a write
 is unknown: resolve it with the original `device_event_id` (below).
 
@@ -262,7 +358,9 @@ hand: Hyper Backup with client-side encryption to an off-NAS target on Synology
 a failed scheduled run (any non-zero exit, a daily that fails verification
 included) is the scheduler's failure notification, and a failed replication is the
 platform tool's own notification; both are reviewed daily (§9). The "backup too
-old" alert is added by P16-S6. The recovery point objective is the daily schedule
+old" alert is `check.sh` `backup_age`: the newest published backup of any kind
+older than 26 hours (§2, §9; P16-S6). It is installed on the pilot host in
+P16-S7. The recovery point objective is the daily schedule
 (24 hours) until the owner approves the RPO and RTO (P16-S7).
 
 ### Backup lock
@@ -290,7 +388,9 @@ $PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT co
 rm -r "<backup-dir>/.backup.lock" "<backup-dir>/.partial/<name>"   # the name from the owner file, when it has one
 ```
 
-Never remove a lock whose owner is `release.sh` while that release runs.
+Never remove a lock whose owner is `release.sh` while that release runs. While
+`release.sh` holds the backup lock (or its release lock exists) `check.sh` skips
+its `status` checks (§5 Observe).
 
 ## 4. Restore test — never overwrite first
 
@@ -525,7 +625,10 @@ The manual equivalent, in the same order, with the current tag in
 ### Observe
 
 Monitor errors, latency, locks, restarts, disk, and operator feedback through the
-defined observation window. Retain the previous release and the pre-release backup (never rotated). Pages that
+defined observation window: the `check.sh` lines (`errors`, `restarts`,
+`disk_*`), slow reads (`"slow":true`) and `status`, including its lock waits
+(§2). A check during the write freeze reports `backend` stopped (one
+notification) and skips the `status` checks while the release lock exists. Retain the previous release and the pre-release backup (never rotated). Pages that
 were open during the switch show the update notice and reload (GUI_DESIGN §3
 rule 13); an unattended Scan Station or Production Board reloads itself once no
 dialog is open.
@@ -807,6 +910,24 @@ Operating rules:
 - A non-zero exit is an incident (§8). Never edit history or projections
   directly; the owner decides each repair.
 
+Scheduled form (P16-S6; the daily schedule is installed on the pilot host in
+P16-S7): `deploy/production/scheduled-reconcile.sh`, run daily at 04:00 from the
+running release's checkout as the account that owns `PARTFLOW_BACKUP_DIR`. It
+runs the full `reconcile` in the production stack, writes the report to
+`~/partflow-monitoring/reconcile/<UTC timestamp>-reconcile.json` (`--reports-dir`;
+directory 0700, report 0600), and applies the exit-code rule above through
+`monitor_report.py`: it prints `RECONCILE clean|mismatch|error|could_not_run
+<report>` and one `FAIL <check> <title>` line per failed check, and exits 0
+(clean), 1 (mismatch) or 2 (could not run, including a report that is not
+complete). It refuses to run while a release holds its lock or the backup lock
+(exit 2), stops a run longer than `--max-runtime-minutes` (60) and never runs
+concurrently with a migration. `last-result.txt` in the reports directory holds
+the last run's lines. Every non-zero exit reaches the scheduler's failure
+notification; the notification names only check ids, titles and counts.
+**Report handling:** a report is mode 0600 and may contain Worker badge values
+(check (j)). Keep reports like backups and never attach them to tickets or
+emails.
+
 Reconciliation is read-only by default. A mismatch creates an incident; it does
 not trigger an automatic repair.
 
@@ -817,6 +938,8 @@ not trigger an automatic repair.
 - stop the affected workflow if quantity integrity may be at risk;
 - preserve request time, station, user/worker, PN, flow, and
   `device_event_id`;
+- correlate the backend log by `request_id`, `device_event_id`, PN, QuantityFlow,
+  Scan Station and Worker (commands in §2) before retrying;
 - inspect server result/history before retrying;
 - retry only with the original idempotency key when appropriate;
 - never edit Movement history directly;
@@ -835,6 +958,10 @@ not trigger an automatic repair.
 
 - block new writes before disk is exhausted (the write freeze, §5);
 - preserve logs and metrics;
+- the storage alert is a `disk_*` line of `check.sh` below 15 % free: `disk_data`
+  measures the database volume, `disk_backup` the backup directory, `disk_docker`
+  the Docker root (images and container logs) and `disk_archive` the archive
+  directory;
 - do not delete PostgreSQL files, volumes, Movement rows, or backups ad hoc;
 - backups need `2 x` the newest dump plus a reserve free in the backup directory,
   a path 3 restore needs the database size plus `2 x` the dump plus 1 GiB free on
@@ -858,10 +985,10 @@ not trigger an automatic repair.
 
 | Frequency | Tasks |
 | --- | --- |
-| Continuous | Health, restart, disk, certificate, backup-age, and error alerts |
-| Daily | The scheduled `backup.sh --kind daily --keep-daily 14 --keep-weekly 8` (the owner's values); review the scheduler's and the platform tool's notifications (exit 4 includes a daily that fails verification) and off-site replication; review critical errors |
-| Weekly | Review capacity trend, database growth, failed logins/authorization events, and pending security updates |
-| Monthly | Patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts; review database roles with `reconcile --check h`; remove pre-release and manual backups whose observation window ended, and daily backups reported invalid by rotation after review (never an archive) |
+| Continuous | `check.sh` every 15 minutes (P16-S6; scheduled on the pilot host in P16-S7): health, restart, disk, certificate, backup-age, and error alerts with the OD-16-11 thresholds: backup older than 26 h, disk free below 15 %, certificate expiring within 21 days, any restart-count increase, any backend error record (the archival proposal arrives with P16-S10). The notification is the scheduler's failure notification; an unchanged failure is repeated every 6 h |
+| Daily | The scheduled `backup.sh --kind daily --keep-daily 14 --keep-weekly 8` (the owner's values); review the scheduler's and the platform tool's notifications (exit 4 includes a daily that fails verification) and off-site replication; review critical errors; `scheduled-reconcile.sh` at 04:00 (after the 02:00 backup of the platform guides); review `last-check.txt`, `<reports-dir>/last-result.txt` and the notifications |
+| Weekly | Review capacity trend and database growth (`growth.tsv` and `docker stats --no-stream`), failed logins/authorization events (`$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'`: `refusal.type` and `refusal.code` tell a sign-in refused or locked, a permission denied, `station_device_required` or `station_device_mismatch`, and `csrf_rejected` apart; the `app.application.authentication` sign-in lines name a user id only), and pending security updates (a host item, P16-S7) |
+| Monthly | Prune old reconcile reports by hand after review (no tool deletes them; they may hold badge values); patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts; review database roles with `reconcile --check h`; remove pre-release and manual backups whose observation window ended, and daily backups reported invalid by rotation after review (never an archive) |
 | On role-password rotation | A short write freeze: replace the role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, then check health. A plain `up -d backend` does not pick up the new password (the container is not recreated), and running `db-roles` while the backend serves makes its new connections fail. Owner password: `ALTER ROLE … PASSWORD` inside `db` first, then replace `postgres_password` (no service restart: only the one-shot `migrate` and `db-roles` use it) |
 | Quarterly or after material schema change | `restore-test.sh --backup <latest daily>` (§4), its timings compared with the RTO, a measured RPO/RTO exercise, and reconciliation review |
 | Before a PostgreSQL-image or host glibc change | `restore-test.sh --backup <latest> --db-image <candidate>` (§7) |

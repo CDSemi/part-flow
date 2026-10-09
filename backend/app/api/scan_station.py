@@ -267,6 +267,7 @@ from app.api.area_inventory import (
 )
 from app.api.authorization import StationDeviceDep, StationDeviceForPathDep
 from app.api.dependencies import SessionDep
+from app.api.request_log import bind_command, bind_result
 from app.application import (
     direct_processing,
     environment,
@@ -283,6 +284,7 @@ from app.application import (
 )
 from app.application.station_identity import FinalGate, SensitiveAction
 from app.application.worker_sessions import OpenSession
+from app.core import log_context
 from app.domain.enums import Permission, ThemePreference
 from app.infrastructure.models import Worker
 
@@ -491,6 +493,8 @@ class BadgeScanResponse(BaseModel):
 def scan_badge(
     device: StationDeviceForPathDep, station_id: str, body: BadgeScanRequest, session: SessionDep
 ) -> BadgeScanResponse:
+    log_context.bind(station_id=station_id)
+    log_context.suppress_refusal_message()
     result = scan_station.badge_scan(session, station_id, body.badge)
     return BadgeScanResponse(
         outcome=result.outcome.value,
@@ -639,6 +643,8 @@ class ScanResolveResponse(BaseModel):
 def resolve_scan(
     device: StationDeviceForPathDep, station_id: str, body: ScanResolveRequest, session: SessionDep
 ) -> ScanResolveResponse:
+    log_context.bind(station_id=station_id)
+    log_context.suppress_refusal_message()
     result = scan_station.resolve_part_number_scan(
         session, station_id, barcode=body.barcode, part_number=body.part_number
     )
@@ -734,6 +740,8 @@ def resolve_machine_scan(
     body: MachineScanResolveRequest,
     session: SessionDep,
 ) -> MachineScanResolveResponse:
+    log_context.bind(station_id=station_id)
+    log_context.suppress_refusal_message()
     result = scan_station.resolve_machine_scan(
         session, station_id, barcode=body.barcode, asset_tag=body.asset_tag
     )
@@ -829,6 +837,7 @@ def transfer_to_station_area(
     session: SessionDep,
     response: Response,
 ) -> AreaTransferResponse:
+    bind_command(body, station_id=station_id)
     result = transfers.transfer_to_station_area(
         session,
         station_id=station_id,
@@ -844,6 +853,7 @@ def transfer_to_station_area(
         repair_reason=body.repair_reason,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _arrival_response(result)
 
@@ -912,6 +922,7 @@ def stock_at_station_area(
     a stale source, or an unconfirmed route deviation; 422 for a quantity
     exceeding the source. The flow closes as STOCKED; the allocation
     confirmation that follows is its own command (`POST /allocations`)."""
+    bind_command(body, station_id=station_id)
     result = stockroom.stock_into_station_area(
         session,
         station_id=station_id,
@@ -925,6 +936,7 @@ def stock_at_station_area(
         route_deviation_reason=body.route_deviation_reason,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _arrival_response(result)
 
@@ -1032,6 +1044,7 @@ def assign_to_machine(
     session: SessionDep,
     response: Response,
 ) -> MachineProcessingResponse:
+    bind_command(body, station_id=station_id)
     result = machine_processing.assign_to_machine(
         session,
         station_id=station_id,
@@ -1041,6 +1054,7 @@ def assign_to_machine(
         quantity=body.quantity,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     return _processing_response(result, response)
 
 
@@ -1052,6 +1066,7 @@ def release_to_queue(
     session: SessionDep,
     response: Response,
 ) -> MachineProcessingResponse:
+    bind_command(body, station_id=station_id)
     result = machine_processing.release_to_queue(
         session,
         station_id=station_id,
@@ -1062,6 +1077,7 @@ def release_to_queue(
         device_event_id=body.device_event_id,
         confirming_badge=body.confirming_badge,
     )
+    bind_result(result)
     return _processing_response(result, response)
 
 
@@ -1073,6 +1089,7 @@ def complete_area_processing(
     session: SessionDep,
     response: Response,
 ) -> MachineProcessingResponse:
+    bind_command(body, station_id=station_id)
     if body.machine_id is None:
         result = direct_processing.complete_direct_processing(
             session,
@@ -1094,6 +1111,7 @@ def complete_area_processing(
             device_event_id=body.device_event_id,
             confirming_badge=body.confirming_badge,
         )
+    bind_result(result)
     return _processing_response(result, response)
 
 
@@ -1139,6 +1157,7 @@ def merge_flows(
     session: SessionDep,
     response: Response,
 ) -> MergeResponse:
+    bind_command(body, station_id=station_id)
     result = merges.merge_flows(
         session,
         station_id=station_id,
@@ -1146,6 +1165,7 @@ def merge_flows(
         quantity_flow_ids=body.quantity_flow_ids,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return MergeResponse(
         movement_id=result.movement_id,
@@ -1213,6 +1233,7 @@ def scrap_quantity(
     session: SessionDep,
     response: Response,
 ) -> ScrapResponse:
+    bind_command(body, station_id=station_id)
     result = quantity_events.scrap_flow(
         session,
         station_id=station_id,
@@ -1222,6 +1243,7 @@ def scrap_quantity(
         reason=body.reason,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return ScrapResponse(
         movement_id=result.movement_id,
@@ -1286,6 +1308,7 @@ def add_quantity(
     session: SessionDep,
     response: Response,
 ) -> QuantityAdditionResponse:
+    bind_command(body, station_id=station_id)
     result = quantity_events.add_quantity(
         session,
         station_id=station_id,
@@ -1295,6 +1318,7 @@ def add_quantity(
         operation_id=body.operation_id,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return QuantityAdditionResponse(
         movement_id=result.movement_id,
@@ -1403,6 +1427,7 @@ def receive_quantity(
     422 for an invalid PN, quantity, Request Type, Route Mode, Planned
     Route or scan timestamp (naive, in the future, or — for a receipt not
     yet recorded — older than the intake scan window)."""
+    bind_command(body, station_id=station_id)
     result = intake.receive_quantity(
         session,
         station_id=station_id,
@@ -1419,6 +1444,7 @@ def receive_quantity(
         confirm_active_quantity=body.confirm_active_quantity,
         device_event_id=body.device_event_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return ReceiptResponse(
         movement_id=result.movement_id,
@@ -1604,6 +1630,7 @@ def undo_production_command(
     session: SessionDep,
     response: Response,
 ) -> UndoResponse:
+    bind_command(body, station_id=station_id)
     result = undo.undo_command(
         session,
         station_id=station_id,
@@ -1613,6 +1640,7 @@ def undo_production_command(
         reason=body.reason,
         confirming_badge=body.confirming_badge,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return UndoResponse(
         reverses_device_event_id=result.reverses_device_event_id,

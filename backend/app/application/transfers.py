@@ -170,6 +170,7 @@ from app.application.projections import (
     reversed_movement_ids,
     visited_area_ids,
 )
+from app.core import log_context
 from app.domain.enums import (
     MovementReason,
     MovementType,
@@ -268,6 +269,11 @@ class AreaTransfer(NamedTuple):
     occurred_at: datetime.datetime
     created: bool
 
+    @property
+    def area_id(self) -> int:
+        """The Area the command acted in: the destination, the station's Area (the log context)."""
+        return self.to_area_id
+
 
 # ---------------------------------------------------------------------------
 # Station context (shared with the Scan Station read models)
@@ -289,6 +295,8 @@ def require_production_station(session: Session, station_id: str) -> tuple[ScanS
         raise ConflictError(
             f"Scan Station '{station_id}' is inactive and accepts no production use."
         )
+    # The access record names the Area the station is bound to now (Phase 16 slice 6).
+    log_context.bind(area_id=station.area_id)
     area = session.get(Area, station.area_id)
     if area is None:  # pragma: no cover - FK guarantees the row
         raise NotFoundError(f"Area {station.area_id} does not exist.")
@@ -705,6 +713,8 @@ def _require_confirmed_station(
             " Area — its configuration changed since the action was prepared. Reload"
             f" the station and confirm again. {nothing}"
         )
+    # The access record names the Area the station is bound to now (Phase 16 slice 6).
+    log_context.bind(area_id=station.area_id)
     area = session.get(Area, station.area_id)
     if area is None:  # pragma: no cover - FK guarantees the row
         raise NotFoundError(f"Area {station.area_id} does not exist.")

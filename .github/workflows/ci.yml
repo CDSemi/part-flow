@@ -76,7 +76,10 @@ jobs:
                       docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
             # Also runs the release.sh/smoke.sh tests (fake docker, git and
             # curl), the reconcile_regression.py tests (P16-S3) and the
-            # backup.sh/restore-test.sh tests (P16-S5, test_backup_scripts.py).
+            # backup.sh/restore-test.sh tests (P16-S5, test_backup_scripts.py)
+            # and the check.sh, scheduled-reconcile.sh and monitor_report.py
+            # tests (P16-S6: test_check_script.py,
+            # test_scheduled_reconcile.py, test_monitor_report.py).
             - name: Production artifact static tests
               run: python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
 

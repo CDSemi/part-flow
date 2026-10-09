@@ -778,10 +778,13 @@ def _invalid_key(raw: dict[str, object]) -> str | None:
     return None
 
 
-def _manifest_detail(
-    raw: object, name: BackupName, digests: dict[str, backup_files.FileDigest]
-) -> str | None:
-    """Why ``manifest.json`` is invalid (None = valid)."""
+def manifest_problem(raw: object, name: BackupName) -> str | None:
+    """Why ``manifest.json`` is invalid apart from its ``files`` digests (None = valid).
+
+    The object, ``manifest_version``, key set, every key's value and the
+    name/kind/label agreement with the directory name — no file is read
+    (``status``, Phase 16 slice 6). ``_manifest_detail`` adds the digests.
+    """
     if not isinstance(raw, dict):
         return f"{MANIFEST_FILE}: is not a JSON object"
     if raw.get("manifest_version") != MANIFEST_VERSION or not _is_int(raw["manifest_version"]):
@@ -799,6 +802,17 @@ def _manifest_detail(
         return f"{MANIFEST_FILE}: name differs from the directory name"
     if raw["kind"] != name.kind or raw["label"] != name.label:
         return f"{MANIFEST_FILE}: kind or label differs from the directory name"
+    return None
+
+
+def _manifest_detail(
+    raw: object, name: BackupName, digests: dict[str, backup_files.FileDigest]
+) -> str | None:
+    """Why ``manifest.json`` is invalid (None = valid)."""
+    problem = manifest_problem(raw, name)
+    if problem is not None:
+        return problem
+    assert isinstance(raw, dict)
     expected_files = [
         {"name": file, "bytes": digests[file].size, "sha256": digests[file].sha256}
         for file in (DUMP_FILE, LIST_FILE)

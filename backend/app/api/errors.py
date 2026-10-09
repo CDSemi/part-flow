@@ -58,13 +58,21 @@ Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
 echoes the submitted ``input`` (and ``ctx``), which would return a
 password or the setup token in clear text (Phase 14 slice 1).
+
+Every handler registered here also records its refusal in the request's
+access record before answering (Phase 16 slice 6, ``app.api.request_log``):
+the error class, the flag the body carries (null for the generic status
+mapping) and the error's authored message — a validation refusal records
+``request_invalid`` and each error's ``type`` and ``loc`` only (never
+``msg``, ``input`` or ``ctx``). Responses are unchanged.
 """
 
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.api.authorization import clear_session_cookie
 from app.api.hot_list import entry_response
@@ -105,6 +113,7 @@ from app.application.station_identity import (
     WorkerSessionRequiredError,
 )
 from app.application.undo import UndoReasonRequiredError
+from app.core import log_context
 
 _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: 404,
@@ -115,9 +124,36 @@ _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
 }
 
 
+_MAX_LOGGED_VALIDATION_ERRORS = 10
+
+Handler = Callable[[Request, Exception], Awaitable[Response]]
+
+
 def _validation_detail(error: dict[str, Any]) -> dict[str, Any]:
     """One validation error without the submitted value or its context."""
     return {key: error[key] for key in ("type", "loc", "msg") if key in error}
+
+
+def _logged_validation_error(error: dict[str, Any]) -> dict[str, object]:
+    """One validation error as the access record keeps it: ``type`` and ``loc`` only."""
+    loc = [
+        item if isinstance(item, int) else log_context.clean_text(str(item), 64)
+        for item in error.get("loc", ())
+    ]
+    return {"type": str(error.get("type")), "loc": loc}
+
+
+def _add_handler(
+    app: FastAPI, error_type: type[ApplicationError], handler: Handler, code: str | None
+) -> None:
+    """Register ``handler``; it first records the refusal in the request's access record."""
+
+    async def recorded(request: Request, exc: Exception) -> Response:
+        # FastAPI dispatches by the registered type: an ApplicationError here.
+        log_context.record_refusal(type(exc).__name__, code, cast(ApplicationError, exc).message)
+        return await handler(request, exc)
+
+    app.add_exception_handler(error_type, recorded)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -125,6 +161,15 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     async def request_validation_handler(request: Request, exc: Exception) -> JSONResponse:
         errors = cast(RequestValidationError, exc).errors()
+        log_context.record_refusal(
+            "RequestValidationError",
+            "request_invalid",
+            None,
+            errors=[
+                _logged_validation_error(dict(error))
+                for error in errors[:_MAX_LOGGED_VALIDATION_ERRORS]
+            ],
+        )
         return JSONResponse(
             status_code=422,
             content={"detail": [_validation_detail(dict(error)) for error in errors]},
@@ -139,7 +184,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             message = cast(ApplicationError, exc).message
             return JSONResponse(status_code=status_code, content={"detail": message})
 
-        app.add_exception_handler(error_type, handler)
+        _add_handler(app, error_type, handler, None)
 
     for error_type, status_code in _STATUS_BY_ERROR.items():
         _register(error_type, status_code)
@@ -157,8 +202,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             },
         )
 
-    app.add_exception_handler(
-        ActiveQuantityConfirmationRequiredError, confirmation_required_handler
+    _add_handler(
+        app,
+        ActiveQuantityConfirmationRequiredError,
+        confirmation_required_handler,
+        "confirmation_required",
     )
 
     async def route_deviation_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -174,7 +222,12 @@ def register_exception_handlers(app: FastAPI) -> None:
             },
         )
 
-    app.add_exception_handler(RouteDeviationConfirmationRequiredError, route_deviation_handler)
+    _add_handler(
+        app,
+        RouteDeviationConfirmationRequiredError,
+        route_deviation_handler,
+        "confirmation_required",
+    )
 
     async def work_order_selection_handler(request: Request, exc: Exception) -> JSONResponse:
         # Phase 10.5 (PROJECT_PROFILE §14): several internal
@@ -191,7 +244,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             },
         )
 
-    app.add_exception_handler(WorkOrderSelectionRequiredError, work_order_selection_handler)
+    _add_handler(
+        app, WorkOrderSelectionRequiredError, work_order_selection_handler, "selection_required"
+    )
 
     async def hot_list_changed_handler(request: Request, exc: Exception) -> JSONResponse:
         # Phase 12: the optimistic precondition failed — nothing was
@@ -208,7 +263,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             },
         )
 
-    app.add_exception_handler(HotListChangedError, hot_list_changed_handler)
+    _add_handler(app, HotListChangedError, hot_list_changed_handler, "hot_list_changed")
 
     async def hot_demand_removal_handler(request: Request, exc: Exception) -> JSONResponse:
         # Phase 12 follow-up (OD3): the demand line is on the Hot list and
@@ -224,7 +279,12 @@ def register_exception_handlers(app: FastAPI) -> None:
             },
         )
 
-    app.add_exception_handler(HotDemandRemovalConfirmationRequiredError, hot_demand_removal_handler)
+    _add_handler(
+        app,
+        HotDemandRemovalConfirmationRequiredError,
+        hot_demand_removal_handler,
+        "confirmation_required",
+    )
 
     async def worker_session_required_handler(request: Request, exc: Exception) -> JSONResponse:
         # Phase 13: no valid Worker Session at a Scanned-session station —
@@ -235,7 +295,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"detail": error.message, "worker_session_required": True},
         )
 
-    app.add_exception_handler(WorkerSessionRequiredError, worker_session_required_handler)
+    _add_handler(
+        app, WorkerSessionRequiredError, worker_session_required_handler, "worker_session_required"
+    )
 
     # Phase 13 slice 5: the final-gate refusals — nothing was recorded;
     # the flag tells the station which gate form to present next. Each
@@ -256,7 +318,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             message = cast(ApplicationError, exc).message
             return JSONResponse(status_code=status_code, content={"detail": message, flag: True})
 
-        app.add_exception_handler(error_type, handler)
+        _add_handler(app, error_type, handler, flag)
 
     for error_type, status_code, flag in _gate_refusals:
         _register_gate_refusal(error_type, status_code, flag)
@@ -307,7 +369,12 @@ def register_exception_handlers(app: FastAPI) -> None:
             },
         )
 
-    app.add_exception_handler(StationPermissionDeniedError, station_permission_denied_handler)
+    _add_handler(
+        app,
+        StationPermissionDeniedError,
+        station_permission_denied_handler,
+        "station_permission_denied",
+    )
 
     async def authentication_required_handler(request: Request, exc: Exception) -> JSONResponse:
         # No usable sign-in: the stale cookie (if any) is cleared too.
@@ -321,7 +388,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         clear_session_cookie(response)
         return response
 
-    app.add_exception_handler(AuthenticationRequiredError, authentication_required_handler)
+    _add_handler(
+        app, AuthenticationRequiredError, authentication_required_handler, "authentication_required"
+    )
 
     async def permission_denied_handler(request: Request, exc: Exception) -> JSONResponse:
         error = cast(PermissionDeniedError, exc)
@@ -334,4 +403,4 @@ def register_exception_handlers(app: FastAPI) -> None:
             content["any_permission"] = True
         return JSONResponse(status_code=403, content=content)
 
-    app.add_exception_handler(PermissionDeniedError, permission_denied_handler)
+    _add_handler(app, PermissionDeniedError, permission_denied_handler, "permission_denied")

@@ -507,7 +507,7 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 
 `compose.production.yaml` (Compose project `partflow-production`) là production
 stack: `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và các job
-`migrate`, `db-roles` và `backup-tools` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
+`migrate`, `db-roles`, `backup-tools` và `status` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
 có gì trong repo này tự khởi động nó, và nó chưa được xác minh trên Synology NAS
 hay VPS (Phase 16 slice 7). Configuration là `.env.production` (sao chép
 `.env.production.example`, git bỏ qua) cùng các secret file `postgres_password`, `partflow_app_password` và
@@ -575,6 +575,26 @@ new-instance restore nằm ở
 [`docs/deployment/VPS.md`](./docs/deployment/VPS.md) §8). Schedule và drill đầu tiên
 trên một host thuộc Phase 16 slice 7.
 
+Monitoring (Phase 16 slice 6): backend production ghi mỗi record một dòng JSON và
+mọi response mang một `X-Request-ID`; `status` (service `ops`,
+`python -m app.cli status`) báo database size, connection, lock wait, số Movement,
+schema readiness và tuổi backup dưới dạng JSON; `deploy/production/check.sh` chạy
+các host check (HTTPS readiness, certificate, container và restart, backend error,
+disk, database, schema và tuổi backup) và `deploy/production/scheduled-reconcile.sh`
+chạy `reconcile` hằng ngày:
+
+```bash
+deploy/production/check.sh --url https://<partflow host> --no-state   # manual diagnosis
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" status
+deploy/production/scheduled-reconcile.sh
+```
+
+Cả hai script in cách dùng bằng `--help`. Command, ngưỡng và schedule nằm ở
+[`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
+§2, §7 và §9; cài schedule và chứng minh failure notification trên một host thuộc
+Phase 16 slice 7.
+
 Chỉ bước build dùng `compose.production.build.yaml`: `compose.production.yaml`
 không có phần build, nên `up` hay `run` với một release thiếu image sẽ thất bại
 thay vì build checkout. Không bao giờ chạy `$PF down -v`: nó xóa database volume
@@ -611,7 +631,9 @@ Lệnh đầu chạy static test của Compose model, file environment example, 
 và cấu hình nginx, cùng test của `release.sh` / `smoke.sh` (`test_release_scripts.py`,
 với `docker`, `git` và `curl` giả), test của `backup.sh` / `restore-test.sh`
 (`test_backup_scripts.py`, cũng với bản giả) và test của `reconcile_regression.py`
-(`test_reconcile_regression.py`); lệnh thứ hai build cả hai production image (build
+(`test_reconcile_regression.py`) và test monitoring (`test_check_script.py`,
+`test_scheduled_reconcile.py` và `test_monitor_report.py`, với `docker` và `curl`
+giả); lệnh thứ hai build cả hai production image (build
 `web` chạy production-boundary check, và build thiếu `PARTFLOW_COMMIT` thì fail).
 Compose stack smoke
 (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) khởi
@@ -620,7 +642,9 @@ rồi xóa nó; `python3 deploy/production/tests/release_rehearsal.py` diễn t�
 release trên project tạm `partflow-s3-rehearsal`;
 `python3 deploy/production/tests/backup_rehearsal.py --evidence <path.json>` build ba
 release và kiểm tra backup, restore drill và rollback path 3 trên các project tạm
-`partflow-s5-*`. Cả ba cần Docker daemon và không thuộc CI.
+`partflow-s5-*`; `python3 deploy/production/tests/observability_rehearsal.py --evidence <path.json>`
+kiểm tra structured log, `status`, `check.sh` và `scheduled-reconcile.sh` trên một project tạm với dữ liệu
+tổng hợp. Cả bốn cần Docker daemon và không thuộc CI.
 
 ## Continuous integration
 
@@ -652,11 +676,12 @@ backend/
   Dockerfile       stage `production` và `development` (mặc định)
 frontend/nginx/    cấu hình image `web` (nginx template, proxy/header snippet, trusted-proxy entrypoint)
 compose.yaml       development stack: db, backend, frontend
-compose.production.yaml  production stack (db, backend, web, migrate, db-roles, backup-tools); không dành cho development
+compose.production.yaml  production stack (db, backend, web, migrate, db-roles, backup-tools, status); không dành cho development
 compose.production.build.yaml  file đi kèm chỉ để build: build production image của backend và web
 .env.production.example  bảng kê configuration production (sao chép thành .env.production)
 deploy/production/release.sh, smoke.sh  release flow và loopback smoke check (reconcile_regression.py so sánh các report reconcile)
 deploy/production/backup.sh, restore-test.sh  backup artifact và restore drill cô lập
-deploy/production/tests/ static test production artifact, test script release và backup, Compose stack smoke, release rehearsal và backup rehearsal
+deploy/production/check.sh, scheduled-reconcile.sh, monitor_report.py  host check, reconcile hằng ngày và helper tạo report của chúng
+deploy/production/tests/ static test production artifact, test script release, backup và monitoring, Compose stack smoke, release rehearsal, backup rehearsal và observability rehearsal
 docs/              tài liệu chuẩn của project
 ```

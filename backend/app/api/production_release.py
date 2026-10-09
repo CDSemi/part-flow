@@ -41,6 +41,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.authorization import RequirePermission
 from app.api.dependencies import SessionDep
+from app.api.request_log import bind_command, bind_result
 from app.application import production_release
 from app.application.authentication import Principal
 from app.application.production_release import ProductionRelease
@@ -119,6 +120,7 @@ def release_to_production(
     session: SessionDep,
     response: Response,
 ) -> ProductionReleaseResponse:
+    bind_command(body, work_order_id=work_order_id, demand_id=demand_id)
     result = production_release.release_to_production(
         session,
         work_order_id=work_order_id,
@@ -133,5 +135,6 @@ def release_to_production(
         device_event_id=body.device_event_id,
         actor_user_id=principal.user_id,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _response(result)

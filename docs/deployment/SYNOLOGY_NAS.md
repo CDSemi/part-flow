@@ -257,7 +257,8 @@ Then **Settings** → assign the certificate to the PartFlow reverse-proxy
 entry's hostname. DSM does not renew an imported certificate: import the new one
 before expiry and re-assign it. Distribute the internal CA to workstations and
 barcode terminals through the company's device management, and check expiry
-with the `openssl s_client` command in DEPLOYMENT §3.1 (monitoring: P16-S6).
+with the `openssl s_client` command in DEPLOYMENT §3.1 (expiry alert:
+`check.sh` `certificate`, §8 Monitoring and alerts).
 Executed and verified in P16-S7.
 
 ## 6. Backup staging data
@@ -399,11 +400,11 @@ run from the release checkout `repo/`.
 6. **Never run `down -v`** (or remove a volume) on the `partflow-production`
    project: it deletes the production database.
 
-Pending: observability
-(P16-S6), and the NAS host checks and pilot gates (P16-S7); the release flow
-itself (`release.sh`, `smoke.sh`) and the backup and restore tooling
-(`backup.sh`, `restore-test.sh`, P16-S5) are implemented and not yet executed on
-the NAS.
+Pending: the execution of observability (implemented in P16-S6) with the NAS
+host checks and the pilot gates (P16-S7); the release flow itself (`release.sh`,
+`smoke.sh`), the backup and restore tooling (`backup.sh`, `restore-test.sh`,
+P16-S5) and the monitoring scripts (`check.sh`, `scheduled-reconcile.sh`, P16-S6)
+are implemented and not yet executed on the NAS.
 
 - immutable production frontend and backend images — implemented (P16-S2:
   images tagged by `PARTFLOW_RELEASE`, never pulled); the release identity is
@@ -423,12 +424,38 @@ the NAS.
   and successful restore drill — the scripts, the manifest, the verification, the
   retention and the drill are implemented (P16-S5); the schedule and the
   replication executed on the NAS and a drill timed there are pending (P16-S7),
-  and the backup-age alert is pending (P16-S6);
+  and the backup-age alert is implemented (P16-S6: `check.sh` `backup_age`) and
+  installed on the NAS in P16-S7;
 - monitoring for health, logs, disk, backup age, restart count, and database
-  growth;
+  growth — implemented (P16-S6: `check.sh`, `status`), executed on the NAS in
+  P16-S7;
 - release, migration, rollback, reconciliation, and incident runbooks tested by
   the actual administrators;
 - approved RPO/RTO and pilot scope.
+
+### Monitoring and alerts (Phase 16)
+
+The scripts are implemented (P16-S6) and exercised on Docker Desktop; the tasks
+below are **configured and executed on the NAS in P16-S7**, and nothing here has
+been run on a Synology NAS yet. Configure DSM Control Panel → Notification →
+Email first, so the scheduler's failure mail can leave the NAS. Then, in Task
+Scheduler → Create → Scheduled Task → User-defined script, as the account that
+owns the backup directory:
+
+1. `PartFlow check`: daily from 00:00, repeat every 15 minutes until 23:45; Run
+   command: `cd <running release checkout> && deploy/production/check.sh --url https://<partflow host> --quiet`.
+2. `PartFlow reconcile`: daily at 04:00 (after the 02:00 backup); Run command:
+   `cd <running release checkout> && deploy/production/scheduled-reconcile.sh`.
+
+Both tasks enable "Send run details by email" **only when the script terminates
+abnormally**: `check.sh --quiet` prints nothing and exits 0 unless a `FAIL` is
+due, and a repeated unchanged failure is reported again only every 6 hours. After
+each release update the checkout path in both tasks. Add `--resolve-to 127.0.0.1`
+to task 1 when the NAS cannot resolve its own PartFlow name. The notification
+test is one run of task 1 with
+`--only disk_backup --min-free-percent 100 --renotify-hours 0` (P16-S7 executes
+it). The thresholds, the exit codes and what each line means are in
+[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §2 and §9.
 
 ## 9. Capacity and reliability
 
@@ -445,7 +472,11 @@ realistic staging test:
   shutdown.
 
 Maintain disk alerts with enough headroom for the database, at least one upgrade
-image set, temporary migration work, and the local backup staging window: a
+image set, temporary migration work, and the local backup staging window (the
+`check.sh` disk checks, P16-S6, alert below 15 % free: `disk_data` measures the
+database volume, `disk_backup` the backup directory, `disk_docker` the Docker
+root, and the database growth is the `growth.tsv` history in the check state
+directory): a
 backup needs `2 x` the newest dump plus 1 GiB free in the backup directory, and a
 restore drill needs `5 x` the dump plus 1 GiB free on the Docker root (the drill
 runs one backend worker).

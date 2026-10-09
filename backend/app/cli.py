@@ -70,11 +70,17 @@ Commands:
   and the newest of each recent ISO week, delete the other verified daily
   backups; never touches other kinds or invalid backups. 0 rotated, 1
   rotated but some daily backups failed verification, 2 failed.
+- ``status [--backup-dir DIR] [--max-backup-age-hours N] [--statement-timeout
+  SECONDS]`` (Phase 16 slice 6, read-only): the database size, connections
+  and lock waits, the Movement count, the schema readiness and the age of
+  the newest published backup as one JSON document
+  (``deploy/production/check.sh``). 0 ok, 1 a finding, 2 could not run.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
 ``provision-roles``, ``apply-grants``, ``backup-manifest``, ``backup-verify``,
-``backup-rotate``: their JSON document); refusals and errors go to stderr.
+``backup-rotate``, ``status``: their JSON document); refusals and errors go
+to stderr.
 """
 
 import argparse
@@ -95,7 +101,14 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.application import authentication, backups, database_roles, migration, reconciliation
+from app.application import (
+    authentication,
+    backups,
+    database_roles,
+    migration,
+    reconciliation,
+    system_status,
+)
 from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
 from app.core.config import DEVELOPMENT_RELEASE, get_settings
 from app.infrastructure import schema_revision
@@ -860,6 +873,85 @@ def _run_backup_rotate(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+_STATUS_HELP = (
+    "Report database size, Movement count, schema readiness and backup age as JSON. Never"
+    " changes data."
+)
+
+
+def _add_status_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("status", help=_STATUS_HELP, description=_STATUS_HELP)
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="The backup directory whose newest backup is reported (default: none).",
+    )
+    parser.add_argument(
+        "--max-backup-age-hours",
+        type=_bounded_int(1, 720),
+        default=system_status.DEFAULT_MAX_BACKUP_AGE_HOURS,
+        metavar="N",
+        help="A newest backup older than N hours is a finding (1-720, default %(default)s).",
+    )
+    parser.add_argument(
+        "--statement-timeout",
+        type=_bounded_int(1, 600),
+        default=system_status.DEFAULT_STATEMENT_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Per-statement timeout in seconds (1-600, default %(default)s); keep below 30 so a"
+            " release's migrate is never aborted by this run."
+        ),
+    )
+    parser.set_defaults(handler=_run_status)
+
+
+def _status_report(args: argparse.Namespace) -> system_status.StatusReport:
+    options: dict[str, Any] = {
+        "backup_dir": args.backup_dir,
+        "max_backup_age_hours": args.max_backup_age_hours,
+        "statement_timeout_seconds": args.statement_timeout,
+    }
+    try:
+        settings = get_settings()
+        engine = build_engine(
+            settings.database_url,
+            application_name=schema_revision.CLI_APPLICATION_NAME,
+            connect_timeout=system_status.CONNECT_TIMEOUT_SECONDS,
+        )
+    except (ValidationError, ArgumentError, ValueError):
+        # No valid configuration: the backups are still reported.
+        tag, commit = _tool_identity()
+        return system_status.collect_status(
+            None, release_tag=tag, release_commit=commit, accepted_revision=None, **options
+        )
+    try:
+        return system_status.collect_status(
+            engine,
+            release_tag=settings.release_tag,
+            release_commit=settings.release_commit,
+            accepted_revision=settings.accept_schema_revision,
+            **options,
+        )
+    finally:
+        engine.dispose()
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    report = _status_report(args)
+    _print_document(system_status.status_document(report))
+    if (
+        report.error is not None
+        and report.error.code == "internal_error"
+        and report.error.exception is not None
+    ):
+        traceback.print_exception(report.error.exception, file=sys.stderr)
+    print(system_status.status_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -873,6 +965,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_backup_manifest_parser(subparsers)
     _add_backup_verify_parser(subparsers)
     _add_backup_rotate_parser(subparsers)
+    _add_status_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result

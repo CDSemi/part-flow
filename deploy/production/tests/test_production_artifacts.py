@@ -1,13 +1,14 @@
-"""P16-S2/S3/S4/S5: static checks of the production artifacts (compose.production.yaml, its build-only companion
-compose.production.build.yaml, .env.production.example, both Dockerfiles and the web tier configuration in
-frontend/nginx/).
+"""P16-S2/S3/S4/S5/S6: static checks of the production artifacts (compose.production.yaml, its build-only companion
+compose.production.build.yaml, .env.production.example, both Dockerfiles, the backend's production logging
+configuration and the web tier configuration in frontend/nginx/).
 
-Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2, P16-S4 SPEC section 6.4 and P16-S5 SPEC
-section 6.3):
-  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20..ST-22)
+Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2, P16-S4 SPEC section 6.4, P16-S5 SPEC
+section 6.3 and P16-S6 SPEC section 6.2):
+  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20..ST-23, ST-25)
   Dockerfiles and the development default              -> Dockerfiles (ST-13)
   Liveness probes and the release meta (P16-S3)        -> ReleaseArtifacts (ST-18, ST-19)
-  nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-12)
+  Backend production logging configuration (P16-S6)    -> LoggingConfiguration (ST-24)
+  nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-14)
 
 Run from anywhere on a host with the docker CLI (Compose v2) and git:
   python -B -m unittest discover -s deploy/production/tests -p 'test*.py'
@@ -36,14 +37,19 @@ PROXY_API = NGINX_DIR / "partflow" / "proxy-api.conf"
 STATIC_HEADERS = NGINX_DIR / "partflow" / "static-headers.conf"
 STATIC_HEADERS_INCLUDE = "/etc/nginx/partflow/static-headers.conf"
 PROXY_API_INCLUDE = "/etc/nginx/partflow/proxy-api.conf"
+# P16-S6: the backend's production dictConfig (uvicorn --log-config) and its JSON formatter (ST-13, ST-24).
+LOGGING_CONFIG = REPO / "backend" / "app" / "core" / "logging.production.json"
+LOGGING_CONFIG_ARGUMENT = "app/core/logging.production.json"
+JSON_FORMATTER = "app.core.structured_logging.JsonFormatter"
 
 DOCKER_REQUIRED = "docker compose is required for the production artifact tests"
 RELEASE = "static-test"
 # The commit the generated env passes to the build file (ST-12); any 40-hex value.
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 LONG_RUNNING = {"db", "backend", "web"}
-PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles", "backup-tools")
-# P16-S5: the backup directory's container path (backup-tools read-write, migrate read-only; ST-4, ST-21).
+PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles", "backup-tools", "status")
+# P16-S5: the backup directory's container path (backup-tools read-write, migrate and, P16-S6, status read-only; ST-4,
+# ST-21, ST-23).
 BACKUP_TARGET = "/backups"
 # P16-S4: the database-role secrets and the application database role's name in code (ST-9, ST-10).
 SECRET_NAMES = ("postgres_password", "partflow_app_password", "partflow_maintenance_password")
@@ -87,13 +93,35 @@ STATIC_HEADER_LINES = [
     ("add_header", ["X-Content-Type-Options", "nosniff", "always"]),
     ("add_header", ["Referrer-Policy", "same-origin", "always"]),
     ("add_header", ["Content-Security-Policy", CSP, "always"]),
+    # P16-S6: every web response (its own 413/429/502/504 bodies and static files included) carries the request id.
+    ("add_header", ["X-Request-ID", "$partflow_request_id", "always"]),
 ]
 PROXY_API_LINES = [
     ("proxy_pass", ["$partflow_backend"]),
     ("proxy_set_header", ["Host", "$host"]),
     ("proxy_set_header", ["X-Forwarded-For", "$remote_addr"]),
     ("proxy_set_header", ["X-Forwarded-Proto", "$partflow_forwarded_proto"]),
+    # P16-S6: web's request id reaches the backend; the backend's copy of the header is hidden (web adds its own).
+    ("proxy_set_header", ["X-Request-ID", "$partflow_request_id"]),
+    ("proxy_hide_header", ["X-Request-ID"]),
 ]
+# P16-S6: the request-id map (NX-13) and the JSON access-log keys in order (NX-14).
+REQUEST_ID_MAP = [("~^[A-Za-z0-9._-]{1,64}$", ["$http_x_request_id"]), ("default", ["$request_id"])]
+LOG_KEYS = ["ts", "source", "request_id", "client", "method", "path", "status", "bytes", "duration_s",
+            "upstream_status", "user_agent"]
+# A sample value per log_format variable; the user agent carries a quote, escaped as nginx `escape=json` does.
+LOG_SAMPLES = {
+    "$time_iso8601": "2026-10-08T14:00:00+00:00",
+    "$partflow_request_id": "5f0c2a9e8b7d4c1f9a3e6b2d1c0f8e7a",
+    "$remote_addr": "10.20.30.40",
+    "$request_method": "POST",
+    "$uri": "/api/scan-stations/3/transfers",
+    "$status": "409",
+    "$body_bytes_sent": "123",
+    "$request_time": "0.012",
+    "$upstream_status": "409",
+    "$http_user_agent": 'Mozilla/5.0 \\"quoted\\"',
+}
 PROXY_BODIES = {
     "@partflow_too_large": (
         "413",
@@ -418,7 +446,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual({n for n, s in self.services.items() if not s.get("profiles")}, LONG_RUNNING)
         for name in self.ops_services():
             self.assertEqual(self.services[name]["profiles"], ["ops"], name)
-        self.assertEqual(self.ops_services(), {"migrate", "db-roles", "backup-tools"})
+        self.assertEqual(self.ops_services(), {"migrate", "db-roles", "backup-tools", "status"})
 
     # ST-3
     def test_st3_only_web_published_on_loopback(self):
@@ -431,10 +459,10 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(ports[0]["target"], 80)
         self.assertEqual(str(ports[0]["published"]), example_values()["PARTFLOW_HTTP_PORT"])
 
-    # ST-4 (amended by P16-S5): the only host-path mounts are the backup directory on backup-tools (read-write) and,
-    # read-only, on migrate; the long syntax never lets Compose create a missing host path.
+    # ST-4 (amended by P16-S5 and P16-S6): the only host-path mounts are the backup directory on backup-tools
+    # (read-write) and, read-only, on migrate and status; the long syntax never lets Compose create a missing host path.
     def test_st4_volumes(self):
-        expected = {"backup-tools": False, "migrate": True}
+        expected = {"backup-tools": False, "migrate": True, "status": True}
         for name, service in self.services.items():
             binds = [v for v in service.get("volumes") or [] if v.get("type") == "bind"]
             if name not in expected:
@@ -449,10 +477,10 @@ class ComposeModel(unittest.TestCase):
             self.assertIsNot((volume.get("bind") or {}).get("create_host_path"), True, name)
         for name in ("backend", "web", "db-roles"):
             self.assertFalse(self.services[name].get("volumes"), f"{name} has a volume")
-        # The raw file uses the long syntax for both mounts (the short syntax resolves to create_host_path: true).
+        # The raw file uses the long syntax for every mount (the short syntax resolves to create_host_path: true).
         raw = COMPOSE_FILE.read_text(encoding="utf-8")
-        self.assertEqual(raw.count("source: ${PARTFLOW_BACKUP_DIR:?"), 2)
-        self.assertEqual(raw.count("create_host_path: false"), 2)
+        self.assertEqual(raw.count("source: ${PARTFLOW_BACKUP_DIR:?"), 3)
+        self.assertEqual(raw.count("create_host_path: false"), 3)
         volumes = self.services["db"]["volumes"]
         self.assertEqual(
             [(v["type"], v["source"], v["target"]) for v in volumes],
@@ -509,7 +537,7 @@ class ComposeModel(unittest.TestCase):
             self.assertTrue(logging.get("options", {}).get("max-size"), name)
             self.assertTrue(logging.get("options", {}).get("max-file"), name)
 
-    # ST-9 (amended by P16-S4: backend holds only the application database role's password)
+    # ST-9 (amended by P16-S4: backend holds only the application database role's password; P16-S6: so does status)
     def test_st9_secret(self):
         secrets = self.model["secrets"]
         self.assertEqual(set(secrets), set(SECRET_NAMES))
@@ -517,7 +545,7 @@ class ComposeModel(unittest.TestCase):
             self.assertTrue(same_path(secrets[name]["file"], self.secrets_dir / name), name)
         expected_users = {
             "postgres_password": {"db", "migrate", "db-roles"},
-            "partflow_app_password": {"backend", "db-roles"},
+            "partflow_app_password": {"backend", "db-roles", "status"},
             "partflow_maintenance_password": {"db-roles"},
         }
         for secret, expected in expected_users.items():
@@ -575,6 +603,8 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(attached["db"], {"internal"})
         self.assertEqual(attached["migrate"], {"internal"})
         self.assertEqual(attached["db-roles"], {"internal"})
+        # P16-S6: status reaches db only.
+        self.assertEqual(attached["status"], {"internal"})
         # P16-S5: backup-tools needs no database and has no network at all.
         self.assertEqual(attached["backup-tools"], set())
         self.assertEqual(self.services["backup-tools"].get("network_mode"), "none")
@@ -590,6 +620,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(self.services["migrate"]["image"], self.services["backend"]["image"])
         self.assertEqual(self.services["db-roles"]["image"], self.services["backend"]["image"])
         self.assertEqual(self.services["backup-tools"]["image"], self.services["backend"]["image"])
+        self.assertEqual(self.services["status"]["image"], self.services["backend"]["image"])
         for name in PARTFLOW_IMAGES:
             self.assertEqual(self.services[name].get("pull_policy"), "never", name)
         # No service of the runtime file can build: `up` or `run` with a missing PARTFLOW_RELEASE image must fail
@@ -678,6 +709,42 @@ class ComposeModel(unittest.TestCase):
             if "PARTFLOW_BACKUP_DIR" in line and not line.lstrip().startswith("#"):
                 self.assertTrue(line.strip().startswith("source: ${PARTFLOW_BACKUP_DIR:?"), line)
 
+    # ST-23 (P16-S6): the read-only status report as the application database role, the backup directory read-only;
+    # never started by `up`, never starts db (documented calls use --no-deps).
+    def test_st23_status(self):
+        status = self.services["status"]
+        backend = self.services["backend"]
+        self.assertEqual(status["image"], backend["image"])
+        self.assertNotIn("build", status)
+        self.assertEqual(status.get("pull_policy"), "never")
+        self.assertEqual(status.get("profiles"), ["ops"])
+        self.assertEqual(status.get("entrypoint"), ["python", "-m", "app.cli", "status", "--backup-dir", BACKUP_TARGET])
+        self.assertIsNone(status.get("command"))
+        self.assertFalse(status.get("depends_on"))
+        self.assertEqual(set(status.get("networks") or {}), {"internal"})
+        self.assertEqual([s["source"] for s in status.get("secrets") or []], ["partflow_app_password"])
+        environment = status["environment"]
+        self.assertEqual(environment["DATABASE_USER"], "partflow_app")
+        self.assertEqual(environment["DATABASE_PASSWORD_FILE"], "/run/secrets/partflow_app_password")
+        self.assertNotIn("DATABASE_ROLES_REQUIRED", environment)
+        self.assertEqual(environment["ACCEPT_SCHEMA_REVISION"], backend["environment"]["ACCEPT_SCHEMA_REVISION"])
+        accepted = self.variant("status-accept-revision", PARTFLOW_ACCEPT_SCHEMA_REVISION="9999_unknown_to_this_image")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(json.loads(accepted.stdout)["services"]["status"]["environment"]["ACCEPT_SCHEMA_REVISION"],
+                         "9999_unknown_to_this_image")
+        self.assertEqual([(v["type"], v["target"], bool(v.get("read_only"))) for v in status["volumes"]],
+                         [("bind", BACKUP_TARGET, True)])
+        self.assertEqual(status["restart"], "no")
+        self.assertIs(status["healthcheck"].get("disable"), True)
+        limits = status["deploy"]["resources"]["limits"]
+        self.assertTrue(limits.get("memory") and limits.get("cpus"))
+        self.assertEqual(status["logging"]["driver"], "json-file")
+
+    # ST-25 (P16-S6): db error lines without DETAIL/HINT/CONTEXT (a constraint violation's DETAIL prints key values).
+    def test_st25_db_error_verbosity(self):
+        self.assertEqual(self.services["db"].get("command"), ["postgres", "-c", "log_error_verbosity=terse"])
+        self.assertIsNone(self.services["db"].get("entrypoint"))
+
     # ST-17 (P16-S3)
     def test_st17_release_identity_comes_from_the_image(self):
         for name, service in self.services.items():
@@ -739,6 +806,14 @@ class Dockerfiles(unittest.TestCase):
         self.assertEqual(len(cmd), 1)
         self.assertIn("--no-access-log", cmd[0])
         self.assertNotIn("alembic", cmd[0])
+        # P16-S6: JSON log records through uvicorn's dictConfig (the file ships with `COPY app ./app`).
+        self.assertEqual(
+            cmd[0],
+            'CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log",'
+            f' "--log-config", "{LOGGING_CONFIG_ARGUMENT}"]',
+        )
+        self.assertTrue(LOGGING_CONFIG.is_file(), LOGGING_CONFIG)
+        self.assertIn("COPY app ./app", body)
         # The production venv comes from a stage that installs the locked runtime dependencies only.
         source = re.search(r"COPY --from=(\S+) /app/\.venv /app/\.venv", joined)
         self.assertIsNotNone(source, "production does not copy a locked venv")
@@ -832,7 +907,35 @@ class ReleaseArtifacts(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# NX-1..NX-12
+# ST-24 (P16-S6)
+# ---------------------------------------------------------------------------
+
+
+class LoggingConfiguration(unittest.TestCase):
+    # ST-24: root and uvicorn write through the JSON formatter; uvicorn's own access log writes nothing.
+    def test_st24_production_logging_configuration(self):
+        config = json.loads(LOGGING_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(config["version"], 1)
+        self.assertIs(config.get("disable_existing_loggers"), False)
+        formatters = config["formatters"]
+        handlers = config["handlers"]
+
+        def formatter_of(handler_names):
+            self.assertEqual(len(handler_names), 1, handler_names)
+            handler = handlers[handler_names[0]]
+            return formatters[handler["formatter"]].get("()")
+
+        self.assertEqual(formatter_of(config["root"]["handlers"]), JSON_FORMATTER)
+        self.assertEqual(formatter_of(config["loggers"]["uvicorn"]["handlers"]), JSON_FORMATTER)
+        self.assertIs(config["loggers"]["uvicorn"].get("propagate"), False)
+        access = config["loggers"]["uvicorn.access"]
+        self.assertEqual(access.get("handlers"), [])
+        self.assertIs(access.get("propagate"), False)
+        self.assertFalse(config["loggers"].get("uvicorn.error", {}).get("handlers"))
+
+
+# ---------------------------------------------------------------------------
+# NX-1..NX-14
 # ---------------------------------------------------------------------------
 
 
@@ -963,6 +1066,40 @@ class WebTier(unittest.TestCase):
             self.assertNotIn(forbidden, text)
         self.assertIsNone(re.search(r"\$request(?![_a-z])", text), "bare $request logs the query string")
         self.assertEqual(self.value(self.server.block, "access_log"), ["/var/log/nginx/access.log", "partflow"])
+        # P16-S6: JSON lines with the request id.
+        self.assertEqual(formats[0].args[1], "escape=json")
+        self.assertIn("$partflow_request_id", text)
+
+    # NX-13 (P16-S6)
+    def test_nx13_request_id(self):
+        maps = [d for d in self.http_level("map") if d.args == ["$http_x_request_id", "$partflow_request_id"]]
+        self.assertEqual(len(maps), 1)
+        self.assertEqual([(e.name, e.args) for e in maps[0].block], REQUEST_ID_MAP)
+        for path in nginx_config_files():
+            text = strip_comments(path.read_text(encoding="utf-8"))
+            uses = [d for d in walk(parse_nginx(text)) if any("$partflow_request_id" in a for a in d.args)]
+            names = {d.name for d in uses}
+            if path == TEMPLATE:
+                self.assertEqual(names, {"map", "log_format"}, path)
+            elif path in (PROXY_API, STATIC_HEADERS):
+                self.assertEqual(len(uses), 1, path)
+            else:
+                self.assertFalse(uses, path)
+        self.assertIn(("proxy_hide_header", ["X-Request-ID"]), [(d.name, d.args) for d in self.proxy_api])
+
+    # NX-14 (P16-S6)
+    def test_nx14_log_format_is_json(self):
+        formats = [d for d in self.http_level("log_format") if d.args[0] == "partflow"]
+        self.assertEqual(len(formats), 1)
+        text = "".join(formats[0].args[2:])
+        variables = re.findall(r"\$[a-z_0-9]+", text)
+        self.assertEqual(sorted(set(variables) - set(LOG_SAMPLES)), [], "a variable without a sample")
+        rendered = re.sub(r"\$[a-z_0-9]+", lambda m: LOG_SAMPLES[m.group(0)], text)
+        record = json.loads(rendered)
+        self.assertEqual(list(record), LOG_KEYS)
+        self.assertEqual(record["source"], "web")
+        self.assertEqual(record["status"], 409)
+        self.assertEqual(record["user_agent"], 'Mozilla/5.0 "quoted"')
 
     # NX-7
     def test_nx7_static_caching(self):

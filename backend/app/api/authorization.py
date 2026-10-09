@@ -56,6 +56,7 @@ from app.application.errors import (
     StationDeviceRequiredError,
 )
 from app.application.station_devices import StationDevice
+from app.core import log_context
 from app.core.config import get_settings
 from app.domain.enums import Permission
 
@@ -63,7 +64,11 @@ _COOKIE_PATH: Final = "/api"
 
 
 def optional_principal(request: Request, session: SessionDep) -> Principal | None:
-    return authentication.resolve_principal(session, request.cookies.get(SESSION_COOKIE))
+    principal = authentication.resolve_principal(session, request.cookies.get(SESSION_COOKIE))
+    if principal is not None:
+        # The access record names the User by id only (Phase 16 slice 6).
+        log_context.bind(user_id=principal.user_id)
+    return principal
 
 
 OptionalPrincipalDep = Annotated[Principal | None, Depends(optional_principal)]
@@ -174,6 +179,8 @@ class RequireStationDevice:
         device = station_devices.resolve_station_device(request.app.state.engine, header)
         if device is None:
             raise StationDeviceRequiredError(STATION_DEVICE_REQUIRED_MESSAGE)
+        # Before the binding check, so its refusal names the device's station too.
+        log_context.bind(station_device_id=device.device_id, station_id=device.station_id)
         if self.bind_path_station:
             station_devices.require_station_binding(device, request.path_params["station_id"])
         return device

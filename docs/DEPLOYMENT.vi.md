@@ -28,7 +28,8 @@ bảng kê configuration và secret, và network rate limiting, §3.1), slice 3
 `migrate`, `release.sh` và `smoke.sh`, §3.1) và slice 4 (database-role hardening: các database role `partflow_app` và
 `partflow_maintenance`, `provision-roles`, grant được áp dụng bởi mọi `migrate` và bởi `apply-grants`, và
 reconcile check (h), §3.1) và slice 5 (backup: backup artifact đã verify, pre-release backup trong write
-freeze, restore drill cô lập và rollback path 3, §3.1) đã triển khai. Phase 16 vẫn sở hữu observability,
+freeze, restore drill cô lập và rollback path 3, §3.1) và slice 6 (observability: structured log với HTTP request id,
+`status`, `check.sh` và `scheduled-reconcile.sh`, §3.1) đã triển khai. Phase 16 vẫn sở hữu
 TLS trên host, việc chạy backup và drill trên pilot host và các gate (§5 và `IMPLEMENTATION_ROADMAP.md`).
 
 Vì vậy:
@@ -37,7 +38,7 @@ Vì vậy:
 | --- | --- | --- |
 | Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
 | Synology staging/test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong LAN, dùng dữ liệu giả/không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot hoặc production | Chưa sẵn sàng | Production artifact, release flow, database-role hardening và backup đã có (§3.1: image, `web`, `compose.production.yaml`, bảng kê configuration, `release.sh`, `partflow_app`, `backup.sh`, `restore-test.sh`), nhưng observability và các pilot gate ở §5 vẫn còn lại (Phase 16: P16-S6…S7). |
+| Pilot hoặc production | Chưa sẵn sàng | Production artifact, release flow, database-role hardening, backup và observability đã có (§3.1: image, `web`, `compose.production.yaml`, bảng kê configuration, `release.sh`, `partflow_app`, `backup.sh`, `restore-test.sh`, `check.sh`, `scheduled-reconcile.sh`, `status`), nhưng các pilot gate ở §5 vẫn còn lại (Phase 16: P16-S7). |
 | Mở ra Internet | Hiện tại bị cấm | TLS do platform proxy kết thúc, và chưa host nào cấu hình hay xác minh nó (P16-S7); các gate §5 chưa đạt. Network rate limiting đã có trong `web`; `compose.yaml` vẫn expose các service development (§2). |
 
 Triển khai staging nội bộ không có nghĩa Phase 16 đã hoàn thành.
@@ -119,7 +120,7 @@ Các ranh giới bắt buộc:
 - dùng cùng một format backup portable giữa NAS và VPS (đã triển khai: backup
   artifact của P16-S5, `deployment/OPERATIONS_RUNBOOK.md` §3).
 
-### 3.1 Production stack (Phase 16 slice 2 đến 5)
+### 3.1 Production stack (Phase 16 slice 2 đến 6)
 
 **Trạng thái.** Đã triển khai (P16-S2): các stage `production` của
 `backend/Dockerfile` và `frontend/Dockerfile`, cấu hình `web` trong
@@ -132,7 +133,7 @@ Desktop và một Linux container; không có gì trong mục này đã được
 Synology NAS hay VPS (đó là P16-S7). Đã triển khai (P16-S3): release identity,
 liveness và readiness, backend write gate, `migrate` và `revision`, `release.sh`
 và `smoke.sh` cùng `reconcile_regression.py`, và update notice ở frontend (các
-mục con bên dưới). Cả hai production image nhận `PARTFLOW_RELEASE` và `PARTFLOW_COMMIT` làm build argument và mang release identity (stage `production` của backend đặt `RELEASE_TAG` và `RELEASE_COMMIT`); production stack smoke và release rehearsal đã chạy (Trạng thái, Bằng chứng). Đã triển khai (P16-S4): các database role `partflow_app` và `partflow_maintenance`, `provision-roles` và `apply-grants`, service `db-roles` và reconcile check (h) (Database role và grant, bên dưới). Đã triển khai (P16-S5): `deploy/production/backup.sh` (backup daily, manual và pre-release: `pg_dump` custom-format từ bên trong `db`, được publish thành một directory cùng manifest và `SHA256SUMS`), các command `backup-manifest`, `backup-verify` và `backup-rotate` của service `backup-tools`, các quy tắc verify và freshness mà `migrate` áp dụng cho pre-release backup, backup mà `release.sh` lấy bên trong write freeze, `deploy/production/restore-test.sh` (restore drill cô lập) và rollback path 3 cùng new-instance restore đã được tài liệu hóa (`deployment/OPERATIONS_RUNBOOK.md` §3, §4 và §6). Bằng chứng chỉ gồm Windows/Docker Desktop và một Linux container; schedule, off-host replication, drill có đo thời gian đầu tiên và path 3 trên một host thuộc P16-S7. Observability vẫn là P16-S6.
+mục con bên dưới). Cả hai production image nhận `PARTFLOW_RELEASE` và `PARTFLOW_COMMIT` làm build argument và mang release identity (stage `production` của backend đặt `RELEASE_TAG` và `RELEASE_COMMIT`); production stack smoke và release rehearsal đã chạy (Trạng thái, Bằng chứng). Đã triển khai (P16-S4): các database role `partflow_app` và `partflow_maintenance`, `provision-roles` và `apply-grants`, service `db-roles` và reconcile check (h) (Database role và grant, bên dưới). Đã triển khai (P16-S5): `deploy/production/backup.sh` (backup daily, manual và pre-release: `pg_dump` custom-format từ bên trong `db`, được publish thành một directory cùng manifest và `SHA256SUMS`), các command `backup-manifest`, `backup-verify` và `backup-rotate` của service `backup-tools`, các quy tắc verify và freshness mà `migrate` áp dụng cho pre-release backup, backup mà `release.sh` lấy bên trong write freeze, `deploy/production/restore-test.sh` (restore drill cô lập) và rollback path 3 cùng new-instance restore đã được tài liệu hóa (`deployment/OPERATIONS_RUNBOOK.md` §3, §4 và §6). Bằng chứng chỉ gồm Windows/Docker Desktop và một Linux container; schedule, off-host replication, drill có đo thời gian đầu tiên và path 3 trên một host thuộc P16-S7. Đã triển khai (P16-S6): structured JSON log với HTTP request id, command và service `status`, `deploy/production/check.sh` và `deploy/production/scheduled-reconcile.sh` (Logging và monitoring, bên dưới); schedule của chúng và failure notification trên một host thuộc P16-S7.
 
 **Service và network (`compose.production.yaml`).**
 
@@ -161,7 +162,8 @@ không bao giờ mount password của owner.
 **Image.** `backend` (stage `production`): Python 3.12 slim, dependency không
 phải development đã lock, không có `tests/`, không có `.env`, không có reload
 server, chạy bằng user `10001:10001`; lệnh start là `uvicorn app.main:app --host
-0.0.0.0 --port 8000 --no-access-log`. Nó không bao giờ chạy migration khi start.
+0.0.0.0 --port 8000 --no-access-log --log-config app/core/logging.production.json`.
+Nó không bao giờ chạy migration khi start.
 `web` (stage `production`): official `nginx:1.30.5-alpine` đã pin cùng build bất
 biến từ `npm run build` (gồm production-boundary check). Hai stage `development`
 mặc định không đổi.
@@ -373,10 +375,48 @@ client và thay header gửi cho backend bằng đúng địa chỉ đó; `X-For
 chỉ được chấp nhận từ cùng hop. `web` không publish certificate và không đọc cấu
 hình TLS.
 
-**Request log.** Access log của `web` (client address, method, path không có
-query string, status, bytes, duration, user agent) là request log trong slice
-này; nó không bao giờ chứa cookie, query string hay header PartFlow nào, và các
-health probe bị loại. Access log của chính uvicorn tắt.
+**Request log.** Backend ghi một application record JSON (logger `app.access`) cho
+mỗi write, refusal, failure và slow read, mang HTTP request id (`X-Request-ID`) mà
+mọi response trả về. `web` ghi một edge record JSON cho mỗi request (client
+address, method, path không có query string, status, bytes, duration, upstream
+status, user agent, `request_id`); cả hai log mang cùng HTTP request id
+(`X-Request-ID`): `web` chấp nhận giá trị của client gồm 1-64 ký tự `A-Za-z0-9._-`
+hoặc tự sinh một id, chuyển nó cho backend và ghi đè bản của backend trong header.
+Không log nào chứa cookie, query string hay header PartFlow nào; health probe bị
+loại khỏi log của `web` và nằm dưới INFO trong log của backend. Access log của
+chính uvicorn vẫn tắt.
+
+**Logging và monitoring (P16-S6).** Backend production start với
+`--log-config app/core/logging.production.json`: mọi record, kể cả của uvicorn, là
+một dòng JSON trên stderr (`ts`, `level`, `logger`, `message`, `request_id`, rồi
+các field của record; một traceback không bao giờ chứa message của exception
+database, nên không có dòng `DETAIL`, statement hay giá trị parameter nào lọt vào
+log). Request id là `X-Request-ID` của request khi dài 1-64 ký tự thuộc
+`A-Za-z0-9._-`, nếu không là một id 32-hex mới; backend echo đúng một
+`X-Request-ID` trên mọi response. Record `app.access` được ghi ở INFO cho write,
+designed refusal (`not_ready`, `release_mismatch`, `password_check_busy`,
+validation, authorization) và read từ một giây trở lên (`"slow":true`), ở ERROR cho
+failure, và ở DEBUG cho health poll hoặc read nhanh thông thường. Nó nêu PN,
+QuantityFlow, Area, Operation, Machine, Worker (chỉ sau identity resolution), Scan
+Station và `device_event_id` của một production command cùng lý do của một
+refusal, và không bao giờ nêu request body, query string, cookie, token, badge,
+password hay giá trị đã scan; setup token first-run vẫn là ngoại lệ duy nhất được
+công bố. `db` chạy với `log_error_verbosity=terse`. Container rotate bằng driver
+json-file (`max-size` 10m, `max-file` 5); khoảng 1,1 MB log backend và 0,6 MB log `web`
+cho mỗi 1.000 command được đo trong rehearsal tổng hợp. Service ops `status`
+(`python -m app.cli status`, profile `ops`) là báo cáo chỉ đọc bằng application
+role với backup directory mount read-only; chạy với
+`--no-deps -T --user "$(id -u):$(id -g)"`. `deploy/production/check.sh` đánh giá
+HTTPS readiness, certificate, container, restart, backend error, disk và báo cáo
+`status` với ngưỡng OD-16-11 (backup cũ hơn 26 giờ, disk còn trống dưới 15 %,
+certificate hết hạn trong 21 ngày, restart count tăng, bất kỳ record error nào của
+backend) và thoát khác 0 để tới failure notification của host scheduler;
+`deploy/production/scheduled-reconcile.sh` chạy `reconcile` hằng ngày và áp quy tắc
+exit code của nó. Command, schedule và ngưỡng nằm ở
+`deployment/OPERATIONS_RUNBOOK.md` §2, §7 và §9 và ở các platform guide
+([`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §8,
+[`deployment/VPS.md`](./deployment/VPS.md) §8); cài chúng và chứng minh một
+notification trên host là P16-S7.
 
 **Yêu cầu với platform proxy.** DSM reverse proxy (hoặc Caddy) phải: kết thúc
 HTTPS bằng certificate mà workstation công ty tin cậy; chỉ gửi HTTP dưới dạng
@@ -398,8 +438,9 @@ công khai (tên DNS public) hoặc CA nội bộ của công ty (tên chỉ dù
 không bao giờ self-signed theo từng host và không bao giờ được chấp nhận theo
 từng workstation bằng cách bỏ qua cảnh báo của browser. CA cấp certificate nội bộ
 được phân phối đến workstation và barcode terminal bằng device management của
-công ty. Deployment administrator sở hữu việc gia hạn; giám sát hạn dùng là
-P16-S6. Kiểm tra hạn dùng từ bất kỳ client nào: `openssl s_client -connect
+công ty. Deployment administrator sở hữu việc gia hạn; hạn dùng được giám sát bởi
+`check.sh` `certificate` (alert dưới 21 ngày, `deployment/OPERATIONS_RUNBOOK.md`
+§9). Kiểm tra hạn dùng từ bất kỳ client nào: `openssl s_client -connect
 <host>:443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout
 -subject -enddate`. Các bước theo nền tảng nằm ở SYNOLOGY_NAS §5 và VPS §4. Thực
 hiện và xác minh ở P16-S7.
@@ -526,7 +567,9 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
 - Mọi thiết bị Scan Station đã được enroll, tên của nó được ghi lại, và thiết bị bị mất hoặc ngừng dùng được revoke. Enrollment code và device token là bearer credential: giống session cookie, chúng chỉ đi qua HTTPS hoặc LAN cô lập được chấp nhận chính thức (Network and host bên dưới), và reverse proxy không bao giờ log header `X-PartFlow-Station-Device`.
 - `SESSION_COOKIE_SECURE=true` được đặt phía sau TLS. Setup token của first-run
   là secret duy nhất từng được ghi vào backend log: hoàn tất first-run setup
-  trước khi mở service ra ngoài và hạn chế quyền đọc log cho đến lúc đó.
+  trước khi mở service ra ngoài và hạn chế quyền đọc log cho đến lúc đó (structured
+  log giữ nguyên ngoại lệ này; không secret, cookie, device token, badge hay
+  request body nào khác bị log — test P16-S6).
 - Mọi production view nằm trong pilot scope đều dùng API thật; không nhầm mock
   hoặc placeholder chưa kết nối với tính năng vận hành.
 - Production write vẫn bị block khi mất kết nối và không bao giờ được queue cục
@@ -581,7 +624,8 @@ Các gate ở trên vẫn là gate cho đến khi P16-S7 ghi nhận bằng chứ
 - PostgreSQL logical backup chạy tự động theo lịch, được mã hóa và sao chép
   off-host/off-NAS, có retention và monitoring — đã triển khai bởi `backup.sh`,
   `backup-rotate` và các task của platform tool (P16-S5; schedule, replication và
-  alert tuổi backup được chạy trên pilot host ở P16-S7 và được P16-S6 bổ sung); xem
+  alert tuổi backup là `check.sh` `backup_age`, P16-S6; schedule, replication và
+  alert được chạy trên pilot host ở P16-S7); xem
   `deployment/OPERATIONS_RUNBOOK.md` §3;
 - restore vào database cô lập đã được test và đo thời gian — đã triển khai bởi
   `restore-test.sh` (P16-S5); drill có đo thời gian đầu tiên trên pilot host là
@@ -594,9 +638,11 @@ Các gate ở trên vẫn là gate cho đến khi P16-S7 ghi nhận bằng chứ
   triển khai (P16-S5; `deployment/OPERATIONS_RUNBOOK.md` §6), bằng chứng trên pilot
   host: P16-S7;
 - health, log, disk, tuổi backup, tăng trưởng database và số lần container
-  restart đều được monitor;
+  restart đều được monitor — đã triển khai bởi `check.sh` và `status` với ngưỡng
+  OD-16-11 (P16-S6); cài và chứng minh trên pilot host: P16-S7;
 - reconciliation check cho Movement/quantity chạy và alert nhưng không mutate
-  dữ liệu;
+  dữ liệu — `scheduled-reconcile.sh` hằng ngày (P16-S6); schedule trên host
+  P16-S7;
 - backend kết nối bằng `partflow_app`, role không có UPDATE, DELETE hay TRUNCATE privilege trên history append-only (UPDATE chỉ trên `worker_sessions`, DELETE chỉ trên `assigned_route_steps`) — được chứng minh bằng privilege probe (§3.1) và reconcile check (h) sạch trên production database; raise-on-write trigger vẫn là lớp thứ nhất; một superuser (owner role) tắt trigger nằm ngoài khả năng phát hiện — đã chấp nhận (quyết định owner OD-16-09);
 - database đã chạy các commit Phase 12 chưa phát hành (`80f7925` … `b9785d2`)
   phải qua check chỉ đọc này trước khi dựa vào Hot list — nó phải trả về 0 row,
@@ -618,7 +664,8 @@ Các gate ở trên vẫn là gate cho đến khi P16-S7 ghi nhận bằng chứ
 - đồng bộ thời gian NAS/VPS chính xác;
 - host có UPS hoặc chiến lược mất điện được ghi rõ;
 - cảnh báo capacity chừa đủ disk cho PostgreSQL, image update, migration tạm và
-  backup.
+  backup — các check `disk_data`, `disk_backup`, `disk_docker` và `disk_archive`
+  của `check.sh` alert khi còn trống dưới 15 % (P16-S6).
 
 ## 6. Tách biệt environment
 

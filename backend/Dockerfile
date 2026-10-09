@@ -43,7 +43,8 @@ COPY alembic ./alembic
 COPY app ./app
 USER 10001:10001
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+# One JSON log record per line (Phase 16 slice 6); the backend writes its own access record.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--log-config", "app/core/logging.production.json"]
 
 # Development image (Phase 1): the default target of compose.yaml (last stage).
 FROM base AS development

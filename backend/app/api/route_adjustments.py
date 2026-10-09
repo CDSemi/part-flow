@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.api.authorization import RequirePermission
 from app.api.dependencies import SessionDep
+from app.api.request_log import bind_command, bind_result
 from app.api.route_templates import RouteStepRequest
 from app.api.tracking import (
     FlowPositionResponse,
@@ -140,6 +141,7 @@ def adjust_assigned_route(
     session: SessionDep,
     response: Response,
 ) -> RouteAdjustmentResponse:
+    bind_command(body, quantity_flow_id=quantity_flow_id)
     result = route_adjustments.adjust_assigned_route(
         session,
         actor_user_id=principal.user_id,
@@ -158,6 +160,7 @@ def adjust_assigned_route(
         ],
         reason=body.reason,
     )
+    bind_result(result)
     response.status_code = 201 if result.created else 200
     return _adjustment_response(result)
 

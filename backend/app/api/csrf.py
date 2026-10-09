@@ -12,7 +12,9 @@ Two pure ASGI middlewares, registered by ``app.main.create_app``:
   middleware, so no other site can obtain one. The body is never read.
   Safe methods and anonymous requests without the cookie are untouched,
   so every existing caller keeps working unchanged. A later station
-  device token travels in its own header and is unaffected.
+  device token travels in its own header and is unaffected. The refusal
+  is recorded as ``csrf_rejected`` in the request's access record
+  (Phase 16 slice 6, ``app.api.request_log``).
 - ``NoStoreMiddleware`` — every ``/api/session*`` and ``/api/setup*``
   response, refusals included, carries ``Cache-Control: no-store``.
 """
@@ -25,6 +27,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.application.authentication import SESSION_COOKIE
+from app.core import log_context
 
 CSRF_HEADER: Final = "x-partflow-csrf"
 CSRF_REJECTED_MESSAGE: Final = (
@@ -50,6 +53,7 @@ class CsrfMiddleware:
             if (carries_cookie or scope["path"] in _ALWAYS_CHECKED_PATHS) and headers.get(
                 CSRF_HEADER
             ) != "1":
+                log_context.record_refusal("CsrfRejected", "csrf_rejected", None)
                 response = JSONResponse(
                     status_code=403,
                     content={"detail": CSRF_REJECTED_MESSAGE, "csrf_rejected": True},

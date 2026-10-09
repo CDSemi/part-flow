@@ -15,12 +15,13 @@ before routing, before CSRF and before any body read:
    ``mismatch`` is 503 ``not_ready``; a readiness that cannot be
    determined is 503 ``not_ready`` too (fail closed).
 
-A refusal writes nothing, takes no lock and is not audited; it logs one
-INFO line without header values or query string. Safe methods are never
-gated. Refusals carry ``Cache-Control: no-store``.
+A refusal writes nothing, takes no lock and is not audited; it is
+recorded in the request's access record (``release_mismatch`` or
+``not_ready``, Phase 16 slice 6, ``app.api.request_log``) — no header
+value or query string. Safe methods are never gated. Refusals carry
+``Cache-Control: no-store``.
 """
 
-import logging
 from typing import Final
 
 from starlette.concurrency import run_in_threadpool
@@ -29,8 +30,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.application.readiness import ReadinessMonitor
-
-logger = logging.getLogger(__name__)
+from app.core import log_context
 
 RELEASE_HEADER: Final = "x-partflow-release"
 RELEASE_MISMATCH_MESSAGE: Final = (
@@ -47,6 +47,7 @@ READINESS_UNKNOWN_MESSAGE: Final = (
     " Try again in a moment."
 )
 _UNSAFE_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_REFUSAL_TYPES: Final = {"release_mismatch": "ReleaseMismatch", "not_ready": "NotReady"}
 
 
 class ReleaseGate:
@@ -73,7 +74,7 @@ class ReleaseGateMiddleware:
             await self.app(scope, receive, send)
             return
         status_code, code, content = refusal
-        logger.info("release gate refused %s %s: %s", scope["method"], scope["path"], code)
+        log_context.record_refusal(_REFUSAL_TYPES[code], code, None)
         response = JSONResponse(
             status_code=status_code, content=content, headers={"Cache-Control": "no-store"}
         )

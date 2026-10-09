@@ -17,13 +17,28 @@ class DatabaseUnavailableError(Exception):
     """
 
 
-def build_engine(database_url: str, *, application_name: str | None = None) -> Engine:
+def build_engine(
+    database_url: str,
+    *,
+    application_name: str | None = None,
+    connect_timeout: int | None = None,
+) -> Engine:
     """The engine; ``application_name`` names its sessions in ``pg_stat_activity``.
 
     ``migrate`` refuses while a session named ``partflow-api`` is
     connected (Phase 16 slice 3), so the API and the CLI name theirs.
+    ``connect_timeout`` (seconds) bounds establishing a connection
+    (``status``, Phase 16 slice 6). Statement parameters are never part of
+    an exception's text (``hide_parameters``): a logged traceback of a
+    failing statement must not print a badge, a login name or a token.
     """
-    connect_args = {} if application_name is None else {"application_name": application_name}
+    connect_args: dict[str, object] = {}
+    if application_name is not None:
+        connect_args["application_name"] = application_name
+    if connect_timeout is not None:
+        connect_args["connect_timeout"] = connect_timeout
     # pool_pre_ping avoids handing out stale connections after a database
     # restart, which matters for a long-running development stack.
-    return create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)
+    return create_engine(
+        database_url, pool_pre_ping=True, hide_parameters=True, connect_args=connect_args
+    )

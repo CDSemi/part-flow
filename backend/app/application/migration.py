@@ -404,7 +404,8 @@ def _is_lock_timeout(exc: BaseException) -> bool:
     return isinstance(exc, DBAPIError) and isinstance(exc.orig, psycopg.errors.LockNotAvailable)
 
 
-def _is_connection_failure(exc: BaseException) -> bool:
+def is_connection_failure(exc: BaseException) -> bool:
+    """A lost or refused connection (also ``status``, Phase 16 slice 6)."""
     if isinstance(exc, DBAPIError) and exc.connection_invalidated:
         return True
     if isinstance(exc, InterfaceError):
@@ -615,7 +616,7 @@ def _migrate_in_transaction(
 def _failure_code(exc: BaseException, phase: _Phase) -> str:
     if _is_lock_timeout(exc):
         return "lock_not_available"
-    if isinstance(exc, SQLAlchemyError) and _is_connection_failure(exc):
+    if isinstance(exc, SQLAlchemyError) and is_connection_failure(exc):
         return "database_unavailable"
     if phase == "upgrade" or (phase == "grants" and isinstance(exc, SQLAlchemyError)):
         return "migration_failed"
@@ -709,7 +710,7 @@ def revision_report(
             connection.execute(text("SELECT set_config('statement_timeout', '30s', true)"))
             database = schema_revision.read_revision(connection)
     except SQLAlchemyError as exc:
-        code = "database_unavailable" if _is_connection_failure(exc) else "internal_error"
+        code = "database_unavailable" if is_connection_failure(exc) else "internal_error"
         report.error = RunError(code, REVISION_MESSAGES[code], exc)
         return report
     report.database_revision = database
@@ -928,7 +929,7 @@ def grants_failure(
 def _role_failure_code(exc: BaseException) -> str:
     if _is_lock_timeout(exc):
         return "lock_not_available"
-    if isinstance(exc, SQLAlchemyError) and _is_connection_failure(exc):
+    if isinstance(exc, SQLAlchemyError) and is_connection_failure(exc):
         return "database_unavailable"
     return "internal_error"
 

@@ -1,4 +1,4 @@
-# PartFlow production stack (Phase 16 slices 2-5; DEPLOYMENT §3.1). Not for development:
+# PartFlow production stack (Phase 16 slices 2-6; DEPLOYMENT §3.1). Not for development:
 # development uses compose.yaml. Run from the release checkout with
 #   PF="docker compose -f compose.production.yaml --env-file .env.production"
 # and never `$PF down -v` (it deletes the production database volume). Releases run through
@@ -37,6 +37,10 @@ services:
         # Debian variant pinned to the development minor: collation and the
         # reconcile check (j) depend on glibc, so never an -alpine image.
         image: postgres:16.14
+        # Error lines without DETAIL/HINT/CONTEXT: a constraint violation's DETAIL prints the
+        # conflicting key or the failing row (badge, login name, token digest). Statements are
+        # logged with $n placeholders (server-side binding), never parameter values.
+        command: ["postgres", "-c", "log_error_verbosity=terse"]
         environment:
             POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.production}
             POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
@@ -210,6 +214,36 @@ services:
             - type: bind
               source: ${PARTFLOW_BACKUP_DIR:?Set PARTFLOW_BACKUP_DIR in .env.production}
               target: /backups
+              bind:
+                  create_host_path: false
+        restart: "no"
+        healthcheck:
+            disable: true
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_OPS_MEMORY:-512m}
+                    cpus: "${PARTFLOW_OPS_CPUS:-1.0}"
+        logging: *logging
+
+    status:
+        image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        pull_policy: never
+        profiles: [ops]
+        # `run --rm --no-deps -T --user "$(id -u):$(id -g)" status [--max-backup-age-hours N]`
+        # (deploy/production/check.sh). Read-only report as the application database role.
+        entrypoint: ["python", "-m", "app.cli", "status", "--backup-dir", "/backups"]
+        environment:
+            <<: *app-database-environment
+            # Same readiness answer as backend (rollback path 2 override, S3).
+            ACCEPT_SCHEMA_REVISION: ${PARTFLOW_ACCEPT_SCHEMA_REVISION:-}
+        secrets: [partflow_app_password]
+        networks: [internal]
+        volumes:
+            - type: bind
+              source: ${PARTFLOW_BACKUP_DIR:?Set PARTFLOW_BACKUP_DIR in .env.production}
+              target: /backups
+              read_only: true
               bind:
                   create_host_path: false
         restart: "no"

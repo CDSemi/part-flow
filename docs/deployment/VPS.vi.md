@@ -40,8 +40,9 @@ Không triển khai production từ `compose.yaml`. Release phải cung cấp (t
   automation release quanh nó đã triển khai (P16-S3: `deploy/production/release.sh`
   và `smoke.sh`, `revision`, endpoint readiness và liveness), chưa được thực thi
   trên VPS (P16-S7);
-- logging/monitoring configuration — P16-S6 (access log của `web` là request log
-  trong P16-S2);
+- logging/monitoring configuration — đã triển khai (P16-S6: JSON log với HTTP
+  request id, [`check.sh`, `scheduled-reconcile.sh` và `status`](./OPERATIONS_RUNBOOK.md)
+  §2 và §7), chạy trên VPS ở P16-S7;
 - quy trình release và rollback gắn với version bất biến — đã triển khai (P16-S3:
   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5 và §6 và `release.sh`;
   rollback path 3 đã triển khai ở P16-S5, §6 của runbook).
@@ -57,7 +58,8 @@ Không triển khai production từ `compose.yaml`. Release phải cung cấp (t
 - NTP/timezone policy chính xác;
 - persistent storage riêng cho PostgreSQL và local backup staging;
 - provider/off-site backup destination được mã hóa;
-- monitor resource và disk;
+- monitor resource và disk (`check.sh` qua systemd timer ở §8 Monitoring, review
+  CPU và RAM bằng `docker stats`);
 - không chạy workload thử nghiệm không liên quan trên production host.
 
 Không publish PostgreSQL ra Internet. Ưu tiên private provider network cho remote
@@ -160,7 +162,8 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
    Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations → `Devices…`).
 9. Chạy smoke test và reconciliation qua HTTPS theo runbook; reconcile
    check (h) phải báo `pass`.
-10. Bật monitoring và backup schedule (systemd timer ở §8), rồi chạy backup ngay:
+10. Bật các timer backup, check và reconcile ở §8 (cùng alert unit), rồi chạy backup
+    ngay:
     `deploy/production/backup.sh --kind manual --operator "<name>" --reason "initial backup"`.
 11. Thực hiện và đo isolated restore trước khi nhận pilot data:
     `deploy/production/restore-test.sh --backup <backup đó> --operator "<name>"`.
@@ -222,6 +225,35 @@ chối unit); kiểm tra cả hai unit bằng
 `systemd-analyze verify partflow-backup.service partflow-backup.timer`. Một exit khác 0, kể cả daily không
 qua verify, làm unit thất bại. Giữ schedule ngoài maintenance window (một release
 giữ backup lock).
+
+**Monitoring (systemd).** Đã triển khai ở P16-S6, cài và chạy trên VPS ở P16-S7
+(`systemd-analyze verify` cả năm unit; `ExecStart=` dùng đường dẫn tuyệt đối như
+trên). `partflow-alert@.service` là unit báo lỗi của mọi unit:
+
+```ini
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'journalctl -u %i -n 60 --no-pager | mail -s "PartFlow alert: %i failed on %H" <ops address>'
+```
+
+`%i` và `%H` là systemd specifier (systemd không bao giờ chạy `$(...)`). Nó cần một
+MTA đã cấu hình trên host, ví dụ msmtp, và quyền đọc journal cho user của unit:
+cấu hình host, P16-S7. `partflow-check.service` (`Type=oneshot`,
+`User=<deploy account>`, `WorkingDirectory=/srv/partflow/current`,
+`OnFailure=partflow-alert@%n.service`) chạy
+`ExecStart=/srv/partflow/current/deploy/production/check.sh --url https://<host> --env-file /srv/partflow/env/production.env`
+và `partflow-check.timer` có `OnCalendar=*:0/15`. `partflow-reconcile.service`
+(cùng `User=` và `WorkingDirectory=`, `OnFailure=partflow-alert@%n.service`) chạy
+`ExecStart=/srv/partflow/current/deploy/production/scheduled-reconcile.sh --env-file /srv/partflow/env/production.env`
+và `partflow-reconcile.timer` có `OnCalendar=*-*-* 04:00:00` và `Persistent=true`.
+`OnFailure=` của backup unit cũng là `partflow-alert@%n.service`. Nếu dùng cron,
+đặt `MAILTO=` và dùng `--quiet` cho cả hai dòng, vì cron gửi mail mỗi khi một job
+có in ra:
+
+```cron
+*/15 * * * * cd /srv/partflow/current && deploy/production/check.sh --url https://<host> --env-file /srv/partflow/env/production.env --quiet
+0 4 * * * cd /srv/partflow/current && deploy/production/scheduled-reconcile.sh --env-file /srv/partflow/env/production.env --quiet
+```
 
 **Bản copy off-VPS (restic).** `RESTIC_REPOSITORY` trỏ tới object storage, và
 `RESTIC_PASSWORD_FILE` tới một key file mode 0400 do custody ngoài VPS giữ (mất nó
