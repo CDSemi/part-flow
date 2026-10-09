@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "readme-md": {
+      "source": "LisaHQ/lisa-skills",
+      "sourceType": "github",
+      "skillPath": "skills/readme-md/SKILL.md",
+      "computedHash": "b5eee66b2329027f5c8bdd46c6d7e94751e9d63c316f26cc4beb249304eca18a"
+    }
+  }
+}
