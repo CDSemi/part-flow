@@ -507,12 +507,14 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 
 `compose.production.yaml` (Compose project `partflow-production`) là production
 stack: `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và các job
-`migrate` và `db-roles` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
+`migrate`, `db-roles` và `backup-tools` one-shot. **Nó không dành cho development** (dùng `compose.yaml`), không
 có gì trong repo này tự khởi động nó, và nó chưa được xác minh trên Synology NAS
 hay VPS (Phase 16 slice 7). Configuration là `.env.production` (sao chép
 `.env.production.example`, git bỏ qua) cùng các secret file `postgres_password`, `partflow_app_password` và
 `partflow_maintenance_password` trong `PARTFLOW_SECRETS_DIR` (tạo cả ba trước lệnh
-đầu tiên khởi động `backend` hoặc một ops service). Backend kết nối bằng database
+đầu tiên khởi động `backend` hoặc một ops service) và một backup directory đã tồn
+tại, `PARTFLOW_BACKUP_DIR` (mode 0700, mọi lệnh Compose của stack này đều cần).
+Backend kết nối bằng database
 role ít đặc quyền `partflow_app`, không bao giờ bằng owner. Build và start, từ
 release checkout:
 
@@ -543,14 +545,35 @@ một stack cài trước slice 4 và quy tắc password của owner nằm ở
 [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Các release sau chạy qua `deploy/production/release.sh`, thực hiện release
-sequence (build, reconcile pre-release và post-release, write freeze, `migrate`,
-chuyển `backend` rồi `web`, `smoke.sh`) và ghi deployment record;
+sequence (build, reconcile pre-release và post-release, write freeze, pre-release
+backup đã verify, `migrate`, chuyển `backend` rồi `web`, `smoke.sh`) và ghi deployment record;
 `deploy/production/smoke.sh --release <tag>` chạy các loopback check của release
 đang chạy. Cả hai in cách dùng với `--help`; quy trình nằm ở
 [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1 và
 [`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
 §5 và §6. Mỗi production image mang release của nó (`PARTFLOW_RELEASE`,
 `PARTFLOW_COMMIT`); image backend và `web` đều từ chối giá trị thiếu hoặc sai dạng (`docs/IMPLEMENTATION_ROADMAP.md`, Phase 16 slice 3).
+
+Backup (Phase 16 slice 5): `deploy/production/backup.sh` ghi một directory đã verify
+cho mỗi backup (`pg_dump` custom-format lấy bên trong `db`, một manifest và
+`SHA256SUMS`) vào `PARTFLOW_BACKUP_DIR`; `release.sh` tự lấy pre-release backup,
+bên trong write freeze khi có migration đang chờ, và `migrate` từ chối backup stale,
+của database khác hoặc bị tamper. `deploy/production/restore-test.sh` restore một
+backup vào project tạm cô lập, chạy readiness, `reconcile` đầy đủ và smoke check, rồi
+ghi evidence có đo thời gian trước khi teardown project:
+
+```bash
+deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8   # 14 and 8: the owner's retention
+deploy/production/restore-test.sh --backup <NAME> --operator "<name>"
+```
+
+Cả hai in cách dùng với `--help`. Quy trình, retention, rollback path 3 và
+new-instance restore nằm ở
+[`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
+§3, §4 và §6; mã hóa và off-host replication thuộc platform tool
+([`docs/deployment/SYNOLOGY_NAS.md`](./docs/deployment/SYNOLOGY_NAS.md) §6,
+[`docs/deployment/VPS.md`](./docs/deployment/VPS.md) §8). Schedule và drill đầu tiên
+trên một host thuộc Phase 16 slice 7.
 
 Chỉ bước build dùng `compose.production.build.yaml`: `compose.production.yaml`
 không có phần build, nên `up` hay `run` với một release thiếu image sẽ thất bại
@@ -581,20 +604,23 @@ Phần static của các kiểm tra production artifact không cần stack đang
 
 ```bash
 python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
-PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=$(git rev-parse HEAD) PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
+PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=$(git rev-parse HEAD) PARTFLOW_SECRETS_DIR=<thư mục chứa postgres_password> PARTFLOW_BACKUP_DIR=<any directory> PARTFLOW_SITE_TIMEZONE=UTC   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
 ```
 
 Lệnh đầu chạy static test của Compose model, file environment example, Dockerfile
 và cấu hình nginx, cùng test của `release.sh` / `smoke.sh` (`test_release_scripts.py`,
-với `docker`, `git` và `curl` giả) và test của `reconcile_regression.py`
+với `docker`, `git` và `curl` giả), test của `backup.sh` / `restore-test.sh`
+(`test_backup_scripts.py`, cũng với bản giả) và test của `reconcile_regression.py`
 (`test_reconcile_regression.py`); lệnh thứ hai build cả hai production image (build
 `web` chạy production-boundary check, và build thiếu `PARTFLOW_COMMIT` thì fail).
 Compose stack smoke
 (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) khởi
 động một project `partflow-s2-smoke` tạm trên loopback port, kiểm tra qua `web`
 rồi xóa nó; `python3 deploy/production/tests/release_rehearsal.py` diễn tập một
-release trên project tạm `partflow-s3-rehearsal`. Cả hai cần Docker daemon và không
-thuộc CI.
+release trên project tạm `partflow-s3-rehearsal`;
+`python3 deploy/production/tests/backup_rehearsal.py --evidence <path.json>` build ba
+release và kiểm tra backup, restore drill và rollback path 3 trên các project tạm
+`partflow-s5-*`. Cả ba cần Docker daemon và không thuộc CI.
 
 ## Continuous integration
 
@@ -626,10 +652,11 @@ backend/
   Dockerfile       stage `production` và `development` (mặc định)
 frontend/nginx/    cấu hình image `web` (nginx template, proxy/header snippet, trusted-proxy entrypoint)
 compose.yaml       development stack: db, backend, frontend
-compose.production.yaml  production stack (db, backend, web, migrate); không dành cho development
+compose.production.yaml  production stack (db, backend, web, migrate, db-roles, backup-tools); không dành cho development
 compose.production.build.yaml  file đi kèm chỉ để build: build production image của backend và web
 .env.production.example  bảng kê configuration production (sao chép thành .env.production)
 deploy/production/release.sh, smoke.sh  release flow và loopback smoke check (reconcile_regression.py so sánh các report reconcile)
-deploy/production/tests/ static test production artifact, test release script, Compose stack smoke và release rehearsal
+deploy/production/backup.sh, restore-test.sh  backup artifact và restore drill cô lập
+deploy/production/tests/ static test production artifact, test script release và backup, Compose stack smoke, release rehearsal và backup rehearsal
 docs/              tài liệu chuẩn của project
 ```

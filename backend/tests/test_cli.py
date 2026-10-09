@@ -388,6 +388,7 @@ def test_the_cli_reads_no_model() -> None:
         "reconciliation",
         "migration",
         "database_roles",
+        "backups",
     }
 
 
@@ -404,5 +405,19 @@ def test_help_lists_every_command(capsys: pytest.CaptureFixture[str]) -> None:
         "revision",
         "provision-roles",
         "apply-grants",
+        "backup-manifest",
+        "backup-verify",
+        "backup-rotate",
     ):
         assert command_name in out
+
+
+@pytest.mark.parametrize("command_name", ["backup-manifest", "backup-verify", "backup-rotate"])
+def test_each_backup_command_has_help(
+    capsys: pytest.CaptureFixture[str], command_name: str
+) -> None:
+    """CLI-1 (Phase 16 slice 5)."""
+    with pytest.raises(SystemExit) as raised:
+        cli.main([command_name, "--help"])
+    assert raised.value.code == 0
+    assert f"usage: python -m app.cli {command_name}" in capsys.readouterr().out

@@ -18,6 +18,10 @@ Evidence JSON: per case id pass / fail / invalid / manual with the observed stat
 durations. Exit status: 0 = every automated case passed; 1 = a case failed or the run broke; 2 = no failure but a
 case is invalid (host too slow) and must be re-run.
 
+Amended by P16-S5 (P16-S5 SPEC section 4.8.1): compose.production.yaml needs PARTFLOW_BACKUP_DIR for every command, so
+the generated env files name a temporary backup directory (mode 0700, inside the work directory, removed with it);
+migrate runs with --no-backup-reason and reads no backup.
+
 Spec amendments applied here (recorded in the P16-S2 evidence):
 - SM-17a/SM-17b: "no output line contains ://" cannot hold (pydantic prints an errors.pydantic.dev link and uvicorn
   prints its http:// listen address); the check is "no output line carries a credential URL" (ST-10's pattern).
@@ -293,6 +297,7 @@ class Smoke:
         overrides = {
             "PARTFLOW_RELEASE": release,
             "PARTFLOW_SECRETS_DIR": secrets_dir.as_posix(),
+            "PARTFLOW_BACKUP_DIR": posix_host_path(self.backup_dir),
             "PARTFLOW_SITE_TIMEZONE": "UTC",
             "PARTFLOW_HTTP_PORT": str(self.port),
             "PARTFLOW_EDGE_SUBNET": EDGE_SUBNET,
@@ -321,6 +326,7 @@ class Smoke:
         return (self.secrets_dir / name).read_text(encoding="utf-8").strip()
 
     def prepare(self):
+        self.backup_dir = make_backup_dir(self.workdir)
         self.secrets_dir = self.workdir / "secrets"
         self.write_secrets(self.secrets_dir)
         self.env_file = self.workdir / "smoke.env"
@@ -1095,6 +1101,23 @@ class Smoke:
             evidence_path.write_text(json.dumps(self.evidence, indent=2) + "\n", encoding="utf-8")
             print(f"evidence: {evidence_path} ({self.evidence['outcome']})", flush=True)
         return outcome
+
+
+def posix_host_path(path):
+    """An absolute host path as deploy/production/*.sh require it (leading "/"; the MSYS form /c/... on Windows, which
+    Docker Desktop also accepts as a bind source)."""
+    text = Path(path).resolve().as_posix()
+    if os.name == "nt" and re.match(r"^[A-Za-z]:/", text):
+        return "/" + text[0].lower() + text[2:]
+    return text
+
+
+def make_backup_dir(parent):
+    """A temporary PARTFLOW_BACKUP_DIR (P16-S5), mode 0700, removed with its parent work directory."""
+    path = Path(parent) / "backups"
+    path.mkdir()
+    os.chmod(path, 0o700)
+    return path
 
 
 def free_port():

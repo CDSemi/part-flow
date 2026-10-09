@@ -27,8 +27,9 @@ secret inventory, and network rate limiting, §3.1), slice 3 (the release
 flow: release identity, liveness and readiness, the backend write gate,
 `migrate`, `release.sh` and `smoke.sh`, §3.1) and slice 4 (database-role hardening: the `partflow_app` and
 `partflow_maintenance` database roles, `provision-roles`, grants applied by every `migrate` and by `apply-grants`, and
-reconcile check (h), §3.1) are implemented. Phase 16 still owns backups, observability,
-host TLS and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
+reconcile check (h), §3.1) and slice 5 (backups: the verified backup artifact, the pre-release backup inside
+the write freeze, the isolated restore drill and rollback path 3, §3.1) are implemented. Phase 16 still owns observability,
+host TLS, the execution of backups and drills on a pilot host, and the gates (§5 and `IMPLEMENTATION_ROADMAP.md`).
 
 Therefore:
 
@@ -36,7 +37,7 @@ Therefore:
 | --- | --- | --- |
 | Developer workstation | Supported | Use `compose.yaml` as documented in the root README. |
 | Internal Synology staging/test | Supported with restrictions | LAN-only, synthetic/non-production data, controlled users, and explicit backups. See [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot or production use | Not ready | Production artifacts, a release flow and database-role hardening exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`, `partflow_app`), but backups, observability and the pilot gates of §5 remain (Phase 16: P16-S5…S7). |
+| Pilot or production use | Not ready | Production artifacts, a release flow, database-role hardening and backups exist (§3.1: images, `web`, `compose.production.yaml`, configuration inventory, `release.sh`, `partflow_app`, `backup.sh`, `restore-test.sh`), but observability and the pilot gates of §5 remain (Phase 16: P16-S6…S7). |
 | Internet exposure | Prohibited now | TLS is terminated by the platform proxy, which no host has configured or verified yet (P16-S7), and the §5 gates have not passed. Network rate limiting exists in `web`; `compose.yaml` still exposes development services (§2). |
 
 An internal staging deployment does not mean Phase 16 is complete.
@@ -125,9 +126,10 @@ Required boundaries:
 - run schema migration as an explicit release step, never as an uncontrolled
   side effect of every application replica starting;
 - identify every deployment by an immutable Git commit or image tag;
-- make the same backup format portable between NAS and VPS.
+- make the same backup format portable between NAS and VPS (implemented: the
+  P16-S5 backup artifact, `deployment/OPERATIONS_RUNBOOK.md` §3).
 
-### 3.1 Production stack (Phase 16 slices 2 to 4)
+### 3.1 Production stack (Phase 16 slices 2 to 5)
 
 **State.** Implemented (P16-S2): the `production` stages of
 `backend/Dockerfile` and `frontend/Dockerfile`, the `web` configuration in
@@ -142,7 +144,7 @@ has been verified on the Synology NAS or a VPS (that is P16-S7). Implemented
 `reconcile_regression.py`, and the update notice in the frontend (the
 subsections below). Both production images take `PARTFLOW_RELEASE` and `PARTFLOW_COMMIT` as build arguments and carry the release identity (the backend `production` stage sets `RELEASE_TAG` and `RELEASE_COMMIT`); the production stack smoke and the release rehearsal have run (State, Evidence). Implemented (P16-S4): the database roles
 `partflow_app` and `partflow_maintenance`, `provision-roles` and `apply-grants`, the `db-roles` service and reconcile check (h)
-(Database roles and grants, below). Backups and observability remain P16-S5…S6.
+(Database roles and grants, below). Implemented (P16-S5): `deploy/production/backup.sh` (daily, manual and pre-release backups: a custom-format `pg_dump` from inside `db`, published as one directory with a manifest and `SHA256SUMS`), the `backup-manifest`, `backup-verify` and `backup-rotate` commands of the `backup-tools` service, the verification and freshness rules `migrate` applies to the pre-release backup, the backup `release.sh` takes inside the write freeze, `deploy/production/restore-test.sh` (the isolated restore drill) and the documented rollback path 3 and new-instance restore (`deployment/OPERATIONS_RUNBOOK.md` §3, §4 and §6). Evidence is Windows/Docker Desktop and a Linux container only; the schedule, the off-host replication, the first timed drill and path 3 on a host are P16-S7. Observability remains P16-S6.
 
 **Services and networks (`compose.production.yaml`).**
 
@@ -151,7 +153,8 @@ subsections below). Both production images take `PARTFLOW_RELEASE` and `PARTFLOW
 | `db` | PostgreSQL `postgres:16.14` (Debian variant, never `-alpine`: collation and reconcile check (j) depend on glibc) | `internal` (no external route) | volume `postgres_data`; no published port; 60 s stop grace |
 | `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, `production` stage | `internal`, `edge` | connects as `partflow_app` (`DATABASE_ROLES_REQUIRED=true`) and mounts only `partflow_app_password`; `SESSION_COOKIE_SECURE=true` fixed; `WEB_CONCURRENCY` from `PARTFLOW_BACKEND_WORKERS` (default 2); `FORWARDED_ALLOW_IPS` = the edge subnet; 200 s stop grace (above `web`'s longest 180 s upstream timeout); `restart: unless-stopped` (never `on-failure`: with several workers a configuration refusal exits `0`) |
 | `web` | image `partflow/web:${PARTFLOW_RELEASE}`, `production` stage | `edge` | the only published port, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (no variable for the bind address); no `depends_on`, so it keeps serving the shell while `backend` is stopped |
-| `migrate` | one-shot `python -m app.cli migrate` from the backend image (entrypoint; one connection, one transaction) | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)`; without a backup option it is a usage error |
+| `migrate` | one-shot `python -m app.cli migrate` from the backend image (entrypoint; one connection, one transaction) | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm -T --user "$(id -u):$(id -g)" migrate (--pre-release-backup NAME \| --no-backup-reason TEXT)`; without a backup option it is a usage error; mounts the backup directory read-only at `/backups` to verify the named backup (`--user` lets it read the 0700 directory) |
+| `backup-tools` | one-shot `python -m app.cli` from the backend image; run with `backup-manifest`, `backup-verify` or `backup-rotate` (`deploy/production/backup.sh`) | none (`network_mode: none`) | profile `ops`: never started by `up`; no database, no secret; mounts only the backup directory at `/backups`; run with `--user "$(id -u):$(id -g)"` |
 | `db-roles` | one-shot `python -m app.cli provision-roles` (default command) or `apply-grants` (argument) from the backend image; connects as the owner and mounts the three secret files | `internal` | profile `ops`: never started by `up`; run with `--profile ops run --rm -T db-roles [apply-grants]` |
 
 Images are built locally from the checked-out release, through the build-only
@@ -161,7 +164,7 @@ companion file `compose.production.build.yaml`, and never pulled
 has no build section, so `up` or `run` with a tag whose images are missing fails
 with `No such image` instead of building the current checkout under that tag.
 Every service has a
-restart policy, a health check (except `migrate`; the `backend` check is the
+restart policy, a health check (except the one-shot `ops` services; the `backend` check is the
 liveness route, see Readiness and write gate), memory and CPU limits from
 the environment file (starting values, to be measured on the pilot host in
 P16-S7), and `json-file` log rotation (10 MiB, 5 files). Secrets are mounted as
@@ -272,9 +275,13 @@ recorded by that request, and an earlier unanswered attempt stays unknown) and a
 **Migration job and `revision` (P16-S3).** `python -m app.cli migrate` applies
 the pending migrations in one transaction on one connection, runs the
 `apply-grants` hook in the same transaction (it applies the grants, see Database roles and grants) and prints
-a JSON report; it needs exactly one of `--pre-release-backup REF` or
-`--no-backup-reason TEXT` (recorded; for example `first install: empty
-database`) and accepts `--lock-timeout SECONDS` (1-600, default 30). It refuses,
+a JSON report; it needs exactly one of `--pre-release-backup NAME` (a backup
+directory taken by `backup.sh`, verified before the migration and recorded; with a
+pending migration it also needs `--backup-not-before UTC`, the write-freeze time)
+or `--no-backup-reason TEXT` (recorded; for example `first install: empty
+database`) and accepts `--lock-timeout SECONDS` (1-600, default 30).
+`--backup-dir` names the mount (default `/backups`). The freshness and
+ownership rules are in `deployment/OPERATIONS_RUNBOOK.md` §5. It refuses,
 changing nothing, a revision file with non-transactional DDL
 (`autocommit_block`, `CONCURRENTLY`), a database revision this release does not
 know, a concurrent `migrate`, and (best effort, not proof that `backend` is
@@ -285,15 +292,20 @@ revisions, pending revisions and the readiness the backend would report; exit
 0 only when the schema is `current`.
 
 **First install (P16-S3, extended by P16-S4).** From the release checkout, with the tag in
-`.env.production`, in this order: create the three secret files (`postgres_password`, `partflow_app_password`, `partflow_maintenance_password`) before any `$PF` command that starts `backend` or an ops service, because Compose replaces a missing file by an empty directory; build **both** images with `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`; start the database (`$PF up -d db`); create the roles (`$PF --profile ops run --rm -T db-roles`); apply the schema and the grants (`$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`); start `backend` with one worker for the first-run setup as the Process model describes, then `$PF up -d backend web`; finally run `reconcile` and expect check (h) `pass`.
+`.env.production`, in this order: create the backup directory (`install -d -m 0700 <path>`) and set `PARTFLOW_BACKUP_DIR` in `.env.production` (every Compose command of the stack needs the key); create the three secret files (`postgres_password`, `partflow_app_password`, `partflow_maintenance_password`) before any `$PF` command that starts `backend` or an ops service, because Compose replaces a missing file by an empty directory; build **both** images with `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`; start the database (`$PF up -d db`); create the roles (`$PF --profile ops run --rm -T db-roles`); apply the schema and the grants (`$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`); start `backend` with one worker for the first-run setup as the Process model describes, then `$PF up -d backend web`; finally run `reconcile` and expect check (h) `pass`.
 
 **Converting a stack installed before P16-S4** (rehearsal stacks only; no pilot exists before P16-S7). The database must already be at the candidate's head, otherwise `apply-grants` refuses `revision_mismatch` and changes nothing. In this order: (1) create `partflow_app_password` and `partflow_maintenance_password` before any `$PF` command of the new Compose file that runs `backend` or `db-roles` (remove an empty directory Compose created at a missing path); (2) build both images, never only `backend` and never without `PARTFLOW_COMMIT`: `PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build backend web`; (3) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles`; (4) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles apply-grants`; (5) `deploy/production/release.sh` as usual. Its first steps run the current image through `backend` as `partflow_app`, so steps 3 and 4 must come first, and the build step then reuses the images of step 2.
+
+**Converting a stack installed before P16-S5** (rehearsal stacks only; no pilot exists before P16-S7). In this order: (1) create the backup directory (`install -d -m 0700 <path>`, owned by the account that runs `backup.sh` and `release.sh`) and set `PARTFLOW_BACKUP_DIR` in `.env.production` **before any `$PF` command with the P16-S5 checkout**, otherwise every Compose command fails on the missing key; (2) `deploy/production/release.sh` as usual: its first pre-release backup uses the candidate's `backup-tools` (`--tools-release`), because the running release predates P16-S5; (3) install the daily schedule and the platform-tool task (`deployment/SYNOLOGY_NAS.md` §6, `deployment/VPS.md` §8); (4) run the first drill, `deploy/production/restore-test.sh --backup <NAME> --operator "<name>"`.
 
 **Releases (P16-S3).** `deploy/production/release.sh` runs the release
 sequence of §7 from the repository root of the release checkout with the
 release tag checked out (`deploy/production/release.sh --help` prints the usage):
-`--release TAG --operator NAME --approver NAME` and exactly one of
-`--pre-release-backup REF` or `--no-backup-reason TEXT`, optionally
+`--release TAG --operator NAME --approver NAME`, optionally one of
+`--pre-release-backup NAME` (an existing `backup.sh` backup, only for a release
+without a pending migration) or `--no-backup-reason TEXT` (first installation or
+a rehearsal); with neither, `release.sh` takes the verified pre-release backup
+itself, inside the write freeze when a migration is pending (P16-S5); optionally
 `--accept-pre-release-findings` (continue when the pre-release reconcile has
 findings and block only on findings absent from it) or `--skip-pre-reconcile
 REASON` (no image has the database revision as its head: rollback path 2 state;
@@ -316,10 +328,11 @@ release identity and schema, the JSON 404 for an unknown API path, the gate's
 image identities). Nothing schedules `release.sh`; no updater runs on the
 host, and neither script removes, prunes or re-tags an image.
 
-**Rollback (P16-S3).** The decision tree, paths 1 and 2 and the schema
+**Rollback (P16-S3, P16-S5).** The decision tree, paths 1 and 2 and the schema
 override are in `deployment/OPERATIONS_RUNBOOK.md` §6; the previous release's
-images stay on the host through the rollback window. Path 3 (restore) waits
-for P16-S5.
+images stay on the host through the rollback window. Path 3 (restore the
+pre-release backup into a new database) is in the same section; it needs the
+owner's recorded approval.
 
 **Request limits and timeouts (`web`).**
 
@@ -414,12 +427,14 @@ monitoring is P16-S6. Check expiry from any client: `openssl s_client -connect
 and verified in P16-S7.
 
 **Environment separation (OD-16-01).** Production uses its own Compose project,
-database volume, secrets directory, hostname and (P16-S5) backup location; none
+database volume, secrets directory, hostname and backup location
+(`PARTFLOW_BACKUP_DIR`); none
 is shared with or pointed at a staging or development stack. Production starts
 from a new, empty database volume, then migrations, then first-run setup;
 staging or development data is never attached, reused or copied into it, and a
-deliberate restore into production is a P16-S5 procedure that needs an owner
-decision. During the pilot, pf-managed staging is not installed on the pilot
+deliberate restore into production follows `deployment/OPERATIONS_RUNBOOK.md`
+§6 path 3 or §8 host failure (new-instance restore), and the owner's approval is
+recorded before `backend` starts. During the pilot, pf-managed staging is not installed on the pilot
 Docker daemon, and the manual `compose.yaml` staging of SYNOLOGY_NAS §4 is
 stopped, with its containers removed and **without** deleting volumes, before
 production starts. `SITE_TIMEZONE` equals the staging value (§6). Never run
@@ -437,6 +452,7 @@ the set of `${NAME}` references in `compose.production.yaml` and
 | `PARTFLOW_COMMIT` | full commit of the release being built; empty in the file, passed in the shell by `release.sh` at build time | required to build |
 | `PARTFLOW_ACCEPT_SCHEMA_REVISION` | rollback path 2 only: the one database revision the running release may serve (`OPERATIONS_RUNBOOK.md` §6); `release.sh` clears it | empty |
 | `PARTFLOW_SECRETS_DIR` | absolute path of the secrets directory, outside the checkout, production only (directory 0700, each file 0444) | required |
+| `PARTFLOW_BACKUP_DIR` | absolute path of the production backup directory (`backup.sh` writes one sub-directory per backup), outside the checkout, the secrets directory and any archive directory, production only (never staging's or a drill's); an existing directory, mode 0700, owned by the account that runs `backup.sh` and `release.sh`; required by **every** `$PF` command, write it unquoted; encrypted and replicated off-host by the platform tool | required |
 | `PARTFLOW_SITE_TIMEZONE` | factory calendar zone, equal to staging (§6) | required |
 | `PARTFLOW_HTTP_PORT` | loopback port the platform proxy connects to | required (example `18080`) |
 | `POSTGRES_USER`, `POSTGRES_DB` | bootstrap (owner) role and database | required (example `partflow_owner`, `partflow`) |
@@ -466,12 +482,15 @@ changed by replacing its file, `$PF stop backend`, `$PF --profile ops run --rm -
 | Validate the configuration | `$PF config --quiet` |
 | Build a release (tag and commit in the shell; the only use of the build file) | `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` |
 | Start the database | `$PF up -d db` |
-| Apply migrations and grants (once per release, with `backend` stopped) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)` (first install: the tag is already in `.env.production`) |
+| Apply migrations and grants (once per release, with `backend` stopped) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate (--pre-release-backup NAME --backup-not-before UTC \| --no-backup-reason TEXT)` (first install: the tag is already in `.env.production`) |
+| Take a backup (daily, manual) | `deploy/production/backup.sh --kind daily --operator … --keep-daily N --keep-weekly N` · `--kind manual --operator … --reason …` (`OPERATIONS_RUNBOOK.md` §3) |
+| Verify a backup, or preview the retention | `$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-verify NAME` · `… backup-tools backup-rotate --keep-daily N --keep-weekly N --dry-run` |
+| Restore drill in an isolated project | `deploy/production/restore-test.sh --backup NAME --operator …` (`OPERATIONS_RUNBOOK.md` §4) |
 | Create or repair the database roles; set or rotate their passwords | `$PF --profile ops run --rm -T db-roles` (= `provision-roles`) |
 | Apply the grants outside a migrate (after a restore, or to repair drift) | `$PF --profile ops run --rm -T db-roles apply-grants` |
 | Guard-integrity check (reconcile check (h), as `partflow_app`) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile --check h` |
 | Privilege probe (evidence; one invocation per table and statement, zero rows, rolled back) | `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN -c "SET LOCAL ROLE partflow_app" -c "UPDATE part_movements SET id = id WHERE false" -c ROLLBACK'` (refused = stderr has `permission denied for table <t>`; allowed = stdout has `UPDATE 0` and no `ERROR`; the variables expand inside `db`) |
-| Release (the whole sequence of §7) | `deploy/production/release.sh --release <new> --operator … --approver … (--pre-release-backup REF \| --no-backup-reason TEXT)` |
+| Release (the whole sequence of §7) | `deploy/production/release.sh --release <new> --operator … --approver … [--pre-release-backup NAME \| --no-backup-reason TEXT]` |
 | Smoke checks of a running release | `deploy/production/smoke.sh --release <tag>` |
 | Expected and database revision, readiness | `$PF run --rm --no-deps -T backend python -m app.cli revision` |
 | Start or recreate the application | `$PF up -d backend web` |
@@ -496,7 +515,7 @@ Rollback of application code with no schema change: restore the previous tag in
 images on the host, so keep them (no `docker image prune -a`) through the
 rollback window; when they are gone, `up` fails with `No such image` and starts
 nothing. A schema rollback is the restore
-path of the runbook (path 3, P16-S5), never a down-migration here. **Never run
+path of the runbook (path 3, `deployment/OPERATIONS_RUNBOOK.md` §6), never a down-migration here. **Never run
 `down -v`, or remove a volume, on the `partflow-production` project**: it
 deletes `partflow-production_postgres_data`; `$PF down` without `-v` is the
 only stop-everything form.
@@ -509,7 +528,7 @@ the 11 mock sentinels), and a Compose stack smoke on Docker Desktop (cases
 SM-1…SM-22, including the rate limit, the proxy-generated JSON answers, the
 content security policy in a real browser, the one-worker first-run, the
 reconcile commands, and 2,000-Work-Order import timings of 18.06 s to create and
-31.33 s to change quantities, below `web`'s 180 s). P16-S3 evidence: the production static and script suite (93 tests, all passing), the 51 release-script and reconcile-regression tests passing under `dash` in a Linux container, `sh -n` on both scripts, both production images built with a full commit and the build failing without one, the Compose stack smoke passing (SM-1…SM-19 and SM-21…SM-28; SM-20 is the manual S2 browser check), the release rehearsal passing (RH-1…RH-8 and RH-10: a release with a migration, the write freeze, the two-step switch, the refused migration while a backend is connected, and `/api/health` and `/api/health/live` latency through `web`), and a browser check of the update notice and the automatic reload of the Production Board kiosk on the rehearsal stack. Not run (P16-S7): the Scan Station reload cases that need a configured Area, Operation and enrolled station, and every NAS and VPS host check. P16-S4 evidence: the production static and script suite (98 tests on the host and 63 release-script, reconcile-regression and rehearsal tests under `dash` in a Linux container), the Compose stack smoke passing on its second run (39 automated cases, including the privilege probe, the role-password rotation and the secret-file checks; SM-20 is the manual S2 browser check), and the release rehearsal passing (RH-1…RH-8 and RH-10, with the conversion of a stack installed before P16-S4 as RH-11 and its refusal while a role file is missing as RH-11b). Host checks on the Synology NAS and a VPS are
+31.33 s to change quantities, below `web`'s 180 s). P16-S3 evidence: the production static and script suite (93 tests, all passing), the 51 release-script and reconcile-regression tests passing under `dash` in a Linux container, `sh -n` on both scripts, both production images built with a full commit and the build failing without one, the Compose stack smoke passing (SM-1…SM-19 and SM-21…SM-28; SM-20 is the manual S2 browser check), the release rehearsal passing (RH-1…RH-8 and RH-10: a release with a migration, the write freeze, the two-step switch, the refused migration while a backend is connected, and `/api/health` and `/api/health/live` latency through `web`), and a browser check of the update notice and the automatic reload of the Production Board kiosk on the rehearsal stack. Not run (P16-S7): the Scan Station reload cases that need a configured Area, Operation and enrolled station, and every NAS and VPS host check. P16-S4 evidence: the production static and script suite (98 tests on the host and 63 release-script, reconcile-regression and rehearsal tests under `dash` in a Linux container), the Compose stack smoke passing on its second run (39 automated cases, including the privilege probe, the role-password rotation and the secret-file checks; SM-20 is the manual S2 browser check), and the release rehearsal passing (RH-1…RH-8 and RH-10, with the conversion of a stack installed before P16-S4 as RH-11 and its refusal while a role file is missing as RH-11b). P16-S5 evidence: the production static and script suite (154 tests on the host, plus 116 backup-script, release-script, reconcile-regression and rehearsal tests under `dash` in a Linux container), `sh -n` clean on `release.sh`, `backup.sh`, `restore-test.sh` and `smoke.sh`, the Compose stack smoke passing (38 cases) and the release rehearsal passing (RH-1…RH-8 and RH-10, with RH-5 and RH-11 taking the automatic backup) with the temporary backup directory, and the backup rehearsal (`deploy/production/tests/backup_rehearsal.py`) passing on real images with synthetic data: a daily backup and its host `sha256sum -c`, an isolated drill (reconcile (h) and (j) `pass`, an uploaded image read back with an equal SHA-256, 14.2 s from restore to ready and 32.3 s in total on that host, production untouched), a drill on `postgres:16.14-bookworm` (glibc collation version 2.36 against 2.41, (h) and (j) `pass`), rollback path 3 from a release left stopped frozen (the dump inside the freeze, the documented commands run exactly, the migrated database kept), an atomic failed restore, the stale, tampered and concurrent refusals and a backup taken during writes. Not run: a second host type (DR-9) and the fail-closed behaviour of a missing backup mount on a Linux engine (Docker Desktop creates the missing directory; P16-S7). Host checks on the Synology NAS and a VPS are
 not part of this evidence.
 
 ## 4. Platform decision
@@ -598,12 +617,20 @@ The gates above remain gates until P16-S7 records passing evidence.
 ### Data safety and operations
 
 - automated PostgreSQL logical backups run on a documented schedule, are
-  encrypted off-host/off-NAS, have retention, and are monitored;
-- a restore into an isolated database has been tested and timed;
+  encrypted off-host/off-NAS, have retention, and are monitored — implemented by
+  `backup.sh`, `backup-rotate` and the platform-tool tasks (P16-S5; the
+  schedule, the replication and the backup-age alert are executed on the pilot
+  host in P16-S7 and added by P16-S6); see `deployment/OPERATIONS_RUNBOOK.md` §3;
+- a restore into an isolated database has been tested and timed — implemented by
+  `restore-test.sh` (P16-S5); the first timed drill on the pilot host is P16-S7
+  (`deployment/OPERATIONS_RUNBOOK.md` §4);
 - every migration has a backup, forward plan, compatibility assessment, smoke
-  test, and recovery plan;
+  test, and recovery plan — the verified backup is taken by `release.sh` inside
+  the write freeze and checked by `migrate` (P16-S5);
 - rollback uses the previous compatible application release, or restores the
-  matching pre-migration database when a schema rollback is unsafe;
+  matching pre-migration database when a schema rollback is unsafe — path 3,
+  implemented (P16-S5; `deployment/OPERATIONS_RUNBOOK.md` §6), evidence on the
+  pilot host: P16-S7;
 - health, logs, disk use, backup age, database growth, and container restarts
   are monitored;
 - movement/quantity reconciliation checks run and alert without mutating data;
@@ -654,10 +681,10 @@ Every platform follows the same release order:
 1. Select and record an immutable release commit/tag following §10.
 2. Confirm CI and release quality gates for that exact revision.
 3. Read the migration notes from the currently deployed revision to the target.
-4. Verify the latest backup and create a fresh pre-release backup. Before
-   P16-S5 this is the operator's dump of `deployment/OPERATIONS_RUNBOOK.md` §3,
-   taken before the freeze and named with `--pre-release-backup`; writes made
-   after it are not in it (`OPERATIONS_RUNBOOK.md` §5 and §6).
+4. Verify the latest backup and create a fresh pre-release backup:
+   `release.sh` takes it inside the write freeze when a migration is pending
+   (step 6), verified, and `migrate` refuses a stale, foreign or tampered backup
+   (`deployment/OPERATIONS_RUNBOOK.md` §3 and §5).
 5. Build the target images without replacing the running release
    (`release.sh` builds the candidate and never touches the running one).
 6. Enter the write freeze (stop `backend`, `OPERATIONS_RUNBOOK.md` §5) when a

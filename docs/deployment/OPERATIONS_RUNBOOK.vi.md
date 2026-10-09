@@ -10,9 +10,12 @@
 > release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Các command
 > release, migration, write freeze và rollback (path 1 và 2) đã là thật (P16-S3:
 > `deploy/production/release.sh`, `smoke.sh`, `migrate`, `revision`); các command
-> backup, restore và rollback path 3 (P16-S5) và các command monitoring (P16-S6)
-> vẫn là placeholder và phải được thay bằng tên cuối cùng do repo cung cấp trước
-> khi dùng cho production.
+> backup, restore drill và rollback path 3 đã là thật (P16-S5:
+> `deploy/production/backup.sh`, `deploy/production/restore-test.sh`,
+> `backup-manifest`, `backup-verify`, `backup-rotate`), dù chưa có schedule,
+> off-host replication, drill hay path 3 nào được chạy trên pilot host (P16-S7);
+> chỉ các command monitoring (P16-S6) vẫn là placeholder và phải được thay bằng
+> tên cuối cùng do repo cung cấp trước khi dùng cho production.
 >
 > **Quyền chuẩn:** Tiếng Anh là source of truth.
 
@@ -39,12 +42,18 @@ mọi bước) trong `<records-dir>/<UTC>-<tag>/`, và các trường ánh xạ 
 trên: `environment` và `url` (dòng 1), `host` (dòng 2), `release` (tag, commit,
 tag trước và image ID cục bộ của `backend` và `web`; dòng 3), `alembic`
 (`before`, `after`, `expected`; dòng 4), `operator`, `approver` (dòng 5),
-`started_at`, `finished_at` (dòng 6), `backup` (dòng 7; `verified` là `false` cho
-đến P16-S5), `migration` (các file `migrate.json` và `migrate.log`; dòng 8; `migrate.json` mang kết quả `grants`, và các báo cáo JSON `provision-roles` và `apply-grants` của một lần chạy thủ công được giữ cạnh nó),
+`started_at`, `finished_at` (dòng 6), `backup` (dòng 7: `kind`, `reference`,
+`name`, `path` tuyệt đối, `verified`, `verification`, `freshness`, `taken_by`
+(`release.sh`, `operator` hoặc `null`), `manifest_sha256` và các manifest fact ở
+§3), `migration` (các file `migrate.json` và `migrate.log`; dòng 8; `migrate.json` mang kết quả `grants`, và các báo cáo JSON `provision-roles` và `apply-grants` của một lần chạy thủ công được giữ cạnh nó),
 `reconcile` và `smoke` (dòng 9), `rollback_deadline` và `observation_owner`
-(dòng 10), `known_limitations` (dòng 11); `outcome`, `writes_reopened_at` và
-`refrozen` nêu cách lần chạy kết thúc. Một thao tác thủ công (ví dụ rollback) ghi
-bổ sung vào cùng thư mục với cùng các trường.
+(dòng 10), `known_limitations` (dòng 11); `freeze_completed_at` (thời điểm
+`backend` được xác nhận đã dừng; `null` khi không có freeze), `outcome`,
+`writes_reopened_at` và `refrozen` nêu cách lần chạy kết thúc. Một thao tác thủ
+công (ví dụ rollback) ghi bổ sung vào cùng thư mục với cùng các trường. Evidence
+của restore drill (`evidence.json`, §4) cùng `rollback.json` của path 3 và
+`restore.json` của new-instance restore (§6) được ghi dưới cùng records
+directory.
 
 ## 2. Health và chẩn đoán
 
@@ -97,34 +106,191 @@ không chắc chắn ở client không tạo write trùng.
 
 ## 3. Logical database backup
 
-Tạo custom-format dump:
+`deploy/production/backup.sh` (P16-S5) thực hiện backup. Chạy nó từ repository
+root của một release checkout (checkout của release đang chạy cho backup theo
+lịch và thủ công; `release.sh` gọi nó từ checkout của candidate) khi `db` của
+production stack đang chạy. Dump được stream từ **bên trong `db`**
+(`pg_dump --format=custom --no-owner --no-privileges --lock-wait-timeout=60s`,
+một snapshot, client và server là cùng một binary), được list bằng `pg_restore
+--list`, và được publish cùng manifest và checksum bởi service one-shot
+`backup-tools` (không có network, chỉ mount backup directory). Repo cung cấp
+artifact, việc verify và retention; mã hóa và off-host replication thuộc về
+platform tool (bên dưới).
 
-```bash
-mkdir -p backups/database manifests
-backup_file="backups/database/partflow-$(date -u +%Y%m%dT%H%M%SZ).dump"
-docker compose exec -T db sh -c \
-  'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' \
-  > "$backup_file"
-test -s "$backup_file"
-pg_restore --list "$backup_file" > "$backup_file.list"
-sha256sum "$backup_file" "$backup_file.list"
+### Artifact và tên
+
+Một backup là một thư mục `<backup-dir>/<NAME>/`, trong đó `<backup-dir>` là
+`PARTFLOW_BACKUP_DIR` của `.env.production` và
+
+```text
+NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-daily
+                                         and 20261008T140000Z-pre-release-v1.0.0-rc.2
 ```
 
-Nếu host không có `pg_restore`, chạy list check trong PostgreSQL client container
-cùng version. Lưu cùng dump:
+`kind` là `daily`, `manual` hoặc `pre-release`; `label` (release tag đích) bắt
+buộc với `pre-release` và bị cấm với các loại khác; stamp là thời điểm UTC
+`backup.sh` bắt đầu. Thư mục chứa đúng `partflow.dump`, `partflow.dump.list`
+(`pg_restore --list`), `manifest.json` và `SHA256SUMS`. Nó được dựng dưới
+`<backup-dir>/.partial/` và publish bằng một lần rename nguyên tử, nên một backup
+hoặc tồn tại đầy đủ hoặc không tồn tại; crash chỉ để lại entry trong `.partial/`.
+Entry không thuộc grammar (ví dụ `@eaDir` của DSM) bị bỏ qua và được báo cáo,
+không bao giờ gây lỗi.
 
-- UTC timestamp;
-- environment;
-- Git commit/image digest;
-- Alembic current revision;
-- PostgreSQL major version;
-- checksum dump/list;
-- operator và lý do backup.
+### Thực hiện backup
+
+```bash
+# scheduled daily backup (14 and 8 are placeholders for the owner's retention)
+deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8
+# manual backup (a reason is required)
+deploy/production/backup.sh --kind manual --operator "<name>" --reason "<why>"
+```
+
+Backup `pre-release` do `release.sh` thực hiện (§5); dạng thủ công là
+`backup.sh --kind pre-release --label <target tag> --tools-release <target tag>
+--operator "<name>"`. Khi thành công, stdout đúng một dòng,
+`BACKUP <NAME> <absolute path>`; tiến trình và báo cáo của các tool đi ra stderr.
+`deploy/production/backup.sh --help` in mọi option:
+
+| Option | Ý nghĩa |
+| --- | --- |
+| `--kind daily\|manual\|pre-release`, `--operator NAME` | bắt buộc |
+| `--reason TEXT` | bắt buộc với `manual`; mặc định `scheduled daily backup` (daily) và `pre-release backup for TAG` (pre-release) |
+| `--label TAG` | release tag đích; bắt buộc với `pre-release`, bị từ chối với loại khác |
+| `--tools-release TAG` | image `backup-tools` ghi và verify manifest (mặc định: `PARTFLOW_RELEASE` của env file; dùng tag của candidate khi release đang chạy có trước P16-S5) |
+| `--keep-daily N --keep-weekly N` hoặc `--no-rotate` | chỉ `daily`; retention của owner (bên dưới). Không có mặc định: lệnh theo lịch nêu rõ giá trị |
+| `--reserve-mib N` | dung lượng trống giữ lại ngoài hai lần dump mới nhất (mặc định 1024) |
+| `--lock-held-by-release DIR` | chỉ `release.sh` (nó giữ backup lock) |
+| `--rehearsal --project NAME` | một Compose project tạm (không bao giờ `partflow-production`) |
+
+Giá trị text dài 1-500 ký tự, không có control character, `"` hay `\`. Mỗi bước làm
+gì, theo thứ tự (`backup: <step> ok (<ms> ms)` trên stderr):
+
+1. `preflight`: tool, env file (`PARTFLOW_RELEASE`, `PARTFLOW_BACKUP_DIR`),
+   `config`, `db` đang chạy, image `backup-tools`, và backup lock (bên dưới);
+2. `identify`: release đang chạy, commit, image ID và Alembic revision mong đợi
+   (best effort, không bao giờ gây lỗi);
+3. `space`: phải còn trống trong backup directory ít nhất hai lần dump mới nhất
+   (hoặc kích thước database khi chưa có dump) cộng reserve, nếu không bị từ chối
+   và không ghi gì;
+4. `dump`, `list` và `revision`: ba lệnh exec trong `db` với `TZ=UTC` (archive lưu
+   các trường theo giờ local);
+5. `manifest`: `backup-manifest` publish thư mục; `verify`: `backup-verify` kiểm
+   tra nó; `rotate`: `backup-rotate` cho backup `daily`; `done`.
+
+| Exit | Ý nghĩa | Làm gì |
+| --- | --- | --- |
+| 0 | hoàn tất | - |
+| 1 | bị từ chối trước khi ghi (`backup_running`, `backup_lock_stale`, `insufficient_space`, `name_exists`) | đọc lý do được in; chưa ghi gì |
+| 2 | không chạy được (cú pháp, tool, environment, `db` không chạy) | sửa và chạy lại |
+| 3 | thất bại: không backup nào được publish, hoặc backup đã publish không qua verify | không dùng backup mà message nêu tên; xóa nó sau khi review |
+| 4 | backup đầy đủ và đã verify, nhưng rotation thất bại hoặc phát hiện một backup daily không qua verify | review báo cáo `backup-rotate` trên stderr; xem Retention |
+
+Mọi exit khác 0 được báo bằng failure notification của scheduler trên host.
+
+### Manifest và verify
+
+`manifest.json` (`manifest_version` 1) ánh xạ vào các trường deployment record ở
+§1 và vào những gì một restore cần:
+
+| Trường record | Manifest key |
+| --- | --- |
+| UTC timestamp | `dump_started_at`, `completed_at` |
+| environment, host | `environment`, `host` |
+| Git commit/image digest | `release.commit`, `release.tag`, `images.backend`, `images.web`, `images.db` |
+| Alembic current revision | `alembic_revision` (và `alembic_rows`); `release.expected_revision` là revision release đang chạy mong đợi |
+| PostgreSQL major version | `database.server_major` (và `server_version`, `pg_dump_version`, `database.name`) |
+| checksum dump/list | `files[].sha256` và `SHA256SUMS` |
+| operator và lý do backup | `operator`, `reason` |
+
+Nó cũng ghi `kind`, `label`, image `tool` đã ghi nó, và các `dump` fact (`options`,
+`toc_entries`, `table_data_entries`, `tables_checked`, `extra_tables`).
+`tables_checked: true` nghĩa là mọi table trong table classification của release
+đều có data entry; dump của revision khác được publish với `tables_checked: false`.
+`alembic_version` không chứa đúng một revision hợp lệ, hoặc table mà release không
+biết, được publish kèm warning (một backup trung thực của database đã lệch có giá
+trị hơn không có backup); `migrate` từ chối backup như vậy (§5) và restore drill
+thất bại ở bước revision.
+
+Verify bất kỳ backup nào (chỉ đọc; cùng các check chạy trong `migrate` và trong
+drill), và độc lập với mọi image sau mỗi lần copy:
+
+```bash
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-verify "<NAME>"
+(cd "<backup-dir>/<NAME>" && sha256sum -c SHA256SUMS)
+```
+
+(thêm tiền tố `PARTFLOW_RELEASE=<tag>` vào lệnh đầu để dùng image `backup-tools`
+của release khác). `backup-verify` in một JSON document với các check
+`directory`, `files`, `sha256sums`, `manifest`, `dump_header`, `list` và
+`expect_database` (`--expect-database NAME`), exit 0 `verified`, 1 `invalid`
+(`backup_invalid`: không dùng backup) hoặc 2 `failed`. Không có `--user`, container
+không đọc được backup directory mode 0700.
+
+### Backup directory
+
+- một directory tuyệt đối đã tồn tại, nằm ngoài repository checkout, secrets
+  directory và mọi archive directory; **chỉ production** (không bao giờ của
+  staging hay của một drill); mode 0700, thuộc account chạy `backup.sh` và
+  `release.sh`; file mode 0600; được tạo trước lệnh `$PF` đầu tiên, vì mọi lệnh
+  Compose của stack cần `PARTFLOW_BACKUP_DIR` (`DEPLOYMENT.md` §3.1);
+- dump chứa mọi table, kể cả credential hash và digest của session/device token:
+  coi directory và mọi bản copy là secret;
+- dung lượng trống: `2 x` dump mới nhất cộng reserve (mặc định 1 GiB).
 
 Dump không mang grant theo thiết kế (`--no-privileges`): database role và privilege của chúng được derive lại sau restore (§4).
 
-Mã hóa và copy bundle ra ngoài host. Alert khi scheduled backup bị thiếu, rỗng,
-quá cũ hoặc replicate off-site thất bại.
+### Retention, off-host copy và alert
+
+`backup.sh --kind daily` áp dụng `backup-rotate` (có thể chạy riêng, `--dry-run`
+chỉ báo cáo mà không xóa):
+
+```bash
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-daily 14 --keep-weekly 8 --dry-run
+```
+
+Nó giữ `--keep-daily` backup daily đã verify mới nhất cùng backup daily mới nhất
+của mỗi tuần trong `--keep-weekly` tuần ISO mới nhất (UTC; các tuần chồng lên cửa
+sổ daily, giống restic `forget --keep-daily --keep-weekly`). Mỗi candidate được
+verify trước; candidate không qua verify không được đếm và **không bao giờ bị
+xóa** (exit 4: operator review nó, §9). **Backup pre-release và manual không bao
+giờ bị rotate** (operator xóa chúng sau observation window, §9), và **archive
+directory không bao giờ bị rotate hay prune bởi bất kỳ tool nào**, kể cả platform
+tool. Phần còn sót trong `.partial/` cũ hơn 24 giờ bị xóa. Giá trị 14 và 8 là
+placeholder: owner đặt giá trị thật trong lệnh theo lịch; chúng là option bắt
+buộc, không bao giờ là default trong code.
+
+Mã hóa và copy backup directory ra ngoài host bằng platform tool, không bao giờ làm
+tay: Hyper Backup với client-side encryption tới đích off-NAS trên Synology
+(`SYNOLOGY_NAS.md` §6), restic tới object storage trên VPS (`VPS.md` §8). Alert:
+một lần chạy theo lịch thất bại (mọi exit khác 0, kể cả daily không qua verify) là
+failure notification của scheduler, và replication thất bại là notification của
+chính platform tool; cả hai được review hằng ngày (§9). Alert "backup quá cũ" do
+P16-S6 bổ sung. Recovery point objective là daily schedule (24 giờ) cho đến khi
+owner duyệt RPO và RTO (P16-S7).
+
+### Backup lock
+
+Các backup được tuần tự hóa bằng thư mục `<backup-dir>/.backup.lock` (file `owner`
+của nó chứa `host`, `pid`, `started_at`, `by=backup.sh|release.sh` và `name` hoặc
+`release`). Lần chạy thứ hai bị từ chối, không bao giờ xếp hàng: `backup_running`
+nghĩa là một backup (hoặc một release đang giữ lock) đang chạy, nên hãy chờ.
+`release.sh` giữ lock từ write freeze (hoặc bước backup) đến lúc chuyển `backend`,
+nên hãy lên lịch daily backup ngoài maintenance window: một daily đang chạy sẽ
+dừng release trước freeze mà không đổi gì, và một daily bắt đầu trong lúc release
+sẽ bị từ chối.
+
+`backup_lock_stale` nghĩa là lock do một lần chạy không còn tồn tại để lại (bị
+kill, bị out-of-memory kill hoặc mất điện); nó không bao giờ tự bị phá. Khôi phục
+thủ công:
+
+```bash
+cat "<backup-dir>/.backup.lock/owner"   # host, pid, started_at, by and name|release
+ps -p <pid>                             # on that host: must report no such process
+$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = '"'"'pg_dump'"'"'"'   # must print 0
+rm -r "<backup-dir>/.backup.lock" "<backup-dir>/.partial/<name>"   # the name from the owner file, when it has one
+```
+
+Không bao giờ xóa lock mà owner là `release.sh` khi release đó đang chạy.
 
 ## 4. Restore test — không overwrite ngay
 
@@ -134,7 +300,8 @@ production database duy nhất:
 1. verify checksum của dump và manifest;
 2. provision cùng PostgreSQL major version hoặc target đã xác nhận tương thích;
 3. tạo restore-test database trống;
-4. restore bằng `pg_restore --exit-on-error --no-owner --no-privileges`;
+4. restore bằng `pg_restore --single-transaction --exit-on-error --no-owner --no-privileges`
+   (một transaction: restore thất bại để lại target trống);
 5. start application release tương ứng trỏ vào database đó;
 6. verify Alembic revision;
 7. chạy health, representative read model, quantity/Movement/allocation
@@ -142,19 +309,70 @@ production database duy nhất:
 8. ghi thời gian restore và kết quả;
 9. chỉ xóa isolated restore copy sau khi đã giữ lại bằng chứng.
 
-Khi restore vào một cluster mới, hãy provision database role trước (`provision-roles`, với password tạm trong restore drill), và chạy `apply-grants` trên database đã restore trước khi start application (bước 5): dump không chứa grant, nên database đã restore không có grant nào cho đến khi `apply-grants` derive lại, và application role không thể hoạt động nếu thiếu chúng. Reconcile check (h) phải pass trước khi application start.
+Khi restore vào một cluster mới, hãy provision database role trước (`provision-roles`, với password tạm trong restore drill), và chạy `apply-grants` trên database đã restore trước khi start application (bước 5): dump không chứa grant, nên database đã restore không có grant nào cho đến khi `apply-grants` derive lại, và application role không thể hoạt động nếu thiếu chúng. Reconcile check (h) phải pass trước khi application start. `restore-test.sh` làm việc này trong project riêng của nó (bên dưới).
 
-Ví dụ trong Compose project cô lập:
+Với production stack, toàn bộ quy trình là `deploy/production/restore-test.sh`
+(P16-S5), chạy từ repository root của một release checkout:
 
 ```bash
-docker compose exec -T db sh -c \
-  'createdb -U "$POSTGRES_USER" partflow_restore_test'
-docker compose exec -T db sh -c \
-  'pg_restore -U "$POSTGRES_USER" -d partflow_restore_test --exit-on-error --no-owner --no-privileges' \
-  < <verified-dump-file>
+deploy/production/restore-test.sh --backup <NAME> --operator "<name>"
+# a candidate PostgreSQL image (glibc or image change), a baseline of known findings:
+deploy/production/restore-test.sh --backup <NAME> --operator "<name>" \
+    --db-image postgres:16.14-bookworm --baseline-report <records>/<release>/pre-reconcile.json
 ```
 
-Với production stack, role và grant của restore database được tạo bằng các lệnh của `DEPLOYMENT.md` §3.1 (`$PF --profile ops run --rm -T db-roles`, rồi `… db-roles apply-grants`), với `DATABASE_NAME` trỏ vào restore database.
+`deploy/production/restore-test.sh --help` in mọi option: `--release TAG` (release
+chạy trên database đã restore; mặc định là release trong manifest, và backup lấy
+giữa lúc migration và lúc ghi lại environment cần nêu tên release), `--tools-release TAG`,
+`--db-image IMAGE`, `--baseline-report FILE`, `--project`, `--http-port`,
+`--edge-subnet`, `--records-dir`, `--space-factor` và `--keep`.
+
+Cô lập, do script thực thi: Compose project riêng `partflow-restore-<suffix>`
+(không bao giờ `partflow-production`), với volume và network riêng, loopback port
+và edge subnet riêng (không phải của production), database name cố định
+`partflow_restore_test`, **password database-role tạm được sinh ra** (secret file
+bị xóa khi teardown), một backend worker, và backup directory được mount **read-only**;
+nó không bao giờ chạy `migrate`, không bao giờ ghi vào backup directory và từ chối
+một project đã có container hoặc volume. Nó cần `5 x` dump cộng 1 GiB trống trên
+Docker root (`--space-factor`).
+
+Script thực hiện chín bước trên và ghi từng bước vào evidence: `verify` (bước 1:
+`backup-verify`), `db_start` (bước 2 và 3: database trống trên PostgreSQL major
+của manifest, hoặc `--db-image`), `restore` (bước 4, một transaction), `roles` và
+`grants` (`provision-roles`, rồi `apply-grants` trước khi application start),
+`revision` (bước 6: state `current` và revision của manifest), `app_start` (bước 5
+và health của bước 7: `backend` và `web` lên, readiness `current`), `reconcile`
+(`reconcile` đầy đủ: các check (a)-(f) của nó replay Movement history với mọi
+projection và allocation đã lưu, đó là evidence về quantity, movement và
+allocation của bước 7), `smoke` (`deploy/production/smoke.sh`, smoke được chỉ
+định), `evidence` (bước 8) và `teardown` (bước 9: `down -v` chỉ cho drill project,
+sau khi evidence file đã tồn tại và chỉ khi lần chạy này tạo project; `--keep` giữ
+nó và in command).
+
+Quy tắc pass: `passed` cần reconcile exit 0 **và** check (h) `pass` **và** check
+(j) `pass` (grant vừa được áp dụng mới trên drill, nên một finding (h) hoặc
+`not_applicable` là defect thật; với `--db-image`, check (j) là nửa
+glibc/PostgreSQL-image của platform-upgrade identity check, §7).
+`passed_with_preexisting_findings` cần `--baseline-report` và mọi finding, kể cả
+của (j), đều có trong report đó (`reconcile_regression.py`), với (h) `pass`. Mọi
+trường hợp khác là `failed`. Evidence
+`<records-dir>/<UTC>-restore-test-<NAME>/evidence.json` ghi outcome, bước thất
+bại, các fact của backup và drill, version/collation/collation version của drill
+server, timing từng bước (`restore_to_ready` và `total` là input đo RTO) và các
+trạng thái reconcile.
+
+| Exit | Ý nghĩa |
+| --- | --- |
+| 0 | `passed` hoặc `passed_with_preexisting_findings` |
+| 1 | `failed`, hoặc không đủ dung lượng trống |
+| 2 | không chạy được, hoặc bị ngắt (không để lại gì đang chạy trừ khi `--keep`) |
+| 3 | teardown thất bại: evidence vẫn có giá trị, message in `docker compose -p <project> down -v` |
+
+**Giới hạn đã ghi nhận:** việc đọc lại có xác thực từng màn hình read model chưa
+được tự động hóa (cần account thật của dữ liệu đã restore); evidence ghi
+`read_model_readback: not_automated`. Owner có thể kiểm tra thủ công: chạy drill
+với `--keep`, đăng nhập vào loopback port được in ra, rồi teardown project bằng
+command được in.
 
 Dùng tên restore-test rõ ràng. Không thay production database name vào command
 diễn tập.
@@ -167,7 +385,10 @@ diễn tập.
 - xác nhận kết quả CI/quality của revision đó;
 - review mọi migration cùng hành vi downgrade/recovery;
 - ước lượng lock/time/disk impact bằng staging data;
-- verify off-site backup và tạo pre-release dump mới;
+- verify off-site backup (notification gần nhất của platform tool) và backup mới
+  nhất còn gần đây (§3); `release.sh` lấy pre-release backup đã verify **bên trong
+  write freeze** khi có migration đang chờ (không có khoảng hở giữa backup và
+  migration), hoặc trước bước switch trong trường hợp khác;
 - xác nhận previous release còn dùng được;
 - chạy reconciliation (§7) trên release hiện tại, giữ report, và mở incident cho
   mọi finding; trong production stack chạy nó, và mọi CLI recovery, với tag
@@ -177,9 +398,9 @@ diễn tập.
   freeze bên dưới);
 - thông báo window và deadline quyết định rollback, và nhắc các station hoàn tất
   dialog đang mở;
-- lấy pre-release dump càng muộn càng tốt và ghi lại thời điểm: cho đến P16-S5 nó
-  được lấy trước freeze, nên write xảy ra giữa dump và freeze **không** nằm trong
-  đó; đặt tên nó bằng `--pre-release-backup`.
+- lên lịch daily backup ngoài maintenance window: một backup đang chạy dừng
+  release trước freeze mà không đổi gì (`backup_running`, §3), và một daily bắt đầu
+  trong lúc release sẽ bị từ chối.
 
 ### Write freeze
 
@@ -205,22 +426,28 @@ Chạy `deploy/production/release.sh` từ repository root của release checkou
 release tag đã checkout:
 
 ```bash
-deploy/production/release.sh --release <new-tag> --operator "<name>" --approver "<name>" \
-    --pre-release-backup "<dump reference>"
+deploy/production/release.sh --release <new-tag> --operator "<name>" --approver "<name>"
 ```
 
-(`--no-backup-reason "<text>"` thay cho dump reference khi không có, ví dụ
-rehearsal; `deploy/production/release.sh --help` in mọi option.) Nó chạy, ghi lại
-từng bước: preflight (tool, environment file, dạng tag, build input sạch); revision
+(`deploy/production/release.sh --help` in mọi option.) Khi không có option backup
+nào, `release.sh` tự lấy pre-release backup đã verify. `--pre-release-backup <NAME>`
+nêu tên một backup `backup.sh` đã có và chỉ dành cho release **không** có migration
+đang chờ (nếu có, `release.sh` dừng mà không đổi gì, vì backup phải được lấy bên
+trong freeze); `--no-backup-reason "<text>"` chỉ dành cho lần cài đặt đầu tiên hoặc
+rehearsal (được ghi lại). Nó chạy, ghi lại từng bước: preflight (tool, environment file, dạng tag, build input sạch); revision
 hiện tại và reconcile pre-release với release đang chạy; build candidate (tag đã có
 không bao giờ build lại, và chỉ được dùng lại khi cả hai image được build từ commit này
 với đúng release này); check (j) và revision của candidate (phải báo đúng release và
 commit này); write freeze khi có
-migration đang chờ; `migrate` (cũng áp dụng grant); reconcile post-release; chuyển `backend` trong khi
+migration đang chờ; pre-release backup đã verify (bước 6a, `pre_release_backup`:
+`backup.sh --kind pre-release`, sau freeze khi có migration đang chờ, giữ backup lock
+từ freeze đến lúc chuyển `backend`); `migrate` (verify backup trước và cũng áp dụng grant); reconcile post-release; chuyển `backend` trong khi
 `web` vẫn phục vụ bundle trước (write vẫn bị từ chối, mọi page đã tải gửi release
 trước và nhận 409), chờ health của release mới và schema `current`; chuyển `web`,
 việc này mở lại write; và `smoke.sh`. Một check thất bại sau switch sẽ dừng
 `backend` lại. Preflight của nó cũng từ chối, không đổi gì, khi `partflow_app_password`, `partflow_maintenance_password` hoặc `postgres_password` thiếu, rỗng hoặc không phải regular file.
+
+`migrate --pre-release-backup NAME` verify backup theo quy tắc `backup-verify` trước khi nó kết nối, và chỉ chấp nhận khi backup còn mới và thuộc đúng database này: dump phải **bắt đầu tại hoặc sau** thời điểm write-freeze (`--backup-not-before`, do `release.sh` truyền: thời điểm freeze khi có migration đang chờ, nếu không là thời điểm release bắt đầu hoặc record hoàn tất mới nhất), nên nó chứa mọi write mà `backend` đã commit; không có option đó thì áp dụng giới hạn tuổi 60 phút, nhưng chỉ khi không có migration đang chờ (có migration thì `migrate` từ chối `backup_freshness_unproven`). Revision và database name của backup phải bằng của database. Một từ chối (`backup_not_found`, `backup_invalid`, `backup_stale`, `backup_revision_mismatch`, `backup_freshness_unproven`, `backup_database_mismatch`; exit 1) không đổi gì và, khi đang frozen, mở lại write trên release hiện tại như mọi từ chối khác; backup directory không đọc được là `backup_unreadable` (exit 2: container cần `--user "$(id -u):$(id -g)"`, mà `release.sh` truyền). Free text bị từ chối: `--pre-release-backup` nêu tên một backup directory.
 
 Mọi `migrate` áp dụng grant trong cùng transaction với upgrade. Kết quả `refused` với một mã database-role (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`, `role_owns_objects`, `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) rollback toàn bộ lần chạy và dừng release trước khi đổi gì (exit 1, như mọi từ chối khác); đọc thông báo được in, sửa nguyên nhân (`$PF --profile ops run --rm -T db-roles` cho mã role, `DEPLOYMENT.md` §3.1) rồi chạy lại. Khi cài đặt lần đầu, thứ tự là: secret file, build, `db`, `db-roles`, `migrate`, first-run setup (`DEPLOYMENT.md` §3.1).
 
@@ -249,10 +476,20 @@ Dạng thủ công tương đương, cùng thứ tự, với tag hiện tại tr
    đổi:
    `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
    (check thất bại thì dừng release; chưa có gì thay đổi).
-3. Freeze khi có migration đang chờ: `$PF stop backend`, rồi xác nhận
-   `$PF ps --status running -q backend` không in gì.
-4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`;
-   lưu JSON output của nó (trường `grants` báo grant đã áp dụng) và revision mới.
+3. Freeze khi có migration đang chờ: `$PF stop backend`, xác nhận
+   `$PF ps --status running -q backend` không in gì, rồi ghi lại thời điểm,
+   `T=$(date -u +%Y-%m-%dT%H:%M:%SZ)` (khi không có migration đang chờ, ghi `T`
+   trước bước 3a).
+   3a. Lấy backup từ candidate checkout:
+   `deploy/production/backup.sh --kind pre-release --label <new> --tools-release <new> --operator "<name>"`;
+   ghi lại NAME trong dòng `BACKUP`.
+4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate --pre-release-backup NAME --backup-not-before "$T"`
+   (`--no-backup-reason TEXT` thay cho backup chỉ với lần cài đặt đầu tiên hoặc
+   rehearsal). Không có `--backup-not-before`, `migrate` từ chối migration đang chờ
+   (`backup_freshness_unproven`), và không có `--user` nó không đọc được backup
+   directory mode 0700 (`backup_unreadable`).
+   Lưu JSON output của nó (trường `grants` báo grant đã áp dụng, trường `backup`
+   báo kết quả verify) và revision mới.
 5. Chạy reconcile post-release với tag mới (§7) và so sánh với report pre-release:
    chỉ finding không có trong đó mới chặn bước 7; finding đã có từ trước vẫn là
    incident mở theo quyết định của owner.
@@ -274,7 +511,7 @@ Dạng thủ công tương đương, cùng thứ tự, với tag hiện tại tr
 ### Quan sát
 
 Monitor error, latency, lock, restart, disk và phản hồi operator trong observation
-window đã định. Giữ previous release cùng backup. Các page đang mở trong lúc switch
+window đã định. Giữ previous release cùng pre-release backup (không bao giờ bị rotate). Các page đang mở trong lúc switch
 hiện update notice và reload (GUI_DESIGN §3 rule 13); một Scan Station hoặc
 Production Board không người trực tự reload khi không còn dialog nào mở.
 
@@ -300,15 +537,108 @@ Production Board không người trực tự reload khi không còn dialog nào 
    production). Release forward từ trạng thái này dùng candidate image cho
    reconcile pre-release (`release.sh` làm vậy) hoặc `--skip-pre-reconcile REASON`.
 3. **Schema đã migrate nhưng không backward-compatible hoặc chưa rõ:** stop
-   write; restore pre-migration database vào instance sạch và deploy previous
-   application release tương ứng. Thủ tục restore là placeholder của P16-S5; việc
-   restore pre-release dump không bao giờ bỏ các write sau nó nếu chưa qua
-   escalation của path 4.
+   write; restore pre-migration database vào một database mới, trống trong
+   PostgreSQL instance của production (`createdb --template=template0`, restore
+   trong một transaction; database đã migrate được giữ nguyên) và deploy previous
+   application release tương ứng, theo *Thủ tục path 3* bên dưới. Việc restore
+   pre-release backup không bao giờ bỏ các write sau nó nếu chưa qua escalation
+   của path 4.
 4. **Đã có production write mới sau migration:** không blindly restore đè lên.
    Escalate; bảo toàn cả current database và pre-release backup, xác định forward
    fix hoặc audited data-recovery plan và giữ application ở write-blocked.
+   Pre-release backup và database đã migrate đều được bảo toàn.
 
 CLI recovery chạy với release khớp database.
+
+### Thủ tục path 3
+
+*Ghi chú về wording:* trước P16-S5, path 3 ghi "restore pre-migration database
+vào instance sạch". P16-S5 triển khai nó thành một database mới trong cùng
+instance (không bao giờ overwrite, không cần đổi volume, và database role là
+cluster-global); việc chỉnh câu này đang chờ owner chấp nhận
+(`IMPLEMENTATION_ROADMAP.md`, slice P16-S5). Nếu owner muốn một volume mới thì chỉ
+bước B đổi, không gì khác.
+
+Path 3 chỉ áp dụng khi release record cho thấy `writes_reopened_at: null` (release
+dừng ở trạng thái frozen) hoặc owner ghi lại rằng không có production write nào
+sau migration; nếu không thì là path 4. Restore vào production cần **sự phê duyệt
+của owner, được ghi trong `rollback.json` trước khi `backend` start** trên
+database đã restore; không có nó, thủ tục dừng sau `reconcile` với application ở
+write-blocked.
+
+Các key của `.env.production` do Compose đọc và không được export vào shell, nên
+mọi giá trị bên dưới được đặt tường minh. Bước A chạy trong checkout của release
+**candidate** (`release.sh` của nó đã lấy backup, nên nó có `backup-tools` của
+P16-S5 dù release trước có trước P16-S5):
+
+```sh
+REC=<release record directory>; CAND=<candidate tag>; PREV=<previous tag>
+python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["writes_reopened_at"] is not None)' "$REC/record.json" \
+    || echo "writes were reopened: path 4, not path 3"            # stop here unless the owner recorded otherwise
+NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["name"])' "$REC/record.json")
+BPATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["path"])' "$REC/record.json")
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF stop backend                                                  # keep or enter the write freeze
+$PF ps --status running -q backend                                # must print nothing
+(cd "$BPATH" && sha256sum -c SHA256SUMS)                          # host check, independent of any image
+PARTFLOW_RELEASE="$CAND" $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" backup-tools backup-verify "$NAME"
+```
+
+Bước B chạy trong checkout của release **trước**, với image của nó còn trên host
+(từ đây không dùng service P16-S5 nào):
+
+```sh
+ENV=.env.production
+PF="docker compose -f compose.production.yaml --env-file $ENV"
+OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV"); PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
+NEWDB="${OLDDB}_r$(date -u +%Y%m%d%H%M)"                          # never the live name; createdb refuses an existing one
+# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve.
+FREE_KIB=$($PF exec -T db sh -c 'df -Pk /var/lib/postgresql/data' | awk 'NR==2 {print $4}')
+DB_BYTES=$($PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT pg_database_size(current_database())"')
+DUMP_BYTES=$(wc -c < "$BPATH/partflow.dump")
+[ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
+    || echo "not enough space: expand the storage first, or follow path 4"   # stop here when printed
+$PF exec -T db sh -c 'createdb -U "$POSTGRES_USER" --template=template0 "$1"' sh "$NEWDB"
+$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$1" --single-transaction --exit-on-error --no-owner --no-privileges' sh "$NEWDB" \
+    < "$BPATH/partflow.dump"
+# On a restore failure (nothing was restored: one transaction) drop the never-live copy, fix the cause, restart from createdb:
+#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh "$NEWDB"
+# Edit $ENV: PARTFLOW_RELEASE=$PREV, POSTGRES_DB=$NEWDB, PARTFLOW_ACCEPT_SCHEMA_REVISION=   (empty)
+$PF --profile ops run --rm -T db-roles apply-grants               # roles already exist in the cluster
+$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current"
+$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json"; echo "reconcile exit $?"
+# Owner approval recorded in $REC/rollback.json before the next line (see above).
+$PF up -d db backend                                              # db recreated for the new POSTGRES_DB (same volume)
+curl -fsS "http://127.0.0.1:$PORT/api/health"                    # "release":"<previous>", "schema":"current"
+$PF up -d --no-deps web                                           # the reopen: backend first, then web
+deploy/production/smoke.sh --release "$PREV"
+```
+
+`reconcile` phải exit 0, hoặc exit 1 chỉ với các finding có trong
+`pre-reconcile.json` của release (`deploy/production/reconcile_regression.py`).
+`rollback.json` mang các trường của §1 cùng `approved_by` (owner), `approved_at`
+(UTC) và `reason`, tên database mới và cũ, tên backup và cả hai kết quả
+reconcile. **Database đã migrate giữ nguyên tên và nội dung** cho phân tích path 4;
+owner xóa nó sau observation window
+(`$PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh <old name>`), không
+bao giờ do một tool.
+
+### New-instance restore
+
+Cho host hỏng (§8) hoặc di chuyển (`SYNOLOGY_NAS.md` §10), trên host mới với release
+checkout khớp (release đã lấy backup, tối thiểu P16-S5) và một volume
+`postgres_data` **mới, trống**. Backup directory đã copy được kiểm tra trước
+(`sha256sum -c SHA256SUMS` và `backup-verify`, như bước A). Sau đó, với cùng `PF`,
+`BPATH` và quy tắc dung lượng như bước B (`DB_BYTES` = 0):
+
+1. `$PF up -d db`;
+2. kiểm tra rỗng: `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"'"'` phải in `0`, nếu không thì dừng: volume không phải mới;
+3. dòng `pg_restore` của bước B vào database của container, `$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' < "$BPATH/partflow.dump"` (thất bại thì rollback, database vẫn trống, và kiểm tra rỗng lại pass trước khi thử lại);
+4. `$PF --profile ops run --rm -T db-roles`, rồi `… -T db-roles apply-grants`;
+5. `revision` và `reconcile` như bước B, giữ report trong records directory;
+6. sự phê duyệt của owner được ghi trong `<records-dir>/<UTC>-restore-<NAME>/restore.json` (cùng các trường như `rollback.json`), rồi `$PF up -d backend`, kiểm tra health, `$PF up -d --no-deps web` và `deploy/production/smoke.sh --release <tag>`.
+
+Ghi lại data-loss window so với RPO đã duyệt.
 
 Không mặc định `alembic downgrade` an toàn. PartFlow chủ động bảo vệ append-only
 history và downgrade có thể bị từ chối hoặc làm mất loại dữ liệu mới.
@@ -410,10 +740,13 @@ Quy tắc vận hành:
   đồng thời, và chạy ngoài giờ cao điểm.
 - Rehearsal platform-upgrade cho (j): với nâng cấp Python/UCD, chạy `--check j`
   từ candidate backend image trên database hiện tại; với thay đổi glibc hoặc
-  PostgreSQL image, chạy `--check j` trên bản restore vào candidate server
-  (restore drill) hoặc ngay sau in-place upgrade trước khi mở lại write. Nửa
-  glibc/PostgreSQL-image **pending cho đến khi có restore drill**. Owner quyết
-  định re-canonicalization trước mọi nâng cấp.
+  PostgreSQL image, chạy restore drill vào candidate server,
+  `deploy/production/restore-test.sh --backup <latest> --db-image <candidate image>`
+  (§4; `reconcile` đầy đủ của nó thực thi check (j) và các trigger definition của
+  check (h) trên server đó), hoặc, sau một thay đổi image tại chỗ cùng major
+  version, `reconcile --check j` trước khi mở lại write (`COLLATION_VERSION_MISMATCH`
+  là quyết định của owner). Owner quyết định re-canonicalization trước mọi nâng
+  cấp.
 - Với Work Order báo `not_completed_but_fully_allocated`, `expected` là giá trị
   replay, không phải đề xuất repair; owner chọn done date trong incident.
 - Exit khác 0 là incident (§8). Không bao giờ sửa trực tiếp history hoặc
@@ -445,6 +778,10 @@ Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự 
 - block write mới trước khi hết disk (write freeze, §5);
 - giữ log và metric;
 - không xóa tùy tiện PostgreSQL file, volume, Movement row hoặc backup;
+- backup cần `2 x` dump mới nhất cộng reserve trống trong backup directory, một
+  restore path 3 cần kích thước database cộng `2 x` dump cộng 1 GiB trống trên
+  database volume (§6), và một backup lock stale (`backup_lock_stale`) chặn backup
+  và release cho đến khi được xóa (§3);
 - mở rộng storage hoặc theo verified archive/purge maintenance path Phase 16;
 - chạy reconciliation trước khi mở lại write.
 
@@ -452,22 +789,25 @@ Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự 
 
 - ngăn split-brain: xác nhận instance hỏng không còn nhận write;
 - provision recovery host đã duyệt;
-- restore verified backup mới nhất và matching release;
+- restore verified backup mới nhất và matching release bằng new-instance restore
+  (§6);
 - chạy reconciliation và smoke test;
 - ghi data-loss window so với RPO đã duyệt;
-- chỉ redirect client sau khi được phê duyệt.
+- chỉ redirect client sau khi được phê duyệt: sự phê duyệt của owner được ghi
+  trong `restore.json` trước khi `backend` start.
 
 ## 9. Lịch định kỳ
 
 | Tần suất | Công việc |
 | --- | --- |
 | Liên tục | Alert health, restart, disk, certificate, backup age và error |
-| Hàng ngày | Review backup success, off-site replication và critical error |
+| Hàng ngày | `backup.sh --kind daily --keep-daily 14 --keep-weekly 8` theo lịch (giá trị của owner); review notification của scheduler và của platform tool (exit 4 gồm cả daily không qua verify) cùng off-site replication; review critical error |
 | Hàng tuần | Review capacity trend, database growth, failed login/authorization event và security update pending |
-| Hàng tháng | Patch staging rồi production; review user/role, firewall rule, secret và liên hệ trong runbook; review database role bằng `reconcile --check h` |
+| Hàng tháng | Patch staging rồi production; review user/role, firewall rule, secret và liên hệ trong runbook; review database role bằng `reconcile --check h`; xóa backup pre-release và manual đã hết observation window, và backup daily mà rotation báo invalid sau khi review (không bao giờ xóa archive) |
 | Khi rotate password của role | Một write freeze ngắn: thay role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, rồi check health. `up -d backend` thông thường không nhận password mới (container không được tạo lại), và chạy `db-roles` trong khi backend đang phục vụ làm các connection mới của nó thất bại. Password owner: `ALTER ROLE … PASSWORD` trong `db` trước, rồi thay `postgres_password` (không restart service: chỉ `migrate` và `db-roles` one-shot dùng nó) |
-| Hàng quý hoặc sau thay đổi schema quan trọng | Full isolated restore drill, bài tập RPO/RTO có đo thời gian và review reconciliation |
-| Trước mỗi release | Fresh verified backup, migration review, rollback decision và smoke-test plan |
+| Hàng quý hoặc sau thay đổi schema quan trọng | `restore-test.sh --backup <latest daily>` (§4), so timing của nó với RTO, bài tập RPO/RTO có đo thời gian và review reconciliation |
+| Trước khi đổi PostgreSQL image hoặc glibc của host | `restore-test.sh --backup <latest> --db-image <candidate>` (§7) |
+| Trước mỗi release | `release.sh` lấy pre-release backup đã verify (§5); migration review, rollback decision và smoke-test plan |
 
 Tổ chức phải tự đặt RPO, RTO, retention và owner thật. Ví dụ trong runbook là quy
 trình, không phải cam kết service level.

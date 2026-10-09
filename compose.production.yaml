@@ -1,4 +1,4 @@
-# PartFlow production stack (Phase 16 slices 2-4; DEPLOYMENT §3.1). Not for development:
+# PartFlow production stack (Phase 16 slices 2-5; DEPLOYMENT §3.1). Not for development:
 # development uses compose.yaml. Run from the release checkout with
 #   PF="docker compose -f compose.production.yaml --env-file .env.production"
 # and never `$PF down -v` (it deletes the production database volume). Releases run through
@@ -133,7 +133,8 @@ services:
         logging: *logging
 
     # One-shot migration job: never started by `up`; run once per release (release.sh does) with
-    # `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`.
+    # `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup NAME | --no-backup-reason TEXT)`,
+    # with `--user "$(id -u):$(id -g)"` for a backup NAME (the 0700 backup directory belongs to that account).
     # One connection, one transaction; it refuses while backend is connected. No command: without a backup
     # option it is a usage error (exit 2).
     migrate:
@@ -146,6 +147,15 @@ services:
             # Refuses (roles_not_provisioned) instead of migrating without grants; every migrate applies them.
             DATABASE_ROLES_REQUIRED: "true"
         secrets: [postgres_password]
+        volumes:
+            # Read-only: migrate verifies the pre-release backup it is given (CD4).
+            # Long syntax: a missing host path fails instead of being created as an empty root-owned directory.
+            - type: bind
+              source: ${PARTFLOW_BACKUP_DIR:?Set PARTFLOW_BACKUP_DIR in .env.production}
+              target: /backups
+              read_only: true
+              bind:
+                  create_host_path: false
         networks: [internal]
         depends_on:
             db:
@@ -178,6 +188,30 @@ services:
         depends_on:
             db:
                 condition: service_healthy
+        restart: "no"
+        healthcheck:
+            disable: true
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_OPS_MEMORY:-512m}
+                    cpus: "${PARTFLOW_OPS_CPUS:-1.0}"
+        logging: *logging
+
+    backup-tools:
+        image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        pull_policy: never
+        profiles: [ops]
+        # `run --rm --user "$(id -u):$(id -g)" backup-tools backup-manifest|backup-verify|backup-rotate …`
+        # (deploy/production/backup.sh). No database, no network, no secret.
+        entrypoint: ["python", "-m", "app.cli"]
+        network_mode: none
+        volumes:
+            - type: bind
+              source: ${PARTFLOW_BACKUP_DIR:?Set PARTFLOW_BACKUP_DIR in .env.production}
+              target: /backups
+              bind:
+                  create_host_path: false
         restart: "no"
         healthcheck:
             disable: true

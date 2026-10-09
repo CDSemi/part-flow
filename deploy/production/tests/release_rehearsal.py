@@ -36,6 +36,17 @@ A's first migrate, so backend runs as partflow_app throughout RH-1..RH-10. New, 
   (migrate already_current with the grants applied, the build reused), backend sessions are partflow_app and (h) passes.
 RH-11b runs on the fresh A0 install before RH-11 (it changes nothing), so one A0 install serves both.
 --cases main|rh11 runs one part only (default: both).
+
+Amended by P16-S5 (P16-S5 SPEC section 4.8.1): every generated env file names a temporary PARTFLOW_BACKUP_DIR (mode
+0700, in the work directory). RH-2 (B, a pending migration) keeps --no-backup-reason; RH-5 (C from the path-2 state,
+nothing pending) and RH-11's completing release.sh (B over A0, nothing pending) run with the automatic pre-release
+backup and assert `backup.taken_by: release.sh` and `backup.verified: true` (RH-5's backup reports
+release_matches_revision false: the running A expects 0032 while the database is at the rehearsal revision; expected).
+RH-11's A0 install keeps the A0 Compose file of `git archive 7b24d10`, which ignores the key.
+Host adaptation (Docker Desktop on Windows): host-created files of a bind-mounted Windows folder show as uid 0 inside a
+container, so backup-tools running as the MSYS uid (`--user "$(id -u):$(id -g)"`) cannot chmod the host-created
+.partial/<NAME> directory; on Windows the commands run with an `id` shim first on PATH that prints 0 for -u/-g. On a
+Linux host the invoking account owns the backup directory and no shim is used.
 """
 import argparse
 import contextlib
@@ -61,6 +72,8 @@ import traceback
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stack_smoke import (  # noqa: E402  (the stack smoke's HTTP client and helpers)
     IMPORT_HEADER,
+    make_backup_dir,
+    posix_host_path,
     TOKEN_PATTERN,
     Answer,
     CaseFailure,
@@ -153,8 +166,8 @@ def probe_verdict(samples, release_a, release_b):
     Expected order: 404 (backend A passes A's write to a path with no route), the freeze (web's JSON 502/504), 409
     release_mismatch once backend B runs while web still serves shell A, then shell B (the web switch) with 409 on.
     A connection-level error (no HTTP answer: the published port has no listener while `up -d --no-deps web` replaces
-    the container) is accepted only inside the web switch, i.e. after the first 409 and before the first B shell; it
-    is no write and no pass-through. Returns {"violations": [...], "first_409_index", "first_b_shell_index",
+    the container) is accepted only inside the web switch, i.e. after the first 409 and before the first B shell, or as
+    the POST of the round whose shell is the first B shell; it is no write and no pass-through. Returns {"violations": [...], "first_409_index", "first_b_shell_index",
     "web_switch_errors"}.
     """
     violations = []
@@ -166,7 +179,14 @@ def probe_verdict(samples, release_a, release_b):
         return any(isinstance(sample.get(key), str) and sample[key].startswith("error") for key in ("post", "shell"))
 
     def in_web_switch(index):
-        return first_409 is not None and first_b_shell is not None and first_409 < index < first_b_shell
+        if first_409 is None or first_b_shell is None:
+            return False
+        if first_409 < index < first_b_shell:
+            return True
+        # The round of the first B shell: its POST (sent first) may still have reached the old web container as it
+        # closed; only the POST may have failed in that round (the shell answered B).
+        sample = samples[index]
+        return index == first_b_shell and isinstance(sample.get("post"), str) and sample["post"].startswith("error")
 
     switch_errors = [i for i, s in enumerate(samples) if errored(s) and in_web_switch(i)]
     other_errors = [i for i, s in enumerate(samples) if errored(s) and not in_web_switch(i)]
@@ -238,6 +258,22 @@ def copy_checkout(destination):
         shutil.copyfile(path, destination / path.name)
 
 
+def write_windows_id_shim(workdir):
+    """P16-S5 host adaptation (Docker Desktop on Windows only): an `id` printing 0 for -u/-g; None elsewhere."""
+    if os.name != "nt":
+        return None
+    real_id = shutil.which("id")
+    if real_id is None:
+        return None
+    directory = Path(workdir) / "id-shim"
+    directory.mkdir()
+    shim = directory / "id"
+    shim.write_text('#!/bin/sh\ncase "$*" in -u | -g) echo 0; exit 0 ;; esac\n'
+                    f'exec "{Path(real_id).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
+    os.chmod(shim, 0o755)
+    return directory
+
+
 def write_secret_files(directory, names):
     """Each secret file a distinct 32-character value (P16-S4: the role passwords differ from each other)."""
     for name in names:
@@ -254,6 +290,7 @@ class Rehearsal:
         self.args = args
         self.project = project or args.project
         self.workdir = Path(tempfile.mkdtemp(prefix="pf-s3-rehearsal-"))
+        self.id_shim = write_windows_id_shim(self.workdir)
         self.port = free_port()
         self.client = Client(self.port)
         self.created = False
@@ -273,6 +310,8 @@ class Rehearsal:
     def environment(self, **extra):
         env = {k: v for k, v in os.environ.items() if not k.upper().startswith(_HOST_VARIABLE_PREFIXES)}
         env.update(extra)
+        if getattr(self, "id_shim", None) and "PATH" not in extra:
+            env["PATH"] = str(self.id_shim) + os.pathsep + env.get("PATH", "")
         return env
 
     def run(self, command, timeout=600, check_rc=True, env_extra=None, record_output=False, cwd=REPO):
@@ -314,6 +353,7 @@ class Rehearsal:
             "PARTFLOW_RELEASE": release,
             "PARTFLOW_ACCEPT_SCHEMA_REVISION": accept,
             "PARTFLOW_SECRETS_DIR": self.secrets_dir.as_posix(),
+            "PARTFLOW_BACKUP_DIR": posix_host_path(self.backup_dir),
             "PARTFLOW_SITE_TIMEZONE": "UTC",
             "PARTFLOW_HTTP_PORT": str(self.port),
             "PARTFLOW_EDGE_SUBNET": self.edge_subnet,
@@ -373,6 +413,7 @@ class Rehearsal:
         self.secrets_dir = self.workdir / "secrets"
         self.secrets_dir.mkdir()
         write_secret_files(self.secrets_dir, ("postgres_password", *ROLE_SECRETS))
+        self.backup_dir = make_backup_dir(self.workdir)
         self.env_file = self.workdir / "rehearsal.env"
         self.records = self.workdir / "records"
         self.set_env(RELEASES["A"])
@@ -432,11 +473,12 @@ class Rehearsal:
             time.sleep(2)
         raise CaseFailure(f"{service} is not healthy within {seconds} s (last {status})")
 
-    def release(self, name, *extra):
+    def release(self, name, *extra, backup=("--no-backup-reason", "s3 rehearsal: throwaway database")):
+        """release.sh --rehearsal; `backup=()` lets it take the pre-release backup itself (P16-S5)."""
         tag = self.releases[name]
         result = self.run(
             ["sh", RELEASE_SH.as_posix(), "--release", tag, "--operator", "S3 rehearsal", "--approver", "S3 rehearsal",
-             "--no-backup-reason", "s3 rehearsal: throwaway database", "--env-file", self.env_file.as_posix(),
+             *backup, "--env-file", self.env_file.as_posix(),
              "--records-dir", self.records.as_posix(), "--rehearsal", "--project", self.project, *extra],
             timeout=1800, check_rc=False, record_output=True,
         )
@@ -570,11 +612,21 @@ class Rehearsal:
             observed["write_accepted"] = unknown.summary()
             check(unknown.status == 401, f"a write did not pass the gate on the override ({unknown.status})")
 
+    def check_own_backup(self, record, observed):
+        """P16-S5: release.sh took and migrate verified the pre-release backup."""
+        backup = record.get("backup") or {}
+        observed["backup"] = backup
+        check(backup.get("taken_by") == "release.sh", f"the backup was not taken by release.sh: {backup}")
+        check(backup.get("verified") is True and backup.get("verification") == "passed", f"the backup was not verified: {backup}")
+        check(backup.get("name") and (self.backup_dir / backup["name"] / "manifest.json").is_file(), "no published backup directory")
+        check(not (self.backup_dir / ".backup.lock").exists(), "the backup lock was left behind")
+
     def rh5_forward_from_path2(self):
         with self.case("RH-5") as observed:
-            result, record = self.release("C")
+            result, record = self.release("C", backup=())
             observed.update({"rc": result.returncode, "stdout_tail": result.stdout[-1500:], "record": record})
             check(result.returncode == 0 and record and record["outcome"] == "completed", f"release.sh C exit {result.returncode}")
+            self.check_own_backup(record, observed)
             current = json.loads(next(self.records.glob(f"*-{RELEASES['C']}/current-revision.json")).read_text(encoding="utf-8"))
             observed["current_revision"] = {k: current.get(k) for k in ("state", "readiness", "database_revision")}
             check(current.get("readiness") == "accepted", "step 1 did not see the override")
@@ -761,6 +813,7 @@ class Conversion(Rehearsal):
         self.secrets_dir.mkdir()
         # A pre-S4 installation: the owner password only (RH-11b runs without the role files).
         write_secret_files(self.secrets_dir, ("postgres_password",))
+        self.backup_dir = make_backup_dir(self.workdir)
         self.env_file = self.workdir / "rh11.env"
         self.records = self.workdir / "records"
         self.set_env(self.releases["A0"])
@@ -869,13 +922,14 @@ class Conversion(Rehearsal):
                                         "grants": grants_report.get("grants")}
             check(roles.returncode == 0 and roles_report.get("result") == "provisioned", "db-roles failed")
             check(grants.returncode == 0 and grants_report.get("result") == "applied", "apply-grants failed")
-            # Conversion step 5: the release.
-            result, record = self.release("B")
+            # Conversion step 5: the release, with the automatic pre-release backup (P16-S5).
+            result, record = self.release("B", backup=())
             steps = [s["name"] for s in (record or {}).get("steps", [])]
             observed["release"] = {"rc": result.returncode, "outcome": (record or {}).get("outcome"), "steps": steps,
                                    "stdout_tail": result.stdout[-1500:]}
             check(result.returncode == 0 and record and record["outcome"] == "completed", f"release.sh B exit {result.returncode}")
             check("freeze" not in steps, "a freeze without a pending revision")
+            self.check_own_backup(record, observed)
             directory = sorted(self.records.glob(f"*-{self.releases['B']}/record.json"))[-1].parent
             migrate = json.loads((directory / "migrate.json").read_text(encoding="utf-8"))
             observed["migrate"] = {"result": migrate.get("result"), "grants": migrate.get("grants")}

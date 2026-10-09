@@ -287,6 +287,44 @@ tested database-consistent snapshot procedure is used.
 Follow the restore-test procedure in
 [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) before trusting the backup.
 
+### Production backups (Phase 16)
+
+The production stack uses the P16-S5 backup artifact, not the staging dump
+above ([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §3; one directory per
+backup with a manifest and `SHA256SUMS`). The scripts, the manifest and the
+verification are implemented and exercised on Docker Desktop; the task
+definitions below are **configured and executed on the NAS in P16-S7**, and
+nothing here has been run on a Synology NAS yet.
+
+- **Backup directory.** A shared folder outside the release checkout, the
+  secrets directory and any archive directory, for example
+  `/volume1/partflow-backups/production`, mode 0700, owned by the account the
+  scheduled task runs as (the account that runs `release.sh`). Set it as
+  `PARTFLOW_BACKUP_DIR` in `.env.production` (unquoted) before the first `$PF`
+  command. Production only: never staging's or a drill's.
+- **Schedule (DSM Task Scheduler).** Create → Scheduled Task → User-defined
+  script, user = that account, daily at 02:00, task settings → Run command:
+  `cd <running release checkout> && deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8`
+  (14 and 8 are placeholders; the owner sets the real retention, and the options
+  are required). Enable "Send run details by email" **only when the script
+  terminates abnormally**, so every non-zero exit (a refused, failed or
+  unverifiable backup, `backup_lock_stale`) reaches an administrator. Keep the
+  schedule outside maintenance windows (RUNBOOK §5). The recovery point
+  objective is this schedule (24 hours) until the owner approves one.
+- **Encrypted off-NAS copy (Hyper Backup).** A task whose source is the backup
+  directory and whose destination is off-NAS (a remote NAS, C2 or an
+  S3-compatible service), with **client-side encryption on**: the owner keeps the
+  password and the key file off the NAS, and losing them loses the off-NAS
+  copies. Schedule it after the backup (03:00), set the tool's own version
+  rotation as the owner decides, run its integrity check weekly and enable
+  email notification on failure. The review of these notifications is part of
+  the daily routine (RUNBOOK §9). Local snapshots remain a second layer only.
+- **Archive directory** (Phase 16 slice S8): it gets its own Hyper Backup task
+  with **no version rotation**; archives are never rotated or pruned by any
+  tool.
+- **Restore drill.** Quarterly, `deploy/production/restore-test.sh --backup <latest daily> --operator "<name>"`
+  (RUNBOOK §4); keep the evidence and compare its timings with the approved RTO.
+
 ## 7. Staging update procedure
 
 1. Announce a staging maintenance window.
@@ -324,7 +362,11 @@ run from the release checkout `repo/`.
    lists no `partflow-staging`.
 2. **Create the configuration.** Copy `.env.production.example` to
    `.env.production` (mode 600) and fill every empty value. Create the secrets
-   directory (`PARTFLOW_SECRETS_DIR`, mode 0700) and the three one-line files
+   directory (`PARTFLOW_SECRETS_DIR`, mode 0700), the backup directory
+   (`install -d -m 0700`, §6) with `PARTFLOW_BACKUP_DIR` set in
+   `.env.production` **before any `$PF` command** (every Compose command of the
+   stack needs it; a stack installed before P16-S5 is converted in the order of
+   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1), and the three one-line files
    `postgres_password`, `partflow_app_password` and
    `partflow_maintenance_password` (mode 0444; the two role files are 16 to 128
    printable ASCII characters without spaces and different from each other),
@@ -344,8 +386,9 @@ run from the release checkout `repo/`.
    files, `build backend web` with `PARTFLOW_COMMIT`, `db-roles`, `db-roles
    apply-grants`, then `release.sh`). The volume
    `partflow-production_postgres_data` is new and empty: staging data is never
-   promoted, and a restore into production is a P16-S5 procedure that needs an
-   owner decision.
+   promoted, and a restore into production follows
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 path 3 or §8 host
+   failure, with the owner's approval recorded before `backend` starts.
 5. **First-run setup with one worker.**
    `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, read the token with
    `$PF logs backend | grep "Setup token"`, complete setup, then `$PF up -d backend`
@@ -356,10 +399,11 @@ run from the release checkout `repo/`.
 6. **Never run `down -v`** (or remove a volume) on the `partflow-production`
    project: it deletes the production database.
 
-Pending: backups and restore
-(P16-S5), observability (P16-S6), and the NAS host checks and pilot gates
-(P16-S7); the release flow itself (`release.sh`, `smoke.sh`) is implemented and
-not yet executed on the NAS.
+Pending: observability
+(P16-S6), and the NAS host checks and pilot gates (P16-S7); the release flow
+itself (`release.sh`, `smoke.sh`) and the backup and restore tooling
+(`backup.sh`, `restore-test.sh`, P16-S5) are implemented and not yet executed on
+the NAS.
 
 - immutable production frontend and backend images — implemented (P16-S2:
   images tagged by `PARTFLOW_RELEASE`, never pulled); the release identity is
@@ -376,7 +420,10 @@ not yet executed on the NAS.
   (P16-S4: `partflow_app`, `partflow_maintenance`, `db-roles`, grants in every
   `migrate`; host evidence in P16-S7);
 - scheduled logical backups, encrypted off-NAS replication, retention alerts,
-  and successful restore drill;
+  and successful restore drill — the scripts, the manifest, the verification, the
+  retention and the drill are implemented (P16-S5); the schedule and the
+  replication executed on the NAS and a drill timed there are pending (P16-S7),
+  and the backup-age alert is pending (P16-S6);
 - monitoring for health, logs, disk, backup age, restart count, and database
   growth;
 - release, migration, rollback, reconciliation, and incident runbooks tested by
@@ -391,23 +438,34 @@ realistic staging test:
 - idle and peak CPU/RAM for all services and existing NAS workloads;
 - PostgreSQL data and index growth;
 - image build/update temporary space;
-- backup duration, size, and restore duration;
+- backup duration, size, and restore duration (the `backup.sh` progress lines
+  and the `evidence.json` of `restore-test.sh`);
 - UI/API latency from shop-floor VLANs;
 - behavior during NAS reboot, container restart, network interruption, and UPS
   shutdown.
 
 Maintain disk alerts with enough headroom for the database, at least one upgrade
-image set, temporary migration work, and the local backup staging window.
+image set, temporary migration work, and the local backup staging window: a
+backup needs `2 x` the newest dump plus 1 GiB free in the backup directory, and a
+restore drill needs `5 x` the dump plus 1 GiB free on the Docker root (the drill
+runs one backend worker).
 
 ## 10. Migration from Synology to VPS
 
 1. Provision the VPS using [`VPS.md`](./VPS.md) at the same application release
    and migration level.
-2. Rehearse a dump/restore with staging data.
-3. Schedule a production write freeze.
-4. Create the final logical dump and checksum manifest.
-5. Transfer it through an encrypted channel and verify the checksum.
-6. Restore into the VPS PostgreSQL instance.
+2. Rehearse a restore with a backup of staging data
+   (`deploy/production/restore-test.sh`).
+3. Schedule a production write freeze (`$PF stop backend`).
+4. Create the final backup with
+   `deploy/production/backup.sh --kind manual --operator "<name>" --reason "move to VPS"`
+   inside the freeze (its `SHA256SUMS` is the checksum manifest).
+5. Transfer the backup directory through an encrypted channel and verify it:
+   `sha256sum -c SHA256SUMS` and `backup-verify`.
+6. Restore into the VPS PostgreSQL instance with the new-instance restore of
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 (a new, empty
+   `postgres_data` volume; the owner's approval recorded before `backend`
+   starts).
 7. Run Alembic `current` and reconciliation checks before opening access.
 8. Change internal DNS with a controlled TTL and test clients.
 9. Keep the NAS instance stopped and recoverable until the rollback window

@@ -6,9 +6,12 @@
 > from the release checkout ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). The
 > release, migration, write-freeze and rollback commands (paths 1 and 2) are
 > real (P16-S3: `deploy/production/release.sh`, `smoke.sh`, `migrate`,
-> `revision`); the backup, restore and rollback path 3 commands (P16-S5) and the
-> monitoring commands (P16-S6) are still placeholders and must be replaced by
-> their final repository-provided names before production use.
+> `revision`); the backup, restore-drill and rollback path 3 commands are real
+> (P16-S5: `deploy/production/backup.sh`, `deploy/production/restore-test.sh`,
+> `backup-manifest`, `backup-verify`, `backup-rotate`), though no schedule,
+> off-host replication, drill or path 3 has been executed on a pilot host yet
+> (P16-S7); only the monitoring commands (P16-S6) are still placeholders and must
+> be replaced by their final repository-provided names before production use.
 >
 > **Language:** English is the source of truth. [Tiếng Việt](./OPERATIONS_RUNBOOK.vi.md).
 
@@ -35,13 +38,16 @@ output of every step) in `<records-dir>/<UTC>-<tag>/`, and the fields map to the
 rows above: `environment` and `url` (row 1), `host` (row 2), `release` (tag,
 commit, previous tag and the local image IDs of `backend` and `web`; row 3),
 `alembic` (`before`, `after`, `expected`; row 4), `operator`, `approver`
-(row 5), `started_at`, `finished_at` (row 6), `backup` (row 7; `verified` is
-`false` until P16-S5), `migration` (the `migrate.json` and `migrate.log`
+(row 5), `started_at`, `finished_at` (row 6), `backup` (row 7: `kind`, `reference`, `name`, the absolute `path`,
+`verified`, `verification`, `freshness`, `taken_by` (`release.sh`, `operator` or
+`null`), `manifest_sha256` and the manifest facts of §3), `migration` (the `migrate.json` and `migrate.log`
 files; row 8; `migrate.json` carries the `grants` result, and the `provision-roles` and `apply-grants` JSON reports of a manual run are kept beside it), `reconcile` and `smoke` (rows 9), `rollback_deadline` and
-`observation_owner` (row 10), `known_limitations` (row 11); `outcome`,
-`writes_reopened_at` and `refrozen` state how the run ended. A manual
-operation (for example a rollback) appends to the same directory with the same
-fields.
+`observation_owner` (row 10), `known_limitations` (row 11); `freeze_completed_at` (the instant `backend` was confirmed stopped; `null` when
+no freeze happened), `outcome`, `writes_reopened_at` and `refrozen` state how the
+run ended. A manual operation (for example a rollback) appends to the same
+directory with the same fields. The restore-drill evidence (`evidence.json`, §4)
+and the path 3 `rollback.json` and new-instance `restore.json` (§6) are written
+under the same records directory.
 
 ## 2. Health and diagnosis
 
@@ -95,34 +101,193 @@ so an uncertain client response cannot duplicate a write.
 
 ## 3. Logical database backup
 
-Create a custom-format dump:
+`deploy/production/backup.sh` (P16-S5) takes the backup. Run it from the
+repository root of a release checkout (the running release's for scheduled and
+manual backups; `release.sh` calls it from the candidate's) with the production
+stack's `db` running. Its dump is streamed from **inside `db`**
+(`pg_dump --format=custom --no-owner --no-privileges --lock-wait-timeout=60s`,
+one snapshot, client and server are the same binary), listed with `pg_restore
+--list`, and published with a manifest and checksums by the `backup-tools`
+one-shot service (no network, the backup directory only). The repository
+provides the artifact, its verification and the retention; encryption and
+off-host replication belong to the platform tool (below).
 
-```bash
-mkdir -p backups/database manifests
-backup_file="backups/database/partflow-$(date -u +%Y%m%dT%H%M%SZ).dump"
-docker compose exec -T db sh -c \
-  'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' \
-  > "$backup_file"
-test -s "$backup_file"
-pg_restore --list "$backup_file" > "$backup_file.list"
-sha256sum "$backup_file" "$backup_file.list"
+### Artifact and name
+
+One backup is one directory `<backup-dir>/<NAME>/`, where `<backup-dir>` is the
+`PARTFLOW_BACKUP_DIR` of `.env.production` and
+
+```text
+NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-daily
+                                         and 20261008T140000Z-pre-release-v1.0.0-rc.2
 ```
 
-If `pg_restore` is not installed on the host, run the list check in a matching
-PostgreSQL client container. Store with the dump:
+`kind` is `daily`, `manual` or `pre-release`; `label` (the target release tag) is
+required for `pre-release` and forbidden otherwise; the stamp is the UTC start of
+`backup.sh`. The directory holds exactly `partflow.dump`, `partflow.dump.list`
+(`pg_restore --list`), `manifest.json` and `SHA256SUMS`. It is assembled under
+`<backup-dir>/.partial/` and published by one atomic rename, so a backup either
+exists completely or not at all; a crash leaves only `.partial/` entries. Entries
+that are not part of the grammar (for example a DSM `@eaDir`) are ignored and
+reported, never fatal.
 
-- UTC timestamp;
-- environment;
-- Git commit/image digests;
-- Alembic current revision;
-- PostgreSQL major version;
-- dump/list checksums;
-- operator and backup reason.
+### Taking a backup
+
+```bash
+# scheduled daily backup (14 and 8 are placeholders for the owner's retention)
+deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8
+# manual backup (a reason is required)
+deploy/production/backup.sh --kind manual --operator "<name>" --reason "<why>"
+```
+
+A `pre-release` backup is taken by `release.sh` (§5); the manual form is
+`backup.sh --kind pre-release --label <target tag> --tools-release <target tag>
+--operator "<name>"`. On success stdout is exactly one line,
+`BACKUP <NAME> <absolute path>`; progress and the tool reports go to stderr.
+`deploy/production/backup.sh --help` prints every option:
+
+| Option | Meaning |
+| --- | --- |
+| `--kind daily\|manual\|pre-release`, `--operator NAME` | required |
+| `--reason TEXT` | required for `manual`; defaults to `scheduled daily backup` (daily) and `pre-release backup for TAG` (pre-release) |
+| `--label TAG` | the target release tag; required for `pre-release`, refused otherwise |
+| `--tools-release TAG` | the `backup-tools` image that writes and verifies the manifest (default: `PARTFLOW_RELEASE` of the env file; use the candidate tag when the running release predates P16-S5) |
+| `--keep-daily N --keep-weekly N` or `--no-rotate` | `daily` only; the retention of the owner (below). There is no default: the scheduled command states the values |
+| `--reserve-mib N` | free space kept beyond twice the newest dump (default 1024) |
+| `--lock-held-by-release DIR` | `release.sh` only (it holds the backup lock) |
+| `--rehearsal --project NAME` | a throwaway Compose project (never `partflow-production`) |
+
+Text values are 1-500 characters without control characters, `"` or `\`. What
+each step does, in order (`backup: <step> ok (<ms> ms)` on stderr):
+
+1. `preflight`: tools, the env file (`PARTFLOW_RELEASE`, `PARTFLOW_BACKUP_DIR`),
+   `config`, `db` running, the `backup-tools` image, and the backup lock (below);
+2. `identify`: the running release, commit, image IDs and the expected Alembic
+   revision (best effort, never fatal);
+3. `space`: at least twice the newest dump (or the database size when there is
+   none) plus the reserve must be free in the backup directory, else it is refused
+   and nothing is written;
+4. `dump`, `list` and `revision`: the three exec calls inside `db` with `TZ=UTC`
+   (the archive stores local-time fields);
+5. `manifest`: `backup-manifest` publishes the directory; `verify`:
+   `backup-verify` checks it; `rotate`: `backup-rotate` for a `daily` backup;
+   `done`.
+
+| Exit | Meaning | Do |
+| --- | --- | --- |
+| 0 | completed | - |
+| 1 | refused before writing (`backup_running`, `backup_lock_stale`, `insufficient_space`, `name_exists`) | read the printed reason; nothing was written |
+| 2 | could not run (usage, tools, environment, `db` not running) | fix and rerun |
+| 3 | failed: no backup was published, or the published backup failed verification | do not use a backup the message names; remove it after review |
+| 4 | the backup is complete and verified, but the rotation failed or found a daily backup that fails verification | review the `backup-rotate` report on stderr; see Retention |
+
+Every non-zero exit is reported by the host scheduler's failure notification.
+
+### Manifest and verification
+
+`manifest.json` (`manifest_version` 1) maps to the deployment record fields of §1
+and to what a restore needs:
+
+| Record field | Manifest key |
+| --- | --- |
+| UTC timestamp | `dump_started_at`, `completed_at` |
+| environment, host | `environment`, `host` |
+| Git commit/image digests | `release.commit`, `release.tag`, `images.backend`, `images.web`, `images.db` |
+| Alembic current revision | `alembic_revision` (and `alembic_rows`); `release.expected_revision` is what the running release expected |
+| PostgreSQL major version | `database.server_major` (and `server_version`, `pg_dump_version`, `database.name`) |
+| dump/list checksums | `files[].sha256` and `SHA256SUMS` |
+| operator and backup reason | `operator`, `reason` |
+
+It also records the `kind`, the `label`, the `tool` image that wrote it, and the
+`dump` facts (`options`, `toc_entries`, `table_data_entries`, `tables_checked`,
+`extra_tables`). `tables_checked: true` means every table of the release's table
+classification has a data entry; a dump of another revision is published with
+`tables_checked: false`. An `alembic_version` that does not hold exactly one valid
+revision, or tables the release does not know, are published with a warning
+(a faithful backup of a drifted database is worth more than none); `migrate`
+refuses such a backup (§5) and the restore drill fails at its revision step.
+
+Verify any backup (read-only; the same checks run in `migrate` and in the
+drill), and independently of any image after any copy:
+
+```bash
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-verify "<NAME>"
+(cd "<backup-dir>/<NAME>" && sha256sum -c SHA256SUMS)
+```
+
+(prefix the first command with `PARTFLOW_RELEASE=<tag>` to use another release's
+`backup-tools` image). `backup-verify` prints one JSON document with the checks
+`directory`, `files`, `sha256sums`, `manifest`, `dump_header`, `list` and
+`expect_database` (`--expect-database NAME`), exit 0 `verified`, 1 `invalid`
+(`backup_invalid`: do not use the backup) or 2 `failed`. Without `--user` the
+container cannot read the 0700 backup directory.
+
+### Backup directory
+
+- an existing absolute directory, outside the repository checkout, the secrets
+  directory and any archive directory; **production only** (never staging's or a
+  drill's); mode 0700, owned by the account that runs `backup.sh` and
+  `release.sh`; files 0600; created before the first `$PF` command, because every
+  Compose command of the stack needs `PARTFLOW_BACKUP_DIR` (`DEPLOYMENT.md`
+  §3.1);
+- a dump holds every table, including credential hashes and session and device
+  token digests: treat the directory and every copy as secret;
+- free space: `2 x` the newest dump plus the reserve (default 1 GiB).
 
 Dumps carry no grants by design (`--no-privileges`): the database roles and their privileges are re-derived after a restore (§4).
 
-Encrypt and copy the bundle off-host. Alert when a scheduled backup is missing,
-empty, too old, or fails off-site replication.
+### Retention, off-host copy and alerts
+
+`backup.sh --kind daily` applies `backup-rotate` (it can be run alone,
+`--dry-run` reports without deleting):
+
+```bash
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-daily 14 --keep-weekly 8 --dry-run
+```
+
+It keeps the newest `--keep-daily` verified daily backups plus the newest daily
+backup of each of the newest `--keep-weekly` ISO weeks (UTC; the weeks overlap the
+daily window, like restic `forget --keep-daily --keep-weekly`). Every candidate is
+verified first; one that fails is not counted and **never deleted** (exit 4: the
+operator reviews it, §9). **Pre-release and manual backups are never rotated**
+(the operator removes them after the observation window, §9), and **an archive
+directory is never rotated or pruned by any tool**, platform tools included.
+Leftovers in `.partial/` older than 24 hours are removed. The values 14 and 8 are
+placeholders: the owner sets the real ones in the scheduled command; they are
+required options, never code defaults.
+
+Encrypt and copy the backup directory off-host with the platform tool, never by
+hand: Hyper Backup with client-side encryption to an off-NAS target on Synology
+(`SYNOLOGY_NAS.md` §6), restic to object storage on a VPS (`VPS.md` §8). Alerts:
+a failed scheduled run (any non-zero exit, a daily that fails verification
+included) is the scheduler's failure notification, and a failed replication is the
+platform tool's own notification; both are reviewed daily (§9). The "backup too
+old" alert is added by P16-S6. The recovery point objective is the daily schedule
+(24 hours) until the owner approves the RPO and RTO (P16-S7).
+
+### Backup lock
+
+Backups are serialized by the directory `<backup-dir>/.backup.lock` (its `owner`
+file holds `host`, `pid`, `started_at`, `by=backup.sh|release.sh` and `name` or
+`release`). A second run is refused, never queued: `backup_running` means a
+backup (or a release holding the lock) is in progress, so wait. `release.sh`
+holds the lock from the write freeze (or the backup step) through the `backend`
+switch, so schedule daily backups outside maintenance windows: a daily that is
+running stops a release before the freeze with nothing changed, and a daily that
+starts during a release is refused.
+
+`backup_lock_stale` means the lock was left by a run that no longer exists (a
+kill, an out-of-memory kill or a power loss); it is never broken automatically.
+Recover by hand:
+
+```bash
+cat "<backup-dir>/.backup.lock/owner"   # host, pid, started_at, by and name|release
+ps -p <pid>                             # on that host: must report no such process
+$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = '"'"'pg_dump'"'"'"'   # must print 0
+rm -r "<backup-dir>/.backup.lock" "<backup-dir>/.partial/<name>"   # the name from the owner file, when it has one
+```
+
+Never remove a lock whose owner is `release.sh` while that release runs.
 
 ## 4. Restore test — never overwrite first
 
@@ -133,7 +298,8 @@ only production database:
 2. provision the same PostgreSQL major version or a documented compatible
    target;
 3. create an empty restore-test database;
-4. restore with `pg_restore --exit-on-error --no-owner --no-privileges`;
+4. restore with `pg_restore --single-transaction --exit-on-error --no-owner --no-privileges`
+   (one transaction: a failed restore leaves the target empty);
 5. start the matching application release against that database;
 6. verify Alembic revision;
 7. run health, representative read models, quantity/movement/allocation
@@ -141,19 +307,72 @@ only production database:
 8. record restore duration and result;
 9. destroy the isolated restore copy only after evidence is retained.
 
-In a restore into a new cluster, provision the database roles first (`provision-roles`, with throwaway passwords in a restore drill), and run `apply-grants` against the restored database before starting the application (step 5): a dump contains no grants, so a restored database has none until `apply-grants` re-derives them, and the application role cannot work without them. Reconcile check (h) must pass before the application starts.
+In a restore into a new cluster, provision the database roles first (`provision-roles`, with throwaway passwords in a restore drill), and run `apply-grants` against the restored database before starting the application (step 5): a dump contains no grants, so a restored database has none until `apply-grants` re-derives them, and the application role cannot work without them. Reconcile check (h) must pass before the application starts. `restore-test.sh` does this in its own project (below).
 
-Example inside an isolated Compose project:
+With the production stack the whole procedure is `deploy/production/restore-test.sh`
+(P16-S5), run from the repository root of a release checkout:
 
 ```bash
-docker compose exec -T db sh -c \
-  'createdb -U "$POSTGRES_USER" partflow_restore_test'
-docker compose exec -T db sh -c \
-  'pg_restore -U "$POSTGRES_USER" -d partflow_restore_test --exit-on-error --no-owner --no-privileges' \
-  < <verified-dump-file>
+deploy/production/restore-test.sh --backup <NAME> --operator "<name>"
+# a candidate PostgreSQL image (glibc or image change), a baseline of known findings:
+deploy/production/restore-test.sh --backup <NAME> --operator "<name>" \
+    --db-image postgres:16.14-bookworm --baseline-report <records>/<release>/pre-reconcile.json
 ```
 
-With the production stack the roles and grants of the restore database are created with the commands of `DEPLOYMENT.md` §3.1 (`$PF --profile ops run --rm -T db-roles`, then `… db-roles apply-grants`), with `DATABASE_NAME` pointed at the restore database.
+`deploy/production/restore-test.sh --help` prints every option: `--release TAG`
+(the release to run on the restored database; default the release in the
+manifest, and a backup taken between a migration and the environment rewrite needs
+it named), `--tools-release TAG`, `--db-image IMAGE`, `--baseline-report FILE`,
+`--project`, `--http-port`, `--edge-subnet`, `--records-dir`, `--space-factor` and
+`--keep`.
+
+Isolation, enforced by the script: its own Compose project
+`partflow-restore-<suffix>` (never `partflow-production`), with its own volume and
+networks, its own loopback port and edge subnet (neither the production ones), the
+fixed database name `partflow_restore_test`, **generated throwaway database-role
+passwords** (secret files removed at teardown), one backend worker, and the backup
+directory mounted **read-only**; it never runs `migrate`, never writes to the
+backup directory and refuses a project that already has containers or volumes. It
+needs `5 x` the dump plus 1 GiB free on the Docker root (`--space-factor`).
+
+The script performs the nine steps above and records each one in the evidence:
+`verify` (step 1: `backup-verify`), `db_start` (steps 2 and 3: an empty database
+on the manifest's PostgreSQL major, or `--db-image`), `restore` (step 4, one
+transaction), `roles` and `grants` (`provision-roles`, then `apply-grants` before
+the application starts), `revision` (step 6: state `current` and the manifest's
+revision), `app_start` (step 5 and the health of step 7: `backend` and `web` up,
+readiness `current`), `reconcile` (the full `reconcile`: its checks (a)-(f) replay
+Movement history against every stored projection and allocation, which is the
+quantity, movement and allocation evidence of step 7), `smoke`
+(`deploy/production/smoke.sh`, the designated smoke), `evidence` (step 8) and
+`teardown` (step 9: `down -v` of the drill project only, after the evidence file
+exists and only when this run created the project; `--keep` keeps it and prints
+the command).
+
+Pass rule: `passed` needs reconcile exit 0 **and** check (h) `pass` **and** check
+(j) `pass` (grants are freshly applied on the drill, so a (h) finding or
+`not_applicable` is a real defect; with `--db-image` check (j) is the glibc and
+PostgreSQL-image half of the platform-upgrade identity check, §7).
+`passed_with_preexisting_findings` needs `--baseline-report` and every finding,
+(j)'s included, to exist in that report (`reconcile_regression.py`), with (h)
+`pass`. Anything else is `failed`. The evidence
+`<records-dir>/<UTC>-restore-test-<NAME>/evidence.json` records the outcome, the
+failed step, the backup and drill facts, the drill server's version, collation and
+collation versions, the per-step timings (`restore_to_ready` and `total` are the
+RTO measurement inputs) and the reconcile statuses.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | `passed` or `passed_with_preexisting_findings` |
+| 1 | `failed`, or not enough free space |
+| 2 | could not run, or interrupted (nothing created is left running unless `--keep`) |
+| 3 | teardown failed: the evidence stands, the message prints `docker compose -p <project> down -v` |
+
+**Recorded limitation:** an authenticated read-back of individual read-model
+screens is not automated (it needs a real account of the restored data); the
+evidence states `read_model_readback: not_automated`. The owner may check it by
+hand: run the drill with `--keep`, sign in to the printed loopback port, and tear
+the project down with the printed command afterwards.
 
 Use explicit restore-test names. Never substitute the production database name
 in a rehearsal command.
@@ -166,7 +385,10 @@ in a rehearsal command.
 - confirm CI/quality results for that revision;
 - review every migration and its downgrade/recovery behavior;
 - estimate lock/time/disk impact using staging data;
-- verify off-site backup health and make a fresh pre-release dump;
+- verify off-site backup health (the platform tool's last notification) and that
+  the newest backup is recent (§3); `release.sh` takes the verified pre-release
+  backup **inside the write freeze** when a migration is pending (no window
+  between the backup and the migration), or before the switch otherwise;
 - verify the previous release remains available;
 - run reconciliation (§7) on the current release, keep the report, and open
   incidents for any findings; in the production stack run it, and any recovery
@@ -176,9 +398,9 @@ in a rehearsal command.
   write freeze below);
 - announce the window and rollback decision deadline, and ask stations to
   finish their open dialogs;
-- take the pre-release dump as late as possible and record its time: until
-  P16-S5 it is taken before the freeze, so writes made between the dump and the
-  freeze are **not** in it; name it with `--pre-release-backup`.
+- schedule daily backups outside maintenance windows: a running backup stops a
+  release before the freeze with nothing changed (`backup_running`, §3), and a
+  daily that starts during a release is refused.
 
 ### Write freeze
 
@@ -206,23 +428,31 @@ Run `deploy/production/release.sh` from the repository root of the release
 checkout, with the release tag checked out:
 
 ```bash
-deploy/production/release.sh --release <new-tag> --operator "<name>" --approver "<name>" \
-    --pre-release-backup "<dump reference>"
+deploy/production/release.sh --release <new-tag> --operator "<name>" --approver "<name>"
 ```
 
-(`--no-backup-reason "<text>"` instead of the dump reference when there is none,
-for example a rehearsal; `deploy/production/release.sh --help` prints every
-option.) It runs, recording each step: preflight (tools, the environment file,
+(`deploy/production/release.sh --help` prints every option.) With neither backup
+option `release.sh` takes the verified pre-release backup itself.
+`--pre-release-backup <NAME>` names an existing `backup.sh` backup and is only for
+a release **without** a pending migration (with one, `release.sh` stops with
+nothing changed, because the backup must be taken inside the freeze);
+`--no-backup-reason "<text>"` is only for a first installation or a rehearsal
+(recorded). It runs, recording each step: preflight (tools, the environment file,
 the tag form, clean build inputs); the current revision and the pre-release
 reconcile with the running release; the candidate build (an existing tag is
 never rebuilt, and is reused only when both images were built from this commit
 as this release); the candidate's check (j) and revision (which must report this
 release and commit); the write freeze when a
-migration is pending; `migrate` (which also applies the grants); the post-release reconcile; the `backend`
+migration is pending; the verified pre-release backup (step 6a,
+`pre_release_backup`: `backup.sh --kind pre-release`, after the freeze when a
+migration is pending, holding the backup lock from the freeze through the
+`backend` switch); `migrate` (which verifies the backup first and also applies the grants); the post-release reconcile; the `backend`
 switch while `web` still serves the previous bundle (writes stay refused, every
 loaded page sends the previous release and gets 409), the health wait for the
 new release and a `current` schema; the `web` switch, which reopens writes; and
 `smoke.sh`. A failed check after the switch stops `backend` again. Its preflight also refuses, with nothing changed, while `partflow_app_password`, `partflow_maintenance_password` or `postgres_password` is missing, empty or not a regular file.
+
+`migrate --pre-release-backup NAME` verifies the backup with the `backup-verify` rules before it connects, and accepts it only when it is fresh and belongs to this database: the dump must have **started at or after** the write-freeze time (`--backup-not-before`, which `release.sh` passes: the freeze time when a migration is pending, otherwise its own start or the newest completed record), so it holds every write `backend` committed; without that option a 60-minute age limit applies, but only when no migration is pending (with one, `migrate` refuses `backup_freshness_unproven`). The backup's revision and database name must equal the database's. A refusal (`backup_not_found`, `backup_invalid`, `backup_stale`, `backup_revision_mismatch`, `backup_freshness_unproven`, `backup_database_mismatch`; exit 1) changes nothing and, while frozen, reopens writes on the current release like any refusal; an unreadable backup directory is `backup_unreadable` (exit 2: the container needs `--user "$(id -u):$(id -g)"`, which `release.sh` passes). Free text is refused: `--pre-release-backup` names a backup directory.
 
 Every `migrate` applies the grants in the same transaction as the upgrade. A `refused` result with a database-role code (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`, `role_owns_objects`, `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) rolls the whole run back and stops the release before anything changes (exit 1, as any other refusal); read the printed message, fix the cause (`$PF --profile ops run --rm -T db-roles` for a role code, `DEPLOYMENT.md` §3.1) and rerun. On a first installation the order is: secret files, build, `db`, `db-roles`, `migrate`, first-run setup (`DEPLOYMENT.md` §3.1).
 
@@ -253,10 +483,20 @@ The manual equivalent, in the same order, with the current tag in
    unchanged database:
    `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`
    (a failing check stops the release; nothing has changed).
-3. Freeze when a migration is pending: `$PF stop backend`, then confirm
-   `$PF ps --status running -q backend` prints nothing.
-4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF | --no-backup-reason TEXT)`;
-   capture its JSON output (the `grants` field reports the applied grants) and the new revision.
+3. Freeze when a migration is pending: `$PF stop backend`, confirm
+   `$PF ps --status running -q backend` prints nothing, then record the instant,
+   `T=$(date -u +%Y-%m-%dT%H:%M:%SZ)` (without a pending migration, record `T`
+   before step 3a instead).
+   3a. Take the backup from the candidate checkout:
+   `deploy/production/backup.sh --kind pre-release --label <new> --tools-release <new> --operator "<name>"`;
+   note the `BACKUP` line's NAME.
+4. `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate --pre-release-backup NAME --backup-not-before "$T"`
+   (`--no-backup-reason TEXT` instead of the backup only for a first installation
+   or a rehearsal). Without `--backup-not-before`, `migrate` refuses a pending
+   migration (`backup_freshness_unproven`), and without `--user` it cannot read the
+   0700 backup directory (`backup_unreadable`).
+   Capture its JSON output (the `grants` field reports the applied grants, the
+   `backup` field the verification) and the new revision.
 5. Run the post-release reconcile with the new tag (§7) and compare it with the
    pre-release report: only findings absent from it block step 7; pre-existing
    findings stay open incidents under the owner's decision.
@@ -279,7 +519,7 @@ The manual equivalent, in the same order, with the current tag in
 ### Observe
 
 Monitor errors, latency, locks, restarts, disk, and operator feedback through the
-defined observation window. Retain the previous release and backup. Pages that
+defined observation window. Retain the previous release and the pre-release backup (never rotated). Pages that
 were open during the switch show the update notice and reload (GUI_DESIGN §3
 rule 13); an unattended Scan Station or Production Board reloads itself once no
 dialog is open.
@@ -308,16 +548,109 @@ dialog is open.
    from this state uses the candidate image for the pre-release reconcile
    (`release.sh` does) or `--skip-pre-reconcile REASON`.
 3. **Schema migrated and is not backward-compatible, or compatibility is
-   unknown:** stop writes; restore the pre-migration database into a clean
-   instance and deploy the matching previous application release. The restore
-   procedure is a P16-S5 placeholder; a restore of the pre-release dump never
+   unknown:** stop writes; restore the pre-migration database into a new,
+   empty database in the production PostgreSQL instance (`createdb
+   --template=template0`, restored in one transaction; the migrated database is
+   preserved untouched) and deploy the matching previous application release,
+   following *Path 3 procedure* below. A restore of the pre-release backup never
    discards writes made after it without the path 4 escalation.
 4. **New production writes occurred after migration:** do not blindly restore
    over them. Escalate; preserve both the current database and pre-release
    backup, determine a forward fix or audited data-recovery plan, and keep the
-   application write-blocked.
+   application write-blocked. The pre-release backup and the migrated database
+   are both preserved.
 
 Recovery CLIs run with the release that matches the database.
+
+### Path 3 procedure
+
+*Wording note:* before P16-S5 path 3 read "restore the pre-migration database
+into a clean instance". P16-S5 implements it as a new database in the same
+instance (it never overwrites, needs no volume change, and the database roles
+are cluster-global); this amendment of the sentence awaits the owner's
+acceptance (`IMPLEMENTATION_ROADMAP.md`, slice P16-S5). If the owner prefers a
+new volume, step B changes and nothing else.
+
+Path 3 applies only when the release record shows `writes_reopened_at: null`
+(the release stopped frozen) or the owner records that no production write
+happened after the migration; otherwise it is path 4. Restoring into production
+needs the **owner's approval, recorded in `rollback.json` before `backend`
+starts** on the restored database; without it the procedure stops after
+`reconcile` with the application write-blocked.
+
+The `.env.production` keys are read by Compose and are not exported to the shell,
+so every value below is set explicitly. Step A runs in the **candidate**
+release's checkout (its `release.sh` took the backup, so it has the P16-S5
+`backup-tools` even when the previous release predates P16-S5):
+
+```sh
+REC=<release record directory>; CAND=<candidate tag>; PREV=<previous tag>
+python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["writes_reopened_at"] is not None)' "$REC/record.json" \
+    || echo "writes were reopened: path 4, not path 3"            # stop here unless the owner recorded otherwise
+NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["name"])' "$REC/record.json")
+BPATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["backup"]["path"])' "$REC/record.json")
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF stop backend                                                  # keep or enter the write freeze
+$PF ps --status running -q backend                                # must print nothing
+(cd "$BPATH" && sha256sum -c SHA256SUMS)                          # host check, independent of any image
+PARTFLOW_RELEASE="$CAND" $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" backup-tools backup-verify "$NAME"
+```
+
+Step B runs in the **previous** release's checkout, with its images present (no
+P16-S5 service is used from here on):
+
+```sh
+ENV=.env.production
+PF="docker compose -f compose.production.yaml --env-file $ENV"
+OLDDB=$(sed -n 's/^POSTGRES_DB=//p' "$ENV"); PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV")
+NEWDB="${OLDDB}_r$(date -u +%Y%m%d%H%M)"                          # never the live name; createdb refuses an existing one
+# Space: the database volume must hold the restored copy, the WAL of its transaction and a reserve.
+FREE_KIB=$($PF exec -T db sh -c 'df -Pk /var/lib/postgresql/data' | awk 'NR==2 {print $4}')
+DB_BYTES=$($PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT pg_database_size(current_database())"')
+DUMP_BYTES=$(wc -c < "$BPATH/partflow.dump")
+[ $((FREE_KIB * 1024)) -ge $((DB_BYTES + 2 * DUMP_BYTES + 1073741824)) ] \
+    || echo "not enough space: expand the storage first, or follow path 4"   # stop here when printed
+$PF exec -T db sh -c 'createdb -U "$POSTGRES_USER" --template=template0 "$1"' sh "$NEWDB"
+$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$1" --single-transaction --exit-on-error --no-owner --no-privileges' sh "$NEWDB" \
+    < "$BPATH/partflow.dump"
+# On a restore failure (nothing was restored: one transaction) drop the never-live copy, fix the cause, restart from createdb:
+#   $PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh "$NEWDB"
+# Edit $ENV: PARTFLOW_RELEASE=$PREV, POSTGRES_DB=$NEWDB, PARTFLOW_ACCEPT_SCHEMA_REVISION=   (empty)
+$PF --profile ops run --rm -T db-roles apply-grants               # roles already exist in the cluster
+$PF run --rm --no-deps -T backend python -m app.cli revision      # "state": "current"
+$PF run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 > "$REC/rollback-reconcile.json"; echo "reconcile exit $?"
+# Owner approval recorded in $REC/rollback.json before the next line (see above).
+$PF up -d db backend                                              # db recreated for the new POSTGRES_DB (same volume)
+curl -fsS "http://127.0.0.1:$PORT/api/health"                    # "release":"<previous>", "schema":"current"
+$PF up -d --no-deps web                                           # the reopen: backend first, then web
+deploy/production/smoke.sh --release "$PREV"
+```
+
+`reconcile` must exit 0, or exit 1 with only findings that are in the release's
+`pre-reconcile.json` (`deploy/production/reconcile_regression.py`).
+`rollback.json` carries the §1 fields plus `approved_by` (the owner),
+`approved_at` (UTC) and `reason`, the new and the old database names, the backup
+name and both reconcile results. **The migrated database keeps its name and
+content** for the path 4 analysis; the owner drops it after the observation window
+(`$PF exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$1"' sh <old name>`), never a
+tool.
+
+### New-instance restore
+
+For a host failure (§8) or a move (`SYNOLOGY_NAS.md` §10), on the new host with
+the matching release checkout (the release that took the backup, at least
+P16-S5) and a **new, empty** `postgres_data` volume. The copied backup directory
+is checked first (`sha256sum -c SHA256SUMS` and `backup-verify`, as in step A).
+Then, with the same `PF`, `BPATH` and space rule as step B (`DB_BYTES` = 0):
+
+1. `$PF up -d db`;
+2. emptiness check: `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"'"'` must print `0`, otherwise stop: the volume is not new;
+3. the step B `pg_restore` line into the container's database, `$PF exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' < "$BPATH/partflow.dump"` (a failure rolls back, the database stays empty, and the emptiness check passes again before a retry);
+4. `$PF --profile ops run --rm -T db-roles`, then `… -T db-roles apply-grants`;
+5. `revision` and `reconcile` as in step B, with the report kept in the records directory;
+6. the owner's approval recorded in `<records-dir>/<UTC>-restore-<NAME>/restore.json` (same fields as `rollback.json`), then `$PF up -d backend`, the health check, `$PF up -d --no-deps web` and `deploy/production/smoke.sh --release <tag>`.
+
+Document the data-loss window against the approved RPO.
 
 Never assume `alembic downgrade` is safe. PartFlow intentionally protects
 append-only history, and a downgrade may refuse or would discard newly supported
@@ -418,10 +751,13 @@ Operating rules:
   concurrently, and run it off-peak.
 - Platform-upgrade rehearsal for (j): for a Python/UCD upgrade, run
   `--check j` from the candidate backend image against the current database;
-  for a glibc or PostgreSQL-image change, run `--check j` on a restore onto the
-  candidate server (restore drill) or right after an in-place upgrade before
-  writes reopen. The glibc/PostgreSQL-image half is **pending until the restore
-  drill exists**. The owner decides on re-canonicalization before any upgrade.
+  for a glibc or PostgreSQL-image change, run the restore drill onto the
+  candidate server, `deploy/production/restore-test.sh --backup <latest>
+  --db-image <candidate image>` (§4; its full `reconcile` executes check (j) and
+  the check (h) trigger definitions on that server), or, after an in-place image
+  change of the same major version, `reconcile --check j` before writes reopen (a
+  `COLLATION_VERSION_MISMATCH` is an owner decision). The owner decides on
+  re-canonicalization before any upgrade.
 - For a Work Order reported `not_completed_but_fully_allocated`, `expected` is
   the replay value, not a repair proposal; the owner picks the done date in the
   incident.
@@ -457,6 +793,10 @@ not trigger an automatic repair.
 - block new writes before disk is exhausted (the write freeze, §5);
 - preserve logs and metrics;
 - do not delete PostgreSQL files, volumes, Movement rows, or backups ad hoc;
+- backups need `2 x` the newest dump plus a reserve free in the backup directory,
+  a path 3 restore needs the database size plus `2 x` the dump plus 1 GiB free on
+  the database volume (§6), and a stale backup lock (`backup_lock_stale`) blocks
+  backups and releases until it is removed (§3);
 - expand storage or follow the Phase 16 verified archive/purge maintenance path;
 - run reconciliation before reopening writes.
 
@@ -464,22 +804,25 @@ not trigger an automatic repair.
 
 - prevent split-brain: confirm the failed instance cannot accept writes;
 - provision the approved recovery host;
-- restore the latest verified backup and matching release;
+- restore the latest verified backup and matching release with the new-instance
+  restore (§6);
 - run reconciliation and smoke tests;
 - document data-loss window against the approved RPO;
-- redirect clients only after approval.
+- redirect clients only after approval: the owner's approval is recorded in
+  `restore.json` before `backend` starts.
 
 ## 9. Routine schedule
 
 | Frequency | Tasks |
 | --- | --- |
 | Continuous | Health, restart, disk, certificate, backup-age, and error alerts |
-| Daily | Review backup success and off-site replication; review critical errors |
+| Daily | The scheduled `backup.sh --kind daily --keep-daily 14 --keep-weekly 8` (the owner's values); review the scheduler's and the platform tool's notifications (exit 4 includes a daily that fails verification) and off-site replication; review critical errors |
 | Weekly | Review capacity trend, database growth, failed logins/authorization events, and pending security updates |
-| Monthly | Patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts; review database roles with `reconcile --check h` |
+| Monthly | Patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts; review database roles with `reconcile --check h`; remove pre-release and manual backups whose observation window ended, and daily backups reported invalid by rotation after review (never an archive) |
 | On role-password rotation | A short write freeze: replace the role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, then check health. A plain `up -d backend` does not pick up the new password (the container is not recreated), and running `db-roles` while the backend serves makes its new connections fail. Owner password: `ALTER ROLE … PASSWORD` inside `db` first, then replace `postgres_password` (no service restart: only the one-shot `migrate` and `db-roles` use it) |
-| Quarterly or after material schema change | Full isolated restore drill, measured RPO/RTO exercise, and reconciliation review |
-| Before every release | Fresh verified backup, migration review, rollback decision, and smoke-test plan |
+| Quarterly or after material schema change | `restore-test.sh --backup <latest daily>` (§4), its timings compared with the RTO, a measured RPO/RTO exercise, and reconciliation review |
+| Before a PostgreSQL-image or host glibc change | `restore-test.sh --backup <latest> --db-image <candidate>` (§7) |
+| Before every release | `release.sh` takes the verified pre-release backup (§5); migration review, rollback decision, and smoke-test plan |
 
 The organization must set actual RPO, RTO, retention, and owners. Examples in
 this runbook are procedures, not service-level commitments.

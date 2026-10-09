@@ -4,12 +4,21 @@
 connection in ONE transaction, in this order (every refusal before the
 upgrade leaves the database untouched):
 
+0. This image's code head and known revisions; then, with
+   ``--pre-release-backup NAME`` and before any connection (step 0b,
+   Phase 16 slice 5): the backup directory ``<backup-dir>/NAME`` passes
+   every ``backup-verify`` check and is fresh — started at or after
+   ``--backup-not-before``, or at most ``--max-backup-age-minutes`` old.
 1. ``lock_timeout`` for the transaction, then the ``partflow:migrate``
    advisory transaction lock (not granted → ``migrate_running``). The
    lowercase key can never equal a Part Number lock's input, and no
    application transaction takes it.
 2. The database revision; a revision this release does not know →
-   ``revision_unknown``.
+   ``revision_unknown``. Then (step 2b, with a pre-release backup): the
+   backup holds exactly this revision (an anomalous ``alembic_version``
+   never matches) of this database, and a pending migration needs the
+   not-before proof (an age limit cannot prove that the dump holds every
+   write committed before the freeze → ``backup_freshness_unproven``).
 3. When revisions are pending: a pending revision that needs autocommit
    or ``CONCURRENTLY`` → ``non_transactional_migration``; a session of
    the API (``application_name = 'partflow-api'``) connected to this
@@ -45,13 +54,13 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, NoReturn
 
 import psycopg.errors
 from sqlalchemy import Connection, Engine, RootTransaction, text
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
 
-from app.application import database_roles
+from app.application import backups, database_roles
 from app.application.readiness import SchemaState, evaluate, override_ignored
 from app.core.config import SecretFileError, get_settings, read_secret_line
 from app.infrastructure import schema_revision
@@ -63,7 +72,6 @@ DEFAULT_LOCK_TIMEOUT_SECONDS: Final = 30
 MAX_TEXT_LENGTH: Final = 500
 API_APPLICATION_NAME: Final = schema_revision.API_APPLICATION_NAME
 _MIGRATE_LOCK: Final = "partflow:migrate"
-_BACKUP_VERIFICATION: Final = "pending: backup-verify arrives with P16-S5"
 
 MIGRATE_MESSAGES: Final = {
     "migrate_running": "Another migrate is running on this database. Nothing was changed.",
@@ -80,6 +88,45 @@ MIGRATE_MESSAGES: Final = {
     "backend_connected": (
         "The PartFlow backend is still connected to this database. Stop it first (the write"
         " freeze), then run migrate again. Nothing was changed."
+    ),
+    "backup_not_found": (
+        "The pre-release backup {reference} was not found in {dir}. Name a backup created by"
+        " backup.sh (for example 20261008T140000Z-pre-release-v1.0.0-rc.2). Nothing was"
+        " changed."
+    ),
+    "backup_invalid": (
+        "The pre-release backup {reference} failed verification ({check}: {detail}). Do not use"
+        " it; take a new backup. Nothing was changed."
+    ),
+    "backup_unreadable": (
+        "The pre-release backup {reference} could not be read ({reason}). Nothing was changed."
+    ),
+    "backup_stale": (
+        "The pre-release backup {reference} was started at {started}, before {not_before}: it"
+        " may miss changes made since. Take a new backup inside the write freeze. Nothing was"
+        " changed."
+    ),
+    "backup_stale_age": (
+        "The pre-release backup {reference} is {age} minutes old (the limit is {max} minutes):"
+        " it may miss recent changes. Take a new backup inside the write freeze, or name the"
+        " freeze time with --backup-not-before. Nothing was changed."
+    ),
+    "backup_revision_mismatch": (
+        "The pre-release backup {reference} holds database revision {backup_revision}, but the"
+        " database is at {revision}: it is not a backup of the current database. Nothing was"
+        " changed."
+    ),
+    "backup_revision_anomalous": (
+        "The pre-release backup {reference} holds an unusual alembic_version ({n} rows), so it"
+        " cannot be matched to database revision {revision}. Nothing was changed."
+    ),
+    "backup_freshness_unproven": (
+        "A migration is pending: name the write-freeze time with --backup-not-before. Nothing"
+        " was changed."
+    ),
+    "backup_database_mismatch": (
+        "The pre-release backup {reference} is of database {backup_database}, not of"
+        " {database}. Nothing was changed."
     ),
     "database_unavailable": "PartFlow could not reach its database. Nothing was changed.",
     "lock_not_available": (
@@ -115,11 +162,24 @@ _GRANT_REFUSALS: Final = frozenset(
         "not_superuser",
     }
 )
+#: The pre-release backup refusals (Phase 16 slice 5); ``backup_unreadable``
+#: is a failure (exit 2), never a refusal.
+_BACKUP_REFUSALS: Final = frozenset(
+    {
+        "backup_not_found",
+        "backup_invalid",
+        "backup_stale",
+        "backup_revision_mismatch",
+        "backup_freshness_unproven",
+        "backup_database_mismatch",
+    }
+)
 _REFUSALS: Final = (
     frozenset(
         {"migrate_running", "revision_unknown", "non_transactional_migration", "backend_connected"}
     )
     | _GRANT_REFUSALS
+    | _BACKUP_REFUSALS
 )
 
 MigrateResult = Literal["upgraded", "already_current", "refused", "failed", "outcome_unknown"]
@@ -147,22 +207,46 @@ def operator_text(value: str) -> str:
     return trimmed
 
 
-@dataclass(frozen=True)
+@dataclass
 class Backup:
-    """Exactly one of a pre-release backup reference or a no-backup reason."""
+    """Exactly one of a pre-release backup name or a no-backup reason.
+
+    For a backup name: where to find it, the freshness rule (``not_before``,
+    else ``max_age_minutes``), and what its verification found
+    (``verification`` is ``passed``, the refusal code, or ``not_run``).
+    """
 
     reference: str | None = None
     no_backup_reason: str | None = None
+    backup_dir: Path = backups.DEFAULT_BACKUP_DIR
+    not_before: datetime.datetime | None = None
+    max_age_minutes: int = backups.DEFAULT_MAX_AGE_MINUTES
+    verified: bool = False
+    verification: str = "not_run"
+    manifest: backups.Manifest | None = None
+    manifest_sha256: str | None = None
+    freshness: backups.Freshness | None = None
+    warnings: list[str] = field(default_factory=list)
 
     def document(self) -> dict[str, object]:
-        if self.reference is not None:
-            return {
-                "kind": "reference",
-                "reference": self.reference,
-                "verified": False,
-                "verification": _BACKUP_VERIFICATION,
-            }
-        return {"kind": "none", "reason": self.no_backup_reason}
+        if self.reference is None:
+            return {"kind": "none", "reason": self.no_backup_reason}
+        manifest = self.manifest
+        return {
+            "kind": "reference",
+            "reference": self.reference,
+            "verified": self.verified,
+            "verification": self.verification,
+            "dump_started_at": (
+                backups.utc_text(manifest.dump_started_at) if manifest is not None else None
+            ),
+            "alembic_revision": manifest.alembic_revision if manifest is not None else None,
+            "database": manifest.database_name if manifest is not None else None,
+            "release": manifest.release_tag if manifest is not None else None,
+            "manifest_sha256": self.manifest_sha256,
+            "freshness": self.freshness.document() if self.freshness is not None else None,
+            "warnings": list(self.warnings),
+        }
 
 
 @dataclass(frozen=True)
@@ -341,10 +425,14 @@ def _discard(transaction: RootTransaction) -> None:
 
 
 class _Refused(Exception):
-    def __init__(self, code: str, **values: str) -> None:
+    def __init__(self, code: str, *, message: str | None = None, **values: str) -> None:
         super().__init__(code)
         self.code = code
+        self.message = message
         self.values = values
+
+    def render(self) -> str:
+        return self.message or MIGRATE_MESSAGES[self.code].format(**self.values)
 
 
 class _RevisionNotReachedError(Exception):
@@ -367,6 +455,109 @@ def migrate_failure(
     report.grants = None
     report.finished_at = _now()
     return report
+
+
+def _refuse_backup(
+    backup: Backup, code: str, message_key: str | None = None, **values: str
+) -> NoReturn:
+    """Record a refusal of the pre-release backup and raise it."""
+    backup.verified = False
+    backup.verification = code
+    message = MIGRATE_MESSAGES[message_key or code].format(reference=backup.reference, **values)
+    raise _Refused(code, message=message)
+
+
+def _read_failure_reason(exception: BaseException | None) -> str:
+    if isinstance(exception, OSError) and exception.strerror:
+        return exception.strerror
+    return type(exception).__name__ if exception is not None else "unknown"
+
+
+def _verify_backup(backup: Backup, now: datetime.datetime) -> None:
+    """Step 0b (no database): the named backup is verified and fresh; raises ``_Refused``."""
+    assert backup.reference is not None
+    location = {"dir": str(backup.backup_dir)}
+    if backups.parse_name(backup.reference) is None:
+        _refuse_backup(backup, "backup_not_found", **location)
+    result = backups.verify_backup(backup.backup_dir, backup.reference)
+    if result.error is not None and result.error.code == "internal_error":
+        assert result.error.exception is not None
+        raise result.error.exception
+    backup.manifest_sha256 = result.manifest_sha256
+    if result.error is not None and result.error.code == "io_error":
+        reason = _read_failure_reason(result.error.exception)
+        _refuse_backup(backup, "backup_unreadable", reason=reason)
+    if result.check("directory").detail == "not found":
+        _refuse_backup(backup, "backup_not_found", **location)
+    failure = result.first_failure()
+    if failure is not None or result.manifest is None:
+        check, detail = failure or ("manifest", "unreadable")
+        _refuse_backup(backup, "backup_invalid", check=check, detail=detail)
+    manifest = result.manifest
+    backup.manifest = manifest
+    if manifest.anomalous:
+        rows = manifest.alembic_rows or []
+        backup.warnings.append(backups.alembic_warning(backups.AlembicData(None, rows, len(rows))))
+    if manifest.extra_tables:
+        backup.warnings.append(backups.extra_tables_warning(manifest.extra_tables))
+    backup.warnings.sort()
+    try:
+        backup.freshness = backups.check_freshness(
+            manifest.dump_started_at,
+            not_before=backup.not_before,
+            max_age_minutes=backup.max_age_minutes,
+            now=now,
+        )
+    except backups.StaleBackupError as stale:
+        backup.freshness = stale.freshness
+        started = backups.utc_text(stale.started)
+        if stale.freshness.not_before is not None:
+            not_before = backups.utc_text(stale.freshness.not_before)
+            _refuse_backup(backup, "backup_stale", started=started, not_before=not_before)
+        _refuse_backup(
+            backup,
+            "backup_stale",
+            "backup_stale_age",
+            age=str(stale.freshness.age_minutes),
+            max=str(backup.max_age_minutes),
+        )
+    backup.verified = True
+    backup.verification = "passed"
+
+
+def _match_backup(
+    connection: Connection, backup: Backup, current: str | None, pending: list[str]
+) -> None:
+    """Step 2b (inside the transaction): the backup is of this database at this revision."""
+    manifest = backup.manifest
+    assert manifest is not None
+    revision = current or "none"
+    if manifest.anomalous:
+        _refuse_backup(
+            backup,
+            "backup_revision_mismatch",
+            "backup_revision_anomalous",
+            n=str(len(manifest.alembic_rows or [])),
+            revision=revision,
+        )
+    if manifest.alembic_revision != current:
+        _refuse_backup(
+            backup,
+            "backup_revision_mismatch",
+            backup_revision=manifest.alembic_revision or "none",
+            revision=revision,
+        )
+    database = str(connection.execute(text("SELECT current_database()")).scalar_one())
+    if manifest.database_name != database:
+        _refuse_backup(
+            backup,
+            "backup_database_mismatch",
+            backup_database=manifest.database_name,
+            database=database,
+        )
+    freshness = backup.freshness
+    if pending and (freshness is None or freshness.rule != "not_before"):
+        _refuse_backup(backup, "backup_freshness_unproven")
 
 
 def _migrate_in_transaction(
@@ -392,6 +583,8 @@ def _migrate_in_transaction(
     if current is not None and current not in known:
         raise _Refused("revision_unknown", revision=current)
     pending = schema_revision.pending_revisions(current)
+    if report.backup.reference is not None:
+        _match_backup(connection, report.backup, current, pending)
     if pending:
         blocked = schema_revision.non_transactional_revisions(pending)
         if blocked:
@@ -447,6 +640,14 @@ def run_migrate(
         known = schema_revision.known_revisions()
     except schema_revision.MigrationScriptsError as exc:
         return migrate_failure(report, "internal_error", exception=exc)
+    if backup.reference is not None:
+        try:
+            _verify_backup(backup, _now())
+        except _Refused as refusal:
+            # Nothing is connected yet: the database is untouched.
+            return migrate_failure(report, refusal.code, message=refusal.render())
+        except Exception as exc:
+            return migrate_failure(report, "internal_error", exception=exc)
     try:
         connection = engine.connect()
     except SQLAlchemyError as exc:
@@ -458,8 +659,7 @@ def run_migrate(
             _migrate_in_transaction(connection, report, known, lock_timeout_seconds, phase)
         except _Refused as refusal:
             _discard(transaction)
-            message = MIGRATE_MESSAGES[refusal.code].format(**refusal.values)
-            return migrate_failure(report, refusal.code, message=message)
+            return migrate_failure(report, refusal.code, message=refusal.render())
         except database_roles.DatabaseRolesRefusal as refusal:
             # The grants step refused: the upgrade of this run is discarded too.
             _discard(transaction)

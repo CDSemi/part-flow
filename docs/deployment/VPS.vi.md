@@ -32,7 +32,9 @@ Không triển khai production từ `compose.yaml`. Release phải cung cấp (t
   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1);
 - danh mục secret/configuration — đã triển khai (`.env.production.example`, secret
   file `postgres_password`; DEPLOYMENT §3.1);
-- automation backup và restore — P16-S5;
+- automation backup và restore — đã triển khai (P16-S5: `deploy/production/backup.sh`,
+  `restore-test.sh`, [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §3 và §4);
+  chạy trên VPS ở P16-S7;
 - command health và reconciliation — `reconcile` đã có (P16-S1); production
   invocation của nó đã triển khai (P16-S2: các lệnh ở DEPLOYMENT §3.1); phần
   automation release quanh nó đã triển khai (P16-S3: `deploy/production/release.sh`
@@ -42,7 +44,7 @@ Không triển khai production từ `compose.yaml`. Release phải cung cấp (t
   trong P16-S2);
 - quy trình release và rollback gắn với version bất biến — đã triển khai (P16-S3:
   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5 và §6 và `release.sh`;
-  rollback path 3 chờ P16-S5).
+  rollback path 3 đã triển khai ở P16-S5, §6 của runbook).
 
 ## 3. Baseline của host
 
@@ -116,10 +118,10 @@ Ví dụ:
   current -> releases/<immutable-release>/
   env/production.env
   data/
-  backups/database/
-  manifests/
+  backups/database/        = PARTFLOW_BACKUP_DIR (one directory per backup, mode 0700)
 ```
 
+Manifest của backup nằm trong từng backup directory (không có `manifests/` riêng).
 Deployment account sở hữu release file. Secret chỉ cho account/service cần thiết
 đọc. Dữ liệu PostgreSQL không bao giờ nằm trong Git checkout.
 
@@ -136,12 +138,16 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
    ops service. `PF` bên dưới là `docker compose -f compose.production.yaml
    --env-file .env.production`. Build cả hai image bằng
    `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`.
+   Trước tiên tạo backup directory (`install -d -m 0700 /srv/partflow/backups/database`)
+   và đặt `PARTFLOW_BACKUP_DIR` trỏ tới nó trong `.env.production` (không có dấu
+   nháy): mọi lệnh `$PF` đều cần key này.
 5. Start PostgreSQL ở private: `$PF up -d db`, rồi tạo database role:
    `$PF --profile ops run --rm -T db-roles` (P16-S4; backend kết nối bằng
    `partflow_app`, không bao giờ bằng owner).
 6. Tạo database trống trong volume mới (dữ liệu production không bao giờ bắt đầu
-   từ dữ liệu staging hay development; restore vào production cần owner quyết
-   định, P16-S5).
+   từ dữ liệu staging hay development; restore vào production theo
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 path 3 hoặc §8 host hỏng,
+   với sự phê duyệt của owner được ghi lại trước khi `backend` start).
 7. Chạy migration đúng một lần từ release backend image:
    `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`;
    lệnh này cũng áp dụng grant.
@@ -154,8 +160,10 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
    Sau đó enroll từng thiết bị Scan Station (Administration → Scan Stations → `Devices…`).
 9. Chạy smoke test và reconciliation qua HTTPS theo runbook; reconcile
    check (h) phải báo `pass`.
-10. Bật lịch monitoring/backup rồi chạy backup ngay.
-11. Thực hiện và đo isolated restore trước khi nhận pilot data.
+10. Bật monitoring và backup schedule (systemd timer ở §8), rồi chạy backup ngay:
+    `deploy/production/backup.sh --kind manual --operator "<name>" --reason "initial backup"`.
+11. Thực hiện và đo isolated restore trước khi nhận pilot data:
+    `deploy/production/restore-test.sh --backup <backup đó> --operator "<name>"`.
 12. Chỉ mở nguồn network đã duyệt và bắt đầu pilot có kiểm soát.
 
 Để chuyển một rehearsal stack cài trước P16-S4, theo thứ tự: (1) tạo
@@ -168,7 +176,9 @@ $PF -f compose.production.build.yaml build backend web`), không bao giờ chỉ
 (tiền tố tag chạy image mới: `.env.production` vẫn ghi release đang chạy); (5)
 `deploy/production/release.sh`
 ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Chuyển một stack cài trước
-P16-S4).
+P16-S4). Một rehearsal stack cài trước P16-S5 trước tiên tạo backup directory và đặt
+`PARTFLOW_BACKUP_DIR` **trước mọi lệnh `$PF` với checkout P16-S5**, rồi chạy
+`release.sh` (Chuyển một stack cài trước P16-S5, cùng mục).
 
 ## 7. Release và rollback
 
@@ -176,8 +186,11 @@ Dùng directory/image bất biến. Build/pull release mới trước khi dừng
 Backup trước migration. Không deploy trực tiếp từ checkout `main` có thể thay
 đổi.
 
+`release.sh` lấy pre-release backup đã verify bên trong write freeze.
 Chỉ rollback application khi code cũ tương thích với schema đã migrate. Nếu
-không, phải restore cả database pre-migration và application release tương ứng.
+không, phải restore cả database pre-migration và application release tương ứng
+(rollback path 3 của runbook: một database mới trong cùng instance, với sự phê
+duyệt của owner được ghi lại).
 Alembic downgrade không phải rollback tổng quát: migration PartFlow có thể bảo
 vệ immutable history bằng cách từ chối downgrade phá dữ liệu.
 
@@ -187,17 +200,39 @@ Theo [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md).
 
 Dùng PostgreSQL logical dump làm baseline portable; có thể thêm provider volume
 snapshot làm lớp thứ hai. Snapshot không thay thế logical restore đã test.
+Artifact, việc verify, retention và restore drill nằm trong
+[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §3 và §4 (đã triển khai ở
+P16-S5; các unit và task dưới đây được cài và chạy trên VPS ở P16-S7):
 
-- custom-format `pg_dump` theo lịch;
+- custom-format `pg_dump` theo lịch (`backup.sh`, một directory cho mỗi backup);
 - checksum và manifest chứa release commit cùng Alembic revision;
 - mã hóa khi truyền và khi lưu;
 - bản copy off-VPS có retention và failure alert;
 - định kỳ restore vào database cô lập;
 - RPO/RTO được ghi và đo bằng lần chạy thật.
 
+**Schedule (systemd).** `partflow-backup.service`, `Type=oneshot`,
+`User=<deploy account>`, `WorkingDirectory=/srv/partflow/current`,
+`ExecStart=deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env`
+(14 và 8 là placeholder: owner đặt giá trị thật, và các option là bắt buộc),
+`OnFailure=` một unit gửi mail cho administrator; và `partflow-backup.timer` với
+`OnCalendar=*-*-* 02:00:00` và `Persistent=true`. Một exit khác 0, kể cả daily không
+qua verify, làm unit thất bại. Giữ schedule ngoài maintenance window (một release
+giữ backup lock).
+
+**Bản copy off-VPS (restic).** `RESTIC_REPOSITORY` trỏ tới object storage, và
+`RESTIC_PASSWORD_FILE` tới một key file mode 0400 do custody ngoài VPS giữ (mất nó
+là mất các bản copy). Sau backup unit:
+`restic backup --tag database /srv/partflow/backups/database`, rồi
+`restic forget --tag database --keep-daily 14 --keep-weekly 8 --prune` (retention
+khớp `backup-rotate`), và `restic check` hằng tuần; thất bại làm unit của nó thất
+bại (`OnFailure=`). Archive directory (Phase 16 slice S8) đi vào repository hoặc tag
+riêng mà `forget` không bao giờ nhắm tới: archive không bao giờ bị rotate hay prune.
+
 ## 9. Chuyển từ Synology
 
-Dùng quy trình dump/restore cutover trong `SYNOLOGY_NAS.md` §10. Giữ source và
+Dùng quy trình backup và restore cutover trong `SYNOLOGY_NAS.md` §10 (cùng backup
+artifact và new-instance restore trong runbook §6). Giữ source và
 target cùng release, enforce write freeze, verify checksum/reconciliation rồi
 mới đổi DNS. Không chạy hai production instance writable trên database đã tách
 nhánh.

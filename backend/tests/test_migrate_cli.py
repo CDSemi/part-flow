@@ -1,16 +1,20 @@
-"""Tests for ``python -m app.cli migrate`` (Phase 16 slices 3 and 4: M-1 … M-21).
+"""Tests for ``python -m app.cli migrate`` (Phase 16 slices 3 to 5: M-1 … M-21, M-30 … M-43).
 
 ``migrate`` applies this release's pending Alembic revisions on one
-connection in one transaction, records the backup reference (or the
-reason there is none) and prints exactly one JSON document on stdout.
+connection in one transaction, verifies and records the pre-release backup
+(or the reason there is none) and prints exactly one JSON document on stdout.
 Every case runs ``app.cli.main`` in process (M-16 as a subprocess)
 against its own temporary database created on the development cluster
 and dropped afterwards; ``DATABASE_URL`` points at it. M-17 … M-21 add
 uniquely named temporary database roles (``tests.role_harness``) for the
-grants step. The module keeps the owner in the application-role test
-mode (``database_owner``): it migrates, creates roles and corrupts ACLs.
+grants step. M-30 … M-43 publish backups of the temporary database into a
+temporary backup directory (``tests.backup_harness``). The module keeps the
+owner in the application-role test mode (``database_owner``): it migrates,
+creates roles and corrupts ACLs.
 """
 
+import builtins
+import datetime
 import json
 import os
 import re
@@ -37,6 +41,7 @@ from app.application.database_roles import DatabaseRoles
 from app.core.config import get_settings
 from app.infrastructure import schema_revision
 from app.infrastructure.database_privileges import TABLE_CLASSES, TableClass
+from tests.backup_harness import RELEASE, flip_last_byte, name_of, publish
 from tests.conftest import owner_engine
 from tests.role_harness import (
     acl_snapshot,
@@ -186,18 +191,13 @@ def test_first_install_then_rerun(database: URL, capsys: pytest.CaptureFixture[s
         assert password is None or password not in text
 
     # M-2: rerun — nothing applied, the grants hook still runs.
-    code, document, err = _migrate(capsys, "--pre-release-backup", "dump-20261008.sql.gz")
+    code, document, err = _migrate(capsys, "--no-backup-reason", "rerun")
     assert code == 0, err
     assert document["result"] == "already_current"
     assert document["revision_before"] == document["revision_after"] == _HEAD
     assert document["applied_revisions"] == []
     assert document["grants"] == _GRANTS
-    assert document["backup"] == {
-        "kind": "reference",
-        "reference": "dump-20261008.sql.gz",
-        "verified": False,
-        "verification": "pending: backup-verify arrives with P16-S5",
-    }
+    assert document["backup"] == {"kind": "none", "reason": "rerun"}
     assert f"migrate: already at {_HEAD}; nothing to apply (" in err
 
 
@@ -737,3 +737,371 @@ def test_foreign_grantees_and_grantors(
     finally:
         drop_roles(cluster, [foreign])
         admin.dispose()
+
+
+# ---------------------------------------------------------------------------
+# M-30 … M-43: the verified pre-release backup (Phase 16 slice 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def backup_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "backups"
+    directory.mkdir(mode=0o700)
+    return directory
+
+
+def _minutes_ago(minutes: int) -> datetime.datetime:
+    moment = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=minutes)
+    return moment.replace(microsecond=0)
+
+
+def _utc(moment: datetime.datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _backup(
+    backup_dir: Path,
+    database: URL,
+    *,
+    rows: list[str] | None,
+    started: datetime.datetime | None = None,
+    dbname: str | None = None,
+) -> tuple[str, datetime.datetime]:
+    """A published backup of the test database whose dump started at ``started``."""
+    moment = started or _minutes_ago(12)
+    name = name_of(moment, "pre-release", "v1.0.0-rc.2")
+    publish(
+        backup_dir,
+        name,
+        dbname=dbname or str(database.database),
+        created=moment,
+        rows=rows,
+        expected_revision=rows[0] if rows else None,
+    )
+    return name, moment
+
+
+def _with_backup(name: str, backup_dir: Path, *extra: str) -> list[str]:
+    return ["--pre-release-backup", name, "--backup-dir", str(backup_dir), *extra]
+
+
+def _backup_refused(document: dict[str, Any], code: str, message: str) -> None:
+    _refused(document, code)
+    assert document["error"] == {"code": code, "message": message}
+    assert document["backup"]["verified"] is False
+    assert document["backup"]["verification"] == code
+
+
+def _refuse_connections(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From here on, any database connection fails the test (engine factory spy)."""
+
+    def refuse(self: sa.Engine) -> None:
+        raise AssertionError("migrate connected before refusing the backup")
+
+    monkeypatch.setattr(sa.Engine, "connect", refuse)
+
+
+def test_a_fresh_backup_inside_the_freeze_lets_the_migration_run(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-30."""
+    _at_previous(database)
+    name, started = _backup(backup_dir, database, rows=[_PREVIOUS])
+    arguments = _with_backup(name, backup_dir, "--backup-not-before", _utc(started))
+    code, document, err = _migrate(capsys, *arguments)
+    assert code == 0, err
+    assert document["result"] == "upgraded"
+    assert document["applied_revisions"] == [_HEAD]
+    assert document["backup"] == {
+        "kind": "reference",
+        "reference": name,
+        "verified": True,
+        "verification": "passed",
+        "dump_started_at": _utc(started),
+        "alembic_revision": _PREVIOUS,
+        "database": database.database,
+        "release": RELEASE,
+        "manifest_sha256": document["backup"]["manifest_sha256"],
+        "freshness": {"rule": "not_before", "not_before": _utc(started)},
+        "warnings": [],
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", document["backup"]["manifest_sha256"])
+    assert _revision(database) == _HEAD
+
+
+def test_a_pending_migration_needs_the_not_before_proof(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-42."""
+    _at_previous(database)
+    name, _ = _backup(backup_dir, database, rows=[_PREVIOUS])
+    code, document, _ = _migrate(capsys, *_with_backup(name, backup_dir))
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_freshness_unproven",
+        "A migration is pending: name the write-freeze time with --backup-not-before. Nothing"
+        " was changed.",
+    )
+    assert document["backup"]["freshness"] == {
+        "rule": "max_age",
+        "max_age_minutes": 60,
+        "age_minutes": 12,
+    }
+    assert _revision(database) == _PREVIOUS
+
+
+def test_nothing_pending_accepts_a_recent_backup(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-37: the age rule stands when no migration follows."""
+    command.upgrade(_alembic_config(database), _HEAD)
+    name, _ = _backup(backup_dir, database, rows=[_HEAD])
+    code, document, err = _migrate(capsys, *_with_backup(name, backup_dir))
+    assert code == 0, err
+    assert document["result"] == "already_current"
+    assert document["backup"]["verified"] is True
+    assert document["backup"]["verification"] == "passed"
+    assert document["backup"]["freshness"]["rule"] == "max_age"
+
+
+def test_an_anomalous_backup_never_matches(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-43."""
+    command.upgrade(_alembic_config(database), _HEAD)
+    name, _ = _backup(backup_dir, database, rows=[_HEAD, _PREVIOUS])
+    code, document, _ = _migrate(capsys, *_with_backup(name, backup_dir))
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_revision_mismatch",
+        f"The pre-release backup {name} holds an unusual alembic_version (2 rows), so it cannot"
+        f" be matched to database revision {_HEAD}. Nothing was changed.",
+    )
+    assert document["backup"]["warnings"] == [
+        f"alembic_version holds 2 rows ({_HEAD}, {_PREVIOUS})"
+    ]
+    assert _revision(database) == _HEAD
+
+
+def test_a_tampered_backup_is_refused_before_connecting(
+    database: URL,
+    backup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-31."""
+    _at_previous(database)
+    name, started = _backup(backup_dir, database, rows=[_PREVIOUS])
+    flip_last_byte(backup_dir / name / "partflow.dump")
+    arguments = _with_backup(name, backup_dir, "--backup-not-before", _utc(started))
+    with monkeypatch.context() as patch:
+        _refuse_connections(patch)
+        code, document, _ = _migrate(capsys, *arguments)
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_invalid",
+        f"The pre-release backup {name} failed verification (sha256sums: partflow.dump: sha256"
+        " differs from SHA256SUMS). Do not use it; take a new backup. Nothing was changed.",
+    )
+    assert document["revision_before"] is None
+    assert _revision(database) == _PREVIOUS
+
+
+def test_a_backup_started_before_the_freeze_is_stale(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-32."""
+    _at_previous(database)
+    name, started = _backup(backup_dir, database, rows=[_PREVIOUS])
+    later = started + datetime.timedelta(seconds=1)
+    code, document, _ = _migrate(
+        capsys, *_with_backup(name, backup_dir, "--backup-not-before", _utc(later))
+    )
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_stale",
+        f"The pre-release backup {name} was started at {_utc(started)}, before {_utc(later)}:"
+        " it may miss changes made since. Take a new backup inside the write freeze. Nothing"
+        " was changed.",
+    )
+    assert _revision(database) == _PREVIOUS
+
+
+def test_an_old_backup_is_stale(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-33."""
+    command.upgrade(_alembic_config(database), _HEAD)
+    name, _ = _backup(backup_dir, database, rows=[_HEAD], started=_minutes_ago(61))
+    code, document, _ = _migrate(capsys, *_with_backup(name, backup_dir))
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_stale",
+        f"The pre-release backup {name} is 61 minutes old (the limit is 60 minutes): it may"
+        " miss recent changes. Take a new backup inside the write freeze, or name the freeze"
+        " time with --backup-not-before. Nothing was changed.",
+    )
+    code, document, err = _migrate(
+        capsys, *_with_backup(name, backup_dir, "--max-backup-age-minutes", "90")
+    )
+    assert code == 0, err
+    assert document["backup"]["freshness"]["max_age_minutes"] == 90
+
+
+def test_a_backup_of_another_revision_is_refused(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-34."""
+    command.upgrade(_alembic_config(database), _HEAD)
+    name, started = _backup(backup_dir, database, rows=[_PREVIOUS])
+    code, document, _ = _migrate(
+        capsys, *_with_backup(name, backup_dir, "--backup-not-before", _utc(started))
+    )
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_revision_mismatch",
+        f"The pre-release backup {name} holds database revision {_PREVIOUS}, but the database"
+        f" is at {_HEAD}: it is not a backup of the current database. Nothing was changed.",
+    )
+    assert document["revision_before"] == _HEAD
+
+
+def test_a_backup_of_another_database_is_refused(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-35."""
+    command.upgrade(_alembic_config(database), _HEAD)
+    name, _ = _backup(backup_dir, database, rows=[_HEAD], dbname="other")
+    code, document, _ = _migrate(capsys, *_with_backup(name, backup_dir))
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_database_mismatch",
+        f"The pre-release backup {name} is of database other, not of {database.database}."
+        " Nothing was changed.",
+    )
+
+
+@pytest.mark.parametrize("case", ["grammar", "absent", "no_directory"])
+def test_an_unknown_backup_is_not_found(
+    database: URL,
+    backup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """M-36."""
+    reference, directory = {
+        "grammar": ("dump-20261008.sql.gz", backup_dir),
+        "absent": ("20261008T140000Z-pre-release-v1.0.0-rc.2", backup_dir),
+        "no_directory": ("20261008T140000Z-pre-release-v1.0.0-rc.2", backup_dir / "missing"),
+    }[case]
+    with monkeypatch.context() as patch:
+        _refuse_connections(patch)
+        code, document, _ = _migrate(capsys, *_with_backup(reference, directory))
+    assert code == 1
+    _backup_refused(
+        document,
+        "backup_not_found",
+        f"The pre-release backup {reference} was not found in {directory}. Name a backup created"
+        " by backup.sh (for example 20261008T140000Z-pre-release-v1.0.0-rc.2). Nothing was"
+        " changed.",
+    )
+    assert document["backup"]["dump_started_at"] is None
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--pre-release-backup", "x", "--backup-not-before", "2026-10-08 10:00"],
+        [
+            "--pre-release-backup",
+            "x",
+            "--backup-not-before",
+            "2026-10-08T10:00:00Z",
+            "--max-backup-age-minutes",
+            "5",
+        ],
+        ["--no-backup-reason", "x", "--backup-not-before", "2026-10-08T10:00:00Z"],
+        ["--no-backup-reason", "x", "--max-backup-age-minutes", "5"],
+        ["--pre-release-backup", "x", "--max-backup-age-minutes", "0"],
+    ],
+)
+def test_freshness_usage_errors_print_no_document(
+    database: URL, capsys: pytest.CaptureFixture[str], arguments: list[str]
+) -> None:
+    """M-38."""
+    with pytest.raises(SystemExit) as usage:
+        cli.main(["migrate", *arguments])
+    assert usage.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "usage:" in err
+    assert _revision(database) is None
+
+
+@pytest.mark.parametrize("unreadable", ["dump", "directory"])
+def test_an_unreadable_backup_fails_before_connecting(
+    database: URL,
+    backup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    unreadable: str,
+) -> None:
+    """M-39: an unreadable dump, and a backup directory migrate cannot search (no --user)."""
+    name, started = _backup(backup_dir, database, rows=None)
+    dump = backup_dir / name / "partflow.dump"
+    real_open = builtins.open
+    real_lstat = os.lstat
+
+    def guarded_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, str | os.PathLike) and Path(file) == dump:
+            raise PermissionError(13, "Permission denied", str(file))
+        return real_open(file, *args, **kwargs)
+
+    def guarded_lstat(target: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if Path(target).parent == backup_dir:
+            raise PermissionError(13, "Permission denied", str(target))
+        return real_lstat(target, *args, **kwargs)
+
+    arguments = _with_backup(name, backup_dir, "--backup-not-before", _utc(started))
+    with monkeypatch.context() as patch:
+        if unreadable == "dump":
+            patch.setattr(builtins, "open", guarded_open)
+        else:
+            patch.setattr(os, "lstat", guarded_lstat)
+        _refuse_connections(patch)
+        code, document, _ = _migrate(capsys, *arguments)
+    assert code == 2
+    assert document["result"] == "failed"
+    assert document["error"] == {
+        "code": "backup_unreadable",
+        "message": (
+            f"The pre-release backup {name} could not be read (Permission denied). Nothing was"
+            " changed."
+        ),
+    }
+    assert document["backup"]["verification"] == "backup_unreadable"
+    assert _revision(database) is None
+
+
+def test_an_empty_database_matches_an_empty_backup(
+    database: URL, backup_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M-40: null == null."""
+    name, started = _backup(backup_dir, database, rows=None)
+    code, document, err = _migrate(
+        capsys, *_with_backup(name, backup_dir, "--backup-not-before", _utc(started))
+    )
+    assert code == 0, err
+    assert document["result"] == "upgraded"
+    assert document["backup"]["alembic_revision"] is None
+    assert document["backup"]["verified"] is True
+    assert _revision(database) == _HEAD

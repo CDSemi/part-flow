@@ -27,8 +27,9 @@ bảng kê configuration và secret, và network rate limiting, §3.1), slice 3
 (release flow: release identity, liveness và readiness, backend write gate,
 `migrate`, `release.sh` và `smoke.sh`, §3.1) và slice 4 (database-role hardening: các database role `partflow_app` và
 `partflow_maintenance`, `provision-roles`, grant được áp dụng bởi mọi `migrate` và bởi `apply-grants`, và
-reconcile check (h), §3.1) đã triển khai. Phase 16 vẫn sở hữu backup, observability, TLS trên host và các
-gate (§5 và `IMPLEMENTATION_ROADMAP.md`).
+reconcile check (h), §3.1) và slice 5 (backup: backup artifact đã verify, pre-release backup trong write
+freeze, restore drill cô lập và rollback path 3, §3.1) đã triển khai. Phase 16 vẫn sở hữu observability,
+TLS trên host, việc chạy backup và drill trên pilot host và các gate (§5 và `IMPLEMENTATION_ROADMAP.md`).
 
 Vì vậy:
 
@@ -36,7 +37,7 @@ Vì vậy:
 | --- | --- | --- |
 | Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
 | Synology staging/test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong LAN, dùng dữ liệu giả/không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Pilot hoặc production | Chưa sẵn sàng | Production artifact, release flow và database-role hardening đã có (§3.1: image, `web`, `compose.production.yaml`, bảng kê configuration, `release.sh`, `partflow_app`), nhưng backup, observability và các pilot gate ở §5 vẫn còn lại (Phase 16: P16-S5…S7). |
+| Pilot hoặc production | Chưa sẵn sàng | Production artifact, release flow, database-role hardening và backup đã có (§3.1: image, `web`, `compose.production.yaml`, bảng kê configuration, `release.sh`, `partflow_app`, `backup.sh`, `restore-test.sh`), nhưng observability và các pilot gate ở §5 vẫn còn lại (Phase 16: P16-S6…S7). |
 | Mở ra Internet | Hiện tại bị cấm | TLS do platform proxy kết thúc, và chưa host nào cấu hình hay xác minh nó (P16-S7); các gate §5 chưa đạt. Network rate limiting đã có trong `web`; `compose.yaml` vẫn expose các service development (§2). |
 
 Triển khai staging nội bộ không có nghĩa Phase 16 đã hoàn thành.
@@ -115,9 +116,10 @@ Các ranh giới bắt buộc:
 - chạy schema migration như một release step rõ ràng, không phải side effect
   không kiểm soát mỗi khi replica khởi động;
 - định danh mỗi lần triển khai bằng Git commit hoặc image tag bất biến;
-- dùng cùng một format backup portable giữa NAS và VPS.
+- dùng cùng một format backup portable giữa NAS và VPS (đã triển khai: backup
+  artifact của P16-S5, `deployment/OPERATIONS_RUNBOOK.md` §3).
 
-### 3.1 Production stack (Phase 16 slice 2 đến 4)
+### 3.1 Production stack (Phase 16 slice 2 đến 5)
 
 **Trạng thái.** Đã triển khai (P16-S2): các stage `production` của
 `backend/Dockerfile` và `frontend/Dockerfile`, cấu hình `web` trong
@@ -130,7 +132,7 @@ Desktop và một Linux container; không có gì trong mục này đã được
 Synology NAS hay VPS (đó là P16-S7). Đã triển khai (P16-S3): release identity,
 liveness và readiness, backend write gate, `migrate` và `revision`, `release.sh`
 và `smoke.sh` cùng `reconcile_regression.py`, và update notice ở frontend (các
-mục con bên dưới). Cả hai production image nhận `PARTFLOW_RELEASE` và `PARTFLOW_COMMIT` làm build argument và mang release identity (stage `production` của backend đặt `RELEASE_TAG` và `RELEASE_COMMIT`); production stack smoke và release rehearsal đã chạy (Trạng thái, Bằng chứng). Đã triển khai (P16-S4): các database role `partflow_app` và `partflow_maintenance`, `provision-roles` và `apply-grants`, service `db-roles` và reconcile check (h) (Database role và grant, bên dưới). Backup và observability vẫn là P16-S5…S6.
+mục con bên dưới). Cả hai production image nhận `PARTFLOW_RELEASE` và `PARTFLOW_COMMIT` làm build argument và mang release identity (stage `production` của backend đặt `RELEASE_TAG` và `RELEASE_COMMIT`); production stack smoke và release rehearsal đã chạy (Trạng thái, Bằng chứng). Đã triển khai (P16-S4): các database role `partflow_app` và `partflow_maintenance`, `provision-roles` và `apply-grants`, service `db-roles` và reconcile check (h) (Database role và grant, bên dưới). Đã triển khai (P16-S5): `deploy/production/backup.sh` (backup daily, manual và pre-release: `pg_dump` custom-format từ bên trong `db`, được publish thành một directory cùng manifest và `SHA256SUMS`), các command `backup-manifest`, `backup-verify` và `backup-rotate` của service `backup-tools`, các quy tắc verify và freshness mà `migrate` áp dụng cho pre-release backup, backup mà `release.sh` lấy bên trong write freeze, `deploy/production/restore-test.sh` (restore drill cô lập) và rollback path 3 cùng new-instance restore đã được tài liệu hóa (`deployment/OPERATIONS_RUNBOOK.md` §3, §4 và §6). Bằng chứng chỉ gồm Windows/Docker Desktop và một Linux container; schedule, off-host replication, drill có đo thời gian đầu tiên và path 3 trên một host thuộc P16-S7. Observability vẫn là P16-S6.
 
 **Service và network (`compose.production.yaml`).**
 
@@ -139,7 +141,8 @@ mục con bên dưới). Cả hai production image nhận `PARTFLOW_RELEASE` và
 | `db` | PostgreSQL `postgres:16.14` (biến thể Debian, không bao giờ `-alpine`: collation và reconcile check (j) phụ thuộc glibc) | `internal` (không có route ra ngoài) | volume `postgres_data`; không publish port; stop grace 60 s |
 | `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, stage `production` | `internal`, `edge` | kết nối bằng `partflow_app` (`DATABASE_ROLES_REQUIRED=true`) và chỉ mount `partflow_app_password`; `SESSION_COOKIE_SECURE=true` cố định; `WEB_CONCURRENCY` lấy từ `PARTFLOW_BACKEND_WORKERS` (mặc định 2); `FORWARDED_ALLOW_IPS` = edge subnet; stop grace 200 s (cao hơn upstream timeout dài nhất 180 s của `web`); `restart: unless-stopped` (không bao giờ `on-failure`: với nhiều worker, một lần từ chối configuration thoát với mã `0`) |
 | `web` | image `partflow/web:${PARTFLOW_RELEASE}`, stage `production` | `edge` | port publish duy nhất, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80` (không có biến cho bind address); không có `depends_on`, nên nó vẫn phục vụ shell khi `backend` đang dừng |
-| `migrate` | `python -m app.cli migrate` one-shot từ image backend (entrypoint; một connection, một transaction) | `internal` | profile `ops`: không bao giờ được `up` khởi động; chạy bằng `--profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)`; thiếu backup option là lỗi cú pháp |
+| `migrate` | `python -m app.cli migrate` one-shot từ image backend (entrypoint; một connection, một transaction) | `internal` | profile `ops`: không bao giờ được `up` khởi động; chạy bằng `--profile ops run --rm -T --user "$(id -u):$(id -g)" migrate (--pre-release-backup NAME \| --no-backup-reason TEXT)`; thiếu backup option là lỗi cú pháp; mount backup directory read-only tại `/backups` để verify backup được nêu tên (`--user` cho phép nó đọc directory mode 0700) |
+| `backup-tools` | `python -m app.cli` one-shot từ image backend; chạy với `backup-manifest`, `backup-verify` hoặc `backup-rotate` (`deploy/production/backup.sh`) | không có (`network_mode: none`) | profile `ops`: không bao giờ được `up` khởi động; không database, không secret; chỉ mount backup directory tại `/backups`; chạy với `--user "$(id -u):$(id -g)"` |
 | `db-roles` | `python -m app.cli provision-roles` (lệnh mặc định) hoặc `apply-grants` (tham số) one-shot từ image backend; kết nối bằng owner và mount cả ba secret file | `internal` | profile `ops`: không bao giờ được `up` khởi động; chạy bằng `--profile ops run --rm -T db-roles [apply-grants]` |
 
 Image được build cục bộ từ release đã checkout, qua file đi kèm chỉ để build
@@ -148,7 +151,7 @@ là `PARTFLOW_RELEASE` và build còn cần release commit (`PARTFLOW_COMMIT`, x
 Release identity). `compose.production.yaml` không có phần build, nên `up` hay
 `run` với một tag thiếu image sẽ thất bại với `No such image` thay vì build
 checkout hiện tại dưới tag đó. Mỗi service có restart policy,
-health check (trừ `migrate`; check của `backend` là route liveness, xem Readiness và write gate), giới hạn memory và CPU lấy từ file môi trường (giá
+health check (trừ các service `ops` one-shot; check của `backend` là route liveness, xem Readiness và write gate), giới hạn memory và CPU lấy từ file môi trường (giá
 trị khởi đầu, sẽ đo trên host pilot ở P16-S7) và log rotation `json-file` (10 MiB,
 5 file). Secret được mount dạng file dưới `/run/secrets`; không secret nào là
 giá trị environment và không secret nào có default đã commit. Owner role (`POSTGRES_USER`, một
@@ -255,9 +258,13 @@ màn hình là `GUI_DESIGN.md` §3 rule 13.
 **Migration job và `revision` (P16-S3).** `python -m app.cli migrate` áp các
 migration đang chờ trong một transaction trên một connection, chạy hook
 `apply-grants` trong cùng transaction (nó áp dụng grant, xem Database role và grant) và in một báo cáo
-JSON; nó cần đúng một trong `--pre-release-backup REF` hoặc `--no-backup-reason
-TEXT` (được ghi lại; ví dụ `first install: empty database`) và nhận `--lock-timeout
-SECONDS` (1-600, mặc định 30). Nó từ chối, không đổi gì, một revision file có DDL
+JSON; nó cần đúng một trong `--pre-release-backup NAME` (một backup directory do
+`backup.sh` lấy, được verify trước migration và được ghi lại; khi có migration đang
+chờ nó còn cần `--backup-not-before UTC`, thời điểm write-freeze) hoặc
+`--no-backup-reason TEXT` (được ghi lại; ví dụ `first install: empty database`) và
+nhận `--lock-timeout SECONDS` (1-600, mặc định 30). `--backup-dir` nêu tên mount
+(mặc định `/backups`). Quy tắc freshness và ownership nằm ở
+`deployment/OPERATIONS_RUNBOOK.md` §5. Nó từ chối, không đổi gì, một revision file có DDL
 không transactional (`autocommit_block`, `CONCURRENTLY`), một database revision mà
 release này không biết, một `migrate` đồng thời, và (best effort, không phải bằng
 chứng `backend` đã dừng) một backend session đang kết nối; database đã ở head trả
@@ -267,15 +274,20 @@ revision đang chờ và readiness mà backend sẽ báo; exit 0 chỉ khi schem
 `current`.
 
 **Cài đặt đầu tiên (P16-S3, mở rộng bởi P16-S4).** Từ release checkout, với tag trong
-`.env.production`, theo thứ tự: tạo ba secret file (`postgres_password`, `partflow_app_password`, `partflow_maintenance_password`) trước mọi lệnh `$PF` khởi động `backend` hoặc một ops service, vì Compose thay file thiếu bằng một directory rỗng; build **cả hai** image bằng `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`; khởi động database (`$PF up -d db`); tạo role (`$PF --profile ops run --rm -T db-roles`); áp schema và grant (`$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`); khởi động `backend` với một worker cho first-run setup như Process model mô tả, rồi `$PF up -d backend web`; cuối cùng chạy `reconcile` và kỳ vọng check (h) `pass`.
+`.env.production`, theo thứ tự: tạo backup directory (`install -d -m 0700 <path>`) và đặt `PARTFLOW_BACKUP_DIR` trong `.env.production` (mọi lệnh Compose của stack cần key này); tạo ba secret file (`postgres_password`, `partflow_app_password`, `partflow_maintenance_password`) trước mọi lệnh `$PF` khởi động `backend` hoặc một ops service, vì Compose thay file thiếu bằng một directory rỗng; build **cả hai** image bằng `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`; khởi động database (`$PF up -d db`); tạo role (`$PF --profile ops run --rm -T db-roles`); áp schema và grant (`$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`); khởi động `backend` với một worker cho first-run setup như Process model mô tả, rồi `$PF up -d backend web`; cuối cùng chạy `reconcile` và kỳ vọng check (h) `pass`.
 
 **Chuyển một stack cài trước P16-S4** (chỉ rehearsal stack; chưa có pilot nào trước P16-S7). Database phải đã ở head của candidate, nếu không `apply-grants` từ chối `revision_mismatch` và không đổi gì. Theo thứ tự: (1) tạo `partflow_app_password` và `partflow_maintenance_password` trước mọi lệnh `$PF` của Compose file mới chạy `backend` hoặc `db-roles` (xóa directory rỗng mà Compose đã tạo ở đường dẫn thiếu); (2) build cả hai image, không bao giờ chỉ `backend` và không bao giờ thiếu `PARTFLOW_COMMIT`: `PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build backend web`; (3) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles`; (4) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles apply-grants`; (5) `deploy/production/release.sh` như thường lệ. Các bước đầu của nó chạy image hiện tại qua `backend` bằng `partflow_app`, nên bước 3 và 4 phải đến trước, và bước build sau đó dùng lại image của bước 2.
+
+**Chuyển một stack cài trước P16-S5** (chỉ rehearsal stack; chưa có pilot nào trước P16-S7). Theo thứ tự: (1) tạo backup directory (`install -d -m 0700 <path>`, thuộc account chạy `backup.sh` và `release.sh`) và đặt `PARTFLOW_BACKUP_DIR` trong `.env.production` **trước mọi lệnh `$PF` với checkout P16-S5**, nếu không mọi lệnh Compose thất bại vì thiếu key; (2) `deploy/production/release.sh` như thường lệ: pre-release backup đầu tiên của nó dùng `backup-tools` của candidate (`--tools-release`), vì release đang chạy có trước P16-S5; (3) cài daily schedule và task của platform tool (`deployment/SYNOLOGY_NAS.md` §6, `deployment/VPS.md` §8); (4) chạy drill đầu tiên, `deploy/production/restore-test.sh --backup <NAME> --operator "<name>"`.
 
 **Release (P16-S3).** `deploy/production/release.sh` chạy release sequence của §7
 từ repository root của release checkout với release tag đã checkout
 (`deploy/production/release.sh --help` in cách dùng): `--release TAG --operator
-NAME --approver NAME` và đúng một trong `--pre-release-backup REF` hoặc
-`--no-backup-reason TEXT`, tùy chọn `--accept-pre-release-findings` (tiếp tục khi
+NAME --approver NAME`, tùy chọn một trong `--pre-release-backup NAME` (một backup
+`backup.sh` đã có, chỉ cho release không có migration đang chờ) hoặc
+`--no-backup-reason TEXT` (cài đặt đầu tiên hoặc rehearsal); khi không có option
+nào, `release.sh` tự lấy pre-release backup đã verify, bên trong write freeze khi có
+migration đang chờ (P16-S5); tùy chọn `--accept-pre-release-findings` (tiếp tục khi
 pre-release reconcile có finding và chỉ chặn với finding không có trong đó) hoặc
 `--skip-pre-reconcile REASON` (không image nào có database revision làm head:
 trạng thái rollback path 2; khi đó mọi finding sau release đều chặn),
@@ -297,9 +309,10 @@ cho API path không tồn tại, 409 của gate khi thiếu release header và v
 `release.sh`; không có updater nào chạy trên host, và không script nào xóa, prune
 hay re-tag image.
 
-**Rollback (P16-S3).** Cây quyết định, path 1 và 2 và schema override nằm trong
+**Rollback (P16-S3, P16-S5).** Cây quyết định, path 1 và 2 và schema override nằm trong
 `deployment/OPERATIONS_RUNBOOK.md` §6; image của release trước ở lại host trong
-suốt rollback window. Path 3 (restore) chờ P16-S5.
+suốt rollback window. Path 3 (restore pre-release backup vào một database mới)
+nằm trong cùng mục; nó cần sự phê duyệt của owner được ghi lại.
 
 **Request limit và timeout (`web`).**
 
@@ -392,12 +405,13 @@ P16-S6. Kiểm tra hạn dùng từ bất kỳ client nào: `openssl s_client -c
 hiện và xác minh ở P16-S7.
 
 **Tách biệt environment (OD-16-01).** Production dùng Compose project, database
-volume, thư mục secret, hostname và (P16-S5) vị trí backup riêng; không cái nào
+volume, thư mục secret, hostname và vị trí backup riêng (`PARTFLOW_BACKUP_DIR`); không cái nào
 được dùng chung hay trỏ vào stack staging hoặc development. Production bắt đầu từ
 database volume mới, rỗng, rồi migration, rồi first-run setup; dữ liệu
 staging hoặc development không bao giờ được attach, tái sử dụng hay copy vào đó,
-và việc restore có chủ đích vào production là quy trình P16-S5 cần owner quyết
-định. Trong thời gian pilot, pf-managed staging không được cài trên Docker daemon
+và việc restore có chủ đích vào production theo `deployment/OPERATIONS_RUNBOOK.md`
+§6 path 3 hoặc §8 host hỏng, và sự phê duyệt của owner được ghi lại trước khi
+`backend` start. Trong thời gian pilot, pf-managed staging không được cài trên Docker daemon
 của pilot, và staging thủ công bằng `compose.yaml` ở SYNOLOGY_NAS §4 được dừng,
 container được xóa và **không** xóa volume, trước khi production khởi động.
 `SITE_TIMEZONE` bằng giá trị của staging (§6). Không bao giờ chạy `down -v` (hay
@@ -414,6 +428,7 @@ của file example (có test).
 | `PARTFLOW_COMMIT` | commit đầy đủ của release đang được build; rỗng trong file, `release.sh` truyền trong shell lúc build | bắt buộc để build |
 | `PARTFLOW_ACCEPT_SCHEMA_REVISION` | chỉ cho rollback path 2: đúng một database revision mà release đang chạy được phục vụ (`OPERATIONS_RUNBOOK.md` §6); `release.sh` xóa nó | rỗng |
 | `PARTFLOW_SECRETS_DIR` | đường dẫn tuyệt đối của thư mục secret, ngoài checkout, chỉ cho production (thư mục 0700, mỗi file 0444) | bắt buộc |
+| `PARTFLOW_BACKUP_DIR` | đường dẫn tuyệt đối của backup directory production (`backup.sh` ghi một thư mục con cho mỗi backup), ngoài checkout, thư mục secret và mọi archive directory, chỉ cho production (không bao giờ của staging hay của drill); một directory đã tồn tại, mode 0700, thuộc account chạy `backup.sh` và `release.sh`; **mọi** lệnh `$PF` đều cần, viết không có dấu nháy; được mã hóa và sao chép off-host bởi platform tool | bắt buộc |
 | `PARTFLOW_SITE_TIMEZONE` | múi giờ lịch nhà máy, bằng staging (§6) | bắt buộc |
 | `PARTFLOW_HTTP_PORT` | loopback port mà platform proxy kết nối | bắt buộc (ví dụ `18080`) |
 | `POSTGRES_USER`, `POSTGRES_DB` | role bootstrap (owner) và database | bắt buộc (ví dụ `partflow_owner`, `partflow`) |
@@ -442,12 +457,15 @@ thay file (không cần restart service). `backend` chỉ mount `partflow_app_pa
 | Validate configuration | `$PF config --quiet` |
 | Build một release (tag và commit trong shell; cách dùng duy nhất của file build) | `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` |
 | Khởi động database | `$PF up -d db` |
-| Áp dụng migration và grant (một lần mỗi release, khi `backend` đang dừng) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T migrate (--pre-release-backup REF \| --no-backup-reason TEXT)` (cài đặt đầu tiên: tag đã nằm trong `.env.production`) |
+| Áp dụng migration và grant (một lần mỗi release, khi `backend` đang dừng) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate (--pre-release-backup NAME --backup-not-before UTC \| --no-backup-reason TEXT)` (cài đặt đầu tiên: tag đã nằm trong `.env.production`) |
+| Thực hiện backup (daily, manual) | `deploy/production/backup.sh --kind daily --operator … --keep-daily N --keep-weekly N` · `--kind manual --operator … --reason …` (`OPERATIONS_RUNBOOK.md` §3) |
+| Verify một backup, hoặc xem trước retention | `$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-verify NAME` · `… backup-tools backup-rotate --keep-daily N --keep-weekly N --dry-run` |
+| Restore drill trong project cô lập | `deploy/production/restore-test.sh --backup NAME --operator …` (`OPERATIONS_RUNBOOK.md` §4) |
 | Tạo hoặc sửa database role; đặt hoặc rotate password của chúng | `$PF --profile ops run --rm -T db-roles` (= `provision-roles`) |
 | Áp grant ngoài một migrate (sau restore, hoặc để sửa drift) | `$PF --profile ops run --rm -T db-roles apply-grants` |
 | Guard-integrity check (reconcile check (h), bằng `partflow_app`) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile --check h` |
 | Privilege probe (bằng chứng; một lần gọi cho mỗi table và statement, không row nào, rollback) | `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN -c "SET LOCAL ROLE partflow_app" -c "UPDATE part_movements SET id = id WHERE false" -c ROLLBACK'` (bị từ chối = stderr có `permission denied for table <t>`; được phép = stdout có `UPDATE 0` và không có `ERROR`; biến được expand bên trong `db`) |
-| Release (toàn bộ sequence ở §7) | `deploy/production/release.sh --release <new> --operator … --approver … (--pre-release-backup REF \| --no-backup-reason TEXT)` |
+| Release (toàn bộ sequence ở §7) | `deploy/production/release.sh --release <new> --operator … --approver … [--pre-release-backup NAME \| --no-backup-reason TEXT]` |
 | Smoke check của release đang chạy | `deploy/production/smoke.sh --release <tag>` |
 | Revision mong đợi và của database, readiness | `$PF run --rm --no-deps -T backend python -m app.cli revision` |
 | Khởi động hoặc tạo lại application | `$PF up -d backend web` |
@@ -471,7 +489,7 @@ Rollback code application khi không đổi schema: khôi phục tag trước tr
 trước còn trên host, nên giữ chúng (không `docker image prune -a`) trong suốt
 rollback window; nếu chúng đã mất, `up` thất bại với `No such image` và không
 khởi động gì. Rollback schema là đường restore
-của runbook (path 3, P16-S5), không bao giờ là down-migration ở đây. **Không bao giờ
+của runbook (path 3, `deployment/OPERATIONS_RUNBOOK.md` §6), không bao giờ là down-migration ở đây. **Không bao giờ
 chạy `down -v`, hay xóa volume, trên project `partflow-production`**: nó xóa
 `partflow-production_postgres_data`; `$PF down` không có `-v` là dạng dừng-tất-cả
 duy nhất.
@@ -484,7 +502,7 @@ trong 11 mock sentinel), và Compose stack smoke trên Docker Desktop (các case
 SM-1…SM-22, gồm rate limit, các câu trả lời JSON do proxy sinh, content security
 policy trong trình duyệt thật, first-run một worker, các lệnh reconcile, và thời
 gian import 2.000 Work Order là 18,06 s để tạo và 31,33 s để đổi quantity, thấp
-hơn 180 s của `web`). Bằng chứng P16-S3: bộ static và script production (93 test, đều pass), 51 test release-script và reconcile-regression pass dưới `dash` trong Linux container, `sh -n` trên cả hai script, cả hai production image được build với commit đủ và build fail khi thiếu, Compose stack smoke pass (SM-1…SM-19 và SM-21…SM-28; SM-20 là browser check thủ công của S2), release rehearsal pass (RH-1…RH-8 và RH-10: một release có migration, write freeze, switch hai bước, migration bị từ chối khi backend đang kết nối, và độ trễ `/api/health` và `/api/health/live` qua `web`), và browser check update notice cùng automatic reload của kiosk Production Board trên rehearsal stack. Chưa chạy (P16-S7): các case reload của Scan Station cần Area, Operation và station đã enroll được cấu hình, và mọi host check NAS và VPS. Bằng chứng P16-S4: bộ static và script production (98 test trên host và 63 test release-script, reconcile-regression và rehearsal dưới `dash` trong Linux container), Compose stack smoke pass ở lần chạy thứ hai (39 case tự động, gồm privilege probe, việc rotate password của role và các check secret file; SM-20 là browser check thủ công của S2), và release rehearsal pass (RH-1…RH-8 và RH-10, cùng việc chuyển một stack cài trước P16-S4 là RH-11 và việc nó bị từ chối khi thiếu role file là RH-11b). Các host check trên Synology NAS và VPS không thuộc bằng chứng này.
+hơn 180 s của `web`). Bằng chứng P16-S3: bộ static và script production (93 test, đều pass), 51 test release-script và reconcile-regression pass dưới `dash` trong Linux container, `sh -n` trên cả hai script, cả hai production image được build với commit đủ và build fail khi thiếu, Compose stack smoke pass (SM-1…SM-19 và SM-21…SM-28; SM-20 là browser check thủ công của S2), release rehearsal pass (RH-1…RH-8 và RH-10: một release có migration, write freeze, switch hai bước, migration bị từ chối khi backend đang kết nối, và độ trễ `/api/health` và `/api/health/live` qua `web`), và browser check update notice cùng automatic reload của kiosk Production Board trên rehearsal stack. Chưa chạy (P16-S7): các case reload của Scan Station cần Area, Operation và station đã enroll được cấu hình, và mọi host check NAS và VPS. Bằng chứng P16-S4: bộ static và script production (98 test trên host và 63 test release-script, reconcile-regression và rehearsal dưới `dash` trong Linux container), Compose stack smoke pass ở lần chạy thứ hai (39 case tự động, gồm privilege probe, việc rotate password của role và các check secret file; SM-20 là browser check thủ công của S2), và release rehearsal pass (RH-1…RH-8 và RH-10, cùng việc chuyển một stack cài trước P16-S4 là RH-11 và việc nó bị từ chối khi thiếu role file là RH-11b). Bằng chứng P16-S5: bộ static và script production (154 test trên host, cùng 116 test backup-script, release-script, reconcile-regression và rehearsal dưới `dash` trong Linux container), `sh -n` sạch trên `release.sh`, `backup.sh`, `restore-test.sh` và `smoke.sh`, Compose stack smoke pass (38 case) và release rehearsal pass (RH-1…RH-8 và RH-10, với RH-5 và RH-11 dùng automatic backup) với backup directory tạm, và backup rehearsal (`deploy/production/tests/backup_rehearsal.py`) pass trên image thật với dữ liệu tổng hợp: một daily backup cùng `sha256sum -c` trên host, một isolated drill (reconcile (h) và (j) `pass`, một ảnh đã upload được đọc lại với SHA-256 bằng nhau, 14,2 s từ restore đến ready và 32,3 s tổng trên host đó, production không bị đụng tới), một drill trên `postgres:16.14-bookworm` (glibc collation version 2.36 so với 2.41, (h) và (j) `pass`), rollback path 3 từ một release bị để ở trạng thái stopped frozen (dump nằm trong freeze, các command được tài liệu hóa chạy đúng nguyên văn, database đã migrate được giữ lại), một restore thất bại có tính nguyên tử, các từ chối stale, tampered và đồng thời, và một backup lấy trong lúc có write. Chưa chạy: loại host thứ hai (DR-9) và hành vi fail-closed khi thiếu backup mount trên Linux engine (Docker Desktop tạo directory còn thiếu; P16-S7). Các host check trên Synology NAS và VPS không thuộc bằng chứng này.
 
 ## 4. Chọn nền tảng
 
@@ -561,12 +579,20 @@ Các gate ở trên vẫn là gate cho đến khi P16-S7 ghi nhận bằng chứ
 ### An toàn dữ liệu và vận hành
 
 - PostgreSQL logical backup chạy tự động theo lịch, được mã hóa và sao chép
-  off-host/off-NAS, có retention và monitoring;
-- restore vào database cô lập đã được test và đo thời gian;
+  off-host/off-NAS, có retention và monitoring — đã triển khai bởi `backup.sh`,
+  `backup-rotate` và các task của platform tool (P16-S5; schedule, replication và
+  alert tuổi backup được chạy trên pilot host ở P16-S7 và được P16-S6 bổ sung); xem
+  `deployment/OPERATIONS_RUNBOOK.md` §3;
+- restore vào database cô lập đã được test và đo thời gian — đã triển khai bởi
+  `restore-test.sh` (P16-S5); drill có đo thời gian đầu tiên trên pilot host là
+  P16-S7 (`deployment/OPERATIONS_RUNBOOK.md` §4);
 - mỗi migration có backup, forward plan, đánh giá compatibility, smoke test và
-  recovery plan;
+  recovery plan — backup đã verify do `release.sh` lấy bên trong write freeze và do
+  `migrate` kiểm tra (P16-S5);
 - rollback dùng release ứng dụng tương thích trước đó, hoặc restore database
-  pre-migration khớp phiên bản nếu rollback schema không an toàn;
+  pre-migration khớp phiên bản nếu rollback schema không an toàn — path 3, đã
+  triển khai (P16-S5; `deployment/OPERATIONS_RUNBOOK.md` §6), bằng chứng trên pilot
+  host: P16-S7;
 - health, log, disk, tuổi backup, tăng trưởng database và số lần container
   restart đều được monitor;
 - reconciliation check cho Movement/quantity chạy và alert nhưng không mutate
@@ -618,10 +644,10 @@ Mọi nền tảng dùng cùng thứ tự release:
 1. Chọn và ghi lại release commit/tag bất biến theo §10.
 2. Xác nhận CI và quality gate trên đúng revision đó.
 3. Đọc migration note từ revision đang chạy đến target.
-4. Kiểm tra backup mới nhất và tạo backup pre-release mới. Trước P16-S5 đây là
-   dump của operator theo `deployment/OPERATIONS_RUNBOOK.md` §3, lấy trước freeze
-   và đặt tên bằng `--pre-release-backup`; các write sau nó không nằm trong đó
-   (`OPERATIONS_RUNBOOK.md` §5 và §6).
+4. Kiểm tra backup mới nhất và tạo backup pre-release mới: `release.sh` lấy nó
+   bên trong write freeze khi có migration đang chờ (bước 6), đã verify, và
+   `migrate` từ chối backup stale, của database khác hoặc bị tamper
+   (`deployment/OPERATIONS_RUNBOOK.md` §3 và §5).
 5. Build target image mà chưa thay thế release đang chạy (`release.sh` build
    candidate và không bao giờ chạm release đang chạy).
 6. Vào write freeze (dừng `backend`, `OPERATIONS_RUNBOOK.md` §5) khi có migration

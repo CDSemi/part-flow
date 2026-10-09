@@ -1153,13 +1153,15 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 
 `compose.production.yaml` (Compose project `partflow-production`) is the
 production stack: `db`, `backend`, `web` (nginx, published on `127.0.0.1` only)
-and the one-shot `migrate` and `db-roles` jobs. **It is not for development** (use `compose.yaml`),
+and the one-shot `migrate`, `db-roles` and `backup-tools` jobs. **It is not for development** (use `compose.yaml`),
 it is not started by anything in this repository, and it has not been verified
 on a Synology NAS or a VPS yet (Phase 16 slice 7). Configuration is
 `.env.production` (copy `.env.production.example`, git-ignored) plus the secret
 files `postgres_password`, `partflow_app_password` and
 `partflow_maintenance_password` in `PARTFLOW_SECRETS_DIR` (create all three before
-the first command that starts `backend` or an ops service). The backend connects as
+the first command that starts `backend` or an ops service) and an existing backup
+directory, `PARTFLOW_BACKUP_DIR` (mode 0700, required by every Compose command of
+this stack). The backend connects as
 the least-privilege database role `partflow_app`, never as the owner. Build and
 start, from the release checkout:
 
@@ -1191,13 +1193,35 @@ are in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1.
 
 Later releases run through `deploy/production/release.sh`, which performs the
 release sequence (build, pre-release and post-release reconcile, write freeze,
-`migrate`, the `backend` then `web` switch, `smoke.sh`) and writes a
-deployment record; `deploy/production/smoke.sh --release <tag>` runs the
+the verified pre-release backup, `migrate`, the `backend` then `web` switch,
+`smoke.sh`) and writes a deployment record; `deploy/production/smoke.sh --release <tag>` runs the
 loopback checks of a running release. Both print their usage with `--help`; the
 procedure is in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1 and
 [`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
 §5 and §6. Each production image carries its release (`PARTFLOW_RELEASE`,
 `PARTFLOW_COMMIT`); the backend and `web` images both refuse a missing or malformed value (`docs/IMPLEMENTATION_ROADMAP.md`, Phase 16 slice 3).
+
+Backups (Phase 16 slice 5): `deploy/production/backup.sh` writes one verified
+directory per backup (a custom-format `pg_dump` taken inside `db`, a manifest and
+`SHA256SUMS`) into `PARTFLOW_BACKUP_DIR`; `release.sh` takes the pre-release
+backup itself, inside the write freeze when a migration is pending, and `migrate`
+refuses a stale, foreign or tampered one. `deploy/production/restore-test.sh`
+restores a backup into an isolated throwaway project, runs the readiness, the
+full `reconcile` and the smoke checks, and writes timed evidence before it tears
+the project down:
+
+```bash
+deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8   # 14 and 8: the owner's retention
+deploy/production/restore-test.sh --backup <NAME> --operator "<name>"
+```
+
+Both print their usage with `--help`. The procedures, the retention, the
+rollback path 3 and the new-instance restore are in
+[`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md)
+§3, §4 and §6; encryption and off-host replication belong to the platform tool
+([`docs/deployment/SYNOLOGY_NAS.md`](./docs/deployment/SYNOLOGY_NAS.md) §6,
+[`docs/deployment/VPS.md`](./docs/deployment/VPS.md) §8). The schedule and the
+first drill on a host are Phase 16 slice 7.
 
 Only the build uses `compose.production.build.yaml`: `compose.production.yaml`
 has no build section, so `up` or `run` with a release whose images are missing
@@ -1230,21 +1254,24 @@ The production artifact checks need no running stack for their static part:
 
 ```bash
 python3 -B -m unittest discover -s deploy/production/tests -p 'test*.py'
-PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=$(git rev-parse HEAD) PARTFLOW_SECRETS_DIR=<dir holding postgres_password> PARTFLOW_SITE_TIMEZONE=UTC \
+PARTFLOW_RELEASE=s2-check PARTFLOW_COMMIT=$(git rev-parse HEAD) PARTFLOW_SECRETS_DIR=<dir holding postgres_password> PARTFLOW_BACKUP_DIR=<any directory> PARTFLOW_SITE_TIMEZONE=UTC \
   docker compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production.example build
 ```
 
 The first runs the static tests of the Compose model, the environment example,
 the Dockerfiles and the nginx configuration, plus the `release.sh` / `smoke.sh`
-tests (`test_release_scripts.py`, with fake `docker`, `git` and `curl`) and the
-`reconcile_regression.py` tests (`test_reconcile_regression.py`); the second
+tests (`test_release_scripts.py`, with fake `docker`, `git` and `curl`), the
+`backup.sh` / `restore-test.sh` tests (`test_backup_scripts.py`, also with fakes)
+and the `reconcile_regression.py` tests (`test_reconcile_regression.py`); the second
 builds both production images (the `web` build runs the production-boundary
 check, and a build without `PARTFLOW_COMMIT` fails). The Compose stack
 smoke (`python3 deploy/production/tests/stack_smoke.py --evidence <path.json>`) starts a throwaway
 `partflow-s2-smoke` project on loopback ports, drives it through `web` and
 removes it; `python3 deploy/production/tests/release_rehearsal.py` rehearses a
-release on a throwaway `partflow-s3-rehearsal` project. Both need a Docker
-daemon and are not part of CI.
+release on a throwaway `partflow-s3-rehearsal` project;
+`python3 deploy/production/tests/backup_rehearsal.py --evidence <path.json>` builds
+three releases and exercises backups, the restore drill and rollback path 3 on
+throwaway `partflow-s5-*` projects. All three need a Docker daemon and are not part of CI.
 
 ## Continuous integration
 
@@ -1280,10 +1307,11 @@ backend/
   Dockerfile       `production` and `development` (default) stages
 frontend/nginx/    `web` image configuration (nginx templates, proxy and header snippets, trusted-proxy entrypoint)
 compose.yaml       development stack (db, backend, frontend)
-compose.production.yaml  production stack (db, backend, web, migrate); not for development
+compose.production.yaml  production stack (db, backend, web, migrate, db-roles, backup-tools); not for development
 compose.production.build.yaml  build-only companion: the production image builds of backend and web
 .env.production.example  production configuration inventory (copy to .env.production)
 deploy/production/release.sh, smoke.sh  release flow and loopback smoke checks (reconcile_regression.py compares reconcile reports)
-deploy/production/tests/ production artifact static tests, release script tests, Compose stack smoke and release rehearsal
+deploy/production/backup.sh, restore-test.sh  backup artifact and isolated restore drill
+deploy/production/tests/ production artifact static tests, release and backup script tests, Compose stack smoke, release rehearsal and backup rehearsal
 docs/              canonical project documentation
 ```

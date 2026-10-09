@@ -5,7 +5,10 @@
 # It automates the release sequence with `PF="docker compose -f compose.production.yaml --env-file <env>"`:
 # preflight; the current revision and pre-release reconcile with the RUNNING release; the candidate build (the only
 # use of compose.production.build.yaml); the candidate's check (j) and revision; the write freeze (`$PF stop backend`)
-# when a migration is pending; `migrate` (one transaction); the post-release reconcile; then the switch in two steps:
+# when a migration is pending; the verified pre-release backup (P16-S5: backup.sh, taken INSIDE the freeze when a
+# migration is pending so that it holds every committed write; the backup lock is held from the freeze, or from the
+# backup, until the env file names the new release); `migrate` (one transaction); the post-release reconcile; then
+# the switch in two steps:
 # `backend` first while `web` still serves the previous bundle (every loaded page sends the previous release, so the
 # release gate refuses its writes with 409), health, then `web` (this reopens writes), then smoke.sh. A failed check
 # after the switch re-freezes (`$PF stop backend`). Nothing is ever removed, pruned or re-tagged: rollback path 1
@@ -24,20 +27,25 @@ PRODUCTION_TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(al
 HEALTH_ATTEMPTS=90
 HEALTH_INTERVAL=2
 # The release in the shell would override the env file for every command: the script sets it per command only.
-unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR COMPOSE_PROJECT_NAME COMPOSE_FILE \
+    COMPOSE_PROFILES
+BACKUP_NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
 
 usage() {
     cat <<'EOF'
 Usage: deploy/production/release.sh --release TAG --operator NAME --approver NAME
-           (--pre-release-backup REF | --no-backup-reason TEXT)
+           [--pre-release-backup NAME | --no-backup-reason TEXT]
            [--accept-pre-release-findings | --skip-pre-reconcile REASON] [--env-file .env.production]
            [--records-dir DIR] [--environment NAME] [--url URL]
            [--rollback-deadline TEXT] [--observation-owner TEXT] [--known-limitations TEXT]
            [--rehearsal --project NAME]
 
 Run from the repository root of the release checkout (git tag TAG checked out, clean build inputs).
-  --pre-release-backup REF       the pre-release dump taken before this run (OPERATIONS_RUNBOOK §5, Before maintenance)
-  --no-backup-reason TEXT        why there is no pre-release dump (recorded)
+  (neither backup option)        take the verified pre-release backup with backup.sh: inside the write freeze when a
+                                 migration is pending (OPERATIONS_RUNBOOK §5)
+  --pre-release-backup NAME      a backup directory taken by backup.sh before this run; refused when a migration is
+                                 pending (the backup must then be taken inside the freeze)
+  --no-backup-reason TEXT        no pre-release backup: first installation and rehearsals only (recorded)
   --accept-pre-release-findings  the pre-release reconcile has findings: continue, and block only on findings that
                                  are absent from it (reconcile_regression.py; needs python3)
   --skip-pre-reconcile REASON    no image of a release has the database revision as its head (rollback path 2
@@ -116,7 +124,12 @@ while [ "$#" -gt 0 ]; do
         --release) TAG=$value ;;
         --operator) check_text "$option" "$value"; OPERATOR=$value ;;
         --approver) check_text "$option" "$value"; APPROVER=$value ;;
-        --pre-release-backup) check_text "$option" "$value"; BACKUP_REF=$value ;;
+        --pre-release-backup)
+            check_text "$option" "$value"
+            printf '%s' "$value" | grep -Eq "$BACKUP_NAME_PATTERN" \
+                || usage_error "--pre-release-backup must name a backup directory created by backup.sh (for example 20261008T140000Z-pre-release-v1.0.0-rc.2)."
+            BACKUP_REF=$value
+            ;;
         --no-backup-reason) check_text "$option" "$value"; NO_BACKUP_REASON=$value ;;
         --skip-pre-reconcile) check_text "$option" "$value"; SKIP_REASON=$value ;;
         --env-file) ENV_FILE=$value ;;
@@ -136,7 +149,6 @@ done
 if [ -n "$BACKUP_REF" ] && [ -n "$NO_BACKUP_REASON" ]; then
     usage_error "give either --pre-release-backup or --no-backup-reason, not both."
 fi
-[ -n "$BACKUP_REF$NO_BACKUP_REASON" ] || usage_error "--pre-release-backup REF or --no-backup-reason TEXT is required."
 if [ -n "$ACCEPT_FINDINGS" ] && [ -n "$SKIP_REASON" ]; then
     usage_error "--accept-pre-release-findings and --skip-pre-reconcile exclude each other."
 fi
@@ -158,11 +170,13 @@ if [ -z "$RECORDS_DIR" ]; then
     [ -n "${HOME:-}" ] || usage_error "HOME is not set: give --records-dir DIR."
     RECORDS_DIR=$HOME/partflow-deployments
 fi
-BACKUP_OPTION=--pre-release-backup
-BACKUP_VALUE=$BACKUP_REF
+# none: --no-backup-reason; operator: --pre-release-backup NAME; own: release.sh takes the backup (step 6a).
 if [ -n "$NO_BACKUP_REASON" ]; then
-    BACKUP_OPTION=--no-backup-reason
-    BACKUP_VALUE=$NO_BACKUP_REASON
+    BACKUP_MODE=none
+elif [ -n "$BACKUP_REF" ]; then
+    BACKUP_MODE=operator
+else
+    BACKUP_MODE=own
 fi
 
 could_not_run() {
@@ -184,6 +198,18 @@ PORT=$(sed -n 's/^PARTFLOW_HTTP_PORT=//p' "$ENV_FILE" | tail -n 1)
 printf '%s' "$CURRENT" | grep -Eq "$RELEASE_PATTERN" \
     || could_not_run "PARTFLOW_RELEASE in $ENV_FILE must name the running release (unquoted)."
 printf '%s' "$PORT" | grep -Eq '^[0-9]{1,5}$' || could_not_run "PARTFLOW_HTTP_PORT in $ENV_FILE is not an unquoted port."
+# P16-S5: compose.production.yaml needs the backup directory for every command, whatever the backup mode.
+BACKUP_DIR=$(sed -n 's/^PARTFLOW_BACKUP_DIR=//p' "$ENV_FILE" | tail -n 1)
+case "$BACKUP_DIR" in
+    /*) ;;
+    *) could_not_run "PARTFLOW_BACKUP_DIR in $ENV_FILE must name the backup directory as an absolute path, unquoted (DEPLOYMENT §3.1)." ;;
+esac
+case "$BACKUP_DIR" in
+    *\"* | *\'* | *[[:space:]]*) could_not_run "PARTFLOW_BACKUP_DIR in $ENV_FILE must be unquoted and without spaces." ;;
+esac
+[ -d "$BACKUP_DIR" ] || could_not_run "The backup directory $BACKUP_DIR (PARTFLOW_BACKUP_DIR) does not exist."
+BACKUP_DIR=${BACKUP_DIR%/}
+BACKUP_LOCK=$BACKUP_DIR/.backup.lock
 
 if [ "$TAG" = "$CURRENT" ]; then
     echo "release: $TAG is already the running release in $ENV_FILE. Nothing was changed." >&2
@@ -246,6 +272,11 @@ SMOKE_RC=
 FROZEN=
 SWITCHED=
 PENDING=
+FREEZE_COMPLETED_AT=
+BACKUP_LOCK_HELD=
+BACKUP_NAME=
+BACKUP_PATH=
+BACKUP_DURATION_MS=
 
 if [ -n "$PROJECT" ]; then
     PF_TEXT="docker compose -p $PROJECT -f compose.production.yaml --env-file $ENV_FILE"
@@ -311,18 +342,32 @@ step_end() {
 }
 
 write_record() {
-    if [ -n "$BACKUP_REF" ]; then
-        backup="{\"kind\": \"reference\", \"reference\": \"$BACKUP_REF\", \"verified\": false}"
-    else
+    case "$BACKUP_MODE" in
+        own)
+            taken_by=null
+            [ -z "$BACKUP_NAME" ] || taken_by='"release.sh"'
+            ;;
+        operator) taken_by='"operator"' ;;
+        none) taken_by=null ;;
+    esac
+    if [ "$BACKUP_MODE" = none ]; then
         backup="{\"kind\": \"none\", \"reason\": \"$NO_BACKUP_REASON\", \"verified\": false}"
+    else
+        backup="{\"kind\": \"reference\", \"reference\": $(js "$BACKUP_NAME"), \"verified\": false}"
     fi
     if [ -n "$MIGRATE_REACHED" ]; then
         reached=$(json_object "$RECORD_DIR/migrate.json" backup)
-        [ -z "$reached" ] || backup=$reached
+        case "$reached" in
+            \{*\}) backup=$reached ;;
+        esac
         migration="{\"result\": $(js "$MIGRATE_RESULT"), \"file\": \"migrate.json\", \"log\": \"migrate.log\"}"
     else
         migration='{"result": null, "file": null, "log": null}'
     fi
+    # P16-S5: who took the backup, where it is, and how long backup.sh took (step 6a).
+    close='}'
+    backup="${backup%"$close"}, \"taken_by\": $taken_by, \"name\": $(js "$BACKUP_NAME"), \"path\": $(js "$BACKUP_PATH"),"
+    backup="$backup \"duration_ms\": $(if [ -n "$BACKUP_DURATION_MS" ]; then printf '%s' "$BACKUP_DURATION_MS"; else printf 'null'; fi)}"
     host=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._-') || host=
     after=$REVISION_AFTER
     [ -n "$after" ] || after=$REVISION_BEFORE
@@ -356,6 +401,7 @@ write_record() {
             "$(file_rc pre-reconcile.json "$PRE_RC")" "$(file_rc candidate-j.json "$J_RC")" \
             "$(file_rc post-reconcile.json "$POST_RC")" "$(js "$BASELINE_IMAGE")" "$(js "$SKIP_REASON")"
         printf ' "regression": %s},\n' "$(file_rc regression.txt "$REGRESSION_RC")"
+        printf '  "freeze_completed_at": %s,\n' "$(js "$FREEZE_COMPLETED_AT")"
         printf '  "writes_reopened_at": %s,\n' "$(js "$WRITES_REOPENED_AT")"
         printf '  "refrozen": %s,\n' "$REFROZEN"
         printf '  "smoke": %s,\n' "$(file_rc smoke.txt "$SMOKE_RC")"
@@ -373,11 +419,70 @@ write_record() {
     mv "$RECORD_DIR/record.json.tmp" "$RECORD_DIR/record.json"
 }
 
+# The backup lock (P16-S5, OPERATIONS_RUNBOOK §3): held from the freeze (migration pending) or from the own backup
+# (nothing pending) until the env file names the new release, so no scheduled backup dumps during migrate or records
+# the old release beside the new revision. Only a lock whose owner names this run's record directory is removed.
+take_backup_lock() {
+    if mkdir "$BACKUP_LOCK" 2>/dev/null; then
+        BACKUP_LOCK_HELD=1
+        {
+            echo "host=$(uname -n)"
+            echo "pid=$$"
+            echo "started_at=$(utc)"
+            echo "by=release.sh"
+            echo "release=$RECORD_DIR"
+        } >"$BACKUP_LOCK/owner"
+        return 0
+    fi
+    # Busy: the backup.sh step-0 decision (never removes or changes the lock).
+    owner=$BACKUP_LOCK/owner
+    o_host=$(sed -n 's/^host=//p' "$owner" 2>/dev/null | head -n 1)
+    o_pid=$(sed -n 's/^pid=//p' "$owner" 2>/dev/null | head -n 1)
+    o_started=$(sed -n 's/^started_at=//p' "$owner" 2>/dev/null | head -n 1)
+    o_by=$(sed -n 's/^by=//p' "$owner" 2>/dev/null | head -n 1)
+    o_name=$(sed -n 's/^name=//p' "$owner" 2>/dev/null | head -n 1)
+    o_release=$(sed -n 's/^release=//p' "$owner" 2>/dev/null | head -n 1)
+    running=
+    if [ "$o_host" != "$(uname -n)" ]; then
+        running=1
+    elif ! ps -p "$$" >/dev/null 2>&1; then
+        running=1
+    elif printf '%s' "$o_pid" | grep -Eq '^[0-9]+$' && ps -p "$o_pid" >/dev/null 2>&1; then
+        running=1
+    else
+        sessions=$(pf exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = '"'"'pg_dump'"'"'"' \
+            2>/dev/null | tr -d '\r' | head -n 1) || sessions=
+        [ "$sessions" = 0 ] || running=1
+    fi
+    if [ -n "$running" ]; then
+        detail=
+        [ -z "$o_release" ] || detail=", release record $o_release"
+        BACKUP_LOCK_MESSAGE="refused — a backup is running (${o_by:-unknown} on ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail)."
+    else
+        detail=
+        paths=
+        if [ -n "$o_name" ]; then
+            detail=", backup $o_name"
+            paths=" and $BACKUP_DIR/.partial/$o_name"
+        fi
+        BACKUP_LOCK_MESSAGE="refused — the backup lock of ${o_by:-unknown} (host ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail) was left by a run that no longer exists. Check OPERATIONS_RUNBOOK §3, then remove $BACKUP_DIR/.backup.lock$paths."
+    fi
+    return 1
+}
+release_backup_lock() {
+    [ -n "$BACKUP_LOCK_HELD" ] || return 0
+    BACKUP_LOCK_HELD=
+    if grep -qxF "release=$RECORD_DIR" "$BACKUP_LOCK/owner" 2>/dev/null; then
+        rm -rf "$BACKUP_LOCK"
+    fi
+}
+
 finish() {
     OUTCOME=$1
     FINALIZED=1
     write_record
     rm -f "$RECORD_DIR/steps.part"
+    release_backup_lock
     if [ -n "${LOCK_HELD:-}" ]; then
         rmdir "$LOCK" 2>/dev/null || true
         LOCK_HELD=
@@ -385,6 +490,10 @@ finish() {
     echo "release: $OUTCOME (exit $2); record: $RECORD_DIR/record.json"
     exit "$2"
 }
+if [ "$BACKUP_MODE" = operator ]; then
+    BACKUP_NAME=$BACKUP_REF
+    BACKUP_PATH=$BACKUP_DIR/$BACKUP_REF
+fi
 
 on_signal() {
     trap - INT TERM
@@ -698,6 +807,9 @@ candidate_commit=$(json_field "$RECORD_DIR/candidate-revision.json" commit)
 if [ "$candidate_release" != "$TAG" ] || [ "$candidate_commit" != "$HEAD_COMMIT" ]; then
     stop_unchanged "the candidate image reports release ${candidate_release:-unknown} at commit ${candidate_commit:-unknown}, not $TAG at $HEAD_COMMIT ($RECORD_DIR/candidate-revision.json): /api/health would never show $TAG after the switch."
 fi
+if [ -n "$PENDING" ] && [ "$BACKUP_MODE" = operator ]; then
+    stop_unchanged "A migration is pending, so the pre-release backup must be taken inside the write freeze. Run release.sh without --pre-release-backup; it takes the backup."
+fi
 
 if [ "$baseline" = candidate ] && [ -z "$SKIP_REASON" ]; then
     if [ -n "$PENDING" ]; then
@@ -706,12 +818,39 @@ if [ "$baseline" = candidate ] && [ -z "$SKIP_REASON" ]; then
     reconcile_baseline candidate
 fi
 
+# reopen_current WHY: the database is unchanged and backend is frozen: reopen writes on the running release
+# (aborted_reopened, exit 1), or stay frozen (exit 3) when it is not ready or the reopen fails.
+reopen_current() {
+    echo "release: $1; the database is unchanged: reopening writes on $CURRENT." >&2
+    step_begin reopen reopen-revision.json "reopen writes on $CURRENT"
+    run_report reopen-revision.json current revision
+    readiness=$(json_field "$RECORD_DIR/reopen-revision.json" readiness)
+    case "$readiness" in
+        current | accepted) ;;
+        *)
+            step_end "$RC"
+            stop_frozen "the running release $CURRENT is not ready on the database (readiness ${readiness:-unknown}); writes stay frozen."
+            ;;
+    esac
+    rc=0
+    pf up -d backend >>"$RECORD_DIR/reopen.log" 2>&1 || rc=$?
+    step_end "$rc"
+    [ "$rc" -eq 0 ] || stop_frozen "'up -d backend' failed ($RECORD_DIR/reopen.log)."
+    FROZEN=
+    echo "release: writes reopened on $CURRENT; $1." >&2
+    finish aborted_reopened 1
+}
+
 # ---------------------------------------------------------------------------
-# 6 freeze (pending only), 7 migrate
+# 6 freeze (pending only; the backup lock first), 6a pre-release backup, 7 migrate
 # ---------------------------------------------------------------------------
 
 if [ -n "$PENDING" ]; then
     step_begin freeze freeze.log "write freeze: $PF_TEXT stop backend (waits up to 200 s for in-flight requests)"
+    if ! take_backup_lock; then
+        step_end 1
+        stop_unchanged "$BACKUP_LOCK_MESSAGE"
+    fi
     FROZEN=1
     rc=0
     pf stop backend >>"$RECORD_DIR/freeze.log" 2>&1 || rc=$?
@@ -724,14 +863,83 @@ if [ -n "$PENDING" ]; then
         step_end 1
         stop_frozen "backend is still running after the stop ($running); migrate was not run."
     fi
+    # Every write backend committed is in a dump that starts at or after this instant (migrate --backup-not-before).
+    FREEZE_COMPLETED_AT=$(utc)
     step_end 0
 fi
 
-step_begin migrate migrate.json "migrate with the candidate image ($BACKUP_OPTION)"
+if [ "$BACKUP_MODE" = own ]; then
+    step_begin pre_release_backup pre-release-backup.out "deploy/production/backup.sh --kind pre-release --label $TAG"
+    if [ -z "$BACKUP_LOCK_HELD" ] && ! take_backup_lock; then
+        step_end 1
+        stop_unchanged "$BACKUP_LOCK_MESSAGE"
+    fi
+    backup_started=$(date +%s)
+    rc=0
+    if [ -n "$PROJECT" ]; then
+        sh "$SCRIPT_DIR/backup.sh" --kind pre-release --label "$TAG" --tools-release "$TAG" \
+            --lock-held-by-release "$RECORD_DIR" --operator "$OPERATOR" --env-file "$ENV_FILE" --rehearsal --project "$PROJECT" \
+            >"$RECORD_DIR/pre-release-backup.out" 2>"$RECORD_DIR/pre-release-backup.log" || rc=$?
+    else
+        sh "$SCRIPT_DIR/backup.sh" --kind pre-release --label "$TAG" --tools-release "$TAG" \
+            --lock-held-by-release "$RECORD_DIR" --operator "$OPERATOR" --env-file "$ENV_FILE" \
+            >"$RECORD_DIR/pre-release-backup.out" 2>"$RECORD_DIR/pre-release-backup.log" || rc=$?
+    fi
+    step_end "$rc"
+    BACKUP_DURATION_MS=$((($(date +%s) - backup_started) * 1000))
+    line=$(sed -n '/^BACKUP [^ ][^ ]* /p' "$RECORD_DIR/pre-release-backup.out" 2>/dev/null | head -n 1)
+    name=$(printf '%s' "$line" | sed -n 's/^BACKUP \([^ ]*\) .*$/\1/p')
+    if [ "$rc" -eq 0 ] && printf '%s' "$name" | grep -Eq "$BACKUP_NAME_PATTERN"; then
+        BACKUP_NAME=$name
+        BACKUP_PATH=${line#BACKUP "$name" }
+        echo "release: pre-release backup $BACKUP_NAME ($BACKUP_PATH)."
+    else
+        cat "$RECORD_DIR/pre-release-backup.log" >&2 || true
+        why="the pre-release backup failed (backup.sh exit $rc; $RECORD_DIR/pre-release-backup.log)"
+        [ -n "$FROZEN" ] || stop_unchanged "$why."
+        reopen_current "$why"
+    fi
+fi
+
+# --backup-not-before: the freeze (pending), this run's start (own backup, nothing pending: later than every completed
+# release, which the release lock serializes), the newest completed release (operator backup); none: the age rule.
+NOT_BEFORE=
+case "$BACKUP_MODE" in
+    own)
+        NOT_BEFORE=$STARTED_AT
+        [ -z "$FREEZE_COMPLETED_AT" ] || NOT_BEFORE=$FREEZE_COMPLETED_AT
+        ;;
+    operator)
+        for record in "$RECORDS_DIR"/*/record.json; do
+            [ -f "$record" ] || continue
+            grep -qx '  "outcome": "completed"' "$record" 2>/dev/null || continue
+            finished=$(json_field "$record" finished_at)
+            printf '%s' "$finished" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || continue
+            if [ -z "$NOT_BEFORE" ] || [ "$finished" \> "$NOT_BEFORE" ]; then
+                NOT_BEFORE=$finished
+            fi
+        done
+        ;;
+esac
+
+if [ "$BACKUP_MODE" = none ]; then
+    step_begin migrate migrate.json "migrate with the candidate image (--no-backup-reason)"
+else
+    step_begin migrate migrate.json "migrate with the candidate image (--pre-release-backup $BACKUP_NAME)"
+fi
 MIGRATE_REACHED=1
 rc=0
-pf_candidate --profile ops run --rm -T migrate "$BACKUP_OPTION" "$BACKUP_VALUE" \
-    >"$RECORD_DIR/migrate.json" 2>"$RECORD_DIR/migrate.log" || rc=$?
+if [ "$BACKUP_MODE" = none ]; then
+    pf_candidate --profile ops run --rm -T migrate --no-backup-reason "$NO_BACKUP_REASON" \
+        >"$RECORD_DIR/migrate.json" 2>"$RECORD_DIR/migrate.log" || rc=$?
+elif [ -n "$NOT_BEFORE" ]; then
+    # --user: the container reads the 0700 backup directory as the account that owns it.
+    pf_candidate --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate --pre-release-backup "$BACKUP_NAME" \
+        --backup-not-before "$NOT_BEFORE" >"$RECORD_DIR/migrate.json" 2>"$RECORD_DIR/migrate.log" || rc=$?
+else
+    pf_candidate --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate --pre-release-backup "$BACKUP_NAME" \
+        >"$RECORD_DIR/migrate.json" 2>"$RECORD_DIR/migrate.log" || rc=$?
+fi
 step_end "$rc"
 MIGRATE_RESULT=$(json_field "$RECORD_DIR/migrate.json" result)
 migrate_error=$(sed -n 's/^    "code": "\([^"]*\)",\{0,1\}$/\1/p' "$RECORD_DIR/migrate.json" 2>/dev/null | head -n 1)
@@ -766,24 +974,7 @@ if [ "$rc:$MIGRATE_RESULT" != 0:upgraded ] && [ "$rc:$MIGRATE_RESULT" != 0:alrea
     if [ -z "$FROZEN" ]; then
         stop_unchanged "migrate ${MIGRATE_RESULT} (${migrate_error:-no code}; $RECORD_DIR/migrate.json)."
     fi
-    echo "release: migrate $MIGRATE_RESULT (${migrate_error:-no code}); the database is unchanged: reopening writes on $CURRENT." >&2
-    step_begin reopen reopen-revision.json "reopen writes on $CURRENT"
-    run_report reopen-revision.json current revision
-    readiness=$(json_field "$RECORD_DIR/reopen-revision.json" readiness)
-    case "$readiness" in
-        current | accepted) ;;
-        *)
-            step_end "$RC"
-            stop_frozen "the running release $CURRENT is not ready on the database (readiness ${readiness:-unknown}); writes stay frozen."
-            ;;
-    esac
-    rc=0
-    pf up -d backend >>"$RECORD_DIR/reopen.log" 2>&1 || rc=$?
-    step_end "$rc"
-    [ "$rc" -eq 0 ] || stop_frozen "'up -d backend' failed ($RECORD_DIR/reopen.log)."
-    FROZEN=
-    echo "release: writes reopened on $CURRENT; migrate ${MIGRATE_RESULT} ($RECORD_DIR/migrate.json)." >&2
-    finish aborted_reopened 1
+    reopen_current "migrate ${MIGRATE_RESULT} (${migrate_error:-no code}; $RECORD_DIR/migrate.json)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -837,6 +1028,8 @@ awk -v tag="$TAG" '
 ' "$RECORD_DIR/env-before.txt" >"$ENV_TMP"
 mv "$ENV_TMP" "$ENV_FILE"
 SWITCHED=1
+# The env file names the new release: a backup taken from now on records it beside the new revision.
+release_backup_lock
 rc=0
 pf up -d --no-deps backend >>"$RECORD_DIR/switch-backend.log" 2>&1 || rc=$?
 step_end "$rc"

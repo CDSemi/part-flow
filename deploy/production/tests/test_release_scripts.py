@@ -1,9 +1,13 @@
 """P16-S3: deploy/production/release.sh and smoke.sh against fake `docker`, `git`, `curl` and `sleep` executables
 (P16-S3 SPEC section 6.3, cases RS-1..RS-24 and SS-1..SS-8; RS-25 covers Ctrl-C/TERM while a step runs; P16-S4 SPEC
-section 6.4 adds RS-26, the preflight secret-file check).
+section 6.4 adds RS-26, the preflight secret-file check; P16-S5 SPEC section 6.3 adds RS-27..RS-37, the pre-release
+backup and the backup lock).
 
-A temporary directory holds a fake repository root (copies of both production Compose files and an env file) and a
-`bin` directory placed first on PATH. Each fake is a POSIX `sh` wrapper that runs this interpreter (sys.executable) on
+A temporary directory holds a fake repository root (copies of both production Compose files, an env file, and copies of
+release.sh, smoke.sh and reconcile_regression.py in deploy/production/ beside a STUB backup.sh, so that release.sh,
+which resolves its helpers through its own directory, calls the stub; backup.sh itself is covered by
+test_backup_scripts.py) and a `bin` directory placed first on PATH (fake `docker`, `git`, `curl`, `sleep`, `ps`, `uname`
+and `id`). Each fake is a POSIX `sh` wrapper that runs this interpreter (sys.executable) on
 fake_tool.py, which appends its argv and the PARTFLOW_* variables of its environment to calls.jsonl and answers from
 the case's rule table (exit code, stdout, stderr; for curl the HTTP status, headers and body); an answer may also ask
 the wrapper to send a signal to the calling script once it has answered. A `python3` wrapper of
@@ -36,7 +40,13 @@ OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 PORT = "18080"
 DB_REVISION = "0032_phase14_route_adjusted"
 NEW_REVISION = "0033_s3_test"
-BACKUP_REF = "pre-release dump 2026-10-08T10:00Z"
+# P16-S5: the fixture's backup option (RS-2, RS-3, RS-5..RS-20, RS-23, RS-25, RS-26) and the name the stub backup.sh
+# prints (RS-1, RS-4, RS-21, RS-22 and RS-27.. run with the automatic backup).
+NO_BACKUP = ("--no-backup-reason", "rs fixture")
+AUTO_BACKUP = ()
+BACKUP_NAME = f"20261008T100000Z-pre-release-{TAG}"
+OPERATOR_BACKUP = "20261008T090000Z-manual"
+USER_IDS = "1000:1000"
 COMPOSE_PREFIX = "compose -f compose.production.yaml --env-file .env.production "
 HOST_VARIABLE_PREFIXES = ("PARTFLOW_", "POSTGRES_", "COMPOSE_")
 
@@ -89,8 +99,6 @@ if tool == "curl":
     request, options = curl_request(args)
     subject = request
 env = {k: v for k, v in os.environ.items() if k.startswith("PARTFLOW_")}
-with open(os.path.join(state_dir, "calls.jsonl"), "a", encoding="utf-8") as log:
-    log.write(json.dumps({"tool": tool, "argv": args, "request": request, "env": env}) + "\n")
 
 rules = load("rules.json", {}).get(tool, [])
 counts = load("counts.json", {})
@@ -110,6 +118,27 @@ for index, rule in enumerate(rules):
     responses = rule["responses"]
     answer = responses[min(seen, len(responses) - 1)]
     break
+
+entry = {"tool": tool, "argv": args, "request": request, "env": env}
+# P16-S5: the content of each watched file (for example the backup lock's owner) when this call ran, the size and first
+# bytes of stdin when the answer reads it (a restore fed from the dump), and an answer's own action ("run": Python).
+watched = load("watch.json", [])
+if watched:
+    snapshot = {}
+    for path in watched:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                snapshot[path] = handle.read()
+        except OSError:
+            snapshot[path] = None
+    entry["watch"] = snapshot
+if answer.get("read_stdin"):
+    data = sys.stdin.buffer.read()
+    entry["stdin"] = {"bytes": len(data), "head": data[:16].decode("latin-1")}
+with open(os.path.join(state_dir, "calls.jsonl"), "a", encoding="utf-8") as log:
+    log.write(json.dumps(entry) + "\n")
+if answer.get("run"):
+    exec(answer["run"], {"args": args, "os": os, "json": json, "sys": sys})
 
 if tool == "curl":
     if answer.get("rc"):
@@ -202,16 +231,24 @@ def reconcile_doc(exit_code, findings=(), truncated=False):
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
 
 
-def migrate_doc(result, exit_code, before=DB_REVISION, after=None, applied=(), error_code=None, backup_ref=BACKUP_REF):
+def verified_backup(name=BACKUP_NAME):
+    """The `backup` object of a migrate report that accepted the backup NAME (P16-S5)."""
+    return {"kind": "reference", "reference": name, "verified": True, "verification": "passed",
+            "dump_started_at": "2026-10-08T10:00:00Z", "alembic_revision": DB_REVISION, "database": "partflow",
+            "release": CURRENT, "manifest_sha256": "a" * 64,
+            "freshness": {"rule": "not_before", "not_before": "2026-10-08T10:00:00Z"}, "warnings": []}
+
+
+def migrate_doc(result, exit_code, before=DB_REVISION, after=None, applied=(), error_code=None, backup=None):
     after = after if after is not None else before
+    backup = backup if backup is not None else {"kind": "none", "reason": NO_BACKUP[1]}
     return json.dumps(
         {
             "report_version": 1, "command": "migrate", "result": result, "exit_code": exit_code,
             "started_at": "2026-10-08T10:00:00Z", "finished_at": "2026-10-08T10:00:01Z", "duration_ms": 1000,
             "release": TAG, "commit": HEAD, "expected_revision": NEW_REVISION, "revision_before": before,
             "revision_after": after, "applied_revisions": list(applied),
-            "backup": {"kind": "reference", "reference": backup_ref, "verified": False,
-                       "verification": "pending: backup-verify arrives with P16-S5"},
+            "backup": backup,
             "grants": None if error_code else {
                 "status": "applied", "roles": {"application": "partflow_app", "maintenance": "partflow_maintenance"},
                 "tables": 29, "sequences": 23, "default_privileges_removed": 0, "foreign_grantees": [],
@@ -251,7 +288,7 @@ CANDIDATE_ENV = {"PARTFLOW_RELEASE": TAG}
 REVISION = r"run --rm --no-deps -T backend python -m app\.cli revision$"
 RECONCILE = r"run --rm --no-deps -T backend python -m app\.cli reconcile --max-findings 10000$"
 CHECK_J = r"run --rm --no-deps -T backend python -m app\.cli reconcile --check j$"
-MIGRATE = r"--profile ops run --rm -T migrate "
+MIGRATE = r"--profile ops run --rm -T (--user \S+ )?migrate "
 LABEL_INSPECT = r"^image inspect --format \{\{index \.Config\.Labels \"org\.opencontainers\.image\.revision\"\}\} partflow/(backend|web):"
 VERSION_INSPECT = r"^image inspect --format \{\{index \.Config\.Labels \"org\.opencontainers\.image\.version\"\}\} partflow/(backend|web):"
 GIT_STATUS = "status --porcelain --untracked-files=all -- backend frontend compose.production.yaml compose.production.build.yaml deploy/production"
@@ -311,6 +348,11 @@ def default_rules():
                  not_match=r"X-PartFlow-Release"),
         ],
         "sleep": [rule(r".*")],
+        # P16-S5: the backup lock's owner check (`ps -p PID`: every pid is alive unless a case says otherwise).
+        "ps": [rule(r".*")],
+        "uname": [rule(r"^-n$", out("rs-host\n"))],
+        "id": [rule(r"^-u$", out("1000\n")), rule(r"^-g$", out("1000\n"))],
+        "backup.sh": [rule(r".*", out(f"BACKUP {BACKUP_NAME} /srv/partflow/backups/{BACKUP_NAME}\n"))],
     }
 
 
@@ -323,15 +365,24 @@ def find_sh():
     return shutil.which("sh")
 
 
-class Harness(unittest.TestCase):
-    env_lines = (
-        f"PARTFLOW_RELEASE={CURRENT}",
-        "PARTFLOW_SECRETS_DIR=/srv/partflow/secrets",
-        "PARTFLOW_SITE_TIMEZONE=UTC",
-        f"PARTFLOW_HTTP_PORT={PORT}",
-        "POSTGRES_USER=partflow_owner",
-    )
+def sh_path(path):
+    """PATH as the POSIX shell names it: an absolute path starting with "/" (MSYS form /c/... on Windows)."""
+    text = Path(path).resolve().as_posix()
+    if os.name == "nt" and re.match(r"^[A-Za-z]:/", text):
+        return "/" + text[0].lower() + text[2:]
+    return text
 
+
+BASE_ENV_LINES = (
+    f"PARTFLOW_RELEASE={CURRENT}",
+    "PARTFLOW_SECRETS_DIR=/srv/partflow/secrets",
+    "PARTFLOW_SITE_TIMEZONE=UTC",
+    f"PARTFLOW_HTTP_PORT={PORT}",
+    "POSTGRES_USER=partflow_owner",
+)
+
+
+class Harness(unittest.TestCase):
     def setUp(self):
         self.sh = find_sh()
         if self.sh is None:
@@ -342,6 +393,12 @@ class Harness(unittest.TestCase):
         self.root.mkdir()
         for name in ("compose.production.yaml", "compose.production.build.yaml"):
             shutil.copyfile(REPO / name, self.root / name)
+        # P16-S5: the backup directory (required by every Compose command) and its lock's owner file.
+        self.backup_dir = self.tmp / "backups"
+        self.backup_dir.mkdir()
+        os.chmod(self.backup_dir, 0o700)
+        self.lock_owner = self.backup_dir / ".backup.lock" / "owner"
+        self.env_lines = (*BASE_ENV_LINES, f"PARTFLOW_BACKUP_DIR={sh_path(self.backup_dir)}")
         self.env_file = self.root / ".env.production"
         self.write_env_file(self.env_lines)
         self.state = self.tmp / "state"
@@ -353,12 +410,23 @@ class Harness(unittest.TestCase):
         fake.write_text(FAKE_TOOL, encoding="utf-8")
         python = Path(sys.executable).as_posix()
         state = self.state.as_posix()
-        for tool in ("docker", "git", "curl", "sleep"):
+        for tool in ("docker", "git", "curl", "sleep", "ps", "uname", "id"):
             self.wrapper(tool, f'"{python}" "{fake.as_posix()}" "{state}" {tool} "$@"\nrc=$?\n'
                                f'if [ -f "{state}/signal" ]; then\n'
                                f'    signal=$(cat "{state}/signal"); rm -f "{state}/signal"; kill -s "$signal" "$PPID"\n'
                                f'fi\nexit $rc')
         self.wrapper("python3", f'exec "{python}" "$@"')
+        # The scripts under test run from the fake checkout: release.sh calls its own directory's backup.sh (a stub).
+        scripts = self.root / "deploy" / "production"
+        scripts.mkdir(parents=True)
+        for name in ("release.sh", "smoke.sh", "reconcile_regression.py"):
+            shutil.copyfile(REPO / "deploy" / "production" / name, scripts / name)
+        self.release_sh = scripts / "release.sh"
+        stub = scripts / "backup.sh"
+        stub.write_text(f'#!/bin/sh\nexec "{python}" "{fake.as_posix()}" "{state}" backup.sh "$@"\n', encoding="utf-8",
+                        newline="\n")
+        os.chmod(stub, 0o755)
+        (self.state / "watch.json").write_text(json.dumps([str(self.lock_owner), str(self.env_file)]), encoding="utf-8")
         self.rules = default_rules()
         self.secrets = self.tmp / "secrets"
         self.secrets.mkdir()
@@ -393,6 +461,8 @@ class Harness(unittest.TestCase):
         return env
 
     def run_script(self, script, *arguments):
+        if script == RELEASE_SH:
+            script = self.release_sh
         (self.state / "rules.json").write_text(json.dumps(self.rules), encoding="utf-8")
         result = subprocess.run(
             [self.sh, script.as_posix(), *arguments], cwd=self.root, env=self.environment(),
@@ -401,7 +471,7 @@ class Harness(unittest.TestCase):
         self.result = result
         return result
 
-    def release(self, *extra, backup=("--pre-release-backup", BACKUP_REF), release=TAG):
+    def release(self, *extra, backup=NO_BACKUP, release=TAG):
         arguments = ["--release", release, "--operator", "Ops Person", "--approver", "Owner Person", *backup,
                      "--records-dir", self.records.as_posix(), *extra]
         return self.run_script(RELEASE_SH, *arguments)
@@ -420,6 +490,13 @@ class Harness(unittest.TestCase):
             text = " ".join(entry["argv"])
             labels.append(text[len(COMPOSE_PREFIX):] if text.startswith(COMPOSE_PREFIX) else text)
         return labels
+
+    def lock_at(self, pattern, tool="docker"):
+        """The backup lock's owner file content when the first call matching PATTERN ran (None: no lock)."""
+        for entry in self.calls(tool):
+            if re.search(pattern, " ".join(entry["argv"])):
+                return entry["watch"][str(self.lock_owner)]
+        self.fail(f"no {tool} call matches {pattern}")
 
     def docker_entries(self, pattern):
         return [e for e in self.calls("docker") if re.search(pattern, " ".join(e["argv"]))]
@@ -492,9 +569,27 @@ SMOKE_DOCKER = [
 ]
 FULL_PENDING = [
     *CURRENT_IMAGES, RUN_REVISION, RUN_RECONCILE, *CANDIDATE_IMAGES, BUILD, *CANDIDATE_IDS, RUN_CHECK_J, RUN_REVISION,
-    "stop backend", "ps --status running -q backend", f"--profile ops run --rm -T migrate --pre-release-backup {BACKUP_REF}",
+    "stop backend", "ps --status running -q backend", "--profile ops run --rm -T migrate --no-backup-reason rs fixture",
     RUN_RECONCILE, "up -d --no-deps backend", "up -d --no-deps web", *SMOKE_DOCKER,
 ]
+
+
+def auto_migrate_label(not_before):
+    """The migrate call with the backup release.sh took (P16-S5)."""
+    return (f"--profile ops run --rm -T --user {USER_IDS} migrate --pre-release-backup {BACKUP_NAME}"
+            f" --backup-not-before {not_before}")
+
+
+def full_pending_auto(not_before):
+    """RS-1: the full release with the automatic backup (the stub backup.sh makes no docker call)."""
+    return [label if not label.startswith("--profile ops run --rm -T migrate") else auto_migrate_label(not_before)
+            for label in FULL_PENDING]
+
+
+def auto_backup(harness):
+    """The fake migrate accepts the backup release.sh took."""
+    harness.prepend("docker", rule(MIGRATE, out(migrate_doc("upgraded", 0, after=NEW_REVISION, applied=[NEW_REVISION],
+                                                            backup=verified_backup()))))
 
 
 def nothing_pending(harness):
@@ -511,9 +606,11 @@ def nothing_pending(harness):
 class ReleaseFlow(Harness):
     # RS-1, RS-14, RS-24
     def test_rs1_full_release_with_a_pending_migration(self):
-        self.release("--environment", "production", "--url", "https://partflow.example.lan")
+        auto_backup(self)
+        self.release("--environment", "production", "--url", "https://partflow.example.lan", backup=AUTO_BACKUP)
         self.assertExit(0, "completed")
-        self.assertEqual(self.docker(), FULL_PENDING)
+        record = self.record()
+        self.assertEqual(self.docker(), full_pending_auto(record["freeze_completed_at"]))
         build = self.docker_entries(r" build backend web$")[0]
         self.assertEqual(build["env"], {"PARTFLOW_RELEASE": TAG, "PARTFLOW_COMMIT": HEAD})
         for entry in self.calls("docker"):
@@ -530,13 +627,15 @@ class ReleaseFlow(Harness):
         self.assertIn("PARTFLOW_ACCEPT_SCHEMA_REVISION=\n", env)
         self.assertIn(f"PARTFLOW_HTTP_PORT={PORT}\n", env)
         self.assertEqual((self.record_dir() / "env-before.txt").read_text(encoding="utf-8"), "\n".join(self.env_lines) + "\n")
-        record = self.record()
         self.assertTrue(record["writes_reopened_at"])
         self.assertIs(record["refrozen"], False)
         self.assertEqual(record["migration"], {"result": "upgraded", "file": "migrate.json", "log": "migrate.log"})
         self.assertEqual(record["alembic"], {"before": DB_REVISION, "after": NEW_REVISION, "expected": NEW_REVISION})
-        self.assertEqual(record["backup"]["reference"], BACKUP_REF)
-        self.assertEqual(record["backup"]["verification"], "pending: backup-verify arrives with P16-S5")
+        self.assertEqual(record["backup"], {**verified_backup(), "taken_by": "release.sh", "name": BACKUP_NAME,
+                                            "path": f"/srv/partflow/backups/{BACKUP_NAME}",
+                                            "duration_ms": record["backup"]["duration_ms"]})
+        self.assertIsInstance(record["backup"]["duration_ms"], int)
+        self.assertFalse(self.lock_owner.parent.exists())
         self.assertEqual(record["smoke"], {"file": "smoke.txt", "exit_code": 0})
         self.assertIn("PASS S-8", (self.record_dir() / "smoke.txt").read_text(encoding="utf-8"))
         self.assertSafeInvocations()
@@ -548,7 +647,8 @@ class ReleaseFlow(Harness):
         self.assertExit(0)
         record = self.record()
         for key in ("record_version", "environment", "url", "host", "release", "alembic", "operator", "approver",
-                    "started_at", "finished_at", "backup", "migration", "steps", "reconcile", "writes_reopened_at",
+                    "started_at", "finished_at", "backup", "migration", "steps", "reconcile", "freeze_completed_at",
+                    "writes_reopened_at",
                     "refrozen", "smoke", "rollback_deadline", "observation_owner", "known_limitations", "rehearsal",
                     "outcome"):
             self.assertIn(key, record)
@@ -603,7 +703,7 @@ class ReleaseFlow(Harness):
     # RS-4
     def test_rs4_migrate_refused_while_frozen_reopens(self):
         self.prepend("docker", rule(MIGRATE, out(migrate_doc("refused", 1, error_code="revision_unknown"), rc=1)))
-        self.release()
+        self.release(backup=AUTO_BACKUP)
         self.assertExit(1, "aborted_reopened")
         docker = self.docker()
         self.assertEqual(docker[-2:], [RUN_REVISION, "up -d backend"])
@@ -614,9 +714,10 @@ class ReleaseFlow(Harness):
     def test_rs4_migrate_refused_reopen_check_fails_stays_frozen(self):
         self.prepend("docker", rule(MIGRATE, out(migrate_doc("failed", 2, error_code="migration_failed"), rc=2)))
         self.prepend("docker", rule(REVISION, out(revision_doc("current", 0)), out(revision_doc("upgrade_available", 1, readiness="mismatch"), rc=1), env=CURRENT_ENV))
-        self.release()
+        self.release(backup=AUTO_BACKUP)
         self.assertExit(3, "stopped_frozen")
         self.assertNoDocker(r"^up ")
+        self.assertFalse(self.lock_owner.parent.exists())
 
     # RS-5
     def test_rs5_migrate_outcome_unknown(self):
@@ -862,9 +963,10 @@ class ReleasePreflight(Harness):
                 self.assertFalse(self.records.exists())
 
     def test_usage_errors(self):
+        # P16-S5: neither backup option is no longer a usage error (release.sh takes the backup by default).
         cases = (
-            ("--release", TAG, "--operator", "a", "--approver", "b"),
-            ("--release", TAG, "--operator", "a", "--approver", "b", "--no-backup-reason", "x", "--pre-release-backup", "y"),
+            ("--release", TAG, "--operator", "a", "--approver", "b", "--no-backup-reason", "x", "--pre-release-backup",
+             OPERATOR_BACKUP),
             ("--release", TAG, "--operator", "a", "--approver", "b", "--no-backup-reason", "x", "--accept-pre-release-findings",
              "--skip-pre-reconcile", "r"),
             ("--release", "bad tag", "--operator", "a", "--approver", "b", "--no-backup-reason", "x"),
@@ -927,7 +1029,7 @@ class ReleaseAfterSwitch(Harness):
     # RS-21
     def test_rs21_backend_still_running_after_stop(self):
         self.prepend("docker", rule(r"ps --status running -q backend$", out("cid-backend\n")))
-        self.release()
+        self.release(backup=AUTO_BACKUP)
         self.assertExit(3, "stopped_frozen")
         self.assertNoDocker(MIGRATE, r"^up ")
 
@@ -937,7 +1039,7 @@ class ReleaseAfterSwitch(Harness):
             with self.subTest(code=code):
                 self.reset()
                 self.prepend("docker", rule(MIGRATE, out(migrate_doc("refused", 1, error_code=code), rc=1)))
-                self.release()
+                self.release(backup=AUTO_BACKUP)
                 self.assertExit(3, "stopped_frozen")
                 self.assertNoDocker(r"^up ")
                 self.assertIn(code, self.result.stderr)
@@ -954,7 +1056,7 @@ class ReleaseInterrupted(Harness):
                 self.release()
                 self.assertExit(code, "interrupted")
                 self.assertNoDocker(r"^up ")
-                self.assertEqual(self.docker()[-1], f"--profile ops run --rm -T migrate --pre-release-backup {BACKUP_REF}")
+                self.assertEqual(self.docker()[-1], "--profile ops run --rm -T migrate --no-backup-reason rs fixture")
                 record = self.record()
                 self.assertEqual(record["migration"], {"result": "outcome_unknown", "file": "migrate.json", "log": "migrate.log"})
                 self.assertEqual(record["alembic"], {"before": DB_REVISION, "after": None, "expected": NEW_REVISION})
@@ -1083,6 +1185,260 @@ class ReleaseFindings(Harness):
         self.assertExit(1, "stopped_unchanged")
         self.assertIn("does not match the database", self.result.stderr)
         self.assertNoDocker(RECONCILE, r" build ")
+
+
+class ReleaseBackup(Harness):
+    """P16-S5: the pre-release backup and the backup lock (RS-27..RS-37)."""
+
+    def call_index(self, tool, pattern):
+        for index, entry in enumerate(self.calls()):
+            if entry["tool"] == tool and re.search(pattern, " ".join(entry["argv"])):
+                return index
+        self.fail(f"no {tool} call matches {pattern}")
+
+    def stub_argv(self):
+        calls = self.calls("backup.sh")
+        self.assertEqual(len(calls), 1, calls)
+        return calls[0]["argv"]
+
+    def expected_stub_argv(self):
+        return ["--kind", "pre-release", "--label", TAG, "--tools-release", TAG, "--lock-held-by-release",
+                self.record_dir().as_posix(), "--operator", "Ops Person", "--env-file", ".env.production"]
+
+    def assertOwnedByThisRun(self, owner):
+        self.assertIsNotNone(owner, "no backup lock")
+        lines = owner.splitlines()
+        self.assertIn("by=release.sh", lines)
+        self.assertIn(f"release={self.record_dir().as_posix()}", lines)
+        self.assertIn("host=rs-host", lines)
+
+    def write_lock(self, pid, host="rs-host", by="backup.sh", name="20261008T020000Z-daily"):
+        self.lock_owner.parent.mkdir()
+        text = f"host={host}\npid={pid}\nstarted_at=2026-10-08T02:00:00Z\nby={by}\nname={name}\n"
+        self.lock_owner.write_text(text, encoding="utf-8", newline="\n")
+        return text
+
+    # RS-27
+    def test_rs27_pending_default_backup_inside_the_freeze(self):
+        auto_backup(self)
+        self.release(backup=AUTO_BACKUP)
+        self.assertExit(0, "completed")
+        record = self.record()
+        self.assertOwnedByThisRun(self.lock_at(r"stop backend$"))
+        stop = self.call_index("docker", r"stop backend$")
+        running = self.call_index("docker", r"ps --status running -q backend$")
+        backup = self.call_index("backup.sh", r".*")
+        migrate = self.call_index("docker", MIGRATE)
+        post = [i for i, e in enumerate(self.calls()) if e["tool"] == "docker" and re.search(RECONCILE, " ".join(e["argv"]))][-1]
+        switch = self.call_index("docker", r"up -d --no-deps backend$")
+        self.assertLess(stop, running)
+        self.assertLess(running, backup)
+        self.assertLess(backup, migrate)
+        self.assertLess(migrate, post)
+        self.assertLess(post, switch)
+        self.assertEqual(self.stub_argv(), self.expected_stub_argv())
+        self.assertEqual(self.docker()[self.docker().index(auto_migrate_label(record["freeze_completed_at"]))],
+                         auto_migrate_label(record["freeze_completed_at"]))
+        # The lock is held through the post reconcile and removed right after the env rewrite, before the switch.
+        self.assertOwnedByThisRun(self.calls()[migrate]["watch"][str(self.lock_owner)])
+        self.assertOwnedByThisRun(self.calls()[post]["watch"][str(self.lock_owner)])
+        at_switch = self.calls()[switch]["watch"]
+        self.assertIsNone(at_switch[str(self.lock_owner)])
+        self.assertIn(f"PARTFLOW_RELEASE={TAG}\n", at_switch[str(self.env_file)])
+        self.assertRegex(record["freeze_completed_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(record["backup"]["taken_by"], "release.sh")
+        self.assertEqual(record["backup"]["name"], BACKUP_NAME)
+        steps = [s["name"] for s in record["steps"]]
+        self.assertEqual(steps[steps.index("freeze"):steps.index("migrate") + 1], ["freeze", "pre_release_backup", "migrate"])
+        self.assertFalse(self.lock_owner.parent.exists())
+        self.assertSafeInvocations()
+
+    # RS-28
+    def test_rs28_nothing_pending_default_backup(self):
+        nothing_pending(self)
+        self.release(backup=AUTO_BACKUP)
+        self.assertExit(0, "completed")
+        record = self.record()
+        self.assertNoDocker(r"^stop backend$")
+        self.assertOwnedByThisRun(self.calls("backup.sh")[0]["watch"][str(self.lock_owner)])
+        self.assertEqual(self.stub_argv(), self.expected_stub_argv())
+        self.assertIn(auto_migrate_label(record["started_at"]), self.docker())
+        self.assertIsNone(record["freeze_completed_at"])
+        switch = self.call_index("docker", r"up -d --no-deps backend$")
+        self.assertIsNone(self.calls()[switch]["watch"][str(self.lock_owner)])
+        self.assertFalse(self.lock_owner.parent.exists())
+
+    # RS-29
+    def test_rs29_backup_fails_while_frozen(self):
+        self.prepend("backup.sh", rule(r".*", out("", rc=3, stderr="backup: pg_dump failed (exit 1). No backup was published.\n")))
+        self.release(backup=AUTO_BACKUP)
+        self.assertExit(1, "aborted_reopened")
+        self.assertNoDocker(MIGRATE)
+        self.assertEqual(self.docker()[-2:], [RUN_REVISION, "up -d backend"])
+        self.assertIn("pg_dump failed", self.result.stderr)
+        self.assertIsNone(self.record()["backup"]["taken_by"])
+        self.assertFalse(self.lock_owner.parent.exists())
+        with self.subTest(case="the reopen fails"):
+            self.reset()
+            self.prepend("backup.sh", rule(r".*", out("", rc=3)))
+            self.prepend("docker", rule(r"up -d backend$", out("", rc=1)))
+            self.release(backup=AUTO_BACKUP)
+            self.assertExit(3, "stopped_frozen")
+            self.assertNoDocker(MIGRATE)
+            self.assertFalse(self.lock_owner.parent.exists())
+        with self.subTest(case="no BACKUP line"):
+            self.reset()
+            self.prepend("backup.sh", rule(r".*", out("something else\n")))
+            self.release(backup=AUTO_BACKUP)
+            self.assertExit(1, "aborted_reopened")
+            self.assertNoDocker(MIGRATE)
+
+    # RS-29: nothing pending (not frozen): a failed backup changes nothing.
+    def test_rs29_backup_fails_nothing_pending(self):
+        nothing_pending(self)
+        self.prepend("backup.sh", rule(r".*", out("", rc=1)))
+        self.release(backup=AUTO_BACKUP)
+        self.assertExit(1, "stopped_unchanged")
+        self.assertNoDocker(MIGRATE, r"^up ", r"^stop ")
+        self.assertFalse(self.lock_owner.parent.exists())
+
+    # RS-30
+    def test_rs30_operator_backup_with_a_pending_migration(self):
+        self.release(backup=("--pre-release-backup", OPERATOR_BACKUP))
+        self.assertExit(1, "stopped_unchanged")
+        self.assertIn("release: A migration is pending, so the pre-release backup must be taken inside the write freeze."
+                      " Run release.sh without --pre-release-backup; it takes the backup. Nothing was changed.",
+                      self.result.stderr)
+        self.assertNotIn("--no-backup-reason", self.result.stderr)
+        self.assertNoDocker(r"stop backend", MIGRATE)
+        self.assertEqual(self.calls("backup.sh"), [])
+        self.assertEqual(self.record()["steps"][-1]["name"], "candidate_revision")
+
+    # RS-31
+    def test_rs31_operator_backup_nothing_pending(self):
+        def old_record(directory, outcome, finished):
+            path = self.records / directory
+            path.mkdir(parents=True)
+            (path / "record.json").write_text(
+                json.dumps({"record_version": 1, "finished_at": finished, "outcome": outcome}, indent=2) + "\n",
+                encoding="utf-8")
+
+        old_record("20261001T100000Z-v0.9.0", "completed", "2026-10-01T10:30:00Z")
+        old_record("20261005T100000Z-v1.0.0", "completed", "2026-10-05T10:30:00Z")
+        old_record("20261006T100000Z-v1.0.1", "stopped_unchanged", "2026-10-06T10:30:00Z")
+        nothing_pending(self)
+        self.release(backup=("--pre-release-backup", OPERATOR_BACKUP))
+        self.assertEqual(self.result.returncode, 0, self.result.stderr)
+        self.assertEqual(self.calls("backup.sh"), [])
+        self.assertIn(f"--profile ops run --rm -T --user {USER_IDS} migrate --pre-release-backup {OPERATOR_BACKUP}"
+                      " --backup-not-before 2026-10-05T10:30:00Z", self.docker())
+        backup = json.loads((sorted(self.records.glob("*-v1.1.0/record.json"))[0]).read_text(encoding="utf-8"))["backup"]
+        self.assertEqual(backup["taken_by"], "operator")
+        self.assertEqual(backup["name"], OPERATOR_BACKUP)
+        self.assertNoDocker(r"^stop backend$")
+        self.assertFalse(self.lock_owner.parent.exists())
+        with self.subTest(case="no completed record"):
+            self.reset()
+            nothing_pending(self)
+            self.release(backup=("--pre-release-backup", OPERATOR_BACKUP))
+            self.assertExit(0, "completed")
+            self.assertIn(f"--profile ops run --rm -T --user {USER_IDS} migrate --pre-release-backup {OPERATOR_BACKUP}",
+                          self.docker())
+            self.assertNoDocker(r"--backup-not-before")
+
+    # RS-32
+    def test_rs32_no_backup_reason(self):
+        self.release()
+        self.assertExit(0, "completed")
+        self.assertEqual(self.calls("backup.sh"), [])
+        self.assertIn("--profile ops run --rm -T migrate --no-backup-reason rs fixture", self.docker())
+        self.assertNoDocker(r"--user", r"--pre-release-backup")
+        record = self.record()
+        self.assertEqual(record["backup"], {"kind": "none", "reason": "rs fixture", "taken_by": None, "name": None,
+                                            "path": None, "duration_ms": None})
+        # A pending migration still holds the backup lock through the switch (no scheduled dump during migrate).
+        self.assertOwnedByThisRun(self.lock_at(MIGRATE))
+        self.assertFalse(self.lock_owner.parent.exists())
+
+    # RS-33
+    def test_rs33_migrate_refuses_a_stale_backup_while_frozen(self):
+        self.prepend("docker", rule(MIGRATE, out(migrate_doc("refused", 1, error_code="backup_stale"), rc=1)))
+        self.release(backup=AUTO_BACKUP)
+        self.assertExit(1, "aborted_reopened")
+        self.assertEqual(self.docker()[-2:], [RUN_REVISION, "up -d backend"])
+        self.assertIn("backup_stale", self.result.stderr)
+        self.assertFalse(self.lock_owner.parent.exists())
+
+    # RS-34
+    def test_rs34_operator_backup_must_be_a_backup_name(self):
+        for value in ("free text", "dump.sql.gz", "20261008T100000Z-daily/../x", "20261008T1000Z-daily"):
+            with self.subTest(value=value):
+                self.release(backup=("--pre-release-backup", value))
+                self.assertEqual(self.result.returncode, 2, self.result.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertFalse(self.records.exists())
+
+    # RS-35
+    def test_rs35_lock_held_through_the_post_reconcile_and_removed_by_the_trap(self):
+        self.prepend("docker", rule(RECONCILE, out(reconcile_doc(0)), out(reconcile_doc(1, [("a", "x", "part_movement", 1)]), rc=1)))
+        auto_backup(self)
+        self.release(backup=AUTO_BACKUP)
+        self.assertExit(3, "stopped_frozen")
+        self.assertOwnedByThisRun(self.lock_at(MIGRATE))
+        post = [e for e in self.calls("docker") if re.search(RECONCILE, " ".join(e["argv"]))][-1]
+        self.assertOwnedByThisRun(post["watch"][str(self.lock_owner)])
+        self.assertFalse(self.lock_owner.parent.exists())
+
+    # RS-36
+    def test_rs36_backup_lock_busy(self):
+        cases = {
+            "running": ([], "release: refused — a backup is running (backup.sh on rs-host, pid 4242, since"
+                            " 2026-10-08T02:00:00Z). Nothing was changed."),
+            "stale": ([rule(r"^-p 4242$", out("", rc=1))],
+                      "release: refused — the backup lock of backup.sh (host rs-host, pid 4242, since 2026-10-08T02:00:00Z,"
+                      " backup 20261008T020000Z-daily) was left by a run that no longer exists. Check OPERATIONS_RUNBOOK §3,"
+                      " then remove {dir}/.backup.lock and {dir}/.partial/20261008T020000Z-daily. Nothing was changed."),
+            "running pg_dump": ([rule(r"^-p 4242$", out("", rc=1))], "release: refused — a backup is running"),
+        }
+        for name, (ps_rules, message) in cases.items():
+            with self.subTest(case=name):
+                self.reset()
+                message = message.replace("{dir}", sh_path(self.backup_dir))
+                owner = self.write_lock(4242)
+                self.prepend("ps", *ps_rules)
+                sessions = "1\n" if name == "running pg_dump" else "0\n"
+                self.prepend("docker", rule(r"exec -T db sh -c psql .*pg_stat_activity", out(sessions)))
+                self.release(backup=AUTO_BACKUP)
+                self.assertExit(1, "stopped_unchanged")
+                self.assertIn(message, self.result.stderr)
+                self.assertNoDocker(r"stop backend", MIGRATE)
+                self.assertEqual(self.calls("backup.sh"), [])
+                self.assertEqual(self.lock_owner.read_text(encoding="utf-8"), owner)
+                if name == "running":
+                    self.assertNoDocker(r"pg_stat_activity")
+                self.assertEqual(self.record()["steps"][-1]["name"], "freeze")
+        with self.subTest(case="another host"):
+            self.reset()
+            owner = self.write_lock(4242, host="nas02")
+            self.prepend("ps", rule(r".*", out("", rc=1)))
+            self.release(backup=AUTO_BACKUP)
+            self.assertExit(1, "stopped_unchanged")
+            self.assertIn("a backup is running (backup.sh on nas02", self.result.stderr)
+            self.assertEqual(self.lock_owner.read_text(encoding="utf-8"), owner)
+
+    # RS-37
+    def test_rs37_backup_dir_required_in_every_mode(self):
+        for name, lines in (("absent", BASE_ENV_LINES),
+                            ("relative", (*BASE_ENV_LINES, "PARTFLOW_BACKUP_DIR=backups")),
+                            ("quoted", (*BASE_ENV_LINES, f'PARTFLOW_BACKUP_DIR="{sh_path(self.backup_dir)}"')),
+                            ("missing directory", (*BASE_ENV_LINES, f"PARTFLOW_BACKUP_DIR={sh_path(self.tmp)}/none"))):
+            with self.subTest(case=name):
+                self.write_env_file(lines)
+                self.release()
+                self.assertEqual(self.result.returncode, 2, self.result.stderr)
+                self.assertIn("PARTFLOW_BACKUP_DIR" if name != "missing directory" else "does not exist", self.result.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertFalse(self.records.exists())
 
 
 # ---------------------------------------------------------------------------

@@ -30,15 +30,19 @@ Commands:
   (Phase 16 slice 1, read-only): run the reconciliation checks in one
   read-only snapshot and print one JSON report on stdout (also when it
   could not run); 0 clean, 1 mismatch, 2 could not run. Never repairs.
-- ``migrate (--pre-release-backup REF | --no-backup-reason TEXT)
-  [--lock-timeout SECONDS]`` (Phase 16 slice 3): apply this release's
-  pending Alembic revisions on one connection in one transaction, with
-  the backup reference (or the reason there is none) recorded; refused
-  while another migrate runs, the database revision is unknown to this
-  release, a pending revision cannot run in one transaction or the API is
-  still connected. Prints one JSON document on stdout (also on refusal
-  and failure); the Alembic log goes to stderr. 0 upgraded or already
-  current, 1 refused, 2 failed or its outcome is unknown.
+- ``migrate (--pre-release-backup NAME | --no-backup-reason TEXT)
+  [--backup-not-before UTC | --max-backup-age-minutes N] [--backup-dir DIR]
+  [--lock-timeout SECONDS]`` (Phase 16 slices 3 and 5): apply this
+  release's pending Alembic revisions on one connection in one
+  transaction, with the verified pre-release backup (or the reason there
+  is none) recorded; refused while another migrate runs, the database
+  revision is unknown to this release, a pending revision cannot run in
+  one transaction or the API is still connected, and for a backup that is
+  missing, fails verification, is stale, is of another revision or
+  database, or (with a migration pending) has no not-before proof. Prints
+  one JSON document on stdout (also on refusal and failure); the Alembic
+  log goes to stderr. 0 upgraded or already current, 1 refused, 2 failed
+  or its outcome is unknown.
 - ``revision`` (Phase 16 slice 3, read-only): the release identity, the
   expected and database revisions, the pending revisions and the
   readiness the backend would report, as one JSON document; 0 current,
@@ -53,10 +57,24 @@ Commands:
   grant of the two database roles at this release's revision (also part of
   every ``migrate``); runs as the database owner role. 0 applied, 1
   refused, 2 failed or its outcome is unknown.
+- ``backup-manifest --name NAME --operator TEXT --reason TEXT --release-tag
+  TAG …`` (Phase 16 slice 5, ``deploy/production/backup.sh``): publish the
+  dump files of ``<backup-dir>/.partial/NAME/`` as the backup directory
+  ``<backup-dir>/NAME/`` with its manifest and ``SHA256SUMS``. Reads no
+  database setting. 0 published, 1 refused, 2 failed.
+- ``backup-verify NAME [--backup-dir DIR] [--expect-database NAME]`` (Phase
+  16 slice 5, read-only): verify one backup directory. 0 verified, 1
+  invalid, 2 could not read it.
+- ``backup-rotate --keep-daily N --keep-weekly N [--backup-dir DIR]
+  [--dry-run]`` (Phase 16 slice 5): keep the newest verified daily backups
+  and the newest of each recent ISO week, delete the other verified daily
+  backups; never touches other kinds or invalid backups. 0 rotated, 1
+  rotated but some daily backups failed verification, 2 failed.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
-``provision-roles``, ``apply-grants``: their JSON document); refusals and errors go to stderr.
+``provision-roles``, ``apply-grants``, ``backup-manifest``, ``backup-verify``,
+``backup-rotate``: their JSON document); refusals and errors go to stderr.
 """
 
 import argparse
@@ -64,6 +82,8 @@ import datetime
 import getpass
 import json
 import logging
+import os
+import re
 import sys
 import traceback
 from collections.abc import Callable, Sequence
@@ -75,9 +95,9 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.application import authentication, database_roles, migration, reconciliation
+from app.application import authentication, backups, database_roles, migration, reconciliation
 from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
-from app.core.config import get_settings
+from app.core.config import DEVELOPMENT_RELEASE, get_settings
 from app.infrastructure import schema_revision
 from app.infrastructure.database import build_engine
 
@@ -359,14 +379,24 @@ _MIGRATE_HELP = (
 )
 
 
+def _utc_instant(value: str) -> datetime.datetime:
+    parsed = backups.parse_utc(value)
+    if parsed is None:
+        raise argparse.ArgumentTypeError(f"must be a UTC time YYYY-MM-DDTHH:MM:SSZ, got {value!r}")
+    return parsed
+
+
 def _add_migrate_parser(subparsers: Any) -> None:
     parser = subparsers.add_parser("migrate", help=_MIGRATE_HELP, description=_MIGRATE_HELP)
     backup = parser.add_mutually_exclusive_group(required=True)
     backup.add_argument(
         "--pre-release-backup",
         type=_operator_text,
-        metavar="REF",
-        help="The pre-release backup this migration can be restored from (recorded).",
+        metavar="NAME",
+        help=(
+            "The backup directory created by deploy/production/backup.sh that this migration can"
+            " be restored from; it is verified before the migration and recorded."
+        ),
     )
     backup.add_argument(
         "--no-backup-reason",
@@ -374,6 +404,26 @@ def _add_migrate_parser(subparsers: Any) -> None:
         metavar="TEXT",
         help="Why there is no pre-release backup, e.g. a first install (recorded).",
     )
+    freshness = parser.add_mutually_exclusive_group()
+    freshness.add_argument(
+        "--backup-not-before",
+        type=_utc_instant,
+        metavar="UTC",
+        help=(
+            "The backup must have started at or after this instant (YYYY-MM-DDTHH:MM:SSZ): the"
+            " write-freeze time. Required when a migration is pending."
+        ),
+    )
+    freshness.add_argument(
+        "--max-backup-age-minutes",
+        type=_bounded_int(1, 1440),
+        metavar="N",
+        help=(
+            "The backup may be at most N minutes old (1-1440, default"
+            f" {backups.DEFAULT_MAX_AGE_MINUTES}); only when no migration is pending."
+        ),
+    )
+    _backup_dir_argument(parser)
     parser.add_argument(
         "--lock-timeout",
         type=_bounded_int(1, 600),
@@ -381,13 +431,27 @@ def _add_migrate_parser(subparsers: Any) -> None:
         metavar="SECONDS",
         help="How long a statement may wait for a table lock (1-600, default %(default)s).",
     )
-    parser.set_defaults(handler=_run_migrate)
+
+    def handler(args: argparse.Namespace) -> int:
+        if args.pre_release_backup is None and (
+            args.backup_not_before is not None or args.max_backup_age_minutes is not None
+        ):
+            parser.error(
+                "--backup-not-before and --max-backup-age-minutes need --pre-release-backup"
+            )
+        return _run_migrate(args)
+
+    parser.set_defaults(handler=handler)
 
 
 def _migrate_report(args: argparse.Namespace) -> migration.MigrateReport:
     started_at = datetime.datetime.now(datetime.UTC)
     backup = migration.Backup(
-        reference=args.pre_release_backup, no_backup_reason=args.no_backup_reason
+        reference=args.pre_release_backup,
+        no_backup_reason=args.no_backup_reason,
+        backup_dir=args.backup_dir,
+        not_before=args.backup_not_before,
+        max_age_minutes=args.max_backup_age_minutes or backups.DEFAULT_MAX_AGE_MINUTES,
     )
     try:
         settings = get_settings()
@@ -593,6 +657,209 @@ def _run_apply_grants(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+def _pattern(pattern: re.Pattern[str], rule: str, *, empty_is_none: bool) -> Callable[[str], Any]:
+    def parse(value: str) -> str | None:
+        if empty_is_none and value == "":
+            return None
+        if pattern.fullmatch(value) is None:
+            raise argparse.ArgumentTypeError(f"must be {rule}, got {value!r}")
+        return value
+
+    return parse
+
+
+def _backup_name(value: str) -> backups.BackupName:
+    parsed = backups.parse_name(value)
+    if parsed is None:
+        raise argparse.ArgumentTypeError(
+            "must be <YYYYMMDDTHHMMSSZ>-daily, -manual or -pre-release-<release tag>,"
+            f" got {value!r}"
+        )
+    return parsed
+
+
+def _backup_text(value: str) -> str:
+    try:
+        return backups.backup_text(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _backup_dir_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=backups.DEFAULT_BACKUP_DIR,
+        metavar="DIR",
+        help="The backup directory (default %(default)s).",
+    )
+
+
+_BACKUP_MANIFEST_HELP = (
+    "Publish the dump files of <backup-dir>/.partial/NAME/ as the backup <backup-dir>/NAME/"
+    " with its manifest and SHA256SUMS (deploy/production/backup.sh). Needs no database."
+)
+
+
+def _add_backup_manifest_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "backup-manifest", help=_BACKUP_MANIFEST_HELP, description=_BACKUP_MANIFEST_HELP
+    )
+    image = _pattern(backups.IMAGE_ID_PATTERN, "sha256:<64 hex> or empty", empty_is_none=True)
+    parser.add_argument("--name", type=_backup_name, required=True, metavar="NAME")
+    parser.add_argument("--operator", type=_backup_text, required=True, metavar="TEXT")
+    parser.add_argument("--reason", type=_backup_text, required=True, metavar="TEXT")
+    parser.add_argument(
+        "--release-tag",
+        type=_pattern(backups.RELEASE_TAG_PATTERN, "a release tag", empty_is_none=False),
+        required=True,
+        metavar="TAG",
+        help="The release running when the backup was taken.",
+    )
+    parser.add_argument(
+        "--release-commit",
+        type=_pattern(backups.COMMIT_PATTERN, "40 lowercase hex or empty", empty_is_none=True),
+        metavar="SHA",
+    )
+    parser.add_argument(
+        "--expected-revision",
+        type=_pattern(backups.REVISION_PATTERN, "an Alembic revision or empty", empty_is_none=True),
+        metavar="REV",
+        help="The revision the running release expects (empty when it could not be read).",
+    )
+    parser.add_argument(
+        "--environment",
+        type=_pattern(backups.ENVIRONMENT_PATTERN, "a lowercase name", empty_is_none=False),
+        default="production",
+        metavar="NAME",
+        help="Default %(default)s.",
+    )
+    parser.add_argument(
+        "--host",
+        type=_pattern(backups.HOST_PATTERN, "1-100 of A-Z a-z 0-9 . _ -", empty_is_none=False),
+        default="unknown",
+        metavar="TEXT",
+        help="Default %(default)s.",
+    )
+    parser.add_argument("--image-backend", type=image, metavar="ID")
+    parser.add_argument("--image-web", type=image, metavar="ID")
+    parser.add_argument("--image-db", type=image, metavar="ID")
+    _backup_dir_argument(parser)
+    parser.set_defaults(handler=_run_backup_manifest)
+
+
+def _tool_identity() -> tuple[str | None, str | None]:
+    """The RELEASE_TAG / RELEASE_COMMIT of this image (no Settings: no database configuration)."""
+    tag = os.environ.get("RELEASE_TAG") or DEVELOPMENT_RELEASE
+    commit = os.environ.get("RELEASE_COMMIT") or None
+    return (
+        tag if backups.RELEASE_TAG_PATTERN.fullmatch(tag) else None,
+        commit if commit is not None and backups.COMMIT_PATTERN.fullmatch(commit) else None,
+    )
+
+
+def _run_backup_manifest(args: argparse.Namespace) -> int:
+    tool_tag, tool_commit = _tool_identity()
+    request = backups.ManifestRequest(
+        name=args.name,
+        operator=args.operator,
+        reason=args.reason,
+        release_tag=args.release_tag,
+        release_commit=args.release_commit,
+        expected_revision=args.expected_revision,
+        environment=args.environment,
+        host=args.host,
+        image_backend=args.image_backend,
+        image_web=args.image_web,
+        image_db=args.image_db,
+        tool_tag=tool_tag,
+        tool_commit=tool_commit,
+    )
+    report = backups.publish_backup(args.backup_dir, request)
+    _print_document(backups.publish_document(report))
+    _print_backup_traceback(report.error)
+    print(backups.publish_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
+def _print_backup_traceback(error: backups.BackupError | None) -> None:
+    if error is not None and error.code == "internal_error" and error.exception is not None:
+        traceback.print_exception(error.exception, file=sys.stderr)
+
+
+_BACKUP_VERIFY_HELP = (
+    "Verify one backup directory (checksums, manifest, dump header, table of contents) and"
+    " print a JSON report. Never changes anything."
+)
+
+
+def _add_backup_verify_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "backup-verify", help=_BACKUP_VERIFY_HELP, description=_BACKUP_VERIFY_HELP
+    )
+    parser.add_argument("name", metavar="NAME", help="The backup directory name.")
+    _backup_dir_argument(parser)
+    parser.add_argument(
+        "--expect-database",
+        metavar="NAME",
+        help="Also require the backup to be of this database.",
+    )
+    parser.set_defaults(handler=_run_backup_verify)
+
+
+def _run_backup_verify(args: argparse.Namespace) -> int:
+    result = backups.verify_backup(args.backup_dir, args.name, expect_database=args.expect_database)
+    _print_document(backups.verify_document(result))
+    _print_backup_traceback(result.error)
+    print(backups.verify_summary(result), file=sys.stderr)
+    return result.exit_code
+
+
+_BACKUP_ROTATE_HELP = (
+    "Keep the newest verified daily backups and the newest verified daily backup of each of"
+    " the newest ISO weeks; delete the other verified daily backups. Never touches pre-release,"
+    " manual or invalid backups."
+)
+
+
+def _add_backup_rotate_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "backup-rotate", help=_BACKUP_ROTATE_HELP, description=_BACKUP_ROTATE_HELP
+    )
+    parser.add_argument(
+        "--keep-daily",
+        type=_bounded_int(1, 3650),
+        required=True,
+        metavar="N",
+        help="The newest N verified daily backups are kept (1-3650).",
+    )
+    parser.add_argument(
+        "--keep-weekly",
+        type=_bounded_int(0, 520),
+        required=True,
+        metavar="N",
+        help="The newest daily backup of each of the newest N ISO weeks is kept (0-520).",
+    )
+    _backup_dir_argument(parser)
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would be removed; change nothing."
+    )
+    parser.set_defaults(handler=_run_backup_rotate)
+
+
+def _run_backup_rotate(args: argparse.Namespace) -> int:
+    report = backups.rotate_backups(
+        args.backup_dir,
+        keep_daily=args.keep_daily,
+        keep_weekly=args.keep_weekly,
+        dry_run=args.dry_run,
+    )
+    _print_document(backups.rotate_document(report))
+    _print_backup_traceback(report.error)
+    print(backups.rotate_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -603,6 +870,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_revision_parser(subparsers)
     _add_provision_roles_parser(subparsers)
     _add_apply_grants_parser(subparsers)
+    _add_backup_manifest_parser(subparsers)
+    _add_backup_verify_parser(subparsers)
+    _add_backup_rotate_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result

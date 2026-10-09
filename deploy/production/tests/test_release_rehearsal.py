@@ -40,6 +40,19 @@ class ProbeVerdict(unittest.TestCase):
         self.assertEqual(verdict["violations"], [])
         self.assertEqual(verdict["web_switch_errors"], [5])
 
+    def test_post_error_in_the_round_of_the_first_b_shell_is_accepted(self):
+        # Regression (P16-S5 DR-10 run, 2026-10-09): the round's POST reached the old web container as it closed
+        # (RemoteDisconnected) while the round's GET / was already answered by web B.
+        samples = [sample(404), sample(502), sample(409), sample(DISCONNECTED, DISCONNECTED), sample(DISCONNECTED, B),
+                   sample(409, B)]
+        verdict = probe_verdict(samples, A, B)
+        self.assertEqual(verdict["violations"], [])
+        self.assertEqual(verdict["web_switch_errors"], [3, 4])
+
+    def test_post_error_after_the_first_b_shell_round_fails(self):
+        samples = [sample(404), sample(502), sample(409), sample(409, B), sample(DISCONNECTED, B)]
+        self.assertIn("probe errors outside the web switch at samples [4]", probe_verdict(samples, A, B)["violations"])
+
     def test_connection_error_outside_the_web_switch_fails(self):
         samples = [sample(404), sample(DISCONNECTED), sample(502), sample(409), sample(409, B)]
         self.assertIn("probe errors outside the web switch at samples [1]", probe_verdict(samples, A, B)["violations"])

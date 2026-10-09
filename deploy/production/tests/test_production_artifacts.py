@@ -1,9 +1,10 @@
-"""P16-S2/S3/S4: static checks of the production artifacts (compose.production.yaml, its build-only companion
+"""P16-S2/S3/S4/S5: static checks of the production artifacts (compose.production.yaml, its build-only companion
 compose.production.build.yaml, .env.production.example, both Dockerfiles and the web tier configuration in
 frontend/nginx/).
 
-Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2 and P16-S4 SPEC section 6.4):
-  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20)
+Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2, P16-S4 SPEC section 6.4 and P16-S5 SPEC
+section 6.3):
+  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20..ST-22)
   Dockerfiles and the development default              -> Dockerfiles (ST-13)
   Liveness probes and the release meta (P16-S3)        -> ReleaseArtifacts (ST-18, ST-19)
   nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-12)
@@ -41,7 +42,9 @@ RELEASE = "static-test"
 # The commit the generated env passes to the build file (ST-12); any 40-hex value.
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 LONG_RUNNING = {"db", "backend", "web"}
-PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles")
+PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles", "backup-tools")
+# P16-S5: the backup directory's container path (backup-tools read-write, migrate read-only; ST-4, ST-21).
+BACKUP_TARGET = "/backups"
 # P16-S4: the database-role secrets and the application database role's name in code (ST-9, ST-10).
 SECRET_NAMES = ("postgres_password", "partflow_app_password", "partflow_maintenance_password")
 DATABASE_ROLES_MODULE = REPO / "backend" / "app" / "application" / "database_roles.py"
@@ -53,11 +56,13 @@ REQUIRED_VARIABLES = (
     "PARTFLOW_HTTP_PORT",
     "POSTGRES_USER",
     "POSTGRES_DB",
+    "PARTFLOW_BACKUP_DIR",
 )
 # Site-specific values (and the optional trusted-proxy override) the example leaves empty (ST-14).
 EMPTY_IN_EXAMPLE = (
     "PARTFLOW_RELEASE",
     "PARTFLOW_SECRETS_DIR",
+    "PARTFLOW_BACKUP_DIR",
     "PARTFLOW_SITE_TIMEZONE",
     "PARTFLOW_TRUSTED_PROXY",
     "PARTFLOW_COMMIT",
@@ -213,6 +218,14 @@ def duration_seconds(value):
     return sum(float(number) * units[unit] for number, unit in parts)
 
 
+def make_backup_dir(root):
+    """A temporary backup directory (mode 0700) for the generated env (P16-S5: required by every Compose call)."""
+    path = Path(root) / "backups"
+    path.mkdir()
+    os.chmod(path, 0o700)
+    return path
+
+
 def same_path(left, right):
     if os.name == "nt":
         return PureWindowsPath(left) == PureWindowsPath(right)
@@ -361,9 +374,11 @@ class ComposeModel(unittest.TestCase):
         cls.secrets_dir.mkdir()
         for name in SECRET_NAMES:
             (cls.secrets_dir / name).write_text(f"static-test-{name}\n", encoding="utf-8")
+        cls.backup_dir = make_backup_dir(root)
         cls.base_overrides = {
             "PARTFLOW_RELEASE": RELEASE,
             "PARTFLOW_SECRETS_DIR": cls.secrets_dir.as_posix(),
+            "PARTFLOW_BACKUP_DIR": cls.backup_dir.as_posix(),
             "PARTFLOW_SITE_TIMEZONE": "UTC",
             "PARTFLOW_COMMIT": COMMIT,
         }
@@ -403,7 +418,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual({n for n, s in self.services.items() if not s.get("profiles")}, LONG_RUNNING)
         for name in self.ops_services():
             self.assertEqual(self.services[name]["profiles"], ["ops"], name)
-        self.assertEqual(self.ops_services(), {"migrate", "db-roles"})
+        self.assertEqual(self.ops_services(), {"migrate", "db-roles", "backup-tools"})
 
     # ST-3
     def test_st3_only_web_published_on_loopback(self):
@@ -416,13 +431,28 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(ports[0]["target"], 80)
         self.assertEqual(str(ports[0]["published"]), example_values()["PARTFLOW_HTTP_PORT"])
 
-    # ST-4
+    # ST-4 (amended by P16-S5): the only host-path mounts are the backup directory on backup-tools (read-write) and,
+    # read-only, on migrate; the long syntax never lets Compose create a missing host path.
     def test_st4_volumes(self):
+        expected = {"backup-tools": False, "migrate": True}
         for name, service in self.services.items():
-            for volume in service.get("volumes") or []:
-                self.assertNotEqual(volume.get("type"), "bind", f"{name} has a host-path mount")
-        for name in ("backend", "web", "migrate", "db-roles"):
+            binds = [v for v in service.get("volumes") or [] if v.get("type") == "bind"]
+            if name not in expected:
+                self.assertFalse(binds, f"{name} has a host-path mount")
+                continue
+            self.assertEqual(len(service["volumes"]), 1, name)
+            volume = service["volumes"][0]
+            self.assertEqual(volume["type"], "bind", name)
+            self.assertTrue(same_path(volume["source"], self.backup_dir), volume["source"])
+            self.assertEqual(volume["target"], BACKUP_TARGET, name)
+            self.assertIs(bool(volume.get("read_only")), expected[name], name)
+            self.assertIsNot((volume.get("bind") or {}).get("create_host_path"), True, name)
+        for name in ("backend", "web", "db-roles"):
             self.assertFalse(self.services[name].get("volumes"), f"{name} has a volume")
+        # The raw file uses the long syntax for both mounts (the short syntax resolves to create_host_path: true).
+        raw = COMPOSE_FILE.read_text(encoding="utf-8")
+        self.assertEqual(raw.count("source: ${PARTFLOW_BACKUP_DIR:?"), 2)
+        self.assertEqual(raw.count("create_host_path: false"), 2)
         volumes = self.services["db"]["volumes"]
         self.assertEqual(
             [(v["type"], v["source"], v["target"]) for v in volumes],
@@ -545,6 +575,9 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(attached["db"], {"internal"})
         self.assertEqual(attached["migrate"], {"internal"})
         self.assertEqual(attached["db-roles"], {"internal"})
+        # P16-S5: backup-tools needs no database and has no network at all.
+        self.assertEqual(attached["backup-tools"], set())
+        self.assertEqual(self.services["backup-tools"].get("network_mode"), "none")
         self.assertEqual(attached["backend"], {"internal", "edge"})
         self.assertEqual(attached["web"], {"edge"})
         self.assertFalse(self.services["web"].get("depends_on"), "web must start without backend")
@@ -556,6 +589,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(self.services["web"]["image"], f"partflow/web:{RELEASE}")
         self.assertEqual(self.services["migrate"]["image"], self.services["backend"]["image"])
         self.assertEqual(self.services["db-roles"]["image"], self.services["backend"]["image"])
+        self.assertEqual(self.services["backup-tools"]["image"], self.services["backend"]["image"])
         for name in PARTFLOW_IMAGES:
             self.assertEqual(self.services[name].get("pull_policy"), "never", name)
         # No service of the runtime file can build: `up` or `run` with a missing PARTFLOW_RELEASE image must fail
@@ -613,6 +647,36 @@ class ComposeModel(unittest.TestCase):
         db_roles = self.services["db-roles"]
         self.assertEqual(db_roles.get("entrypoint"), ["python", "-m", "app.cli"])
         self.assertEqual(db_roles.get("command"), ["provision-roles"])
+
+    # ST-21 (P16-S5): the backup one-shot has no database, no network, no secret; running it without arguments is a
+    # usage error (exit 2).
+    def test_st21_backup_tools(self):
+        tools = self.services["backup-tools"]
+        self.assertEqual(tools["image"], self.services["backend"]["image"])
+        self.assertNotIn("build", tools)
+        self.assertEqual(tools.get("pull_policy"), "never")
+        self.assertEqual(tools.get("entrypoint"), ["python", "-m", "app.cli"])
+        self.assertIsNone(tools.get("command"))
+        self.assertEqual(tools.get("network_mode"), "none")
+        for key in ("networks", "secrets", "environment", "depends_on"):
+            self.assertFalse(tools.get(key), key)
+        self.assertEqual(tools["restart"], "no")
+        self.assertIs(tools["healthcheck"].get("disable"), True)
+        limits = tools["deploy"]["resources"]["limits"]
+        self.assertTrue(limits.get("memory") and limits.get("cpus"))
+        self.assertEqual(tools["logging"]["driver"], "json-file")
+        self.assertEqual([(v["type"], v["target"], bool(v.get("read_only"))) for v in tools["volumes"]],
+                         [("bind", BACKUP_TARGET, False)])
+
+    # ST-22 (P16-S5): the backup location is a host path for Compose only, never an application setting.
+    def test_st22_backup_dir_is_not_in_any_environment(self):
+        for name, service in self.services.items():
+            for key, value in (service.get("environment") or {}).items():
+                self.assertNotEqual(key, "PARTFLOW_BACKUP_DIR", name)
+                self.assertFalse(bool(value) and same_path(str(value), self.backup_dir), f"{name}.{key}")
+        for line in COMPOSE_FILE.read_text(encoding="utf-8").splitlines():
+            if "PARTFLOW_BACKUP_DIR" in line and not line.lstrip().startswith("#"):
+                self.assertTrue(line.strip().startswith("source: ${PARTFLOW_BACKUP_DIR:?"), line)
 
     # ST-17 (P16-S3)
     def test_st17_release_identity_comes_from_the_image(self):
@@ -739,7 +803,8 @@ class ReleaseArtifacts(unittest.TestCase):
             for name in SECRET_NAMES:
                 (secrets_dir / name).write_text(f"static-test-{name}\n", encoding="utf-8")
             env_file = Path(tmp) / "env"
-            write_env(env_file, {"PARTFLOW_RELEASE": RELEASE, "PARTFLOW_SECRETS_DIR": secrets_dir.as_posix(), "PARTFLOW_SITE_TIMEZONE": "UTC"})
+            write_env(env_file, {"PARTFLOW_RELEASE": RELEASE, "PARTFLOW_SECRETS_DIR": secrets_dir.as_posix(),
+                                 "PARTFLOW_BACKUP_DIR": make_backup_dir(tmp).as_posix(), "PARTFLOW_SITE_TIMEZONE": "UTC"})
             arguments = ["--env-file", str(env_file), "--profile", "ops"] if path == COMPOSE_FILE else []
             result = subprocess.run(
                 ["docker", "compose", "-f", str(path), *arguments, "config", "--format", "json"],

@@ -281,6 +281,42 @@ database-consistent đã được ghi rõ và test.
 Làm restore test theo [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) trước
 khi tin rằng backup dùng được.
 
+### Backup production (Phase 16)
+
+Production stack dùng backup artifact của P16-S5, không phải staging dump ở trên
+([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §3; một directory cho mỗi
+backup cùng manifest và `SHA256SUMS`). Script, manifest và việc verify đã được triển
+khai và chạy thử trên Docker Desktop; các định nghĩa task dưới đây được **cấu hình
+và chạy trên NAS ở P16-S7**, và chưa có gì ở đây được chạy trên Synology NAS.
+
+- **Backup directory.** Một shared folder nằm ngoài release checkout, thư mục
+  secret và mọi archive directory, ví dụ `/volume1/partflow-backups/production`,
+  mode 0700, thuộc account mà scheduled task chạy bằng (account chạy
+  `release.sh`). Đặt nó làm `PARTFLOW_BACKUP_DIR` trong `.env.production` (không có
+  dấu nháy) trước lệnh `$PF` đầu tiên. Chỉ production: không bao giờ của staging
+  hay của một drill.
+- **Schedule (DSM Task Scheduler).** Create → Scheduled Task → User-defined
+  script, user = account đó, hằng ngày lúc 02:00, task settings → Run command:
+  `cd <running release checkout> && deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8`
+  (14 và 8 là placeholder; owner đặt retention thật, và các option là bắt buộc).
+  Bật "Send run details by email" **chỉ khi script kết thúc bất thường**, để mọi
+  exit khác 0 (backup bị từ chối, thất bại hoặc không verify được,
+  `backup_lock_stale`) đến tay administrator. Giữ schedule ngoài maintenance window
+  (RUNBOOK §5). Recovery point objective là schedule này (24 giờ) cho đến khi owner
+  duyệt một giá trị.
+- **Bản copy off-NAS có mã hóa (Hyper Backup).** Một task có source là backup
+  directory và đích off-NAS (NAS từ xa, C2 hoặc dịch vụ tương thích S3), với
+  **client-side encryption bật**: owner giữ password và key file ngoài NAS, và mất
+  chúng là mất các bản copy off-NAS. Đặt lịch sau backup (03:00), đặt version
+  rotation riêng của tool theo quyết định của owner, chạy integrity check hằng tuần
+  và bật email notification khi thất bại. Việc review các notification này nằm
+  trong routine hằng ngày (RUNBOOK §9). Snapshot local chỉ là lớp thứ hai.
+- **Archive directory** (Phase 16 slice S8): nó có task Hyper Backup riêng với
+  **không version rotation**; archive không bao giờ bị rotate hay prune bởi bất kỳ
+  tool nào.
+- **Restore drill.** Hằng quý, `deploy/production/restore-test.sh --backup <latest daily> --operator "<name>"`
+  (RUNBOOK §4); giữ evidence và so timing của nó với RTO đã duyệt.
+
 ## 7. Quy trình update staging
 
 1. Thông báo maintenance window cho staging.
@@ -318,7 +354,10 @@ release checkout `repo/`.
    không liệt kê `partflow-staging`.
 2. **Tạo configuration.** Sao chép `.env.production.example` thành
    `.env.production` (mode 600) và điền mọi giá trị còn rỗng. Tạo thư mục secret
-   (`PARTFLOW_SECRETS_DIR`, mode 0700) và ba file một dòng `postgres_password`,
+   (`PARTFLOW_SECRETS_DIR`, mode 0700), backup directory (`install -d -m 0700`, §6)
+   với `PARTFLOW_BACKUP_DIR` đặt trong `.env.production` **trước mọi lệnh `$PF`**
+   (mọi lệnh Compose của stack cần nó; một stack cài trước P16-S5 được chuyển theo
+   thứ tự của [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1), và ba file một dòng `postgres_password`,
    `partflow_app_password` và `partflow_maintenance_password` (mode 0444; hai role
    file dài 16 đến 128 ký tự ASCII in được không có khoảng trắng và khác nhau),
    trước mọi lệnh `$PF` khởi động `backend` hoặc một ops service. Backend kết nối
@@ -337,7 +376,8 @@ release checkout `repo/`.
    web` với `PARTFLOW_COMMIT`, `db-roles`, `db-roles apply-grants`, rồi
    `release.sh`). Volume `partflow-production_postgres_data`
    mới và rỗng: dữ liệu staging không bao giờ được promote, và restore vào
-   production là quy trình P16-S5 cần owner quyết định.
+   production theo [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 path 3 hoặc
+   §8 host hỏng, với sự phê duyệt của owner được ghi lại trước khi `backend` start.
 5. **First-run setup với một worker.**
    `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web`, đọc token bằng
    `$PF logs backend | grep "Setup token"`, hoàn tất setup, rồi
@@ -348,10 +388,10 @@ release checkout `repo/`.
 6. **Không bao giờ chạy `down -v`** (hay xóa volume) trên project
    `partflow-production`: nó xóa database production.
 
-Còn lại: backup và restore (P16-S5),
-observability (P16-S6), và các host check trên NAS cùng pilot gate (P16-S7); bản
-thân release flow (`release.sh`, `smoke.sh`) đã triển khai và chưa được thực thi
-trên NAS.
+Còn lại: observability (P16-S6), và các host check trên NAS cùng pilot gate
+(P16-S7); bản thân release flow (`release.sh`, `smoke.sh`) và công cụ backup và
+restore (`backup.sh`, `restore-test.sh`, P16-S5) đã triển khai và chưa được thực
+thi trên NAS.
 
 - frontend/backend image production bất biến — đã triển khai (P16-S2: image gắn
   tag bằng `PARTFLOW_RELEASE`, không bao giờ pull); release identity nằm trong image
@@ -366,7 +406,9 @@ trên NAS.
   (P16-S4: `partflow_app`, `partflow_maintenance`, `db-roles`, grant trong mọi
   `migrate`; bằng chứng trên host ở P16-S7);
 - logical backup theo lịch, replicate off-NAS có mã hóa, retention alert và
-  restore drill thành công;
+  restore drill thành công — script, manifest, verify, retention và drill đã triển
+  khai (P16-S5); schedule và replication chạy trên NAS cùng một drill được đo thời
+  gian ở đó còn lại (P16-S7), và alert tuổi backup còn lại (P16-S6);
 - monitor health, log, disk, backup age, restart count và database growth;
 - release, migration, rollback, reconciliation và incident runbook đã được
   administrator thật sự diễn tập;
@@ -380,21 +422,30 @@ test thực tế:
 - CPU/RAM lúc idle và peak của mọi service cùng workload NAS hiện có;
 - tốc độ tăng data/index PostgreSQL;
 - dung lượng tạm cho build/update image;
-- thời gian/kích thước backup và thời gian restore;
+- thời gian/kích thước backup và thời gian restore (các dòng tiến trình của
+  `backup.sh` và `evidence.json` của `restore-test.sh`);
 - latency UI/API từ shop-floor VLAN;
 - hành vi khi reboot NAS, restart container, gián đoạn mạng và UPS shutdown.
 
 Đặt disk alert sao cho còn đủ chỗ cho database, ít nhất một bộ image update,
-temporary migration work và local backup staging window.
+temporary migration work và local backup staging window: một backup cần `2 x` dump
+mới nhất cộng 1 GiB trống trong backup directory, và một restore drill cần `5 x`
+dump cộng 1 GiB trống trên Docker root (drill chạy một backend worker).
 
 ## 10. Chuyển từ Synology sang VPS
 
 1. Provision VPS theo [`VPS.md`](./VPS.md) với cùng release và migration level.
-2. Diễn tập dump/restore bằng staging data.
-3. Lên lịch production write freeze.
-4. Tạo logical dump cuối và checksum manifest.
-5. Chuyển qua kênh mã hóa và verify checksum.
-6. Restore vào PostgreSQL trên VPS.
+2. Diễn tập restore bằng backup của staging data
+   (`deploy/production/restore-test.sh`).
+3. Lên lịch production write freeze (`$PF stop backend`).
+4. Tạo backup cuối bằng
+   `deploy/production/backup.sh --kind manual --operator "<name>" --reason "move to VPS"`
+   bên trong freeze (`SHA256SUMS` của nó là checksum manifest).
+5. Chuyển backup directory qua kênh mã hóa và verify: `sha256sum -c SHA256SUMS`
+   và `backup-verify`.
+6. Restore vào PostgreSQL trên VPS bằng new-instance restore trong
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 (volume `postgres_data`
+   mới, rỗng; sự phê duyệt của owner được ghi lại trước khi `backend` start).
 7. Chạy Alembic `current` và reconciliation trước khi mở truy cập.
 8. Đổi internal DNS với TTL được kiểm soát và test client.
 9. Giữ NAS instance ở trạng thái stopped nhưng còn recover được đến hết
