@@ -224,6 +224,9 @@ def migrate_doc(result, exit_code, before=DB_REVISION, after=None, applied=(), e
 
 # The top-level secrets of compose.production.yaml (P16-S4); the fake `config --format json` names a file for each.
 SECRET_NAMES = ("postgres_password", "partflow_app_password", "partflow_maintenance_password")
+# Without `--profile ops` real Compose leaves out a secret only profile-gated services use: the maintenance password
+# file is mounted by db-roles alone, so the unprofiled model names just these two.
+UNPROFILED_SECRET_NAMES = ("postgres_password", "partflow_app_password")
 SECRET_ERROR = ("is missing, empty or not a regular file. Create it as DEPLOYMENT §3.1 describes; if Compose already"
                 " created a directory there, remove it first. Nothing was changed.")
 
@@ -361,7 +364,10 @@ class Harness(unittest.TestCase):
         self.secrets.mkdir()
         for name in SECRET_NAMES:
             (self.secrets / name).write_text(f"rs-{name}-value\n", encoding="utf-8")
-        self.rules["docker"].insert(1, rule(r"config --format json$", out(compose_config_doc(self.secrets))))
+        self.rules["docker"][1:1] = [
+            rule(r"--profile ops config --format json$", out(compose_config_doc(self.secrets))),
+            rule(r"config --format json$", out(compose_config_doc(self.secrets, names=UNPROFILED_SECRET_NAMES))),
+        ]
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -463,7 +469,7 @@ class Harness(unittest.TestCase):
 # The docker sequence of a full release with a pending migration (RS-1).
 CURRENT_IMAGES = [
     "config --quiet",
-    "config --format json",
+    "--profile ops config --format json",
     'ps -a --format {{.Label "com.docker.compose.project"}}',
     f"image inspect --format {{{{.Id}}}} partflow/backend:{CURRENT}",
     f"image inspect --format {{{{.Id}}}} partflow/web:{CURRENT}",
@@ -701,14 +707,19 @@ class ReleasePreflight(Harness):
             path.unlink()
             path.mkdir()
 
-        for name, damage in (("missing", missing), ("empty", empty), ("directory", directory)):
+        # partflow_maintenance_password is named only by the ops-profile model (db-roles), so its absence must stop
+        # step 0 too: a later `--profile ops run db-roles` would otherwise leave a directory at its path.
+        for name, damage, secret_name in (("missing", missing, "partflow_app_password"),
+                                          ("empty", empty, "partflow_app_password"),
+                                          ("directory", directory, "partflow_app_password"),
+                                          ("maintenance missing", missing, "partflow_maintenance_password")):
             with self.subTest(case=name):
                 self.reset()
-                secret = self.secrets / "partflow_app_password"
+                secret = self.secrets / secret_name
                 damage(secret)
                 self.release()
                 self.assertExit(1, "stopped_unchanged")
-                self.assertIn(f"the secret file partflow_app_password ({secret.as_posix()}) {SECRET_ERROR}", self.result.stderr)
+                self.assertIn(f"the secret file {secret_name} ({secret.as_posix()}) {SECRET_ERROR}", self.result.stderr)
                 self.assertEqual(self.docker(), CURRENT_IMAGES[:2])
                 self.assertNoDocker(r"^run ", r"--profile ops run", r" build ", r"^stop ", r"^up ")
                 steps = self.record()["steps"]
@@ -733,7 +744,7 @@ class ReleasePreflight(Harness):
         for name, answer in cases.items():
             with self.subTest(case=name):
                 self.reset()
-                self.prepend("docker", rule(r"config --format json$", answer))
+                self.prepend("docker", rule(r"--profile ops config --format json$", answer))
                 self.release()
                 self.assertExit(2, "could_not_run")
                 self.assertIn("config --format json' failed or names no secret file", self.result.stderr)

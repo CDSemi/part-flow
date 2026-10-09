@@ -471,10 +471,12 @@ def run_migrate(
         try:
             commit_transaction(transaction)
         except Exception as exc:
-            # COMMIT itself failed: the outcome is unknown, never "nothing changed".
+            # COMMIT itself failed: the outcome is unknown, never "nothing changed". The grants ran
+            # in the same transaction, so their outcome is unknown too (as in run_apply_grants).
             report.result = "outcome_unknown"
             report.error = RunError("outcome_unknown", MIGRATE_MESSAGES["outcome_unknown"], exc)
             report.revision_after = report.revision_before
+            report.grants = None
             report.finished_at = _now()
             return report
     finally:

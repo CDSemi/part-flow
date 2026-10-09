@@ -163,8 +163,10 @@ Deployment account sở hữu release file. Secret chỉ cho account/service c�
 của Compose file mới chạy `backend` hoặc `db-roles`; (2) build cả hai image với
 `PARTFLOW_COMMIT` (`PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD)
 $PF -f compose.production.build.yaml build backend web`), không bao giờ chỉ
-`backend`; (3) `$PF --profile ops run --rm -T db-roles`; (4) `$PF --profile ops
-run --rm -T db-roles apply-grants`; (5) `deploy/production/release.sh`
+`backend`; (3) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles`;
+(4) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles apply-grants`
+(tiền tố tag chạy image mới: `.env.production` vẫn ghi release đang chạy); (5)
+`deploy/production/release.sh`
 ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Chuyển một stack cài trước
 P16-S4).
 

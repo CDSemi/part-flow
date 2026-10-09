@@ -162,8 +162,10 @@ To convert a rehearsal stack installed before P16-S4, in this order: (1) create
 command of the new Compose file that runs `backend` or `db-roles`; (2) build both
 images with `PARTFLOW_COMMIT` (`PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD)
 $PF -f compose.production.build.yaml build backend web`), never only `backend`;
-(3) `$PF --profile ops run --rm -T db-roles`; (4) `$PF --profile ops run --rm -T
-db-roles apply-grants`; (5) `deploy/production/release.sh`
+(3) `PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles`; (4)
+`PARTFLOW_RELEASE=<tag> $PF --profile ops run --rm -T db-roles apply-grants`
+(the tag prefix runs the new image: `.env.production` still names the running
+release); (5) `deploy/production/release.sh`
 ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Converting a stack installed
 before P16-S4).
 

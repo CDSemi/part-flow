@@ -984,9 +984,11 @@ def _provision_one(
         fixed = _differing_attributes(role)
         _execute(connection, sql.SQL("ALTER ROLE {} {}").format(role_name, _SAFE_ATTRIBUTES))
         for membership in _memberships(connection, role):
+            # CASCADE: PG16 tracks role grants the role made with an ADMIN OPTION it held; without
+            # it the REVOKE fails with "dependent privileges exist" (as for the table REVOKEs).
             _execute(
                 connection,
-                sql.SQL("REVOKE {} FROM {} GRANTED BY {}").format(
+                sql.SQL("REVOKE {} FROM {} GRANTED BY {} CASCADE").format(
                     sql.Identifier(membership.granted),
                     role_name,
                     sql.Identifier(membership.grantor),

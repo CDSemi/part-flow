@@ -445,6 +445,8 @@ def test_a_commit_failure_is_an_unknown_outcome(
             ' have been applied. Run "python -m app.cli revision" before doing anything else.'
         ),
     }
+    # The grants ran inside the uncommitted transaction: their outcome is unknown too.
+    assert document["grants"] is None
     assert _NOTHING_CHANGED not in json.dumps(document) + err
 
 

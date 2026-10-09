@@ -515,9 +515,11 @@ if ! pf config --quiet >>"$PREFLIGHT" 2>&1; then
     finish could_not_run 2
 fi
 # Every top-level secret file must exist before any `run`: Compose only warns about a missing file and creates an
-# empty directory at its path (P16-S4). The names and paths come from the resolved model ("secrets" block).
+# empty directory at its path (P16-S4). The names and paths come from the resolved model ("secrets" block), rendered
+# with the ops profile: Compose leaves out a secret that only profile-gated services use (partflow_maintenance_password
+# is mounted by db-roles alone).
 secret_files=
-if model=$(pf config --format json 2>>"$PREFLIGHT"); then
+if model=$(pf --profile ops config --format json 2>>"$PREFLIGHT"); then
     secret_files=$(printf '%s\n' "$model" | awk '
         /^  "secrets": \{/ { on = 1; next }
         on && /^  \}/ { exit }
@@ -527,7 +529,7 @@ if model=$(pf config --format json 2>>"$PREFLIGHT"); then
 fi
 if [ -z "$secret_files" ]; then
     step_end 2
-    echo "release: '$PF_TEXT config --format json' failed or names no secret file ($PREFLIGHT). Nothing was changed." >&2
+    echo "release: '$PF_TEXT --profile ops config --format json' failed or names no secret file ($PREFLIGHT). Nothing was changed." >&2
     finish could_not_run 2
 fi
 set -f

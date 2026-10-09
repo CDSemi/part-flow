@@ -1146,6 +1146,39 @@ def test_provision_repairs_drift(
         context.restore()
 
 
+def test_provision_revokes_a_membership_the_role_granted_on(
+    context: Context, cli_run: Callable[..., CliRun], extra_roles: list[str]
+) -> None:
+    """PR-4 variant: the role used an ADMIN OPTION to grant the membership on (PG16)."""
+    third = temporary_name("member")
+    extra_roles.append(third)
+    _create_role(third)
+    try:
+        context.execute(
+            'GRANT pg_read_all_data TO "{app}" WITH ADMIN OPTION',
+            'GRANT pg_read_all_data TO "{third}" GRANTED BY "{app}"',
+            third=third,
+        )
+        result = _provision_cli(cli_run, context.url, context.roles, context.files)
+        assert result.exit_code == 0, result.stderr
+        app, maintenance = result.document["roles"]
+        assert app["action"] == "updated"
+        assert app["memberships_revoked"] == ["pg_read_all_data"]
+        assert maintenance["action"] == "unchanged"
+        with context.engine.connect() as connection:
+            granted = connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member"
+                    " WHERE r.rolname = ANY(:names)"
+                ),
+                {"names": [context.roles.app, third]},
+            ).scalar_one()
+        assert granted == 0
+        context.assert_clean()
+    finally:
+        context.restore()
+
+
 def test_the_owner_name_may_not_be_a_partflow_role(
     context: Context, cli_run: Callable[..., CliRun], tmp_path: Path
 ) -> None:
