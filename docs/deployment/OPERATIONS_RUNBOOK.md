@@ -96,7 +96,16 @@ archive directory; `SKIP` until one is configured, P16-S8), then `database`,
 is `SKIP` until P16-S10). A disk is a `FAIL` below 15 % free and `backup_age` a
 `FAIL` when the newest published backup of any kind is older than 26 hours. Exit
 codes: 0 nothing to notify, 1 at least one `FAIL` to notify, 2 the check could not
-run (also notifies). An unchanged failing set is notified again only after 6
+run (also notifies). While a release holds its lock the four `status` checks are
+`SKIP`; a release lock (or a backup lock owned by `release.sh`) older than 4 hours
+is `FAIL database` naming the lock, because a killed `release.sh` leaves it behind
+(remove it as §3 describes). `errors` reads the log of the current `backend`
+container only, and Docker removes a container's log with the container: when
+`backend` was recreated since the previous full run (a release, a role-password
+rotation) the run adds `NOTE errors backend was recreated ...`, and the replaced
+container's records after the cursor can no longer be read. Before recreating
+`backend` by hand, run `check.sh --url https://<partflow-host> --only errors
+--no-state` and keep what it reports. An unchanged failing set is notified again only after 6
 hours (`--renotify-hours`; the output then says `already reported`). State lives
 in `~/partflow-monitoring` (`--state-dir`, mode 0700): `restarts` (restart
 baseline), `errors-since` (log cursor), `alert-state` (re-notification),
@@ -129,13 +138,17 @@ $PF logs --no-log-prefix backend | grep '"request_id":"<id>"'
 The HTTP request id changes on every resubmit. A production command is therefore
 always correlated and retried by its `device_event_id` (the GUI's "request
 identity"), never by `request_id`. To follow a command or a Station, filter the
-`app.access` records by the fields they carry:
+`app.access` records by the fields they carry (a numeric id is matched with its
+closing `,` or `}` so that `1` does not also match `10`; an Area is also matched
+as the source, target or starting Area of a command, and a Work Order Demand also
+in the `work_order_demand_ids` list of an allocation):
 
 ```bash
 $PF logs --no-log-prefix backend | grep '"device_event_id":"<id>"'
 $PF logs --no-log-prefix backend | grep '"part_number":"<PN>"'
-$PF logs --no-log-prefix backend | grep '"quantity_flow_id":<n>'
-$PF logs --no-log-prefix backend | grep '"area_id":<n>'
+$PF logs --no-log-prefix backend | grep -E '"quantity_flow_id":<n>[,}]'
+$PF logs --no-log-prefix backend | grep -E '"(area|source_area|target_area|starting_area)_id":<n>[,}]'
+$PF logs --no-log-prefix backend | grep -E '"work_order_demand_id":<n>[,}]|"work_order_demand_ids":\[([0-9]+,)*<n>[],]'
 $PF logs --no-log-prefix backend | grep '"station_id":"<id>"'
 ```
 
@@ -143,7 +156,8 @@ An `app.access` record holds `event`, `method`, `route` (the route template;
 `path` only when no route matched), `status`, `duration_ms`, `client`, `outcome`
 (`ok`, `created`, `replayed`, `refused` or `error`), `slow`, `refusal` (`type`,
 `code`, `message`) and `context`: the PN, QuantityFlow, quantity, Area,
-Operation, Machine, Work Order, `device_event_id`, Scan Station, `user_id` and
+Operation, Machine, Work Order, Work Order Demand (an allocation's lines as
+`work_order_demand_ids`), `device_event_id`, Scan Station, `user_id` and
 `worker_id` that the request named. `worker_id` appears only on records of a
 command that reached identity resolution (a created command or an identity
 refusal): the Worker of a replayed command is in its Movement. Never logged:
@@ -154,14 +168,28 @@ exception: it is printed once, until setup is complete. Routine reads below 1
 second and every health poll are not written at `INFO` (`"slow":true` marks a
 read of 1 second or more); designed refusals (`not_ready`, `release_mismatch`,
 `password_check_busy`, a rejected request) are `INFO`, and only a real failure is
-`ERROR`. Measured backend volume in the rehearsal: about 1.1 MB per 1,000
-commands, so the 10 MB x 5 json-file rotation of the stack holds about 9 days of
-log at 5,000 commands per day; the rehearsal was synthetic, so P16-S7 re-measures
-it on the pilot host. `web` writes one JSON edge record per request with the same
+`ERROR`. `web` writes one JSON edge record per request with the same
 `request_id` (and the upstream status), so a `502` or `504` from `web` is found by
-its `request_id` in the `web` log like any other request; measured `web` volume in
-the same rehearsal: about 0.6 MB per 1,000 commands (about 18 days of rotation at
-5,000 commands per day).
+its `request_id` in the `web` log like any other request.
+
+Log retention. Each container keeps at most 10 MB x 5 of json-file log; how many
+days that holds depends on the load, budgeted per source:
+
+- Station commands: the synthetic rehearsal measured about 1.1 MB of backend
+  log and 0.6 MB of `web` log per 1,000 commands, read as `docker compose logs`
+  output.
+- Polling displays: every open Production Board, Area Board or Tracking screen
+  refreshes every 15 s, and each request of a refresh is a `web` record (the
+  Production Board sends 2 requests per refresh: about 11,500 records, roughly
+  3 MB of `web` log a day per open board). The backend writes these reads only
+  when they take 1 second or more.
+- On disk, the json-file driver wraps and escapes every line, so a file holds
+  fewer records than the output measured above.
+
+Commands alone (5,000 a day) would give about 9 days of backend and 18 days of
+`web` log; with three Production Boards open all day the `web` log holds only a
+few days. Copy what an investigation needs as soon as it starts. P16-S7
+re-measures both on the pilot host, with its real displays and on-disk sizes.
 
 `/api/health` is readiness: it reports `release`, `commit`, `schema`
 (`current`, `accepted`, `mismatch` or `unknown`), `expected_revision`,
@@ -390,7 +418,10 @@ rm -r "<backup-dir>/.backup.lock" "<backup-dir>/.partial/<name>"   # the name fr
 
 Never remove a lock whose owner is `release.sh` while that release runs. While
 `release.sh` holds the backup lock (or its release lock exists) `check.sh` skips
-its `status` checks (§5 Observe).
+its `status` checks (§5 Observe); once such a lock is older than 4 hours
+`check.sh` reports `FAIL database` instead (§2). A release lock left by a killed
+`release.sh` is the empty directory `<records-dir>/.release.lock`: when no
+`release.sh` runs (`ps`), remove it with `rmdir`.
 
 ## 4. Restore test — never overwrite first
 
@@ -628,7 +659,9 @@ Monitor errors, latency, locks, restarts, disk, and operator feedback through th
 defined observation window: the `check.sh` lines (`errors`, `restarts`,
 `disk_*`), slow reads (`"slow":true`) and `status`, including its lock waits
 (§2). A check during the write freeze reports `backend` stopped (one
-notification) and skips the `status` checks while the release lock exists. Retain the previous release and the pre-release backup (never rotated). Pages that
+notification) and skips the `status` checks while the release lock exists (a
+`FAIL database` once the lock is older than 4 hours). The release recreates
+`backend`: run `check.sh --only errors --no-state` before it (§2). Retain the previous release and the pre-release backup (never rotated). Pages that
 were open during the switch show the update notice and reload (GUI_DESIGN §3
 rule 13); an unattended Scan Station or Production Board reloads itself once no
 dialog is open.
@@ -989,7 +1022,7 @@ not trigger an automatic repair.
 | Daily | The scheduled `backup.sh --kind daily --keep-daily 14 --keep-weekly 8` (the owner's values); review the scheduler's and the platform tool's notifications (exit 4 includes a daily that fails verification) and off-site replication; review critical errors; `scheduled-reconcile.sh` at 04:00 (after the 02:00 backup of the platform guides); review `last-check.txt`, `<reports-dir>/last-result.txt` and the notifications |
 | Weekly | Review capacity trend and database growth (`growth.tsv` and `docker stats --no-stream`), failed logins/authorization events (`$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'`: `refusal.type` and `refusal.code` tell a sign-in refused or locked, a permission denied, `station_device_required` or `station_device_mismatch`, and `csrf_rejected` apart; the `app.application.authentication` sign-in lines name a user id only), and pending security updates (a host item, P16-S7) |
 | Monthly | Prune old reconcile reports by hand after review (no tool deletes them; they may hold badge values); patch in staging then production; review users/roles, firewall rules, secrets, and runbook contacts; review database roles with `reconcile --check h`; remove pre-release and manual backups whose observation window ended, and daily backups reported invalid by rotation after review (never an archive) |
-| On role-password rotation | A short write freeze: replace the role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, then check health. A plain `up -d backend` does not pick up the new password (the container is not recreated), and running `db-roles` while the backend serves makes its new connections fail. Owner password: `ALTER ROLE … PASSWORD` inside `db` first, then replace `postgres_password` (no service restart: only the one-shot `migrate` and `db-roles` use it) |
+| On role-password rotation | First `check.sh --url https://<partflow-host> --only errors --no-state` (recreating `backend` removes its log, §2). A short write freeze: replace the role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, then check health. A plain `up -d backend` does not pick up the new password (the container is not recreated), and running `db-roles` while the backend serves makes its new connections fail. Owner password: `ALTER ROLE … PASSWORD` inside `db` first, then replace `postgres_password` (no service restart: only the one-shot `migrate` and `db-roles` use it) |
 | Quarterly or after material schema change | `restore-test.sh --backup <latest daily>` (§4), its timings compared with the RTO, a measured RPO/RTO exercise, and reconciliation review |
 | Before a PostgreSQL-image or host glibc change | `restore-test.sh --backup <latest> --db-image <candidate>` (§7) |
 | Before every release | `release.sh` takes the verified pre-release backup (§5); migration review, rollback decision, and smoke-test plan |

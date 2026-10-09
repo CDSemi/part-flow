@@ -50,6 +50,8 @@ ALLOWED_FIELDS: Final = (
     "machine_id",
     "work_order_id",
     "work_order_demand_id",
+    "work_order_demand_ids",
+    "work_order_demand_ids_truncated",
     "demand_id",
     "allocation_id",
     "route_template_id",
@@ -57,7 +59,9 @@ ALLOWED_FIELDS: Final = (
     "reverses_device_event_id",
 )
 # Set only by the helpers below, never by ``bind``.
-_FLAG_FIELDS: Final = frozenset({"part_number_invalid", "quantity_flow_ids_truncated"})
+_FLAG_FIELDS: Final = frozenset(
+    {"part_number_invalid", "quantity_flow_ids_truncated", "work_order_demand_ids_truncated"}
+)
 _ALLOWED: Final = frozenset(ALLOWED_FIELDS)
 
 MAX_TEXT_LENGTH: Final = 128

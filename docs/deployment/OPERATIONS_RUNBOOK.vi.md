@@ -101,7 +101,16 @@ directory; `SKIP` cho đến khi được cấu hình, P16-S8), rồi `database`
 cho đến P16-S10). Một disk là `FAIL` khi còn trống dưới 15 % và `backup_age` là
 `FAIL` khi backup đã publish mới nhất, thuộc bất kỳ loại nào, cũ hơn 26 giờ. Exit
 code: 0 không có gì để thông báo, 1 có ít nhất một `FAIL` cần thông báo, 2 check
-không chạy được (cũng thông báo). Một tập lỗi không đổi chỉ được thông báo lại sau
+không chạy được (cũng thông báo). Khi một release đang giữ lock của nó, bốn check
+`status` là `SKIP`; một release lock (hoặc một backup lock mà owner là
+`release.sh`) cũ hơn 4 giờ là `FAIL database` nêu tên lock đó, vì một `release.sh`
+bị kill để lại lock (xóa nó như §3 mô tả). `errors` chỉ đọc log của container
+`backend` hiện tại, và Docker xóa log của một container cùng với container đó: khi
+`backend` đã được tạo lại kể từ lần chạy đầy đủ trước (một release, một lần rotate
+password của role), lần chạy thêm `NOTE errors backend was recreated ...`, và các
+record của container cũ sau cursor không còn đọc được. Trước khi tự tay tạo lại
+`backend`, chạy `check.sh --url https://<partflow-host> --only errors --no-state`
+và giữ lại những gì nó báo. Một tập lỗi không đổi chỉ được thông báo lại sau
 6 giờ (`--renotify-hours`; output khi đó ghi `already reported`). State nằm trong
 `~/partflow-monitoring` (`--state-dir`, mode 0700): `restarts` (baseline restart),
 `errors-since` (log cursor), `alert-state` (re-notification), `last-check.txt`
@@ -134,13 +143,17 @@ $PF logs --no-log-prefix backend | grep '"request_id":"<id>"'
 HTTP request id đổi sau mỗi lần resubmit. Vì vậy một production command luôn được
 đối chiếu và retry bằng `device_event_id` của nó (the GUI's "request identity"),
 không bao giờ bằng `request_id`. Để lần theo một command hoặc một Station, lọc các
-record `app.access` theo field chúng mang:
+record `app.access` theo field chúng mang (một id dạng số được khớp cùng dấu `,`
+hoặc `}` đứng sau nó để `1` không khớp cả `10`; một Area cũng được khớp khi là
+Area nguồn, đích hoặc Area bắt đầu của một command, và một Work Order Demand cũng
+được khớp trong danh sách `work_order_demand_ids` của một allocation):
 
 ```bash
 $PF logs --no-log-prefix backend | grep '"device_event_id":"<id>"'
 $PF logs --no-log-prefix backend | grep '"part_number":"<PN>"'
-$PF logs --no-log-prefix backend | grep '"quantity_flow_id":<n>'
-$PF logs --no-log-prefix backend | grep '"area_id":<n>'
+$PF logs --no-log-prefix backend | grep -E '"quantity_flow_id":<n>[,}]'
+$PF logs --no-log-prefix backend | grep -E '"(area|source_area|target_area|starting_area)_id":<n>[,}]'
+$PF logs --no-log-prefix backend | grep -E '"work_order_demand_id":<n>[,}]|"work_order_demand_ids":\[([0-9]+,)*<n>[],]'
 $PF logs --no-log-prefix backend | grep '"station_id":"<id>"'
 ```
 
@@ -148,7 +161,9 @@ Một record `app.access` chứa `event`, `method`, `route` (route template; `pa
 khi không route nào khớp), `status`, `duration_ms`, `client`, `outcome` (`ok`,
 `created`, `replayed`, `refused` hoặc `error`), `slow`, `refusal` (`type`, `code`,
 `message`) và `context`: PN, QuantityFlow, quantity, Area, Operation, Machine, Work
-Order, `device_event_id`, Scan Station, `user_id` và `worker_id` mà request nêu.
+Order, Work Order Demand (các line của một allocation dưới dạng
+`work_order_demand_ids`), `device_event_id`, Scan Station, `user_id` và `worker_id`
+mà request nêu.
 `worker_id` chỉ xuất hiện trên record của command đã đi tới bước resolve identity
 (command được tạo hoặc identity refusal): Worker của một command replay nằm trong
 Movement của nó. Không bao giờ log: request hoặc response body, query string,
@@ -158,14 +173,27 @@ duy nhất là first-run setup token: nó được in một lần, cho đến kh
 Read thường dưới 1 giây và mọi health poll không được ghi ở mức `INFO`
 (`"slow":true` đánh dấu read từ 1 giây trở lên); designed refusal (`not_ready`,
 `release_mismatch`, `password_check_busy`, một request bị từ chối) ở mức `INFO`, và
-chỉ failure thật mới là `ERROR`. Khối lượng log backend đo được trong rehearsal:
-khoảng 1,1 MB cho mỗi 1.000 command, nên rotation json-file 10 MB x 5 của stack
-chứa khoảng 9 ngày log ở mức 5.000 command mỗi ngày; rehearsal là dữ liệu tổng
-hợp, nên P16-S7 đo lại trên pilot host. `web` ghi một edge record JSON cho mỗi
-request với cùng `request_id` (và upstream status), nên một `502` hoặc `504` từ
-`web` được tìm theo `request_id` trong log `web` như mọi request khác; khối lượng
-`web` đo được trong cùng rehearsal: khoảng 0,6 MB cho mỗi 1.000 command (khoảng 18
-ngày rotation ở mức 5.000 command mỗi ngày).
+chỉ failure thật mới là `ERROR`. `web` ghi một edge record JSON cho mỗi request
+với cùng `request_id` (và upstream status), nên một `502` hoặc `504` từ `web` được
+tìm theo `request_id` trong log `web` như mọi request khác.
+
+Thời gian giữ log. Mỗi container giữ tối đa 10 MB x 5 log json-file; số ngày mà
+dung lượng đó chứa được phụ thuộc vào tải, tính theo từng nguồn:
+
+- Station command: rehearsal tổng hợp đo được khoảng 1,1 MB log backend và
+  0,6 MB log `web` cho mỗi 1.000 command, đọc từ output của `docker compose logs`.
+- Display polling: mọi Production Board, Area Board hoặc màn hình Tracking đang mở
+  refresh mỗi 15 s, và mỗi request của một lần refresh là một record `web`
+  (Production Board gửi 2 request mỗi lần refresh: khoảng 11.500 record, tức
+  khoảng 3 MB log `web` mỗi ngày cho mỗi board đang mở). Backend chỉ ghi các read
+  này khi chúng mất từ 1 giây trở lên.
+- Trên disk, driver json-file bọc và escape từng dòng, nên một file chứa ít record
+  hơn so với output đo được ở trên.
+
+Chỉ tính command (5.000 mỗi ngày) thì được khoảng 9 ngày log backend và 18 ngày log
+`web`; với ba Production Board mở cả ngày, log `web` chỉ còn giữ được vài ngày. Hãy
+sao lưu những gì một cuộc điều tra cần ngay khi bắt đầu. P16-S7 đo lại cả hai trên
+pilot host, với các display thật và kích thước thật trên disk.
 
 `/api/health` là readiness: nó báo `release`, `commit`, `schema` (`current`,
 `accepted`, `mismatch` hoặc `unknown`), `expected_revision`, `database_revision` và
@@ -389,7 +417,10 @@ rm -r "<backup-dir>/.backup.lock" "<backup-dir>/.partial/<name>"   # the name fr
 
 Không bao giờ xóa lock mà owner là `release.sh` khi release đó đang chạy. Khi
 `release.sh` đang giữ backup lock (hoặc release lock của nó tồn tại), `check.sh`
-bỏ qua các check `status` của mình (§5 Quan sát).
+bỏ qua các check `status` của mình (§5 Quan sát); khi một lock như vậy cũ hơn 4
+giờ, `check.sh` báo `FAIL database` thay vào đó (§2). Release lock do một
+`release.sh` bị kill để lại là thư mục rỗng `<records-dir>/.release.lock`: khi
+không có `release.sh` nào chạy (`ps`), xóa nó bằng `rmdir`.
 
 ## 4. Restore test — không overwrite ngay
 
@@ -616,7 +647,8 @@ Monitor error, latency, lock, restart, disk và phản hồi operator trong obse
 window đã định: các dòng của `check.sh` (`errors`, `restarts`, `disk_*`), slow read
 (`"slow":true`) và `status`, gồm cả lock wait của nó (§2). Một check trong lúc write
 freeze báo `backend` đã dừng (một notification) và bỏ qua các check `status` khi
-release lock còn tồn tại. Giữ previous release cùng pre-release backup (không bao giờ bị rotate). Các page đang mở trong lúc switch
+release lock còn tồn tại (là `FAIL database` khi lock cũ hơn 4 giờ). Release tạo
+lại `backend`: chạy `check.sh --only errors --no-state` trước đó (§2). Giữ previous release cùng pre-release backup (không bao giờ bị rotate). Các page đang mở trong lúc switch
 hiện update notice và reload (GUI_DESIGN §3 rule 13); một Scan Station hoặc
 Production Board không người trực tự reload khi không còn dialog nào mở.
 
@@ -968,7 +1000,7 @@ Reconciliation mặc định chỉ đọc. Mismatch tạo incident, không tự 
 | Hàng ngày | `backup.sh --kind daily --keep-daily 14 --keep-weekly 8` theo lịch (giá trị của owner); review notification của scheduler và của platform tool (exit 4 gồm cả daily không qua verify) cùng off-site replication; review critical error; `scheduled-reconcile.sh` lúc 04:00 (sau backup 02:00 của các platform guide); review `last-check.txt`, `<reports-dir>/last-result.txt` và các notification |
 | Hàng tuần | Review capacity trend và database growth (`growth.tsv` và `docker stats --no-stream`), failed login/authorization event (`$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'`: `refusal.type` và `refusal.code` phân biệt sign-in bị từ chối hoặc bị khóa, permission denied, `station_device_required` hoặc `station_device_mismatch`, và `csrf_rejected`; các dòng sign-in của `app.application.authentication` chỉ nêu user id), và security update pending (việc của host, P16-S7) |
 | Hàng tháng | Xóa thủ công các reconcile report cũ sau khi review (không tool nào xóa chúng; chúng có thể chứa giá trị badge); patch staging rồi production; review user/role, firewall rule, secret và liên hệ trong runbook; review database role bằng `reconcile --check h`; xóa backup pre-release và manual đã hết observation window, và backup daily mà rotation báo invalid sau khi review (không bao giờ xóa archive) |
-| Khi rotate password của role | Một write freeze ngắn: thay role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, rồi check health. `up -d backend` thông thường không nhận password mới (container không được tạo lại), và chạy `db-roles` trong khi backend đang phục vụ làm các connection mới của nó thất bại. Password owner: `ALTER ROLE … PASSWORD` trong `db` trước, rồi thay `postgres_password` (không restart service: chỉ `migrate` và `db-roles` one-shot dùng nó) |
+| Khi rotate password của role | Trước tiên `check.sh --url https://<partflow-host> --only errors --no-state` (tạo lại `backend` xóa log của nó, §2). Một write freeze ngắn: thay role file, `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, `$PF up -d --force-recreate --no-deps backend`, rồi check health. `up -d backend` thông thường không nhận password mới (container không được tạo lại), và chạy `db-roles` trong khi backend đang phục vụ làm các connection mới của nó thất bại. Password owner: `ALTER ROLE … PASSWORD` trong `db` trước, rồi thay `postgres_password` (không restart service: chỉ `migrate` và `db-roles` one-shot dùng nó) |
 | Hàng quý hoặc sau thay đổi schema quan trọng | `restore-test.sh --backup <latest daily>` (§4), so timing của nó với RTO, bài tập RPO/RTO có đo thời gian và review reconciliation |
 | Trước khi đổi PostgreSQL image hoặc glibc của host | `restore-test.sh --backup <latest> --db-image <candidate>` (§7) |
 | Trước mỗi release | `release.sh` lấy pre-release backup đã verify (§5); migration review, rollback decision và smoke-test plan |

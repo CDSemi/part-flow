@@ -9,8 +9,9 @@ their PN, flow, quantity, Area, Operation, Machine, Worker, Scan Station
 and ``device_event_id`` context and never a body field outside the
 allowlist. Records are captured with the production ``JsonFormatter``
 (``tests.log_capture``). Three test-only routes are added to the module's
-app: an unhandled failure, a slow read and a ``password_check_busy``
-refusal. The module database is dropped afterwards.
+app: an unhandled failure, a slow read, a ``password_check_busy``
+refusal and a raw-body image upload. The module database is dropped
+afterwards.
 """
 
 import ast
@@ -22,13 +23,13 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import psycopg
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL, make_url
@@ -37,6 +38,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from alembic import command
 from app.api import request_log
+from app.api.uploads import UploadedImage, read_image_body
 from app.application.errors import PasswordCheckBusyError
 from app.core import log_context
 from app.core.config import get_settings
@@ -76,6 +78,7 @@ _ACCESS_KEYS = [
 _FAILURE_PATH = "/api/test-only/failure"
 _SLOW_PATH = "/api/test-only/slow"
 _BUSY_PATH = "/api/test-only/busy"
+_UPLOAD_PATH = "/api/test-only/upload"
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -127,6 +130,10 @@ def _app_with_test_routes() -> FastAPI:
     @app.post(_BUSY_PATH)
     def busy() -> dict[str, str]:
         raise PasswordCheckBusyError("PartFlow is busy checking passwords. Try again.")
+
+    @app.put(_UPLOAD_PATH)
+    def upload(image: Annotated[UploadedImage, Depends(read_image_body)]) -> dict[str, int]:
+        return {"bytes": len(image.data)}
 
     return app
 
@@ -426,6 +433,7 @@ def test_unhandled_failure_record(client: TestClient) -> None:
         response = failing.get(_FAILURE_PATH, headers={"X-Request-ID": "rl6"})
     assert response.status_code == 500
     assert response.text == "Internal Server Error"
+    assert response.headers.get_list("X-Request-ID") == ["rl6"]
     record = _access(logs, "rl6")
     assert record["level"] == "ERROR" and record["status"] == 500
     assert record["outcome"] == "error"
@@ -574,9 +582,25 @@ def test_allocation_records_name_the_device_station(client: TestClient, db_engin
             json=allocation(stockroom.station_id),
             headers={"X-Request-ID": "rl7c-missing"},
         )
+        # Nothing stocked is left to allocate: refused with no database row.
+        management = admin_of(client).post(
+            "/api/allocations/management",
+            json={
+                "part_number": pn,
+                "allocation_quantity": 10,
+                "lines": [{"work_order_demand_id": demand_id, "quantity": 10}],
+                "device_event_id": str(uuid.uuid4()),
+            },
+            headers={"X-Request-ID": "rl7c-management"},
+        )
     assert created.status_code == 201, created.text
     assert mismatch.status_code == foreign.status_code == 403
     assert missing.status_code == 401
+    assert 400 <= management.status_code < 500, management.text
+    # The targeted Work Order Demands, also when the allocation is refused.
+    for request_id in ("rl7c-created", "rl7c-mismatch", "rl7c-management"):
+        assert _access(logs, request_id)["context"]["work_order_demand_ids"] == [demand_id]
+    assert _access(logs, "rl7c-management")["outcome"] == "refused"
     for request_id in ("rl7c-created", "rl7c-mismatch", "rl7c-foreign"):
         context = _access(logs, request_id)["context"]
         assert context["station_id"] == stockroom.station_id, request_id
@@ -808,6 +832,8 @@ def test_bind_rules() -> None:
     assert context.fields["quantity_flow_ids"] == list(range(20))
     assert context.fields["quantity_flow_ids_truncated"] is True
     assert "quantity" not in context.fields
+    with pytest.raises(ValueError):
+        log_context.bind(work_order_demand_ids_truncated=True)
 
 
 def test_invalid_part_number_is_never_logged(client: TestClient) -> None:
@@ -855,13 +881,63 @@ def test_client_disconnect_record() -> None:
     async def run() -> None:
         await middleware(scope, receive, send)
 
-    with capture_json_logs() as logs, pytest.raises(ClientDisconnect):
+    with capture_json_logs() as logs:
+        # Not re-raised: uvicorn would log the escaping ClientDisconnect as an
+        # ERROR traceback, which the monitor counts as an internal error.
         asyncio.run(run())
     assert sent == []
     record = _access(logs, "rl17")
+    assert record["level"] == "INFO"
     assert record["status"] == 499 and record["outcome"] == "error"
+    assert record["refusal"]["type"] == ClientDisconnect.__name__
     assert record["refusal"]["code"] == "client_disconnected"
     assert record["client"] == "10.0.0.9"
+
+
+def test_client_disconnect_during_an_upload_escapes_nothing(client: TestClient) -> None:
+    """RL-17b: a cancelled raw-body upload through the real application stack.
+
+    Whatever escapes the ASGI application is what uvicorn logs at ERROR as
+    "Exception in ASGI application"; nothing may escape for a client that
+    left while its upload was read, and no record is ERROR.
+    """
+    app = client.app
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "http",
+        "path": _UPLOAD_PATH,
+        "raw_path": _UPLOAD_PATH.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"content-type", b"image/png"), (b"x-request-id", b"rl17b")],
+        "client": ("10.0.0.9", 50001),
+        "server": ("testserver", 80),
+    }
+    incoming: list[Message] = [
+        {"type": "http.request", "body": b"\x89PNG\r\n", "more_body": True},
+    ]
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return incoming.pop(0) if incoming else {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def run() -> None:
+        await app(scope, receive, send)
+
+    with capture_json_logs() as logs:
+        asyncio.run(run())
+    assert sent == []
+    record = _access(logs, "rl17b")
+    assert record["level"] == "INFO" and record["status"] == 499
+    assert record["route"] == _UPLOAD_PATH
+    assert record["refusal"]["code"] == "client_disconnected"
+    assert not [entry for entry in logs.records if entry["level"] in ("ERROR", "CRITICAL")]
 
 
 # ---------------------------------------------------------------------------

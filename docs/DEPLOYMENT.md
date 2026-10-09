@@ -417,14 +417,17 @@ of `A-Za-z0-9._-`, otherwise a new 32-hex id; the backend echoes exactly one
 a write, a designed refusal (`not_ready`, `release_mismatch`,
 `password_check_busy`, validation, authorization) and a read of one second or
 more (`"slow":true`), at ERROR for a failure, and at DEBUG for a health poll or a
-routine fast read. It names the PN, QuantityFlow, Area, Operation, Machine,
-Worker (only after identity resolution), Scan Station and `device_event_id` of a
-production command and the reason of a refusal, and never a request body, query
+routine fast read. It names the PN, QuantityFlow, Work Order Demand(s), Area,
+Operation, Machine, Worker (only after identity resolution), Scan Station and
+`device_event_id` of a production command and the reason of a refusal, and never a request body, query
 string, cookie, token, badge, password or scanned value; the first-run setup
 token remains the one announced exception. `db` runs with
 `log_error_verbosity=terse`. Containers rotate with the json-file driver
 (`max-size` 10m, `max-file` 5); about 1.1 MB of backend log and 0.6 MB of `web` log
-per 1,000 commands were measured in the synthetic rehearsal. The `status` ops service
+per 1,000 commands were measured in the synthetic rehearsal, which had no polling
+display and measured `docker compose logs` output, not the json-file size on disk:
+every open board or Tracking screen adds `web` records every 15 s, so the retention
+budget is per source (`deployment/OPERATIONS_RUNBOOK.md` §2). The `status` ops service
 (`python -m app.cli status`, profile `ops`) is a read-only report as the
 application role with the backup directory mounted read-only; run it with
 `--no-deps -T --user "$(id -u):$(id -g)"`. `deploy/production/check.sh` evaluates

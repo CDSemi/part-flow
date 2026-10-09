@@ -1,5 +1,5 @@
 """P16-S6: deploy/production/check.sh against fake `docker`, `curl`, `openssl`, `df`, `date`, `id`, `timeout` and `mv`
-executables (P16-S6 SPEC section 6.3, cases CK-1..CK-23).
+executables (P16-S6 SPEC section 6.3, cases CK-1..CK-23, and the audit cases CK-24..CK-26).
 
 The fake-tool harness of test_release_scripts.py is reused through test_backup_scripts.ScriptHarness: a temporary fake
 repository root (copies of both production Compose files and an env file whose PARTFLOW_BACKUP_DIR is a temporary
@@ -197,7 +197,8 @@ class Check(CheckHarness):
             r"^docker ps .*service=db ", r"^docker inspect .* cid-db$", r"^docker ps .*service=backend ", r"^docker inspect .* cid-backend$",
             r"^docker ps .*service=web ", r"^docker inspect .* cid-web$", r"^docker logs --no-log-prefix --since ",
             r"^docker exec -T db df -Pk .*/var/lib/postgresql/data$", r"^df -Pk .*backups$", r"^docker info ",
-            r"^df -Pk .*/var/lib/docker$", r"^docker --profile ops run --rm --no-deps -T --user 1000:1000 status --max-backup-age-hours 26$",
+            r"^df -Pk .*/var/lib/docker$", r"^docker ps .*service=status --filter label=com\.docker\.compose\.oneoff=True$",
+            r"^docker --profile ops run --rm --no-deps -T --user 1000:1000 status --max-backup-age-hours 26$",
         ]
         self.assertEqual(len(order), len(patterns), order)
         for text, pattern in zip(order, patterns):
@@ -214,6 +215,10 @@ class Check(CheckHarness):
                 self.assertEqual(matches[0], expected, command)
         self.assertIn(["5", "true"], self.timeout_calls())
         self.assertTrue((self.monitoring / "status.json").exists())
+        moved = [e["argv"] for e in self.calls("mv")]
+        for name in ("status.json", "status.err"):
+            target = f"{self.monitoring.as_posix()}/{name}"
+            self.assertIn(["-f", f"{target}.tmp", target], moved, name)
         # --quiet prints nothing on a green run.
         self.check("--quiet")
         self.assertExit(0)
@@ -301,9 +306,10 @@ class Check(CheckHarness):
         self.check()
         self.assertExit(0)
         self.assertEqual(self.line("containers"), "PASS containers db, backend, web running and healthy")
-        self.assertFalse([c for c in self.docker() if "cid-run-1" in c or "oneoff=True" in c], self.docker())
+        self.assertFalse([c for c in self.docker() if "cid-run-1" in c
+                          or ("oneoff=True" in c and "service=status" not in c)], self.docker())
         for text in self.docker():
-            if text.startswith("ps "):
+            if text.startswith("ps ") and "service=status" not in text:
                 self.assertIn("--filter label=com.docker.compose.oneoff=False", text)
                 self.assertNotIn(" ps -a\n", text)
         self.reset()
@@ -606,8 +612,10 @@ class Check(CheckHarness):
         self.assertEqual((self.monitoring / "errors-since").read_bytes(), cursor)
         self.reset()
         self.prepend("timeout", rule(r"^120 docker compose .* status ", out(rc=124)))
+        # Before the run another (overlapping) run's status container exists; after it, this run's leftover too.
         self.prepend("docker", rule(r"^ps -a -q --filter " + PROJECT_LABEL + r" --filter label=com\.docker\.compose\.service=status"
-                                    r" --filter label=com\.docker\.compose\.oneoff=True$", out("leftover-1\n")),
+                                    r" --filter label=com\.docker\.compose\.oneoff=True$",
+                                    out("other-run-1\n"), out("other-run-1\nleftover-1\n")),
                      rule(r"^rm -f leftover-1$"))
         self.check()
         self.assertExit(1)
@@ -626,6 +634,7 @@ class Check(CheckHarness):
     def test_ck22_release_guard(self):
         lock = self.records_dir / ".release.lock"
         lock.mkdir(parents=True)
+        os.utime(lock, (EPOCH - 60, EPOCH - 60))
         self.check()
         self.assertExit(0)
         for check_id in ("database", "schema", "backup_age", "archival_proposal"):
@@ -635,6 +644,7 @@ class Check(CheckHarness):
         lock.rmdir()
         self.reset_calls()
         self.write_lock("by=release.sh", "release=/srv/records/20261008T100000Z-v1.1.0")
+        os.utime(self.lock, (EPOCH - 60, EPOCH - 60))
         self.check()
         self.assertTrue(self.line("database").startswith("SKIP database a release is running ("), self.line("database"))
         self.assertFalse(self.status_runs())
@@ -643,6 +653,70 @@ class Check(CheckHarness):
         self.check()
         self.assertTrue(self.line("database").startswith("PASS database "))
         self.assertEqual(len(self.status_runs()), 1)
+
+    # CK-24 (audit F7)
+    def test_ck24_stale_release_lock_fails(self):
+        lock = self.records_dir / ".release.lock"
+        lock.mkdir(parents=True)
+        os.utime(lock, (EPOCH - 4 * 3600, EPOCH - 4 * 3600))
+        self.check()
+        self.assertExit(1)
+        self.assertEqual(self.line("database"),
+                         f"FAIL database the release lock {lock.as_posix()} is older than 4 h; remove it if no release.sh"
+                         " runs (OPERATIONS_RUNBOOK §3)")
+        for check_id in ("schema", "backup_age", "archival_proposal"):
+            self.assertEqual(self.line(check_id), f"SKIP {check_id} status did not run (release lock {lock.as_posix()})")
+        self.assertFalse(self.status_runs())
+        # A lock just under the bound is a running release.
+        os.utime(lock, (EPOCH - 4 * 3600 + 60, EPOCH - 4 * 3600 + 60))
+        self.check("--only", "database")
+        self.assertExit(0)
+        self.assertTrue(self.line("database").startswith("SKIP database a release is running ("), self.line("database"))
+        lock.rmdir()
+        # The backup lock that release.sh left behind.
+        self.write_lock("by=release.sh", "release=/srv/records/20261008T010000Z-v1.1.0")
+        os.utime(self.lock, (EPOCH - 6 * 3600, EPOCH - 6 * 3600))
+        self.check("--only", "database", "--only", "backup_age")
+        self.assertExit(1)
+        # The backup directory arrives in the shell's own path form (sh_path).
+        self.assertRegex(self.line("database"), r"^FAIL database the release lock \S+/backups/\.backup\.lock is older than 4 h; ")
+        self.assertRegex(self.line("backup_age"), r"^SKIP backup_age status did not run \(release lock \S+/\.backup\.lock\)$")
+        self.assertFalse(self.status_runs())
+
+    # CK-25 (audit F4)
+    def test_ck25_overlapping_run_never_mixes_the_status_report(self):
+        shared = (self.monitoring / "status.json").as_posix()
+        # While this run's status runs, another run truncates the shared state copy and starts writing its own.
+        overlap = (f"sys.stdout.write({self.status_document!r}); sys.stdout.flush(); "
+                   f"open({shared!r}, 'w', encoding='utf-8').write('{{\"overlap')")
+        # (Not the STATUS_RUN pattern itself: check() replaces that rule with the plain answer.)
+        self.prepend("docker", rule(".*" + STATUS_RUN, {"stdout": "", "rc": 0, "stderr": "", "run": overlap}))
+        self.check("--no-state")
+        self.assertExit(0)
+        self.assertTrue(self.line("database").startswith("PASS database "), self.line("database"))
+        self.assertEqual((self.monitoring / "status.json").read_text(encoding="utf-8"), self.status_document)
+
+    # CK-26 (audit F3)
+    def test_ck26_recreated_backend_is_noted(self):
+        self.check()
+        self.assertExit(0)
+        self.assertFalse([t for t in self.lines() if t.startswith("NOTE errors")], self.lines())
+        recreated = "2026-10-08T12:05:00.000000000Z"
+        self.set_clock(EPOCH + 900)
+        self.prepend("docker", ps_rule("backend", ["cid-backend-new"]), inspect_rule("cid-backend-new", started=recreated))
+        self.check()
+        self.assertExit(0)
+        self.assertEqual(self.line("errors"), f"PASS errors no error records in the backend log since {iso(EPOCH)}")
+        self.assertIn(f"NOTE errors backend was recreated (started at {recreated}): records the replaced container wrote"
+                      f" after {iso(EPOCH)} could not be read", self.lines())
+        # The baseline follows the new container: the next run notes nothing; --only errors reads the same facts.
+        self.set_clock(EPOCH + 1800)
+        self.check()
+        self.assertFalse([t for t in self.lines() if t.startswith("NOTE errors")], self.lines())
+        (self.monitoring / "restarts").write_text(f"backend cid-backend 0 {STARTED}\n", encoding="utf-8")
+        self.check("--only", "errors")
+        self.assertIn(f"NOTE errors backend was recreated (started at {recreated}): records the replaced container wrote"
+                      f" after {iso(EPOCH + 1800)} could not be read", self.lines())
 
     def write_lock(self, *lines):
         self.lock.mkdir(exist_ok=True)

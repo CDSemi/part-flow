@@ -8,13 +8,13 @@
 # disk_archive, then database, schema, backup_age and archival_proposal from one read-only `status` run (the `status`
 # ops service, as the application database role, the backup directory mounted read-only). It never starts, stops or
 # changes a service, never writes in the backup or archive directories and never repairs; after a `status` run that hit
-# its time bound it removes the leftover one-off `status` containers of its own project.
+# its time bound it removes the one-off `status` container that run left (one that was not there before it).
 #
 # Exit status: 0 nothing to notify (every line PASS/SKIP, or the failing set was already reported less than
 # --renotify-hours ago); 1 at least one FAIL to notify; 2 could not run (one line `ERROR check could not run: ...`).
 # State (<state-dir>, mode 0700): restarts (restart baseline), errors-since (log cursor), alert-state (re-notification),
-# written only by a full run (no --only, no --no-state); last-check.txt (every run); status.json, status.err and
-# growth.tsv (the status run).
+# written only by a full run (no --only, no --no-state); last-check.txt (every run); status.json and status.err (a copy
+# of the status run's output, which the run evaluates in its own work directory) and growth.tsv (a full run's status).
 set -eu
 
 # The values in the shell would override the env file for every Compose command.
@@ -28,6 +28,8 @@ RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 DOCKER_SECONDS=30
 OPENSSL_SECONDS=15
 STATUS_SECONDS=120
+# A release lock older than this is reported as stale (FAIL database) instead of skipping the status checks.
+RELEASE_LOCK_HOURS=4
 
 usage() {
     cat <<'EOF'
@@ -550,6 +552,16 @@ check_errors() {
         return 0
     fi
     NEW_CURSOR=$t0
+    # Docker removes a container's log with the container: a backend recreated since the stored restart baseline (a
+    # release, a password rotation) took the records it wrote after the cursor with it.
+    if [ -s "$CONTAINERS" ]; then
+        current=$(awk '$1 == "backend" { print $2 }' "$CONTAINERS" | head -n 1)
+        started=$(awk '$1 == "backend" { print $7 }' "$CONTAINERS" | head -n 1)
+        base=$(awk '$1 == "backend" { print $2 }' "$STATE_DIR/restarts" 2>/dev/null | head -n 1) || base=
+        if [ -n "$current" ] && [ -n "$base" ] && [ "$current" != "$base" ]; then
+            note "errors backend was recreated (started at $started): records the replaced container wrote after $cursor could not be read"
+        fi
+    fi
     grep -E '"level":"(ERROR|CRITICAL)"' "$WORK/backend.log" >"$WORK/error-records" 2>/dev/null || true
     count=$(wc -l <"$WORK/error-records" | tr -d ' ')
     if [ "$count" -eq 0 ]; then
@@ -642,6 +654,18 @@ check_disk_docker() {
 # ---------------------------------------------------------------------------
 
 STATUS_IDS='database schema backup_age archival_proposal'
+# one_off_status: the ids of this project's one-off `status` containers (`docker compose run`).
+one_off_status() {
+    dk ps -a -q --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+        --filter "label=com.docker.compose.service=status" --filter "label=com.docker.compose.oneoff=True" \
+        2>>"$WORK/docker.err"
+}
+# lock_age_seconds PATH: seconds since PATH was last modified (nothing when that cannot be read).
+lock_age_seconds() {
+    modified=$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$1" 2>/dev/null) || return 0
+    printf '%s' "$modified" | grep -Eq '^[0-9]+$' || return 0
+    echo $(($(date -u +%s) - modified))
+}
 check_status() {
     guard=
     if [ -d "$RECORDS_DIR/.release.lock" ]; then
@@ -650,20 +674,35 @@ check_status() {
         guard=$BACKUP_DIR/.backup.lock
     fi
     if [ -n "$guard" ]; then
+        age=$(lock_age_seconds "$guard")
+        if [ -n "$age" ] && [ "$age" -ge $((RELEASE_LOCK_HOURS * 3600)) ]; then
+            # A killed release.sh (SIGKILL, out of memory, power loss) leaves its lock: never skip silently forever.
+            emit FAIL database "the release lock $guard is older than $RELEASE_LOCK_HOURS h; remove it if no release.sh runs (OPERATIONS_RUNBOOK §3)"
+            for id in schema backup_age archival_proposal; do
+                emit SKIP "$id" "status did not run (release lock $guard)"
+            done
+            return 0
+        fi
         for id in $STATUS_IDS; do
             emit SKIP "$id" "a release is running ($guard)"
         done
         return 0
     fi
+    before=$(one_off_status) || before=
     src=0
     pf "$STATUS_SECONDS" --profile ops run --rm --no-deps -T --user "$USER_IDS" status --max-backup-age-hours "$MAX_AGE" \
-        >"$STATE_DIR/status.json" 2>"$STATE_DIR/status.err" || src=$?
+        >"$WORK/status.json" 2>"$WORK/status.err" || src=$?
+    # This run evaluates its own output; the state copies (for the operator) are replaced whole, never mixed.
+    for name in status.json status.err; do
+        cp "$WORK/$name" "$STATE_DIR/$name.tmp" && replace "$STATE_DIR/$name"
+    done
     if [ "$src" -eq 124 ]; then
-        leftovers=$(dk ps -a -q --filter "label=com.docker.compose.project=$PROJECT_NAME" \
-            --filter "label=com.docker.compose.service=status" --filter "label=com.docker.compose.oneoff=True" \
-            2>>"$WORK/docker.err") || leftovers=
-        for id in $leftovers; do
-            dk rm -f "$id" >/dev/null 2>>"$WORK/docker.err" || true
+        # Remove only the one-off status container this run left (one that was not there before the run).
+        for id in $(one_off_status || true); do
+            case " $(printf '%s' "$before" | tr '\n' ' ') " in
+                *" $id "*) ;;
+                *) dk rm -f "$id" >/dev/null 2>>"$WORK/docker.err" || true ;;
+            esac
         done
         emit FAIL database "no answer within $STATUS_SECONDS s"
         for id in schema backup_age archival_proposal; do
@@ -671,7 +710,7 @@ check_status() {
         done
         return 0
     fi
-    set -- status "$STATE_DIR/status.json" "$src"
+    set -- status "$WORK/status.json" "$src"
     [ -z "$FULL" ] || set -- "$@" --growth-file "$STATE_DIR/growth.tsv"
     mrc=0
     python3 "$SCRIPT_DIR/monitor_report.py" "$@" >"$WORK/status.out" 2>"$WORK/monitor.err" || mrc=$?
@@ -698,7 +737,7 @@ check_status() {
 
 if selected https; then check_https; fi
 if selected certificate; then check_certificate; fi
-if any_selected containers restarts disk_data; then gather_containers; fi
+if any_selected containers restarts errors disk_data; then gather_containers; fi
 if selected containers; then check_containers; fi
 if selected restarts; then check_restarts; fi
 if selected errors; then check_errors; fi

@@ -2,7 +2,8 @@
 
 ``RequestLogMiddleware`` — a pure ASGI middleware, the outermost one
 ``app.main.create_app`` adds (Starlette's ``ServerErrorMiddleware`` stays
-outside it): RequestLog → NoStore → ReleaseGate → Csrf → routes.
+outside it, so the middleware answers an unhandled failure's plain 500
+itself): RequestLog → NoStore → ReleaseGate → Csrf → routes.
 
 1. The request id is the request's ``X-Request-ID`` when it is 1-64
    characters of ``[A-Za-z0-9._-]``, otherwise a new ``uuid4().hex``; a
@@ -11,7 +12,9 @@ outside it): RequestLog → NoStore → ReleaseGate → Csrf → routes.
 2. One ``app.core.log_context`` context per request; routes, dependencies
    and handlers add the domain context and the refusal to it.
 3. Exactly one record on logger ``app.access`` per request, also for
-   middleware refusals, 404s, 422s, failures and client disconnects.
+   middleware refusals, 404s, 422s, failures and client disconnects. A
+   ``ClientDisconnect`` while the body is read ends with that 499 record
+   and is not re-raised, so the server logs no traceback for it.
 
 Level (the first rule that matches): a health path → DEBUG whatever the
 status; a designed refusal (recorded by a registered handler or the CSRF
@@ -25,9 +28,9 @@ the conforming request id, cookies, form fields, uploaded files. ``path``
 is logged only when no route matched; otherwise the route template.
 
 Also ``bind_command``/``bind_result``, which the production command routes
-call to put their PN, flow, quantity, Area, Operation, Machine and
-``device_event_id`` into the record — never a badge, a scanned value or a
-free-text reason.
+call to put their PN, flow, quantity, Work Order Demand(s), Area,
+Operation, Machine and ``device_event_id`` into the record — never a
+badge, a scanned value or a free-text reason.
 """
 
 import logging
@@ -38,6 +41,8 @@ from typing import Final
 
 from pydantic import BaseModel
 from starlette.datastructures import Headers, MutableHeaders
+from starlette.requests import ClientDisconnect
+from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core import log_context
@@ -66,6 +71,8 @@ COMMAND_BODY_FIELDS: Final = (
     "device_event_id",
     "reverses_device_event_id",
 )
+#: A command body's ``lines`` name their Work Order Demands as ``work_order_demand_ids``.
+LINES_FIELD: Final = "lines"
 #: The committed context a command result adds (when the result has it).
 RESULT_FIELDS: Final = ("area_id", "operation_id", "machine_id")
 
@@ -210,18 +217,33 @@ class RequestLogMiddleware:
         try:
             await self.app(scope, receive_tracked, send_with_id)
         except Exception as exc:
+            answer_failure = False
             if disconnected and status is None:
                 status = _CLIENT_CLOSED_REQUEST
                 log_context.record_refusal(
                     type(exc).__name__, "client_disconnected", None, designed=False
                 )
+                if isinstance(exc, ClientDisconnect):
+                    # A cancelled upload is not a failure: no answer can reach
+                    # the gone client, and re-raising would make uvicorn log an
+                    # ERROR traceback the monitor counts as an internal error.
+                    _emit(scope, context, status, (time.perf_counter() - started) * 1000)
+                    return
             else:
+                answer_failure = status is None
                 status = status or 500
                 log_context.record_refusal(
                     type(exc).__name__, "internal_error", None, designed=False
                 )
             _emit(scope, context, status, (time.perf_counter() - started) * 1000)
-            # Starlette answers its unchanged 500 and uvicorn logs the traceback.
+            if answer_failure:
+                # Starlette's unchanged plain 500, answered here so it carries
+                # the request id (ServerErrorMiddleware's own answer would
+                # bypass ``send_with_id``); it then sends nothing more.
+                await PlainTextResponse("Internal Server Error", status_code=500)(
+                    scope, receive_tracked, send_with_id
+                )
+            # Re-raised so uvicorn logs the traceback.
             raise
         if disconnected and (status is None or status >= 400):
             # The client left before any answer reached it.
@@ -252,7 +274,10 @@ def bind_command(body: BaseModel | None = None, **path_values: int | str) -> Non
     The path values given, and from ``body`` exactly the attributes in
     :data:`COMMAND_BODY_FIELDS` that its model has; ``part_number`` in its
     canonical form (``part_number_invalid`` when it has none — the raw
-    value is never logged). Called first in each production command route.
+    value is never logged); the ``work_order_demand_id`` of each of its
+    ``lines`` as ``work_order_demand_ids`` (an allocation names its
+    targeted demands even when it is refused). Called first in each
+    production command route.
     """
     log_context.mark_command()
     log_context.bind(**path_values)
@@ -267,6 +292,21 @@ def bind_command(body: BaseModel | None = None, **path_values: int | str) -> Non
             _bind_part_number(value)
         else:
             log_context.bind(**{name: value})
+    if LINES_FIELD in fields:
+        _bind_line_demands(getattr(body, LINES_FIELD))
+
+
+def _bind_line_demands(lines: object) -> None:
+    if not isinstance(lines, list):
+        return
+    demand_ids = [getattr(line, "work_order_demand_id", None) for line in lines]
+    log_context.bind(
+        work_order_demand_ids=[
+            demand_id
+            for demand_id in demand_ids
+            if isinstance(demand_id, int) and not isinstance(demand_id, bool)
+        ]
+    )
 
 
 def bind_result(result: object) -> None:

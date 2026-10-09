@@ -397,13 +397,16 @@ log). Request id là `X-Request-ID` của request khi dài 1-64 ký tự thuộc
 designed refusal (`not_ready`, `release_mismatch`, `password_check_busy`,
 validation, authorization) và read từ một giây trở lên (`"slow":true`), ở ERROR cho
 failure, và ở DEBUG cho health poll hoặc read nhanh thông thường. Nó nêu PN,
-QuantityFlow, Area, Operation, Machine, Worker (chỉ sau identity resolution), Scan
-Station và `device_event_id` của một production command cùng lý do của một
+QuantityFlow, Work Order Demand, Area, Operation, Machine, Worker (chỉ sau identity
+resolution), Scan Station và `device_event_id` của một production command cùng lý do của một
 refusal, và không bao giờ nêu request body, query string, cookie, token, badge,
 password hay giá trị đã scan; setup token first-run vẫn là ngoại lệ duy nhất được
 công bố. `db` chạy với `log_error_verbosity=terse`. Container rotate bằng driver
 json-file (`max-size` 10m, `max-file` 5); khoảng 1,1 MB log backend và 0,6 MB log `web`
-cho mỗi 1.000 command được đo trong rehearsal tổng hợp. Service ops `status`
+cho mỗi 1.000 command được đo trong rehearsal tổng hợp, vốn không có display polling
+và đo output của `docker compose logs`, không phải kích thước file json-file trên
+disk: mỗi board hoặc màn hình Tracking đang mở thêm record `web` mỗi 15 s, nên
+ngân sách giữ log tính theo từng nguồn (`deployment/OPERATIONS_RUNBOOK.md` §2). Service ops `status`
 (`python -m app.cli status`, profile `ops`) là báo cáo chỉ đọc bằng application
 role với backup directory mount read-only; chạy với
 `--no-deps -T --user "$(id -u):$(id -g)"`. `deploy/production/check.sh` đánh giá
