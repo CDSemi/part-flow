@@ -349,6 +349,65 @@ Trong repository vẫn giữ source/reference của `pf.sh`, `compose.nas.yaml` 
 `deploy/synology/*` để version-control và review. Sau khi cài control plane, các bản trong
 repo **không phải** bản được chạy cho thao tác quản trị NAS thông thường.
 
+### Mục tiêu thiết kế: một deployment controller dùng lại được
+
+Deployment Admin được thiết kế (design revision `2026-09-13-design-r3`) như một **lifecycle
+controller dùng lại được** cho các ứng dụng Docker Compose, không phải công cụ chỉ dành cho
+PartFlow. Mục này là bản ghi trong repository về mục tiêu đó và các ranh giới của nó. Nó mô
+tả năng lực **dự kiến**: checkpoint hiện tại vẫn gắn riêng với PartFlow (xem *Trạng thái hiện
+tại* bên dưới).
+
+**Mô hình.** Controller nhận ba input tách biệt:
+
+| Input | Phụ trách |
+| --- | --- |
+| Shared core | Registration, instance context, lock, process runner, Compose envelope, resource inventory, journal, permission và các lifecycle operation (deploy/update, checkpoint, rollback, reset, purge, exact restore, isolated recovery, interruption recovery). Core không biết khái niệm nào của ứng dụng. |
+| Installed application profile | Dữ liệu đã review và được bảo vệ cho một ứng dụng: Compose topology và typed substitution key, source identity (`git_commit` hoặc `image_digest`), typed parameter, service role (application, writer, background job, data store; tên tùy ý), storage inventory cùng strategy, migration argv, health/readiness và recovery check. |
+| Instance configuration | Một bản triển khai: identity, environment và policy revision, registered path, daemon binding và giá trị của ứng dụng. |
+
+Mỗi installation pin control release và profile revision riêng; cập nhật control của một
+instance không bao giờ âm thầm nâng cấp instance khác. Core không cần hiểu Work Order hay
+Movement: PartFlow dùng profile PostgreSQL/Alembic, còn một website chỉ chạy image dùng
+profile stateless và không bao giờ bị hỏi về database hay Git.
+
+**Phạm vi.**
+
+- Bao gồm: một host Linux với Docker daemon rootful cục bộ và một bản Docker Compose v2 đã
+  được test; runtime Python standard library với shell entry point mỏng; giữ lệnh `pf` cho
+  người dùng hiện có.
+- Data strategy ban đầu: stateless, PostgreSQL logical recovery, và cold files cho workload
+  mà mọi writer đều dừng trong lúc capture.
+- Không bao gồm: chứng nhận Docker remote hoặc rootless, Compose v1, Kubernetes/Swarm,
+  điều phối nhiều host, tự động merge database, tự nhận diện database engine, web UI,
+  plugin marketplace, hook tùy ý trên host, provisioning hạ tầng và production hardening của
+  ứng dụng.
+- Profile là dữ liệu đã review. Nó không bao giờ là code Python lấy từ repository của ứng
+  dụng, một import path hay một chuỗi shell trên host, và chỉ tham chiếu các strategy đã cài
+  và đã test. Thêm một ứng dụng phù hợp với strategy sẵn có chỉ cần một profile đã review và
+  một acceptance fixture; một database engine mới cần một strategy mới đã test. Không bao giờ
+  tự đoán operational profile cho một ứng dụng mới.
+- Không cần tên sản phẩm trung tính hay repository riêng. Code nằm trong repository này: dưới
+  `deploy/synology/` cho tới hết PF-A3, và dưới `deploy/admin/` khi PF-A4 đã chuyển phần
+  code trung tính.
+
+**Trạng thái hiện tại.** Tại checkpoint PF-A3.4, controller vẫn gắn riêng với PartFlow: một
+profile đã cài (`partflow-staging-legacy`), topology allowlist của PartFlow (ba service), bảy
+key `.env` của PartFlow ở mục 6, các lệnh PostgreSQL/Alembic của PartFlow và chỉ có staging
+policy. Một số seam đã trung tính (label `io.deploy-admin.instance-id`, runner, bootstrap
+verifier và source store), nhưng chưa cài được ứng dụng nào khác. Cho tới khi PF-A4.2 pass,
+không ứng dụng nào ngoài PartFlow staging được hỗ trợ.
+
+**Work package dự kiến.** PF-A4 chỉ bắt đầu sau khi PF-A3 được chấp nhận với bằng chứng
+lifecycle trên Docker/PostgreSQL thật.
+
+| Slice | Kết quả | Gate |
+| --- | --- | --- |
+| PF-A4.1 | Chuyển các giả định của PartFlow (metadata repository, tên service, health check, biến môi trường, lệnh PostgreSQL/Alembic, tương thích migration) vào PartFlow profile đã cài; đóng băng wire schema của profile và các strategy ID; chuyển code trung tính sang `deploy/admin/` sau các compatibility wrapper của `pf`. Quyết định OD-16-28. | Core không chứa khái niệm nghiệp vụ hay health path của PartFlow, `CDSemi/part-flow`, tên database hay service cố định, hay DSM group nào; PartFlow staging vẫn hoạt động như trước. |
+| PF-A4.2 | Chứng minh dùng lại được bằng fixture: PartFlow với service đổi tên; một service stateless chỉ chạy image, không liên quan, tên `site` (readiness tại `/ready`, không Git, không database); một workload cold-files có dữ liệu persist thật; một profile khai báo database strategy không được hỗ trợ và một persistent volume không khai báo, bị từ chối trước mọi effect. Source provider theo Git commit và registry image, capability summary cho từng operation (`supported`, `unsupported`, `blocked`, `unverified`) và managed `start`/`stop`/`restart`. | Các fixture chạy được mà không sửa lifecycle logic của core. Đổi tên biến `partflow` không phải bằng chứng về tính tổng quát. |
+| PF-A4.3 | Environment theo policy; một production policy path được test với stateless fixture. | PartFlow production vẫn ngoài phạm vi cho tới khi có một PartFlow production deployment contract được duyệt độc lập cùng bằng chứng acceptance riêng. |
+| PF-A5.1 | Supported matrix (OS/DSM, kiến trúc, Python, Engine, Compose, filesystem/ACL, version của profile và strategy); kiểm tra thật trên Linux và DSM/SMB, các bước trên NAS do owner chạy. | Mọi tuyên bố hỗ trợ chỉ nêu các tổ hợp đã test. |
+| PF-A5.2 | Audit lifecycle cuối cùng, tài liệu vận hành (tiếng Anh và tiếng Việt) và thông tin release. | Không còn blocker chưa giải quyết trong phạm vi hỗ trợ đã nêu. Việc dùng `pf` quản lý PartFlow production instance vẫn là một quyết định riêng của owner. |
+
 ## 2. Quyền truy cập
 
 Từ PF-A2.3, permission của một instance đã đăng ký tuân theo một **permission policy theo ngữ nghĩa**. Không có

@@ -21,6 +21,7 @@
 | --- | --- | --- |
 | [`DEPLOYMENT.vi.md`](./DEPLOYMENT.vi.md) | Trạng thái triển khai, các hướng được hỗ trợ, topology đích và release gate | [`DEPLOYMENT.md`](./DEPLOYMENT.md) |
 | [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) | Synology staging nội bộ hiện tại và hướng production ở Phase 16 | [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) |
+| [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md) | Deployment Admin (`pf`) cho Synology staging; §1 ghi mục tiêu thiết kế dự kiến là một controller dùng lại được (PF-A4/PF-A5) | [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) |
 | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) | Triển khai production portable trên VPS | [`deployment/VPS.md`](./deployment/VPS.md) |
 | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) | Điều kiện tương thích shared hosting và đánh giá Hawk Host | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) |
 | [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) | Backup, restore, release, rollback, monitoring và xử lý sự cố | [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) |

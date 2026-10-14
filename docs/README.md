@@ -19,6 +19,7 @@
 | --- | --- | --- |
 | [`DEPLOYMENT.md`](./DEPLOYMENT.md) | Deployment status, supported paths, target topology, and release gates | [`DEPLOYMENT.vi.md`](./DEPLOYMENT.vi.md) |
 | [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) | Internal Synology staging now and the Phase 16 production path | [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) |
+| [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) | Deployment Admin (`pf`) for Synology staging; §1 records its planned reusable-controller design goal (PF-A4/PF-A5) | [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md) |
 | [`deployment/VPS.md`](./deployment/VPS.md) | Portable VPS production deployment | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) |
 | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) | Shared-hosting compatibility and Hawk Host evaluation | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) |
 | [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) | Backup, restore, release, rollback, monitoring, and incident procedures | [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) |

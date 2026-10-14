@@ -357,6 +357,66 @@ The repository still contains source/reference copies of `pf.sh`, `compose.nas.y
 and `deploy/synology/*` so the control plane remains versioned and reviewable. Those
 repository copies are **not** used for normal NAS administration after installation.
 
+### Design goal: a reusable deployment controller
+
+The Deployment Admin is designed (design revision `2026-09-13-design-r3`) as a **reusable
+lifecycle controller** for Docker Compose applications, not as a PartFlow-only tool. This
+subsection is the repository record of that goal and its boundaries. It describes
+**planned** capability: the current checkpoint is still PartFlow-specific (see *Current
+state* below).
+
+**Model.** The controller takes three separate inputs:
+
+| Input | Owns |
+| --- | --- |
+| Shared core | Registration, instance context, locks, the process runner, the Compose envelope, the resource inventory, journals, permissions and the lifecycle operations (deploy/update, checkpoints, rollback, reset, purge, exact restore, isolated recovery, interruption recovery). It knows no application concept. |
+| Installed application profile | Reviewed, protected data for one application: Compose topology and typed substitution keys, source identity (`git_commit` or `image_digest`), typed parameters, service roles (application, writers, background jobs, data stores; the names are arbitrary), the storage inventory with its strategies, migration argv, health/readiness and recovery checks. |
+| Instance configuration | One deployed copy: identity, environment and policy revision, registered paths, daemon binding and application values. |
+
+Each installation pins its own control release and profile revision; updating one
+instance's control never silently upgrades another. The core does not need to understand
+Work Orders or Movements: PartFlow uses a PostgreSQL/Alembic profile, and an image-only
+website uses a stateless profile and is never asked database or Git questions.
+
+**Scope.**
+
+- Included: a single Linux host with a local rootful Docker daemon and a tested Docker
+  Compose v2 implementation; a Python standard-library runtime with thin shell entry
+  points; the `pf` command is kept for existing users.
+- Initial data strategies: stateless, PostgreSQL logical recovery, and cold files for
+  workloads whose writers are all stopped during capture.
+- Excluded: remote or rootless Docker certification, Compose v1, Kubernetes/Swarm,
+  multi-host orchestration, automatic database merge, generic database-engine detection,
+  a web UI, a plugin marketplace, arbitrary host hooks, infrastructure provisioning and
+  application production hardening.
+- A profile is reviewed data. It is never Python code from an application repository, an
+  import path or a host shell string, and it references only installed, tested strategy
+  implementations. Adding an application that fits the existing strategies needs only a
+  reviewed profile and an acceptance fixture; a new data engine needs a new tested
+  strategy. No operational profile is ever guessed automatically for a new application.
+- A neutral product name and a separate repository are not required. The implementation
+  stays in this repository: under `deploy/synology/` through PF-A3, and under
+  `deploy/admin/` once PF-A4 has moved the neutral code.
+
+**Current state.** As of checkpoint PF-A3.4 the controller is PartFlow-specific: one
+installed profile (`partflow-staging-legacy`), the PartFlow topology allowlist (three
+services), the seven PartFlow `.env` keys of section 6, the PartFlow PostgreSQL/Alembic
+commands and the staging policy only. Some seams are already neutral (the
+`io.deploy-admin.instance-id` label, the runner, the bootstrap verifier and the source
+store), but no other application can be installed. Until PF-A4.2 passes, no application
+other than PartFlow staging is supported.
+
+**Planned work packages.** PF-A4 starts only after PF-A3 is accepted with real
+Docker/PostgreSQL lifecycle evidence.
+
+| Slice | Outcome | Gate |
+| --- | --- | --- |
+| PF-A4.1 | Move the PartFlow assumptions (repository metadata, service names, health checks, environment variables, PostgreSQL/Alembic commands, migration compatibility) into the installed PartFlow profile; freeze the profile wire schema and the strategy IDs; move the neutral code to `deploy/admin/` behind `pf` compatibility wrappers. Decides OD-16-28. | The core contains no PartFlow business concept, health path, `CDSemi/part-flow`, fixed database or service name, or DSM group; PartFlow staging behaves as before. |
+| PF-A4.2 | Prove reuse with fixtures: PartFlow with renamed services; an unrelated image-only stateless service `site` (readiness at `/ready`, no Git or database); a cold-files workload with real persisted data; a profile with an unsupported database strategy and an undeclared persistent volume, refused before any effect. Git-commit and registry-image source providers, a capability summary per operation (`supported`, `unsupported`, `blocked`, `unverified`) and managed `start`/`stop`/`restart`. | The fixtures work without editing core lifecycle logic. Renaming `partflow` variables is not evidence of generality. |
+| PF-A4.3 | Policy-based environments; a production policy path tested with the stateless fixture. | PartFlow production stays out of scope until an independently approved PartFlow production deployment contract and its own acceptance evidence exist. |
+| PF-A5.1 | Supported matrix (OS/DSM, architecture, Python, Engine, Compose, filesystem/ACL, profile and strategy versions); real Linux and DSM/SMB checks, the NAS steps run by the owner. | Support claims name only tested combinations. |
+| PF-A5.2 | Final lifecycle audit, operator documentation (English and Vietnamese) and release information. | Zero unresolved blockers for the stated support scope. Managing the PartFlow production instance with `pf` remains a separate owner decision. |
+
 ## 2. Permission model
 
 Since PF-A2.3 the permissions of a registered instance follow one **semantic permission policy**. Nothing

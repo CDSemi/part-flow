@@ -728,6 +728,8 @@ Release). Command và điểm quyết định chi tiết nằm trong
 ## 8. Hướng dẫn theo nền tảng
 
 - [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md)
+- [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) (Deployment Admin `pf`
+  cho staging; §1 ghi mục tiêu thiết kế dự kiến là một controller dùng lại được)
 - [`deployment/VPS.md`](./deployment/VPS.md)
 - [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md)
 - [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md)

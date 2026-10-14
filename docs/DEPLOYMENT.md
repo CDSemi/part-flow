@@ -769,6 +769,8 @@ Releases). Detailed commands and decision points are in
 ## 8. Platform guides
 
 - [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md)
+- [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) (the Deployment
+  Admin `pf` for staging; §1 records its planned reusable-controller design goal)
 - [`deployment/VPS.md`](./deployment/VPS.md)
 - [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md)
 - [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md)
