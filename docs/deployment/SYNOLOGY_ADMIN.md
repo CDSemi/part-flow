@@ -384,7 +384,8 @@ website uses a stateless profile and is never asked database or Git questions.
   Compose v2 implementation; a Python standard-library runtime with thin shell entry
   points; the `pf` command is kept for existing users.
 - Initial data strategies: stateless, PostgreSQL logical recovery, and cold files for
-  workloads whose writers are all stopped during capture.
+  explicitly compatible workloads (declared compatible filesystems, every writer stopped
+  during capture).
 - Excluded: remote or rootless Docker certification, Compose v1, Kubernetes/Swarm,
   multi-host orchestration, automatic database merge, generic database-engine detection,
   a web UI, a plugin marketplace, arbitrary host hooks, infrastructure provisioning and
@@ -394,28 +395,38 @@ website uses a stateless profile and is never asked database or Git questions.
   implementations. Adding an application that fits the existing strategies needs only a
   reviewed profile and an acceptance fixture; a new data engine needs a new tested
   strategy. No operational profile is ever guessed automatically for a new application.
-- A neutral product name and a separate repository are not required. The implementation
-  stays in this repository: under `deploy/synology/` through PF-A3, and under
-  `deploy/admin/` once PF-A4 has moved the neutral code.
+- Design r3 does not require a neutral product name or a separate repository, and it
+  plans the implementation in this repository: under `deploy/synology/` through PF-A3,
+  then a neutral layout under `deploy/admin/`. No owner decision on the name or the
+  location is recorded yet.
 
 **Current state.** As of checkpoint PF-A3.4 the controller is PartFlow-specific: one
-installed profile (`partflow-staging-legacy`), the PartFlow topology allowlist (three
-services), the seven PartFlow `.env` keys of section 6, the PartFlow PostgreSQL/Alembic
-commands and the staging policy only. Some seams are already neutral (the
-`io.deploy-admin.instance-id` label, the runner, the bootstrap verifier and the source
-store), but no other application can be installed. Until PF-A4.2 passes, no application
-other than PartFlow staging is supported.
+installed profile (`partflow-staging-legacy`, a five-key record whose only runtime use is
+selecting the built-in PartFlow declaration), `compose.nas.yaml` shipped inside the
+control release (one installation root serves one topology), the PartFlow topology
+allowlist (three services), the seven PartFlow `.env` keys of section 6, the PartFlow
+PostgreSQL/Alembic commands and the staging policy only. Only two pieces are
+application-agnostic in form: the label key `io.deploy-admin.instance-id` and the Git
+source-store module (`pf_source.py`). Neither is a neutral seam yet: resource ownership
+still requires the services `db`/`backend`/`frontend`, the `postgres_data`/`default`
+names and the `backend|frontend` image-tag grammar; the runner's fixed `PATH` lists DSM
+package directories; the bootstrap verifier requires `compose.nas.yaml` in every release
+and stays frozen until the PF-A4.3 launcher migration; the only approved source remote is
+GitHub. No other application can be installed, and until PF-A4.2 passes no application
+other than PartFlow staging is supported. The PF-A3.4 gate is `CHANGES_REQUIRED` (the
+real re-run is pending, section 18) and no PF-A3 work-package gate is recorded, so PF-A4
+has not started.
 
 **Planned work packages.** PF-A4 starts only after PF-A3 is accepted with real
 Docker/PostgreSQL lifecycle evidence.
 
 | Slice | Outcome | Gate |
 | --- | --- | --- |
-| PF-A4.1 | Move the PartFlow assumptions (repository metadata, service names, health checks, environment variables, PostgreSQL/Alembic commands, migration compatibility) into the installed PartFlow profile; freeze the profile wire schema and the strategy IDs; move the neutral code to `deploy/admin/` behind `pf` compatibility wrappers. Decides OD-16-28. | The core contains no PartFlow business concept, health path, `CDSemi/part-flow`, fixed database or service name, or DSM group; PartFlow staging behaves as before. |
-| PF-A4.2 | Prove reuse with fixtures: PartFlow with renamed services; an unrelated image-only stateless service `site` (readiness at `/ready`, no Git or database); a cold-files workload with real persisted data; a profile with an unsupported database strategy and an undeclared persistent volume, refused before any effect. Git-commit and registry-image source providers, a capability summary per operation (`supported`, `unsupported`, `blocked`, `unverified`) and managed `start`/`stop`/`restart`. | The fixtures work without editing core lifecycle logic. Renaming `partflow` variables is not evidence of generality. |
-| PF-A4.3 | Policy-based environments; a production policy path tested with the stateless fixture. | PartFlow production stays out of scope until an independently approved PartFlow production deployment contract and its own acceptance evidence exist. |
-| PF-A5.1 | Supported matrix (OS/DSM, architecture, Python, Engine, Compose, filesystem/ACL, profile and strategy versions); real Linux and DSM/SMB checks, the NAS steps run by the owner. | Support claims name only tested combinations. |
-| PF-A5.2 | Final lifecycle audit, operator documentation (English and Vietnamese) and release information. | Zero unresolved blockers for the stated support scope. Managing the PartFlow production instance with `pf` remains a separate owner decision. |
+| PF-A4.1 | Extract in place: move the PartFlow assumptions (repository metadata, service names, health checks, environment variables, PostgreSQL/Alembic commands, migration compatibility) into the installed PartFlow profile; freeze the profile wire schema and the strategy IDs before profile loading is enabled. Also settles the repository decision OD-16-28 (IMPLEMENTATION_ROADMAP Phase 16, not part of design r3): how a PartFlow profile provisions database roles, grants and globals, and whether it adopts the Phase 16 backup artifact. | The affected A1 boundary cases and A3-T11/A3-T12 pass again on the accepted PartFlow fixture; a dependency scan finds no prohibited application or host constant in the core (PartFlow business concept, health path, `CDSemi/part-flow`, fixed database or service name, DSM group or DSM path); PartFlow staging behaves as before. |
+| PF-A4.2 | Prove reuse with fixtures: PartFlow with renamed services; an unrelated image-only stateless service `site` (readiness at `/ready`, no Git or database); a cold-files workload with real persisted data; a profile with an unsupported database strategy and an undeclared persistent volume, refused before any unsafe effect while supported diagnostics stay available. Git-commit and registry-image source providers, a capability summary per operation (`supported`, `unsupported`, `blocked`, `unverified`) and managed `start`/`stop`/`restart`. | The fixtures work without editing core lifecycle logic. Renaming `partflow` variables is not evidence of generality. |
+| PF-A4.3 | Policy-based environments: protected policy grants for unattended routes (scheduled `backup.sh`, `release-check --apply`), downgrade protection, release tags resolved once and automatic apply off; a production policy path tested with the stateless fixture. The neutral layout under `deploy/admin/` with the installer and launcher migration for existing roots and `pf` compatibility wrappers (design r3 names the move in its A4.1 text but schedules it in the A4.3 slice; the installed installer and the frozen bootstrap cannot install a moved layout before that migration). | PartFlow production stays out of scope until an independently approved PartFlow production deployment contract and its own acceptance evidence exist. |
+| PF-A5.1 | Supported matrix (OS/DSM, architecture, Python, Engine, Compose, filesystem/ACL, profile and strategy versions); real Linux and DSM/SMB checks, the NAS steps run by the owner; bounded streamed output, redaction, command timeouts and cancellation, capacity checks and the retention of checkpoints, temporary images, volumes and workspace generations. | Support claims name only tested combinations. |
+| PF-A5.2 | Final lifecycle audit, operator documentation (English and Vietnamese) and release information. | PASS requires zero unresolved blockers for the stated support scope, real-data recovery evidence, no documentation overclaims, explicit owner acceptance of the host-specific checks and the closure of the remaining design findings; unavailable DSM/SMB leaves DSM certification pending without blocking a Linux-only release. Managing the PartFlow production instance with `pf` remains a separate owner decision. |
 
 ## 2. Permission model
 
