@@ -131,8 +131,8 @@ measure them on the production host and adjust. Run the `ops` services that read
 #### Configuration file
 
 `.env.production` is copied from `.env.production.example`, is ignored by git, has mode 600 and holds only non-secret
-values. A static test checks that every `${NAME}` reference in `compose.production.yaml` and
-`compose.production.build.yaml` is a key of the example file.
+values. A static test checks that the set of `${NAME}` references in `compose.production.yaml` and
+`compose.production.build.yaml` equals the set of keys of the example file.
 
 | Key | Meaning | Required or default |
 | --- | --- | --- |
@@ -225,7 +225,8 @@ effect.
   limits. With two workers, a setup request can reach the worker whose token was not copied and is refused with
   `403 setup_token_invalid` (nothing is written). Start the backend with `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`,
   read the token with `$PF logs backend | grep "Setup token"`, complete setup in the browser, then restore the
-  configured worker count with `$PF up -d backend`.
+  configured worker count with `$PF up -d backend`. The setup token is the only secret ever written to the backend
+  log: complete first-run setup before opening access to users, and restrict access to the log until then.
 - **A configuration refusal exits with code 0** when there is more than one worker. The log line and the restart
   count, not the exit code, show the failure.
 - **Stopping a multi-worker backend does not refuse new connections at once.** The Uvicorn supervisor keeps the
@@ -624,7 +625,9 @@ data and is set up after go-live, when convenient.
   and Work Order imports fail; the largest allowed import, 2,000 Work Orders, takes about half a minute. Every
   workstation and Scan Station must trust the certificate (§3.1, Certificate procedure).
 - **First-run setup** with one backend worker until the first Administrator exists (§7 step 8; the setup token is in
-  the backend log), then each Scan Station device enrolled in Administration → Scan Stations.
+  the backend log), then each Scan Station device enrolled in Administration → Scan Stations. Enrollment codes and
+  device tokens are bearer credentials: like session cookies they travel only over HTTPS. Revoke a lost or retired
+  device there.
 - **No `partflow-staging` Compose project on the production Docker daemon.** `release.sh` refuses to run while one
   exists (§3.1, Environment separation). Try changes on a workstation instead.
 - **Releases from a git tag.** `release.sh` builds only the checked-out tag (named as §10.2 describes) with unchanged
@@ -641,6 +644,7 @@ Each item is one platform task or one command; the details are in `deployment/OP
 - `check.sh` every 15 minutes and `scheduled-reconcile.sh` daily, with the platform's failure notification
   (OPERATIONS_RUNBOOK §9 and §7).
 - Firewall rules that admit only the factory networks, correct host time, and UPS coverage.
+- Controlled security updates of DSM, Container Manager and the base images.
 
 The check "Hot list entries are active demand" (reconcile check (i), `deployment/OPERATIONS_RUNBOOK.md` §7) runs the
 Hot-list query below. It returns no rows on a healthy database; a returned row is an inactive Hot list entry, which is
@@ -764,6 +768,7 @@ requirements. A database migration alone does not require a major increment; ass
 
 `alpha`, `beta` and `rc` express release maturity, not the deployment host. Mark all three as GitHub pre-releases and
 never designate them as the latest stable release. A stable version may be rehearsed in staging before production.
+The suffix never proves that deployment validation passed.
 
 ### 10.3 Release title and description
 
@@ -848,7 +853,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
+| 2026-11-09 | uncommitted | Restored rules the rewrite had dropped: the configuration key test, setup-token log access, device credentials and revocation, security updates and the version-suffix caveat. |
+| 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-14 | `2c360cb` | Pointed to the Deployment Admin's planned reusable-controller design goal. |
 | 2026-10-09 | `03bd90c` | Added structured logs, request ids, the status command and the monitoring scripts. |
 | 2026-10-08 | `a330383` | Added verified backups, the isolated restore drill and the pre-release backup inside the write freeze. |

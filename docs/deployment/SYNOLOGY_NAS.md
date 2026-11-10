@@ -230,7 +230,8 @@ docker compose -p partflow-staging logs --tail=200 backend frontend db
 
 From an allowed workstation:
 
-1. open `http://<NAS LAN address>:5173` and check the connected indicator;
+1. open `http://<NAS LAN address>:5173` and check the connected indicator, and
+   that `http://<NAS LAN address>:5173/api/health` answers;
 2. check that the views you intend to test load, and note any that are still
    unavailable;
 3. with designated test records, exercise create, release, transfer, Machine,
@@ -414,8 +415,11 @@ docker compose -p partflow-staging exec -T backend uv run alembic current
 sha256sum ../backups/partflow-*.dump
 ```
 
-A snapshot of a running PostgreSQL volume is not a database backup unless a
-documented and tested database-consistent snapshot procedure is used.
+Copy the dump and its manifest to an encrypted destination outside the NAS.
+Before trusting a dump, restore it into a separate, empty database, never over
+the running one ([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §4 lists the
+steps). A snapshot of a running PostgreSQL volume is not a database backup
+unless a documented and tested database-consistent snapshot procedure is used.
 
 ## 7. Staging update procedure
 
@@ -431,7 +435,9 @@ To move staging (§4) to a newer revision:
    dependency lock files and the migrations.
 6. Build and start: `docker compose -p partflow-staging up -d --build`.
 7. Run `alembic upgrade head` once (§4.5).
-8. Run the smoke test of §4.6.
+8. Run the smoke test of §4.6 and the reconciliation
+   ([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §7):
+   `docker compose -p partflow-staging exec -T backend uv run python -m app.cli reconcile`.
 9. Keep the previous commit and the dump until the testers confirm the update.
 
 Never use an unattended "latest" or `main` auto-updater for a system with a
@@ -449,7 +455,8 @@ over SSH as the operating account (§2), from `repo/` once step 2.1 has created 
 1. **Remove staging from this NAS.** `release.sh` refuses to run while a
    `partflow-staging` project has containers on the Docker daemon (environment
    separation, [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §6). Stop and remove the
-   staging containers **without** `-v`:
+   staging containers **without** `-v`. If staging was never installed on this
+   NAS, run only the second command, which confirms that nothing is there:
 
    ```bash
    docker compose -p partflow-staging down
@@ -554,8 +561,9 @@ over SSH as the operating account (§2), from `repo/` once step 2.1 has created 
    $PF run --rm --no-deps -T backend python -m app.cli reconcile
    ```
 
-   The reconciliation must report check (h) as `pass`. Then enroll each Scan
-   Station device in Administration → Scan Stations → `Devices…`.
+   The reconciliation must report the check "Append-only guards and
+   database-role privileges intact" (check (h)) as `pass`. Then enroll each
+   Scan Station device in Administration → Scan Stations → `Devices…`.
 7. **Never run `down -v`**, and never remove a volume, on the
    `partflow-production` project: it deletes the production database. `$PF down`
    without `-v` is the only safe way to stop everything.
@@ -667,7 +675,9 @@ dump plus 1 GiB on the Docker root (the drill runs one backend worker).
    [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 (a new, empty
    `postgres_data` volume; the owner's approval recorded before `backend`
    starts).
-7. Run `revision` and the reconciliation checks before opening access.
+7. Before opening access, check the database revision
+   (`$PF run --rm --no-deps -T backend python -m app.cli revision`) and run the
+   reconciliation checks.
 8. Change the internal DNS record with a short time to live (TTL) and test the
    clients.
 9. Keep the NAS instance stopped and recoverable until the rollback window
@@ -677,7 +687,8 @@ dump plus 1 GiB on the Docker root (the drill runs one backend worker).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
+| 2026-11-09 | uncommitted | Restored small items the rewrite had dropped: the health check in the staging smoke test, the off-NAS copy and restore test of staging dumps, the staging reconciliation, the full name of reconcile check (h) and the full `revision` command; step 1 now covers a NAS where staging was never installed. |
+| 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | 03bd90c | Added the monitoring tasks and the disk thresholds of the host checks. |
 | 2026-10-08 | a330383 | Added the production backup tasks, the off-NAS encrypted copy and the restore drill. |
 | 2026-10-08 | 1116b07 | Added the production database roles to the installation steps. |

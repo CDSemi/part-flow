@@ -2914,11 +2914,11 @@ test('a transfer from actively processing quantity appends AREA_COMPLETED, then 
 
   // One atomic command: completion of source processing + transfer.
   expect(dialog.textContent).toContain('Source processing');
-  expect(dialog.textContent).toContain('marked complete at the source');
+  expect(dialog.textContent).toContain('Completed at Mill by this transfer');
   // The source-processing deviation carries the warning value tone.
   expect(
     dialog.querySelector('.ss-confirm dd.tone-warn')?.textContent,
-  ).toContain('marked complete at the source');
+  ).toContain('Completed at Mill by this transfer');
   expect(dialog.textContent).toContain('AREA_COMPLETED, then TRANSFERRED');
   fireEvent.keyDown(dialog, { key: 'Enter' });
 

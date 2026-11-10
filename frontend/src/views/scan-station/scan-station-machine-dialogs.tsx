@@ -324,7 +324,7 @@ export function AssignToMachineDialog({
       return;
     }
     setScanError(
-      'Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.',
+      'Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.',
     );
   }
 

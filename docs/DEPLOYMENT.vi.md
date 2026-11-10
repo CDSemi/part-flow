@@ -1,7 +1,7 @@
 # Hướng dẫn triển khai PartFlow
 
 > **Bản gốc chuẩn:** [`DEPLOYMENT.md`](DEPLOYMENT.md).
-> Đồng bộ với bản tiếng Anh tại commit `2c360cb` cộng các thay đổi chưa commit ngày 2026-11-09.
+> Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09.
 > Bản tiếng Anh là source of truth; khi hai bản khác nhau, bản tiếng Anh được áp dụng.
 
 Hướng dẫn này là điểm bắt đầu để cài đặt và vận hành PartFlow bên ngoài máy của developer. Người đọc là người cài đặt,
@@ -133,8 +133,8 @@ có mode 0700 và thuộc tài khoản của operator.
 #### File configuration
 
 `.env.production` được copy từ `.env.production.example`, bị git bỏ qua, có mode 600 và chỉ chứa giá trị không bí
-mật. Một static test kiểm tra rằng mọi tham chiếu `${NAME}` trong `compose.production.yaml` và
-`compose.production.build.yaml` đều là key của file example.
+mật. Một static test kiểm tra rằng tập các tham chiếu `${NAME}` trong `compose.production.yaml` và
+`compose.production.build.yaml` bằng đúng tập các key của file example.
 
 | Key | Ý nghĩa | Bắt buộc hoặc mặc định |
 | --- | --- | --- |
@@ -227,7 +227,8 @@ dụng.
   worker, một request setup có thể tới worker có token không phải token đã được copy và bị từ chối với
   `403 setup_token_invalid` (không ghi gì). Khởi động backend bằng `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, đọc
   token bằng `$PF logs backend | grep "Setup token"`, hoàn tất setup trong browser, rồi khôi phục số worker đã cấu hình
-  bằng `$PF up -d backend`.
+  bằng `$PF up -d backend`. Setup token là bí mật duy nhất từng được ghi vào log backend: hãy hoàn tất first-run
+  setup trước khi mở quyền truy cập cho người dùng, và giới hạn quyền đọc log cho đến lúc đó.
 - **Một lần từ chối configuration thoát với code 0** khi có nhiều hơn một worker. Dòng log và số lần restart, không
   phải exit code, cho biết lỗi.
 - **Dừng một backend nhiều worker không từ chối kết nối mới ngay lập tức.** Uvicorn supervisor giữ socket lắng nghe mở
@@ -629,7 +630,9 @@ của xưởng và được thiết lập sau go-live, khi tiện.
   import lớn nhất cho phép, 2.000 Work Order, mất khoảng nửa phút. Mọi workstation và Scan Station phải tin
   certificate (§3.1, Quy trình certificate).
 - **First-run setup** với một backend worker cho đến khi có Administrator đầu tiên (§7 bước 8; setup token nằm trong
-  log backend), rồi enroll từng thiết bị Scan Station ở Administration → Scan Stations.
+  log backend), rồi enroll từng thiết bị Scan Station ở Administration → Scan Stations. Enrollment code và device
+  token là bearer credential: giống session cookie, chúng chỉ được truyền qua HTTPS. Thiết bị bị mất hoặc ngừng
+  dùng phải được revoke tại đó.
 - **Không có Compose project `partflow-staging` trên Docker daemon của production.** `release.sh` từ chối chạy khi
   còn project đó (§3.1, Tách biệt environment). Hãy thử thay đổi trên workstation.
 - **Release từ git tag.** `release.sh` chỉ build đúng tag đang checkout (đặt tên theo §10.2) với build input không
@@ -646,6 +649,7 @@ Mỗi mục là một platform task hoặc một lệnh; chi tiết nằm ở `d
 - `check.sh` mỗi 15 phút và `scheduled-reconcile.sh` hằng ngày, kèm failure notification của nền tảng
   (OPERATIONS_RUNBOOK §9 và §7).
 - Firewall chỉ cho các mạng của xưởng truy cập, giờ của host chính xác, và có UPS.
+- Cập nhật bảo mật có kiểm soát cho DSM, Container Manager và các base image.
 
 Check "Hot list entries are active demand" (reconcile check (i), `deployment/OPERATIONS_RUNBOOK.md` §7) chạy query Hot
 list dưới đây. Trên database bình thường query không trả về dòng nào; mỗi dòng trả về là một Hot list entry không còn
@@ -769,7 +773,7 @@ liệu. Riêng một database migration không bắt buộc tăng major; hãy đ
 
 `alpha`, `beta` và `rc` thể hiện mức độ hoàn thiện của release, không phải host triển khai. Đánh dấu cả ba là GitHub
 pre-release và không bao giờ chỉ định chúng là bản stable mới nhất. Có thể diễn tập một version stable trên staging
-trước production.
+trước production. Hậu tố không bao giờ chứng minh rằng việc kiểm tra triển khai đã đạt.
 
 ### 10.3 Release title và description
 
@@ -855,7 +859,8 @@ Tham khảo: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | chưa commit | Viết lại thành nội dung hiện hành cho người mới đọc; bỏ pilot và release gate theo quyết định của owner. |
+| 2026-11-09 | uncommitted | Khôi phục các quy tắc mà lần viết lại đã bỏ sót: test về key configuration, quyền đọc log khi còn setup token, credential và revoke thiết bị, cập nhật bảo mật và lưu ý về hậu tố version. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người mới đọc; bỏ pilot và release gate theo quyết định của owner. |
 | 2026-10-14 | `2c360cb` | Trỏ tới mục tiêu thiết kế controller tái sử dụng đã lên kế hoạch của Deployment Admin. |
 | 2026-10-09 | `03bd90c` | Thêm structured log, request id, lệnh status và các script giám sát. |
 | 2026-10-08 | `a330383` | Thêm backup đã verify, restore drill cô lập và pre-release backup bên trong write freeze. |

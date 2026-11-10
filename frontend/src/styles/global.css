@@ -490,10 +490,10 @@ select {
    edge of the owning surface is the click target. At rest the zone
    stays transparent — it reads as part of the owning surface's own
    background, not a separate panel — and only the icon/text carry the
-   error color; a light error surface highlights in ONLY on hover,
-   with the same translucent surface continuing for focus-visible /
-   active. Layout (tracks, margins, radius) belongs to the owning
-   stylesheet. */
+   error color; a light error surface highlights in ONLY on hover and
+   while pressed (active), and keyboard focus (focus-visible) draws an
+   inset error outline (GUI_DESIGN §3 rule 6). Layout (tracks, margins,
+   radius) belongs to the owning stylesheet. */
 .zone-action {
   border: none;
   background: transparent;

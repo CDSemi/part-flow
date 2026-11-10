@@ -1,7 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `2c360cb` cộng
-> các thay đổi chưa commit ngày 2026-11-09. Bản tiếng Anh là source of truth.
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `b405c6e`. Bản tiếng Anh là source of truth.
 
 Runbook này là sổ quy trình của operator cho production stack của PartFlow: cần ghi lại gì cho mỗi release, cách kiểm
 tra health và tìm ra sự cố, cách lấy và kiểm thử backup, cách release và rollback, cách chạy reconciliation, cần làm gì
@@ -1040,7 +1039,7 @@ trong runbook này là ví dụ làm việc, không phải cam kết mức dịc
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | chưa commit | Viết lại thành nội dung hiện hành cho người mới đọc; pilot và release gate được bỏ theo quyết định của owner. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người mới đọc; pilot và release gate được bỏ theo quyết định của owner. |
 | 2026-10-09 | 4271f61 | Thêm cách tìm log theo Work Order Demand và check error cần chạy trước khi tạo lại `backend`. |
 | 2026-10-09 | 03bd90c | Thêm monitoring: structured log có request id, command `status`, `check.sh` và reconciliation theo lịch. |
 | 2026-10-08 | 92727f6 | Làm cho các script rollback path 3 dừng ở mọi guard không thỏa và chỉ mở lại `web` sau khi `backend` sẵn sàng. |

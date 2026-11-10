@@ -1,7 +1,6 @@
 # Triển khai PartFlow trên Linux VPS
 
-> **Bản gốc chuẩn:** [`VPS.md`](VPS.md). Đồng bộ với bản tiếng Anh tại commit `2c360cb` cộng các thay đổi chưa commit
-> ngày 2026-11-09. Tiếng Anh là source of truth.
+> **Bản gốc chuẩn:** [`VPS.md`](VPS.md). Đồng bộ với bản tiếng Anh tại commit `b405c6e`. Tiếng Anh là source of truth.
 
 Tài liệu này mô tả cách chạy PartFlow trên máy chủ ảo riêng (virtual private server, VPS) chạy Linux. VPS là host
 production thay thế: host đang dùng hiện nay là Synology NAS của công ty (xem [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md)).
@@ -262,7 +261,7 @@ reconciliation, rồi mới chuyển DNS. Không bao giờ chạy hai production
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Viết lại thành nội dung hiện hành cho người đọc mới; owner đã bỏ pilot và các release gate. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; owner đã bỏ pilot và các release gate. |
 | 2026-10-09 | `03bd90c` | Thêm các unit giám sát, bộ thông báo alert và phương án cron. |
 | 2026-10-08 | `a330383` | Thêm tự động hóa backup production, các unit lịch và bản sao restic ngoài VPS. |
 | 2026-10-08 | `1116b07` | Thêm bước tạo database role vào quy trình triển khai ban đầu. |

@@ -972,6 +972,21 @@ test('refused Machine scans are actionable errors that keep the station and exis
     within(pnGroup).getByRole('button', { name: /2027-60-8114-00/ }),
   ).toHaveAttribute('aria-pressed', 'true');
   expect(within(dlg).getByRole('button', { name: 'Next' })).toBeEnabled();
+
+  // An unsupported barcode shows the operator-facing guidance error
+  // (GUI_DESIGN §4.6) and keeps both selections too.
+  fireEvent.change(scanInput, { target: { value: 'PF:AREA:LATHE' } });
+  fireEvent.keyDown(scanInput, { key: 'Enter' });
+  const unsupported = await within(dlg).findByText(
+    'Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.',
+  );
+  expect(unsupported.closest('.ss-guide')).toHaveClass('error');
+  expect(
+    within(machineGroup).getByRole('button', { name: /Lathe 1/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  expect(
+    within(pnGroup).getByRole('button', { name: /2027-60-8114-00/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
   expect(writes()).toHaveLength(0);
 });
 

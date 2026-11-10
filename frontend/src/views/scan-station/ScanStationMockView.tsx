@@ -2683,7 +2683,7 @@ function TransferDialog({
               [
                 'Source processing',
                 completesQty > 0
-                  ? `${completesQty} pcs will be marked complete at the source before transfer`
+                  ? `Completed at ${source.areaLabel} by this transfer`
                   : null,
                 undefined,
                 'warn',

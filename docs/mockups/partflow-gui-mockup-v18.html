@@ -3290,7 +3290,7 @@ function ssDlgTransfer(){
         ['Quantity','<span class="mono">'+q+' pcs</span>'],
         ['Source',ssAreaChip(ssAreaColor(f.source.card.area),f.source.areaLabel)],
         ['Destination',ssAreaChip(ssAreaColor(ssStation.area),f.destNote)],
-        ['Source processing',completes>0?completes+' pcs will be marked complete at the source before transfer':null,'warn'],
+        ['Source processing',completes>0?'Completed at '+f.source.areaLabel+' by this transfer':null,'warn'],
         ['Remaining at source','<span class="mono">'+(f.source.qty-q)+' pcs</span>'],
         ['Worker',ssWorker],
         ['Scan Station',ssStation.id],

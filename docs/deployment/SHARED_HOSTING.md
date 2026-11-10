@@ -97,6 +97,6 @@ and makes the move from the Synology NAS to the VPS a database migration rather 
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Rewritten as current content for new readers; the host recommendation now names the company Synology NAS as production. |
+| 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; the host recommendation now names the company Synology NAS as production. |
 | 2026-09-02 | `8e5ab18` | Moved the Vietnamese mirror beside the English source and repointed links. |
 | 2026-09-02 | `d2f68de` | First version of the shared-hosting assessment with its Vietnamese mirror. |

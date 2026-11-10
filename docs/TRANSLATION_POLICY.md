@@ -3,6 +3,11 @@
 > **Language:** English is the source of truth. [Read this policy in
 > Vietnamese](./TRANSLATION_POLICY.vi.md).
 
+This policy explains how the Vietnamese mirrors of the PartFlow documents are
+written, checked and kept up to date. It is for anyone who changes an English
+document or its Vietnamese mirror. The documents themselves are listed in the
+[documentation index](./README.md).
+
 ## 1. Authority
 
 The English document is authoritative. A Vietnamese file is a reading aid
@@ -44,9 +49,16 @@ The baseline is evidence of synchronization, not a claim that a newly authored
 English file existed in that upstream commit and not a substitute for review.
 
 Vietnamese mirrors are complete **semantic** translations, not mechanical
-line-by-line copies. Repeated explanation and superseded change-history detail
-may be consolidated in Vietnamese, but every active normative requirement and
-every numbered section must remain represented with the same strength.
+line-by-line copies. Repeated explanation may be consolidated in Vietnamese, but
+every active normative requirement and every numbered section must remain
+represented with the same strength.
+
+A document states only its current content, and the mirror translates that
+current content. The history of a document lives in the change history table at
+its end. The mirror translates that table like any other table: every row and
+every column, under the heading `Lịch sử thay đổi` with the columns `Ngày`,
+`Commit` and `Thay đổi`. Dates, commit hashes and the `uncommitted` marker stay
+unchanged.
 
 ## 4. Update workflow
 
@@ -76,7 +88,8 @@ For each mirror:
   source, so relative paths need no adjustment;
 - normative words such as **must**, **never**, **required**, **refused**, and
   **no write** keep the same strength;
-- normative mapping and decision tables keep every source row and column;
+- normative mapping and decision tables, and the change history table, keep
+  every source row and column;
 - no translated statement contradicts a newer canonical source.
 
 Automated structural checks help find omissions, but a human semantic review is
@@ -95,3 +108,11 @@ Vietnamese mirrors. These are excluded by design:
 - `AGENTS.md` and `CLAUDE.md`, because they are AI operating instructions rather
   than user-facing project documentation. Duplicating them in another language
   would create competing instruction entry points.
+
+## Change history
+
+| Date | Commit | Change |
+| --- | --- | --- |
+| 2026-11-09 | uncommitted | Aligned with the current-content documentation rule: the change history table is translated like any other table, and superseded change-history detail is no longer a consolidation case; an introduction was added. |
+| 2026-09-02 | `8e5ab18`, `6fae517` | Mirrors placed beside their English sources with the `.vi.md` suffix, and technical literals restored in the mirrors. |
+| 2026-09-02 | `d2f68de` | Policy created with the Vietnamese documentation mirrors. |

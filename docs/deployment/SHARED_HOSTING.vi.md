@@ -1,7 +1,6 @@
 # PartFlow trên shared hosting
 
-> **Bản gốc chuẩn:** [`SHARED_HOSTING.md`](SHARED_HOSTING.md). Đồng bộ với bản tiếng Anh tại commit `2c360cb` cộng các
-> thay đổi chưa commit ngày 2026-11-09. Tiếng Anh là source of truth.
+> **Bản gốc chuẩn:** [`SHARED_HOSTING.md`](SHARED_HOSTING.md). Đồng bộ với bản tiếng Anh tại commit `b405c6e`. Tiếng Anh là source of truth.
 
 Tài liệu này ghi lại vì sao shared web hosting chỉ khả thi có điều kiện cho PartFlow, và nhà cung cấp phải xác nhận
 bằng văn bản những gì trước khi có ai cân nhắc nó. Hãy đọc trước khi bỏ tiền cho một gói shared hosting. Quyết định là:
@@ -99,6 +98,6 @@ từ Synology NAS sang VPS thành một cuộc di chuyển database thay vì por
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Viết lại thành nội dung hiện hành cho người đọc mới; khuyến nghị host nay nêu Synology NAS của công ty là production. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; khuyến nghị host nay nêu Synology NAS của công ty là production. |
 | 2026-09-02 | `8e5ab18` | Chuyển bản dịch tiếng Việt sang cạnh bản tiếng Anh và trỏ lại các link. |
 | 2026-09-02 | `d2f68de` | Phiên bản đầu của đánh giá shared hosting cùng bản dịch tiếng Việt. |

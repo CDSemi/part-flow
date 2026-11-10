@@ -1,7 +1,7 @@
 # Triển khai PartFlow trên Synology NAS
 
 > **Bản gốc:** [`SYNOLOGY_NAS.md`](SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh
-> tại commit `2c360cb` cộng các thay đổi chưa commit ngày 2026-11-09. Bản tiếng
+> tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09. Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh
 > thắng.
 
@@ -231,7 +231,8 @@ docker compose -p partflow-staging logs --tail=200 backend frontend db
 
 Từ một máy trạm được phép:
 
-1. mở `http://<NAS LAN address>:5173` và kiểm tra chỉ báo kết nối;
+1. mở `http://<NAS LAN address>:5173` và kiểm tra chỉ báo kết nối, và kiểm tra
+   `http://<NAS LAN address>:5173/api/health` có trả lời;
 2. kiểm tra các màn hình định thử đều tải được, và ghi lại những màn hình còn
    chưa có;
 3. với các bản ghi thử được chỉ định, thử tạo, release, transfer, Machine,
@@ -420,6 +421,10 @@ docker compose -p partflow-staging exec -T backend uv run alembic current
 sha256sum ../backups/partflow-*.dump
 ```
 
+Sao chép bản dump và manifest của nó tới một đích được mã hóa nằm ngoài NAS.
+Trước khi tin một bản dump, hãy khôi phục nó vào một database riêng, rỗng, không
+bao giờ đè lên database đang chạy
+([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §4 liệt kê các bước).
 Snapshot của một volume PostgreSQL đang chạy không phải là bản sao lưu database,
 trừ khi dùng một quy trình snapshot nhất quán với database đã được ghi lại và
 thử nghiệm.
@@ -438,7 +443,9 @@ thử nghiệm.
    tệp khóa phụ thuộc và các migration.
 6. Build và khởi động: `docker compose -p partflow-staging up -d --build`.
 7. Chạy `alembic upgrade head` một lần (§4.5).
-8. Chạy smoke test ở §4.6.
+8. Chạy smoke test ở §4.6 và đối soát (reconciliation,
+   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §7):
+   `docker compose -p partflow-staging exec -T backend uv run python -m app.cli reconcile`.
 9. Giữ commit trước và bản dump cho đến khi người thử xác nhận bản cập nhật.
 
 Không bao giờ dùng một công cụ tự động cập nhật "latest" hay `main` không người
@@ -457,7 +464,8 @@ SSH bằng tài khoản vận hành (§2), từ `repo/` khi bước 2.1 đã t�
 1. **Gỡ staging khỏi NAS này.** `release.sh` từ chối chạy khi một project
    `partflow-staging` còn container trên Docker daemon (tách biệt môi trường,
    [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §6). Dừng và xóa các container staging
-   **không có** `-v`:
+   **không có** `-v`. Nếu staging chưa từng được cài trên NAS này, chỉ chạy
+   lệnh thứ hai, lệnh này xác nhận không còn gì ở đó:
 
    ```bash
    docker compose -p partflow-staging down
@@ -562,8 +570,9 @@ SSH bằng tài khoản vận hành (§2), từ `repo/` khi bước 2.1 đã t�
    $PF run --rm --no-deps -T backend python -m app.cli reconcile
    ```
 
-   Kết quả đối soát phải báo check (h) là `pass`. Sau đó đăng ký từng thiết bị
-   Scan Station trong Administration → Scan Stations → `Devices…`.
+   Kết quả đối soát phải báo check "Append-only guards and database-role
+   privileges intact" (check (h)) là `pass`. Sau đó đăng ký từng thiết bị Scan
+   Station trong Administration → Scan Stations → `Devices…`.
 7. **Không bao giờ chạy `down -v`**, và không bao giờ xóa một volume, trên
    project `partflow-production`: việc đó xóa database production. `$PF down`
    không có `-v` là cách an toàn duy nhất để dừng mọi thứ.
@@ -679,7 +688,9 @@ tập chạy một backend worker).
    [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 (một volume
    `postgres_data` mới, rỗng; sự chấp thuận của owner được ghi lại trước khi
    `backend` khởi động).
-7. Chạy `revision` và các kiểm tra đối soát trước khi mở truy cập.
+7. Trước khi mở truy cập, kiểm tra revision của database
+   (`$PF run --rm --no-deps -T backend python -m app.cli revision`) và chạy các
+   kiểm tra đối soát.
 8. Đổi bản ghi DNS nội bộ với thời gian sống (time to live, TTL) ngắn và kiểm
    tra các client.
 9. Giữ instance trên NAS ở trạng thái dừng và có thể khôi phục cho đến khi hết
@@ -690,7 +701,8 @@ tập chạy một backend worker).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và release gate theo quyết định của owner. |
+| 2026-11-09 | uncommitted | Khôi phục các mục nhỏ mà lần viết lại đã bỏ sót: kiểm tra health trong smoke test của staging, bản sao ngoài NAS và restore test của dump staging, reconciliation của staging, tên đầy đủ của reconcile check (h) và lệnh `revision` đầy đủ; bước 1 nay áp dụng cả cho NAS chưa từng cài staging. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và release gate theo quyết định của owner. |
 | 2026-10-09 | 03bd90c | Thêm các tác vụ giám sát và ngưỡng đĩa của các kiểm tra host. |
 | 2026-10-08 | a330383 | Thêm các tác vụ sao lưu production, bản sao mã hóa ngoài NAS và diễn tập khôi phục. |
 | 2026-10-08 | 1116b07 | Thêm các database role của production vào các bước cài đặt. |

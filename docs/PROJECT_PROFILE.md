@@ -5,13 +5,27 @@
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
 
+This profile is the canonical source for PartFlow's domain vocabulary, business rules, invariants, workflows and product
+scope. Read it first if you are new to PartFlow, and come back to it whenever you need to know what the system must do
+and why. It is written for everyone who builds, reviews or operates PartFlow. The other canonical documents depend on
+it: [`GUI_DESIGN.md`](./GUI_DESIGN.md) owns the approved user interface and refers here for business rules;
+[`IMPLEMENTATION_ROADMAP.md`](./IMPLEMENTATION_ROADMAP.md) owns the implementation order and the current implementation
+state, including temporary limitations; slice documents such as [`SLICE1_DATA_MODEL.md`](./SLICE1_DATA_MODEL.md) hold
+subordinate implementation detail and must not contradict this profile; [`DEPLOYMENT.md`](./DEPLOYMENT.md) owns
+deployment. This profile describes the target behavior; whether a rule is already implemented is stated in the roadmap.
+Source code cites this profile by section number (for example "PROJECT_PROFILE §14"), so the section numbers are stable.
+
+The profile uses a few abbreviations throughout: Part Number (PN), Work Order (WO, used only where §7 Work Order allows it),
+enterprise resource planning system (ERP), minimum viable product (MVP, the first production release), user
+interface (UI), and Admin (the Administrator role, §20). Every other abbreviation is spelled out where it first appears.
+
 ---
 
 # 1. Project Overview
 
 ## Purpose
 
-PartFlow is an internal shop-floor tracking system designed to track Part Numbers and physical production quantities as they move through manufacturing Areas.
+PartFlow is an internal shop-floor tracking system designed to track Part Numbers (PN) and physical production quantities as they move through manufacturing Areas.
 
 The system must always be able to answer:
 
@@ -30,7 +44,7 @@ The system must always be able to answer:
 
 PartFlow is intentionally focused on lightweight production tracking.
 
-It is not an ERP, MES, inventory management system, production scheduler, accounting system, or machine-control platform.
+It is not an enterprise resource planning (ERP) system, a manufacturing execution system (MES), an inventory management system, a production scheduler, an accounting system, or a machine-control platform.
 
 ERP integration may be added later, but the application must remain independently usable without ERP connectivity.
 
@@ -65,7 +79,7 @@ The application should allow operators to record real production activity with a
 
 Barcode scanning is the primary production interaction.
 
-- Keyboard-wedge scanners must work without custom drivers.
+- Keyboard-wedge scanners (scanners that type the scanned value as if it were keyboard input) must work without custom drivers.
 - The normal workflow must not require mouse interaction.
 - Touch interfaces should be optimized for tablets and fixed workstations.
 - Scan input must automatically regain focus after every completed operation.
@@ -265,7 +279,7 @@ The following rules are mandatory:
 12. Routes guide production but do not replace actual Movement history.
 13. Corrections must preserve the original event.
 14. Scan updates must be atomic.
-15. The MVP must work without ERP connectivity.
+15. The minimum viable product (MVP) must work without ERP connectivity.
 
 ---
 
@@ -318,7 +332,7 @@ The external Work Order Number is **nullable**. The user may create demand witho
 - may later receive the real external Work Order Number through an audited edit,
 - keeps its own stable internal identity (a database key that is never the user-facing identifier).
 
-No temporary Work Order Number (such as `TMP-YYYYMMDD-HHMMSS`) is ever generated — that earlier convention is removed. Multiple Work Orders may simultaneously have a null external number; uniqueness applies to non-null Work Order Numbers only. No UUID or other machine identifier is ever the user-facing Work Order identifier. Work Order Numbers that were entered by the user remain opaque arbitrary strings and are never reformatted.
+No temporary Work Order Number (such as `TMP-YYYYMMDD-HHMMSS`) is ever generated. Multiple Work Orders may simultaneously have a null external number; uniqueness applies to non-null Work Order Numbers only. No universally unique identifier (UUID) or other machine identifier is ever the user-facing Work Order identifier. Work Order Numbers that were entered by the user remain opaque arbitrary strings and are never reformatted.
 
 Work Order Number and external Job Number are separate identifiers (for example Work Order Number `007125` versus external Job Number `17555`). Job Numbers remain informational metadata on Work Order Demand: usable for display, search, sorting, and reporting, but never an internal identity, a movement identity, or a workflow key.
 
@@ -352,7 +366,7 @@ Initial values:
 - `NEW`
 - `MODIFY`
 
-`NEW` is externally requested production. `MODIFY` means physical quantity of a PN is introduced for modification work — an internal PartFlow concept that does not need to exist in ERP. A MODIFY intake may have no external Work Order Number, no predefined Route, and no pre-existing active Work Order Demand; PartFlow still creates the minimum internal records needed for quantity integrity and traceability (an internal WorkOrder with a null number, one WorkOrderDemand, a QuantityFlow, and immutable Movement history).
+`NEW` is externally requested production. `MODIFY` means physical quantity of a PN is introduced for modification work — an internal PartFlow concept that does not need to exist in ERP. A MODIFY intake may have no external Work Order Number, no predefined Route, and no pre-existing active Work Order Demand; PartFlow still creates the minimum internal records needed for quantity integrity and traceability (an internal WorkOrder with a null number, one WorkOrderDemand for the PN — or, when an internal Work Order is reused, its existing line raised (§14) — a QuantityFlow, and immutable Movement history).
 
 **Repair is not a Request Type.** `REPAIR` is an explicit production movement intent (a `movement_reason` on a transfer, §8.11): some or all quantity already in production returns to a previously visited Area to correct work performed earlier. Repair creates no new physical quantity and no new business demand.
 
@@ -498,7 +512,7 @@ The explicit completion of processing at the current Area for a **selected physi
 
 `DONE` means: the selected physical quantity has completed processing at the current Area and is ready to be transferred to another Area — it waits on the Area's finished rack. The current Machine clears from the resulting position; the current Area remains the physical location until the quantity is transferred.
 
-`DONE` never means: PN completion, completion of every quantity of the PN, Work Order completion, manufacturing completion, stocked quantity, QC approval, or allocation to Work Order Demand. Manufacturing completion remains represented only by `STOCKED` at the terminal Stockroom.
+`DONE` never means: PN completion, completion of every quantity of the PN, Work Order completion, manufacturing completion, stocked quantity, quality control (QC) approval, or allocation to Work Order Demand. Manufacturing completion remains represented only by `STOCKED` at the terminal Stockroom.
 
 DONE is quantity-scoped, never a global PartNumber status: it applies to a selected physical quantity of a specific current Quantity Flow/position. The same PN may simultaneously have quantities queued, on Machines, directly processing, finished and ready to transfer, in other Areas, stocked, and scrapped. There is no `PartNumber.status = DONE`, and the state remains reconstructable from immutable Movement history.
 
@@ -574,7 +588,7 @@ Rules:
 - A PartNumber master is **created on first valid use**: no pre-populated authoritative PN catalog is required, ERP is never called during MVP, and manual PN entry accepts any PN value that is non-empty after trimming and free of internal whitespace (canonicalized to uppercase). The master record exists for current metadata and future ERP mapping only.
 - Production identity and historical truth **never depend on the existence of the PartNumber master record**. WorkOrder demand, QuantityFlows, PartMovements, Allocations, and history each keep the canonical PN value they need themselves; historical display never requires a join through the PN master to know what the PN is. A PN master lookup only enriches current metadata when the record exists.
 - Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The canonical string must be preserved everywhere; PN segments must never be parsed for business meaning.
-- `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (e.g. `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
+- `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (for example `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
 - The folder barcode identifies only the PN and carries the PN itself: `PF:PN:<part-number>` with the canonical uppercase PN (§10).
 - PartNumber master metadata is production master data maintained in **Management → Part Numbers** (§21) by authorized production roles (§20), like Machines and Planned Routes. An authorized user may **hard-delete** a PartNumber master record there (§28 Administrative Archival and Purge): deletion removes only the metadata, never cascades into production data, and never affects the PN's traceability — historical surfaces continue to display the PN string normally. If the PN is used again later, a new master record may be created for the same canonical PN identity. There is no PN archive or tombstone kept merely to preserve PN identity.
 - Current revision is informational only.
@@ -607,9 +621,13 @@ Rules:
 - `due_date` may be null. A missing Work Order due date is valid data, not a validation error; it may be added later. The Work Order due date serves as the entry default for demand-line due dates.
 - A Work Order contains one or more Work Order Demand records.
 - A Work Order is complete when every Work Order Demand has been fully allocated. Completion is **derived state**: the allocation records remain the source of truth.
-- `completed_at` records the completion moment (the **done date**): it is set to the timestamp of the event that left the last open Work Order Demand fully allocated — the allocation event that fully allocated it, or a demand change that leaves every remaining Work Order Demand fully allocated (a save lowering a requested quantity to its allocated quantity, §13, or the removal of the last line that was not fully allocated), which completes the Work Order in its own transaction, audited with that change as its cause. It exists so the permanent completed history can be ordered, filtered and paged by done date efficiently (indexed; keyset pagination over `(completed_at, id)`) — it is never entered by hand.
+- `completed_at` records the completion moment (the **done date**). It is set to the timestamp of the event that left the last open Work Order Demand fully allocated. That event is either:
+  - the allocation event that fully allocated it, or
+  - a demand change that leaves every remaining Work Order Demand fully allocated — a save lowering a requested quantity to its allocated quantity (§13), or the removal of the last line that was not fully allocated. Such a change completes the Work Order in its own transaction, audited with that change as its cause.
+
+  `completed_at` exists so the permanent completed history can be ordered, filtered and paged by done date efficiently (it is indexed, and paging uses keyset pagination over `(completed_at, id)`). It is never entered by hand.
 - A later audited allocation adjustment (§18) may make a Work Order incomplete again: `completed_at` is then cleared (and set again by a later completing allocation). The Work Order returns to active views; nothing is deleted and the allocation audit trail preserves the full history.
-- Completed Work Orders move out of active views but remain permanently available in history — presented on a dedicated Completed Work Orders surface, read-only for demand, entry and release (users holding Edit Work Order Allocation keep the allocation adjustment of §8.12 / §18, which may reopen the Work Order), ordered and default-filtered by done date and searchable by WO Number, PN and Job Number (§21 Work Orders). Because completed history is retained permanently, that surface must treat the list as unbounded: its search, filtering, ordering and paging are server-side.
+- Completed Work Orders move out of active views but remain permanently available in history — presented on a dedicated Completed Work Orders surface, read-only for demand, entry and release (users holding Edit Work Order Allocation keep the allocation adjustment of §8.12 / §18, which may reopen the Work Order), ordered and default-filtered by done date and searchable by Work Order Number, PN and Job Number (§21 Work Orders). Because completed history is retained permanently, that surface must treat the list as unbounded: its search, filtering, ordering and paging are server-side.
 - Work Order Number uniqueness (and the never-duplicate rule, §13) spans the whole history including completed Work Orders.
 
 ---
@@ -749,7 +767,7 @@ Rules:
 - A retired Machine never appears in assignment choices and accepts no new scans.
 - A retired Machine may **return to service (reactivation: RETIRED → ACTIVE)** — for the **same physical machine only**, on the **same record**: identity, barcode, asset metadata, and history are unchanged, and `retired_on` clears. During reactivation a new active Area may be chosen when the physical machine moved while it was retired; the change is forward-looking only — historical Movements keep their recorded Areas. The reactivated Machine returns as Idle (the operational state stays derived — assigned quantity, not reactivation, makes it Running).
 - Reactivation is blocked when the Asset Tag (which is also the barcode) or the serial number has meanwhile been reissued to another active Machine — with never-reused Asset Tags this indicates a data problem that must be resolved first — when the target Area is not active and no replacement Area is chosen, or when the display name would collide with an active Machine of the target Area.
-- Retirement and reactivation are recorded as **append-only lifecycle audit events** (`RETIRED`, `REACTIVATED`): who, when, reason, the before/after state, and the previous and current Area when the Machine moved. (Phase 2 mocks these events; persistence arrives with the relevant backend phase.)
+- Retirement and reactivation are recorded as **append-only lifecycle audit events** (`RETIRED`, `REACTIVATED`): who, when, reason, the before/after state, and the previous and current Area when the Machine moved.
 - Replacement follows §7 Machine: retire the old record, create a new record with its own stable identity and its own new Asset Tag (and barcode); the display name may be reused, the old record is never mutated. A **different physical machine is always a new record** — never a reactivation.
 
 ---
@@ -846,7 +864,7 @@ Rules:
 - It becomes independent after assignment.
 - Template changes must not alter active work.
 - Authorized users may edit it.
-- Past steps are immutable: an authorized edit replaces only the future steps — those after the last step any Movement of the flow references, undone Movements included — of the selected flow's own AssignedRoute, requires a reason, and is audited as `ROUTE_ADJUSTED` with the complete previous and new step lists and the signed-in user (decided 2026-10-06, OD-P11).
+- Past steps are immutable: an authorized edit replaces only the future steps — those after the last step any Movement of the flow references, undone Movements included — of the selected flow's own AssignedRoute, requires a reason, and is audited as `ROUTE_ADJUSTED` with the complete previous and new step lists and the signed-in user.
 - Different Quantity Flows of the same PN may have different Routes.
 - Actual Movement history remains authoritative.
 - Route deviations must be recorded.
@@ -894,7 +912,7 @@ Initial Movement types may include:
 - `STOCKED`
 - `QUANTITY_ADJUSTED`
 - `SCRAPPED`
-- `ROUTE_ADJUSTED` — recorded as an audit event on the AssignedRoute, never as a PartMovement: it moves no quantity (decided 2026-10-06, OD-P11)
+- `ROUTE_ADJUSTED` — recorded as an audit event on the AssignedRoute, never as a PartMovement: it moves no quantity
 - `ROUTE_DEVIATION_CONFIRMED`
 - `REVERSED`
 
@@ -1005,7 +1023,7 @@ PF:SCRAP
 
 The `PF:` namespace exists to identify PartFlow-owned barcodes, determine the entity type safely, and avoid confusing unrelated factory or vendor barcodes with PartFlow entities.
 
-**Worker badges are the one deliberate exception to the `PF:` namespace (v18 — supersedes the former `PF:WORKER:<stable-id>` format, which no longer exists):** the Worker badge barcode is the barcode already printed on the company's existing employee badge — PartFlow never prints or requires a dedicated Worker barcode. A scanned value outside the `PF:` namespace is **matched exactly after canonicalization (trim, uppercase)** against the `badge_barcode` values of **active** Workers (§8.13); on exactly one match it identifies that Worker, otherwise it is an unknown barcode and is rejected with nothing recorded — never guessed. Badge barcodes must stay unique among Workers (compared in that canonical form, inactive Workers included; decided 2026-10-04), and an inactive Worker's badge matches nothing.
+**Worker badges are the one deliberate exception to the `PF:` namespace.** The Worker badge barcode is the barcode already printed on the company's existing employee badge — PartFlow never prints or requires a dedicated Worker barcode, and there is no `PF:WORKER:` barcode format. A scanned value outside the `PF:` namespace is **matched exactly after canonicalization (trim, uppercase)** against the `badge_barcode` values of **active** Workers (§8.13). On exactly one match it identifies that Worker; otherwise it is an unknown barcode and is rejected with nothing recorded — never guessed. Badge barcodes must stay unique among Workers (compared in that canonical form, inactive Workers included), and an inactive Worker's badge matches nothing.
 
 The Machine barcode carries the Machine's Asset Tag (§8.6) — the automatically assigned, immutable identity of the physical machine (`Asset Tag CD-0512` → scanned barcode `PF:MACHINE:CD-0512`). There is no independent Machine barcode identifier and no manual Machine barcode entry.
 
@@ -1275,7 +1293,25 @@ For a newly received Work Order:
 6. Save the business demand. Saving Work Order Demand never automatically creates production quantity.
 7. Confirm the Route Mode (Floating by default) — and the Planned Route where chosen — when production is released.
 
-**File import (Phase 15 — decided 2026-10-06):** a prepared CSV (UTF-8) or Excel (.xlsx, first worksheet, stored values — formulas are never evaluated) whose header row names the fixed columns Work Order Number, Part Number, Requested Quantity (required), Job Number and Due Date (`YYYY-MM-DD`, optional). The file is the row selection: source BOM columns (for example Type, Ref Designator, Issued, Shelf, Cost) refuse the file, and every other non-template column is ignored and listed in the report. Every row needs a Work Order Number; rows group by it, it is stored exactly as written (a number with spaces around it is refused), and a row without one blocks the whole import. One Work Order is one transaction: a Work Order with any invalid row is refused whole, and the other Work Orders import. The file is checked before it is imported, and the import re-validates the same file. An existing Work Order Number is never duplicated — importing the same file again creates nothing — and a completed Work Order is never changed by an import. Imported demand is Request Type `NEW`, with no Work Order due date, no release and no priority. A Revision column is not imported — Revision stays with Part Numbers management (owner decision OD-15-11). For a Work Order Number already in PartFlow (owner decision OD-15-4/5, 2026-10-06), an Open or Released Work Order is updated only after the change list per Work Order has been shown and a typed confirmation given. The update is the ordinary demand edit: quantities (never below the released or allocated floor), due dates, added Job Numbers, and new lines on an Open Work Order, with its usual consequences — a fully allocated Hot line leaves the Hot list, and a Work Order whose lines are all fully allocated completes. Empty cells and lines missing from the file keep the saved values, and an import never removes a demand line. One transaction covers one Work Order. When the confirmed changes no longer match at Import, no existing Work Order in the file is changed (new Work Orders still import); a Work Order that changes after the Import re-checked it is not changed either; each is listed with the reason. The confirmation covers the changes shown, so a change by someone else that leaves them as shown does not stop them.
+**File import.** Work Orders can be imported from a prepared file instead of being typed in.
+
+- **File format.** The file is a comma-separated values (CSV) file encoded in UTF-8, or an Excel workbook (.xlsx). For Excel, only the first worksheet is read, and only its stored values: formulas are never evaluated.
+- **Columns.** The header row names the fixed template columns: Work Order Number, Part Number and Requested Quantity (required), and Job Number and Due Date (`YYYY-MM-DD`) (optional).
+- **The file is the row selection.** The rows in the file are the rows to import, so the person who prepares the file chooses them. A file that contains source bill of materials (BOM) columns (for example Type, Ref Designator, Issued, Shelf, Cost) is refused. Every other column that is not in the template is ignored and listed in the report.
+- **Work Order Number.** Every row needs a Work Order Number. Rows are grouped by it, and it is stored exactly as written (a number with spaces around it is refused). A row without one blocks the whole import.
+- **One Work Order is one transaction.** A Work Order with any invalid row is refused whole, and the other Work Orders in the file still import.
+- **Check, then import.** The file is checked before it is imported, and the import re-validates the same file.
+- **No duplicates.** An existing Work Order Number is never duplicated: importing the same file again creates nothing. A completed Work Order is never changed by an import.
+- **New Work Orders.** Imported demand is Request Type `NEW`, with no Work Order due date, no release and no priority.
+- **Revision.** A Revision column is not imported; the Revision stays with Part Numbers management.
+
+**File import into an existing Work Order.** For a Work Order Number already in PartFlow, an Open or Released Work Order is updated only after the change list per Work Order has been shown and a typed confirmation has been given.
+
+- The update is the ordinary demand edit: quantities (never below the released or allocated floor), due dates, added Job Numbers, and new lines on an Open Work Order. It has the usual consequences of that edit: a fully allocated Hot line leaves the Hot list, and a Work Order whose lines are all fully allocated completes.
+- Empty cells, and lines missing from the file, keep the saved values. An import never removes a demand line.
+- One transaction covers one Work Order.
+- When the confirmed changes no longer match at Import, no existing Work Order in the file is changed (new Work Orders still import). A Work Order that changes after the Import re-checked it is not changed either. Each such Work Order is listed with the reason.
+- The confirmation covers the changes shown, so a change by someone else that leaves those changes as shown does not stop them.
 
 Production release is a separate, explicit action. On production release:
 
@@ -1289,13 +1325,13 @@ Production release is a separate, explicit action. On production release:
 
 New ERP production normally uses Request Type `NEW`.
 
-The starting Area may be Material or another configured starting Area. A **terminal** Area is never a starting Area (v20): it is where finished quantity ends (§18), so production release into it is refused.
+The starting Area may be Material or another configured starting Area. A **terminal** Area is never a starting Area: it is where finished quantity ends (§18), so production release into it is refused.
 
-**Partial and repeated release (v20 — decided):** a Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal, and each part is its own explicit release creating its own Quantity Flow — parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated next. The demand's released quantity is the sum of the release Movements that record it, and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing.
+**Partial and repeated release.** A Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal. Each part is its own explicit release creating its own Quantity Flow. Parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated below. The demand's released quantity is the sum of the release Movements that record it, and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing.
 
-**Restricted edit after release (v21 — decided; supersedes the v20 "a released demand line is read-only" rule):** business demand keeps changing after production has started — quantities grow, due dates move, Job Numbers arrive — so a Work Order Demand line that has released quantity stays **editable within limits** instead of freezing:
+**Restricted edit after release.** Business demand keeps changing after production has started — quantities grow, due dates move, Job Numbers arrive — so a Work Order Demand line that has released quantity stays **editable within limits**; it is not read-only:
 
-- **Requested quantity** may be edited, but never below what is already committed to the line: `max(released quantity, allocated quantity)`. Raising it is always valid — the line then has remaining quantity to release again, and its Work Order returns to `Open` accordingly (§8.2 status is derived from the demand lines). Lowering it to exactly the committed quantity is valid and simply leaves nothing to release.
+- **Requested quantity** may be edited, but never below what is already committed to the line: `max(released quantity, allocated quantity)`. Raising it is always valid on a Work Order that is not completed (a completed Work Order is read-only history, §8.2 and §18) — the line then has remaining quantity to release again, and its Work Order returns to `Open` accordingly (§8.2 status is derived from the demand lines). Lowering it to exactly the committed quantity is valid and simply leaves nothing to release.
 - **Due date** and external **Job Numbers** may be edited like on any other demand line.
 - **Part Number** stays uneditable — as on every saved demand line, a different PN is a new line, never a rewrite.
 - **Request Type** is fixed once quantity has been released: what was released was released as `NEW` or `MODIFY` work, and that is history. **Requester**, **reason** and **notes** stay fixed with it; opening them is a separate decision, not a side effect of this rule.
@@ -1320,7 +1356,7 @@ When Work Order data originates from the external source system (manual entry fr
 
 A source Work Order may also identify a parent or build-for assembly with its own Part Number, Description, and Revision. Treat that information as Work Order header context unless an approved workflow explicitly requires the parent assembly to become its own tracked WorkOrderDemand or QuantityFlow.
 
-Never import every BOM component automatically as a tracked WorkOrderDemand: only rows representing production demand managed by PartFlow enter the tracking workflow. Source fields such as Type (`Fabricate`, `F`, `P`, `SM`, `Commercial`), Ref Designator, Attribute, Issued, Shelf, Cost, and Open/Closed carry no PartFlow business meaning: source Type values are not PartFlow Request Types, source BOM Quantity is not automatically requested quantity, Issued is not a Part Movement, Shelf is not an Area or current position, source Open/Closed is not a PartFlow status, and Cost is out of scope. There is exactly one Work Order concept — no second Work-Order-like aggregate may be introduced for source data.
+Never import every BOM component automatically as a tracked WorkOrderDemand: only rows representing production demand managed by PartFlow enter the tracking workflow. Source bill of materials fields such as Type (`Fabricate`, `F`, `P`, `SM`, `Commercial`), Ref Designator, Attribute, Issued, Shelf, Cost, and Open/Closed carry no PartFlow business meaning: source Type values are not PartFlow Request Types, source BOM Quantity is not automatically requested quantity, Issued is not a Part Movement, Shelf is not an Area or current position, source Open/Closed is not a PartFlow status, and Cost is out of scope. There is exactly one Work Order concept — no second Work-Order-like aggregate may be introduced for source data.
 
 ## Work Order Demand Removal
 
@@ -1329,7 +1365,7 @@ A Work Order Demand line may be removed from its Work Order only while no produc
 - An unsaved draft line may be removed immediately.
 - A saved Work Order Demand with no released production quantity may be removed only after explicit confirmation.
 - Once any quantity for a Work Order Demand has been released to production, that Work Order Demand must not be deleted from Work Orders. Later adjustments go through the correction and production workflows (§16); removal is not a correction mechanism.
-- A saved Work Order Demand that is on the Hot list (and otherwise removable) is removed only after a warning that states its Hot rank and a typed confirmation (decided 2026-10-04); the removal takes it off the Hot list — the remaining ranks close the gap, audited (§21 Priority Management, §28) — and deletes the line in one transaction. Without that confirmation nothing is removed.
+- A saved Work Order Demand that is on the Hot list (and otherwise removable) is removed only after a warning that states its Hot rank and a typed confirmation; the removal takes it off the Hot list — the remaining ranks close the gap, audited (§21 Priority Management, §28) — and deletes the line in one transaction. Without that confirmation nothing is removed.
 
 Removing a Work Order Demand must never delete the PartNumber master, any Quantity Flow, any Part Movement, release history, or other Work Order Demand records for the same PN.
 
@@ -1339,7 +1375,7 @@ Removing a Work Order Demand must never delete the PartNumber master, any Quanti
 
 ## Modify Intake
 
-`MODIFY` introduces physical quantity of a PN for modification work. A MODIFY intake may have no external Work Order Number, no predefined Route, and no existing active Work Order Demand — PartFlow still creates the minimum internal records needed for quantity integrity and traceability: an internal `WorkOrder` (`work_order_number = NULL`), one `WorkOrderDemand`, a `QuantityFlow`, and immutable Movement history.
+`MODIFY` introduces physical quantity of a PN for modification work. A MODIFY intake may have no external Work Order Number, no predefined Route, and no existing active Work Order Demand — PartFlow still creates the minimum internal records needed for quantity integrity and traceability: an internal `WorkOrder` (`work_order_number = NULL`), one `WorkOrderDemand` for the PN (when an internal Work Order is reused, its existing line is raised instead, as described below), a `QuantityFlow`, and immutable Movement history.
 
 The operator-facing dialog is titled **Receive Quantity**, with **Confirm receipt** as the final confirming action; `intake` remains the internal workflow name (identifiers, comments) and never renders to operators.
 
@@ -1352,18 +1388,17 @@ When a scan opens the intake flow (PN has no active Work Order Demand):
 3. Confirm or change the Route Mode — `FLOATING` is the **default, not a forced value**; a Planned Route is selected only when `PLANNED` is chosen.
 4. Confirm quantity, optional due date (owned by the WorkOrderDemand — the PN never owns a due date), and reason/notes where applicable.
 5. Confirm the starting/current Area and, when needed, the Operation. `received_date` defaults to the scan timestamp: the instant the PN scan opened the workflow, carried unchanged through every step of the wizard and read as a calendar date on the site's own calendar (`SITE_TIMEZONE`, §8.2). It is the SCAN that dates the receipt, never the confirmation — a receipt prepared before midnight and confirmed after it still belongs to the day it was scanned — and the scan instant is part of the confirmed intent, so a retry records the same date.
+6. Where the PN already has active quantity, explicitly confirm that the received quantity is recorded as a **separate** Quantity Flow (see *Received quantity is never joined to existing quantity* below). The confirmation is presented against the PN's existing active distribution, and without it nothing is recorded.
 
-6. Where the PN already has active quantity, explicitly confirm that the received quantity is recorded as a **separate** Quantity Flow (see below). The confirmation is presented against the PN's existing active distribution, and without it nothing is recorded.
-
-On confirmation, the transaction creates or reuses the PartNumber, creates or reuses an applicable internal blank-number MODIFY Work Order, creates the WorkOrderDemand and QuantityFlow, records the initial Movement, establishes the current position, and places quantity in the Area queue (Area with Machines) or directly into Area processing (Area without Machines).
+On confirmation, the transaction creates or reuses the PartNumber, creates or reuses an applicable internal blank-number MODIFY Work Order, creates the WorkOrderDemand (or raises the reused Work Order's existing line for the PN) and the QuantityFlow, records the initial Movement, establishes the current position, and places quantity in the Area queue (Area with Machines) or directly into Area processing (Area without Machines).
 
 Work Order reuse must never guess: if the same PN has exactly one clearly applicable active blank-number MODIFY Work Order — no external number, not completed, and already carrying a `MODIFY` demand line for that PN — reuse it; if multiple are plausible, an explicit selection is required and no first match is taken.
 
-Reuse keeps the one-canonical-PN-per-Work-Order rule intact: the reused Work Order's existing demand line for the PN is **raised** by the received quantity — the restricted edit of §13, where raising a released line's requested quantity is always valid — instead of the Work Order gaining a second line for the same PN, and the receipt releases exactly that increment. Only what restricted edit permits is touched: the requested quantity and, when the operator entered one, the due date. An existing line's Request Type, requester, reason and notes are never rewritten by a station receipt — the receipt's own reason travels on its immutable Movement. A `NEW` receipt never reuses (reuse is defined for blank-number MODIFY Work Orders only) and always creates its own internal Work Order.
+Reuse keeps the one-canonical-PN-per-Work-Order rule intact: the reused Work Order's existing demand line for the PN is **raised** by the received quantity — the restricted edit of §13, where raising a released line's requested quantity is always valid on a Work Order that is not completed — instead of the Work Order gaining a second line for the same PN, and the receipt releases exactly that increment. Only what restricted edit permits is touched: the requested quantity and, when the operator entered one, the due date. An existing line's Request Type, requester, reason and notes are never rewritten by a station receipt — the receipt's own reason travels on its immutable Movement. A `NEW` receipt never reuses (reuse is defined for blank-number MODIFY Work Orders only) and always creates its own internal Work Order.
 
 A confirmed receipt is not undone at the Scan Station: the reversal of §16 restores production state and never rewrites the business demand a receipt created or raised, so a mistaken receipt is corrected through the production correction workflows rather than half-reversed.
 
-**Received quantity is never joined to existing quantity (v22 — decided; resolves the former §32 open decision 3):** a receipt always creates its OWN QuantityFlow. If the PN already has active quantity, the operator must **explicitly confirm** that the newly received quantity is recorded as a **separate** Quantity Flow; the system never infers the intent from PN identity alone, and nothing is written before that confirmation. Existing quantity is never merged into, mutated, inherited from or rewritten by a receipt: its quantity, route mode, Assigned Route, current position and processing state stay exactly as they were, and no Movement is recorded against it. The confirmation is presented against the PN's existing active distribution — where that quantity is and how much of it there is — and the rule is re-judged authoritatively at write time, so a receipt whose PN gained active quantity between the scan and the confirmation is refused with nothing recorded until the operator confirms against the current distribution. This is the same explicit confirmation the §13 production release takes, which likewise always creates a separate flow and never merges.
+**Received quantity is never joined to existing quantity.** A receipt always creates its OWN QuantityFlow. If the PN already has active quantity, the operator must **explicitly confirm** that the newly received quantity is recorded as a **separate** Quantity Flow; the system never infers the intent from PN identity alone, and nothing is written before that confirmation. Existing quantity is never merged into, mutated, inherited from or rewritten by a receipt: its quantity, route mode, Assigned Route, current position and processing state stay exactly as they were, and no Movement is recorded against it. The confirmation is presented against the PN's existing active distribution — where that quantity is and how much of it there is — and the rule is re-judged authoritatively at write time, so a receipt whose PN gained active quantity between the scan and the confirmation is refused with nothing recorded until the operator confirms against the current distribution. This is the same explicit confirmation the §13 production release takes, which likewise always creates a separate flow and never merges.
 
 Quantity Flows that later turn out to belong together are brought together by the existing **Combine quantities** workflow (`MERGED`, §11; GUI_DESIGN §4.7) — the one place quantity is ever merged, and only for portions whose production context is identical. A receipt is never that place. Quantity found beside quantity already active in the Area stays the `QUANTITY_ADJUSTED · INCREASE` correction of §11, which joins nothing.
 
@@ -1434,7 +1469,7 @@ A Scan Station's identity and its binding to one Area are stable application and
 
 ScanSession remains temporary context. Neither Scan Station configuration nor ScanSession is the source of truth for production state — that remains the immutable Part Movement history. Part Movement records the stable station identity (`station_id`) for audit.
 
-A Scan Station is used only from devices an administrator has enrolled for it (§20; owner decision OD-P6, 2026-10-06); enrollment is configuration, never production state, and is never recorded on a Movement.
+A Scan Station is used only from devices an administrator has enrolled for it (§20); enrollment is configuration, never production state, and is never recorded on a Movement.
 
 ---
 
@@ -1454,7 +1489,15 @@ Instead, the system must:
 
 Undo targets the most recent eligible **completed PN operation** and always shows a summary confirmation first (PN, original action, quantity, source and destination, Machine where applicable, Worker, timestamp, and the effect of the reversal); Cancel performs no write. After a confirmed Undo the “last scanned PN” context advances to the next eligible previous operation; Undo disables when nothing is eligible.
 
-The Worker recorded on the reversal follows the Area's Worker ID mode (§19): disabled records no Worker; fixed Worker records the configured Worker; a valid scanned Worker Session records the **Worker active at the moment the Undo is confirmed**. **Final confirmation (v19 — supersedes the v18 "no extra badge scan" rule):** Undo carries the shared final-confirmation gate of the sensitive actions (§19) — in a scanned-session Area with the `UNDO` badge-confirmation option enabled (the default), a Worker badge scan after the reversal summary completes the reversal and identifies the confirming Worker (any active badge; the scan also signs that Worker in); in every other case — a fixed-Worker or disabled Area, or the option disabled — a final warning-toned confirmation question restates the key facts before anything is reversed; the final gate itself is never skipped. In scanned-session mode with no active or an expired session, the Scan Station is already blocked until a valid badge scan (§19) — so Undo is only reachable with a valid session.
+The Worker recorded on the reversal follows the Area's Worker identification (ID) mode (§19): disabled records no Worker; fixed Worker records the configured Worker; a valid scanned Worker Session records the **Worker active at the moment the Undo is confirmed**.
+
+**Final confirmation.** Undo carries the shared final-confirmation gate of the sensitive actions (§19):
+
+- in a scanned-session Area with the `UNDO` badge-confirmation option enabled (the default), a Worker badge scan after the reversal summary completes the reversal and identifies the confirming Worker (any active badge; the scan also signs that Worker in);
+- in every other case — a fixed-Worker or disabled Area, or the option disabled — a final warning-toned confirmation question restates the key facts before anything is reversed;
+- the final gate itself is never skipped.
+
+In scanned-session mode with no active or an expired session, the Scan Station is already blocked until a valid badge scan (§19) — so Undo is only reachable with a valid session.
 
 Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records — for example a transfer that implicitly completed source processing (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — the reversal compensates the whole command rather than blindly reversing one arbitrary row.
 
@@ -1522,7 +1565,7 @@ Rules:
 - Different Quantity Flows of the same PN may have different Routes.
 - A split may inherit the parent Route or receive a modified Route.
 - Route Template changes must not affect active assigned Routes.
-- Authorized edits affect only the selected Quantity Flow, and only its future steps; past steps never change (decided 2026-10-06, OD-P11).
+- Authorized edits affect only the selected Quantity Flow, and only its future steps; past steps never change (§8.10).
 - Actual Movement history remains the source of truth.
 
 ---
@@ -1541,7 +1584,7 @@ Route deviation applies to Planned Routes only (a Floating Route has no expectat
 
 The application must represent actual production rather than forcing production to match an obsolete plan.
 
-A deviation never changes the assigned Route by itself; the route changes only through the authorized, reasoned adjustment (decided 2026-10-06, OD-P11).
+A deviation never changes the assigned Route by itself; the route changes only through the authorized, reasoned adjustment (§8.10).
 
 ---
 
@@ -1561,7 +1604,7 @@ Expected duration may support:
 
 Expected duration is advisory and must never block production.
 
-### Effective expected duration of a position (decided)
+### Effective expected duration of a position
 
 Two sources define an expected duration: the **explicit per-step snapshot** `AssignedRouteStep.expected_duration` (§8.10) and the **live Operation default** `Operation.default_expected_duration` (§8.5). Monitoring judges the quantity's **current position** against exactly one effective value, resolved by this precedence:
 
@@ -1575,7 +1618,7 @@ Rules:
 - **Elapsed duration is the time in the current position**: `now − entered_at` of the branch-aware effective position (§21 — the same `since` every monitoring view already dates a position from). No timer, timestamp or persisted monitoring state is introduced for it.
 - Monitoring is **advisory only**: exceeding the expected duration produces a warning highlight and never blocks a scan, a transfer, `DONE`, a Machine action or any other production command.
 - When a rendered location aggregates several Quantity Flows or portions (a Production Board location, a PN row of the Area Board overview), the location is warned as soon as **at least one** included portion has exceeded **its own** effective expected duration — durations are never averaged, and a newer portion never hides an overdue one.
-- No fixed dwell rule replaces a missing expected duration (the former `≥ 3 days` stand-in of the Production Board is retired).
+- No fixed dwell rule (such as a `≥ 3 days` threshold on the Production Board) replaces a missing expected duration.
 
 ---
 
@@ -1667,9 +1710,9 @@ When Worker scanning is enabled:
 - subsequent scans use the active Worker,
 - a Worker scan never replaces the last-scanned-PN context,
 - scanning a different active Worker's badge switches the active Worker immediately — no sign-out step,
-- the session ends when another Worker signs in or the session expires — there is no sign-out control (Phase 13 owner decision OD-4); a configuration change that invalidates the session (the Area leaving Worker barcode session mode, the Scan Station rebound or deactivated, the Worker deactivated) also ends it.
+- the session ends when another Worker signs in or the session expires — there is no sign-out control; a configuration change that invalidates the session (the Area leaving Worker barcode session mode, the Scan Station rebound or deactivated, the Worker deactivated) also ends it.
 
-**Expiration (v18 — the rules are decided):** a scanned Worker Session expires through a **sliding inactivity timeout**, never at a shift boundary — there is no shift-end concept and no shift-schedule management:
+**Expiration.** A scanned Worker Session expires through a **sliding inactivity timeout**, never at a shift boundary — there is no shift-end concept and no shift-schedule management:
 
 - the timeout value is configured in Administration → Worker sessions: one default policy value with optional per-Area overrides; it is never inferred from the number of Workers in an Area;
 - every valid production interaction at the Scan Station refreshes the timeout — a successfully resolved scan, a confirmed production command, a valid badge scan; invalid or unknown scans never refresh it;
@@ -1677,7 +1720,7 @@ When Worker scanning is enabled:
 - a Scan Station in scanned-session mode opened without an active session shows the same blocking badge-scan requirement before production interaction;
 - if a production dialog is open at expiration, its draft and selections are preserved, but production confirmation stays blocked until a valid badge scan; afterwards the workflow continues where it was.
 
-**Badge confirmation of sensitive actions (v19):** each of the three sensitive Scan Station actions — `DONE` (Area completion), `QUEUE` (return unfinished quantity to queue) and Undo — carries its own **badge-confirmation option** in the Worker sessions policy (Administration → Worker sessions), default **enabled**. Every sensitive action ALWAYS ends in a final confirmation gate; the option decides only whether that gate must be a Worker badge scan:
+**Badge confirmation of sensitive actions.** Each of the three sensitive Scan Station actions — `DONE` (Area completion), `QUEUE` (return unfinished quantity to queue) and Undo — carries its own **badge-confirmation option** in the Worker sessions policy (Administration → Worker sessions), default **enabled**. Every sensitive action ALWAYS ends in a final confirmation gate; the option decides only whether that gate must be a Worker badge scan:
 
 - in a **scanned-session** Area with the option enabled, the action requires a Worker badge scan as the **final step after its confirmation summary** — the key facts of the pending action stay visible, any ACTIVE Worker badge confirms, the badge identifies the confirming Worker (recorded on the action, and signed in exactly like a normal badge scan — switching and refreshing the session), unknown or inactive badges are rejected with nothing recorded, and cancelling the gate returns to the summary;
 - in a **fixed-Worker or disabled-Worker** Area — and in a scanned-session Area whose option is disabled — the gate is a **final confirmation question** restating the key facts (no badge is required) — an information-toned presentation for DONE, a warning presentation for QUEUE return and Undo;
@@ -1698,9 +1741,9 @@ PartFlow uses role-based authorization.
 
 Roles are **named and editable**. Every capability below is a **permission key**; a role grants a set of permission keys and a User holds one role. **Permission keys are the only authority**: authorization is decided by the keys the User's role grants — never by a role's name — and no role is an implicit superuser. The Administrator, Manager and Operator lists below are the **initial roles with their initial grants**, seeded exactly as listed; an authorized administrator may rename these roles or change what any role grants, and every such change is audited.
 
-**Role-named sentences and the permission-management guard (decided 2026-10-06).** Wherever this profile names a role as the one who performs or configures something in the application (for example "Admin or Manager", "Admin-configured"), it names that role's initial grant: the permission the action requires decides. Changing who holds a correction permission or the permission to manage correction permissions — by changing a role's permissions, or a User's role, activity or password — itself requires the permission to manage correction permissions, and PartFlow never lets a change leave no active User with a password holding the permission to manage users and roles, or the permission to manage correction permissions.
+**Role-named sentences and the permission-management guard.** "Admin" in this profile is short for the Administrator role. Wherever this profile names a role as the one who performs or configures something in the application (for example "Admin or Manager", "Admin-configured"), it names that role's initial grant: the permission the action requires decides. Changing who holds a correction permission or the permission to manage correction permissions — by changing a role's permissions, or a User's role, activity or password — itself requires the permission to manage correction permissions, and PartFlow never lets a change leave no active User with a password holding the permission to manage users and roles, or the permission to manage correction permissions.
 
-**Scan Station actions (decided 2026-10-06).** Scan Station actions are performed by Workers, who hold no role (§7), on a Scan Station device that an administrator has enrolled for that station; a device that is not enrolled, or is enrolled for another station, can perform nothing there (owner decision OD-P6). What an enrolled Scan Station may do — including Undo of recent eligible scans (§16) — is decided by the permissions of the one role applied at Scan Stations, initially the Operator role with its initial grants listed below (owner decision OD-S4-1); Worker identity never grants or restricts an action.
+**Scan Station actions.** Scan Station actions are performed by Workers, who hold no role (§7), on a Scan Station device that an administrator has enrolled for that station; a device that is not enrolled, or is enrolled for another station, can perform nothing there. What an enrolled Scan Station may do — including Undo of recent eligible scans (§16) — is decided by the permissions of the one role applied at Scan Stations, initially the Operator role with its initial grants listed below; Worker identity never grants or restricts an action.
 
 Machines, Route Templates (Planned Routes), and PartNumber master metadata are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines, Route Templates, and PartNumber master metadata without being an Administrator. The initial Administrator role holds these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines, Route Templates, or Part Numbers screens (§21).
 
@@ -1768,7 +1811,7 @@ No permission rewrites historical data directly: the initial Operator role holds
 
 ## Scan Station
 
-The Scan Station is a fixed production interface assigned to one Area. Stations are addressed per URL: the bare Scan Station route shows a Station Selector (Station ID, Department, Area, supported Operations, whether the Area has Machines) and never auto-redirects; an unknown or inactive Station ID is an explicit error, never a silent fallback. The Station ID stays a faint non-interactive footer caption (alongside the mode label and the `Ctrl+Shift+K: switch mode` hint); switching stations goes through the Station Selector URL, never through the footer.
+The Scan Station is a fixed production interface assigned to one Area. Stations are addressed per web address (URL): the bare Scan Station route shows a Station Selector (Station ID, Department, Area, supported Operations, whether the Area has Machines) and never auto-redirects; an unknown or inactive Station ID is an explicit error, never a silent fallback. The Station ID stays a faint non-interactive footer caption (alongside the mode label and the `Ctrl+Shift+K: switch mode` hint); switching stations goes through the Station Selector URL, never through the footer.
 
 Requirements:
 
@@ -1794,13 +1837,13 @@ There is no persistent Machine Session, no pending armed context, and no Recent 
 
 ## Production Board
 
-The Production Board is a read-only large-screen Department display. It is Department-wide only: there is **no per-Area filtered mode** (v18 — decided) — per-Area monitoring is the Area Board's responsibility, and the two views never duplicate each other.
+The Production Board is a read-only large-screen Department display. It is Department-wide only: there is **no per-Area filtered mode** — per-Area monitoring is the Area Board's responsibility, and the two views never duplicate each other.
 
 Requirements:
 
 - readable from a distance,
 - automatic pagination,
-- automatic page rotation with a dwell time **proportional to the rows displayed on the current page** (default 3 seconds per displayed row, with a 6-second minimum page dwell); the rotation countdown indicator uses the same deadline and the same per-page duration; the values are configuration **per Department** (future Administration → Department display settings, §22 — never global, never hard-coded UI constants),
+- automatic page rotation with a dwell time **proportional to the rows displayed on the current page** (default 3 seconds per displayed row, with a 6-second minimum page dwell); the rotation countdown indicator uses the same deadline and the same per-page duration; the values are configuration **per Department** (Administration → Department display settings, §22 — never global, never hard-coded UI constants),
 - dynamic rows per page,
 - priority and due-date sorting following the canonical demand ordering (§18),
 - overdue highlighting,
@@ -1831,7 +1874,7 @@ Time in location is highlighted when it exceeds the effective expected duration 
 
 ## Area Board
 
-Area Board is one Management view with two modes behind a single tab strip: the **All Areas overview** and the **per-Area detail** (GUI_DESIGN §6). The "Manager Summary" name is retired — its content is the All Areas overview below; no content was dropped, only its placement changed.
+Area Board is one Management view with two modes behind a single tab strip: the **All Areas overview** and the **per-Area detail** (GUI_DESIGN §6). There is no separate summary view: the cross-Area summary content is the All Areas overview below.
 
 ### All Areas overview
 
@@ -1891,7 +1934,7 @@ It must provide:
 - reactivation of a retired Machine per §8.6: same physical machine on the same record, required reason, an optional new active Area applied forward only, blocked on reissued identity (Asset Tag — which is also the barcode — or serial number) and on active-name collisions in the target Area, returning the Machine as Idle after a final explicit confirmation that the reactivation is recorded permanently in the Machine lifecycle,
 - replacement guidance following §7 Machine: retire the old record, create a new record with its own identity and its own new automatically assigned Asset Tag (and barcode); the display name may be reused (unique among active Machines of one Area).
 
-Machine management stays focused on lifecycle, maintenance, and asset identification. PartFlow is not a CMMS: no spare parts, maintenance schedules, service contracts, or cost accounting.
+Machine management stays focused on lifecycle, maintenance, and asset identification. PartFlow is not a computerized maintenance management system (CMMS): no spare parts, maintenance schedules, service contracts, or cost accounting.
 
 ---
 
@@ -1948,7 +1991,7 @@ It must not imply that the entire PN is at one Route Step.
 
 ## Work Orders
 
-Work Orders is the management view for manual Work Order entry and file import (the Work Order Intake workflow, §12; §13 *File import*). It is a light-theme management view. The Work Order list spans the full view width, its search and the New Work Order action share one toolbar row, and selecting a Work Order row opens the Work Order Details dialog.
+Work Orders is the management view for manual Work Order entry and file import (the Work Order Intake workflow, §13, including §13 *File import*). It is a light-theme management view. The Work Order list spans the full view width, its search and the New Work Order action share one toolbar row, and selecting a Work Order row opens the Work Order Details dialog.
 
 The view must support the minimum confirmed workflow:
 
@@ -1958,11 +2001,11 @@ The view must support the minimum confirmed workflow:
 4. Create the PN barcode when the PN is new.
 5. Enter: Work Order Number (optional — a blank number is saved as NULL on an internal Work Order and displays as `—`, §7 Work Order), received date (defaults to the current date), PN (any PN text that is non-empty after trimming and free of internal whitespace, canonicalized to uppercase — created on first use, §8.1), Request Type (default `NEW`), requested quantity, due date (optional — a missing due date is valid data, §8.3), priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
 6. Save business demand without automatically creating production quantity.
-7. Provide a separate explicit `Release to production` action following the release steps in §12.
+7. Provide a separate explicit `Release to production` action following the release steps in §13.
 
 On production release the view must confirm release quantity, Route Mode (Floating by default; a Route only for Planned), and the configured starting Area and Operation, and show the resulting Quantity Flow, route mode, Area, quantity, and `RECEIVED` Movement.
 
-Completed Work Orders (every Work Order Demand fully allocated, §8.2) never appear in the active list. They live on a dedicated read-only **Completed Work Orders** history page reached from the list: ordered and default-filtered by done date (`completed_at`, newest first, a bounded default range), with its own search (WO Number, PN, Job Number), a done-date range filter, a due-outcome filter and incremental paging. The history is retained permanently and unbounded, so its search, filtering, ordering and paging are server-side; the page offers no entry, demand editing or release actions; users holding Edit Work Order Allocation keep the allocation actions of §8.12 / §18. The active list's search miss points at the completed history, and entering a completed Work Order's number in New Work Order announces the completion and opens its read-only details instead of duplicating (Work Order Number uniqueness spans the whole history, §8.2).
+Completed Work Orders (every Work Order Demand fully allocated, §8.2) never appear in the active list. They live on a dedicated read-only **Completed Work Orders** history page reached from the list: ordered and default-filtered by done date (`completed_at`, newest first, a bounded default range), with its own search (Work Order Number, PN, Job Number), a done-date range filter, a due-outcome filter and incremental paging. The history is retained permanently and unbounded, so its search, filtering, ordering and paging are server-side; the page offers no entry, demand editing or release actions; users holding Edit Work Order Allocation keep the allocation actions of §8.12 / §18. The active list's search miss points at the completed history, and entering a completed Work Order's number in New Work Order announces the completion and opens its read-only details instead of duplicating (Work Order Number uniqueness spans the whole history, §8.2).
 
 If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
 
@@ -2010,16 +2053,16 @@ Priority belongs to Work Order Demand.
 The Hot list is managed within the Department:
 
 1. Show Hot Work Order Demand sorted by explicit priority rank.
-2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode. A scanned PN barcode resolves deterministically (v18): no eligible Work Order Demand adds nothing; exactly one is added directly; more than one filters the candidate list to that PN and requires an explicit selection of the specific Work Order Demand — never a first-match guess.
+2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode. A scanned PN barcode resolves deterministically: no eligible Work Order Demand adds nothing; exactly one is added directly; more than one filters the candidate list to that PN and requires an explicit selection of the specific Work Order Demand — never a first-match guess.
 3. If a PN has multiple active Work Order Demand records, each Work Order Demand is selected and ranked separately.
 4. Add new Hot entries at the bottom by default; adding at the bottom applies directly.
 5. Allow drag-and-drop reordering.
 6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and Work Order Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
 7. Require explicit confirmation before applying any operation that changes the order of existing Hot entries — drag-and-drop, Move Up, Move Down, Undo, and Redo. The confirmation identifies the affected PN and Work Order Demand, the previous rank, the proposed new rank, and the action type; cancelling leaves the list and both histories unchanged, and the visible list is never renumbered before confirmation.
 8. Apply every confirmed Hot list change and record it in the audit trail.
-9. Provide Undo and Redo for Hot list changes instead of a separate save-or-cancel step; stepping back or forward is itself an order change and requires the same confirmation. Undo/Redo depth is unlimited within the current application session (v18) — no numeric limit; the history ends with the session.
+9. Provide Undo and Redo for Hot list changes instead of a separate save-or-cancel step; stepping back or forward is itself an order change and requires the same confirmation. Undo and Redo depth is unlimited within the current application session — no numeric limit; the history ends with the session.
 10. Use the stored rank as the highest work and allocation priority.
-11. An entry leaves the Hot list automatically when its Work Order Demand becomes inactive (§14) — fully allocated, which includes its Work Order completing (§18) — in the same transaction as the change that made it inactive (an allocation, or a demand edit that lowers the requested quantity to the allocated quantity) (decided 2026-10-04). No confirmation is asked: the triggering action is the confirmed one. The remaining ranks close the gap and every rank change is audited as an automatic removal with its cause (§28). A reversal or quantity increase that makes the demand active again does not re-add it.
+11. An entry leaves the Hot list automatically when its Work Order Demand becomes inactive (§14) — fully allocated, which includes its Work Order completing (§18) — in the same transaction as the change that made it inactive (an allocation, or a demand edit that lowers the requested quantity to the allocated quantity). No confirmation is asked: the triggering action is the confirmed one. The remaining ranks close the gap and every rank change is audited as an automatic removal with its cause (§28). A reversal or quantity increase that makes the demand active again does not re-add it.
 
 Multiple Work Orders requesting the same PN may have different priorities.
 
@@ -2250,7 +2293,7 @@ Database constraints should enforce, whenever practical:
 
 ## Administrative Archival and Purge
 
-Normal production runtime is append-only and never silently rewrites or deletes history. Separately, Administrators hold **explicit maintenance authority in every environment** (**explicit Admin archival/purge maintenance**).
+Normal production runtime is append-only and never silently rewrites or deletes history. Separately, Administrators hold **explicit maintenance authority in every environment**: the explicit Admin archival and purge maintenance described below.
 
 **PartNumber master deletion.** The PartNumber master record is optional current metadata (§8.1); every production record keeps its own canonical PN value. An authorized user may therefore **hard-delete** a PN master record through Management → Part Numbers (§20, §21) — for example a junk or test entry, or metadata that is simply no longer wanted — without any loss of production or history identity:
 
@@ -2332,12 +2375,12 @@ The following are outside the confirmed initial scope unless separately approved
 - individual piece tracking,
 - full ERP synchronization,
 - machine automation,
-- CNC telemetry,
+- computer numerical control (CNC) machine telemetry,
 - production scheduling,
 - inventory valuation,
 - cost accounting,
 - payroll,
-- IoT integration,
+- Internet of Things (IoT) integration,
 - predictive analytics,
 - full quality management,
 - general workflow engine,
@@ -2371,8 +2414,6 @@ Only the following unresolved decisions remain:
 1. Whether stocked quantity may be returned to active production through a controlled reversal.
 2. Whether offline scan synchronization will be included in a later release.
 
-(The former scrap question is resolved: `SCRAPPED` is a first-class Movement type, §8.11/§11. Machine sessions no longer exist, so no expiration rule applies to them. The former Worker-session expiration question is resolved in v18: scanned Worker Sessions expire through a configurable sliding inactivity timeout — Administration default with per-Area overrides, §19. The former `MODIFY` intake "join an existing Quantity Flow" question is resolved in v22: a receipt never joins existing quantity — it creates a separate Quantity Flow after an explicit confirmation, and `Combine quantities` stays the only merge, §14.)
-
 Implementations must avoid assumptions that make these decisions difficult to change.
 
 ---
@@ -2395,3 +2436,35 @@ Every future feature must reinforce these principles:
 - Remain ERP-independent.
 - Preserve complete auditability.
 - Prefer the simplest design that accurately represents the shop floor.
+
+---
+
+# Change history
+
+| Date | Commit | Change |
+| --- | --- | --- |
+| 2026-11-09 | uncommitted | Rewritten as current content for new readers. Two general sentences were narrowed to the specific rules they contradicted (and that the code implements): a reused internal MODIFY Work Order raises its existing line, and raising a released line's quantity is valid only while the Work Order is not completed. |
+| 2026-10-08 | e13574f | An omitted Work Order received date defaults to the site calendar date, also for imported Work Orders. |
+| 2026-10-07 | 918f025 | File import may update existing Open and Released Work Orders after a change list and a typed confirmation. |
+| 2026-10-07 | e1dee40 | Added file-based import of new Work Orders from CSV or Excel files. |
+| 2026-10-07 | 4a77dc4 | Future steps of an Assigned Route may be adjusted with a reason, audited as `ROUTE_ADJUSTED`; past steps stay immutable. |
+| 2026-10-07 | 98ba54c | Users who may edit allocations keep the allocation actions on completed Work Orders. |
+| 2026-10-07 | f0ae395, 1c5b3ef | Added the permission-management guard, and Scan Station actions need an enrolled device plus the Scan Station role's permissions. |
+| 2026-10-06 | 69b8ec1, 7581844 | Roles became named and editable, permission keys became the only authority, and the listed roles became initial grants. |
+| 2026-10-06 | 9a7db92 | A Work Order completes when a demand save or a line removal leaves every line fully allocated. |
+| 2026-10-04 | c12728d | Workers have no employee number, and badge barcodes are canonicalized and unique among Workers. |
+| 2026-10-04 | 9f466fa | Inactive Hot entries leave the Hot list automatically, and a Hot demand line is removed only after a typed confirmation. |
+| 2026-09-13 | f016d41, 2410e13, e9a9412 | Defined the effective expected duration of a position and the arrival-based current Planned Route step; dropped the fixed 3-day dwell rule. |
+| 2026-09-04 | f10d8bd | v22: a Scan Station receipt never joins existing quantity, which resolved the third open decision. |
+| 2026-09-04 | 40fbcb5, 4fd635f | Scan Station Receive Quantity introduces a PN without active demand, dated from its scan. |
+| 2026-09-02 | d2f68de, 8e5ab18 | Added the Vietnamese mirror beside the English file. |
+| 2026-08-20 | 813264a | v21: a released Work Order Demand line allows a restricted edit instead of being read-only. |
+| 2026-08-20 | fc83be4 | v20: partial and repeated production release; a terminal Area is never a starting Area. |
+| 2026-08-17 | ecc1ef4, 66faca0, aba9c65 | v19: final confirmation gates for `DONE`, `QUEUE` and Undo with per-action badge-confirmation options. |
+| 2026-08-14 | 6917029, 6439477 | v18: existing employee badges replace `PF:WORKER:` barcodes, Worker Sessions use a sliding inactivity timeout, and the Production Board lost its per-Area mode. |
+| 2026-08-12 | fa4b51d, c4f18a6, c4509f9 | v16 and v17: the PN string is the identity, PN master metadata is optional and deletable, and Movement retention was defined. |
+| 2026-08-11 | 9a29c9f, cb8c457 | v14 and v15: automatic Machine Asset Tags with derived barcodes, and a Completed Work Orders history page. |
+| 2026-08-04 | 74e0386, 01a7904, b59ef51 | v11 to v13: Machines and Planned Routes management views and the Machine reactivation lifecycle. |
+| 2026-07-31 | 8dd337b | v10: Area-level `DONE` completion (`AREA_COMPLETED`, `READY_TO_TRANSFER`). |
+| 2026-07-24 | 027567e, 74edbdd, fbb38cb | v7 to v9: Purchase Order renamed Work Order, nullable dates and numbers, one-shot Scan Station actions, Floating Routes, Repair and Scrap. |
+| 2026-07-20 | c2aeda5 to 2cb4d1c | v3 to v6: initial profile and its realignment. |

@@ -267,7 +267,7 @@ instances against divergent databases.
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
+| 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | `03bd90c` | Added the monitoring units, the alert notifier and the cron alternative. |
 | 2026-10-08 | `a330383` | Added production backup automation, the schedule units and the off-VPS restic copy. |
 | 2026-10-08 | `1116b07` | Added the database role creation step to the initial deployment. |

@@ -1055,7 +1055,7 @@ in this runbook are working examples, not service-level commitments.
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | not yet committed | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
+| 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | 4271f61 | Added Work Order Demand log searches and the error check to run before recreating `backend`. |
 | 2026-10-09 | 03bd90c | Added monitoring: structured logs with request ids, the `status` command, `check.sh` and the scheduled reconciliation. |
 | 2026-10-08 | 92727f6 | Made the rollback path 3 scripts stop at every failed guard and reopen `web` only after `backend` is ready. |
