@@ -3,6 +3,7 @@ _staging/
 _to_delete/
 XOA/
 _claude_outputs/
+secrets/
 
 # Environment variables and secrets
 .env
