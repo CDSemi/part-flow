@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1243,7 +1243,7 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
 ### Bước tiếp theo: go-live trên NAS
 
 PartFlow go-live trực tiếp trên Synology NAS của công ty. Việc cài đặt theo
-[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §8. Chỉ những gì phần mềm cần để chạy là bắt buộc
+[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §1 đến §10. Chỉ những gì phần mềm cần để chạy là bắt buộc
 (DEPLOYMENT §5): HTTPS tại proxy của nền tảng (thân request ít nhất 5 MiB, timeout ít nhất 300 giây, chứng chỉ được mọi
 máy trạm và Scan Station tin cậy), thiết lập lần đầu với một worker backend cho tới khi có Administrator đầu tiên, mỗi
 thiết bị Scan Station được enroll, không có project `partflow-staging` trên Docker daemon production, và release từ một
@@ -1406,7 +1406,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Viết lại thành trạng thái hiện tại cho người đọc mới; pilot được thay bằng go-live trực tiếp (quyết định của chủ sở hữu). |
+| 2026-11-10 | uncommitted | Bước go-live trỏ tới hướng dẫn cài đặt NAS đã viết lại (§1 đến §10). |
+| 2026-11-09 | `398c617` | Viết lại thành trạng thái hiện tại cho người đọc mới; pilot được thay bằng go-live trực tiếp (quyết định của chủ sở hữu). |
 | 2026-11-09 | `b405c6e` | Ghi nhận quyết định go-live trực tiếp của chủ sở hữu, không có pilot và không có release gate. |
 | 2026-10-09 | `03bd90c`, `4271f61` | Giám sát của Phase 16: log có cấu trúc, request id, lệnh status, kiểm tra máy chủ và reconcile theo lịch. |
 | 2026-10-08 | `a330383`, `92727f6` | Backup, diễn tập restore và rollback bằng restore của Phase 16. |

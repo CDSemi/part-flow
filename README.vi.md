@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09.
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-10.
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -96,10 +96,11 @@ Scan behavior trong Administration. Trạng thái hiện thực đầy đủ n�
   làm tham chiếu trực quan.
 - [`docs/IMPLEMENTATION_ROADMAP.vi.md`](./docs/IMPLEMENTATION_ROADMAP.vi.md) —
   những gì đã hiện thực, theo thứ tự nào, và các giới hạn tạm thời.
-- [`docs/DEPLOYMENT.vi.md`](./docs/DEPLOYMENT.vi.md) và
-  [`docs/deployment/SYNOLOGY_NAS.vi.md`](./docs/deployment/SYNOLOGY_NAS.vi.md) —
-  môi trường production. PartFlow chạy production trên Synology NAS của công ty.
-  Theo quyết định của chủ dự án ngày 2026-11-09, hệ thống đi vào sử dụng thật ngay
+- [`docs/DEPLOYMENT.vi.md`](./docs/DEPLOYMENT.vi.md) — môi trường production:
+  bắt đầu từ §1 của tài liệu này, nơi chỉ rõ cần theo tài liệu nào cho từng việc
+  (hướng dẫn cài từng bước trên Synology NAS của công ty là
+  [`docs/deployment/SYNOLOGY_NAS.vi.md`](./docs/deployment/SYNOLOGY_NAS.vi.md)).
+  Theo quyết định của chủ dự án ngày 2026-11-09, PartFlow đi vào sử dụng thật ngay
   khi production stack được cài đặt: không có giai đoạn chạy thử (pilot) và không
   có danh sách điều kiện chặn phát hành (release gate), và các vấn đề được sửa
   trong các bản phát hành sau.
@@ -637,15 +638,15 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 ## Production stack
 
 Production chạy một Compose stack riêng, không bao giờ dùng `compose.yaml`. Mục này
-chỉ định hướng cho lập trình viên; hợp đồng của stack (dịch vụ, file cấu hình, file
-bí mật, cài đặt lần đầu, database role, phát hành, sao lưu, ghi log và giám sát) là
-[`docs/DEPLOYMENT.vi.md`](./docs/DEPLOYMENT.vi.md) §3.1, và việc cài đặt trên
-Synology NAS của công ty nằm ở
-[`docs/deployment/SYNOLOGY_NAS.vi.md`](./docs/deployment/SYNOLOGY_NAS.vi.md) §8.
-Các quy trình hằng ngày nằm trong
+chỉ định hướng cho lập trình viên; phần tra cứu của stack (dịch vụ, file cấu hình,
+file bí mật, database role, health, các giới hạn, ghi log và script) là
+[`docs/DEPLOYMENT.vi.md`](./docs/DEPLOYMENT.vi.md) §3.1, việc cài đặt trên Synology
+NAS của công ty nằm ở
+[`docs/deployment/SYNOLOGY_NAS.vi.md`](./docs/deployment/SYNOLOGY_NAS.vi.md), và các
+quy trình hằng ngày (phát hành, sao lưu, rollback, giám sát) nằm trong
 [`docs/deployment/OPERATIONS_RUNBOOK.vi.md`](./docs/deployment/OPERATIONS_RUNBOOK.vi.md).
-Các lệnh và script production đã được chạy trên Docker Desktop và trong một
-container Linux, nhưng chưa chạy trên Synology NAS hay VPS.
+Các bài kiểm thử tự động của các lệnh và script production chạy trên Docker Desktop
+và trong một container Linux.
 
 - **File.** `compose.production.yaml` (Compose project `partflow-production`) định
   nghĩa `db`, `backend`, `web` (nginx, chỉ publish trên `127.0.0.1`) và các job chạy
@@ -767,7 +768,8 @@ docs/              canonical project documentation
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Viết lại thành phần giới thiệu cho người mới cộng hướng dẫn cho lập trình viên; bỏ phần tường thuật trạng thái theo từng phase, rút gọn mục production thành phần định hướng, và sửa các lệnh và nhận định đã lỗi thời. |
+| 2026-11-10 | uncommitted | Các liên kết production trỏ tới bộ hướng dẫn triển khai đã viết lại, với `docs/DEPLOYMENT.md` §1 là điểm bắt đầu. |
+| 2026-11-09 | `398c617` | Viết lại thành phần giới thiệu cho người mới cộng hướng dẫn cho lập trình viên; bỏ phần tường thuật trạng thái theo từng phase, rút gọn mục production thành phần định hướng, và sửa các lệnh và nhận định đã lỗi thời. |
 | 2026-10-09 | `03bd90c` | Giám sát production: log có cấu trúc, mã định danh request, lệnh `status`, kiểm tra host và reconciliation định kỳ. |
 | 2026-10-08 | `a330383` | Sao lưu production, bản sao lưu trước phát hành có kiểm chứng, diễn tập khôi phục và rollback path 3. |
 | 2026-10-08 | `1116b07` | Các database role production riêng và grant của chúng. |

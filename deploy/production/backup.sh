@@ -9,7 +9,7 @@
 # the `backup-tools` one-shot (no network, no database) writes manifest.json and SHA256SUMS and publishes the backup
 # directory <PARTFLOW_BACKUP_DIR>/<NAME>/ with one atomic rename (backup-manifest), verifies it (backup-verify) and, for
 # a daily backup, applies the retention (backup-rotate). Encryption and the off-host copy belong to the platform backup
-# tool (SYNOLOGY_NAS §6, VPS §8).
+# tool (SYNOLOGY_NAS §11, VPS §8).
 #
 # stdout: exactly one line on success, `BACKUP <NAME> <absolute path>`. stderr: progress, every tool JSON document,
 # errors. Exit status: 0 completed; 1 refused before writing (backup_running, backup_lock_stale, insufficient_space,

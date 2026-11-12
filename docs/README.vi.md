@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09. Mỗi tài liệu đang dùng có một bản dịch tiếng Việt nằm
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-10. Mỗi tài liệu đang dùng có một bản dịch tiếng Việt nằm
 > cạnh với hậu tố `.vi.md`.
 
 Mục lục này liệt kê mọi tài liệu PartFlow đang dùng và mục đích của từng tài liệu.
@@ -25,17 +25,22 @@ khai. Mỗi tài liệu chỉ nêu nội dung hiện tại và kết thúc bằn
 
 ## Triển khai và vận hành
 
+Đọc theo thứ tự này: trước hết §1 và §2 của `DEPLOYMENT.vi.md`, rồi hướng dẫn cài đặt cho máy chủ của bạn, rồi
+runbook khi PartFlow đã chạy.
+
 | Tài liệu | Mục đích | Bản gốc tiếng Anh |
 | --- | --- | --- |
-| [`DEPLOYMENT.vi.md`](./DEPLOYMENT.vi.md) | Điểm bắt đầu để chạy PartFlow ngoài máy trạm: trạng thái hiện tại, hợp đồng của production stack, yêu cầu để đưa vào sử dụng (go-live), và cách đặt tên và công bố bản phát hành. | [`DEPLOYMENT.md`](./DEPLOYMENT.md) |
-| [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) | Cài đặt, cập nhật, sao lưu và giám sát PartFlow production trên Synology NAS của công ty, cùng môi trường staging hạn chế tùy chọn. | [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) |
-| [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md) | Công cụ Deployment Admin (`pf`) quản lý các instance staging trên Synology, gồm cả thiết kế dự kiến của nó như một controller triển khai dùng lại được. | [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) |
-| [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) | Chạy cùng production stack đó trên một máy chủ riêng ảo (virtual private server, VPS) Linux, host production thay thế. | [`deployment/VPS.md`](./deployment/VPS.md) |
+| [`DEPLOYMENT.vi.md`](./DEPLOYMENT.vi.md) | Điểm bắt đầu: production gồm những gì, việc nào theo tài liệu nào, thuật ngữ và quy tắc an toàn, phần tra cứu của production stack, yêu cầu để đưa vào sử dụng (go-live), và cách đặt tên và công bố bản phát hành. | [`DEPLOYMENT.md`](./DEPLOYMENT.md) |
+| [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) | Cài PartFlow production trên Synology NAS của công ty từng bước, từ một NAS trống tới HTTPS, thiết lập lần đầu, sao lưu và giám sát. | [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) |
+| [`deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md) | Tùy chọn: cho phép truy cập PartFlow trên NAS từ Internet qua Cloudflare, với chuyển tiếp cổng và DNS động trên router. | [`deployment/SYNOLOGY_PUBLIC_HTTPS.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.md) |
+| [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) | Vận hành PartFlow sau khi cài: kiểm tra tình trạng, sao lưu, diễn tập khôi phục, cài bản phát hành mới, quay lui và khôi phục, đối soát, các sự cố thường gặp và lịch định kỳ. | [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) |
+| [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) | Cài cùng production stack đó trên một máy chủ riêng ảo (virtual private server, VPS) Linux, máy chủ production thay thế. | [`deployment/VPS.md`](./deployment/VPS.md) |
 | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) | Vì sao shared web hosting chỉ khả thi có điều kiện và nhà cung cấp phải xác nhận những gì trước, gồm cả kết quả đánh giá Hawk Host. | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) |
-| [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) | Các quy trình của người vận hành: hồ sơ triển khai, kiểm tra sức khỏe hệ thống, sao lưu, kiểm tra khôi phục, phát hành, rollback, reconciliation, sự cố và lịch định kỳ. | [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) |
 
-Thư mục `deployment/Synology DSM7 - Staging/` chứa một bộ công cụ staging đã bị thay
-thế, chỉ giữ để tham khảo; nó không bao giờ là hướng dẫn hiện hành.
+Không cần cho production: [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)
+([bản tiếng Anh](./deployment/SYNOLOGY_ADMIN.md)) mô tả công cụ Deployment Admin (`pf`), dùng để quản lý các instance
+staging trên một máy chủ khác máy chủ production, gồm cả thiết kế dự kiến của nó như một controller triển khai dùng
+lại được.
 
 ## Chính sách bản dịch
 
@@ -49,7 +54,8 @@ nằm trong phạm vi dịch.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Viết lại cho người mới đọc: phần giới thiệu, mô tả hiện tại một câu cho mỗi tài liệu, và bảng thay đổi này. |
+| 2026-11-10 | uncommitted | Các tài liệu triển khai được liệt kê theo thứ tự đọc, có thêm hướng dẫn Cloudflare; hướng dẫn Deployment Admin được ghi rõ là không cần cho production; bộ công cụ staging đã bị thay thế được xóa. |
+| 2026-11-09 | `398c617` | Viết lại cho người mới đọc: phần giới thiệu, mô tả hiện tại một câu cho mỗi tài liệu, và bảng thay đổi này. |
 | 2026-10-14 | `2c360cb` | Mục Deployment Admin nêu mục tiêu thiết kế dự kiến là một controller dùng lại được. |
 | 2026-09-02 | `8e5ab18`, `6fae517` | Chuyển các bản dịch tiếng Việt về cạnh bản gốc tiếng Anh và trỏ lại mọi link. |
 | 2026-09-02 | `d2f68de` | Tạo mục lục cùng các hướng dẫn triển khai và các bản dịch tiếng Việt. |

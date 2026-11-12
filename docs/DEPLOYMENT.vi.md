@@ -1,789 +1,671 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc chuẩn:** [`DEPLOYMENT.md`](DEPLOYMENT.md).
-> Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09.
-> Bản tiếng Anh là source of truth; khi hai bản khác nhau, bản tiếng Anh được áp dụng.
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
+> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> hiệu lực.
 
-Hướng dẫn này là điểm bắt đầu để cài đặt và vận hành PartFlow bên ngoài máy của developer. Người đọc là người cài đặt,
-phát hành và bảo trì PartFlow: hiện nay đó là owner, vừa là operator vừa là người phê duyệt. Tài liệu giải thích nên
-dùng stack nào, production stack gồm những gì và được cấu hình ra sao, cần gì trước khi dùng thật, và release được đặt
-tên và phát hành như thế nào. Hãy đọc §1 đến §3 trước. Các hướng dẫn theo nền tảng ở §8 áp dụng tài liệu này cho từng
-loại host, còn [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) chứa các quy trình hằng ngày
-(health, backup, restore, release, rollback, reconciliation và sự cố).
+Hướng dẫn này là điểm khởi đầu để cài đặt và vận hành PartFlow trong môi trường production. Hãy đọc §1 và §2 trước: hai
+phần này giải thích bạn đang cài gì, mỗi việc cần làm theo tài liệu nào, và các quy tắc an toàn mà mọi quy trình đều dựa
+vào. Phần còn lại của hướng dẫn là tài liệu tham chiếu; các quy trình sẽ trỏ về đây khi bạn cần một chi tiết.
 
-Các lệnh trong hướng dẫn này dùng biến shell `PF`, được định nghĩa một lần trong thư mục của release checkout:
+## 1. Bắt đầu từ đây
+
+### 1.1 Bạn đang cài gì
+
+Trong production, PartFlow là một tập hợp các Docker container được định nghĩa trong `compose.production.yaml` (Compose
+project `partflow-production`). Các image được build ngay trên host từ một tag phát hành của repository này. Ba
+container chạy liên tục:
+
+- `db`: PostgreSQL, lưu mọi bản ghi của PartFlow trong Docker volume `partflow-production_postgres_data`;
+- `backend`: giao diện lập trình ứng dụng (API) của PartFlow, một ứng dụng FastAPI;
+- `web`: nginx, phục vụ các màn hình của PartFlow và chuyển mọi yêu cầu `/api` đến `backend`.
+
+Người dùng không bao giờ kết nối trực tiếp đến các container này. Họ mở `https://<PartFlow host name>`. Reverse proxy
+của máy chủ (reverse proxy của DiskStation Manager (DSM) trên Synology NAS, hoặc Caddy trên máy chủ Linux) kết thúc kết
+nối HTTPS rồi chuyển yêu cầu đến `web` trên địa chỉ loopback `127.0.0.1` của chính máy chủ, nơi không máy tính nào khác
+truy cập được:
+
+```text
+Browser or Scan Station
+        │  HTTPS, port 443
+        ▼
+Reverse proxy of the host (DSM reverse proxy, or Caddy on a VPS)
+        │  HTTP to 127.0.0.1:18080, reachable only from the host itself
+        ▼
+web (nginx): PartFlow screens, request size limits, sign-in rate limits
+        │  /api
+        ▼
+backend (FastAPI) ── private container network ── db (PostgreSQL)
+```
+
+Ngoài các container, một bản cài đặt có bốn mục trên máy chủ mà bạn tự tạo và chăm sóc:
+
+| Mục | Nội dung | Ví dụ trên NAS |
+| --- | --- | --- |
+| Thư mục mã nguồn của bản phát hành (release checkout) | Một bản git clone của repository này với tag phát hành đã được checkout. Mọi lệnh chạy từ thư mục gốc của nó. | `/volume1/docker/partflow/repo` |
+| `.env.production` | Cấu hình, không chứa mật khẩu nào, đặt trong thư mục gốc của release checkout. | `/volume1/docker/partflow/repo/.env.production` |
+| Thư mục bí mật (secrets folder) | Ba tệp mật khẩu của database. | `/volume1/docker/partflow/secrets` |
+| Thư mục sao lưu (backup folder) | Mỗi bản sao lưu database một thư mục con. | `/volume1/docker/partflow/backups` |
+
+Các script trong `deploy/production/` làm giúp bạn những việc rủi ro: `release.sh` cài một bản phát hành mới,
+`backup.sh` tạo bản sao lưu, `restore-test.sh` chứng minh bản sao lưu khôi phục được, còn `check.sh` và
+`scheduled-reconcile.sh` giám sát bản cài đặt.
+
+### 1.2 Cần theo tài liệu nào
+
+| Tôi muốn … | Theo |
+| --- | --- |
+| Cài PartFlow lần đầu trên Synology NAS của công ty | [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) §1 đến §10, sau đó §11 khi thuận tiện |
+| Cho phép mọi người truy cập PartFlow từ Internet (tùy chọn) | [`deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md), ở bước HTTPS của hướng dẫn NAS (§9) |
+| Cài bản phát hành mới, sao lưu hoặc kiểm thử bản sao lưu, kiểm tra bản cài đặt, quay lui, hoặc xử lý sự cố | [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) |
+| Chạy PartFlow trên máy chủ ảo riêng (virtual private server, VPS) Linux thay cho NAS | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) |
+| Quyết định xem shared web hosting có dùng được không | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) |
+| Tra cứu một thiết lập, một giới hạn hoặc chức năng của một container | §3.1 của hướng dẫn này |
+| Đặt tên và công bố một bản phát hành (dành cho lập trình viên) | §10 của hướng dẫn này |
+
+Công cụ Deployment Admin `pf` và hướng dẫn của nó [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)
+quản lý các instance staging riêng biệt. Chúng không thuộc bản cài đặt production, và không bước nào ở trên cần đến
+chúng.
+
+### 1.3 Những gì được hỗ trợ
+
+| Cách dùng | Trạng thái |
+| --- | --- |
+| Máy trạm của lập trình viên | Được hỗ trợ với development stack `compose.yaml` ([`README.vi.md`](../README.vi.md) ở thư mục gốc). Hãy thử bản phát hành mới ở đây trước khi cài vào production. |
+| Production trên Synology NAS của công ty | Được hỗ trợ. Đây là máy chủ production đang dùng. |
+| Production trên Linux VPS | Được hỗ trợ như máy chủ thay thế. |
+| Truy cập từ mạng công ty hoặc mạng riêng ảo (VPN) | Được hỗ trợ (hướng dẫn NAS §9, phương án A). |
+| Truy cập từ Internet | Được hỗ trợ thông qua Cloudflare như [`deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md) mô tả. Các thiết kế khác không được tài liệu hóa. |
+| Stack PartFlow thứ hai (staging) trên máy chủ production | Không được hỗ trợ: `release.sh` từ chối chạy khi trên cùng Docker daemon có Compose project `partflow-staging` (§6). |
+| Shared web hosting | Không được hỗ trợ, trừ khi nhà cung cấp chứng minh được mọi yêu cầu của `deployment/SHARED_HOSTING.md`. |
+
+### 1.4 Trạng thái
+
+Production stack, các script của nó và các quy trình phát hành, sao lưu, khôi phục đã hoàn chỉnh. Các bài kiểm thử tự
+động của chúng chạy trong một Linux container và trên Docker Desktop. Các hướng dẫn theo nền tảng đi theo các script đó
+từng bước; khi một bước hoạt động khác đi trên máy chủ thật, hãy sửa hướng dẫn trong cùng thay đổi với bản sửa lỗi.
+
+Theo quyết định của chủ sở hữu (owner) ngày 2026-11-09, PartFlow được đưa vào sử dụng thật ngay khi production stack
+được cài xong: không có giai đoạn chạy thử (pilot) và không có danh sách cổng phát hành (release gates), và các vấn đề
+được sửa ở những bản phát hành sau. Chỉ danh sách đầu tiên của §5 là bắt buộc. Sao lưu và giám sát được khuyến nghị
+mạnh nhưng không bao giờ chặn việc sử dụng.
+
+## 2. Thuật ngữ, quy ước và quy tắc an toàn
+
+### 2.1 Thuật ngữ
+
+| Thuật ngữ | Ý nghĩa |
+| --- | --- |
+| Bản phát hành (Release) | Một phiên bản của PartFlow: một git tag như `v1.0.0` (§10.2) và commit mà tag đó trỏ tới. Cả hai image của một bản phát hành được build từ commit đó và mang tag của nó. |
+| Release checkout | Bản git clone với tag phát hành đã được checkout. Mọi lệnh chạy từ thư mục gốc của nó. |
+| Tài khoản vận hành (Operating account) | Tài khoản duy nhất chạy mọi lệnh PartFlow, `release.sh` và mọi tác vụ theo lịch, đồng thời sở hữu thư mục sao lưu. Trên Synology NAS đó là `root`, vì Docker trên DSM cần như vậy. |
+| `PF` | Một biến shell rút gọn lệnh Compose của production stack (bên dưới). Nó không phải công cụ Deployment Admin `pf`. |
+| Ops job | Một container chạy một lần (`migrate`, `db-roles`, `backup-tools` hoặc `status`) chỉ chạy khi được khởi động bằng `$PF --profile ops run`. |
+| Tạm dừng ghi (Write freeze) | `backend` được dừng có chủ đích để không thể ghi gì, ví dụ trong lúc migration database. `web` vẫn phục vụ các màn hình, các màn hình này hiển thị OFFLINE và chặn mọi thay đổi. |
+| Thiết lập lần đầu (First-run setup) | Tạo Administrator đầu tiên trong trình duyệt bằng mã thiết lập (setup token) dùng một lần mà `backend` ghi vào log của nó. |
+| Đối soát (Reconciliation) | Lệnh kiểm tra tính nhất quán chỉ đọc `python -m app.cli reconcile`, với các kiểm tra (a) đến (j) trong runbook §7. Nó không bao giờ thay đổi dữ liệu. |
+| Thư mục hồ sơ triển khai (Records directory) | Thư mục `~/partflow-deployments` của tài khoản vận hành, mỗi bản phát hành, lần diễn tập khôi phục, lần quay lui hoặc lần khôi phục có một thư mục con. |
+| Chủ sở hữu (Owner) | Người phê duyệt các bản phát hành, các lần khôi phục và sửa chữa. Hiện nay owner cũng là người vận hành; một người có thể được ghi tên vừa là người vận hành (operator) vừa là người phê duyệt (approver). |
+
+Mọi lệnh production đều dùng biến shell `PF`. Hãy đặt biến này trong mỗi phiên terminal mới, tại thư mục gốc của release
+checkout:
 
 ```sh
 PF="docker compose -f compose.production.yaml --env-file .env.production"
 ```
 
-`PF` chỉ là cách viết tắt cho lệnh Docker Compose của production stack. Nó không phải công cụ Deployment Admin `pf`.
-Hãy chạy mọi lệnh `$PF` từ thư mục của release checkout.
+Khi đó `$PF ps` có nghĩa là `docker compose -f compose.production.yaml --env-file .env.production ps`.
 
-## 1. Trạng thái hiện tại
+### 2.2 Quy tắc an toàn
 
-**Những gì đã có.** Repo chứa một production stack hoàn chỉnh (§3.1): production image cho backend và cho tầng `web`,
-file Compose `compose.production.yaml`, bảng kê configuration và secret, các database role tách riêng, một release
-script biết freeze write, backup, migrate và chuyển release, backup đã verify cùng restore drill cô lập, structured
-log, lệnh reconciliation chỉ đọc và các script kiểm tra host để giám sát theo lịch. Thứ tự và lịch sử triển khai nằm ở
-[`IMPLEMENTATION_ROADMAP.md`](./IMPLEMENTATION_ROADMAP.md).
+Các quy tắc này bảo vệ dữ liệu production. Mọi quy trình đều tuân theo chúng; không bao giờ vi phạm một quy tắc để tiết
+kiệm thời gian.
 
-**Những gì chưa chạy trên host thật.** Các lệnh và script này đã chạy trên Docker Desktop và trong một Linux
-container, nhưng chưa chạy trên Synology NAS hay VPS. Các thiết lập host (reverse proxy của DiskStation Manager (DSM),
-certificate, các task theo lịch cùng failure notification của chúng, và giới hạn tài nguyên đo trên host) được làm
-trong lúc cài đặt trên NAS và sau đó.
+1. **Không bao giờ chạy production từ `compose.yaml`.** Tệp đó là development stack: nó chạy các server phát triển tự
+   động tải lại, công bố port của database, dùng một database role cho mọi việc và có các giá trị mặc định cho phát
+   triển. Production chỉ dùng `compose.production.yaml`.
+2. **Không bao giờ chạy `$PF down -v`, và không bao giờ xóa một volume của project `partflow-production`.** Cả hai đều
+   xóa database production. `$PF down` không có `-v` là cách an toàn duy nhất để dừng mọi thứ.
+3. **Không bao giờ xóa image của bản phát hành trước** (ví dụ bằng `docker image prune -a`) khi bạn còn có thể quay lui:
+   quay lui cần chúng.
+4. **Production bắt đầu từ một database mới, trống.** Không bao giờ gắn, sao chép hoặc khôi phục dữ liệu phát triển hay
+   dữ liệu thử nghiệm vào đó, và không bao giờ cho hai bản cài đặt trỏ vào cùng một database.
+5. **Không bao giờ sửa dữ liệu PartFlow trực tiếp trong database.** Lịch sử Movement chỉ được thêm vào (append-only) theo
+   thiết kế; việc hiệu chỉnh đi qua các quy trình hiệu chỉnh của chính PartFlow, và mọi việc sửa chữa là quyết định của
+   owner.
+6. **Không bao giờ lặp lại một lệnh production chưa rõ kết quả dưới một định danh mới.** Một lệnh bị mất câu trả lời
+   giữ nguyên `device_event_id` ban đầu và chỉ được thử lại với chính nó (runbook §2 và §8).
+7. **Không bao giờ chạy `alembic downgrade` trên production.** Quay lui đi theo cây quyết định trong runbook §6.
+8. **Coi bản sao lưu, tệp bí mật và báo cáo đối soát là bí mật.** Chúng chứa băm mật khẩu, bản băm (digest) của token
+   phiên và token thiết bị, cùng các giá trị badge.
 
-**Quyết định của owner (2026-11-09): go-live trực tiếp.** PartFlow được dùng thật trên Synology NAS của công ty ngay
-khi production stack được cài xong. Không có giai đoạn pilot và không có danh sách release gate. Lỗi được sửa ở các
-release sau trong lúc hệ thống đang được dùng. Chỉ những gì phần mềm cần để chạy được là bắt buộc (§5); backup và
-giám sát được khuyến nghị sau go-live và không bao giờ chặn việc sử dụng hay một release.
+## 3. Tham chiếu production stack
 
-| Mục đích | Trạng thái | Cách làm |
-| --- | --- | --- |
-| Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
-| Synology staging hoặc test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong mạng cục bộ (LAN), dữ liệu giả hoặc không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
-| Dùng production | Được hỗ trợ | Cài production stack (§3.1) trong LAN của xưởng theo các yêu cầu ở §5; các bước trên NAS nằm ở [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §8. Các release sau dùng `release.sh`. |
-| Mở ra Internet | Không được hỗ trợ | PartFlow chỉ chạy trong LAN của xưởng. Mở ra Internet cần một quyết định riêng của owner (firewall, mạng riêng ảo (VPN) hoặc certificate public). `compose.yaml` expose các service development (§2). |
-
-## 2. Vì sao Compose stack development không dùng cho production
-
-`compose.yaml` và stage `development` mặc định của mỗi Dockerfile là artifact development. Mỗi Dockerfile còn có một
-stage `production`, chỉ production stack build stage này (§3.1). Không bao giờ chạy production từ `compose.yaml`, vì
-trong stack đó:
-
-- backend khởi động Uvicorn với `--reload`;
-- frontend chạy Vite development server thay vì phục vụ một production build bất biến;
-- thư mục source và thư mục dependency được bind-mount vào container;
-- port của PostgreSQL, backend và frontend được publish trên host;
-- có sẵn giá trị credential mặc định cho development;
-- database và application dùng chung một PostgreSQL role (production stack dùng các role riêng, §3.1);
-- không có reverse proxy, chính sách Transport Layer Security (TLS), nơi lưu secret, log rotation, image tag theo
-  release, backup theo lịch, restore drill hay lệnh rollback;
-- một số view đã duyệt vẫn là preview chỉ dành cho development hoặc còn chờ tích hợp backend và frontend thật.
-
-Đăng nhập, kiểm tra permission phía server và yêu cầu thiết bị đã enroll cho các route Scan Station hoạt động giống
-nhau ở cả hai stack. Không bao giờ che các giới hạn trên phía sau reverse proxy của NAS hay một tên DNS public.
-
-## 3. Topology portable mục tiêu
-
-Production stack dùng một topology chung trên Synology NAS và trên VPS sau này. TLS kết thúc tại platform proxy
-(reverse proxy của DSM trên NAS, hoặc Caddy trên VPS). Bên trong stack, `web` (nginx) phục vụ frontend build bất biến
-và chuyển `/api` tới backend; `web` chỉ được publish trên địa chỉ loopback của host, nên platform proxy là lối vào duy
-nhất.
-
-```text
-Browser / barcode workstation
-            |
-          HTTPS
-            |
-Platform TLS proxy (DSM reverse proxy | Caddy on a VPS)
-            |   http://127.0.0.1:<port>  (loopback only)
-            v
-web (nginx): static build, SPA fallback, request limits, rate limits
-            |
-          /api
-            v
-FastAPI backend
-            |
-    private container network
-            |
-        PostgreSQL
-```
-
-Các ranh giới bắt buộc:
-
-- chỉ expose HTTPS cho client, và HTTP chỉ để chuyển hướng sang HTTPS;
-- giữ PostgreSQL private và không bao giờ publish port 5432 ra mạng không tin cậy;
-- giữ backend private; `web` tới backend qua mạng container private;
-- phục vụ frontend và API từ cùng một origin, để browser tiếp tục dùng các URL `/api` tương đối;
-- giữ dữ liệu PostgreSQL và backup bên ngoài container, vì container có thể bị thay bất cứ lúc nào;
-- chạy schema migration như một bước release rõ ràng, không bao giờ như tác dụng phụ khi một application container
-  khởi động;
-- định danh mọi lần triển khai bằng một Git tag và commit bất biến;
-- dùng một định dạng backup chung trên NAS và trên VPS (backup artifact của
-  [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §3).
+Phần này là tài liệu tham chiếu. Các bước cài đặt nằm trong các hướng dẫn theo nền tảng
+([`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md), [`deployment/VPS.vi.md`](./deployment/VPS.vi.md)) và
+các quy trình vận hành nằm trong [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md); các tài
+liệu đó trỏ về đây khi bạn cần một chi tiết.
 
 ### 3.1 Production stack
 
-Mục này là contract của production stack. Nó định nghĩa các service, file configuration và các secret file, cách build
-image, cách cài stack lần đầu, và hành vi của health, release, database role, backup và giám sát. Các quy trình từng
-bước nằm ở [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md); thiết lập host nằm trong các
-hướng dẫn theo nền tảng (§8).
+#### Các tệp
 
-#### Service và network
+| Tệp | Mục đích |
+| --- | --- |
+| `compose.production.yaml` | Production stack: Compose project `partflow-production` cùng các service, network, volume và tệp bí mật của nó. Không có phần build. |
+| `compose.production.build.yaml` | Tệp đi kèm chỉ dành cho build, bổ sung hai lần build image. Chỉ dùng với `build`. |
+| `.env.production.example` | Mẫu của tệp cấu hình `.env.production`. |
+| `backend/Dockerfile`, `frontend/Dockerfile` | Mỗi tệp có một stage `production` mà chỉ bản build production dùng; `frontend/nginx/` chứa cấu hình của `web`. |
+| `deploy/production/` | Các script liệt kê ở cuối phần này. Mỗi script in các tùy chọn của nó với `--help`. |
 
-`compose.production.yaml` định nghĩa Compose project `partflow-production`:
+#### Các service
 
-| Service | Vai trò | Network | Ghi chú |
-| --- | --- | --- | --- |
-| `db` | PostgreSQL `postgres:16.14`, bản Debian | `internal` (không có route ra ngoài) | Không bao giờ dùng image `-alpine`: collation và check định danh canonical (reconcile check (j)) phụ thuộc vào thư viện GNU C (glibc). Volume `postgres_data`; không publish port; thời gian chờ dừng 60 s; chạy với `log_error_verbosity=terse`. |
-| `backend` | image `partflow/backend:${PARTFLOW_RELEASE}`, stage `production` | `internal`, `edge` | Kết nối bằng application role `partflow_app` và chỉ mount `partflow_app_password`. `SESSION_COOKIE_SECURE=true`, `ENFORCE_CLIENT_RELEASE=true` và `DATABASE_ROLES_REQUIRED=true` là cố định. `WEB_CONCURRENCY` lấy từ `PARTFLOW_BACKEND_WORKERS` (mặc định 2) và `FORWARDED_ALLOW_IPS` là subnet edge. Thời gian chờ dừng 200 s, lớn hơn upstream timeout dài nhất của `web` là 180 s. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lần từ chối configuration thoát với code 0. |
-| `web` | image `partflow/web:${PARTFLOW_RELEASE}`, stage `production` | `edge` | Port duy nhất được publish, `127.0.0.1:${PARTFLOW_HTTP_PORT}:80`; cố ý không có biến cho địa chỉ bind. Không có `depends_on`, nên vẫn phục vụ application shell khi `backend` đang dừng. Thời gian chờ dừng 200 s, để một lần import đang chạy có thể hoàn tất. |
-| `migrate` | one-shot `python -m app.cli migrate` từ backend image | `internal` | Profile `ops`, không bao giờ được `up` khởi động. Một connection, một transaction. Không có tùy chọn backup thì là lỗi cách dùng. Mount thư mục backup chỉ đọc tại `/backups` để verify pre-release backup. |
-| `db-roles` | one-shot `python -m app.cli provision-roles` (mặc định) hoặc `apply-grants` (đối số) từ backend image | `internal` | Profile `ops`. Kết nối bằng owner role và mount cả ba secret file. |
-| `backup-tools` | one-shot `python -m app.cli` từ backend image, chạy với `backup-manifest`, `backup-verify` hoặc `backup-rotate` (được `deploy/production/backup.sh` dùng) | không có (`network_mode: none`) | Profile `ops`. Không database, không secret; chỉ mount thư mục backup tại `/backups`. |
-| `status` | one-shot `python -m app.cli status` từ backend image | `internal` | Profile `ops`. Báo cáo chỉ đọc bằng `partflow_app`, mount thư mục backup chỉ đọc (được `deploy/production/check.sh` dùng). |
+| Service | Chức năng | Chi tiết |
+| --- | --- | --- |
+| `db` | PostgreSQL 16 (`postgres:16.14`, biến thể Debian) | Chỉ ở network `internal`; không công bố port. Dữ liệu nằm trong volume `partflow-production_postgres_data`. Không bao giờ dùng image `-alpine`: việc sắp xếp văn bản (collation) và kiểm tra định danh "Canonical identity under the running interpreter and database" (kiểm tra đối soát (j)) phụ thuộc vào GNU C Library (glibc). Ghi lỗi không kèm dòng chi tiết (`log_error_verbosity=terse`). Thời gian chờ dừng (stop grace period) 60 s. |
+| `backend` | API, image `partflow/backend:<release>` | Các network `internal` và `edge`. Kết nối bằng database role `partflow_app` và chỉ mount tệp mật khẩu của role đó. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` và `DATABASE_ROLES_REQUIRED` được cố định là `true`. Số worker lấy từ `PARTFLOW_BACKEND_WORKERS`; chỉ tin các header được chuyển tiếp từ subnet `edge`. Thời gian chờ dừng 200 s, cao hơn thời gian yêu cầu dài nhất của `web` (180 s), để một lần import đang chạy có thể hoàn tất. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lỗi cấu hình thoát với mã 0. |
+| `web` | nginx, image `partflow/web:<release>` | Network `edge`. Port được công bố duy nhất: `127.0.0.1:${PARTFLOW_HTTP_PORT}` tới port 80 của container; cố ý không có thiết lập nào cho địa chỉ bind. Không có `depends_on`, nên nó vẫn phục vụ các màn hình khi `backend` đang dừng. Thời gian chờ dừng 200 s. |
+| `migrate` | Ops job: `python -m app.cli migrate` | Áp dụng các migration database và quyền (grants) trong một transaction. Cần một tùy chọn sao lưu (Migrations, bên dưới). Mount thư mục sao lưu ở chế độ chỉ đọc tại `/backups`. |
+| `db-roles` | Ops job: `python -m app.cli provision-roles` (mặc định) hoặc `apply-grants` | Tạo hoặc sửa các database role và áp dụng các quyền (Database roles, bên dưới). Kết nối bằng owner role và mount ba tệp bí mật. |
+| `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` hoặc `backup-rotate` | Do `backup.sh` dùng. Không có network, không có database và không có bí mật; chỉ mount thư mục sao lưu tại `/backups`. |
+| `status` | Ops job: `python -m app.cli status` | Báo cáo chỉ đọc dưới role `partflow_app`, với thư mục sao lưu được mount chỉ đọc. Do `check.sh` dùng. |
 
-Mọi service có restart policy, giới hạn bộ nhớ và bộ xử lý lấy từ file configuration, và log rotation `json-file`
-(10 MiB mỗi file, 5 file). Mọi service chạy lâu dài có health check; check của `backend` gọi route liveness, nên schema
-mismatch không bao giờ làm container unhealthy. Giới hạn tài nguyên là giá trị khởi đầu; hãy đo trên production host
-và điều chỉnh. Chạy các service `ops` có đọc hoặc ghi thư mục backup với `--user "$(id -u):$(id -g)"`, vì thư mục đó
-có mode 0700 và thuộc tài khoản của operator.
+Mỗi service có chính sách restart, giới hạn bộ nhớ và bộ xử lý lấy từ `.env.production`, và xoay vòng log (`json-file`,
+10 MiB mỗi tệp, 5 tệp). Mỗi service chạy lâu dài đều có health check; health check của `backend` gọi route liveness, nên
+một schema không khớp không bao giờ đánh dấu container là unhealthy. Network `internal` không có đường ra ngoài máy
+chủ. Hãy chạy các ops job đọc hoặc ghi thư mục sao lưu với `--user "$(id -u):$(id -g)"`, vì thư mục đó có mode 0700 và
+thuộc về tài khoản vận hành.
 
-#### File configuration
+#### Tệp cấu hình
 
-`.env.production` được copy từ `.env.production.example`, bị git bỏ qua, có mode 600 và chỉ chứa giá trị không bí
-mật. Một static test kiểm tra rằng tập các tham chiếu `${NAME}` trong `compose.production.yaml` và
-`compose.production.build.yaml` bằng đúng tập các key của file example.
+`.env.production` là bản sao của `.env.production.example` trong thư mục gốc của release checkout. Git bỏ qua nó, mode
+của nó là 600, và nó không chứa mật khẩu nào. Hãy viết mọi giá trị không có dấu nháy. Một bài kiểm thử tĩnh kiểm tra
+rằng các key của tệp mẫu đúng bằng các tham chiếu `${NAME}` của hai tệp Compose production.
 
 | Key | Ý nghĩa | Bắt buộc hoặc mặc định |
 | --- | --- | --- |
-| `PARTFLOW_RELEASE` | Tag của image **đang chạy** (§10). | bắt buộc |
-| `PARTFLOW_COMMIT` | Commit đầy đủ của release đang được build. Để trống trong file; `release.sh` truyền nó trong shell lúc build. | bắt buộc khi build |
-| `PARTFLOW_ACCEPT_SCHEMA_REVISION` | Chỉ dùng cho rollback path 2: database revision duy nhất mà release đang chạy được phép phục vụ (`deployment/OPERATIONS_RUNBOOK.md` §6). `release.sh` xóa giá trị này. | trống |
-| `PARTFLOW_SECRETS_DIR` | Đường dẫn tuyệt đối của thư mục secret, nằm ngoài checkout, chỉ cho production (thư mục mode 0700, mỗi file mode 0444). | bắt buộc |
-| `PARTFLOW_BACKUP_DIR` | Đường dẫn tuyệt đối của thư mục backup production, nơi `backup.sh` ghi một thư mục con cho mỗi backup. Nằm ngoài checkout, thư mục secret và mọi thư mục archive, và không bao giờ là thư mục của staging hay của một drill. Thư mục phải có sẵn với mode 0700, thuộc tài khoản chạy `backup.sh` và `release.sh`. **Mọi** lệnh `$PF` đều cần key này; ghi không có dấu ngoặc kép. Công cụ backup của nền tảng mã hóa thư mục này và sao chép nó ra ngoài host. | bắt buộc |
-| `PARTFLOW_SITE_TIMEZONE` | Múi giờ lịch của xưởng, bằng giá trị của staging (§6). | bắt buộc |
-| `PARTFLOW_HTTP_PORT` | Port loopback mà platform proxy kết nối tới. | bắt buộc (ví dụ `18080`) |
-| `POSTGRES_USER`, `POSTGRES_DB` | Owner role và database. | bắt buộc (ví dụ `partflow_owner`, `partflow`) |
-| `PARTFLOW_BACKEND_WORKERS` | Số Uvicorn worker. | `2` |
-| `PARTFLOW_EDGE_SUBNET` | Subnet của network `edge`, cũng là các địa chỉ Uvicorn tin cho forwarded header. Chọn subnet chưa được dùng trên host và trong LAN. | `172.30.250.0/24` |
-| `PARTFLOW_TRUSTED_PROXY` | Một địa chỉ IPv4 mà `web` tin cho forwarded header; để trống nghĩa là tự phát hiện (Yêu cầu đối với platform proxy, bên dưới). | trống |
-| `PARTFLOW_{DB,BACKEND,WEB,OPS}_{MEMORY,CPUS}` | Giới hạn tài nguyên. | `1g`/`1.0`, `1g`/`2.0`, `128m`/`0.5`, `512m`/`1.0` |
+| `PARTFLOW_RELEASE` | Tag của bản phát hành đang **chạy**. `release.sh` thay đổi nó khi chuyển sang bản phát hành mới. | bắt buộc |
+| `PARTFLOW_COMMIT` | Commit đầy đủ của bản phát hành đang được build. Hãy để trống: lệnh build đặt nó trong shell. | trống |
+| `PARTFLOW_ACCEPT_SCHEMA_REVISION` | Chỉ dành cho đường quay lui 2 (runbook §6): revision database duy nhất mà bản phát hành đang chạy được phép phục vụ. `release.sh` xóa nó. | trống |
+| `PARTFLOW_SECRETS_DIR` | Đường dẫn tuyệt đối của thư mục bí mật, nằm ngoài release checkout (thư mục mode 0700, tệp mode 0444). | bắt buộc |
+| `PARTFLOW_BACKUP_DIR` | Đường dẫn tuyệt đối của thư mục sao lưu production: nằm ngoài release checkout, thư mục bí mật và mọi thư mục lưu trữ (archive), không bao giờ dùng chung với bản cài đặt khác hay một lần diễn tập khôi phục, mode 0700, thuộc về tài khoản vận hành. Nó phải tồn tại trước lệnh `$PF` đầu tiên, vì **mọi** lệnh `$PF` đều cần nó. | bắt buộc |
+| `PARTFLOW_SITE_TIMEZONE` | Múi giờ của nhà máy, theo tên IANA như `America/Los_Angeles` (§6). | bắt buộc |
+| `PARTFLOW_HTTP_PORT` | Port loopback mà reverse proxy kết nối tới. | `18080` |
+| `POSTGRES_USER`, `POSTGRES_DB` | Tên của database owner role và của database. | `partflow_owner`, `partflow` |
+| `PARTFLOW_BACKEND_WORKERS` | Số tiến trình worker của `backend`. | `2` |
+| `PARTFLOW_EDGE_SUBNET` | Subnet của network `edge`, cũng là các địa chỉ mà `backend` tin cho header được chuyển tiếp. Nó không được dùng ở bất kỳ nơi nào khác trên máy chủ hay mạng công ty. | `172.30.250.0/24` |
+| `PARTFLOW_TRUSTED_PROXY` | Một địa chỉ IPv4 mà `web` tin cho header được chuyển tiếp. Để trống nghĩa là tự động phát hiện (Platform proxy requirements, bên dưới). | trống |
+| `PARTFLOW_{DB,BACKEND,WEB,OPS}_{MEMORY,CPUS}` | Giới hạn bộ nhớ và bộ xử lý của từng service; các ops job dùng chung các giá trị `OPS`. Giá trị `0` của `CPUS` nghĩa là không giới hạn bộ xử lý, điều mà một host có kernel không hỗ trợ hạn mức bộ xử lý cần đến (hướng dẫn NAS §3). | `1g`/`1.0`, `1g`/`2.0`, `128m`/`0.5`, `512m`/`1.0` |
 
-Cố định trong Compose và không cấu hình được: `SESSION_COOKIE_SECURE=true`, `ENFORCE_CLIENT_RELEASE=true`,
-`DATABASE_HOST=db`, `DATABASE_PORT=5432`, đường dẫn mount secret và việc bind vào loopback.
+Các thiết lập sau được cố định trong `compose.production.yaml` và không thể cấu hình: `SESSION_COOKIE_SECURE=true`,
+`ENFORCE_CLIENT_RELEASE=true`, `DATABASE_ROLES_REQUIRED=true` (trên `backend` và `migrate`), `DATABASE_HOST=db`,
+`DATABASE_PORT=5432`, các đường dẫn tệp bí mật và việc bind loopback của `web`.
 
-Backend lấy kết nối database từ đúng một trong hai dạng: `DATABASE_URL` (development, test, tích hợp liên tục (CI) và
-staging), hoặc `DATABASE_HOST`, `DATABASE_NAME`, `DATABASE_USER` và `DATABASE_PASSWORD_FILE` kèm `DATABASE_PORT` tùy
-chọn (mặc định 5432), là dạng production stack dùng. Có cả hai dạng, hoặc không dạng nào đầy đủ, đều bị từ chối khi
-khởi động. Application tự tạo URL kết nối, nên ký tự đặc biệt trong password không cần mã hóa thủ công. Không lỗi
-validation nào lặp lại giá trị đầu vào.
+Backend đọc kết nối database của nó theo đúng một trong hai dạng: `DATABASE_URL` (phát triển, kiểm thử, tích hợp liên
+tục (CI) và staging), hoặc `DATABASE_HOST`, `DATABASE_NAME`, `DATABASE_USER` và `DATABASE_PASSWORD_FILE` với
+`DATABASE_PORT` tùy chọn, là dạng mà production stack dùng. Dùng cả hai dạng cùng lúc, hoặc không dạng nào đầy đủ, đều
+bị từ chối khi khởi động. Vì ứng dụng tự dựng kết nối, mật khẩu không cần mã hóa đặc biệt nào, và không thông báo lỗi
+nào lặp lại một giá trị đầu vào.
 
-#### Secret file
+#### Tệp bí mật
 
-Không secret nào là giá trị environment và không secret nào có giá trị mặc định được commit. Secret là các file trong
-`PARTFLOW_SECRETS_DIR`, được mount dưới `/run/secrets`:
+Không có mật khẩu nào là một giá trị cấu hình và không có mật khẩu nào có giá trị mặc định. Các mật khẩu là ba tệp
+trong thư mục bí mật, được mount vào các container dưới `/run/secrets`:
 
-| File | Được dùng bởi | Quy tắc |
+| Tệp | Do ai dùng | Quy tắc |
 | --- | --- | --- |
-| `postgres_password` | owner role: `db`, `migrate`, `db-roles` | Một dòng. `db` **chỉ đọc file này khi khởi tạo một data volume mới**; `migrate` và `db-roles` đọc nó mỗi lần khởi động. `backend` không bao giờ mount nó. |
-| `partflow_app_password` | `backend`, `status`, `db-roles` | Một dòng, 16 đến 128 ký tự ASCII in được, không có khoảng trắng. |
+| `postgres_password` | owner role: `db`, `migrate`, `db-roles` | Một dòng. `db` chỉ đọc nó **khi tạo một volume database mới, trống**; `migrate` và `db-roles` đọc nó mỗi lần chạy. `backend` không bao giờ mount nó. |
+| `partflow_app_password` | `backend`, `status`, `db-roles` | Một dòng gồm 16 đến 128 ký tự ASCII in được, không có khoảng trắng. |
 | `partflow_maintenance_password` | `db-roles` | Cùng quy tắc, và khác với `partflow_app_password`. |
 
-Tạo các secret file như sau, trước lệnh `$PF` đầu tiên khởi động `backend` hoặc một service `ops`. Compose thay một
-file bị thiếu bằng một thư mục rỗng, và `release.sh` từ chối, không thay đổi gì, khi bất kỳ file nào trong ba file bị
-thiếu, rỗng hoặc không phải file thường. Nếu Compose đã tạo một thư mục ở đường dẫn đó, hãy xóa thư mục đó trước.
+Hãy tạo ba tệp trước lệnh đầu tiên khởi động `backend` hoặc một ops job. Nếu thiếu một tệp, Compose sẽ tạo một
+**thư mục** rỗng có tên đó; hãy xóa thư mục đó trước (`rmdir <path>`), rồi mới tạo tệp. `release.sh` từ chối chạy và
+không thay đổi gì khi bất kỳ tệp nào trong ba tệp bị thiếu, rỗng hoặc không phải tệp thường. Để tạo chúng, hãy đặt
+`PARTFLOW_SECRETS_DIR` trong shell thành cùng đường dẫn tuyệt đối như trong `.env.production` rồi chạy:
 
 ```sh
-install -d -m 0700 "$PARTFLOW_SECRETS_DIR"
+mkdir -p "$PARTFLOW_SECRETS_DIR" && chmod 0700 "$PARTFLOW_SECRETS_DIR"
 for name in postgres_password partflow_app_password partflow_maintenance_password; do
     openssl rand -base64 32 > "$PARTFLOW_SECRETS_DIR/$name"
     chmod 0444 "$PARTFLOW_SECRETS_DIR/$name"
 done
 ```
 
-Trước khi chạy các lệnh này, đặt `PARTFLOW_SECRETS_DIR` trong shell bằng cùng đường dẫn tuyệt đối như trong
-`.env.production`. Mỗi file phải chứa đúng một dòng (dấu xuống dòng ở cuối được bỏ qua), vì `initdb` của PostgreSQL
-chỉ lấy password của role mới từ dòng đầu tiên. File nhiều dòng, rỗng, không đọc được hoặc không phải UTF-8 bị từ
-chối với thông báo nêu đường dẫn file và không bao giờ nêu nội dung.
+Mỗi tệp chứa đúng một dòng (dấu xuống dòng cuối bị bỏ qua), vì PostgreSQL chỉ lấy mật khẩu của role mới từ dòng đầu
+tiên. Tệp có nhiều dòng, rỗng, không đọc được hoặc không phải UTF-8 bị từ chối kèm thông báo nêu tên tệp, không bao giờ
+nêu nội dung. Đổi mật khẩu về sau là một việc thường quy (runbook §9).
 
-Để đổi password về sau:
+#### Image và định danh bản phát hành
 
-- **Password của owner:** chạy `ALTER ROLE <POSTGRES_USER> PASSWORD …` bên trong `db` trước, rồi thay file. Không cần
-  khởi động lại service nào.
-- **Password của role:** thay file của role, chạy `$PF stop backend`, `$PF --profile ops run --rm -T db-roles`, rồi
-  `$PF up -d --force-recreate --no-deps backend`. Backend đọc password file một lần cho mỗi process, nên phải được tạo
-  lại. Làm việc này trong một write freeze ngắn (`deployment/OPERATIONS_RUNBOOK.md` §9).
-
-#### Build image
-
-Image được build tại chỗ từ release đã checkout và không bao giờ được pull (`pull_policy: never`). Chỉ file đi kèm dành
-riêng cho build `compose.production.build.yaml` có phần build, và nó chỉ được dùng với `build`:
+Image được build trên máy chủ từ bản phát hành đã checkout và không bao giờ được pull (`pull_policy: never`). Luôn build
+cả hai image cùng nhau, với tag phát hành và commit đầy đủ của nó đặt trong shell:
 
 ```sh
-PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
+PARTFLOW_RELEASE=<tag> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
 ```
 
-Luôn build cả hai image cùng nhau. Vì `compose.production.yaml` không có phần build, `up` hoặc `run` với một tag chưa
-có image sẽ thất bại với `No such image` thay vì build checkout hiện tại dưới tag đó. Một tag đã có không bao giờ được
-build lại.
+Ở lần cài đặt đầu tiên, tag đã có sẵn trong `.env.production`, nên có thể bỏ `PARTFLOW_RELEASE=<tag>`. Vì
+`compose.production.yaml` không có phần build, `up` hoặc `run` với một tag mà image chưa có sẽ thất bại với
+`No such image` thay vì build checkout hiện tại dưới tag đó. Một tag đã tồn tại không bao giờ bị build lại.
 
-- **Image `backend` (stage `production`):** Python 3.12 slim, các dependency không phải development đã khóa phiên bản,
-  không có `tests/`, không có `.env` và không có reload server; chạy bằng user `10001:10001` với lệnh khởi động
-  `uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log --log-config app/core/logging.production.json`.
-  Image này không bao giờ chạy migration khi khởi động.
-- **Image `web` (stage `production`):** image chính thức `nginx:1.30.5-alpine` đã ghim phiên bản, kèm frontend build
-  bất biến từ `npm run build`, trong đó có production-boundary check (không có dữ liệu preview development trong
-  build).
+- **Image `backend`:** Python 3.12 slim với các dependency production đã khóa, không có test, `.env` hay server reload.
+  Nó chạy với user `10001:10001` bằng
+  `uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log --log-config app/core/logging.production.json`
+  và không bao giờ migrate database khi khởi động.
+- **Image `web`:** `nginx:1.30.5-alpine` chính thức đã ghim phiên bản, cùng frontend được build bằng `npm run build`,
+  lệnh này cũng kiểm tra rằng bản build không chứa dữ liệu xem trước của phát triển.
+- **Định danh bản phát hành.** Lệnh build từ chối một tag không phải gồm 1 đến 64 chữ cái, chữ số, `.`, `_` hoặc `-`
+  (hoặc là `development`) và một commit không phải gồm 40 ký tự thập lục phân viết thường. Cả hai image lưu tag và
+  commit dưới dạng các label `org.opencontainers.image.version` và `org.opencontainers.image.revision`; image
+  `backend` còn lưu dưới dạng `RELEASE_TAG` và `RELEASE_COMMIT` (ngoài một image phát hành, chúng là `development` và
+  trống). Image `web` ghi tag vào các màn hình và vào meta tag `partflow-release`. Mỗi trang gửi tag của bản build của nó
+  trong request header `X-PartFlow-Release`, mà backend so sánh chính xác với tag của chính nó.
 
-#### Mô hình process và lần chạy đầu
+#### Route sức khỏe và cổng ghi (write gate)
 
-`WEB_CONCURRENCY` đặt số Uvicorn worker và `FORWARDED_ALLOW_IPS` đặt các địa chỉ proxy mà Uvicorn tin cho forwarded
-header. Compose đặt cả hai bên trong container, nên giá trị `WEB_CONCURRENCY` trong shell của operator không có tác
-dụng.
+Backend có hai route sức khỏe:
 
-- **First-run setup chạy với một worker.** Mỗi worker có setup token riêng và giới hạn băm password riêng. Với hai
-  worker, một request setup có thể tới worker có token không phải token đã được copy và bị từ chối với
-  `403 setup_token_invalid` (không ghi gì). Khởi động backend bằng `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, đọc
-  token bằng `$PF logs backend | grep "Setup token"`, hoàn tất setup trong browser, rồi khôi phục số worker đã cấu hình
-  bằng `$PF up -d backend`. Setup token là bí mật duy nhất từng được ghi vào log backend: hãy hoàn tất first-run
-  setup trước khi mở quyền truy cập cho người dùng, và giới hạn quyền đọc log cho đến lúc đó.
-- **Một lần từ chối configuration thoát với code 0** khi có nhiều hơn một worker. Dòng log và số lần restart, không
-  phải exit code, cho biết lỗi.
-- **Dừng một backend nhiều worker không từ chối kết nối mới ngay lập tức.** Uvicorn supervisor giữ socket lắng nghe mở
-  cho đến khi worker cuối cùng thoát (tối đa 200 s thời gian chờ dừng trong lúc một lần import hoàn tất). Một request
-  gửi trong lúc đó được nhận nhưng không bao giờ được trả lời: nó kết thúc thành 504 của `web` sau read timeout 60 s,
-  hoặc thành 502 khi supervisor thoát. Backend chưa từng chạy request đó, nhưng client phải coi kết quả là không rõ.
-  Với một worker, request như vậy bị từ chối ngay (502). Vì vậy hãy bắt đầu write freeze khi không có lần import nào
-  đang chạy.
+- **Liveness, `GET /api/health/live`**, trả lời `{"status":"live","service","release","commit"}` mà không chạm vào
+  database. Mọi health check của container đều dùng nó.
+- **Readiness, `GET /api/health`**, còn đọc revision của database. Các key của nó là `status`, `service`, `database`,
+  `release`, `commit`, `schema`, `expected_revision`, `database_revision` và `accepted_revision`. Nó trả lời `200`
+  với `"status":"ok"` chỉ khi `schema` là `current` hoặc `accepted`, `503 not_ready` khi là `mismatch`, và
+  `503 unavailable` với `"schema":"unknown"` khi không kết nối được database.
 
-**Cài đặt lần đầu.** Chạy các bước sau từ release checkout, với release tag đã được đặt làm `PARTFLOW_RELEASE` trong
-`.env.production`:
-
-1. Tạo thư mục backup bằng `install -d -m 0700 <path>` và đặt `PARTFLOW_BACKUP_DIR` trong `.env.production`; mọi lệnh
-   Compose của stack đều cần key này.
-2. Tạo ba secret file (Secret file, ở trên).
-3. Build cả hai image: `PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build`.
-4. Khởi động database: `$PF up -d db`.
-5. Tạo các database role: `$PF --profile ops run --rm -T db-roles`.
-6. Áp schema và grant:
-   `$PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"`.
-7. Chạy first-run setup với một worker (ở trên), rồi khởi động application: `$PF up -d backend web`.
-8. Chạy `$PF run --rm --no-deps -T backend python -m app.cli reconcile` và kiểm tra rằng check "Append-only guards and
-   database-role privileges intact" (check (h)) báo `pass`.
-
-#### Health và release identity
-
-Một release là tag `PARTFLOW_RELEASE` cộng với commit đầy đủ 40 ký tự `PARTFLOW_COMMIT`. Cả hai image của một release
-được build từ cùng một commit và mang cùng một identity.
-
-- `compose.production.build.yaml` truyền `PARTFLOW_RELEASE` và `PARTFLOW_COMMIT` làm build argument cho cả hai image.
-  Build thất bại nếu không có tag hợp lệ (chữ cái, chữ số, `.`, `_` và `-`, tối đa 64 ký tự, không phải `development`)
-  hoặc không có commit 40 ký tự hexa viết thường.
-- Cả hai image lưu identity dưới dạng label `org.opencontainers.image.version` và
-  `org.opencontainers.image.revision`. Image `web` còn nhúng tag vào frontend bundle (`VITE_PARTFLOW_RELEASE`) và vào
-  meta tag `partflow-release` của trang được phục vụ.
-- Backend đọc `RELEASE_TAG` và `RELEASE_COMMIT`, do stage `production` đặt (ngoài release image, mặc định là
-  `development` và không có commit). Compose không bao giờ đặt `RELEASE_TAG`.
-- Mỗi trang gửi release của bundle của nó trong request header `X-PartFlow-Release`; việc so sánh với release của
-  backend là so sánh chuỗi chính xác.
-
-Backend có hai route health:
-
-- **Liveness, `GET /api/health/live`**, trả `{"status":"live","service","release","commit"}` mà không chạm vào
-  database. Mọi container health check dùng route này.
-- **Readiness, `GET /api/health`**, đọc database revision. Các key của nó là `status`, `service`, `database`,
-  `release`, `commit`, `schema`, `expected_revision`, `database_revision` và `accepted_revision`. Nó trả `200` với
-  `"status":"ok"` chỉ khi `schema` là `current` hoặc `accepted`, `503 not_ready` khi `mismatch`, và `503 unavailable`
-  với `"schema":"unknown"` khi không tới được database.
-
-| Giá trị `schema` | Ý nghĩa |
+| `schema` | Ý nghĩa |
 | --- | --- |
-| `current` | Database revision bằng Alembic head duy nhất của image. |
-| `accepted` | Database đang ở đúng revision được nêu bởi `PARTFLOW_ACCEPT_SCHEMA_REVISION`, mà image này không biết (rollback path 2, `deployment/OPERATIONS_RUNBOOK.md` §6). Nêu một revision mà image biết sẽ bị bỏ qua kèm cảnh báo, và `revision` báo `override_ignored`. |
-| `mismatch` | Mọi database revision khác. |
+| `current` | Revision của database bằng Alembic head duy nhất của image đang chạy. |
+| `accepted` | Database ở đúng một revision được `PARTFLOW_ACCEPT_SCHEMA_REVISION` nêu tên mà image đang chạy không biết (đường quay lui 2, runbook §6). Một revision mà image biết sẽ bị bỏ qua kèm cảnh báo, và lệnh `revision` khi đó báo `"override_ignored": true`. |
+| `mismatch` | Bất kỳ revision database nào khác. |
 | `unknown` | Không đọc được database. |
 
-#### Write gate
+**Cổng ghi (write gate).** Backend từ chối mọi `POST`, `PUT`, `PATCH` và `DELETE`, trên bất kỳ path nào, trước khi làm
+bất cứ việc gì khác, trong hai trường hợp. Cả hai lần từ chối đều không ghi gì và mang `Cache-Control: no-store`; các
+màn hình hiển thị chúng như `GUI_DESIGN.md` §3 quy tắc 13 mô tả.
 
-Backend từ chối mọi `POST`, `PUT`, `PATCH` và `DELETE`, trên mọi đường dẫn, trước khi định tuyến, trước check chống
-giả mạo request liên trang (CSRF) và trước khi đọc body, trong hai trường hợp. Cả hai lần từ chối đều không ghi gì và
-mang `Cache-Control: no-store`.
-
-| Phản hồi | Khi nào | Ý nghĩa với client |
+| Câu trả lời | Khi nào | Ý nghĩa với người dùng |
 | --- | --- | --- |
-| `409` với `release_mismatch: true` | Enforcement đang bật và `X-PartFlow-Release` của request bị thiếu hoặc khác `RELEASE_TAG`. | Từ chối chắc chắn: request đó không ghi gì (một lần thử trước đó chưa được trả lời vẫn là không rõ). |
-| `503` với `not_ready: true` | Schema là `mismatch` hoặc không xác nhận được readiness; gate đóng khi lỗi. | Kết quả không rõ. |
+| `409` với `release_mismatch: true` | `X-PartFlow-Release` của yêu cầu bị thiếu hoặc khác bản phát hành đang chạy: trang được tải từ một bản phát hành cũ hơn. | Chắc chắn bị từ chối; không có gì được ghi nhận. Phải tải lại trang. |
+| `503` với `not_ready: true` | Schema là `mismatch`, hoặc không xác nhận được readiness. | Kết quả không xác định. |
 
-Request đọc và route health không bao giờ bị gate chặn. Enforcement (`ENFORCE_CLIENT_RELEASE`) cố định bật trong
-`compose.production.yaml` và tắt trong development và test; backend từ chối khởi động khi enforcement bật với tag
-`development`. Lần ghi duy nhất trên method an toàn, cập nhật `last_seen_at` của thiết bị Scan Station, không chứa dữ
-liệu production và được chấp nhận khi mismatch. Trạng thái màn hình cho các phản hồi này là `GUI_DESIGN.md` §3 quy tắc
-13.
+Các thao tác đọc và các route sức khỏe không bao giờ bị chặn. Việc áp đặt bản phát hành (`ENFORCE_CLIENT_RELEASE`) được
+bật trong production và tắt trong phát triển và kiểm thử, và backend từ chối khởi động khi việc áp đặt đang bật mà tag là
+`development`. Thao tác ghi duy nhất trên một yêu cầu đọc, thời điểm thấy lần cuối của một thiết bị Scan Station, không
+chứa dữ liệu production nào và được chấp nhận trong lúc schema không khớp.
 
 #### Migration và lệnh `revision`
 
-`python -m app.cli migrate` (service `migrate`) áp các migration đang chờ trong một transaction trên một connection, áp
-grant trong cùng transaction đó (Database role và grant, bên dưới) và in một báo cáo JSON.
+`python -m app.cli migrate` (job `migrate`) áp dụng các migration database đang chờ trên một kết nối trong một
+transaction, áp dụng các quyền (grants) của database trong cùng transaction, và in một báo cáo JSON có `result` là
+`upgraded`, `already_current`, `refused`, `failed` hoặc `outcome_unknown`.
 
-- Lệnh cần đúng một trong `--pre-release-backup NAME` hoặc `--no-backup-reason TEXT`. `NAME` là một thư mục backup do
-  `backup.sh` tạo; nó được verify trước migration và được ghi lại, và khi có migration đang chờ thì `migrate` còn cần
-  `--backup-not-before UTC`, thời điểm write freeze bắt đầu. Lý do được ghi lại (ví dụ
-  `first install: empty database`). Quy tắc về độ mới và quyền sở hữu nằm ở `deployment/OPERATIONS_RUNBOOK.md` §5.
-- Lệnh nhận `--lock-timeout SECONDS` (1 đến 600, mặc định 30) và `--backup-dir` (điểm mount, mặc định `/backups`).
-- Lệnh từ chối, không thay đổi gì: một file revision có thay đổi schema không transactional (`autocommit_block`,
-  `CONCURRENTLY`), một database revision mà release này không biết, một `migrate` chạy đồng thời, và một backend
-  session đang kết nối (kiểm tra theo khả năng tốt nhất, không phải bằng chứng rằng `backend` đã dừng). Database đã ở
-  head trả về `already_current`.
-- Một lần từ chối về role hoặc grant (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`, `role_owns_objects`,
-  `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) cho kết quả `refused` với exit code 1, và
-  phần upgrade của cùng lần chạy bị rollback.
+- Nó cần đúng một trong hai: `--pre-release-backup NAME` (một bản sao lưu của `backup.sh`, được xác minh trước khi
+  migrate; khi có migration đang chờ thì kèm cả `--backup-not-before UTC`, thời điểm bắt đầu tạm dừng ghi) hoặc
+  `--no-backup-reason TEXT` (chỉ cho lần cài đặt đầu tiên và các buổi diễn tập; lý do được ghi lại). Các quy tắc mà bản
+  sao lưu trước phát hành phải đáp ứng nằm trong runbook §5.
+- Nó nhận `--lock-timeout SECONDS` (1 đến 600, mặc định 30) và `--backup-dir` (mặc định `/backups`).
+- Nó từ chối và không thay đổi gì khi gặp: một migration có thay đổi schema không giao dịch (non-transactional), một
+  revision database mà bản phát hành không biết, một `migrate` thứ hai chạy cùng lúc, và một `backend` đang kết nối
+  (kiểm tra ở mức cố gắng hết sức: hãy tự dừng `backend`).
+- Việc từ chối vì database role hoặc grant (`roles_not_provisioned`, `roles_incomplete`, `role_unsafe`,
+  `role_owns_objects`, `foreign_grantor`, `table_unclassified`, `table_missing`, `not_superuser`) kết thúc là `refused`
+  với mã thoát (exit code) 1, và phần nâng cấp của cùng lần chạy bị hoàn tác.
 
-Backend không bao giờ migrate. `python -m app.cli revision` chỉ đọc: nó in release identity, revision mong đợi và
-database revision, các revision đang chờ và readiness mà backend sẽ báo, và chỉ thoát với 0 khi schema là `current`.
+Backend không bao giờ tự migrate. `python -m app.cli revision` chỉ đọc: nó in định danh bản phát hành, các revision
+mong đợi và revision của database, các revision đang chờ và readiness mà backend sẽ báo, và thoát với mã 0 chỉ khi
+schema là `current`.
 
-#### Database role và grant
+#### Database role và quyền (grants)
 
-Production database có ba role:
+Database production có ba role:
 
-| Role | Được dùng bởi | Ghi chú |
+| Role | Do ai dùng | Ghi chú |
 | --- | --- | --- |
-| Owner (`POSTGRES_USER`, mặc định `partflow_owner`) | `db`, `migrate`, `db-roles`, backup | Superuser khởi tạo của PostgreSQL; sở hữu mọi object. Tên phải khác hai role bên dưới. |
-| `partflow_app` | `backend` (API, `reconcile`, `revision` và các lệnh khôi phục) và `status` | Chỉ giữ các quyền trong bảng bên dưới. |
-| `partflow_maintenance` | chưa service nào dùng | Chỉ giữ SELECT trên một danh sách bảng được nêu tên; dành cho việc bảo trì archive đã lên kế hoạch. |
+| Owner (`POSTGRES_USER`, mặc định `partflow_owner`) | `db`, `migrate`, `db-roles`, các bản sao lưu | Superuser PostgreSQL được tạo cùng database; nó sở hữu mọi object. Tên của nó phải khác hai role bên dưới. |
+| `partflow_app` | `backend` (API và các lệnh `reconcile`, `revision` cùng các lệnh khôi phục của nó) và `status` | Chỉ giữ các đặc quyền trong bảng tiếp theo. |
+| `partflow_maintenance` | chưa có service nào | Dành riêng cho việc bảo trì lưu trữ (archival) đã được lên kế hoạch; chỉ giữ `SELECT` trên một danh sách bảng có tên. |
 
-`provision-roles` tạo cả hai role không phải owner với `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
-NOBYPASSRLS`, không membership, không setting riêng cho role và không sở hữu object nào. Tên của chúng cố định trong
-code và trong `compose.production.yaml`.
-
-| Nhóm | Quyền của `partflow_app` | Bảng |
+| Loại bảng | Đặc quyền của `partflow_app` | Bảng |
 | --- | --- | --- |
-| append-only | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| guarded update | SELECT, INSERT, UPDATE | `worker_sessions` (row trigger của bảng giới hạn các cột) |
-| no update | SELECT, INSERT, DELETE | `assigned_route_steps` |
-| read only | SELECT | `alembic_version` |
-| ordinary | SELECT, INSERT, UPDATE, DELETE | mọi bảng khác |
+| append-only | `SELECT`, `INSERT` | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
+| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions` (một row trigger giới hạn các cột) |
+| no update | `SELECT`, `INSERT`, `DELETE` | `assigned_route_steps` |
+| read only | `SELECT` | `alembic_version` |
+| ordinary | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | mọi bảng khác |
 
-Không role nào giữ TRUNCATE, quyền trên sequence (các bảng dùng identity column), grant option, hay `CREATE` trên
-schema `public` hoặc trên database, và quyền PUBLIC cùng default privilege bị gỡ bỏ. Phân loại đầy đủ nằm ở
-`SLICE1_DATA_MODEL.md` §17. Các trigger báo lỗi khi có lần ghi bị cấm là lớp bảo vệ thứ nhất; các quyền bị thu hồi là
-lớp thứ hai. Vì vậy một lỗi `permission denied` (SQLSTATE 42501) trong log backend là một sự cố
-(`deployment/OPERATIONS_RUNBOOK.md` §2) và không bao giờ được sửa bằng cách cấp thêm quyền. Một superuser tắt trigger
-nằm ngoài khả năng phát hiện của PartFlow; đây là giới hạn được chấp nhận.
+- `provision-roles` (mặc định của `db-roles`) tạo hoặc sửa `partflow_app` và `partflow_maintenance` với
+  `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, không có membership, không có thiết lập theo
+  role và không sở hữu object nào, và đặt mật khẩu của chúng (SCRAM-SHA-256) từ các tệp bí mật trong một transaction.
+  Lặp lại lệnh này là an toàn.
+- `apply-grants` suy ra mọi grant từ bảng phân loại trong mã và áp dụng chúng trong một transaction. Nó từ chối trừ khi
+  database đang ở Alembic head của bản phát hành.
+- Mỗi lần `migrate` áp dụng các grant sau khi nâng cấp trong cùng lần chạy, nên một bản phát hành không bao giờ để lại
+  bảng mới không có grant. Một bảng chưa được phân loại, một role có thuộc tính hoặc membership bị cấm, một role sở hữu
+  object, hoặc một đặc quyền do một role mà PartFlow không quản lý cấp, sẽ hoàn tác toàn bộ lần chạy.
+- Với `DATABASE_ROLES_REQUIRED=true` (production), các role bị thiếu bị từ chối là `roles_not_provisioned`. Khi không
+  có nó (phát triển, kiểm thử, staging), báo cáo grants ghi `not_provisioned` và không cấp gì.
+- Grants không bao giờ được khôi phục từ bản sao lưu: sau khi khôi phục, hãy chạy `apply-grants`.
+- Không role nào giữ `TRUNCATE`, đặc quyền trên sequence, grant option, hay `CREATE` trên database hoặc schema `public`,
+  và các đặc quyền của `PUBLIC` cùng các đặc quyền mặc định đều bị gỡ. Bảng phân loại đầy đủ nằm ở
+  [`SLICE1_DATA_MODEL.vi.md`](./SLICE1_DATA_MODEL.vi.md) §17.
 
-- `provision-roles` đọc `partflow_app_password` và `partflow_maintenance_password` trước khi kết nối, tạo hoặc sửa hai
-  role và đặt password SCRAM-SHA-256 của chúng trong một transaction. Chạy lại nhiều lần vẫn an toàn.
-- `apply-grants` suy ra mọi grant từ phân loại bảng trong code và áp chúng trong một transaction. Lệnh từ chối nếu
-  database chưa ở Alembic head của release.
-- Mỗi `migrate` chạy phần grant trong transaction của nó sau upgrade, nên một release không bao giờ để lại bảng mới mà
-  thiếu grant. Một bảng chưa được phân loại, một role có thuộc tính hoặc membership bị cấm, một role sở hữu object, hay
-  một quyền được cấp bởi role mà PartFlow không quản lý sẽ rollback toàn bộ lần chạy (kết quả `migrate` là `refused`,
-  exit code 1, không thay đổi gì).
-- Với `DATABASE_ROLES_REQUIRED=true` (cố định trên `backend` và `migrate` trong `compose.production.yaml`), thiếu role
-  cũng bị từ chối với `roles_not_provisioned`. Khi không đặt (development, test và staging), báo cáo grant là
-  `not_provisioned` và không cấp gì.
-- Grant không bao giờ được restore từ dump. Mỗi `migrate` suy ra lại grant từ code, và sau một lần restore bạn chạy
-  `apply-grants`.
-- Check "Append-only guards and database-role privileges intact" (reconcile check (h)) xác minh kết quả.
+Các database trigger từ chối một thao tác ghi bị cấm là lớp bảo vệ thứ nhất; các đặc quyền bị thiếu là lớp thứ hai. Do
+đó một lỗi `permission denied` (SQLSTATE 42501) trong log backend là một sự cố (runbook §8), không bao giờ là lý do để
+cấp thêm quyền. Kiểm tra bảo vệ "Append-only guards and database-role privileges intact" (kiểm tra đối soát (h)) xác
+minh lớp bảo vệ này. Một superuser tắt một trigger nằm ngoài khả năng phát hiện của PartFlow; giới hạn này được chấp
+nhận.
 
-#### Release
+#### Tiến trình backend và thiết lập lần đầu
 
-`deploy/production/release.sh` chạy trình tự release của §7. Chạy script từ thư mục gốc của repo trong release
-checkout, với release tag đã được checkout; `deploy/production/release.sh --help` in cách dùng.
+`PARTFLOW_BACKEND_WORKERS` đặt số tiến trình worker của `backend` (Compose truyền nó dưới dạng `WEB_CONCURRENCY`, nên
+giá trị biến shell `WEB_CONCURRENCY` của riêng bạn không có tác dụng).
 
-```sh
-deploy/production/release.sh --release <new> --operator <name> --approver <name>
-```
+- **Thiết lập lần đầu (first-run setup) cần một worker.** Mỗi worker có mã thiết lập (setup token) dùng một lần riêng.
+  Với hai worker, trình duyệt có thể đến worker mà bạn chưa sao chép token và nhận `403 setup_token_invalid` (không ghi
+  gì cả). Hãy khởi động `backend` bằng `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, đọc token bằng
+  `$PF logs backend | grep "Setup token"`, hoàn tất thiết lập, rồi chạy `$PF up -d backend` để trở về số worker đã cấu
+  hình. Mỗi lần khởi động `backend` đều ghi một token mới, vì vậy luôn dùng token mới nhất. Setup token là bí mật duy
+  nhất từng được ghi vào log backend: hãy hoàn tất thiết lập trước khi bất kỳ ai khác truy cập được PartFlow, và hạn
+  chế quyền truy cập log cho đến lúc đó.
+- **Một lỗi cấu hình thoát với mã 0** khi có nhiều worker. Hãy đọc log và số lần restart, không đọc mã thoát.
+- **Dừng một backend có nhiều worker không từ chối yêu cầu mới ngay lập tức.** Tiến trình chính giữ port mở cho đến khi
+  worker cuối cùng thoát, mất tối đa đến thời gian chờ dừng 200 s trong khi một lần import hoàn tất. Một yêu cầu gửi
+  trong thời gian đó được nhận nhưng không bao giờ được trả lời: nó kết thúc là 504 từ `web` sau 60 s, hoặc 502. Backend
+  chưa bao giờ chạy nó, nhưng người dùng phải coi đó là kết quả không xác định. Vì vậy hãy bắt đầu tạm dừng ghi (write
+  freeze) khi không có lần import nào đang chạy.
 
-| Tùy chọn | Ý nghĩa |
-| --- | --- |
-| `--release TAG`, `--operator NAME`, `--approver NAME` | Bắt buộc. Một người có thể ghi cùng một tên cho operator và approver. |
-| (không có tùy chọn backup) | `release.sh` tự lấy pre-release backup đã verify bằng `backup.sh`, bên trong write freeze khi có migration đang chờ. |
-| `--pre-release-backup NAME` | Dùng một backup `backup.sh` đã có; bị từ chối khi có migration đang chờ. |
-| `--no-backup-reason TEXT` | Không có pre-release backup (chỉ cho lần cài đầu và diễn tập); lý do được ghi lại. |
-| `--accept-pre-release-findings` | Lần reconciliation trước release có finding: tiếp tục, và chỉ chặn với finding không có trong lần đó. |
-| `--skip-pre-reconcile REASON` | Không image nào có database revision làm head (trạng thái của rollback path 2): bỏ qua reconciliation trước release; khi đó mọi finding sau release đều chặn. |
-| `--env-file`, `--records-dir` | File configuration (mặc định `.env.production`) và thư mục record (mặc định `$HOME/partflow-deployments`, mode 0700). |
-| `--environment`, `--url`, `--rollback-deadline`, `--observation-owner`, `--known-limitations` | Các trường record tùy chọn. Giá trị văn bản dài 1 đến 500 ký tự, không có ký tự điều khiển, `"` hay `\`. |
-| `--rehearsal --project NAME` | Diễn tập trên một Compose project dùng một lần, không bao giờ là `partflow-production`. |
+#### Yêu cầu đối với proxy của nền tảng
 
-Trước khi thay đổi bất cứ thứ gì, `release.sh` từ chối khi tag không phải release tag theo §10.2, khi tag không phải
-commit đang checkout hoặc build input khác với commit đó, khi có project `partflow-staging` trên Docker daemon (§6),
-khi thiếu một secret file, khi image của release đang chạy không có trên host (rollback sẽ không thể thực hiện), hoặc
-khi một release khác đang giữ lock.
+Reverse proxy của máy chủ (reverse proxy của DSM, hoặc Caddy trên VPS) phải:
 
-| Exit code | Ý nghĩa |
-| --- | --- |
-| 0 | Hoàn tất. |
-| 1 | Dừng mà không thay đổi gì, hoặc write đã mở lại trên release hiện tại. |
-| 2 | Không chạy được. |
-| 3 | `backend` bị để ở trạng thái dừng; làm theo `deployment/OPERATIONS_RUNBOOK.md` §6. |
-| 4 | Release mới có thể đang chạy và ghi được sau một check thất bại. |
-| 130 hoặc 143 | Bị ngắt bởi Ctrl-C hoặc TERM; record nêu bước đang chạy, và một `migrate` bị ngắt có kết quả không rõ. |
+- chấp nhận HTTPS với một chứng chỉ mà mọi máy trạm và Scan Station đều tin cậy, và không bao giờ chuyển HTTP thuần đến
+  PartFlow (cùng lắm là chuyển hướng nó sang HTTPS);
+- chuyển tiếp đến `http://127.0.0.1:<PARTFLOW_HTTP_PORT>` với đúng địa chỉ `127.0.0.1`, không bao giờ `localhost`, vì
+  `localhost` có thể phân giải thành địa chỉ IPv6 `::1` trước, nơi `web` không lắng nghe;
+- gửi header `Host`, `X-Forwarded-For` với địa chỉ client được nối vào cuối, và `X-Forwarded-Proto: https`;
+- chấp nhận request body ít nhất 5 MiB và chờ câu trả lời ít nhất 300 s (timeout gửi và đọc), để câu trả lời JSON của
+  `web` hoặc của ứng dụng đến trước; nếu không, việc tải ảnh lên và import Work Order sẽ thất bại;
+- không bao giờ ghi log cookie hay các header `X-PartFlow-Station-Device` và `X-PartFlow-CSRF`;
+- chỉ cho phép các mạng dự định, cùng với tường lửa của máy chủ.
 
-Output của từng bước và `record.json` (deployment record của `deployment/OPERATIONS_RUNBOOK.md` §1) được ghi vào
-`<records-dir>/<UTC>-<tag>/`. `deploy/production/smoke.sh --release TAG [--env-file …] [--project NAME]
-[--allow-accepted-schema]` chạy các check qua loopback: trang được phục vụ và release của nó, fallback của single-page
-app, release identity và schema trong health và liveness, JSON 404 cho một đường dẫn API không tồn tại, 409 của write
-gate khi thiếu release header và việc cho qua khi có header, và identity của các image đang chạy.
+**Địa chỉ client thật.** `web` tin các header được chuyển tiếp từ đúng một chặng (hop). Mặc định, chặng đó được phát hiện
+khi container khởi động: đó là default gateway của container trên network `edge`, nơi các kết nối đến địa chỉ loopback
+của máy chủ đi tới. Chỉ đặt `PARTFLOW_TRUSTED_PROXY` (một địa chỉ IPv4) khi proxy đến từ một địa chỉ khác; nếu không tìm
+được địa chỉ nào, `web` từ chối khởi động. `web` lấy địa chỉ `X-Forwarded-For` **cuối cùng** làm client, chỉ gửi địa chỉ
+đó đến backend, và chỉ chấp nhận `X-Forwarded-Proto` từ cùng chặng đó. Khi proxy không cung cấp được địa chỉ client, mọi
+người dùng dùng chung một bucket giới hạn tần suất (Request limits, bên dưới). `web` không giữ chứng chỉ nào.
 
-`.env.production` luôn nêu release **đang chạy**. Candidate tag chỉ nằm trong shell, hoặc trong environment theo từng
-lệnh của script, cho đến lúc chuyển, nên mọi lệnh khôi phục, reconciliation hay `up` trước lúc chuyển đều dùng image
-hiện tại với schema hiện tại. Bản thủ công tương đương với `release.sh`, theo cùng thứ tự, nằm ở
-`deployment/OPERATIONS_RUNBOOK.md` §5. Không có gì lên lịch chạy `release.sh`, không có updater nào chạy trên host, và
-không script nào xóa, prune hay gắn lại tag cho image.
+#### Yêu cầu về chứng chỉ
 
-#### Rollback
+Chứng chỉ nêu tên miền truy cập (host name) của PartFlow làm subject alternative name (SAN). Nó đến từ một trong:
 
-Cây quyết định, path 1 và 2 và schema override nằm ở `deployment/OPERATIONS_RUNBOOK.md` §6.
-
-- **Code application không có thay đổi schema:** đặt lại tag trước trong `.env.production` và chạy
-  `$PF up -d backend web`. Việc này cần image của release trước còn trên host, nên hãy giữ chúng suốt rollback window
-  và không bao giờ chạy `docker image prune -a`; khi chúng không còn, `up` thất bại với `No such image` và không khởi
-  động gì.
-- **Rollback schema:** restore pre-release backup vào một database mới (path 3 trong cùng mục). Việc này cần phê duyệt
-  của owner được ghi lại. Không bao giờ có down-migration.
-- **Không bao giờ chạy `down -v`, hoặc xóa volume, trên project `partflow-production`:** việc đó xóa
-  `partflow-production_postgres_data`. `$PF down` không có `-v` là cách duy nhất để dừng toàn bộ.
-
-#### Giới hạn request và timeout (`web`)
-
-| Route | Giới hạn body | Upstream timeout |
-| --- | --- | --- |
-| Mặc định cho mọi route `/api` | 1 MiB | 60 s |
-| `PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image` | 4 MiB | 60 s |
-| `POST /api/work-orders/import/preview` | 4 MiB | 60 s |
-| `POST /api/work-orders/import` | 4 MiB | 180 s (đọc và gửi) |
-
-Giới hạn 4 MiB cao hơn giới hạn của chính application (ảnh 2 MiB, file import 1 MiB), nên JSON 413 của application trả
-lời cho một file quá lớn nhưng hợp lý; `web` chỉ trả lời trước với một body lớn rõ ràng. `web` không bao giờ thử lại
-request lên upstream: một request của client tối đa là một lần thực thi ở backend.
-
-**Rate limit (theo địa chỉ client được chuyển tiếp).** `POST /api/session` cho phép 10 lần mỗi phút với burst 5 (sáu
-lần thử cùng lúc, sau đó thêm một lần mỗi 6 s). `PUT /api/session/password`, `POST /api/setup/administrator` và
-`PUT /api/users/{user_id}/password` cho phép 5 lần mỗi phút với burst 4 (năm lần cùng lúc, sau đó một lần mỗi 12 s).
-Các request đọc như `GET /api/session` và đăng xuất không bao giờ bị giới hạn. Một 429 từ `web` không bao giờ tới
-application, nên không bao giờ được tính là lần đăng nhập thất bại và không bao giờ khóa tài khoản; khóa theo tài khoản
-và giới hạn theo địa chỉ là hai lớp độc lập. Mã kích hoạt thiết bị không bị rate limit (50 bit entropy, sống 15 phút).
-
-**Phản hồi do `web` tạo ra.** `web` chỉ tự trả lời cho các tình huống nó tự phát hiện; mọi phản hồi của backend, kể cả
-401, 403, 409, 413, 422 và 503 của chính application, đi qua không thay đổi.
-
-| Status | Khi nào | Body `detail` | Ý nghĩa với client |
-| --- | --- | --- | --- |
-| 413 | body vượt giới hạn của location | `This request is too large for PartFlow. Nothing was changed.` (`request_too_large: true`) | từ chối chắc chắn |
-| 429 | vượt rate limit (gửi `Retry-After: 60`) | `Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.` (`rate_limited: true`) | từ chối chắc chắn |
-| 502 | không tới được backend, hoặc backend đóng kết nối trước khi trả lời | `The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | kết quả không rõ với một lần ghi |
-| 504 | backend không trả lời trong thời gian timeout | `The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | kết quả không rõ với một lần ghi |
-
-502 hoặc 504 giữ status 5xx, nên một lần ghi của station có thể đã commit được hiển thị là không rõ và được thử lại với
-cùng `device_event_id` (`deployment/OPERATIONS_RUNBOOK.md` §2). Frontend hiển thị thông báo có sẵn cho 413 hoặc 429
-không mang JSON `detail`, ví dụ từ một platform proxy. `web` không thêm header chia sẻ tài nguyên khác nguồn gốc (CORS)
-và không viết lại gì khác.
-
-**Cache và header.** `index.html` và mọi fallback của single-page app là `no-cache`; `/assets/*` bất biến trong một
-năm, và một asset bị thiếu là 404 thông thường, không bao giờ là trang application. Mọi phản hồi mang
-`X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` và một `Content-Security-Policy` cơ bản (script, style,
-kết nối và frame cùng origin; ảnh `blob:` và `data:` cho preview ảnh cục bộ; không có inline script). Ai thêm một tính
-năng cần nguồn khác thì sửa policy trong cùng thay đổi đó. HTTP Strict Transport Security (HSTS) là trách nhiệm của
-platform proxy; `web` không đặt nó.
-
-#### Logging
-
-- **Request id.** Mọi phản hồi trả về một HTTP request id trong `X-Request-ID`. `web` nhận giá trị từ client dài 1 đến
-  64 ký tự thuộc `A-Za-z0-9._-` hoặc tự tạo một id, chuyển nó cho backend và ghi đè bản header của backend; backend dùng
-  cùng quy tắc và nếu không hợp lệ thì tạo một id mới 32 ký tự hexa.
-- **Log của `web`.** Một bản ghi edge JSON cho mỗi request: địa chỉ client, method, đường dẫn không có query string,
-  status, số byte, thời gian, upstream status, user agent và `request_id`. Health probe không được ghi.
-- **Log của backend.** Backend khởi động với `--log-config app/core/logging.production.json`: mọi bản ghi, kể cả của
-  Uvicorn, là một dòng JSON trên standard error (`ts`, `level`, `logger`, `message`, `request_id`, rồi các trường của
-  bản ghi). Access log riêng của Uvicorn vẫn tắt. Traceback không bao giờ chứa thông báo exception của database, nên
-  không dòng `DETAIL`, câu lệnh hay giá trị tham số nào lọt vào log.
-- **Bản ghi application (`app.access`).** Ghi ở INFO cho một lần ghi, cho một lần từ chối có chủ đích (`not_ready`,
-  `release_mismatch`, `password_check_busy`, validation, authorization) và cho một request đọc từ một giây trở lên
-  (`"slow":true`); ở ERROR cho một lỗi; ở DEBUG cho một lần poll health hoặc một request đọc nhanh thông thường. Bản
-  ghi nêu Part Number, QuantityFlow, Work Order Demand, Area, Operation, Machine, Worker (chỉ sau khi xác định danh
-  tính), Scan Station và `device_event_id` của một production command và lý do của một lần từ chối.
-- **Không bao giờ được ghi:** cookie, query string, mọi PartFlow header, request body, token, badge, password và giá
-  trị quét. Setup token của first-run là ngoại lệ duy nhất đã được thông báo. `db` chạy với
-  `log_error_verbosity=terse`.
-- **Dung lượng.** Container rotate log bằng driver `json-file` (`max-size` 10m, `max-file` 5). Ước lượng thô: 1.000
-  production command tạo khoảng 1,1 MB log backend và 0,6 MB log `web`, và mỗi board hoặc màn hình Tracking đang mở
-  thêm bản ghi `web` mỗi 15 s, nên ngân sách lưu giữ được tính theo từng nguồn (`deployment/OPERATIONS_RUNBOOK.md` §2).
-
-#### Giám sát
-
-- **Service `status`.** `$PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" status` in một báo cáo chỉ
-  đọc bằng `partflow_app`, với thư mục backup được mount chỉ đọc.
-- **`deploy/production/check.sh`.** Được scheduler của host chạy mỗi 15 phút; failure notification của scheduler là
-  kênh cảnh báo. Script đánh giá readiness qua HTTPS, certificate, các container, số lần restart, lỗi của backend, các
-  ổ đĩa và báo cáo `status`, in một dòng `PASS`, `FAIL` hoặc `SKIP` cho mỗi check, không bao giờ thay đổi service, và
-  thoát khác 0 khi có lỗi cần thông báo. Một tập lỗi không đổi được thông báo lại sau 6 giờ theo mặc định.
-- **`deploy/production/scheduled-reconcile.sh`.** Chạy `reconcile` đầy đủ, chỉ đọc, mỗi ngày một lần sau backup hằng
-  ngày, và thoát 0 khi sạch, 1 khi có mismatch và 2 khi không chạy được.
-
-| Check | Ngưỡng mặc định |
-| --- | --- |
-| Tuổi của backup mới nhất | cũ hơn 26 giờ thì lỗi |
-| Dung lượng đĩa trống | dưới 15 % thì lỗi |
-| Hạn certificate | hết hạn trong vòng 21 ngày thì lỗi |
-| Số lần restart container | tăng bất kỳ thì lỗi |
-| Lỗi của backend | có bất kỳ bản ghi lỗi mới nào thì lỗi |
-
-Lệnh, lịch chạy và ngưỡng nằm ở `deployment/OPERATIONS_RUNBOOK.md` §2, §7 và §9 và trong các hướng dẫn theo nền tảng
-([`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §8, [`deployment/VPS.md`](./deployment/VPS.md) §8).
-
-#### Yêu cầu đối với platform proxy
-
-Reverse proxy của DSM, hoặc Caddy trên VPS, phải:
-
-- kết thúc HTTPS bằng một certificate mà các workstation của công ty tin, và chỉ gửi HTTP như một lần chuyển hướng
-  sang HTTPS;
-- chuyển tiếp tới `http://127.0.0.1:<port>`, dùng đúng chuỗi `127.0.0.1` và không bao giờ dùng `localhost`, vì
-  `localhost` có thể được phân giải thành địa chỉ IPv6 `::1` trước trong khi `web` chỉ lắng nghe trên loopback IPv4;
-- gửi `Host`, `X-Forwarded-For` (với địa chỉ client được nối vào cuối) và `X-Forwarded-Proto: https`;
-- nhận request body ít nhất 5 MiB và dùng send timeout và read timeout ít nhất 300 s, để phản hồi JSON của `web` hoặc
-  của application tới trước;
-- không bao giờ ghi log cookie, `X-PartFlow-Station-Device` hay `X-PartFlow-CSRF`;
-- chỉ cho các nguồn LAN hoặc VPN đã được duyệt truy cập, cùng với firewall của host.
-
-**Địa chỉ client thật.** `web` tin forwarded header từ đúng một hop. Mặc định hop đó được phát hiện khi container khởi
-động, là default gateway của nó trên network edge (địa chỉ mà các kết nối loopback của host đi tới từ đó). Chỉ đặt
-`PARTFLOW_TRUSTED_PROXY` (một địa chỉ IPv4) khi platform proxy tới từ một địa chỉ khác. Nếu không cách nào cho ra địa
-chỉ, container từ chối khởi động. Từ hop đó, `web` lấy địa chỉ **cuối cùng** trong `X-Forwarded-For` làm client và chỉ
-gửi địa chỉ đó cho backend; `X-Forwarded-Proto` chỉ được chấp nhận từ cùng hop đó. Nếu proxy không cung cấp được địa
-chỉ client, mọi client dùng chung một bucket rate limit; hãy ghi lại điều này và để owner quyết định. `web` không
-publish certificate và không đọc cấu hình TLS nào.
-
-Thiết lập DSM nằm ở [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §5 và ví dụ Caddy nằm ở
-[`deployment/VPS.md`](./deployment/VPS.md) §4.
-
-#### Quy trình certificate
-
-Certificate nêu hostname của PartFlow làm tên thay thế của chủ thể (SAN). Nó được cấp bởi một trong các nơi sau:
-
-- một tổ chức cấp chứng chỉ (CA) public dùng giao thức Automatic Certificate Management Environment (ACME), cho một
-  tên DNS public;
+- một tổ chức cấp chứng chỉ (CA) công cộng, ví dụ Let's Encrypt qua giao thức Automatic Certificate Management
+  Environment (ACME), cho một tên DNS công cộng;
 - CA nội bộ của công ty;
-- một CA riêng được tạo trên host cho mục đích này, cho một tên chỉ dùng nội bộ (các bước DSM nằm ở
-  `deployment/SYNOLOGY_NAS.md` §5.2).
+- một CA riêng được tạo cho mục đích này, như CA mà DSM tạo (hướng dẫn NAS §9.1);
+- Origin CA của Cloudflare, chỉ khi đứng sau proxy của Cloudflare ([`deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md)).
 
-Không bao giờ dùng certificate tự ký đơn thuần, và không bao giờ chấp nhận certificate trên từng workstation bằng
-cách bỏ qua cảnh báo của browser. Root certificate của CA nội bộ hoặc CA riêng được cài là tin cậy trên mọi
-workstation và barcode terminal, qua công cụ quản lý thiết bị của công ty hoặc bằng tay. Deployment administrator chịu
-trách nhiệm gia hạn; `check.sh` giám sát hạn dùng (check `certificate`, cảnh báo khi còn dưới 21 ngày,
-`deployment/OPERATIONS_RUNBOOK.md` §9). Để kiểm tra hạn dùng từ bất kỳ client nào:
+Không bao giờ dùng chứng chỉ tự ký trần, và không bao giờ để người dùng bấm bỏ qua cảnh báo của trình duyệt. Chứng chỉ
+gốc của một CA nội bộ hoặc CA riêng được cài là đáng tin cậy trên mọi máy trạm và thiết bị Scan Station, thông qua quản
+lý thiết bị của công ty hoặc làm thủ công. Người đã cài chứng chỉ là người gia hạn nó; `check.sh` cảnh báo 21 ngày trước
+khi chứng chỉ mà nó thấy hết hạn. Để đọc ngày hết hạn từ bất kỳ máy tính nào:
 
 ```sh
 openssl s_client -connect <host>:443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout -subject -enddate
 ```
 
-Các bước theo nền tảng nằm ở `deployment/SYNOLOGY_NAS.md` §5 và `deployment/VPS.md` §4.
+#### Giới hạn yêu cầu, giới hạn tần suất và các câu trả lời từ `web`
 
-#### Tách biệt environment
-
-Production dùng Compose project, database volume, thư mục secret, hostname và vị trí backup (`PARTFLOW_BACKUP_DIR`)
-riêng; không thứ nào trong số đó được dùng chung với hoặc trỏ tới một stack staging hay development.
-
-- Production bắt đầu từ một database volume mới, rỗng, rồi migration, rồi first-run setup. Dữ liệu staging hoặc
-  development không bao giờ được gắn vào, dùng lại hay copy vào đó.
-- Một lần restore có chủ đích vào production theo `deployment/OPERATIONS_RUNBOOK.md` §6 path 3 hoặc quy trình host
-  failure của §8 (restore sang instance mới), và phê duyệt của owner được ghi lại trước khi `backend` khởi động.
-- Staging do công cụ Deployment Admin `pf` quản lý không được cài trên Docker daemon của production, và `release.sh`
-  từ chối khi có project `partflow-staging` ở đó. Staging thủ công bằng `compose.yaml` của
-  `deployment/SYNOLOGY_NAS.md` §4 được dừng, xóa container và **giữ lại** volume, trước khi production khởi động.
-- `PARTFLOW_SITE_TIMEZONE` bằng giá trị của staging (§6).
-- Không bao giờ chạy `down -v`, hoặc xóa volume, trên production project: việc đó xóa database.
-
-#### Lệnh của operator
-
-| Mục đích | Lệnh |
-| --- | --- |
-| Preflight (§6, tách biệt environment) | `docker ps -a --format '{{.Label "com.docker.compose.project"}}' \| sort -u` không liệt kê `partflow-staging` |
-| Validate configuration | `$PF config --quiet` |
-| Build một release (tag và commit trong shell; cách dùng duy nhất của file build) | `PARTFLOW_RELEASE=<new> PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build` |
-| Khởi động database | `$PF up -d db` |
-| Áp migration và grant (một lần mỗi release, khi `backend` đã dừng) | `PARTFLOW_RELEASE=<new> $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" migrate (--pre-release-backup NAME --backup-not-before UTC \| --no-backup-reason TEXT)` (lần cài đầu: tag đã có trong `.env.production`) |
-| Lấy backup (hằng ngày, thủ công) | `deploy/production/backup.sh --kind daily --operator … --keep-daily N --keep-weekly N` · `--kind manual --operator … --reason …` (`OPERATIONS_RUNBOOK.md` §3) |
-| Verify một backup, hoặc xem trước việc dọn backup theo retention | `$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-verify NAME` · `… backup-tools backup-rotate --keep-daily N --keep-weekly N --dry-run` |
-| Restore drill trong một project cô lập | `deploy/production/restore-test.sh --backup NAME --operator …` (`OPERATIONS_RUNBOOK.md` §4) |
-| Tạo hoặc sửa database role; đặt hoặc xoay vòng password của chúng | `$PF --profile ops run --rm -T db-roles` (= `provision-roles`) |
-| Áp grant ngoài một lần migrate (sau restore, hoặc để sửa sai lệch) | `$PF --profile ops run --rm -T db-roles apply-grants` |
-| Check toàn vẹn guard (reconcile check (h), bằng `partflow_app`) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile --check h` |
-| Privilege probe (bằng chứng; một lần gọi cho mỗi bảng và câu lệnh, không dòng nào, được rollback) | `$PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN -c "SET LOCAL ROLE partflow_app" -c "UPDATE part_movements SET id = id WHERE false" -c ROLLBACK'` (bị từ chối = stderr có `permission denied for table <t>`; được phép = stdout có `UPDATE 0` và không có `ERROR`; các biến được mở rộng bên trong `db`) |
-| Release (toàn bộ trình tự của §7) | `deploy/production/release.sh --release <new> --operator … --approver … [--pre-release-backup NAME \| --no-backup-reason TEXT]` |
-| Smoke check cho release đang chạy | `deploy/production/smoke.sh --release <tag>` |
-| Revision mong đợi và database revision, readiness | `$PF run --rm --no-deps -T backend python -m app.cli revision` |
-| Khởi động hoặc tạo lại application | `$PF up -d backend web` |
-| Trạng thái và log | `$PF ps` · `$PF logs --since=15m backend web db` |
-| Health (readiness: release, schema, revision) qua `web` trên host | `curl --fail --silent --show-error http://127.0.0.1:${PARTFLOW_HTTP_PORT}/api/health` · liveness: `…/api/health/live` |
-| Reconciliation (cả khi `backend` đang dừng) | `$PF run --rm --no-deps -T backend python -m app.cli reconcile` |
-| Diễn tập identity của một candidate image (check (j)) | `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j` |
-| Lệnh khôi phục | `$PF run --rm --no-deps backend python -m app.cli reset-password …` · `… restore-correction-permission-management …` |
-| Write freeze | `$PF stop backend` (có thể chờ tới 200 s khi một lần import đang hoàn tất, và các request gửi trong lúc đó treo tới 60 s, xem Mô hình process và lần chạy đầu: bắt đầu khi không có lần import nào đang chạy) · mở lại bằng `$PF up -d backend` trên cùng release; ở lần chuyển release, việc mở lại là bước chuyển `web` của `release.sh` (§7) |
-| First-run setup | `PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`, đọc token bằng `$PF logs backend \| grep "Setup token"`, hoàn tất setup, rồi `$PF up -d backend` |
-
-## 4. Quyết định nền tảng
-
-| Nền tảng | Mức phù hợp | Vai trò khuyến nghị |
+| Route | Request body lớn nhất | Thời gian chờ `backend` dài nhất |
 | --- | --- | --- |
-| Synology NAS với Container Manager | Tốt cho triển khai nội bộ nhỏ khi model hỗ trợ các container cần thiết và NAS có lưu trữ, bộ nhớ, giám sát đáng tin cậy, có nguồn điện liên tục (UPS) và backup đã kiểm thử | Production hiện tại (quyết định của owner 2026-11-09, §1) |
-| Linux VPS | Đích portable tốt nhất về lâu dài | Hướng nâng cấp ưu tiên cho production, truy cập từ xa, kiểm soát Docker ổn định và khôi phục off-site độc lập |
-| Shared hosting như Hawk Host | Có điều kiện và không dùng ngay được | Chỉ dùng nếu nhà cung cấp chứng minh hỗ trợ process ASGI/FastAPI native, PostgreSQL, routing cần thiết, migration, job và các cơ chế khôi phục; nếu không thì chọn VPS |
+| Mọi route `/api` khác | 1 MiB | 60 s |
+| `PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image` | 4 MiB | 60 s |
+| `POST /api/work-orders/import/preview` | 4 MiB | 60 s |
+| `POST /api/work-orders/import` | 4 MiB | 180 s |
 
-Chuyển từ Synology sang VPS là triển khai lại một release cộng với một lần backup và restore PostgreSQL đã verify,
-không phải viết lại application.
+Giới hạn 4 MiB cao hơn các giới hạn riêng của ứng dụng (ảnh 2 MiB, tệp import 1 MiB), nên ứng dụng tự trả lời một tệp quá
+lớn hợp lý. Lần import lớn nhất được phép, 2,000 Work Order, mất khoảng nửa phút. `web` không bao giờ thử lại một yêu
+cầu, nên một yêu cầu của người dùng là nhiều nhất một lần thực thi ở backend.
 
-## 5. Yêu cầu khi go-live
+**Giới hạn tần suất (rate limit), theo từng địa chỉ client.** `POST /api/session` (đăng nhập) cho phép 10 mỗi phút với
+burst 5. `PUT /api/session/password`, `POST /api/setup/administrator` và `PUT /api/users/{user_id}/password` cho phép 5
+mỗi phút với burst 4. Các thao tác đọc và đăng xuất không bao giờ bị giới hạn. Một mã 429 từ `web` không bao giờ đến
+được ứng dụng, nên nó không bao giờ được tính là đăng nhập thất bại và không bao giờ khóa tài khoản. Mã đăng ký thiết bị
+(device enrollment code) không bị giới hạn tần suất (50 bit entropy, có hiệu lực 15 phút).
 
-Không có pilot và không có danh sách release gate (quyết định của owner 2026-11-09, §1); không mục nào trong phần này
-chặn việc dùng thật hay một release. Danh sách đầu là những gì phần mềm cần để chạy được. Danh sách sau bảo vệ dữ liệu
-của xưởng và được thiết lập sau go-live, khi tiện.
+`web` chỉ trả lời cho các tình huống mà chính nó phát hiện; mọi câu trả lời của ứng dụng đi qua nguyên vẹn:
 
-### Cần để phần mềm chạy được
+| Status | Khi nào | Thông báo (`detail`) | Ý nghĩa |
+| --- | --- | --- | --- |
+| 413 | Body lớn hơn mức route cho phép. | `This request is too large for PartFlow. Nothing was changed.` (`request_too_large: true`) | Chắc chắn bị từ chối. |
+| 429 | Vượt giới hạn tần suất; gửi `Retry-After: 60`. | `Too many attempts from this computer. Wait a minute, then try again. Nothing was changed.` (`rate_limited: true`) | Chắc chắn bị từ chối. |
+| 502 | Không kết nối được `backend`, hoặc `backend` đóng kết nối trước khi trả lời. | `The PartFlow server did not complete the request. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | Kết quả không xác định đối với một thay đổi. |
+| 504 | `backend` không trả lời kịp thời. | `The PartFlow server did not answer in time. If you were saving a change, check whether it was saved before repeating it.` (`server_unavailable: true`) | Kết quả không xác định đối với một thay đổi. |
 
-- **HTTPS ở platform proxy.** `compose.production.yaml` cố định `SESSION_COOKIE_SECURE=true`, nên browser chỉ giữ
-  cookie đăng nhập qua HTTPS, và chỉ publish `web` trên `127.0.0.1`, nên platform reverse proxy là lối vào duy nhất
-  (§3.1, Yêu cầu đối với platform proxy; thiết lập DSM nằm ở `deployment/SYNOLOGY_NAS.md` §5.2). Proxy phải nhận
-  request body ít nhất 5 MiB và dùng timeout ít nhất 300 s, nếu không thì upload ảnh và import Work Order sẽ lỗi; lần
-  import lớn nhất cho phép, 2.000 Work Order, mất khoảng nửa phút. Mọi workstation và Scan Station phải tin
-  certificate (§3.1, Quy trình certificate).
-- **First-run setup** với một backend worker cho đến khi có Administrator đầu tiên (§7 bước 8; setup token nằm trong
-  log backend), rồi enroll từng thiết bị Scan Station ở Administration → Scan Stations. Enrollment code và device
-  token là bearer credential: giống session cookie, chúng chỉ được truyền qua HTTPS. Thiết bị bị mất hoặc ngừng
-  dùng phải được revoke tại đó.
-- **Không có Compose project `partflow-staging` trên Docker daemon của production.** `release.sh` từ chối chạy khi
-  còn project đó (§3.1, Tách biệt environment). Hãy thử thay đổi trên workstation.
-- **Release từ git tag.** `release.sh` chỉ build đúng tag đang checkout (đặt tên theo §10.2) với build input không
-  đổi, và cần `--operator` và `--approver`; một người có thể ghi cùng một tên cho cả hai. Mặc định nó lấy một backup
-  đã verify trước mỗi release.
+Một lệnh Scan Station có thể đã được lưu được hiển thị là không xác định và được thử lại với `device_event_id` ban đầu
+của nó (runbook §2). Các màn hình hiển thị một thông báo dựng sẵn cho mã 413 hoặc 429 không có JSON body, ví dụ mã đến từ
+reverse proxy. `web` không thêm header chia sẻ tài nguyên giữa các nguồn (cross-origin resource sharing, CORS) nào.
 
-### Nên làm sau go-live
+**Caching và các header bảo mật.** `index.html` và mọi route của ứng dụng một trang (single-page application) là
+`no-cache`; các tệp dưới `/assets/` được cache một năm, và một asset bị thiếu chỉ là 404 thuần. Mọi response mang
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` và một `Content-Security-Policy` chỉ cho phép origin của
+PartFlow cho script, style, kết nối và frame, cộng thêm ảnh `blob:` và `data:` cho phần xem trước ảnh cục bộ, và không có
+script nội tuyến. Một tính năng cần nguồn khác phải thay đổi chính sách này trong cùng thay đổi. HTTP Strict Transport
+Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
 
-Mỗi mục là một platform task hoặc một lệnh; chi tiết nằm ở `deployment/OPERATIONS_RUNBOOK.md`.
+#### Log
 
-- Task `backup.sh` hằng ngày và một bản sao mã hóa ngoài host (OPERATIONS_RUNBOOK §3). Cho đến khi task này chạy,
-  backup duy nhất là các backup `release.sh` lấy trước mỗi release.
-- Một lần chạy `restore-test.sh` có đo thời gian, để biết backup restore được và mất bao lâu (OPERATIONS_RUNBOOK §4).
-- `check.sh` mỗi 15 phút và `scheduled-reconcile.sh` hằng ngày, kèm failure notification của nền tảng
-  (OPERATIONS_RUNBOOK §9 và §7).
-- Firewall chỉ cho các mạng của xưởng truy cập, giờ của host chính xác, và có UPS.
-- Cập nhật bảo mật có kiểm soát cho DSM, Container Manager và các base image.
+- **Request id.** Mỗi response mang một id trong `X-Request-ID`. Giá trị của client gồm 1 đến 64 ký tự `A-Za-z0-9._-`
+  được giữ lại; nếu không thì một giá trị được sinh ra. `web` truyền nó cho backend, và mọi bản ghi log của yêu cầu đó
+  mang nó dưới dạng `request_id`.
+- **Log của `web`.** Một bản ghi JSON cho mỗi yêu cầu: địa chỉ client, method, path không kèm query string, status,
+  số byte, thời lượng, status của upstream, user agent và `request_id`. Các lần thăm dò sức khỏe không được ghi log.
+- **Log của backend.** Một dòng JSON cho mỗi bản ghi trên standard error: `ts`, `level`, `logger`, `message`,
+  `request_id`, rồi các trường riêng của bản ghi. Một traceback không bao giờ chứa thông báo lỗi database, nên không câu
+  lệnh hay giá trị nào lọt vào log.
+- **Bản ghi ứng dụng (`app.access`).** Được ghi ở mức `INFO` cho một thay đổi, cho một lần từ chối có chủ đích
+  (`not_ready`, `release_mismatch`, `password_check_busy`, kiểm tra hợp lệ, phân quyền) và cho một thao tác đọc mất một
+  giây trở lên (`"slow":true`); ở mức `ERROR` cho một lỗi; ở mức `DEBUG` cho một lần thăm dò sức khỏe hoặc một thao tác
+  đọc nhanh. Các trường của nó là `event`, `method`, `route`, `status`, `duration_ms`, `client`, `outcome` (`ok`,
+  `created`, `replayed`, `refused` hoặc `error`), `slow`, `refusal` (`type`, `code`, `message`) và `context`: Part
+  Number, QuantityFlow, số lượng, Area, Operation, Machine, Work Order, Work Order Demand, `device_event_id`, Scan
+  Station, `user_id` và `worker_id` mà yêu cầu nêu tên. `worker_id` chỉ xuất hiện khi lệnh đã đến bước xác định danh
+  tính; Worker của một lệnh được phát lại nằm trong Movement của nó.
+- **Không bao giờ ghi log:** cookie, query string, các header của PartFlow, request body, token, badge, mật khẩu và các
+  giá trị đã quét. Setup token của thiết lập lần đầu là ngoại lệ duy nhất đã được thông báo.
+- **Dung lượng.** Mỗi container giữ tối đa 5 tệp log 10 MiB. Để ước chừng, 1,000 lệnh production ghi khoảng 1.1 MB log
+  backend và 0.6 MB log `web`, và mỗi board hoặc màn hình Tracking đang mở thêm một bản ghi `web` mỗi 15 s, nên log chỉ
+  bao phủ được ít ngày hơn trên một bản cài đặt bận rộn (runbook §2).
 
-Check "Hot list entries are active demand" (reconcile check (i), `deployment/OPERATIONS_RUNBOOK.md` §7) chạy query Hot
-list dưới đây. Trên database bình thường query không trả về dòng nào; mỗi dòng trả về là một Hot list entry không còn
-active, được gỡ ở Management → Priority:
-`SELECT d.id, d.priority_rank FROM work_order_demands d JOIN work_orders w ON w.id = d.work_order_id WHERE d.priority_rank IS NOT NULL AND (w.completed_at IS NOT NULL OR d.requested_quantity <= d.allocated_quantity);`
+#### Script và giám sát
 
-## 6. Tách biệt environment
+| Script trong `deploy/production/` | Mục đích | Quy trình |
+| --- | --- | --- |
+| `release.sh` | Cài một bản phát hành mới: sao lưu, build, migration, chuyển đổi và kiểm tra. | runbook §5 |
+| `smoke.sh` | Kiểm tra một bản phát hành đang chạy thông qua `web` trên port loopback. | runbook §5 |
+| `backup.sh` | Tạo, xác minh và xoay vòng một bản sao lưu. | runbook §3 |
+| `restore-test.sh` | Khôi phục một bản sao lưu vào một stack dùng một lần và kiểm tra nó. | runbook §4 |
+| `check.sh` | Được trình lập lịch của máy chủ chạy mỗi 15 phút, và thông báo lỗi của trình lập lịch chính là cảnh báo. Nó kiểm tra readiness qua HTTPS, chứng chỉ, các container, số lần restart, lỗi backend, các ổ đĩa và báo cáo `status` chỉ đọc, không bao giờ thay đổi gì, và thoát với mã khác 0 khi có điều cần báo cáo. | runbook §2 |
+| `scheduled-reconcile.sh` | Chạy đối soát đầy đủ mỗi ngày một lần, sau bản sao lưu hằng ngày. | runbook §7 |
+| `reconcile_regression.py`, `monitor_report.py` | Các helper mà script gọi; không bao giờ chạy bằng tay. | — |
 
-Dùng database, secret, URL và vị trí backup riêng cho:
+Theo mặc định, `check.sh` báo lỗi khi bản sao lưu mới nhất cũ hơn 26 giờ, một ổ đĩa còn dưới 15 % dung lượng trống,
+chứng chỉ hết hạn trong vòng 21 ngày, một container đã restart, hoặc `backend` ghi log một lỗi mới; một lỗi không đổi
+được báo lại sau 6 giờ.
 
-- `development`: chỉ dữ liệu của developer;
-- `staging`: dữ liệu giả hoặc đã làm sạch, dùng để diễn tập release;
-- `production`: dữ liệu của xưởng đã được phép.
+## 4. Chọn máy chủ
 
-Không bao giờ restore dữ liệu production vào development khi chưa được phép rõ ràng và chưa làm sạch. Không bao giờ cho
-staging và production trỏ tới cùng một database. Các quy tắc cho production nằm ở §3.1, Tách biệt environment.
+| Máy chủ | Mức phù hợp | Vai trò |
+| --- | --- | --- |
+| Synology NAS với Container Manager | Tốt cho một bản cài đặt nội bộ nhỏ khi NAS có lưu trữ đáng tin cậy, đủ bộ nhớ, bộ lưu điện (UPS), giám sát và các bản sao lưu đã được kiểm thử | Production hiện nay |
+| Linux VPS | Mục tiêu dễ di chuyển nhất, với khả năng điều khiển Docker dự đoán được và khả năng phục hồi độc lập ngoài địa điểm | Con đường nâng cấp khi NAS không còn đủ hoặc cần một máy chủ bên ngoài |
+| Shared hosting như Hawk Host | Có điều kiện và không phải là sự thay thế trực tiếp | Chỉ khi nhà cung cấp chứng minh được mọi yêu cầu của `deployment/SHARED_HOSTING.md`; nếu không thì dùng VPS |
 
-Mọi environment đặt `SITE_TIMEZONE` (tên múi giờ IANA như `America/Los_Angeles`; `UTC` khi không đặt) theo múi giờ lịch
-của xưởng; production stack đặt nó từ `PARTFLOW_SITE_TIMEZONE`. Backend validate giá trị này khi khởi động và dùng nó,
-không bao giờ dùng giờ local của browser, để ghi ngày hoàn thành của Work Order (do đó cả Done range lẫn kết quả đúng
-hạn hay trễ hạn của lịch sử đã hoàn thành) và ngày nhận mặc định của Work Order mới và Work Order được import. Staging
-và production phải dùng cùng một giá trị.
+Chuyển từ NAS sang VPS là cài đặt lại cùng bản phát hành cộng với một bản sao lưu đã xác minh và khôi phục (§8), không
+phải viết lại ứng dụng.
 
-## 7. Luồng triển khai chung
+## 5. Yêu cầu để đưa vào sử dụng (go-live)
 
-Mọi nền tảng theo cùng thứ tự release. `deploy/production/release.sh` và `smoke.sh` thực hiện các bước 5 đến 11 và lấy
-pre-release backup của bước 4 (§3.1, Release); các lệnh thủ công và điểm quyết định nằm ở
-[`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §5.
+Không có pilot và không có danh sách cổng phát hành (§1.4). Danh sách đầu tiên là những gì PartFlow cần để hoạt động
+được; danh sách thứ hai bảo vệ dữ liệu nhà máy và được thiết lập sau go-live, khi thuận tiện.
 
-1. Chọn và ghi lại một release tag và commit bất biến theo §10.
-2. Kiểm tra CI đã pass cho đúng commit đó.
-3. Đọc migration note từ release đang chạy đến release đích.
-4. Kiểm tra backup mới nhất và lấy một pre-release backup mới. `release.sh` lấy backup này, đã verify, bên trong write
-   freeze khi có migration đang chờ (bước 6), và `migrate` từ chối một backup cũ, của database khác hoặc bị sửa đổi
-   (`deployment/OPERATIONS_RUNBOOK.md` §3 và §5).
-5. Build image đích mà không thay thế release đang chạy; `release.sh` build candidate và không bao giờ chạm vào release
-   đang chạy.
-6. Khi có migration đang chờ, vào write freeze bằng cách dừng `backend` (`deployment/OPERATIONS_RUNBOOK.md` §5).
-7. Chạy migration đúng một lần và giữ output. `migrate` áp nó trong một transaction, từ chối khi `backend` đang kết nối
-   và từ chối thay đổi schema không transactional.
-8. Chuyển application. `backend` khởi động trước trên release mới trong khi `web` vẫn phục vụ bundle trước, nên write
-   gate từ chối các lần ghi từ những trang đang mở; sau khi health check đạt, `web` được chuyển và write mở lại. Với
-   database chưa có Administrator, khởi động backend với một worker (`PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend`,
-   để chỉ có một setup token, §3.1), hoàn tất first-run setup (setup token nằm trong log backend) trước khi mở truy
-   cập, rồi khởi động lại với số worker đã cấu hình (`$PF up -d backend`). Sau đó enroll từng thiết bị Scan Station
-   (Administration → Scan Stations).
-9. Chạy smoke check cho health, API, giao diện người dùng, authorization, scan-focus và ghi rồi đọc lại, bằng dữ liệu
-   test được chỉ định.
-10. Chạy các check reconciliation về số lượng và Movement. `release.sh` chạy reconciliation trước và sau release; một
-    check thất bại sau lần chuyển sẽ dừng `backend` lại.
-11. Ghi lại release đã deploy, migration head, operator, thời gian và kết quả (`release.sh` ghi `record.json`).
-12. Giữ release trước và pre-release backup cho đến hết observation window.
+### Cần để PartFlow hoạt động
 
-## 8. Hướng dẫn theo nền tảng
+- **HTTPS tại reverse proxy.** Production stack đánh dấu cookie đăng nhập là secure, nên trình duyệt chỉ giữ nó qua
+  HTTPS, và nó chỉ công bố `web` trên `127.0.0.1`, nên reverse proxy là lối vào duy nhất. Proxy phải chấp nhận request
+  body ít nhất 5 MiB và chờ ít nhất 300 s, và mọi máy trạm cùng Scan Station phải tin cậy chứng chỉ (§3.1, Platform proxy
+  requirements và Certificate requirements).
+- **Thiết lập lần đầu** với một backend worker cho đến khi Administrator đầu tiên tồn tại (§3.1, Backend processes và
+  first-run setup), sau đó mỗi thiết bị Scan Station được đăng ký trong Administration → Scan Stations. Mã đăng ký và
+  token thiết bị là thông tin xác thực bearer: giống cookie phiên, chúng chỉ đi qua HTTPS. Hãy thu hồi một thiết bị bị
+  mất hoặc đã ngừng dùng tại đó.
+- **Không có Compose project `partflow-staging` trên Docker daemon production** (§6).
+- **Bản phát hành từ một git tag.** `release.sh` chỉ cài tag đang được checkout, được đặt tên như §10.2 mô tả, với đầu
+  vào build không bị thay đổi, và nó cần tên của một người vận hành và một người phê duyệt. Theo mặc định, nó tạo một
+  bản sao lưu đã xác minh trước mỗi bản phát hành.
 
-- [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md): staging và production trên Synology NAS của công ty.
-- [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md): công cụ Deployment Admin `pf` cho staging; §1 của
-  tài liệu đó ghi mục tiêu thiết kế controller tái sử dụng đã lên kế hoạch.
-- [`deployment/VPS.md`](./deployment/VPS.md): production trên một Linux VPS.
-- [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md): các điều kiện để dùng shared hosting.
-- [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md): vận hành hằng ngày.
+### Khuyến nghị sau go-live
 
-## 9. Tài liệu tham khảo nền tảng bên ngoài
+Mỗi mục là một tác vụ trong hướng dẫn theo nền tảng; các quy trình nằm trong runbook.
 
-Các tài liệu này mô tả khả năng của nền tảng, không phải mức sẵn sàng của PartFlow:
+- Sao lưu hằng ngày và một bản sao được mã hóa ngoài máy chủ (runbook §3). Cho đến khi nó chạy, các bản sao lưu duy nhất
+  là những bản mà `release.sh` tạo trước mỗi bản phát hành.
+- Một lần diễn tập khôi phục có bấm giờ, để biết rằng một bản sao lưu khôi phục được và mất bao lâu (runbook §4).
+- `check.sh` mỗi 15 phút và `scheduled-reconcile.sh` hằng ngày, cùng thông báo lỗi của trình lập lịch (runbook §2 và
+  §7).
+- Quy tắc tường lửa chỉ cho phép các mạng dự định, giờ máy chủ chính xác, và có UPS bảo vệ.
+- Cập nhật bảo mật có kiểm soát cho máy chủ, cho Docker và cho các base image.
 
-- [Synology Container Manager](https://www.synology.com/en-us/dsm/feature/container-manager) mô tả các Project nhiều
-  container từ file Compose.
-- [Synology Container Manager Project help](https://kb.synology.com/en-us/DSM/help/ContainerManager/docker_project?version=7)
-  là tài liệu giao diện để tạo và vận hành một Project.
+### Kiểm tra Hot list
+
+Kiểm tra "Hot list entries are active demand" (kiểm tra đối soát (i)) chạy truy vấn dưới đây. Trên một database lành mạnh
+nó không trả về dòng nào; một dòng được trả về là một mục Hot list mà demand của nó không còn active, và mục đó được gỡ
+trong Management → Priority:
+
+```sql
+SELECT d.id, d.priority_rank FROM work_order_demands d JOIN work_orders w ON w.id = d.work_order_id WHERE d.priority_rank IS NOT NULL AND (w.completed_at IS NOT NULL OR d.requested_quantity <= d.allocated_quantity);
+```
+
+## 6. Tách biệt các môi trường
+
+Các môi trường của PartFlow không bao giờ dùng chung database, bí mật, tên miền truy cập (host name) hay thư mục sao lưu:
+
+- **Development** chạy trên một máy trạm với `compose.yaml` và chỉ dữ liệu của lập trình viên. Đây cũng là nơi một bản
+  phát hành mới được thử trước production ([`README.vi.md`](../README.vi.md) ở thư mục gốc).
+- **Staging** là tùy chọn và chỉ chứa dữ liệu tổng hợp hoặc đã được làm sạch. Nó không bao giờ chạy trên Docker daemon
+  của máy chủ production. Công cụ Deployment Admin `pf` có thể quản lý một instance staging trên máy chủ khác
+  ([`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)).
+- **Production** chạy trên máy chủ production với `compose.production.yaml` và dữ liệu thật của nhà máy. Nó có Compose
+  project, volume database, thư mục bí mật, tên miền truy cập và thư mục sao lưu riêng.
+
+Quy tắc:
+
+- Không bao giờ cho hai môi trường trỏ vào cùng một database, và không bao giờ sao chép dữ liệu production vào
+  development mà không có sự phê duyệt rõ ràng của owner và một bản sao đã được làm sạch.
+- Production bắt đầu từ một database mới, trống. Một lần khôi phục có chủ đích vào production theo runbook §6 (đường 3,
+  hoặc khôi phục sang bản cài mới (new-instance restore) sau khi máy chủ hỏng), với sự phê duyệt của owner được ghi lại
+  trước khi `backend` khởi động.
+- Không có stack PartFlow thứ hai nào chạy trên Docker daemon production. `release.sh` từ chối chạy khi ở đó có Compose
+  project `partflow-staging`.
+- Mỗi môi trường đặt múi giờ của nhà máy: `SITE_TIMEZONE` trong development (tên IANA như `America/Los_Angeles`; `UTC`
+  khi không đặt) và `PARTFLOW_SITE_TIMEZONE` trong production. Backend từ chối một tên không xác định khi khởi động. Nó
+  dùng múi giờ này, không bao giờ dùng giờ cục bộ của trình duyệt, để xác định ngày hoàn thành Work Order (và do đó là
+  khoảng Done cùng kết quả đúng hạn hay trễ hạn) và ngày nhận mặc định của các Work Order mới và được import. Hãy dùng
+  cùng một giá trị ở mọi nơi.
+
+## 7. Một bản phát hành đến production như thế nào
+
+Mọi bản phát hành đều theo cùng một thứ tự. `deploy/production/release.sh` tự thực hiện các bước 4 đến 11, trừ các kiểm tra
+thủ công của bước 9; quy trình, các tùy chọn của nó và việc cần làm khi nó dừng nằm trong runbook §5. Không bao giờ
+cài đặt từ một branch hoặc bằng trình cập nhật tự động: mỗi bản phát hành là một tag được cài đặt có chủ đích.
+
+1. Chọn tag phát hành và commit của nó (§10).
+2. Kiểm tra rằng tích hợp liên tục đã đạt cho đúng commit đó.
+3. Đọc những gì đã thay đổi kể từ bản phát hành đang chạy, đặc biệt là các migration database.
+4. Tạo một bản sao lưu đã xác minh ngay trước khi thay đổi; nếu có migration đang chờ, tạo nó bên trong tạm dừng ghi.
+5. Build các image mới mà không đụng đến các image đang chạy.
+6. Bắt đầu tạm dừng ghi khi có migration đang chờ.
+7. Chạy migration một lần, trong một transaction, và giữ báo cáo của nó.
+8. Khởi động `backend` mới trong khi `web` vẫn phục vụ các màn hình cũ (các thao tác ghi của chúng bị từ chối), rồi
+   chuyển `web`, việc này mở lại việc ghi.
+9. Chạy các kiểm tra nhanh sau khi chuyển (smoke checks, `smoke.sh`), rồi kiểm tra thủ công bằng dữ liệu thử: đăng nhập
+   và phân quyền, quét tại một Scan Station, và một thay đổi được lưu rồi đọc lại.
+10. Chạy đối soát trước và sau thay đổi; một phát hiện (finding) mới sau khi chuyển sẽ dừng `backend` lần nữa.
+11. Ghi lại bản phát hành, migration, người vận hành, thời gian và kết quả.
+12. Giữ các image của bản phát hành trước và bản sao lưu cho đến khi bạn chắc chắn sẽ không quay lui.
+
+## 8. Chuyển sang máy chủ khác
+
+Một lần chuyển (ví dụ từ NAS sang VPS) cài đặt lại **cùng** bản phát hành trên máy chủ mới và khôi phục một bản sao lưu
+cuối cùng được tạo bên trong tạm dừng ghi trên máy chủ cũ. Hai bản cài đặt không bao giờ được nhận thao tác ghi cùng
+lúc. Quy trình nằm trong runbook §6 (Moving to another host).
+
+## 9. Tham chiếu bên ngoài
+
+Các tham chiếu này mô tả khả năng của nền tảng, không phải mức sẵn sàng của PartFlow:
+
+- [Synology Container Manager](https://www.synology.com/en-us/dsm/feature/container-manager) và
+  [Project help](https://kb.synology.com/en-us/DSM/help/ContainerManager/docker_project?version=7) của nó.
+- [Synology Login Portal and reverse proxy help](https://kb.synology.com/en-in/DSM/help/DSM/AdminCenter/system_login_portal_advanced).
+- [Cloudflare Origin CA](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/) và
+  [Origin Rules](https://developers.cloudflare.com/rules/origin-rules/).
 - [Hawk Host Python application guide](https://www.hawkhost.com/kb/programming/python/how-to-create-python-application/)
-  mô tả triển khai Python qua `mod_passenger`; tự nó không chứng minh khả năng tương thích ASGI/FastAPI native.
-- [Hawk Host remote PostgreSQL guide](https://www.hawkhost.com/kb/web-hosting/how-do-i-allow-remote-postgresql-connections/)
-  xác nhận PostgreSQL có trong môi trường đó và truy cập từ xa cần bộ phận hỗ trợ của nhà cung cấp đưa vào whitelist;
-  vẫn phải xác nhận khả năng của từng gói trước khi chọn shared hosting.
+  và [remote PostgreSQL guide](https://www.hawkhost.com/kb/web-hosting/how-do-i-allow-remote-postgresql-connections/)
+  (`deployment/SHARED_HOSTING.md` giải thích vì sao chúng không chứng minh được tính tương thích).
 
-## 10. Release và Versioning
+## 10. Phát hành và đánh phiên bản
 
-Mục này sở hữu quy tắc đặt tên release, release note và checklist phát hành của PartFlow. Một release là một ứng viên
-triển khai có thể truy vết, không phải bằng chứng sẵn sàng cho production; nó được triển khai như §7 mô tả.
+Phần này sở hữu quy tắc đặt tên bản phát hành, ghi chú phát hành và danh sách kiểm tra công bố của PartFlow. Một bản
+phát hành là một ứng viên có thể truy vết để triển khai, không phải bằng chứng rằng nó sẵn sàng cho production; nó được
+cài như §7 mô tả.
 
-### 10.1 Định danh release
+### 10.1 Định danh bản phát hành
 
-Dùng một application release chung cho frontend, backend và migration, tất cả từ cùng một commit. Ghi lại Git tag và
-commit SHA đầy đủ của nó. Alembic revision định danh database schema một cách riêng; package metadata không phải lịch
-sử release. Release identity được nhúng vào cả hai production image và được `GET /api/health` báo (`release`,
-`commit`) (§3.1, Health và release identity).
+Một bản phát hành bao gồm frontend, backend và các migration, tất cả từ cùng một commit. Hãy ghi lại git tag và commit
+đầy đủ của nó. Các revision Alembic xác định schema database một cách riêng, và metadata của package không phải là lịch
+sử phát hành. Cả hai image production đều mang bản phát hành, và `GET /api/health` báo nó (`release`, `commit`).
 
-Tạo release cho một phiên bản được chọn để test hoặc triển khai, không phải cho mọi commit. Triển khai lại cùng phiên
-bản không cần release mới. Không bao giờ di chuyển, ghi đè hoặc dùng lại tag của một release đã phát hành, hay thay
-build artifact đã phát hành của nó. Nội dung release thay đổi cần một version mới.
+Hãy tạo một bản phát hành cho một phiên bản được chọn để kiểm thử hoặc triển khai, không phải cho mọi commit. Cài lại
+cùng một phiên bản không cần bản phát hành mới. Không bao giờ di chuyển, ghi đè hay dùng lại một tag phát hành đã công
+bố, và không bao giờ thay các tệp đã công bố của nó: nội dung thay đổi cần một phiên bản mới.
 
-Dùng tag theo version, không dùng `Stage`, `Production`, `Latest` hay số phase. Các tag không theo version đã có có thể
-giữ làm mốc lịch sử, nhưng không được trở thành đích triển khai di động. Environment và mục đích nằm trong release
-note.
+Hãy dùng các tag có phiên bản, không dùng `Stage`, `Production`, `Latest` hay số của phase. Các tag hiện có theo dạng
+khác có thể được giữ như lịch sử nhưng không bao giờ trở thành mục tiêu triển khai di động. Môi trường và mục đích thuộc
+về ghi chú phát hành.
 
-### 10.2 Quy ước version
+### 10.2 Quy ước phiên bản
 
-Dùng [Semantic Versioning](https://semver.org/spec/v2.0.0.html) với tiền tố `v` viết thường cho Git tag:
-`vMAJOR.MINOR.PATCH`, có thể thêm `-alpha.N`, `-beta.N` hoặc `-rc.N`. Bắt đầu `N` từ 1 và không dùng số 0 ở đầu.
-`release.sh` từ chối một production release có tag không theo dạng này.
+Dùng [Semantic Versioning](https://semver.org/spec/v2.0.0.html) với tiền tố `v` viết thường cho git tag:
+`vMAJOR.MINOR.PATCH`, tùy chọn theo sau là `-alpha.N`, `-beta.N` hoặc `-rc.N`, trong đó `N` bắt đầu từ 1 và không có số
+0 đứng đầu. `release.sh` từ chối một bản phát hành production có tag theo dạng khác.
 
 | Tình huống | Ví dụ |
 | --- | --- |
-| Snapshot development nội bộ đầu tiên được chọn cho staging | `v0.1.0-alpha.1` |
-| Snapshot tiếp theo của cùng release đang dự kiến | `v0.1.0-alpha.2` |
-| Mốc development mới có phạm vi lớn hơn đáng kể | `v0.2.0-alpha.1` |
-| Đã triển khai phạm vi dự kiến; còn cần kiểm thử rộng hơn | `v0.2.0-beta.1` |
-| Ứng viên cho production release ổn định đầu tiên | `v1.0.0-rc.1` |
-| Production release ổn định đầu tiên | `v1.0.0` |
+| Bản chụp phát triển nội bộ đầu tiên được chọn để kiểm thử | `v0.1.0-alpha.1` |
+| Một bản chụp khác của cùng bản phát hành đã lên kế hoạch | `v0.1.0-alpha.2` |
+| Một cột mốc phát triển mới với phạm vi lớn hơn rõ rệt | `v0.2.0-alpha.1` |
+| Phạm vi dự định đã được hiện thực; vẫn còn kiểm thử rộng hơn | `v0.2.0-beta.1` |
+| Ứng viên cho bản phát hành production ổn định đầu tiên | `v1.0.0-rc.1` |
+| Bản phát hành production ổn định đầu tiên | `v1.0.0` |
 | Sửa lỗi tương thích sau `v1.0.0` | `v1.0.1` |
-| Bổ sung tính năng tương thích sau `v1.0.0` | `v1.1.0` |
-| Thay đổi phá vỡ contract được hỗ trợ sau `v1.x` | `v2.0.0` |
+| Tính năng mới tương thích sau `v1.0.0` | `v1.1.0` |
+| Thay đổi phá vỡ hợp đồng được hỗ trợ sau `v1.x` | `v2.0.0` |
 
-Đây là ví dụ, không phải tag dành sẵn hay chuỗi bắt buộc. Chọn version chưa dùng tiếp theo dựa trên lịch sử release
-thực tế và phạm vi thay đổi. Trước 1.0, tính tương thích không được bảo đảm, nhưng breaking change vẫn phải được ghi
-lại.
+Đây là các ví dụ, không phải tag được dành riêng hay một trình tự bắt buộc. Hãy chọn phiên bản chưa dùng tiếp theo dựa
+trên lịch sử phát hành thật và phạm vi của thay đổi. Trước 1.0, tính tương thích không được đảm bảo, nhưng các thay đổi
+phá vỡ vẫn được tài liệu hóa. Hợp đồng được hỗ trợ gồm hành vi API đã được tài liệu hóa cùng các yêu cầu về cấu hình và
+nâng cấp dữ liệu; chỉ một migration database không đòi hỏi phiên bản major mới, nhưng tác động tương thích của nó được
+đánh giá.
 
-Với PartFlow, contract được hỗ trợ gồm hành vi API đã được tài liệu hóa và các yêu cầu về configuration và nâng cấp dữ
-liệu. Riêng một database migration không bắt buộc tăng major; hãy đánh giá tác động của nó đến tính tương thích.
+`alpha`, `beta` và `rc` biểu thị độ chín muồi, không phải máy chủ. Hãy đánh dấu cả ba là GitHub pre-release và không bao
+giờ là bản phát hành ổn định mới nhất. Một hậu tố không bao giờ chứng minh rằng một kiểm tra triển khai đã đạt.
 
-`alpha`, `beta` và `rc` thể hiện mức độ hoàn thiện của release, không phải host triển khai. Đánh dấu cả ba là GitHub
-pre-release và không bao giờ chỉ định chúng là bản stable mới nhất. Có thể diễn tập một version stable trên staging
-trước production. Hậu tố không bao giờ chứng minh rằng việc kiểm tra triển khai đã đạt.
+### 10.3 Tiêu đề và mô tả bản phát hành
 
-### 10.3 Release title và description
-
-Dùng `PartFlow <tag>` kèm một mục đích ngắn tùy chọn, ví dụ `PartFlow v0.1.0-alpha.1 — Internal Staging`. Giữ release
-title và description bằng tiếng Anh trừ khi được yêu cầu rõ ràng khác đi.
-
-Với release đầu tiên, tóm tắt phạm vi đã triển khai. Với các release sau, mô tả thay đổi từ release trước được chọn
-đến đúng commit đích, không chỉ commit mới nhất hay kế hoạch phase. Không đưa vào công việc chưa commit.
-
-Dùng template description này, thay các placeholder bằng thông tin đã xác minh:
+Dùng tiêu đề `PartFlow <tag>` với một mục đích ngắn tùy chọn, ví dụ:
+`PartFlow v0.1.0-alpha.1 — Internal Staging`. Hãy viết tiêu đề và mô tả bản phát hành bằng tiếng Anh trừ khi được yêu cầu khác. Với bản phát hành đầu tiên,
+hãy tóm tắt phạm vi đã hiện thực; với các bản sau, hãy mô tả các thay đổi từ bản phát hành trước đến đúng commit đích,
+không bao giờ là công việc chưa commit. Dùng mẫu này và thay mọi placeholder bằng thông tin đã được xác minh:
 
 ```markdown
 ## Summary
@@ -813,60 +695,57 @@ summarize available functionality for an initial release.>
 identify pending or unverified checks explicitly.>
 ```
 
-Không bao giờ suy ra "No new migrations", tính tương thích hay kết quả validation thành công từ tên release; hãy kiểm
-tra khoảng revision và bằng chứng thực tế. Kết quả chưa biết giữ là `Pending` hoặc `Not verified` trong bản nháp và
-không bao giờ được báo là đã pass. Giữ kết quả smoke test trên NAS tách riêng khỏi kết quả CI. Không bao giờ đưa
-secret, credential hay chi tiết triển khai riêng tư vào release note public.
+Không bao giờ suy ra "No new migrations", tính tương thích hay một kiểm tra đã đạt từ tên bản phát hành: hãy kiểm tra
+khoảng revision và bằng chứng thực tế. Một kết quả chưa biết giữ là `Pending` hoặc `Not verified`. Hãy giữ kết quả smoke
+test trên máy chủ tách biệt với kết quả CI, và không bao giờ đưa bí mật, thông tin xác thực hay chi tiết triển khai
+riêng tư vào ghi chú phát hành công khai.
 
-### 10.4 Checklist phát hành
+### 10.4 Danh sách kiểm tra công bố
 
-1. Chọn đúng commit đích và release trước dùng để so sánh. Giải quyết mọi thay đổi chỉ có ở máy local trước khi chọn
-   source để phát hành.
-2. Kiểm tra trùng tag ở local và remote. Xác nhận CI của repo và các quality check liên quan đã pass cho đúng commit
-   đó; một lần chạy thành công cho commit khác không được tính.
-3. Rà soát thay đổi, migration, configuration, yêu cầu rollback và các giới hạn đã biết. Hoàn tất release note.
-4. Tạo annotated tag tại commit đã chọn, không phải tại đầu một branch đang di chuyển chưa được kiểm tra, và push đúng
-   tag đó.
-5. Trong GitHub Releases, tạo bản nháp release từ tag đã có. Nhập title và description, đặt cờ pre-release nhất quán
-   với §10.2, và đính kèm các build artifact dự định trước khi phát hành.
-6. Phát hành, rồi triển khai theo §7 và hướng dẫn của nền tảng, ghi lại tag, commit, database revision, operator, thời
-   gian và kết quả smoke test. Giữ release trước và các backup cần thiết.
+1. Chọn đúng commit đích và bản phát hành trước để so sánh. Giải quyết trước các thay đổi chỉ có ở máy cục bộ.
+2. Kiểm tra tag cục bộ và tag từ xa xem có trùng tên không. Xác nhận rằng CI và các kiểm tra chất lượng liên quan đã đạt
+   cho đúng commit đó; một lần chạy cho commit khác không được tính.
+3. Rà soát các thay đổi, migration, cấu hình, yêu cầu quay lui và các giới hạn đã biết, rồi hoàn thành ghi chú phát
+   hành.
+4. Tạo một annotated tag tại commit đã chọn (không bao giờ tại đầu một nhánh chưa được kiểm tra) và push tag đó.
+5. Trong GitHub Releases, soạn nháp một bản phát hành từ tag đã có: nhập tiêu đề và mô tả, đặt cờ pre-release như §10.2
+   nói, và đính kèm các tệp dự định.
+6. Công bố, rồi cài nó như §7 và hướng dẫn theo nền tảng mô tả, và giữ bản phát hành trước cùng các bản sao lưu của nó.
 
-Có thể chuẩn bị bản nháp trước khi validation hoàn tất. Phát hành release và triển khai nó là hai thao tác riêng; một
-yêu cầu chuẩn bị thông tin release không cho phép làm thao tác nào trong hai thao tác đó.
+Một bản nháp có thể được chuẩn bị trước khi các kiểm tra kết thúc. Công bố một bản phát hành và cài nó là hai thao tác
+riêng biệt, và một yêu cầu chuẩn bị thông tin phát hành không cho phép thao tác nào trong hai thao tác đó.
 
-### 10.5 Workflow hiện tại và ranh giới rollback
+### 10.5 Quy trình hiện tại và ranh giới quay lui
 
-`.github/workflows/ci.yml` chạy cho các lần push lên `main` và cho pull request. Workflow kiểm tra code, build
-development image và production image với giá trị dùng một lần, và chạy các production static test. Nó không phát hành
-release image hay triển khai gì khi một tag hoặc release được tạo. Source archive của GitHub không phải production
-image build sẵn, và một source tag cố định không bảo đảm các lần build lại về sau giống hệt nhau khi base image có thể
-thay đổi.
+`.github/workflows/ci.yml` chạy cho các lần push vào `main` và cho các pull request. Nó kiểm tra mã, build các image
+phát triển và các image production với giá trị dùng một lần, và chạy các bài kiểm thử tĩnh của production. Nó không công
+bố image nào và không triển khai gì khi một tag hoặc bản phát hành được tạo. Các tệp nén mã nguồn của GitHub không phải
+là image production dựng sẵn, và một tag cố định không đảm bảo các bản build về sau giống hệt khi base image thay đổi.
 
-Release thủ công là đủ cho giai đoạn này. Deployment record giữ local image ID của mọi release. Khi việc phát hành
-production image lên registry được triển khai, hãy ghi registry digest bên cạnh release tag và giữ lại các artifact đã
-triển khai. Không đưa vào một version service riêng, hệ thống branch release hay công cụ phát hành tự động chỉ để áp
-dụng quy ước này.
+Phát hành thủ công là đủ ở giai đoạn này. Hồ sơ triển khai giữ ID image cục bộ của mọi bản phát hành. Khi các image
+production sau này được công bố lên registry, hãy ghi lại digest của chúng bên cạnh tag phát hành. Đừng thêm một dịch vụ
+phiên bản riêng, hệ thống phân cấp nhánh phát hành hay trình công bố tự động chỉ để áp dụng quy ước này.
 
-Rollback theo operations runbook: chuyển application tag không hoàn tác migration. Hãy xác nhận tính tương thích của
-schema hoặc dùng đường khôi phục database, có tính đến các lần ghi sau thời điểm backup. Không bao giờ giả định rằng
-restore một backup cũ hơn giữ lại các Movement production mới hơn.
+Việc chuyển tag của ứng dụng không bao giờ hoàn tác một migration: một lần quay lui xác nhận tính tương thích của
+schema hoặc khôi phục database (runbook §6), và tính đến các thao tác ghi sau bản sao lưu. Không bao giờ giả định rằng
+khôi phục một bản sao lưu cũ hơn sẽ giữ lại các Movement production mới hơn.
 
-Tham khảo: [Git tags](https://git-scm.com/docs/git-tag) và
+Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 [GitHub release management](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository).
 
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Khôi phục các quy tắc mà lần viết lại đã bỏ sót: test về key configuration, quyền đọc log khi còn setup token, credential và revoke thiết bị, cập nhật bảo mật và lưu ý về hậu tố version. |
-| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người mới đọc; bỏ pilot và release gate theo quyết định của owner. |
-| 2026-10-14 | `2c360cb` | Trỏ tới mục tiêu thiết kế controller tái sử dụng đã lên kế hoạch của Deployment Admin. |
-| 2026-10-09 | `03bd90c` | Thêm structured log, request id, lệnh status và các script giám sát. |
-| 2026-10-08 | `a330383` | Thêm backup đã verify, restore drill cô lập và pre-release backup bên trong write freeze. |
-| 2026-10-08 | `1116b07` | Thêm các database role tách riêng và grant của chúng. |
-| 2026-10-08 | `b820e7a` | Thêm release identity, readiness, write gate và `release.sh`. |
-| 2026-10-08 | `d7e86a9` | Thêm production Compose stack, các image và bảng kê configuration. |
-| 2026-10-07 | `3fb66df` | Thêm lệnh reconciliation chỉ đọc. |
-| 2026-09-08 | `8d358ee` | Thêm quy ước release và versioning. |
-| 2026-09-02 | `d2f68de` | Phiên bản đầu của hướng dẫn triển khai cùng bản tiếng Việt. |
+| 2026-11-10 | uncommitted | Viết lại thành điểm khởi đầu: bảng tác vụ, một danh sách thuật ngữ và quy tắc an toàn, và §3.1 chỉ để tham chiếu; các bước cài đặt, phát hành và quay lui nay chỉ nằm trong các hướng dẫn theo nền tảng và runbook; truy cập từ Internet được hỗ trợ thông qua Cloudflare. |
+| 2026-11-09 | `398c617` | Khôi phục các quy tắc mà lần viết lại đã bỏ sót: bài kiểm thử key cấu hình, quyền truy cập log của setup token, thông tin xác thực thiết bị và việc thu hồi, cập nhật bảo mật và lưu ý về hậu tố phiên bản. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và các cổng phát hành theo quyết định của owner. |
+| 2026-10-14 | `2c360cb` | Trỏ đến mục tiêu thiết kế bộ điều khiển tái sử dụng đã lên kế hoạch của Deployment Admin. |
+| 2026-10-09 | `03bd90c` | Thêm log có cấu trúc, request id, lệnh status và các script giám sát. |
+| 2026-10-08 | `a330383` | Thêm bản sao lưu đã xác minh, diễn tập khôi phục cô lập và bản sao lưu trước phát hành bên trong tạm dừng ghi. |
+| 2026-10-08 | `1116b07` | Thêm các database role riêng biệt và các grants của chúng. |
+| 2026-10-08 | `b820e7a` | Thêm định danh bản phát hành, readiness, write gate và `release.sh`. |
+| 2026-10-08 | `d7e86a9` | Thêm production Compose stack, các image và danh mục cấu hình của nó. |
+| 2026-10-07 | `3fb66df` | Thêm lệnh đối soát chỉ đọc. |
+| 2026-09-08 | `8d358ee` | Thêm các quy ước phát hành và đánh phiên bản. |
+| 2026-09-02 | `d2f68de` | Phiên bản đầu tiên của hướng dẫn triển khai cùng bản tiếng Việt của nó. |

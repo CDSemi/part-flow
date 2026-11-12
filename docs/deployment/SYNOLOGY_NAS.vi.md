@@ -1,712 +1,604 @@
-# Triển khai PartFlow trên Synology NAS
+# Cài đặt PartFlow trên Synology NAS
 
-> **Bản gốc:** [`SYNOLOGY_NAS.md`](SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh
-> tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09. Bản tiếng
-> Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh
-> thắng.
+> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
+> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> hiệu lực.
 
-Hướng dẫn này cài PartFlow production trên Synology NAS của công ty, rồi chỉ
-cách cập nhật, sao lưu và theo dõi nó. Người đọc là người cài và vận hành
-PartFlow: có quyền quản trị DiskStation Manager (DSM) và biết dùng Secure Shell
-(SSH) ở mức cơ bản. Các quy tắc chung cho mọi nền tảng nằm ở
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md) (§3.1 production stack, §5 yêu cầu
-go-live); các quy trình vận hành hằng ngày nằm ở
-[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Các lệnh production trong
-hướng dẫn này đã chạy trên Docker Desktop nhưng chưa chạy trên Synology NAS: khi
-một lệnh lỗi trên NAS, hãy sửa nó và ghi lại cách sửa tại đây.
+Hướng dẫn này cài PartFlow production trên Synology NAS của công ty, từng bước, từ một NAS trống đến khi mọi người làm
+việc trong PartFlow qua HTTPS. Sau đó hướng dẫn thiết lập bản sao lưu hằng ngày và việc giám sát, rồi chỉ cách cài một
+bản phát hành (release) mới. Hãy làm theo đúng thứ tự các mục và không bỏ qua bước nào: mỗi bước cho biết bạn phải làm
+gì, bạn sẽ thấy gì, và phải làm gì khi bạn thấy điều khác.
 
-## 1. Bắt đầu từ đây
+Bạn cần một tài khoản quản trị (administrator) của DiskStation Manager (DSM) và một máy tính có phần mềm khách SSH
+(Secure Shell); không cần kinh nghiệm nào khác. Trước khi bắt đầu, hãy đọc [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md)
+§1 và §2 (mười phút): hai mục này giải thích bạn đang cài gì, các thuật ngữ dùng ở đây và các quy tắc an toàn. Việc vận
+hành hằng ngày sau khi cài nằm trong [`OPERATIONS_RUNBOOK.vi.md`](./OPERATIONS_RUNBOOK.vi.md).
 
-**Cài production:** kiểm tra §2 và chuẩn bị các thư mục ở §3, rồi làm theo §8
-từ bước 1. §8 sẽ chỉ sang §5.2 (reverse proxy và chứng chỉ) đúng lúc cần. Sau
-go-live, thiết lập sao lưu ở §6 và giám sát ở §8 "Giám sát và cảnh báo" khi
-thuận tiện; chúng được khuyến nghị và không bao giờ chặn việc sử dụng (quyết
-định của owner ngày 2026-11-09: production go-live trực tiếp, không pilot và
-không release gate, [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §5).
+## 1. Trước khi bắt đầu
 
-**Staging có giới hạn (§4, §5.1, §7) là tùy chọn.** Nó chạy development stack
-với dữ liệu giả hoặc dữ liệu có thể bỏ, để một nhóm nội bộ nhỏ dùng thử
-PartFlow. Nó không bao giờ là production, không bao giờ được mở ra internet, và
-phải được gỡ khỏi NAS trước khi cài production (§8 bước 1). Production luôn bắt
-đầu từ một database mới, rỗng; dữ liệu staging không bao giờ được mang sang.
+### Kết quả bạn có được khi hoàn thành
 
-**Biến shell `PF`.** Mọi lệnh production trong hướng dẫn này và trong runbook
-dùng biến này, được đặt trong phiên SSH tại release checkout (thư mục `repo/` ở
-§3):
+- PartFlow chạy trên NAS trong Compose project `partflow-production`, truy cập được tại `https://<HOSTNAME>` từ mạng
+  công ty và, nếu bạn chọn, từ Internet qua Cloudflare;
+- Administrator đầu tiên đã được tạo và các thiết bị Scan Station đã được đăng ký (enroll);
+- sau §11, có một bản sao lưu hằng ngày đã được xác minh cùng một bản sao được mã hóa nằm ngoài NAS, và có email cảnh
+  báo khi một kiểm tra thất bại.
 
-```bash
-PF="docker compose -f compose.production.yaml --env-file .env.production"
-```
+### Bạn cần chuẩn bị
 
-`PF` chỉ là cách viết tắt cho lệnh Compose của production. Nó không phải công
-cụ Deployment Admin `pf` ([`SYNOLOGY_ADMIN.md`](./SYNOLOGY_ADMIN.md)), công cụ
-này không được cài trên NAS này.
+- Một Synology NAS chạy DSM 7.2 trở lên, trên đó có thể cài gói **Container Manager** (Package Center chỉ cung cấp gói
+  này cho các model hỗ trợ nó).
+- Bộ nhớ trống cho PartFlow ngoài phần NAS đã dùng: ba container của PartFlow bị giới hạn tổng cộng khoảng 2,2 GB, cộng
+  thêm 512 MB trong lúc một tác vụ chạy một lần (one-shot job) đang chạy (§13).
+- Dung lượng trống trên volume cho các image, database và các bản sao lưu cục bộ (§13).
+- Truy cập Internet từ NAS: quá trình build tải mã nguồn, các base image và các gói phần mềm.
+- Một tài khoản quản trị DSM, và một phần mềm khách SSH trên máy tính của bạn (Windows 10 và 11 có sẵn `ssh` trong
+  Terminal và PowerShell).
+- Một tên miền truy cập (host name) cho PartFlow, ví dụ `partflow.yourdomain.com`, và một quyết định về cách mọi người
+  truy cập:
+  - **Phương án A:** chỉ từ mạng công ty hoặc mạng riêng ảo (VPN);
+  - **Phương án B:** truy cập cả từ Internet, qua Cloudflare ([`SYNOLOGY_PUBLIC_HTTPS.vi.md`](./SYNOLOGY_PUBLIC_HTTPS.vi.md)).
+- Khoảng một đến hai giờ. Việc build các image chiếm phần lớn thời gian đó.
 
-## 2. Danh sách kiểm tra trước khi cài
+### Các giá trị dùng trong hướng dẫn này
 
-Kiểm tra và ghi lại các mục sau trước khi cài bất cứ thứ gì:
+Thay các placeholder này bằng giá trị của bạn ở mọi nơi chúng xuất hiện:
 
-- model NAS, kiến trúc bộ xử lý, dung lượng bộ nhớ, phiên bản DSM, storage pool
-  và volume, hệ thống tệp, dung lượng trống và tình trạng mảng đĩa dự phòng
-  (redundant array of independent disks, RAID);
-- **Container Manager** có trong Package Center cho NAS này và tạo được Project
-  nhiều container từ một tệp Compose;
-- kiến trúc bộ xử lý được mọi image mà PartFlow dùng hỗ trợ (các base image
-  PostgreSQL, Python, Node.js và nginx);
-- còn đủ bộ nhớ và thời gian xử lý sau các tác vụ sẵn có của NAS (§9 giải thích
-  cách đo);
-- NAS có địa chỉ mạng cục bộ (local area network, LAN) được giữ cố định và cấu
-  hình hệ thống tên miền (DNS) và giao thức đồng bộ thời gian mạng (NTP) đúng;
-- các thư mục PartFlow (§3) nằm trên một volume được bảo vệ;
-- tường lửa DSM và mạng công ty giới hạn được PartFlow trong các subnet hoặc LAN
-  ảo (VLAN) dự định;
-- có bộ lưu điện (uninterruptible power supply, UPS) được nối, và chức năng tắt
-  máy an toàn tự động đã được cấu hình và thử;
-- có ít nhất một đích sao lưu được mã hóa nằm ngoài NAS này;
-- **Git:** các script production đọc git tag đang được checkout, nên production
-  cần một git checkout, không phải một tệp nén; trên DSM lệnh `git` đến từ gói
-  **Git Server** trong Package Center;
-- **một tài khoản vận hành:** chọn một tài khoản chạy được `docker ps` qua SSH
-  mà không báo lỗi quyền, và chạy mọi lệnh PartFlow, `release.sh` và mọi tác vụ
-  lập lịch (§6, §8) bằng chính tài khoản đó. Trên DSM, Docker socket thường
-  thuộc về `root`, nên tài khoản này thường là `root` (`sudo -i` sau khi đăng
-  nhập bằng một tài khoản quản trị có tên). Tài khoản cần có thư mục home: các
-  script giữ hồ sơ release trong `~/partflow-deployments` và trạng thái giám
-  sát trong `~/partflow-monitoring`.
+| Placeholder | Ý nghĩa | Ví dụ |
+| --- | --- | --- |
+| `<NAS_IP>` | Địa chỉ cố định của NAS trong mạng cục bộ (LAN) | `192.168.0.11` |
+| `<HOSTNAME>` | Tên mà mọi người gõ trong trình duyệt | `partflow.yourdomain.com` |
+| `<TAG>` | Tag phát hành cần cài ([`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §10.2) | `v1.0.0` |
+| `<TIMEZONE>` | Múi giờ của nhà máy, theo tên IANA | `America/Los_Angeles` |
+| `/volume1` | Volume chứa thư mục dùng chung `docker`. Nếu volume của bạn khác, hãy đổi ở mọi lệnh. | `/volume1` |
 
-Nếu NAS này không có Container Manager, không cài các gói Docker không được hỗ
-trợ và không hạ mức bảo mật của DSM. Hãy dùng một máy ảo Linux hoặc một máy chủ
-riêng ảo (virtual private server, VPS) thay thế ([`VPS.md`](./VPS.md)).
+Cổng `18080` trong hướng dẫn này là giá trị mặc định của `PARTFLOW_HTTP_PORT`. Để thử một bản phát hành mới trước khi
+cài, hãy dùng development stack trên một máy trạm (xem [`README.vi.md`](../../README.vi.md) ở thư mục gốc); không bao
+giờ cài một PartFlow stack thứ hai trên NAS này.
 
-## 3. Sơ đồ thư mục
+## 2. Chuẩn bị DSM
 
-Tạo một shared folder riêng cho PartFlow trên volume mà quản trị viên đã chọn.
-Đừng mặc định volume là `volume1`. Ví dụ:
+Thực hiện các thiết lập một lần này trong giao diện web của DSM.
 
-```text
-<NAS_VOLUME>/docker/partflow/
-  repo/          production release checkout; .env.production lives here (mode 600)
-  secrets/       production secret files only (PARTFLOW_SECRETS_DIR, mode 0700)
-  backups/       production backups only (PARTFLOW_BACKUP_DIR, mode 0700)
-  staging/       optional restricted staging (§4): its own checkout and dumps
-```
+1. **Cài các gói.** Mở **Package Center**, tìm **Container Manager** và cài đặt. Trong lúc cài, DSM tạo thư mục dùng
+   chung `docker` trên volume bạn chọn; hãy ghi nhớ volume đó (hướng dẫn này dùng `/volume1`). Sau đó tìm **Git
+   Server** và cài đặt: gói này cung cấp lệnh `git` mà việc cài đặt và mọi bản phát hành đều cần.
+2. **Đặt địa chỉ cố định cho NAS.** Dành riêng địa chỉ của NAS trong cài đặt DHCP của router (khuyến nghị), hoặc đặt
+   trong **Control Panel → Network → Network Interface**, chọn kết nối LAN, **Edit → IPv4 → Use manual
+   configuration**. Ghi địa chỉ đó lại thành `<NAS_IP>`.
+3. **Kiểm tra đồng hồ.** Trong **Control Panel → Regional Options → Time**, chọn múi giờ và chọn **Synchronize with NTP
+   server**. Bản sao lưu, chứng chỉ và log đều phụ thuộc vào đồng hồ đúng.
+4. **Bật SSH.** Trong **Control Panel → Terminal & SNMP → Terminal**, chọn **Enable SSH service** (cổng 22) và bấm
+   **Apply**.
+5. **Nối bộ lưu điện (UPS), khuyến nghị.** Trong **Control Panel → Hardware & Power → UPS**, bật hỗ trợ UPS để NAS tắt
+   an toàn khi mất điện.
 
-Quy tắc:
+## 3. Mở phiên SSH bằng root
 
-- `secrets/` và `backups/` nằm ngoài checkout và chỉ production dùng; staging
-  không bao giờ đọc hay ghi vào chúng.
-- Chỉ tài khoản vận hành (§2) và tài khoản mà Container Manager dùng cần quyền
-  ghi. Người dùng DSM thông thường không cần quyền truy cập nào.
-- Không bao giờ đặt `.env`, `.env.production`, các tệp bí mật, bản dump
-  database hay bản sao lưu trong một shared folder được phục vụ qua web.
-- Không bao giờ cấp quyền đọc hoặc ghi cho nhóm `Everyone`.
+Mọi lệnh của PartFlow và mọi tác vụ theo lịch đều chạy bằng `root`, vì Docker trên DSM cần quyền này. `root` là tài
+khoản vận hành (operating account) của bản cài này ([`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §2.1); hồ sơ của nó
+nằm ở `/root/partflow-deployments` và trạng thái giám sát nằm ở `/root/partflow-monitoring`.
 
-## 4. Triển khai staging có giới hạn (tùy chọn)
+1. Trên máy tính của bạn, mở một terminal và kết nối bằng tài khoản quản trị DSM. Lần đầu, trả lời `yes` để tin cậy
+   NAS.
 
-Bỏ qua mục này khi cài production trực tiếp. Staging dùng tệp Compose phát
-triển `compose.yaml`, tệp này publish các development server và không được gia
-cố bảo mật. Chạy mọi lệnh staging từ `staging/repo/`. Luôn đặt tên project là
-`partflow-staging` (`-p partflow-staging`): `compose.yaml` mặc định đặt tên
-project là `partflow`, còn §8 bước 1 và `release.sh` tìm `partflow-staging`.
-
-### 4.1 Lấy một revision cố định
-
-Bật SSH cho việc cài đặt nếu chính sách công ty cho phép, đăng nhập bằng một tài
-khoản quản trị có tên và clone repository. Checkout một commit hoặc tag cụ thể,
-không bao giờ là một nhánh đang thay đổi, và ghi lại commit thực tế:
-
-```bash
-cd <NAS_VOLUME>/docker/partflow/staging
-git clone https://github.com/CDSemi/part-flow.git repo
-cd repo
-git fetch --tags --prune
-git checkout <approved-commit-or-tag>
-git rev-parse HEAD
-```
-
-### 4.2 Cấu hình bí mật cho staging
-
-Sao chép tệp môi trường mẫu và bảo vệ nó. Tệp `.env` thật không bao giờ được
-commit.
-
-```bash
-cp .env.example .env
-chmod 600 .env
-```
-
-Sau đó sửa `.env`:
-
-- đặt `POSTGRES_PASSWORD` là một mật khẩu dài, duy nhất, chỉ dùng cho staging;
-  không bao giờ dùng lại mật khẩu DSM, GitHub, production hay mật khẩu cá nhân;
-- giữ một bản sao được bảo vệ trong kho mật khẩu của công ty;
-- đặt `SITE_TIMEZONE` là tên múi giờ của nhà máy (ví dụ `America/Los_Angeles`)
-  trước lần khởi động đầu tiên. Backend từ chối tên múi giờ không hợp lệ, và
-  ngày hoàn thành cùng kết quả đúng hạn hay trễ hạn của các Work Order đã hoàn
-  thành được tính theo lịch này. Production sau này phải dùng cùng giá trị.
-
-`compose.yaml` tạo chuỗi kết nối database của backend từ `POSTGRES_USER`,
-`POSTGRES_PASSWORD` và `POSTGRES_DB`, nên không cần thiết lập database nào khác.
-
-### 4.3 Giới hạn các cổng được publish
-
-`compose.yaml` publish PostgreSQL ở cổng `5432`, backend ở `8000` và frontend ở
-`5173` trên mọi địa chỉ của NAS. Người dùng staging chỉ cần frontend, vì
-development server của frontend chuyển tiếp các request `/api` tới backend.
-Trước lần khởi động đầu tiên, sửa `compose.yaml` trong checkout staging này:
-
-1. xóa các mục `ports` của service `db` và `backend`;
-2. đổi mục của `frontend` để chỉ dùng địa chỉ LAN của NAS:
-
-   ```yaml
-   ports:
-       - "<NAS LAN address>:5173:5173"
+   ```sh
+   ssh <your DSM administrator>@<NAS_IP>
    ```
 
-3. giữ mạng service của Compose ở chế độ riêng (không thay đổi gì khác);
-4. trong DSM, Control Panel → Security → Firewall, chỉ cho phép cổng `5173` từ
-   các subnet công ty dự định.
+2. Chuyển sang `root`. `sudo` hỏi lại cùng mật khẩu đó; sau đó dấu nhắc kết thúc bằng `#`.
 
-Staging được truy cập tại `http://<NAS LAN address>:5173`, không qua một tên
-máy (host name); §5.1 giải thích lý do. Không bao giờ commit các thay đổi riêng
-của NAS hay bí mật ngược vào repository.
-
-### 4.4 Tạo Project trong Container Manager
-
-Trong DSM:
-
-1. Cài và mở **Container Manager**.
-2. Mở **Project** → **Create**.
-3. Đặt tên project là `partflow-staging`.
-4. Chọn `staging/repo/` làm đường dẫn và tệp `compose.yaml` đã sửa.
-5. Xem lại các service, mount, network, cổng và giá trị môi trường.
-6. Build và khởi động Project.
-
-Các lệnh SSH tương đương là:
-
-```bash
-docker compose -p partflow-staging up -d --build
-docker compose -p partflow-staging ps
-docker compose ls
-```
-
-`docker compose ls` phải liệt kê project với tên `partflow-staging`. Nếu nó hiện
-`partflow`, dừng nó bằng `docker compose -p partflow down` (không có `-v`) và
-khởi động lại với `-p partflow-staging`.
-
-### 4.5 Áp dụng migration và thiết lập lần đầu
-
-Chờ đến khi `db` và `backend` healthy, rồi nâng cấp schema database một lần và
-lưu lại output:
-
-```bash
-docker compose -p partflow-staging exec backend uv run alembic current
-docker compose -p partflow-staging exec backend uv run alembic upgrade head
-docker compose -p partflow-staging exec backend uv run alembic current
-```
-
-Không bao giờ chạy `alembic downgrade` trên dữ liệu staging cần giữ mà chưa xem
-xét các migration liên quan và chưa tạo một bản dump đã kiểm tra (§6).
-
-Database mới chưa có Administrator. Đọc setup token và hoàn tất thiết lập lần
-đầu trước khi bất kỳ ai khác có địa chỉ:
-
-```bash
-docker compose -p partflow-staging logs backend | grep "Setup token"
-```
-
-Mở `http://<NAS LAN address>:5173`, dùng **Set up PartFlow** với token, rồi
-đăng ký từng thiết bị Scan Station trong Administration → Scan Stations →
-`Devices…`.
-
-### 4.6 Smoke test
-
-Trên NAS, dùng địa chỉ LAN: với cách bind ở §4.3, không có gì lắng nghe tại
-`127.0.0.1:5173`.
-
-```bash
-curl --fail --silent --show-error http://<NAS LAN address>:5173/api/health
-docker compose -p partflow-staging ps
-docker compose -p partflow-staging logs --tail=200 backend frontend db
-```
-
-Từ một máy trạm được phép:
-
-1. mở `http://<NAS LAN address>:5173` và kiểm tra chỉ báo kết nối, và kiểm tra
-   `http://<NAS LAN address>:5173/api/health` có trả lời;
-2. kiểm tra các màn hình định thử đều tải được, và ghi lại những màn hình còn
-   chưa có;
-3. với các bản ghi thử được chỉ định, thử tạo, release, transfer, Machine,
-   correction, stocking và allocation;
-4. kiểm tra mỗi thao tác thành công được server xác nhận và màn hình được làm
-   mới;
-5. dừng backend một lát (`docker compose -p partflow-staging stop backend`),
-   kiểm tra thao tác ghi bị chặn, khởi động lại (`… start backend`) và kiểm tra
-   các màn hình phục hồi;
-6. kiểm tra một máy ngoài các subnet được phép không kết nối được.
-
-### 4.7 Giới hạn của staging
-
-- không có số lượng production thật và không có dữ liệu cá nhân của nhân viên;
-- không chuyển tiếp cổng internet hay chuyển đổi địa chỉ mạng (NAT), không
-  publish qua QuickConnect và không có tunnel công khai;
-- chỉ những người thử có tên, với người theo dõi trong các buổi thử;
-- dump định kỳ có thể bỏ (§6) để lặp lại việc thử migration và cập nhật;
-- báo rõ cho người thử rằng địa chỉ này là staging.
-
-## 5. DSM Reverse Proxy cho HTTPS nội bộ
-
-Reverse proxy của DSM nhận các kết nối HTTPS (Transport Layer Security, TLS)
-cho một tên máy và chuyển tiếp chúng tới một service cục bộ. §5.1 nói về
-trường hợp staging và §5.2 về service `web` của production.
-
-### 5.1 Staging (development stack)
-
-**Không thể dùng DSM reverse proxy cho staging với cấu hình phát triển hiện
-tại.** Frontend của staging là Vite development server (Vite 6,
-`frontend/package.json`). Vite chỉ trả lời các request có header `Host` là
-`localhost`, một tên dưới `.localhost` hoặc một địa chỉ IP, và từ chối mọi tên
-máy khác bằng HTTP 403 kèm thông báo "Blocked request", trừ khi tên đó được
-liệt kê trong `server.allowedHosts`. `frontend/vite.config.ts` không liệt kê
-tên nào, và DSM reverse proxy chuyển tiếp đúng tên máy mà trình duyệt đã dùng,
-nên một request qua `https://<staging name>` bị từ chối.
-
-Thay vào đó, truy cập staging tại `http://<NAS LAN address>:5173` (§4.3). Cách
-này chạy được vì header `Host` khi đó là một địa chỉ IP, và backend phát triển
-không yêu cầu HTTPS cho cookie đăng nhập. Lưu lượng không được mã hóa, thêm một
-lý do để staging chỉ chứa dữ liệu giả hoặc dữ liệu có thể bỏ. Đừng lách cơ chế
-kiểm tra này bằng cách sửa `vite.config.ts` trên NAS.
-
-### 5.2 `web` của production
-
-`compose.production.yaml` publish service `web` của production chỉ trên
-`127.0.0.1:${PARTFLOW_HTTP_PORT}` (mặc định `18080`), nên DSM reverse proxy là
-lối vào duy nhất. HTTPS là bắt buộc: production đánh dấu cookie đăng nhập là
-secure, nên trình duyệt chỉ giữ nó qua HTTPS. Các giá trị bắt buộc lấy từ
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
-
-**Quy tắc reverse proxy.** Trong Control Panel → Login Portal → Advanced →
-Reverse Proxy → **Create**:
-
-| Thiết lập | Giá trị |
-| --- | --- |
-| Giao thức, tên máy, cổng nguồn | HTTPS, tên máy PartFlow, `443` |
-| Giao thức, tên máy, cổng đích | HTTP, `127.0.0.1`, giá trị của `PARTFLOW_HTTP_PORT` |
-| Custom Header | `X-Forwarded-For` = `$proxy_add_x_forwarded_for` và `X-Forwarded-Proto` = `$scheme` (xác nhận hoặc thêm) |
-| Advanced Settings: timeout gửi và đọc của proxy | `300` giây (lớn hơn timeout import 180 giây của `web`) |
-| Advanced Settings: kích thước request body | ít nhất 5 MiB (lớn hơn giới hạn 4 MiB của `web`) |
-
-Lý do của các giá trị này:
-
-- dùng `127.0.0.1`, không bao giờ dùng `localhost`, vì `localhost` có thể phân
-  giải ra địa chỉ IPv6 trước, nơi `web` không lắng nghe;
-- `X-Forwarded-For` đặt địa chỉ client ở cuối để `web` giới hạn tần suất theo
-  từng client; nếu DSM không gửi được header này, mọi client dùng chung một
-  bucket giới hạn tần suất, hãy ghi lại giới hạn đó;
-- timeout ngắn hơn hoặc giới hạn body nhỏ hơn làm việc tải ảnh lên và import
-  Work Order thất bại.
-
-Ngoài ra:
-
-- chuyển hướng HTTP sang HTTPS;
-- không bao giờ ghi log cookie hay các header `X-PartFlow-Station-Device` và
-  `X-PartFlow-CSRF`;
-- trong tường lửa DSM và mạng phía trên, chỉ cho phép các nguồn LAN hoặc mạng
-  riêng ảo (VPN) đã được duyệt;
-- không để lộ trang quản trị DSM qua tên máy PartFlow.
-
-**Chứng chỉ.** Chứng chỉ phải ghi tên máy PartFlow và do một tổ chức cấp chứng
-chỉ (certificate authority, CA) công khai dùng giao thức Automatic Certificate
-Management Environment (ACME), CA nội bộ của công ty, hoặc một CA riêng cấp.
-Người dùng không bao giờ được bấm bỏ qua cảnh báo của trình duyệt để thay thế
-([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1). Trong Control Panel → Security →
-Certificate → **Add**, chọn một phương án:
-
-1. **Import certificate** từ CA của công ty: import chứng chỉ, khóa riêng của nó
-   và chuỗi trung gian.
-2. **Get a certificate from Let's Encrypt**, khi tên máy là một tên DNS công
-   khai. DSM tự động gia hạn chứng chỉ này.
-3. **Create self-signed certificate**, khi không có hai phương án trên. DSM tạo
-   trước một chứng chỉ gốc (CA riêng của bạn), rồi tạo chứng chỉ PartFlow được
-   nó ký; nhập tên máy PartFlow làm common name và làm tên thay thế của chủ thể
-   (subject alternative name, SAN). Xuất chứng chỉ gốc ra.
-
-Sau đó mở **Settings** trên cùng trang và gán chứng chỉ cho tên máy của mục
-reverse proxy PartFlow. Với phương án 1 và 3, cài chứng chỉ gốc của CA công ty
-hoặc CA riêng làm chứng chỉ tin cậy trên mọi máy trạm và mọi thiết bị Scan
-Station, qua hệ thống quản lý thiết bị của công ty hoặc bằng tay. DSM chỉ gia
-hạn chứng chỉ Let's Encrypt: thay mọi chứng chỉ khác trước khi hết hạn và gán
-lại. Kiểm tra ngày hết hạn bằng lệnh `openssl s_client` ở
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1; kiểm tra `certificate` của
-`check.sh` cảnh báo trước khi hết hạn (§8 Giám sát và cảnh báo).
-
-## 6. Sao lưu
-
-### Sao lưu production
-
-Production dùng định dạng sao lưu của `deploy/production/backup.sh`: mỗi bản sao
-lưu là một thư mục có manifest và tệp checksum `SHA256SUMS`
-([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §3). Sao lưu được khuyến
-nghị sau go-live và không bao giờ chặn việc sử dụng; cho đến khi tác vụ hằng
-ngày chạy, bản sao lưu duy nhất là các bản mà `release.sh` tạo trước mỗi
-release.
-
-1. **Thư mục sao lưu.** Dùng thư mục `backups/` ở §3 (ví dụ
-   `<NAS_VOLUME>/docker/partflow/backups`). Nó phải nằm ngoài release checkout,
-   thư mục bí mật và mọi thư mục archive, thuộc về tài khoản vận hành (§2), với
-   mode 0700. Đặt nó, không có dấu nháy, làm `PARTFLOW_BACKUP_DIR` trong
-   `.env.production` trước lệnh `$PF` đầu tiên (§8 bước 2). Nó chỉ chứa bản sao
-   lưu production, không bao giờ chứa của staging hay của một lần diễn tập khôi
-   phục.
-2. **Tác vụ sao lưu hằng ngày.** Control Panel → Task Scheduler → Create →
-   Scheduled Task → User-defined script. User: tài khoản vận hành. Lịch: hằng
-   ngày lúc 02:00. Task Settings → Run command:
-
-   ```bash
-   cd <running release checkout> && deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8
+   ```sh
+   sudo -i
    ```
 
-   `--keep-daily` và `--keep-weekly` là bắt buộc; 14 và 8 là ví dụ, owner chọn
-   mức lưu giữ thật. Bật "Send run details by email" **chỉ khi script kết thúc
-   bất thường**, để mọi mã thoát khác 0 (bản sao lưu bị từ chối, thất bại hoặc
-   không kiểm chứng được, hoặc `backup_lock_stale`) đến được quản trị viên. Giữ
-   giờ này ngoài các khung release
-   ([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5): một bản sao lưu
-   đang chạy sẽ làm release dừng lại, và một bản sao lưu hằng ngày bắt đầu
-   trong lúc release sẽ bị từ chối. Với lịch hằng ngày, mục tiêu điểm khôi phục
-   (recovery point objective, RPO), tức lượng dữ liệu tối đa có thể mất, là 24
-   giờ.
-3. **Bản sao mã hóa ngoài NAS (Hyper Backup).** Tạo một tác vụ Hyper Backup có
-   nguồn là thư mục sao lưu và đích nằm ngoài NAS này (một NAS khác, Synology
-   C2 hoặc một dịch vụ tương thích S3). **Bật mã hóa phía client**; owner giữ
-   mật khẩu và tệp khóa bên ngoài NAS, vì mất chúng là mất các bản sao ngoài
-   NAS. Lập lịch lúc 03:00, sau bản sao lưu. Đặt cơ chế xoay vòng phiên bản của
-   chính Hyper Backup theo quyết định của owner, chạy kiểm tra toàn vẹn hằng
-   tuần và bật thông báo email khi thất bại. Việc xem các thông báo này là một
-   phần của lịch thường kỳ ở
-   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §9. Snapshot cục bộ chỉ là
-   lớp thứ hai.
-4. **Thư mục archive (dự kiến).** PartFlow chưa tạo archive. Khi có, thư mục
-   archive có tác vụ Hyper Backup riêng và **không xoay vòng phiên bản**: không
-   công cụ nào được xoay vòng hay xóa bớt một archive.
-5. **Diễn tập khôi phục.** Một lần sau go-live và sau đó mỗi quý, chạy từ
-   release checkout:
+3. Kiểm tra các công cụ. Mỗi lệnh in ra một phiên bản. `python3` phải từ 3.8 trở lên. Nếu không tìm thấy `git`, nghĩa
+   là Git Server chưa được cài (§2 bước 1); nếu `docker` báo lỗi quyền, nghĩa là bạn chưa phải `root`.
 
-   ```bash
-   deploy/production/restore-test.sh --backup <latest daily backup> --operator "<name>"
+   ```sh
+   docker version --format '{{.Server.Version}}'
+   docker compose version
+   git --version
+   python3 --version
    ```
 
-   Nó khôi phục vào một project tách biệt và không bao giờ đụng tới database
-   đang chạy ([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §4). Giữ lại
-   bằng chứng của nó; các thời gian đo được cho biết thời gian khôi phục cần dự
-   tính.
+4. Kiểm tra xem NAS có giới hạn được mức dùng bộ xử lý của một container hay không. Một số kernel DSM không làm được,
+   và khi đó Docker từ chối khởi động mọi container có giới hạn bộ xử lý (`NanoCPUs can not be set`):
 
-### Dump của staging
+   ```sh
+   docker info 2>&1 | grep -i 'cfs'
+   ```
 
-Staging (§4) dùng một bản dump PostgreSQL đơn giản thay thế. Chạy từ
-`staging/repo/`; các biến trong dấu nháy đơn được mở rộng bên trong container
-database, không phải trong shell DSM:
+   Nếu lệnh in ra `No cpu cfs quota support`, hãy ghi nhớ: §5 bước 2 sẽ tắt các giới hạn bộ xử lý. Nếu không in ra gì,
+   bạn không cần làm gì.
 
-```bash
-mkdir -p ../backups
-docker compose -p partflow-staging exec -T db sh -c \
-  'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' \
-  > ../backups/partflow-$(date -u +%Y%m%dT%H%M%SZ).dump
-```
+5. Kiểm tra rằng NAS này không có PartFlow stack nào khác:
 
-Ghi một manifest bên cạnh mỗi bản dump:
-
-```bash
-git rev-parse HEAD
-docker compose -p partflow-staging exec -T backend uv run alembic current
-sha256sum ../backups/partflow-*.dump
-```
-
-Sao chép bản dump và manifest của nó tới một đích được mã hóa nằm ngoài NAS.
-Trước khi tin một bản dump, hãy khôi phục nó vào một database riêng, rỗng, không
-bao giờ đè lên database đang chạy
-([`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §4 liệt kê các bước).
-Snapshot của một volume PostgreSQL đang chạy không phải là bản sao lưu database,
-trừ khi dùng một quy trình snapshot nhất quán với database đã được ghi lại và
-thử nghiệm.
-
-## 7. Quy trình cập nhật staging
-
-Để chuyển staging (§4) sang một revision mới hơn:
-
-1. Báo cho người thử thời gian staging không dùng được.
-2. Ghi lại commit hiện tại (`git rev-parse HEAD`) và revision Alembic.
-3. Tạo và kiểm tra một bản dump mới (§6, Dump của staging).
-4. Fetch và checkout commit đích đã được duyệt (`git fetch --tags --prune`,
-   `git checkout <target>`), rồi áp dụng lại các thay đổi cổng ở §4.3 nếu việc
-   checkout đã ghi đè chúng.
-5. Xem lại các thay đổi của `.env.example`, `compose.yaml`, các Dockerfile, các
-   tệp khóa phụ thuộc và các migration.
-6. Build và khởi động: `docker compose -p partflow-staging up -d --build`.
-7. Chạy `alembic upgrade head` một lần (§4.5).
-8. Chạy smoke test ở §4.6 và đối soát (reconciliation,
-   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §7):
-   `docker compose -p partflow-staging exec -T backend uv run python -m app.cli reconcile`.
-9. Giữ commit trước và bản dump cho đến khi người thử xác nhận bản cập nhật.
-
-Không bao giờ dùng một công cụ tự động cập nhật "latest" hay `main` không người
-giám sát cho một hệ thống có database. Cập nhật production theo §8, Cập nhật
-production.
-
-## 8. Production (go-live)
-
-Production là production stack: `compose.production.yaml`,
-`.env.production.example`, các stage `production` của `backend/Dockerfile` và
-`frontend/Dockerfile`, và `frontend/nginx/`. Nó không bao giờ là staging với một
-địa chỉ mới. [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §5 liệt kê những gì phần mềm
-cần để hoạt động; mọi thứ khác được khuyến nghị sau go-live. Chạy mọi bước qua
-SSH bằng tài khoản vận hành (§2), từ `repo/` khi bước 2.1 đã tạo nó.
-
-1. **Gỡ staging khỏi NAS này.** `release.sh` từ chối chạy khi một project
-   `partflow-staging` còn container trên Docker daemon (tách biệt môi trường,
-   [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §6). Dừng và xóa các container staging
-   **không có** `-v`. Nếu staging chưa từng được cài trên NAS này, chỉ chạy
-   lệnh thứ hai, lệnh này xác nhận không còn gì ở đó:
-
-   ```bash
-   docker compose -p partflow-staging down
+   ```sh
    docker ps -a --format '{{.Label "com.docker.compose.project"}}' | sort -u
    ```
 
-   Danh sách không được chứa `partflow-staging` hay `partflow` (một project phát
-   triển được khởi động không có `-p`; gỡ nó theo cùng cách với `-p partflow`).
-   Volume staging chỉ chứa dữ liệu staging và không bao giờ được gắn vào
-   production; xóa nó khi không còn cần:
-   `docker volume rm partflow-staging_postgres_data`. Sau đó xóa Project
-   `partflow-staging` trong Container Manager và đóng cổng `5173` trên tường
-   lửa.
-2. **Lấy release và tạo cấu hình.**
-   1. Clone repository vào `repo/` và checkout release tag (dạng
-      `vMAJOR.MINOR.PATCH`, ví dụ `v1.0.0`;
-      [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §10):
+   Danh sách không được chứa `partflow-staging` lẫn `partflow`. Nếu một trong hai xuất hiện, nghĩa là một staging hoặc
+   development stack cũ vẫn còn: hãy dừng nó bằng `docker compose -p <that name> down` (không dùng `-v`) và xóa
+   Project của nó trong Container Manager. Data volume của nó chỉ chứa dữ liệu thử; hãy xóa bằng
+   `docker volume rm <that name>_postgres_data` khi bạn chắc chắn không ai còn cần.
 
-      ```bash
-      cd <NAS_VOLUME>/docker/partflow
-      git clone https://github.com/CDSemi/part-flow.git repo
-      cd repo
-      git checkout <release tag>
-      cp .env.production.example .env.production
-      chmod 600 .env.production
-      PF="docker compose -f compose.production.yaml --env-file .env.production"
-      ```
+**Mọi phiên làm việc sau này** bắt đầu giống nhau: `ssh`, `sudo -i`, rồi hai dòng dưới đây, mở thư mục mã nguồn của bản
+phát hành (release checkout) và đặt biến viết tắt `PF`. Phiên mới không nhớ `PF`, nên hãy đặt lại mỗi lần.
 
-   2. Tạo thư mục bí mật và thư mục sao lưu, mỗi thư mục thuộc về tài khoản vận
-      hành:
+```sh
+cd /volume1/docker/partflow/repo
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+```
 
-      ```bash
-      install -d -m 0700 <NAS_VOLUME>/docker/partflow/secrets
-      install -d -m 0700 <NAS_VOLUME>/docker/partflow/backups
-      ```
+## 4. Tạo các thư mục của PartFlow
 
-   3. Điền mọi giá trị trống trong `.env.production`: `PARTFLOW_RELEASE`
-      (release tag), `PARTFLOW_SECRETS_DIR` và `PARTFLOW_BACKUP_DIR` (hai đường
-      dẫn tuyệt đối ở trên, không có dấu nháy) và `PARTFLOW_SITE_TIMEZONE`
-      (bước 3). Để trống `PARTFLOW_COMMIT`, `PARTFLOW_ACCEPT_SCHEMA_REVISION` và
-      `PARTFLOW_TRUSTED_PROXY`. Kiểm tra `PARTFLOW_EDGE_SUBNET` (mặc định
-      `172.30.250.0/24`) không bị dùng trên NAS hay trong LAN. Mọi lệnh `$PF`
-      đều cần `PARTFLOW_BACKUP_DIR`, nên hãy đặt nó trước.
-   4. Tạo ba tệp bí mật trong thư mục bí mật **trước mọi lệnh `$PF` khởi động
-      `backend` hoặc một ops service**, vì Compose thay một tệp bí mật bị thiếu
-      bằng một thư mục rỗng: `postgres_password`, `partflow_app_password` và
-      `partflow_maintenance_password`. Mỗi tệp chứa đúng một dòng và có mode
-      0444. Hai mật khẩu role dài 16 đến 128 ký tự ASCII in được, không có
-      khoảng trắng, và khác nhau. Giữ một bản sao của từng tệp trong kho mật
-      khẩu của công ty.
+Tạo thư mục bí mật (secrets) và thư mục sao lưu (backup), chỉ `root` đọc được:
 
-      ```bash
-      cd <NAS_VOLUME>/docker/partflow/secrets
-      openssl rand -base64 32 > postgres_password
-      openssl rand -base64 32 > partflow_app_password
-      openssl rand -base64 32 > partflow_maintenance_password
-      chmod 0444 postgres_password partflow_app_password partflow_maintenance_password
-      cd <NAS_VOLUME>/docker/partflow/repo
-      ```
+```sh
+mkdir -p /volume1/docker/partflow/secrets /volume1/docker/partflow/backups
+chmod 700 /volume1/docker/partflow/secrets /volume1/docker/partflow/backups
+ls -ld /volume1/docker/partflow/secrets /volume1/docker/partflow/backups
+```
 
-   5. Kiểm tra cấu hình: `$PF config --quiet` không in gì khi cấu hình hợp lệ.
-3. **Kiểm tra múi giờ.** `PARTFLOW_SITE_TIMEZONE` là tên múi giờ của nhà máy (ví
-   dụ `America/Los_Angeles`) và phải bằng `SITE_TIMEZONE` mà staging đã dùng,
-   nếu từng có staging.
-4. **Build, rồi tạo database.** Chạy theo đúng thứ tự:
+Cả hai dòng kết quả đều bắt đầu bằng `drwx------` và ghi `root`. Cấu trúc đầy đủ, sau khi §5 tạo `repo/`, là:
 
-   ```bash
+```text
+/volume1/docker/partflow/
+  repo/       the release checkout; .env.production lives here
+  secrets/    the three password files (PARTFLOW_SECRETS_DIR)
+  backups/    one sub-folder per database backup (PARTFLOW_BACKUP_DIR)
+```
+
+Không bao giờ cấp cho nhóm DSM `Everyone` quyền truy cập các thư mục này, không bao giờ chia sẻ chúng với người dùng
+DSM thông thường, và không bao giờ đặt chúng trong thư mục mà một web server công bố ra ngoài.
+
+## 5. Tải bản phát hành và cấu hình
+
+1. Tải repository về và checkout tag phát hành. Các tag được liệt kê trên trang GitHub Releases của repository, hoặc
+   bằng `git tag --list 'v*'` sau khi clone.
+
+   ```sh
+   cd /volume1/docker/partflow
+   git clone https://github.com/CDSemi/part-flow.git repo
+   cd repo
+   git checkout <TAG>
+   git describe --tags
+   ```
+
+   `git checkout` báo "detached HEAD": điều này bình thường với một bản phát hành. `git describe --tags` in ra
+   `<TAG>`.
+
+2. Tạo tệp cấu hình từ mẫu của nó và điền bốn giá trị không có mặc định:
+
+   ```sh
+   cp .env.production.example .env.production
+   chmod 600 .env.production
+   sed -i 's|^PARTFLOW_RELEASE=.*|PARTFLOW_RELEASE=<TAG>|' .env.production
+   sed -i 's|^PARTFLOW_SECRETS_DIR=.*|PARTFLOW_SECRETS_DIR=/volume1/docker/partflow/secrets|' .env.production
+   sed -i 's|^PARTFLOW_BACKUP_DIR=.*|PARTFLOW_BACKUP_DIR=/volume1/docker/partflow/backups|' .env.production
+   sed -i 's|^PARTFLOW_SITE_TIMEZONE=.*|PARTFLOW_SITE_TIMEZONE=<TIMEZONE>|' .env.production
+   grep -E '^PARTFLOW_(RELEASE|SECRETS_DIR|BACKUP_DIR|SITE_TIMEZONE|HTTP_PORT|EDGE_SUBNET)=' .env.production
+   ```
+
+   Dòng `grep` in ra bốn giá trị bạn đặt và hai giá trị mặc định mà các bước sau dùng (`PARTFLOW_HTTP_PORT` và
+   `PARTFLOW_EDGE_SUBNET`); hãy kiểm tra từng giá trị. `PARTFLOW_SITE_TIMEZONE` là múi giờ của nhà máy: nó quyết định
+   ngày của việc hoàn thành Work Order, nên hãy đặt trước lần khởi động đầu tiên. Giữ nguyên mọi giá trị khác; từng key
+   được giải thích trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1.
+
+   **Chỉ khi §3 bước 4 in ra `No cpu cfs quota support`**, hãy tắt các giới hạn bộ xử lý (`0` nghĩa là không giới hạn;
+   các giới hạn bộ nhớ vẫn giữ):
+
+   ```sh
+   sed -i 's/^\(PARTFLOW_[A-Z]*_CPUS\)=.*/\1=0/' .env.production
+   grep '_CPUS=' .env.production
+   ```
+
+3. Kiểm tra rằng subnet của mạng nội bộ `edge`, `172.30.250.0/24`, không bị NAS hay mạng công ty sử dụng. Lệnh này
+   không được in ra gì:
+
+   ```sh
+   ip -4 route | grep '172\.30\.250\.'
+   ```
+
+   Nếu nó in ra một dòng, hoặc nếu mạng công ty dùng các địa chỉ `172.30.250.x`, hãy chọn một subnet khác chưa dùng, ví
+   dụ `sed -i 's|^PARTFLOW_EDGE_SUBNET=.*|PARTFLOW_EDGE_SUBNET=172.30.251.0/24|' .env.production`.
+
+## 6. Tạo các tệp bí mật
+
+Tạo ba tệp mật khẩu **trước** bất kỳ lệnh nào khởi động `backend` hoặc một tác vụ chạy một lần. Nếu lúc đó thiếu một
+tệp, Docker Compose sẽ tạo một thư mục rỗng mang tên tệp đó; hãy xóa thư mục ấy bằng `rmdir` rồi tạo tệp.
+
+```sh
+cd /volume1/docker/partflow/secrets
+for name in postgres_password partflow_app_password partflow_maintenance_password; do
+    openssl rand -base64 32 > "$name"
+done
+chmod 0444 postgres_password partflow_app_password partflow_maintenance_password
+ls -l
+cd /volume1/docker/partflow/repo
+```
+
+`ls -l` hiển thị ba tệp với quyền `-r--r--r--` và kích thước 45 byte. Mỗi tệp chứa một mật khẩu ngẫu nhiên trên một
+dòng. Hãy sao chép ba giá trị (`cat <file name>` hiển thị từng tệp) vào kho mật khẩu của công ty.
+
+Bây giờ đặt biến viết tắt `PF` và kiểm tra cấu hình. `$PF config --quiet` không in gì khi cấu hình hợp lệ; một thông
+báo như `Set PARTFLOW_SITE_TIMEZONE in .env.production` chỉ ra một giá trị còn trống cần điền.
+
+```sh
+PF="docker compose -f compose.production.yaml --env-file .env.production"
+$PF config --quiet
+```
+
+## 7. Build các image và tạo database
+
+1. Build hai image, `backend` và `web`, từ bản phát hành đã checkout. Việc này mất 10 đến 30 phút. Nếu nó dừng với lỗi
+   mạng, hãy chạy lại đúng lệnh đó.
+
+   ```sh
    PARTFLOW_COMMIT=$(git rev-parse HEAD) $PF -f compose.production.build.yaml build
+   docker image ls 'partflow/*'
+   ```
+
+   Danh sách hiển thị `partflow/backend` và `partflow/web`, cả hai đều có tag `<TAG>`.
+
+2. Khởi động database và chờ đến khi nó healthy. Chạy lại `$PF ps` cho đến khi dòng `db` hiển thị `(healthy)`, mất
+   khoảng 30 giây.
+
+   ```sh
    $PF up -d db
+   $PF ps
+   ```
+
+3. Tạo hai database role mà PartFlow dùng, rồi tạo schema của database và các quyền (permissions) của nó:
+
+   ```sh
    $PF --profile ops run --rm -T db-roles
    $PF --profile ops run --rm -T migrate --no-backup-reason "first install: empty database"
    ```
 
-   Lệnh build tạo cả hai image (`backend` và `web`); không bao giờ build chỉ một
-   image. `db-roles` tạo các database role `partflow_app` và
-   `partflow_maintenance`; backend kết nối bằng role ít quyền nhất
-   `partflow_app`, không bao giờ bằng owner của database. `migrate` tạo schema
-   và áp dụng các quyền (grant). Volume `partflow-production_postgres_data` là
-   mới và rỗng: dữ liệu staging không bao giờ được đưa lên. Khôi phục một bản
-   sao lưu có sẵn vào production thì theo
-   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 path 3 hoặc §8 Host
-   failure, với sự chấp thuận của owner được ghi lại trước khi `backend` khởi
-   động.
-5. **Khởi động ứng dụng với một backend worker, và mở HTTPS.**
+   Mỗi lệnh in ra một báo cáo JSON. Báo cáo của `migrate` chứa `"result": "upgraded"`. `db-roles` tạo các role
+   `partflow_app`, mà `backend` dùng, và `partflow_maintenance`; `backend` không bao giờ kết nối bằng chủ sở hữu
+   database. Nếu `migrate` báo `roles_not_provisioned`, hãy chạy lệnh `db-roles` trước.
 
-   ```bash
-   PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web
-   curl --fail --silent --show-error http://127.0.0.1:18080/api/health
-   ```
+Database bắt đầu rỗng, trong volume mới `partflow-production_postgres_data`. Để bắt đầu từ một bản sao lưu có sẵn, ví dụ
+khi chuyển PartFlow từ máy chủ khác sang, hãy làm theo runbook §6 (New-instance restore) thay cho bước 3.
 
-   Một worker bảo đảm chỉ có một setup token. Trong lệnh `curl`, dùng cổng bạn
-   đã đặt ở `PARTFLOW_HTTP_PORT`; `127.0.0.1` đúng ở đây vì `web` chỉ lắng nghe
-   trên địa chỉ loopback. Sau đó tạo quy tắc reverse proxy và chứng chỉ ở §5.2,
-   và cài chứng chỉ gốc trên các máy trạm và thiết bị Scan Station nếu chứng
-   chỉ của bạn cần.
-6. **Thiết lập lần đầu.** Đọc token, mở `https://<PartFlow host name>`, dùng
-   **Set up PartFlow**, rồi khởi động lại backend với số worker đã cấu hình:
+## 8. Khởi động PartFlow và kiểm tra trên NAS
 
-   ```bash
-   $PF logs backend | grep "Setup token"
-   $PF up -d backend
-   $PF run --rm --no-deps -T backend python -m app.cli reconcile
-   ```
+Khởi động `backend` với **một** tiến trình worker, để có đúng một mã thiết lập (setup token) cho §10, và khởi động
+`web`:
 
-   Kết quả đối soát phải báo check "Append-only guards and database-role
-   privileges intact" (check (h)) là `pass`. Sau đó đăng ký từng thiết bị Scan
-   Station trong Administration → Scan Stations → `Devices…`.
-7. **Không bao giờ chạy `down -v`**, và không bao giờ xóa một volume, trên
-   project `partflow-production`: việc đó xóa database production. `$PF down`
-   không có `-v` là cách an toàn duy nhất để dừng mọi thứ.
-
-Sau go-live, khi thuận tiện, thiết lập các mục khuyến nghị ở
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §5: bản sao lưu hằng ngày và bản sao mã
-hóa ngoài NAS (§6), một lần diễn tập khôi phục có đo thời gian (§6), và các tác
-vụ giám sát bên dưới.
-
-### Cập nhật production
-
-Mọi release sau đều chạy qua `deploy/production/release.sh`. Script này tạo một
-bản sao lưu đã kiểm chứng, build các image mới mà không đụng tới các image đang
-chạy, migrate database, chuyển ứng dụng sang release mới và chạy smoke check.
-Chi tiết, tùy chọn và kết quả nằm ở
-[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §5 và
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md) §7. Trong `repo/`:
-
-```bash
-git fetch --tags --prune
-git checkout <new release tag>
-deploy/production/release.sh --release <new release tag> --operator "<name>" --approver "<name>"
+```sh
+PARTFLOW_BACKEND_WORKERS=1 $PF up -d backend web
+$PF ps
+curl -fsS http://127.0.0.1:18080/web-health
+curl -fsS http://127.0.0.1:18080/api/health
 ```
 
-Một người có thể ghi cùng một tên cho operator và approver. `.env.production`
-không được git theo dõi, nên nó vẫn ở nguyên chỗ; `release.sh` ghi tag mới vào
-đó lúc chuyển release. Giữ các image của release trước cho đến khi hết thời gian
-quan sát (không chạy `docker image prune -a`), vì rollback cần chúng. Nếu bạn
-dùng một thư mục checkout mới cho mỗi release thay vì `repo/`, hãy sao chép
-`.env.production` vào đó và cập nhật đường dẫn checkout trong mọi tác vụ lập
-lịch sau release.
+Bạn sẽ thấy:
 
-### Giám sát và cảnh báo
+- `$PF ps` liệt kê `db`, `backend` và `web`, mỗi cái `(healthy)` sau khoảng 30 giây;
+- `/web-health` in ra `live`;
+- `/api/health` in ra một dòng JSON chứa `"status":"ok"`, `"release":"<TAG>"` và `"schema":"current"`.
 
-Cấu hình Control Panel → Notification → Email trước, để email báo lỗi của Task
-Scheduler ra được khỏi NAS. Sau đó tạo hai tác vụ trong Control Panel → Task
-Scheduler → Create → Scheduled Task → User-defined script, bằng tài khoản vận
-hành sở hữu thư mục sao lưu:
+Nếu một kiểm tra thất bại, hãy đọc các dòng log cuối bằng `$PF logs --tail=100 backend web`. Địa chỉ
+`http://<NAS_IP>:18080` không hoạt động từ máy tính khác: `web` chỉ lắng nghe trên địa chỉ loopback của chính NAS, theo
+thiết kế. Mọi người truy cập PartFlow qua HTTPS, mà §9 thiết lập.
 
-| Tên tác vụ | Lịch | Run command |
+## 9. Thiết lập HTTPS
+
+PartFlow yêu cầu HTTPS: cookie đăng nhập của nó được đánh dấu secure, nên trình duyệt chỉ giữ cookie đó qua HTTPS. Reverse
+proxy của DSM nhận các kết nối HTTPS cho `<HOSTNAME>` ở cổng 443 và chuyển tiếp chúng tới `http://127.0.0.1:18080`.
+
+- **Phương án A, chỉ mạng công ty hoặc VPN:** làm §9.1, §9.2 và §9.3, rồi tiếp tục với §10.
+- **Phương án B, truy cập cả từ Internet:** làm theo [`SYNOLOGY_PUBLIC_HTTPS.vi.md`](./SYNOLOGY_PUBLIC_HTTPS.vi.md) từ đầu
+  đến cuối. Hướng dẫn đó dùng §9.2 bên dưới cho quy tắc reverse proxy và kết thúc bằng bài kiểm tra riêng của nó. Sau đó
+  tiếp tục với §10.
+
+### 9.1 Tên miền truy cập và chứng chỉ (phương án A)
+
+1. **Làm cho tên miền truy cập trỏ tới NAS.** Trong máy chủ DNS nội bộ của công ty, hoặc trong cài đặt DNS cục bộ của
+   router, tạo một bản ghi `A` từ `<HOSTNAME>` tới `<NAS_IP>`. Trên một máy trạm, `nslookup <HOSTNAME>` phải trả lời
+   `<NAS_IP>`.
+2. **Lấy chứng chỉ cho tên miền truy cập.** Mở **Control Panel → Security → Certificate → Add → Add a new certificate →
+   Next** và chọn một nguồn:
+   - **Import certificate**, khi công ty có tổ chức cấp chứng chỉ (CA) riêng: chọn khóa riêng, chứng chỉ và chứng chỉ
+     trung gian mà CA đã cấp cho `<HOSTNAME>`.
+   - **Get a certificate from Let's Encrypt**, chỉ khi `<HOSTNAME>` là một tên DNS công khai phân giải tới địa chỉ công
+     khai của công ty và cổng 80 từ Internet đến được NAS. DSM tự gia hạn chứng chỉ này. Với truy cập công khai, phương
+     án B là thiết kế được tài liệu hóa.
+   - **Create self-signed certificate**, khi không có hai cách trên. Trước tiên DSM tạo một chứng chỉ gốc, chính là CA
+     riêng của bạn, rồi tạo chứng chỉ PartFlow do nó ký: nhập `<HOSTNAME>` làm common name và làm subject alternative
+     name. Sau đó chọn chứng chỉ mới, chọn **Export certificate**, và chỉ lấy chứng chỉ gốc ra khỏi tệp nén đã tải về
+     (DSM thường đặt tên là `syno-ca-cert.pem`). Tệp nén cũng chứa các khóa riêng: không bao giờ phát tệp nén hay một
+     tệp khóa cho người khác.
+3. **Làm cho mọi thiết bị tin cậy chứng chỉ.** Với CA của công ty hoặc chứng chỉ gốc của DSM, hãy cài chứng chỉ gốc làm
+   chứng chỉ tin cậy trên mọi máy trạm và mọi thiết bị Scan Station, qua hệ thống quản lý thiết bị của công ty hoặc làm
+   thủ công. Trên Windows: mở tệp, **Install Certificate → Local Machine → Place all certificates in the following
+   store → Trusted Root Certification Authorities**. Không bao giờ bảo người dùng bấm bỏ qua cảnh báo của trình duyệt.
+4. **Ghi lại ngày hết hạn.** DSM chỉ gia hạn chứng chỉ Let's Encrypt; hãy thay mọi chứng chỉ khác trước khi nó hết hạn.
+   Tác vụ `check.sh` ở §11 cảnh báo trước 21 ngày.
+
+### 9.2 Tạo quy tắc reverse proxy
+
+Quy tắc này giống nhau cho phương án A và phương án B.
+
+1. Mở **Control Panel → Login Portal → Advanced → Reverse Proxy** và bấm **Create**.
+2. Trên tab **General** nhập:
+
+   | Field | Value |
+   | --- | --- |
+   | Reverse Proxy Name | `PartFlow` |
+   | Source: Protocol, Hostname, Port | `HTTPS`, `<HOSTNAME>`, `443` |
+   | Source: Enable HSTS | chưa chọn lúc này; chỉ chọn khi HTTPS đã hoạt động ở mọi nơi |
+   | Destination: Protocol, Hostname, Port | `HTTP`, `127.0.0.1`, `18080` |
+
+3. Trên tab **Custom Header**, mở **Create ▼**, chọn **Create** (không chọn WebSocket), và thêm hàng đầu tiên bên dưới.
+   Làm tương tự cho hàng thứ hai. Nếu một hàng giống hệt đã có trong danh sách, đừng thêm hai lần.
+
+   | Header Name | Value |
+   | --- | --- |
+   | `X-Forwarded-For` | `$proxy_add_x_forwarded_for` |
+   | `X-Forwarded-Proto` | `$scheme` |
+
+4. Trên tab **Advanced Settings**, đặt **Proxy send timeout** và **Proxy read timeout** là `300` giây. Nếu phiên bản DSM
+   của bạn có cài đặt kích thước request body, hãy đặt nó tối thiểu 5 MiB. Giữ nguyên các cài đặt khác.
+5. Bấm **Save**.
+6. Gán chứng chỉ cho quy tắc: mở **Control Panel → Security → Certificate → Settings**, tìm `<HOSTNAME>` trong danh sách
+   dịch vụ, chọn chứng chỉ PartFlow và bấm **OK**. Đừng dựa vào chứng chỉ mặc định của DSM.
+
+Lý do của các giá trị này:
+
+- Đích là `127.0.0.1`, không bao giờ là `localhost` (có thể là địa chỉ IPv6, nơi `web` không lắng nghe), không bao giờ
+  là địa chỉ của NAS và không bao giờ là một địa chỉ Docker `172.x.x.x`, vì `web` chỉ lắng nghe trên địa chỉ loopback.
+- Giao thức đích là HTTP, vì kết nối nằm trong NAS và `web` không có chứng chỉ.
+- `X-Forwarded-Proto` cho PartFlow biết trình duyệt đã dùng HTTPS; `X-Forwarded-For` cho `web` biết địa chỉ của người
+  dùng, mà các giới hạn tần suất (rate limit) đăng nhập của nó sử dụng.
+- Việc nhập Work Order có thể mất tới 180 giây và ảnh có thể nặng 2 MiB, nên timeout ngắn hơn hoặc kích thước request nhỏ
+  hơn sẽ làm chúng thất bại.
+- Không bao giờ dùng các cổng DSM 5000 và 5001 cho PartFlow, và không bao giờ để phần quản trị DSM truy cập được qua
+  `<HOSTNAME>`.
+
+### 9.3 Kiểm tra HTTPS (phương án A)
+
+Trên một máy trạm của mạng công ty:
+
+1. Mở `https://<HOSTNAME>/api/health`. Trang hiển thị JSON có `"status":"ok"`.
+2. Mở `https://<HOSTNAME>`. PartFlow mở ra và hiển thị nút **Set up PartFlow**, và trình duyệt hiển thị kết nối an toàn
+   mà không có cảnh báo nào.
+
+Cảnh báo chứng chỉ nghĩa là máy trạm này chưa tin cậy chứng chỉ gốc (§9.1 bước 3), hoặc tên trên thanh địa chỉ không
+phải tên trong chứng chỉ. Một trang lỗi của DSM nghĩa là quy tắc reverse proxy không khớp với tên (§9.2).
+
+## 10. Tạo Administrator đầu tiên và đăng ký các Scan Station
+
+Hoàn thành mục này trước khi đưa địa chỉ cho bất kỳ ai: cho đến khi Administrator đầu tiên tồn tại, bất kỳ ai mở được
+PartFlow và đọc được log của backend đều có thể tạo một Administrator.
+
+1. Trên NAS, đọc mã thiết lập (setup token):
+
+   ```sh
+   $PF logs backend | grep "Setup token" | tail -n 1
+   ```
+
+   Dòng đó là một bản ghi log dạng JSON, có thông điệp là
+   `PartFlow first-run setup is open: no administrator exists. Setup token: <token> — enter it in PartFlow …`.
+   Chỉ sao chép token: tám nhóm, mỗi nhóm bốn ký tự, sau `Setup token:`. Mỗi lần `backend` khởi động lại đều ghi một
+   token mới, vì vậy lệnh chỉ giữ dòng mới nhất.
+
+2. Trong trình duyệt, mở `https://<HOSTNAME>`, bấm **Set up PartFlow**, dán token, và tạo Administrator đầu tiên: một
+   tên đăng nhập, một tên hiển thị, một vai trò trong số các vai trò được đưa ra (vai trò nào cũng có thể quản trị
+   PartFlow) và một mật khẩu. Sau đó thiết lập đóng vĩnh viễn.
+3. Trên NAS, đưa `backend` về số worker đã cấu hình và kiểm tra nó healthy trở lại:
+
+   ```sh
+   $PF up -d backend
+   $PF ps
+   ```
+
+4. Kiểm tra rằng cơ chế bảo vệ database đã có hiệu lực. Kết quả hiển thị dòng `"status": "pass"`:
+
+   ```sh
+   $PF run --rm --no-deps -T backend python -m app.cli reconcile --check h | grep -A2 '"id": "h"'
+   ```
+
+   Đây là kiểm tra bảo vệ (h) "Append-only guards and database-role privileges intact" (reconcile check (h)). Mọi trạng
+   thái khác là một sự cố: không bắt đầu dùng PartFlow, và làm theo runbook §7 (Repairing check (h) findings).
+
+5. Kiểm tra rằng việc tải lên đi qua được reverse proxy: trong **Administration → Users**, mở người dùng của chính bạn,
+   gán một ảnh 1 đến 2 MB và lưu. Nếu bị từ chối vì quá lớn, xem runbook §8 (Common problems).
+6. Đăng ký (enroll) từng thiết bị Scan Station: đăng nhập, mở **Administration → Scan Stations**, chọn **Devices…** của
+   station đó, rồi **Enroll device…**, và nhập mã dùng một lần trên station trong vòng 15 phút.
+
+PartFlow giờ đã chạy production. Hãy đưa mọi người địa chỉ `https://<HOSTNAME>`.
+
+## 11. Sau khi đưa vào sử dụng: sao lưu và giám sát
+
+Các tác vụ này được khuyến nghị và không bao giờ chặn việc sử dụng. Cho đến khi bản sao lưu hằng ngày chạy, các bản sao
+lưu duy nhất là những bản mà `release.sh` tạo trước mỗi bản phát hành. Hãy làm theo thứ tự này.
+
+### 11.1 Thông báo qua email
+
+DSM gửi email khi một tác vụ theo lịch thất bại; đây là kênh cảnh báo duy nhất. Mở **Control Panel → Notification →
+Email**, chọn **Enable email notifications**, nhập cài đặt máy chủ thư (SMTP) và người nhận, rồi bấm **Send a test
+email**. Chỉ tiếp tục khi email thử đã đến.
+
+### 11.2 Tác vụ sao lưu hằng ngày
+
+1. Mở **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**.
+2. **General:** Task `PartFlow backup`, User `root`, chọn **Enabled**.
+3. **Schedule:** **Run on the following days: Daily**, giờ chạy đầu tiên `02:00`, một lần mỗi ngày.
+4. **Task Settings:** chọn **Send run details by email**, nhập địa chỉ của bạn, và chọn **Send run details only when
+   the script terminates abnormally**. Trong **Run command** nhập:
+
+   ```sh
+   cd /volume1/docker/partflow/repo && deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8
+   ```
+
+5. Bấm **OK**. Chọn tác vụ và bấm **Run** để thử. Sau khoảng một phút, thư mục sao lưu có thêm một thư mục con có tên
+   kết thúc bằng `-daily`:
+
+   ```sh
+   ls /volume1/docker/partflow/backups
+   ```
+
+`--keep-daily 14 --keep-weekly 8` giữ 14 bản sao lưu hằng ngày mới nhất cộng một bản mỗi tuần trong 8 tuần; hãy chọn
+con số của riêng bạn. Với bản sao lưu hằng ngày, tối đa mất một ngày công việc. Hãy để 02:00 cách xa các thời điểm bạn
+cài bản phát hành: một bản sao lưu đang chạy sẽ làm bản phát hành dừng trước khi thay đổi bất cứ điều gì (hãy chạy lại
+bản phát hành khi bản sao lưu đã xong), và một bản sao lưu bắt đầu trong lúc đang phát hành bị từ chối (bạn nhận email
+báo thất bại của nó; bản sao lưu của ngày hôm sau chạy bình thường, hoặc hãy tạo một bản thủ công, runbook §3). Các bản
+sao lưu được giải thích trong runbook §3.
+
+### 11.3 Bản sao mã hóa ngoài NAS
+
+Một bản sao lưu chỉ nằm trên NAS sẽ mất cùng NAS. Hãy sao chép thư mục sao lưu ra nơi khác bằng **Hyper Backup**:
+
+1. Cài **Hyper Backup** từ Package Center, mở nó và tạo một **Data backup task**.
+2. Chọn đích nằm ngoài NAS này: một NAS khác, Synology C2 Storage hoặc một dịch vụ tương thích S3.
+3. Ở phần nguồn, chọn thư mục `docker/partflow/backups`.
+4. Bật **client-side encryption**. Giữ mật khẩu và tệp khóa ngoài NAS: không có chúng thì không đọc được các bản sao.
+5. Lên lịch hằng ngày lúc `03:00`, sau bản sao lưu. Đặt việc xoay vòng phiên bản (version rotation) theo quyết định của
+   bạn, bật kiểm tra tính toàn vẹn hằng tuần, và bật thông báo email khi thất bại.
+
+Snapshot của volume NAS chỉ là lớp bảo vệ thứ hai: chúng không bao giờ thay thế các bản sao lưu này và bản sao của chúng
+nằm ngoài NAS.
+
+### 11.4 Diễn tập khôi phục (restore drill)
+
+Một lần sau khi đưa vào sử dụng (go-live), rồi mỗi quý, hãy chứng minh rằng một bản sao lưu khôi phục được và đo xem mất
+bao lâu. Dùng tên của bản sao lưu hằng ngày mới nhất (tên thư mục từ §11.2):
+
+```sh
+cd /volume1/docker/partflow/repo
+deploy/production/restore-test.sh --backup <backup name> --operator "<your name>"
+```
+
+Buổi diễn tập (restore drill) khôi phục bản sao lưu vào một stack tạm thời riêng biệt, kiểm tra nó rồi xóa nó; nó không
+bao giờ động đến database production. Mã thoát (exit code) 0 nghĩa là đạt. Tệp bằng chứng và các số đo thời gian của nó
+được giải thích trong runbook §4.
+
+### 11.5 Các tác vụ giám sát
+
+Tạo thêm hai tác vụ như ở §11.2 (User `root`, chỉ gửi email khi script kết thúc bất thường):
+
+| Task | Schedule | Run command |
 | --- | --- | --- |
-| `PartFlow check` | hằng ngày từ 00:00, lặp lại mỗi 15 phút đến 23:45 | `cd <running release checkout> && deploy/production/check.sh --url https://<partflow host> --quiet` |
-| `PartFlow reconcile` | hằng ngày lúc 04:00 (sau bản sao lưu 02:00) | `cd <running release checkout> && deploy/production/scheduled-reconcile.sh` |
+| `PartFlow check` | Hằng ngày, lần chạy đầu `00:00`, lặp lại mỗi 15 phút, lần chạy cuối `23:45` | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/check.sh --url https://<HOSTNAME> --quiet` |
+| `PartFlow reconcile` | Hằng ngày lúc `04:00`, sau bản sao lưu | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/scheduled-reconcile.sh` |
 
-Ở cả hai tác vụ, bật "Send run details by email" **chỉ khi script kết thúc bất
-thường**. `check.sh --quiet` không in gì và thoát với mã 0 trừ khi có lỗi cần
-báo, và nó chỉ báo lại một lỗi không đổi sau mỗi 6 giờ. Thêm
-`--resolve-to 127.0.0.1` vào tác vụ check khi NAS không phân giải được tên máy
-PartFlow của chính nó.
+`HOME=/root` cho các script biết nơi lưu trạng thái của chúng, phòng khi Task Scheduler không đặt biến này. Hãy điều
+chỉnh lệnh check theo phương án HTTPS của bạn:
 
-Thử đường email một lần: tạm thêm
-`--only disk_backup --min-free-percent 100 --renotify-hours 0` vào lệnh của tác
-vụ check, chạy tác vụ một lần từ Task Scheduler (**Run**), xác nhận email báo lỗi
-đến nơi, rồi bỏ các tùy chọn đã thêm. Mức trống tối thiểu 100 % cố ý làm mọi ổ
-đĩa được đo thất bại. Các ngưỡng, mã thoát và ý nghĩa của từng dòng nằm ở
-[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §2 và §9.
+- **Phương án A với CA của công ty hoặc của DSM:** sao chép chứng chỉ gốc lên NAS, ví dụ vào
+  `/volume1/docker/partflow/ca.pem`, và thêm `--cacert /volume1/docker/partflow/ca.pem`. Nếu bản thân NAS không phân
+  giải được `<HOSTNAME>`, hãy thêm cả `--resolve-to 127.0.0.1`.
+- **Phương án B (Cloudflare):** không thêm gì. Lệnh check đến PartFlow qua Cloudflare, giống một người dùng.
 
-## 9. Dung lượng và độ tin cậy
+Thử tác vụ check: chọn nó, bấm **Run**, rồi đọc kết quả trên NAS. Dòng đầu hiển thị thời gian và mã thoát
+(`exit 0`); mọi dòng khác bắt đầu bằng `PASS`, hoặc `SKIP` với một kiểm tra không áp dụng (dòng `archival_proposal`
+luôn là `SKIP`):
 
-Một con số bộ nhớ hay bộ xử lý chung chung không chứng minh NAS đã sẵn sàng. Hãy
-đo trên chính NAS này, trong các buổi thử staging hoặc những tuần đầu của
-production:
+```sh
+cat /root/partflow-monitoring/last-check.txt
+```
 
-- mức dùng bộ xử lý và bộ nhớ lúc rảnh và lúc cao điểm của mọi service PartFlow
-  và của các tác vụ sẵn có trên NAS;
-- mức tăng dữ liệu và index của PostgreSQL;
-- dung lượng tạm cho việc build image và cập nhật;
-- thời gian và kích thước sao lưu, và thời gian khôi phục (các dòng tiến độ của
-  `backup.sh` và tệp `evidence.json` của `restore-test.sh`);
-- thời gian phản hồi của màn hình và API từ các mạng xưởng sản xuất;
-- hành vi khi NAS khởi động lại, container khởi động lại, mạng bị gián đoạn và
-  UPS tắt máy.
+Một dòng `FAIL` nêu tên vấn đề; runbook §2 giải thích từng kiểm tra. `check.sh --quiet` không in gì và kết thúc bình
+thường khi mọi thứ đều đạt, nên bạn chỉ nhận email khi có lỗi, và một lỗi không thay đổi được lặp lại mỗi 6 giờ.
 
-Dùng các số đo này để đặt giới hạn tài nguyên trong `.env.production`:
+### 11.6 Thử email cảnh báo
 
-| Thiết lập | Mặc định |
+Cố ý làm cho kiểm tra thất bại một lần, để chứng minh email đến được bạn:
+
+1. Sửa tác vụ `PartFlow check` và thêm `--only disk_backup --min-free-percent 100 --renotify-hours 0` vào cuối lệnh của
+   nó. Mức tối thiểu 100 % dung lượng trống sẽ cố ý thất bại.
+2. Bấm **Run**. Trong vài phút bạn nhận được email từ DSM báo rằng tác vụ kết thúc bất thường.
+3. Sửa tác vụ một lần nữa và xóa ba tùy chọn đã thêm.
+
+### 11.7 Firewall
+
+Chỉ cho phép các mạng cần dùng PartFlow. Mở **Control Panel → Security → Firewall**, chọn **Enable firewall** và sửa các
+quy tắc của profile đang dùng:
+
+1. Trước tiên thêm các quy tắc cho phép (allow) cho việc quản trị của bạn: các cổng 5000 và 5001 (DSM) và 22 (SSH) từ
+   các máy tính hoặc subnet bạn quản trị từ đó. Nếu thiếu, firewall sẽ khóa bạn khỏi DSM.
+2. Thêm một quy tắc cho phép cổng 443 từ các subnet của công ty hoặc VPN (phương án A). Với phương án B, làm theo
+   [`SYNOLOGY_PUBLIC_HTTPS.vi.md`](./SYNOLOGY_PUBLIC_HTTPS.vi.md) §12.
+3. Đặt hành động cho mọi thứ còn lại là **Deny access**, áp dụng, và kiểm tra rằng bạn vẫn mở được DSM và PartFlow.
+4. Kiểm tra rằng các container vẫn hoạt động sau firewall: chạy toàn bộ kiểm tra bằng tay (với cùng các tùy chọn như
+   tác vụ theo lịch) và chỉ mong thấy các dòng `PASS` và `SKIP`.
+
+   ```sh
+   deploy/production/check.sh --url https://<HOSTNAME> --no-state
+   ```
+
+   Nếu một kiểm tra chỉ thất bại kể từ khi bật firewall, nghĩa là firewall chặn các mạng riêng của container. Liệt kê
+   các subnet của chúng và thêm một quy tắc cho phép cho từng subnet:
+
+   ```sh
+   docker network inspect partflow-production_internal partflow-production_edge --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'
+   ```
+
+## 12. Cài một bản phát hành mới
+
+Mọi bản phát hành sau này được cài bằng `deploy/production/release.sh`. Script tạo một bản sao lưu đã xác minh, build các
+image mới mà không động đến các image đang chạy, migrate database, chuyển PartFlow sang bản phát hành mới và kiểm tra nó.
+Hãy chọn thời điểm không có việc nhập Work Order nào đang chạy và bản sao lưu hằng ngày (02:00) cũng không chạy.
+
+```sh
+cd /volume1/docker/partflow/repo
+git fetch --tags
+git checkout <NEW_TAG>
+deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --approver "<your name>"
+```
+
+- Mã thoát 0 nghĩa là bản phát hành mới đang chạy và các kiểm tra tự động của nó đã đạt. Sau đó hãy kiểm tra bằng tay
+  với dữ liệu thử: đăng nhập, quét ở một Scan Station, và lưu một thay đổi rồi đọc lại. Các trang đang mở hiển thị
+  thông báo cập nhật và phải được tải lại; một Scan Station hoặc Production Board không có người trông tự tải lại.
+- Mọi mã thoát khác: đọc thông báo và làm theo runbook §5 (bảng mã thoát). Không có gì tự mở lại khi `release.sh` đã
+  dừng việc ghi.
+- `.env.production` không được git theo dõi, nên nó ở nguyên chỗ; `release.sh` ghi tag mới vào đó lúc chuyển. Các tác vụ
+  theo lịch không cần thay đổi, vì chúng chạy trong cùng thư mục.
+- Giữ các image của bản phát hành trước (không bao giờ dùng `docker image prune -a`) cho đến khi bạn chắc chắn sẽ không
+  quay lui (rollback) (runbook §6).
+
+## 13. Dung lượng và giới hạn tài nguyên
+
+Một con số chung về bộ nhớ hay bộ xử lý không chứng minh được rằng NAS này đủ lớn. Hãy đo trong những tuần đầu sử dụng:
+mức dùng bộ xử lý và bộ nhớ của mọi container PartFlow lúc nghỉ và lúc cao điểm (`docker stats --no-stream`), mức tăng
+của database, thời gian và kích thước của các bản sao lưu, thời gian của một buổi diễn tập khôi phục, thời gian phản hồi
+từ xưởng sản xuất, và hành vi khi NAS khởi động lại và khi mất điện.
+
+Đặt các giới hạn trong `.env.production` theo các phép đo đó, rồi áp dụng vào lúc ít người dùng bằng
+`$PF up -d db backend web`, lệnh này khởi động lại các container có giới hạn thay đổi. Trước đó, hãy lưu các lỗi gần đây
+của backend bằng `deploy/production/check.sh --url https://<HOSTNAME> --only errors --no-state` (runbook §2). Trên NAS
+không hỗ trợ giới hạn bộ xử lý (§3 bước 4), các giá trị `CPUS` giữ ở `0`.
+
+| Setting | Default |
 | --- | --- |
 | `PARTFLOW_DB_MEMORY`, `PARTFLOW_DB_CPUS` | `1g`, `1.0` |
 | `PARTFLOW_BACKEND_MEMORY`, `PARTFLOW_BACKEND_CPUS` | `1g`, `2.0` |
 | `PARTFLOW_WEB_MEMORY`, `PARTFLOW_WEB_CPUS` | `128m`, `0.5` |
-| `PARTFLOW_OPS_MEMORY`, `PARTFLOW_OPS_CPUS` | `512m`, `1.0` |
+| `PARTFLOW_OPS_MEMORY`, `PARTFLOW_OPS_CPUS` (mỗi tác vụ chạy một lần) | `512m`, `1.0` |
 
-Giữ đủ dung lượng đĩa trống cho database, ít nhất một bộ image release dự phòng,
-công việc migration tạm thời và các bản sao lưu cục bộ. Các kiểm tra đĩa của
-`check.sh` cảnh báo khi dung lượng trống dưới 15 %:
-
-| Check | Đo |
-| --- | --- |
-| `disk_data` | volume database |
-| `disk_backup` | thư mục sao lưu |
-| `disk_docker` | thư mục gốc của Docker (image và log container) |
-
-Mức tăng của database được ghi trong `growth.tsv` ở thư mục trạng thái của
-check (`~/partflow-monitoring`). Một bản sao lưu cần dung lượng trống bằng hai
-lần bản dump mới nhất cộng 1 GiB trong thư mục sao lưu, và một lần diễn tập
-khôi phục cần năm lần bản dump cộng 1 GiB trên thư mục gốc của Docker (lần diễn
-tập chạy một backend worker).
-
-## 10. Chuyển từ Synology sang VPS
-
-1. Chuẩn bị VPS theo [`VPS.md`](./VPS.md) ở cùng release ứng dụng và cùng mức
-   migration với NAS.
-2. Diễn tập trên VPS với một bản sao lưu production gần đây:
-   `deploy/production/restore-test.sh --backup <name> --operator "<name>"`.
-3. Thông báo và bắt đầu đóng băng ghi (write freeze) production trên NAS:
-   `$PF stop backend`.
-4. Tạo bản sao lưu cuối cùng trong lúc đóng băng:
-   `deploy/production/backup.sh --kind manual --operator "<name>" --reason "move to VPS"`.
-   Tệp `SHA256SUMS` của nó là manifest checksum.
-5. Sao chép thư mục sao lưu sang VPS qua một kênh được mã hóa và kiểm tra nó ở
-   đó bằng `sha256sum -c SHA256SUMS` và `backup-verify`.
-6. Khôi phục vào PostgreSQL của VPS bằng quy trình khôi phục vào instance mới ở
-   [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §6 (một volume
-   `postgres_data` mới, rỗng; sự chấp thuận của owner được ghi lại trước khi
-   `backend` khởi động).
-7. Trước khi mở truy cập, kiểm tra revision của database
-   (`$PF run --rm --no-deps -T backend python -m app.cli revision`) và chạy các
-   kiểm tra đối soát.
-8. Đổi bản ghi DNS nội bộ với thời gian sống (time to live, TTL) ngắn và kiểm
-   tra các client.
-9. Giữ instance trên NAS ở trạng thái dừng và có thể khôi phục cho đến khi hết
-   khung thời gian rollback. Không bao giờ để cả hai instance cùng nhận thao tác
-   ghi.
+Giữ đủ dung lượng đĩa trống cho database, các image của ít nhất một bản phát hành nữa, công việc migration tạm thời và
+các bản sao lưu cục bộ. Một bản sao lưu cần dung lượng trống bằng hai lần bản sao lưu mới nhất cộng 1 GiB trong thư mục
+sao lưu; một buổi diễn tập khôi phục cần năm lần bản sao lưu cộng 1 GiB trên vùng lưu trữ của Docker. Các kiểm tra đĩa
+của `check.sh` thất bại khi dung lượng trống dưới 15 %: `disk_data` cho volume database, `disk_backup` cho thư mục sao
+lưu và `disk_docker` cho vùng lưu trữ của Docker (image và log của container). `/root/partflow-monitoring/growth.tsv`
+ghi kích thước database mỗi ngày một lần.
 
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Khôi phục các mục nhỏ mà lần viết lại đã bỏ sót: kiểm tra health trong smoke test của staging, bản sao ngoài NAS và restore test của dump staging, reconciliation của staging, tên đầy đủ của reconcile check (h) và lệnh `revision` đầy đủ; bước 1 nay áp dụng cả cho NAS chưa từng cài staging. |
-| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và release gate theo quyết định của owner. |
-| 2026-10-09 | 03bd90c | Thêm các tác vụ giám sát và ngưỡng đĩa của các kiểm tra host. |
-| 2026-10-08 | a330383 | Thêm các tác vụ sao lưu production, bản sao mã hóa ngoài NAS và diễn tập khôi phục. |
-| 2026-10-08 | 1116b07 | Thêm các database role của production vào các bước cài đặt. |
-| 2026-10-08 | b820e7a | Thêm luồng release với `release.sh` cho các release sau. |
-| 2026-10-08 | d7e86a9 | Thêm production stack, thiết lập DSM reverse proxy và các phương án chứng chỉ. |
-| 2026-10-06 | 702ab1c | Thêm thiết lập Administrator lần đầu và đăng ký thiết bị Scan Station. |
-| 2026-09-02 | d2f68de | Phiên bản đầu của hướng dẫn Synology NAS cùng bản dịch tiếng Việt. |
+| 2026-11-10 | uncommitted | Viết lại thành một quy trình cài đặt tuyến tính từ NAS trống đến khi mọi người làm việc trong PartFlow, với mọi đường dẫn DSM và mọi lệnh theo thứ tự; bước HTTPS đưa ra phương án mạng LAN hoặc hướng dẫn Cloudflare; thêm kiểm tra kernel không hỗ trợ giới hạn bộ xử lý và kiểm tra firewall đối với các mạng của container; phần NAS staging tùy chọn và quy trình chuyển máy được loại bỏ (việc chuyển máy nay nằm trong runbook §6). |
+| 2026-11-09 | `398c617` | Khôi phục các mục nhỏ mà bản viết lại đã bỏ sót: kiểm tra tình trạng trong smoke test của staging, bản sao ngoài NAS và kiểm thử khôi phục của các dump staging, đối soát staging, tên đầy đủ của reconcile check (h) và lệnh `revision` đầy đủ; bước 1 nay bao gồm cả NAS chưa từng cài staging. |
+| 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ các cổng pilot và release theo quyết định của chủ sở hữu. |
+| 2026-10-09 | `03bd90c` | Thêm các tác vụ giám sát và ngưỡng đĩa của các kiểm tra máy chủ. |
+| 2026-10-08 | `a330383` | Thêm các tác vụ sao lưu production, bản sao mã hóa ngoài NAS và buổi diễn tập khôi phục. |
+| 2026-10-08 | `1116b07` | Thêm các database role production vào các bước cài đặt. |
+| 2026-10-08 | `b820e7a` | Thêm quy trình phát hành với `release.sh` cho các bản phát hành sau. |
+| 2026-10-08 | `d7e86a9` | Thêm production stack, các cài đặt reverse proxy của DSM và các phương án chứng chỉ. |
+| 2026-10-06 | `702ab1c` | Thêm thiết lập Administrator lần đầu và đăng ký thiết bị Scan Station. |
+| 2026-09-02 | `d2f68de` | Phiên bản đầu tiên của hướng dẫn Synology NAS cùng bản dịch tiếng Việt. |

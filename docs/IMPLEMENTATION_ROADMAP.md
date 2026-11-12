@@ -1250,7 +1250,7 @@ The full description is in DEPLOYMENT §3.1. In short:
 ### Next step: go-live on the NAS
 
 PartFlow goes live directly on the company Synology NAS. The installation follows
-[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §8. Only what the software needs in order to work is
+[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §1 to §10. Only what the software needs in order to work is
 required (DEPLOYMENT §5): HTTPS at the platform proxy (request bodies of at least 5 MiB, timeouts of at least 300
 seconds, the certificate trusted by every workstation and Scan Station), first-run setup with one backend worker until
 the first Administrator exists, each Scan Station device enrolled, no `partflow-staging` project on the production
@@ -1412,7 +1412,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Rewritten as current state for new readers; pilot replaced by direct go-live (owner decision). |
+| 2026-11-10 | uncommitted | The go-live step points to the rewritten NAS installation guide (§1 to §10). |
+| 2026-11-09 | `398c617` | Rewritten as current state for new readers; pilot replaced by direct go-live (owner decision). |
 | 2026-11-09 | `b405c6e` | Recorded the owner's direct go-live decision with no pilot and no release gates. |
 | 2026-10-09 | `03bd90c`, `4271f61` | Phase 16 monitoring: structured logs, request ids, status command, host checks and scheduled reconcile. |
 | 2026-10-08 | `a330383`, `92727f6` | Phase 16 backups, restore drill and rollback by restore. |

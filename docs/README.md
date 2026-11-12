@@ -23,17 +23,21 @@ states only its current content and ends with a change history table.
 
 ## Deployment and operations
 
+Read them in this order: `DEPLOYMENT.md` §1 and §2 first, then the installation guide of your host, then the runbook
+when PartFlow runs.
+
 | Document | Purpose | Vietnamese |
 | --- | --- | --- |
-| [`DEPLOYMENT.md`](./DEPLOYMENT.md) | The starting point for running PartFlow outside a workstation: current status, the production stack contract, go-live requirements, and release naming and publication. | [`DEPLOYMENT.vi.md`](./DEPLOYMENT.vi.md) |
-| [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) | Installing, updating, backing up and monitoring PartFlow production on the company Synology NAS, plus the optional restricted staging. | [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) |
-| [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) | The Deployment Admin tool (`pf`) that manages Synology staging instances, including its planned design as a reusable deployment controller. | [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md) |
-| [`deployment/VPS.md`](./deployment/VPS.md) | Running the same production stack on a Linux virtual private server (VPS), the alternative production host. | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) |
+| [`DEPLOYMENT.md`](./DEPLOYMENT.md) | The starting point: what production consists of, which document to follow for each task, the terms and safety rules, the reference of the production stack, the go-live requirements, and release naming and publication. | [`DEPLOYMENT.vi.md`](./DEPLOYMENT.vi.md) |
+| [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) | Installing PartFlow production on the company Synology NAS step by step, from an empty NAS to HTTPS, first-run setup, backups and monitoring. | [`deployment/SYNOLOGY_NAS.vi.md`](./deployment/SYNOLOGY_NAS.vi.md) |
+| [`deployment/SYNOLOGY_PUBLIC_HTTPS.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.md) | Optional: making PartFlow on the NAS reachable from the Internet through Cloudflare, with the router's port forwarding and dynamic DNS. | [`deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md`](./deployment/SYNOLOGY_PUBLIC_HTTPS.vi.md) |
+| [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) | Running PartFlow once installed: health checks, backups, restore drills, new releases, rollback and restore, reconciliation, common problems and incidents, and the routine schedule. | [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) |
+| [`deployment/VPS.md`](./deployment/VPS.md) | Installing the same production stack on a Linux virtual private server (VPS), the alternative production host. | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) |
 | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) | Why shared web hosting is only conditionally possible and what a provider must confirm first, including the Hawk Host finding. | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) |
-| [`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) | The operator's procedures: deployment records, health checks, backups, restore tests, releases, rollback, reconciliation, incidents and the routine schedule. | [`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) |
 
-The folder `deployment/Synology DSM7 - Staging/` holds a superseded staging kit kept
-for reference only; it is never current instructions.
+Not needed for production: [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)
+([Vietnamese](./deployment/SYNOLOGY_ADMIN.vi.md)) describes the Deployment Admin tool (`pf`), which manages staging
+instances on a host other than the production one, including its planned design as a reusable deployment controller.
 
 ## Translation policy
 
@@ -47,7 +51,8 @@ are also intentionally excluded.
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Rewritten for new readers: an introduction, a current one-sentence description of each document, and this change table. |
+| 2026-11-10 | uncommitted | Deployment documents listed in reading order with the Cloudflare guide; the Deployment Admin guide marked as not needed for production; the superseded staging kit removed. |
+| 2026-11-09 | `398c617` | Rewritten for new readers: an introduction, a current one-sentence description of each document, and this change table. |
 | 2026-10-14 | `2c360cb` | Deployment Admin entry mentions its planned reusable-controller design goal. |
 | 2026-09-02 | `8e5ab18`, `6fae517` | Vietnamese mirrors moved beside their English sources and every link repointed. |
 | 2026-09-02 | `d2f68de` | Index created with the deployment guides and the Vietnamese mirrors. |

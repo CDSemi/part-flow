@@ -88,10 +88,11 @@ settings in Administration. The full implementation state is in
   as the visual reference.
 - [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md) — what is
   implemented, in which order, and the temporary limitations.
-- [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) and
-  [`docs/deployment/SYNOLOGY_NAS.md`](./docs/deployment/SYNOLOGY_NAS.md) —
-  production. PartFlow runs in production on the company Synology NAS. By the
-  owner's decision of 2026-11-09 it goes directly into real use once the
+- [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) — production: start with its §1,
+  which says which document to follow for each task (the step-by-step
+  installation on the company Synology NAS is
+  [`docs/deployment/SYNOLOGY_NAS.md`](./docs/deployment/SYNOLOGY_NAS.md)). By the
+  owner's decision of 2026-11-09, PartFlow goes directly into real use once the
   production stack is installed: there is no pilot phase and no list of release
   gates, and problems are fixed in later releases.
 
@@ -632,15 +633,15 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 ## Production stack
 
 Production runs a separate Compose stack, never `compose.yaml`. This section only
-orients a developer; the contract of the stack (services, configuration file,
-secret files, first installation, database roles, releases, backups, logging and
-monitoring) is [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1, and the
-installation on the company Synology NAS is
-[`docs/deployment/SYNOLOGY_NAS.md`](./docs/deployment/SYNOLOGY_NAS.md) §8. The
-day-to-day procedures are in
+orients a developer; the reference of the stack (services, configuration file,
+secret files, database roles, health, limits, logging and scripts) is
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) §3.1, the installation on the
+company Synology NAS is
+[`docs/deployment/SYNOLOGY_NAS.md`](./docs/deployment/SYNOLOGY_NAS.md), and the
+day-to-day procedures (releases, backups, rollback, monitoring) are in
 [`docs/deployment/OPERATIONS_RUNBOOK.md`](./docs/deployment/OPERATIONS_RUNBOOK.md).
-The production commands and scripts have been run on Docker Desktop and in a Linux
-container, not yet on a Synology NAS or a VPS.
+The automated tests of the production commands and scripts run on Docker Desktop
+and in a Linux container.
 
 - **Files.** `compose.production.yaml` (Compose project `partflow-production`)
   defines `db`, `backend`, `web` (nginx, published on `127.0.0.1` only) and the
@@ -761,7 +762,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Rewritten as a newcomer introduction plus the developer guide; the phase-by-phase status narrative was removed, the production section shortened to an orientation, and stale commands and statements were corrected. |
+| 2026-11-10 | uncommitted | Production links point to the rewritten deployment guides, with `docs/DEPLOYMENT.md` §1 as the starting point. |
+| 2026-11-09 | `398c617` | Rewritten as a newcomer introduction plus the developer guide; the phase-by-phase status narrative was removed, the production section shortened to an orientation, and stale commands and statements were corrected. |
 | 2026-10-09 | `03bd90c` | Production monitoring: structured logs, request identifiers, the `status` command, host checks and the scheduled reconciliation. |
 | 2026-10-08 | `a330383` | Production backups, the verified pre-release backup, the restore drill and rollback path 3. |
 | 2026-10-08 | `1116b07` | Separate production database roles and their grants. |
