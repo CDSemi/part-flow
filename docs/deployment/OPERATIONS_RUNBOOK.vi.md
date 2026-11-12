@@ -1,7 +1,7 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
-> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Runbook này gồm các thủ tục vận hành PartFlow production sau khi đã cài đặt: kiểm tra tình trạng, sao lưu và thử
@@ -23,6 +23,7 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Chạy hoặc đọc kết quả đối soát | §7 |
 | Giải quyết vấn đề: các triệu chứng và sự cố thường gặp | §8 |
 | Biết việc cần làm hằng ngày, hằng tuần, hằng tháng; đổi mật khẩu; xóa bản sao lưu cũ | §9 |
+| Lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập của một user, hoặc thu hồi quyền truy cập của một user | §8 (Đăng nhập và tài khoản người dùng) |
 | Tìm xem một bản phát hành trước đây đã làm gì | §1 |
 
 ## Trước khi chạy bất kỳ lệnh nào
@@ -947,8 +948,87 @@ chúng vào ticket hay email. Không công cụ nào xóa chúng; hãy xóa bằ
 | `$PF up` thất bại với `No such image` | Các image của tag trong `.env.production` không có trên máy chủ: sửa `PARTFLOW_RELEASE`, hoặc build các image ([`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1, Images and release identity). |
 | Không có dòng `Setup token` trong log | Thiết lập đã hoàn tất (đã có một Administrator), hoặc `backend` chưa khởi động. Khi chưa có Administrator nào, `PARTFLOW_BACKEND_WORKERS=1 $PF up -d --force-recreate backend` ghi một token mới. |
 | Thiết lập lần đầu trả `setup_token_invalid` | Token đã cũ (mỗi lần khởi động lại `backend` ghi một token mới: dùng `$PF logs backend \| grep "Setup token" \| tail -n 1`), hoặc `backend` đang chạy nhiều worker: khởi động nó với một worker ([`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1, Backend processes and first-run setup). |
-| Administrator duy nhất quên mật khẩu | `$PF run --rm --no-deps backend python -m app.cli reset-password --login-name <name>` đặt một mật khẩu tạm thời, nhập tại dấu nhắc ([`README.vi.md`](../../README.vi.md) ở thư mục gốc, Resetting a forgotten password). |
-| Không ai còn quyền quản lý các quyền sửa (correction permissions) (backend ghi một cảnh báo khi khởi động) | `$PF run --rm --no-deps backend python -m app.cli restore-correction-permission-management --role-name <role>` trả quyền đó lại cho một role có người dùng đang hoạt động với mật khẩu ([`README.vi.md`](../../README.vi.md) ở thư mục gốc, Restoring the permission to manage correction permissions). |
+| Không ai đăng nhập được với tư cách Administrator: quên mật khẩu hoặc login name | Xem mục Đăng nhập và tài khoản người dùng, bên dưới. |
+| Không ai còn quyền quản lý các quyền sửa (correction permissions) (backend ghi một cảnh báo khi khởi động) | Xem mục Đăng nhập và tài khoản người dùng, bên dưới. |
+
+### Đăng nhập và tài khoản người dùng (Sign-in and user accounts)
+
+Tài khoản người dùng được quản lý ngay trong PartFlow, ở **Administration → Users**, bởi một user có role giữ quyền
+**Manage users and roles**. Các lệnh trong mục này dành cho lúc không còn ai có quyền đó đăng nhập được. Chạy chúng
+trên máy chủ, trong thư mục mã nguồn của bản phát hành, sau khi đã đặt `PF` (xem Trước khi chạy bất kỳ lệnh nào).
+
+**Quên mật khẩu.**
+
+- Khi còn một Administrator khác đăng nhập được, người đó mở **Administration → Users** và chọn **Set password…** ở
+  dòng của user. User nhận một mật khẩu tạm, mọi phiên đăng nhập của user đó kết thúc, và khóa tài khoản (nếu có)
+  được gỡ.
+- Khi không ai đăng nhập được, ví dụ Administrator duy nhất quên mật khẩu, đặt lại mật khẩu bằng:
+
+  ```sh
+  $PF run --rm --no-deps backend python -m app.cli reset-password --login-name <login name>
+  ```
+
+  Lệnh hỏi mật khẩu mới hai lần (`New temporary password`) và không hiện những gì bạn gõ; lệnh không có `-T`, vì nó
+  cần terminal cho lời hỏi đó. Mật khẩu là mật khẩu tạm: user chọn mật khẩu mới ở lần đăng nhập sau khi tùy chọn đó
+  đang bật. Mọi phiên đăng nhập của user kết thúc và khóa tài khoản được gỡ. Mã thoát 0 nghĩa là xong; 1 nghĩa là bị
+  từ chối và không có gì thay đổi (login name không tồn tại, hai lần gõ mật khẩu khác nhau, user chưa từng có mật
+  khẩu, hoặc không còn Administrator nào); 2 nghĩa là chưa rõ kết quả hoặc không kết nối được database: hãy chạy lại,
+  vì lệnh đặt lại mật khẩu dù lần trước đã thành công hay chưa. Lệnh chỉ chạy khi còn một Administrator và không bao
+  giờ tạo Administrator mới.
+
+**Quên login name.** Đọc login name của những user có quyền quản lý user và role từ database. Việc này chỉ đọc, không
+thay đổi gì. Mở shell của database:
+
+```sh
+$PF exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+Dán câu truy vấn này, rồi thoát bằng `\q`. Bỏ hai dòng `JOIN role_permissions` và `WHERE` thì câu truy vấn liệt kê
+mọi user.
+
+```sql
+SELECT u.login_name, u.display_name, r.name AS role, u.is_active
+FROM users u
+JOIN roles r ON r.id = u.role_id
+JOIN role_permissions rp ON rp.role_id = u.role_id
+WHERE rp.permission = 'MANAGE_USERS_AND_ROLES'
+ORDER BY u.login_name;
+```
+
+Login name luôn được lưu bằng chữ thường. Dùng tên vừa tìm được để đăng nhập, hoặc để đặt lại mật khẩu như trên.
+
+**Đổi login name.** Mở **Administration → Users**, bấm vào dòng của user, sửa **Login name** trong **Edit user** rồi
+bấm **Save changes**. Login name dài 1 đến 128 ký tự, chỉ gồm chữ `a`–`z`, chữ số và `. _ @ + -`, không có khoảng
+trắng; chữ hoa hay thường không quan trọng, vì nó được lưu bằng chữ thường. Tên đó không được trùng với user khác.
+Mật khẩu giữ nguyên; từ đó user đăng nhập bằng tên mới. Không bao giờ đổi login name trực tiếp trong database.
+
+**Xóa một user.** PartFlow không bao giờ xóa user, vì lịch sử vẫn tham chiếu tới user đó. Để thu hồi quyền truy cập,
+mở user trong **Edit user**, tắt **Active** rồi bấm **Save changes**: mọi phiên đăng nhập của user đó kết thúc và
+user không đăng nhập được nữa. Bật **Active** lại để trả quyền truy cập.
+
+- PartFlow từ chối (`last_permission_holder`) việc đổi role hoặc trạng thái nếu việc đó làm không còn user nào đang
+  hoạt động, có mật khẩu, được quản lý user và role hoặc quản lý quyền sửa; nhờ vậy không bao giờ có chuyện mọi người
+  đều bị khóa ngoài.
+- Với một user có role giữ một quyền sửa (correction permission) hoặc **Manage correction permissions**, việc đổi role
+  hay **Active** còn cần thêm quyền **Manage correction permissions**; không có quyền đó, **Edit user** hiện role và
+  trạng thái ở dạng cố định.
+
+**Không ai còn quyền quản lý các quyền sửa.** Khi không còn user nào đang hoạt động, có mật khẩu, giữ quyền **Manage
+correction permissions** (backend ghi một cảnh báo khi khởi động), trả quyền đó lại cho một role có user đang hoạt
+động với mật khẩu:
+
+```sh
+$PF run --rm --no-deps backend python -m app.cli restore-correction-permission-management --role-name <role>
+```
+
+Lệnh không thay đổi gì khác, và từ chối với mã thoát 1 khi đã có người giữ quyền đó, role không tồn tại, hoặc không
+có user nào đang hoạt động với mật khẩu thuộc role đó ([`README.vi.md`](../../README.vi.md) ở thư mục gốc, Restoring
+the permission to manage correction permissions).
+
+**Không còn Administrator nào.** Khi không còn user nào đang hoạt động, có mật khẩu, được quản lý user và role,
+`reset-password` từ chối và PartFlow mở lại bước thiết lập lần đầu: tạo một Administrator mới bằng một mã thiết lập
+mới, như [`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §10 mô tả (với một tiến trình worker của backend, và mã mới nhất
+lấy từ `$PF logs backend | grep "Setup token" | tail -n 1`).
 
 ### Nghi ngờ ghi trùng, mất hoặc không chắc chắn (Suspected duplicate, lost or uncertain write)
 
@@ -1067,7 +1147,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Viết lại cho người vận hành mới: mục lục tác vụ và thiết lập mỗi phiên ngay từ đầu, bảng các vấn đề thường gặp, các đường quay lui 1 và 2 từng bước kèm việc chuyển checkout, việc chuyển sang máy chủ khác (chuyển về đây từ hướng dẫn NAS), và phần tham chiếu chi tiết ngắn gọn hơn; số mục và các script của path 3 không đổi. |
+| 2026-11-12 | uncommitted | Thêm mục đăng nhập và tài khoản người dùng: lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập, thu hồi quyền truy cập của một user, và cách khôi phục khi không còn Administrator nào. |
+| 2026-11-10 | `e0e5056` | Viết lại cho người vận hành mới: mục lục tác vụ và thiết lập mỗi phiên ngay từ đầu, bảng các vấn đề thường gặp, các đường quay lui 1 và 2 từng bước kèm việc chuyển checkout, việc chuyển sang máy chủ khác (chuyển về đây từ hướng dẫn NAS), và phần tham chiếu chi tiết ngắn gọn hơn; số mục và các script của path 3 không đổi. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ các cổng pilot và phát hành theo quyết định của chủ sở hữu. |
 | 2026-10-09 | `4271f61` | Thêm các tìm kiếm log theo Work Order Demand và kiểm tra lỗi cần chạy trước khi tạo lại `backend`. |
 | 2026-10-09 | `03bd90c` | Thêm giám sát: log có cấu trúc kèm request id, lệnh `status`, `check.sh` và đối soát theo lịch. |

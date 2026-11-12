@@ -21,6 +21,7 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | Run or read the reconciliation | §7 |
 | Solve a problem: common symptoms and incidents | §8 |
 | Know what to do daily, weekly and monthly; change a password; remove old backups | §9 |
+| Reset a forgotten password or login name, rename a user, or remove a user's access | §8 (Sign-in and user accounts) |
 | Find what a past release did | §1 |
 
 ## Before you run any command
@@ -931,8 +932,86 @@ emails. No tool deletes them; remove them by hand after review (§9).
 | `$PF up` fails with `No such image` | The images of the tag in `.env.production` are not on the host: correct `PARTFLOW_RELEASE`, or build the images ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Images and release identity). |
 | No `Setup token` line in the log | Setup is already complete (an Administrator exists), or `backend` has not started. While no Administrator exists, `PARTFLOW_BACKEND_WORKERS=1 $PF up -d --force-recreate backend` writes a new token. |
 | First-run setup answers `setup_token_invalid` | The token is old (every restart of `backend` writes a new one: use `$PF logs backend \| grep "Setup token" \| tail -n 1`), or `backend` runs several workers: start it with one worker ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Backend processes and first-run setup). |
-| The only Administrator forgot the password | `$PF run --rm --no-deps backend python -m app.cli reset-password --login-name <name>` sets a temporary password, typed at the prompt (root [`README.md`](../../README.md), Resetting a forgotten password). |
-| Nobody may manage correction permissions any more (the backend logs a warning at startup) | `$PF run --rm --no-deps backend python -m app.cli restore-correction-permission-management --role-name <role>` gives that permission back to a role that has an active user with a password (root [`README.md`](../../README.md), Restoring the permission to manage correction permissions). |
+| Nobody can sign in as an Administrator: forgotten password or login name | Sign-in and user accounts, below. |
+| Nobody may manage correction permissions any more (the backend logs a warning at startup) | Sign-in and user accounts, below. |
+
+### Sign-in and user accounts
+
+User accounts are managed in PartFlow, under **Administration → Users**, by a user whose role holds the permission
+**Manage users and roles**. The commands of this section are for when nobody with that permission can sign in. Run
+them on the host, in the release checkout, with `PF` set (Before you run any command).
+
+**A forgotten password.**
+
+- When another Administrator can sign in, they open **Administration → Users** and choose **Set password…** on the
+  user's row. The user gets a temporary password, every sign-in of that user ends, and a lock is cleared.
+- When nobody can sign in, for example because the only Administrator forgot the password, reset it with:
+
+  ```sh
+  $PF run --rm --no-deps backend python -m app.cli reset-password --login-name <login name>
+  ```
+
+  The command asks for the new password twice (`New temporary password`) and does not show what you type; it has no
+  `-T`, because it needs the terminal for that prompt. The password is temporary: the user chooses a new one at the
+  next sign-in when that option is on. Every sign-in of the user ends and a lock is cleared. Exit code 0 means done;
+  1 means refused with nothing changed (an unknown login name, two different passwords, a user who never had a
+  password, or no Administrator at all); 2 means the outcome is unknown or the database could not be reached: run it
+  again, because it sets the password again either way. It works only while an Administrator exists and never
+  creates one.
+
+**A forgotten login name.** Read the login names of the users who may manage users and roles from the database. This
+only reads; it changes nothing. Open the database shell:
+
+```sh
+$PF exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+Paste this query, then leave with `\q`. Without the `JOIN role_permissions` and `WHERE` lines, it lists every user.
+
+```sql
+SELECT u.login_name, u.display_name, r.name AS role, u.is_active
+FROM users u
+JOIN roles r ON r.id = u.role_id
+JOIN role_permissions rp ON rp.role_id = u.role_id
+WHERE rp.permission = 'MANAGE_USERS_AND_ROLES'
+ORDER BY u.login_name;
+```
+
+Login names are always stored in small letters. Use the name you found to sign in, or to reset the password as
+above.
+
+**Changing a login name.** Open **Administration → Users**, click the user's row, change **Login name** in **Edit
+user** and click **Save changes**. A login name has 1 to 128 characters, only letters `a`–`z`, digits and
+`. _ @ + -`, and no spaces; letter case does not matter, because it is saved in small letters. It must not be in use
+by another user. The password stays the same; from then on the user signs in with the new name. Never change a login
+name directly in the database.
+
+**Removing a user.** PartFlow never deletes a user, because its history keeps referring to them. To take away the
+access, open the user in **Edit user**, turn **Active** off and click **Save changes**: every sign-in of that user ends
+and the user can no longer sign in. Turn **Active** on again to give the access back.
+
+- PartFlow refuses (`last_permission_holder`) a change of role or status that would leave no active user with a
+  password who may manage users and roles, or correction permissions, so that it can never lock everyone out.
+- For a user whose role holds a correction permission or **Manage correction permissions**, changing the role or
+  **Active** also needs **Manage correction permissions**; without it, **Edit user** shows the role and the status
+  as fixed.
+
+**Nobody may manage correction permissions any more.** When no active user with a password holds **Manage
+correction permissions** (the backend logs a warning at startup), give that permission back to a role that has an
+active user with a password:
+
+```sh
+$PF run --rm --no-deps backend python -m app.cli restore-correction-permission-management --role-name <role>
+```
+
+It changes nothing else and refuses, with exit code 1, when a holder already exists, the role does not exist, or no
+active user with a password has that role (root [`README.md`](../../README.md), Restoring the permission to manage
+correction permissions).
+
+**No Administrator left at all.** When no active user with a password may manage users and roles, `reset-password`
+refuses and PartFlow opens first-run setup again: create a new Administrator with a new setup token, as
+[`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §10 describes (with one backend worker, and the newest token from
+`$PF logs backend | grep "Setup token" | tail -n 1`).
 
 ### Suspected duplicate, lost or uncertain write
 
@@ -1050,7 +1129,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Rewritten for new operators: a task index and the setup of every session up front, a table of common problems, step-by-step rollback paths 1 and 2 with the checkout switch, the move to another host (moved here from the NAS guide), and shorter reference detail; section numbers and the path 3 scripts are unchanged. |
+| 2026-11-12 | uncommitted | Added sign-in and user accounts: recovering a forgotten password or login name, renaming a user, removing a user's access, and the recovery when no Administrator is left. |
+| 2026-11-10 | `e0e5056` | Rewritten for new operators: a task index and the setup of every session up front, a table of common problems, step-by-step rollback paths 1 and 2 with the checkout switch, the move to another host (moved here from the NAS guide), and shorter reference detail; section numbers and the path 3 scripts are unchanged. |
 | 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | `4271f61` | Added Work Order Demand log searches and the error check to run before recreating `backend`. |
 | 2026-10-09 | `03bd90c` | Added monitoring: structured logs with request ids, the `status` command, `check.sh` and the scheduled reconciliation. |
