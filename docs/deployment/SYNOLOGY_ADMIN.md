@@ -1,773 +1,249 @@
-# PartFlow NAS Admin v2.5
+# Deployment Admin (`pf`) Guide
 
-> **English is the source of truth.** [Vietnamese translation](./SYNOLOGY_ADMIN.vi.md).
->
-> Version: **2.5.0**
-> Prepared: **2026-09-11**
-> Scope: restricted-LAN **Synology staging** administration. This is not a production-hardening package.
+> **Language:** English is the source of truth. [Tiếng Việt](./SYNOLOGY_ADMIN.vi.md).
 
-> **Deployment Admin checkpoint PF-A1.1 (2026-09-15, audit-r1 and audit-r2 corrections) — development state, not a NAS release.**
-> The controller source in this repository now requires a *protected instance registration*
-> (`pf_instance.py`: installation root with `bootstrap/` (launcher `pf`, `bootstrap.conf`,
-> verifier `pf_bootstrap.py`), `registry/instances.json` and `registry/reservations/`,
-> `locks/`, `releases/<id>/` with a pinned `control-manifest.json`, `instances/<uuid>/record.json`).
-> The installed launcher runs the bootstrap verifier first: interpreter, configuration,
-> every ancestor and the whole pinned release tree are checked before any release code is
-> executed. Construction, `--help`, `instances`, `status`, `backups`, `recoveries` and the
-> default `doctor` are read-only; `status`/`doctor` print identity, trust summary and the
-> pending journal first and issue **no** Git/Docker/Compose command when the context or the
-> runtime configuration is refused. Mutating commands need `--instance <slug|uuid>` (or a
-> protected default), a clean managed-path inventory (no repeated, nested or aliased paths
-> across instances), the stable per-instance lock under `<root>/locks/` and an explicit
-> journal route. Managed and authoritative paths are accepted in exactly one canonical POSIX
-> spelling (single leading `/`, no empty, `.` or `..` component, no trailing `/`); any other
-> spelling such as `//volume1/...` is refused, never normalized. The installation root is
-> chosen by the installed bootstrap alone: `--installation-root` is the verifier→release
-> handshake, and an operator-supplied `--installation-root` anywhere on the command line
-> refuses the whole invocation before any registry or journal is read. Two published records
-> claiming the same daemon `engine_id` and Compose project are reported as a `CONFLICT` by
-> `instances` and refuse mutation on both sides until an administrator repairs the registry.
-> The v2.5 layout described below is **unregistered** in this checkpoint: the installed
-> `control/pf.sh` prints a shell-only read-only report, executes no Python from the legacy
-> control directory and names a pending journal without reading or printing its contents.
-> `install-control.sh` remains the legacy v2.5 installer; do not run it against a live NAS
-> with this checkpoint. Registration exists only as a Python transaction for disposable
-> fixtures (`register_instance`), not as an operator command.
+This guide describes the Deployment Admin, the command-line tool `pf` in `deploy/synology/` that installs and manages
+PartFlow **staging** instances on a Synology NAS or another Linux host with Docker. It is written for the administrator
+of such a staging instance. Production never uses `pf`: production is installed and operated with
+[`DEPLOYMENT.md`](../DEPLOYMENT.md), [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) and
+[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md).
 
-> **Deployment Admin checkpoint PF-A1.2 (2026-09-15) — runner, frozen configuration, protected
-> source store; still a development state, not a NAS release.** Every child process of the
-> control release (Git, Docker/Compose, the SQL tools inside the `db` container, host
-> diagnostics) now goes through one runner (`pf_runner.py`): the executable must be
-> registered by the trusted installer in `<root>/bootstrap/tools.conf` (`docker`,
-> optional `docker_compose`, `git`, `ip`, `hostname`; absolute paths, validated through a
-> trusted link chain and protected ancestors, never looked up on `PATH`), the child
-> environment is built from an allowlist (fixed `PATH`, the instance's private
-> `instances/<uuid>/home` as `HOME`, `DOCKER_CONFIG` inside it with an empty client
-> configuration and plugin directory, `DOCKER_HOST` from the registered daemon endpoint,
-> `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), arguments are arrays, captured
-> output is bounded and redacted (the database password and its URL-encoded form never
-> reach a message or log), every call has a deadline, and a timeout or interruption
-> terminates the whole process group. Interruption means `SIGINT`, `SIGTERM`, `SIGHUP` (for
-> example an SSH session that drops) or `SIGQUIT`: the controller terminates the child group,
-> records the effect and runs its fail-closed stop before it releases the instance lock, and
-> a repeated signal does not cut that short (only `SIGKILL` or power loss can; recovery from
-> those is the next launch's job). Every mutating child (Compose `up`/`down`/`stop`/
-> `build`/`run`, `createdb`/`dropdb`/`pg_restore`, mutating SQL, Docker `tag`/`rm`/`image load`,
-> store `fetch`) carries an effect descriptor (kind, verb, targets — never application values),
-> so its timeout or interruption is recorded under
-> `instances/<uuid>/operations/<id>/unresolved-effects.json` and listed by `status`/`doctor`
-> before any retry; read-only children (`ps`, `config`, `logs`, `inspect`, `pg_dump`,
-> `pg_restore --list`, health probes, `SELECT`s) record nothing. PostgreSQL client programs
-> run inside the `db` service as direct argument vectors (no `sh -c`), connecting as the
-> frozen configuration's `POSTGRES_USER`.
-> `config/.env` is parsed strictly (only the seven PartFlow keys, no duplicates, no
-> `export`, no expansion, single-/double-quoted or unquoted literals; see section 6) and
-> every mutating command first freezes it into a private 0400 snapshot
-> `instances/<uuid>/operations/<id>/app.env`; the operation consumes that snapshot, an
-> edit of `config/.env` during the operation is detected, and an existing value that cannot
-> be frozen literally (a single quote, a trailing backslash, control characters) is an explicit
-> `migration-issue` — it is never rewritten or regenerated. The backend connection URL is
-> generated with percent-encoded credentials as `PARTFLOW_DATABASE_URL` (`compose.nas.yaml` no
-> longer splices `POSTGRES_PASSWORD` into a URL). Privileged Git never runs against `repo/`:
-> sources are fetched into a protected bare store under `<root>/sources/` (own configuration,
-> no hooks/fsmonitor/includes/alternates, HTTPS only) and exported blob by blob (submodules,
-> symbolic links, Git LFS pointers and tracked paths named like ignored workspace artifacts —
-> `.env`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache` — are refused, so nothing
-> deployed is ever outside the manifest); the workspace is compared byte/mode against a
-> protected manifest recorded when the tool deployed a tree; a tree without such
-> provenance is `unknown`, never assigned a commit SHA (section 8). Read-only diagnostics
-> hand Compose a registration-created empty env-file and the values as allowlisted
-> variables, so no editable file is read by Compose. Compose passthrough is bounded to known
-> words and refuses the raw `config` dump until PF-A1.4 removes the route;
-> `install-control.sh` remains the legacy installer.
+The messages of `pf` cite this guide by section number (for example `SYNOLOGY_ADMIN §16`), so the section numbers
+stay fixed.
 
-> **Deployment Admin checkpoint PF-A1.3 (2026-10-06) — Compose envelope, daemon binding, exact
-> resource inventory; still a development state, not a NAS release.**
-> *Daemon binding.* Registration resolves the Docker socket path (system links such as
-> `/var/run` → `/run`) and stores the resolved `unix://` endpoint; validation checks it offline
-> (no symbolic-link component, protected ancestors, a root-owned socket that is not
-> world-writable). A missing socket is reported as a note (a stopped daemon), not as a trust
-> failure. Before the first Docker/Compose child of every process the controller runs
-> `docker info` once and requires the registered engine ID and a rootful daemon; drift
-> (`daemon-drift`), rootless mode (`daemon-rootless`), an unusable answer (`daemon-info-invalid`)
-> or no answer (`daemon-unreachable`) refuses every mutation before any confirmation (the
-> `RESUME PURGE`/`RESUME ABORT DEPLOY` prompts of an interrupted purge or abort included), journal
-> write, pause or Docker effect. `status`/`doctor` print the daemon line, mark every later
-> Docker section `unavailable: <code>` without contacting the daemon again, and still print
-> every non-Docker section.
-> *Compose envelope.* Before any `up`, `run`, `build`, `create`, `start`, `restart`, `scale` or
-> `watch` (managed or passthrough) the controller renders `docker compose … config --format json` with exactly the
-> inputs of that call (installed `compose.nas.yaml`, protected image override, frozen env-file
-> and the effective child values, per-call temporary database names included) into a private
-> 0600 `compose-<n>.json`, validates it against the PartFlow topology allowlist (three
-> services, `postgres_data` and `default` only, no host-privilege options, no bind mounts or
-> Docker socket, one frontend port on the approved address, the instance label everywhere)
-> and compares every application value literally, and records the input hashes in
-> `compose-envelope.json`. Only `POSTGRES_DB=pf_migrate_*`/`pf_clean_*` (the update rehearsal and
-> reset-db databases) may be overridden per call. Compose v1 is unsupported (it cannot render
-> `config --format json`).
-> *Instance label.* `compose.nas.yaml` stamps `io.deploy-admin.instance-id` on the three services,
-> both image builds, the `postgres_data` volume and the `default` network, from
-> `DEPLOY_ADMIN_INSTANCE_ID`, which the controller generates from the protected registration.
-> *Exact inventory.* All containers (stopped ones included, `Config.Env` never read), the topology
-> volume/network names and the labelled volumes, networks and image tags are classified as
-> owned, excluded (references, bind paths, owned resources outside the topology, ungrammatical
-> tags, and foreign-in-use tags: a container of another application uses the tag or, when it
-> was created from an image ID, that image ID) or blockers (`resource-legacy-unlabeled`, `resource-name-collision`,
-> `resource-foreign-claim`, `resource-label-conflict`, `resource-shared`,
-> `resource-unsupported-driver`). Name prefixes never select anything. `deploy` and exact
-> `restore-instance` require an empty target (`resource-target-not-empty`); `backup`, `update`,
-> `rollback`, `reset-db`, `resume`, side-by-side restore, `release-check --apply` and mutating
-> passthrough run an ownership preflight right after the lock (`resource-not-owned`). Legacy or
-> foreign resources are never adopted automatically (adoption is PF-A2). A container that
-> disappears between `docker ps -a` and its inspect (another application's short-lived
-> container) makes the inventory list again; after three such attempts the step stops with
-> `inventory-unstable`.
-> *Closed deletion plan.* `purge` and `abort-deploy` delete exactly a frozen plan
-> (`deletion-plan.json`, hashed in the journal): every item and every container that uses a
-> volume or network is reinspected before its effect and a present item must still be owned (for
-> example an image tag a foreign container started to use), a change stops with `plan-drift`, resume
-> runs the same plan and never adds a resource, and an image tag is deleted only when the
-> purge recovery bundle covers its image ID. Nothing prunes, nothing uses `compose down -v`,
-> image removal is never forced, and bind-mounted paths are never deleted. `abort-deploy` no
-> longer runs `compose down --volumes`; it removes the planned containers, network and volume
-> and keeps the images.
+## 1. Purpose and status
 
-> **Deployment Admin checkpoint PF-A1.4 (2026-10-06) — every entry route on the A1 primitives, no
-> catch-all Compose; PF-A1 closed offline, still a development state, not a NAS release.**
-> *No catch-all Compose.* `pf` accepts exactly the managed commands of section 17 and two
-> read-only Compose views. Every word the former Compose passthrough forwarded (`up`, `start`,
-> `restart`, `create`, `scale`, `watch`, `unpause`, `down`, `stop`, `kill`, `pause`, `rm`, `run`,
-> `exec`, `cp`, `attach`, `build`, `pull`, `push`, `version`, `top`, `images`, `port`, `ls`,
-> `events`, `stats`, `wait`, `config`) is refused with `compose-route-removed` and names the managed
-> alternative; a leading Compose or Docker global option (`-f`, `-p`, `--env-file`,
-> `--project-directory`, `--profile`, `-H`, `--context`, …) is refused with
-> `compose-override-refused`; any other leading option, an abbreviation such as `--inst` included,
-> with `unknown-option`; an unknown word with `unknown-command` (all exit 1). These refusals happen
-> before the registry is read, a lock is taken or any process starts. Abbreviated options are
-> refused by every command.
-> *Read-only views.* `pf ps` and `pf logs` (section 14) rebuild the Compose command from their
-> parsed options only (services `db`, `backend`, `frontend`) and run it through the validated
-> context, the runner and the daemon binding with redacted, bounded output; they take no lock and
-> create no operation. `pf` without a command is `pf ps`.
-> *Commands without a terminal.* A command started without a terminal (a scheduled task, a script,
-> `ssh` without `-t`) is refused before the lock: a command that asks for a typed confirmation with
-> `terminal-required`; `backup` and `release-check` must name the instance
-> (`--instance <slug|uuid>`, else `instance-required-unattended`) and then need a protected policy
-> grant for their class of operation, which no policy grants in this checkpoint
-> (`policy-grant-required`, exit 20; grants arrive with PF-A4.3). PF-A2.3: `permissions check` and
-> `permissions plan` are read-only and run without a terminal and without a grant; `permissions apply` is
-> terminal-only (`terminal-required`). `release-check --apply` is refused
-> with `auto-apply-not-permitted` (exit 20) with or without a terminal; `auto_update` in
-> `pf-config.json` is a proposal only. The scheduler wrappers `backup.sh` and `release-check.sh`
-> require `--instance` and execute only their sibling launcher (section 13).
-> *Fail-closed stop.* After a failed operation with a pending journal the controller stops only
-> this instance's own Compose one-off jobs from the exact inventory (one that already vanished is
-> reported and skipped), then the application services; the legacy `partflow.admin.project` label
-> selects nothing. The message names `pf --instance <slug> status`.
-> *Restore authority.* `recoveries` and `restore-instance` list and verify bundles only in the
-> selected instance's own `recovery/<project>/` directory. `--project` is a Compose project name,
-> never a path, and with `--instance` it must name that instance's project (`selection-conflict`).
-> A bundle outside that directory, or a link to one, is never listed and is refused
-> (`recovery-outside-instance`). A bundle restores only `deployed.json`, `last-reset.json` and
-> `observed-tags.json` into protected state, and its manifest must name them as a list
-> (`recovery-state-file-refused`).
-> This block **supersedes** the passthrough sentences of the PF-A1.2 and PF-A1.3 blocks above.
+`pf` keeps two things apart. The **workspace** is the editable PartFlow checkout that trusted users change over Server
+Message Block (SMB) file sharing. The **control release** is the code that `sudo pf` runs: it is installed once from a
+reviewed tree, owned by root and verified before every run, so the people who can edit the workspace can never change
+what runs as root. Every lifecycle step (deploy, update, backup, rollback, database reset, purge and restore) runs from
+a written plan, asks for a typed confirmation and records each effect in an operation journal, so an interrupted step
+can be continued or cancelled safely with `pf resume`.
 
-> **Deployment Admin checkpoint PF-A2.1 (2026-10-07) — installer and control generations; still a
-> development state, not a NAS release.**
-> *New installation root.* `sudo sh ./deploy/synology/install-control.sh init --root <root>` is the only
-> repository installer verb: it reads the reviewed repository files as data, shows every conflict before
-> anything moves, asks for `INSTALL CONTROL <release-id>`, builds the root in a locked private sibling
-> directory, smoke-checks the new release with the registered interpreter and publishes the root with one
-> rename. It writes the staging policy and the `partflow-staging-legacy` profile, places the scheduler
-> wrappers in `<root>/bootstrap/`, and creates the global launcher (default `/usr/local/bin/pf`) only when
-> that path is absent; an existing launcher (a v2.5 one, another root's or anything else) is never replaced.
-> *Installed verbs.* From the installed control: `pf install status | register | migrate-legacy | control |
-> resume`. Every verb but `status` needs a terminal; inputs that are not given are asked one by one, a
-> read-only preflight reports **every** conflict at once (exit 1, nothing changed), and the frozen plan is
-> confirmed with a typed phrase (`REGISTER <slug>`, `MIGRATE <slug>`, `INSTALL CONTROL <id>`,
-> `SELECT CONTROL <id>`, `RESUME <op>`, `ABANDON <op>`).
-> *Journal and resume.* Each operation writes `plan.json` and `journal.json` under
-> `<root>/install-operations/<id>/` before its first effect and journals every effect before and after it.
-> An interrupted operation stays open; `pf install resume` observes every effect on disk before it
-> decides, and `pf install resume --abandon` restores the previous state where that is legal. An effect
-> found in a state the installer did not write stops in `needs_operator`, which names the target and
-> the next step; it is never a dead end. While an install operation is open, the routes it affects are
-> refused with `install-operation-pending`.
-> *Control generations.* `pf install control --source <reviewed tree>` stages a content-addressed release
-> (`releases/r-<16 hex>`), smoke-checks it (including the live configuration of every instance),
-> re-verifies it, then switches `bootstrap.conf` and every instance record as one binding set under the
-> registry and instance locks, verifies end to end through the real bootstrap and restores the previous
-> binding automatically if that fails. Exactly one generation is bound; old releases are retained and can
-> be selected again with `--release`. No application restart, build, pull or migration happens; a changed
-> `compose.nas.yaml` is reported as a separate application operation.
-> *Defaults and v2.5.* No install operation changes the registry default. `migrate-legacy` copies legacy-only
-> `.env`/`pf-config.json` into `config/` byte for byte (the legacy copies stay), registers the instance with
-> the user's paths and leaves the v2.5 `control/` and its launcher as the working control plane: pf mutating
-> commands on that instance stay refused (`legacy-control-active`) until legacy adoption is installed
-> (OD-A21-05); `status`, `doctor`, `ps` and `logs` work.
-> This block **supersedes** the `install-control.sh` warnings of the PF-A1.4 block and of sections 5 and 15.
+Status:
 
-> **Deployment Admin checkpoint PF-A2.2 (2026-10-07) — config wizards and admin-config schema migration; still a
-> development state, not a NAS release.**
-> *Versioned admin configuration.* `pf-config.json` has two readable forms: legacy schema 1 (no
-> `schema_version`; omitted keys take frozen implicit values) and schema 2 (`"schema_version": 2` and every key
-> explicit). Loading never migrates: `status`, `doctor`, every lifecycle command, the installer preflight and the
-> control-install smoke read both forms as they are. Duplicate, unknown, missing (schema 2), mistyped and
-> unsupported-version files are refused with the first problem.
-> *`pf config admin`.* Creates `pf-config.json` from the installed example, migrates a schema 1 file to schema 2
-> (explicit values kept, implicit values written as the frozen schema 1 defaults) or completes a schema 2 file.
-> It asks only the groups that are missing or uncertain, from a read-only list of the host's groups (groups are
-> never created), shows a summary, asks `Write <path>? [y/N]` and writes atomically without overwriting an
-> edit made in the meantime. Before registration, `pf config admin --configuration <dir> --project <project>`
-> creates the file `pf install register` needs.
-> *`pf config app`.* Creates or completes `.env` for the instance's profile: existing secrets are kept byte for
-> byte; a database password is generated only when it is absent and the instance was never deployed; database
-> credentials are never asked or rewritten after the first deployment; a new timezone must exist in the host's
-> installed zone data. The first `pf deploy` without `.env` runs the same wizard.
-> *Audit.* A `pf config admin` or `pf config app` write on a registered instance records `config-change.json`
-> in its operation directory (key names and `unchanged`/`set` for secrets; no secret value and no `.env` hash).
-> The wizard run inside the first `pf deploy` writes no `config-change.json`: that deploy operation's
-> `operation.json` and its frozen `app.env` snapshot are the evidence. The pre-registration mode writes no record
-> (no instance exists yet).
-> *Audit fixes (uncommitted over `5d102d1`).* The pre-registration wizard refuses while any registered instance
-> record cannot be loaded (`registry-record-invalid`), and its `admin-config-invalid` copy repeats
-> `--configuration`/`--project`; choosing the DSM Reverse Proxy in `config app` re-asks a kept `localhost`
-> hostname; a present `SITE_TIMEZONE` that is not a zone name (a `.`/`..` component) is asked instead of kept;
-> `.env` parser errors never show a character of the line; an interrupt after the write is reported as
-> `config-interrupted` or `config-audit-not-recorded` (the file already holds the new content); the
-> `install-control.sh init` completion names `config admin --configuration`.
-> This block **supersedes** the "create the configuration by hand" steps of the PF-A2.1 block and of section 5.
+- Development of `pf` stopped on 2026-10-14, when the owner decided to rebuild the deployment kit as a separate
+  project. The tool stays in `deploy/synology/` in its last state, and its tests still run.
+- `pf` manages staging only. A staging instance never runs on the Docker daemon of the production host: the production
+  release script `release.sh` refuses to run while a `partflow-staging` Compose project exists on its daemon
+  ([`DEPLOYMENT.md`](../DEPLOYMENT.md) §6).
+- `pf` has never run on a real NAS. Its evidence is an offline test suite and one run with a real Docker Engine, Docker
+  Compose and PostgreSQL inside an isolated Linux container (§18). Treat the first staging run on a NAS as its first
+  real test.
 
-> **Warning (PF-A2.3).** Deployment Admin checkpoint PF-A2.3 (2026-10-07) — semantic permission policy,
-> `check`/`plan`/`apply`, scope floors and a resumable apply; still a **development state, not a NAS release**.
-> Offline evidence only: nothing was run against a real DSM host, SMB client or Docker daemon.
-> *Commands.* `pf permissions check` (compare, read-only, exit 1 on any difference), `pf permissions plan`
-> (preview with group members, counts and a plan hash, read-only) and `pf permissions apply` (numbered wizard,
-> one typed confirmation `APPLY PERMISSIONS <slug>`, then a fenced, journaled and verified apply; terminal
-> only). Bare `pf permissions` no longer changes anything: it is refused with `permissions-verb-required`
-> (exit 2). `check` and `plan` take no lock and write nothing anywhere.
-> *Approval.* A confirmed `apply` writes the **permission policy revision** N to
-> `<root>/instances/<uuid>/permission-policy.json` (root, `0600`, kept by `purge`). Until the first approval
-> the instance uses a derived policy: backups and recovery bundles keep the group of their folders, and the
-> workspace and configuration use `workspace_write_group`. `backup_read_group` is a proposal for every
-> instance, `workspace_write_group` once a revision exists; editing `pf-config.json` alone no longer changes
-> who can read backups or recovery bundles.
-> *Flows.* No lifecycle command walks an editable tree any more: `deploy --current` leaves workspace
-> permissions unchanged, and backups, recovery bundles, replaced or restored source, a restored `.env` and
-> restored state files are content-only copies that get explicit policy targets and are verified.
-> This block **supersedes** the `sudo pf permissions` steps of sections 2 and 16 and the `backup_read_group`
-> note of the PF-A2.2 block and section 6.
+Requirements: a Synology NAS with DiskStation Manager (DSM) or another Linux host, a local rootful Docker daemon with
+Docker Compose v2 (the `docker compose` plugin, or a standalone Compose binary registered at installation; Compose v1 is
+not supported), Git, and a Python interpreter of version 3.9 or newer. `pf` uses the Python standard library only.
 
-> **Warning (PF-A3.1).** Deployment Admin checkpoint PF-A3.1 (2026-10-07) — immutable deployed-source artifacts,
-> strict lifecycle wire schemas and emergency preservation; still a **development state, not a NAS release**.
-> Offline and filesystem evidence only: Docker and PostgreSQL were simulated, nothing was run against a real DSM
-> host, Docker daemon or PostgreSQL server.
-> *Deployment record.* Every successful `deploy`, `update`, `rollback` and `restore-instance` now seals a
-> **deployment record** in `<root>/instances/<uuid>/artifacts/deployments/<deployment-id>/` (root only, `0700`/`0600`):
-> the exact deployed source archive and its manifest, the resolved Compose model, the frozen `.env` (secrets) and
-> the record itself. `deployed.json` points to it. It survives a checkout change, the loss of `repo/.git` and
-> `purge`.
-> *Bundles.* New checkpoints and purge recovery bundles are written as `schema_version` 1 manifests
-> (`contracts/lifecycle-records.schema.json`) and read strictly: the exact manifest bytes, every payload's size and
-> hash, no link and no unlisted file, before anything is extracted, confirmed or journaled. Older format 1 and 2
-> bundles stay usable through an explicit, deterministic in-memory migration; nothing on disk is rewritten. A file
-> such a bundle does not list is recorded and never opened: `restore-instance` takes the runtime `.env` and every state
-> file only from verified payloads (a format 1 `.env` from the verified source archive).
-> *Classes and levels.* A capture is a **healthy checkpoint**, an **emergency preservation** or **partial**; its
-> verification level (`captured`, `failed`, `data-restore`) comes from a separate verification record under
-> `artifacts/verifications/`. Only a healthy checkpoint is a rollback target.
-> *Emergency.* `pf backup --emergency` (terminal only, `EMERGENCY BACKUP <project>`) preserves the actual data when
-> a healthy checkpoint is refused, and every `rollback` now preserves the current database first and refuses
-> (`preservation-failed`) when it cannot.
-> *Downgrade.* Going back to the PF-A2.3 control is **unsupported** once a schema-1 bundle exists (its listings,
-> rollback selection and purge fail on the new manifests).
-> This block **supersedes** the checkpoint contents of section 10 and the `Deployed source` line of section 8.
-
-> **Warning (PF-A3.2).** Deployment Admin checkpoint PF-A3.2 (2026-10-07) — operation journal, `resume` and
-> `--abandon`, workspace generation switch; still a **development state, not a NAS release**. Offline, filesystem and
-> installed-CLI evidence with a fake Docker daemon only: no real DSM host, Docker daemon, PostgreSQL server or SMB
-> client was used.
-> *Journal.* Every `deploy`, `update`, `rollback`, `reset-db`, `backup`, `purge`, `restore-instance` and `abort-deploy`
-> writes a frozen plan and a journal under `<root>/instances/<uuid>/operations/<operation-id>/` (`plan.json` once,
-> then fsynced `journal.json` generations; `attempts.json`, `children.json`, `deletion-progress.json`, the frozen
-> `admin-config.json` and the frozen `app.env`). The former `state/pending.json` is used only by `pf permissions apply`;
-> any other `pending.json` is refused (`journal-format-unsupported`). Every effect is journaled as intended before it
-> starts and complete only after its result was observed.
-> *Resume.* `pf resume [--operation ID] [--abandon | --keep-workspace]` re-enters the open operation: it re-checks the
-> approved authorities, refuses while a recorded child, an owned one-off container or a database session of the
-> operation still runs (`effect-still-running`; it never stops one), observes the unresolved effect and then either
-> reopens the unchanged deployment (nothing data- or source-related started), continues forward, or stops in
-> `needs_operator` when retrying could repeat a change. `purge`, `restore-instance <same bundle>`, `abort-deploy` and
-> `backup` re-enter their own open operation the same way.
-> *Workspace.* `repo/` is no longer replaced in place: after activation the deployed tree is staged next to it and
-> switched by two renames; the old tree is kept, never deleted, as a retained generation in
-> `<workspace parent>/.pf-generations-<instance-uuid>/`.
-> *Diagnostics.* `status`, `doctor` and `instances` show open operations from the protected files before anything else;
-> `pf status --operation ID` shows one operation in detail.
-> *Downgrade.* Going back to the PF-A3.1 control is possible only with no open operation; it loses the journal display
-> and the generation switch, and it treats journal-reconciled runner records as unresolved again.
-> This block **supersedes** the A3.1 wording "PF-A3.2 cleans it" (section 7) and the in-place workspace replacement of
-> sections 8 and 9.
-
-> **Warning (PF-A3.3).** Deployment Admin checkpoint PF-A3.3 (2026-10-08) — integrated operations: exact-bundle
-> functional verification in an isolated topology, side-by-side recovery targets, current-data protection in
-> `reset-db`/`rollback`/`abort-deploy`, the capacity model, `pf cleanup` and the runner-record acknowledgement; still a
-> **development state, not a NAS release**. The functional verification and the isolated topologies are proven
-> **offline with a fake Docker daemon only**: no real Docker network, port, egress or PostgreSQL behaviour was
-> observed, and isolation is proven from the daemon's reported configuration only (PF-A3.4).
-> *Instance purge.* Before any deletion the exact purge bundle is restored into a throwaway `pfverify-<12 hex>` Compose
-> project (own volume, internal network, no published port, generated database password) and checked functionally;
-> the deletion gate requires that `functional_recovery_verified` record. After the deletion the registry record is
-> marked `state: purged` and releases its project claim (section 12).
-> *Recovery.* `restore-instance` accepts only this instance's own bundles (`restore-target-mismatch`), and
-> `--side-by-side` now creates a kept, isolated `pfrecover-<12 hex>` recovery target instead of a `pf_recovery_*`
-> database. `pf cleanup` reports and removes recorded leftovers; `pf resume --operation <op> --acknowledge` closes
-> runner records of operations without a journal (sections 15 and 16).
-
-## 1. Purpose
-
-PartFlow NAS Admin separates the writable application repository from the privileged
-lifecycle controller. This allows trusted DSM users to edit the repository over SMB
-without making the code executed by `sudo pf ...` writable by those users.
-
-The operational layout is:
+The **installation root** holds the control and the private state of every instance:
 
 ```text
-/volume1/docker/partflow/
-├── repo/                              # application working tree; users read/write/delete
-├── control/                           # installed lifecycle control plane; root modifies
-│   ├── pf.sh
-│   ├── pf-admin.py
-│   ├── compose.nas.yaml
-│   ├── backup.sh
-│   ├── release-check.sh
-│   ├── pf-config.example.json
-│   └── nas.env.example
-├── config/                            # host/runtime configuration; trusted users may edit
-│   ├── .env
-│   └── pf-config.json
-├── backups/                           # revision checkpoints; users read/copy only
-├── recovery/                          # purge/control-upgrade recovery; users read/copy only
-└── .pf-state-<project>/               # locks/journal/image state; root only
+<root>/
+├── bootstrap/                 launcher pf, verifier pf_bootstrap.py, bootstrap.conf, tools.conf, scheduler wrappers
+├── releases/r-<16 hex>/       control releases: immutable, content-addressed, one of them bound
+├── install-operations/        the plan and journal of every install operation
+├── profiles/, policies/       the PartFlow staging profile and the staging policy
+├── registry/, locks/          registered instances, reservations and locks
+├── instances/<uuid>/          private state of one instance: record, state, operations, artifacts
+└── sources/, staging/, home/  protected Git source store, staging area, private home of child processes
 ```
 
-The repository still contains source/reference copies of `pf.sh`, `compose.nas.yaml`,
-and `deploy/synology/*` so the control plane remains versioned and reviewable. Those
-repository copies are **not** used for normal NAS administration after installation.
+`<uuid>` is the universally unique identifier (UUID) of an instance; `pf status` and `pf instances` print it. Each
+instance is registered with four folders that the administrator chooses:
 
-### Design goal: a reusable deployment controller
-
-The Deployment Admin is designed (design revision `2026-09-13-design-r3`) as a **reusable
-lifecycle controller** for Docker Compose applications, not as a PartFlow-only tool. This
-subsection is the repository record of that goal and its boundaries. It describes
-**planned** capability: the current checkpoint is still PartFlow-specific (see *Current
-state* below).
-
-**Model.** The controller takes three separate inputs:
-
-| Input | Owns |
-| --- | --- |
-| Shared core | Registration, instance context, locks, the process runner, the Compose envelope, the resource inventory, journals, permissions and the lifecycle operations (deploy/update, checkpoints, rollback, reset, purge, exact restore, isolated recovery, interruption recovery). It knows no application concept. |
-| Installed application profile | Reviewed, protected data for one application: Compose topology and typed substitution keys, source identity (`git_commit` or `image_digest`), typed parameters, service roles (application, writers, background jobs, data stores; the names are arbitrary), the storage inventory with its strategies, migration argv, health/readiness and recovery checks. |
-| Instance configuration | One deployed copy: identity, environment and policy revision, registered paths, daemon binding and application values. |
-
-Each installation pins its own control release and profile revision; updating one
-instance's control never silently upgrades another. The core does not need to understand
-Work Orders or Movements: PartFlow uses a PostgreSQL/Alembic profile, and an image-only
-website uses a stateless profile and is never asked database or Git questions.
-
-**Scope.**
-
-- Included: a single Linux host with a local rootful Docker daemon and a tested Docker
-  Compose v2 implementation; a Python standard-library runtime with thin shell entry
-  points; the `pf` command is kept for existing users.
-- Initial data strategies: stateless, PostgreSQL logical recovery, and cold files for
-  explicitly compatible workloads (declared compatible filesystems, every writer stopped
-  during capture).
-- Excluded: remote or rootless Docker certification, Compose v1, Kubernetes/Swarm,
-  multi-host orchestration, automatic database merge, generic database-engine detection,
-  a web UI, a plugin marketplace, arbitrary host hooks, infrastructure provisioning and
-  application production hardening.
-- A profile is reviewed data. It is never Python code from an application repository, an
-  import path or a host shell string, and it references only installed, tested strategy
-  implementations. Adding an application that fits the existing strategies needs only a
-  reviewed profile and an acceptance fixture; a new data engine needs a new tested
-  strategy. No operational profile is ever guessed automatically for a new application.
-- Design r3 does not require a neutral product name or a separate repository, and it
-  plans the implementation in this repository: under `deploy/synology/` through PF-A3,
-  then a neutral layout under `deploy/admin/`. No owner decision on the name or the
-  location is recorded yet.
-
-**Current state.** As of checkpoint PF-A3.4 the controller is PartFlow-specific: one
-installed profile (`partflow-staging-legacy`, a five-key record whose only runtime use is
-selecting the built-in PartFlow declaration), `compose.nas.yaml` shipped inside the
-control release (one installation root serves one topology), the PartFlow topology
-allowlist (three services), the seven PartFlow `.env` keys of section 6, the PartFlow
-PostgreSQL/Alembic commands and the staging policy only. Only two pieces are
-application-agnostic in form: the label key `io.deploy-admin.instance-id` and the Git
-source-store module (`pf_source.py`). Neither is a neutral seam yet: resource ownership
-still requires the services `db`/`backend`/`frontend`, the `postgres_data`/`default`
-names and the `backend|frontend` image-tag grammar; the runner's fixed `PATH` lists DSM
-package directories; the bootstrap verifier requires `compose.nas.yaml` in every release
-and stays frozen until the PF-A4.3 launcher migration; the only approved source remote is
-GitHub. No other application can be installed, and until PF-A4.2 passes no application
-other than PartFlow staging is supported. The PF-A3.4 gate is `CHANGES_REQUIRED` (the
-real re-run is pending, section 18) and no PF-A3 work-package gate is recorded, so PF-A4
-has not started.
-
-**Planned work packages.** PF-A4 starts only after PF-A3 is accepted with real
-Docker/PostgreSQL lifecycle evidence.
-
-| Slice | Outcome | Gate |
+| Folder | Content | Access for the chosen group (§2) |
 | --- | --- | --- |
-| PF-A4.1 | Extract in place: move the PartFlow assumptions (repository metadata, service names, health checks, environment variables, PostgreSQL/Alembic commands, migration compatibility) into the installed PartFlow profile; freeze the profile wire schema and the strategy IDs before profile loading is enabled. Also settles the repository decision OD-16-28 (IMPLEMENTATION_ROADMAP Phase 16, not part of design r3): how a PartFlow profile provisions database roles, grants and globals, and whether it adopts the Phase 16 backup artifact. | The affected A1 boundary cases and A3-T11/A3-T12 pass again on the accepted PartFlow fixture; a dependency scan finds no prohibited application or host constant in the core (PartFlow business concept, health path, `CDSemi/part-flow`, fixed database or service name, DSM group or DSM path); PartFlow staging behaves as before. |
-| PF-A4.2 | Prove reuse with fixtures: PartFlow with renamed services; an unrelated image-only stateless service `site` (readiness at `/ready`, no Git or database); a cold-files workload with real persisted data; a profile with an unsupported database strategy and an undeclared persistent volume, refused before any unsafe effect while supported diagnostics stay available. Git-commit and registry-image source providers, a capability summary per operation (`supported`, `unsupported`, `blocked`, `unverified`) and managed `start`/`stop`/`restart`. | The fixtures work without editing core lifecycle logic. Renaming `partflow` variables is not evidence of generality. |
-| PF-A4.3 | Policy-based environments: protected policy grants for unattended routes (scheduled `backup.sh`, `release-check --apply`), downgrade protection, release tags resolved once and automatic apply off; a production policy path tested with the stateless fixture. The neutral layout under `deploy/admin/` with the installer and launcher migration for existing roots and `pf` compatibility wrappers (design r3 names the move in its A4.1 text but schedules it in the A4.3 slice; the installed installer and the frozen bootstrap cannot install a moved layout before that migration). | PartFlow production stays out of scope until an independently approved PartFlow production deployment contract and its own acceptance evidence exist. |
-| PF-A5.1 | Supported matrix (OS/DSM, architecture, Python, Engine, Compose, filesystem/ACL, profile and strategy versions); real Linux and DSM/SMB checks, the NAS steps run by the owner; bounded streamed output, redaction, command timeouts and cancellation, capacity checks and the retention of checkpoints, temporary images, volumes and workspace generations. | Support claims name only tested combinations. |
-| PF-A5.2 | Final lifecycle audit, operator documentation (English and Vietnamese) and release information. | PASS requires zero unresolved blockers for the stated support scope, real-data recovery evidence, no documentation overclaims, explicit owner acceptance of the host-specific checks and the closure of the remaining design findings; unavailable DSM/SMB leaves DSM certification pending without blocking a Linux-only release. Managing the PartFlow production instance with `pf` remains a separate owner decision. |
+| Workspace | The editable PartFlow checkout, usually named `repo/`. | Read and edit |
+| Configuration | `pf-config.json` and the application `.env` (§6). | Read and edit |
+| Backups | Revision checkpoints (§10). | View and copy |
+| Recovery | Purge recovery bundles (§12). | View and copy |
+
+In this guide `pf` stands for the installed launcher run as root: `sudo <root>/bootstrap/pf`, or `sudo pf` when the
+installer created the global launcher `/usr/local/bin/pf` for this root (§5). With more than one registered instance,
+add `--instance <slug>` before the command; a command started without a terminal must always name its instance.
+
+Every child process that `pf` starts (Git, Docker and Compose, the PostgreSQL client programs inside the `db`
+container, host diagnostics) goes through one runner: only the tools registered in `<root>/bootstrap/tools.conf` run,
+with a fixed environment, a deadline and bounded output from which the database password is removed. An interruption
+(Ctrl-C, a closed Secure Shell (SSH) session, `SIGTERM`) stops the child processes, records what happened and leaves
+the operation for `pf resume`.
 
 ## 2. Permission model
 
-Since PF-A2.3 the permissions of a registered instance follow one **semantic permission policy**. Nothing
-asks for or accepts an octal mode, `+x-r` or a second numeric representation: modes are outputs shown on
-request. The v2.5 rows for `control/` and `.pf-state-*` no longer apply: the control release lives in
-`<root>/releases/<id>/` and private state in `<root>/instances/<uuid>/`.
+Each instance follows one permission policy. You choose a group and an access level for each scope, and `pf` computes
+the file modes; it never asks for an octal mode.
 
-### Choices and scopes
-
-Each scope with a group gets one of three choices:
-
-| Choice | JSON value | Meaning for members of the group |
+| Choice | Value in the policy | Members of the group can |
 | --- | --- | --- |
-| Read and edit | `read_write` | read, create, edit, rename and delete |
-| View and copy | `read_only` | read and copy |
-| No group access | `none` | nothing; only the owner |
+| Read and edit | `read_write` | Read, create, edit, rename and delete. |
+| View and copy | `read_only` | Read and copy. |
+| No group access | `none` | Nothing; only the owner has access. |
 
-| Scope | Path | What can be chosen | Floor (never changed by a choice) |
+| Scope | Folder | What can be chosen | Never changed by a choice |
 | --- | --- | --- | --- |
-| Workspace | registered `workspace` | group, any choice, inheritance, script execution `Owner only` or `Owner and group` | existing editor owners are kept; execute bits only for files the deployed-source manifest marks executable |
-| Configuration | registered `configuration` | group, any choice, inheritance | no executable option |
-| Control release | `<root>/releases/<id>/` | fixed: No group access | checked, never changed by `apply`: owner uid 0, no group/other write, no special bits |
-| Backups | registered `backups` | group, View and copy or No group access | owner uid 0, no group write, no imported owner |
-| Recovery bundles | registered `recovery` | group, View and copy or No group access | as backups |
-| Private state | `<root>/instances/<uuid>/` | fixed: owner only | directories `0700`, files `0600`, no group |
+| Workspace | The registered workspace. | Group, any access, inheritance, script execution `Owner only` or `Owner and group`. | Existing editor owners are kept; only files that the deployed source marks executable get an execute bit. |
+| Configuration | The registered configuration folder. | Group, any access, inheritance. | Nothing is executable. |
+| Control release | `<root>/releases/<id>/` | Fixed: No group access. | Owner root, no group or other write, no special bits; checked, never changed. |
+| Backups | The registered backups folder. | Group, View and copy or No group access. | Owner root, no group write. |
+| Recovery bundles | The registered recovery folder. | As backups. | As backups. |
+| Private state | `<root>/instances/<uuid>/` | Fixed: owner only. | Folders `0700`, files `0600`. |
 
-Mode table (audit detail; the owner always keeps read/write, `other` never gets a bit, setgid only on
-directories with inheritance, setuid and sticky never):
+The resulting modes (the owner always reads and writes, others get nothing, setgid only on folders with inheritance):
 
-| Access | File | Directory | Directory with inheritance |
+| Access | File | Folder | Folder with inheritance |
 | --- | --- | --- | --- |
 | No group access | `0600` | `0700` | `2700` |
 | View and copy | `0640` | `0750` | `2750` |
 | Read and edit | `0660` | `0770` | `2770` |
 
-A file the protected source manifest marks executable gets the file mode plus owner execute (`Owner only`)
-or owner and group execute (`Owner and group`). No rule looks at a file extension, and nothing under `.git`,
-`node_modules` or another excluded name is ever designated. "No script execution" is not offered for the
-workspace: files marked executable in the deployed source keep an owner execute bit so the workspace still
-matches its source manifest (`permission-policy-unsupported` if such a policy is ever submitted).
+A file that the deployed source marks executable also gets owner execute (`Owner only`) or owner and group execute
+(`Owner and group`).
 
-### Permission policy revision, derived policy and proposals
-
-"Permission policy revision N" is the approved permission policy of one instance. It is unrelated to the
-"approved policy revision" of the environment policy (`staging` revision 1), which no permission command
-changes.
-
-- **Approved.** A confirmed `pf permissions apply` that verified every selected scope writes revision N+1 to
-  `<root>/instances/<uuid>/permission-policy.json` (root, `0600`). A byte copy stays in that apply's operation
-  directory, so the chain of revisions can be walked back to revision 1. `purge` keeps the record; an instance
-  registered anew starts without one (it is not part of recovery bundles).
-- **Derived (not approved yet).** Workspace and configuration: `workspace_write_group`, Read and edit,
-  inheritance, `Owner and group` script execution (the A1/A2.2 modes `2770`/`0660`/`0770`). Control: No group
-  access. Backups and recovery: View and copy for the group that currently owns the backups and recovery
-  folders. Only root can change that group (`validate_context` requires the folders to be owned by root and
-  not group-writable). A folder gid without a group name stops with `permission-group-missing` until `apply`
-  approves a named group.
-- **Proposals.** `backup_read_group` in `pf-config.json` is a proposal for every instance: it never changes
-  who can read backups or recovery bundles by itself. `workspace_write_group` is a proposal once a revision
-  exists; before the first approval it still sets the group of files pf creates in the workspace and the
-  configuration (declared limit). `doctor`, `check`, `plan` and the `apply` wizard show a differing proposal
-  (`permission-group-proposal`); it takes effect only when `apply` writes a new revision.
-- A members-of-the-backup-group warning is shown wherever that group is chosen:
-  members of the backup read group can read database contents and any credentials included in a backup or
-  recovery bundle.
-
-### `check`, `plan` and `apply`
+**Approved and derived policy.** A confirmed `pf permissions apply` writes the next *permission policy revision* to
+`<root>/instances/<uuid>/permission-policy.json` (root, `0600`); `purge` keeps it. Until the first approval the instance
+uses a derived policy: the workspace and the configuration folder get the `workspace_write_group` of `pf-config.json`
+with Read and edit and inheritance, and backups and recovery bundles keep the group their folders already have, with
+View and copy. The groups in `pf-config.json` are proposals: `backup_read_group` never changes access by itself, and
+`workspace_write_group` stops applying once a revision exists. A differing proposal is reported
+(`permission-group-proposal`) and takes effect only through `apply`. Members of the backup group can read the database
+contents and the credentials kept in recovery bundles.
 
 ```sh
-sudo pf --instance <slug> permissions check [--scope SCOPE]...
-sudo pf --instance <slug> permissions plan  [--scope SCOPE]... [--details]
-sudo pf --instance <slug> permissions apply [--scope SCOPE]... [--details]
-sudo pf --instance <slug> permissions apply --resume | --abandon
+pf permissions check [--scope SCOPE]...
+pf permissions plan  [--scope SCOPE]... [--details]
+pf permissions apply [--scope SCOPE]... [--details]
+pf permissions apply --resume | --abandon
 ```
 
-`SCOPE` is `workspace`, `configuration`, `control`, `backups`, `recovery` or `private_state` (repeatable;
-default all).
+`SCOPE` is `workspace`, `configuration`, `control`, `backups`, `recovery` or `private_state` (repeatable; all scopes by
+default).
 
-- `check` and `plan` are read-only: no lock, no operation directory, nothing written anywhere. They map the
-  protected-context findings onto scopes: a finding at, above or below a workspace, configuration, backups or
-  recovery folder blocks that scope (`scope-path-unsafe`) and the others are still reported (without an approved
-  policy, a missing or unsafe backups or recovery folder shows "group unavailable": its group is not read from it);
-  any other refused finding, and one at or above the installation root (even when it is above a scope folder too),
-  stops with `permissions-context-refused` before any folder is read. `check` exits 1 when an entry
-  differs or the control release breaks its ceiling (`permissions-differ`).
-- `plan` prints, per scope, the policy, the group members (at most 20; primary-group and directory-service
-  members are not listed), the counts (group, mode, special bits), whether a freeze is needed, the blockers
-  and, with `--details`, each change in octal and symbolic form. `Plan hash` is the sha256 of the exact change
-  list; `apply` shows the same hash for the same policy on an unchanged tree. With a differing
-  `pf-config.json` proposal, a second block shows the candidate that applies it.
-- `apply` takes the instance lock, asks the numbered wizard (group, access, inheritance and, for the workspace,
-  script execution; Enter keeps the shown default, `q` cancels), plans, shows the policy changes and the plan
-  hash, and asks one typed confirmation `APPLY PERMISSIONS <slug>`. It then revalidates the context, the
-  record, the groups and the folder identities, records its intent (`permission-plan.json`,
-  `permission-changes.jsonl` and `state/pending.json`), applies and verifies every selected scope, and only
-  then writes the new revision. An unchanged approved policy on a compliant tree is `permissions-current`
-  (exit 0, nothing written).
+- `check` and `plan` only read: they take no lock and write nothing. `check` exits 1 when anything differs
+  (`permissions-differ`). `plan` shows, for each scope, the policy, the group members, the counts, whether an editor
+  freeze is needed, the blockers and a plan hash; `--details` lists each change.
+- `apply` takes the instance lock, asks for the group, the access, the inheritance and, for the workspace, the script
+  execution, shows the changes and the plan hash, and asks for `APPLY PERMISSIONS <slug>`. It records its intent,
+  applies and verifies every selected scope, and only then writes the new revision. An interrupted apply blocks every
+  other change to the instance until `apply --resume` or `apply --abandon` (`permissions-apply-pending`).
+- `apply` never follows a link, never crosses a mount, never changes a hard-linked, special, access control list (ACL)
+  carrying or `@docker` entry, and never changes the control release. Each of these is a blocker that `plan` reports,
+  and `apply` changes nothing while one exists.
 
-The apply never follows a link, never crosses a mount, never changes a hard-linked, special, ACL-bearing or
-`@docker` entry, never chowns an untrusted owner into a protected scope and never changes the control release:
-each of these is a blocker reported by `plan`, and `apply` changes nothing while one exists.
+**Editor freeze.** A change below the top folder of the workspace or the configuration needs a verified editor freeze.
+`apply` first makes the scope folder owner-only, so editors can no longer enter it, then looks in `/proc` for any
+process that still uses an entry. A process that does stops the apply (`editor-freeze-refused`, nothing changed); start
+`apply` from outside the scope folders, for example after `cd /`. The freeze is unavailable when `/proc` cannot be read
+or the scope folder carries an ACL (`editor-freeze-unavailable`). Then either leave the scope out with `--scope`, or
+change it by hand: stop SMB editing of the folder, set the modes of the table above as root, and run
+`pf permissions check`. The freeze does not stop a root service or a memory-mapped file.
 
-### Editor freeze
+**ACLs and DSM.** `apply` never writes or removes an ACL entry. An entry with an access ACL is a blocker
+(`scope-entry-acl`); a folder with only a default ACL is allowed. DSM Shared Folder permissions still apply on top of the
+file modes: check them for each SMB account in the DSM Control Panel. A DSM shared folder that uses ACLs therefore
+cannot be changed in bulk by `apply`.
 
-A change below the root of the workspace or the configuration (a bulk change) needs a verified editor freeze.
-`apply` first sets every such scope root to owner-only (keeping its setgid bit), so editors can no longer enter
-the folder, then takes the authoritative inventory of the fenced folders and scans `/proc` for any other process
-whose working directory, root or open file is an entry of the plan or of that inventory (so an entry an editor
-created while the plan was being read counts too). A holder lifts the fence again and refuses with
-`editor-freeze-refused` (nothing changed). The
-scan also reports the shell that started the command: **start `apply` from outside the scope folders, for
-example `cd /`**. The freeze is unavailable when `/proc` cannot be read or the scope root carries an ACL;
-`plan` then reports `editor-freeze-unavailable` and bulk apply of that scope is blocked. Deselect the scope
-with `--scope`, or change it by hand: stop SMB editing of the folder, apply the modes of the table above,
-then run `pf permissions check`. A root-only change needs no freeze. A userspace lock never locks SMB
-clients, and the fence does not stop a root service or a memory-mapped file (declared limit).
+**Statuses.** `check` and `apply` print three statuses per scope: `mode_applied`, `effective_access_verified` and
+`future_file_behavior_verified`. The last two always read `not verified`, because `pf` computes them from file modes
+only; files created over SMB take the client's or the share's mask.
 
-### ACLs and DSM
+**Trust.** Write access to the workspace and the configuration folder lets a trusted user change the application source
+and the runtime settings, including the database password in `.env`. Checkpoints and recovery bundles contain
+application data, and recovery bundles also contain `.env`. Grant SMB access only to people who may see and change all
+of this.
 
-`apply` never writes or removes an ACL entry. An entry with an access ACL, or an ACL this control cannot
-read, is a blocker (`scope-entry-acl`): changing its mode would rewrite the ACL mask. A directory with only a
-default ACL is allowed and reported under future-file behaviour. DSM Shared Folder permissions still apply
-and POSIX modes do not override a DSM deny: verify the Shared Folder permissions for each SMB account from the
-share root (DSM Control Panel), not only from an SSH shell. DSM shares with ACLs block bulk apply until
-PF-A5.1 supplies a DSM adapter.
+## 3. Where `.env` lives
 
-### Three statuses
+The application `.env` lives in the configuration folder, outside the workspace. The application does not depend on
+where the file is stored, because `pf` hands Compose every input explicitly:
 
-`check` and `apply` print three statuses per scope and never one green line: `mode_applied`
-(`yes`, `partial (N differ)`, `no`, `not-selected` or `check-only`), `effective_access_verified` and
-`future_file_behavior_verified`. The last two are always `not verified` in this checkpoint: they are computed
-from mode bits only. Setgid on a directory carries the group, not write access; files created over SMB take
-the client's umask or the share's create mask, and default ACLs can change them. Files created by pf get
-explicit modes and are verified after creation.
+- every changing command first freezes `.env` into a private snapshot in its operation folder and gives Compose that
+  snapshot; an edit of `.env` during the operation is detected;
+- `PARTFLOW_REPO_ROOT` names the workspace for the image builds;
+- `PARTFLOW_DATABASE_URL` carries the backend database address with percent-encoded credentials;
+- `DEPLOY_ADMIN_INSTANCE_ID` carries the instance identity that labels every container, volume, network and image that
+  Compose creates; it comes from the protected registration and is never read from `.env`.
 
-### Trust consequence
+Read-only views give Compose a protected empty environment file and the allowed values instead, so Compose never reads
+an editable file. Keeping `.env` outside the workspace also keeps it out of Git and lets `pf` replace the workspace
+without touching credentials. A raw `docker compose` command run in the workspace finds neither the `.env` nor the
+installed Compose file; §14 shows the explicit form.
 
-Giving `users` write access to `repo/` and `config/` is deliberate for this installation.
-A trusted user can therefore change application source and runtime settings, including
-the PostgreSQL password stored in `config/.env`. Backup/recovery bundles can also expose
-application data and, for purge recovery, a copy of `.env`. Only grant SMB access to
-users who are permitted to see and modify this information.
+## 4. Source files and the installed control
 
-## 3. Does moving `.env` outside the repository affect the app?
+The repository holds the sources of the tool: `pf.sh` and `compose.nas.yaml` at the repository root, and in
+`deploy/synology/` the installer `install-control.sh`, the controller `pf-admin.py` with its modules `pf_*.py`, the
+scheduler wrappers `backup.sh` and `release-check.sh`, the examples `pf-config.example.json` and `nas.env.example`, the
+record schemas in `contracts/`, the tests and `TEST_REPORT.md`.
 
-No, not when PartFlow is run through the installed controller.
+None of these repository files runs during normal administration. `install-control.sh init` (§5) is the trust
+boundary: it reads the reviewed files as data, shows what it will install, and installs exactly that as a control
+release under `<root>/releases/`. The installed launcher runs the bootstrap verifier before any control code; the
+verifier checks the interpreter, the configuration, every parent folder and the whole pinned release tree. The
+repository `pf.sh` refuses to operate; use the installed launcher.
 
-The application does not care where the host-side `.env` file is stored. The controller
-explicitly gives Docker Compose the external file:
+An application `update` never changes the control. When a later PartFlow revision changes `pf-admin.py`,
+`compose.nas.yaml` or another tool file, review that revision and install it with `pf install control` (§15).
 
-```text
---env-file /volume1/docker/partflow/config/.env
-```
+## 5. Installing
 
-It also explicitly provides the repository path used for image build contexts:
-
-```text
-PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo
-```
-
-and, since PF-A1.3, the instance identity that labels every resource Compose creates
-(`DEPLOY_ADMIN_INSTANCE_ID`, generated from the protected registration, never read from
-`.env`).
-
-The installed `control/compose.nas.yaml` uses that value:
-
-```yaml
-backend:
-  build:
-    context: "${PARTFLOW_REPO_ROOT}/backend"
-
-frontend:
-  build:
-    context: "${PARTFLOW_REPO_ROOT}/frontend"
-```
-
-Container environment values remain the same as before. Only the **host storage location**
-of the file changes.
-
-This separation also prevents `.env` from being accidentally added to the Git working
-tree and allows `repo/` to be replaced cleanly during an update without touching runtime
-credentials.
-
-The operational rule is therefore:
-
-```sh
-sudo pf ...
-```
-
-Do not assume a raw `docker compose` command run from `repo/` will automatically discover
-the external `.env` or the installed Compose file. See §14 for the explicit advanced form,
-which must also name `DEPLOY_ADMIN_INSTANCE_ID`.
-
-## 4. Source files versus installed control files
-
-The repository contains these version-controlled sources:
-
-```text
-repo/
-├── pf.sh
-├── compose.nas.yaml
-└── deploy/synology/
-    ├── install-control.sh
-    ├── pf-admin.py
-    ├── backup.sh
-    ├── release-check.sh
-    ├── pf-config.example.json
-    ├── nas.env.example
-    ├── TEST_REPORT.md
-    └── tests/
-```
-
-Since PF-A2.1 the installed control plane is a protected installation root:
-
-```text
-<root>/
-├── bootstrap/            # pf (launcher), pf_bootstrap.py (verifier), bootstrap.conf, tools.conf,
-│                         # backup.sh, release-check.sh (scheduler wrappers)
-├── releases/r-<16 hex>/  # immutable, content-addressed control releases (control-manifest.json)
-├── install-operations/   # one plan.json + journal.json per install operation (kept as the audit record)
-├── profiles/             # partflow-staging-legacy.json
-├── policies/             # staging.json
-├── registry/, locks/, instances/<uuid>/, staging/, sources/, home/
-```
-
-`install-control.sh init` is the trust boundary: the administrator chooses and runs these reviewed
-repository bytes. It reads the candidate files as data (no-follow, size-bounded, parsed as Python 3.9,
-literals only) and runs new code only in the smoke check after the typed confirmation; what is installed
-is exactly what the summary showed. Every later change runs from the installed, verified control
-(`<root>/bootstrap/pf install …`), never from the repository.
-
-After installation, the repository `pf.sh` intentionally refuses operational execution.
-Use:
-
-```sh
-sudo <root>/bootstrap/pf status
-```
-
-(or `sudo pf status` when `init` created the global launcher for this root), not:
-
-```sh
-sudo sh ./pf.sh status
-```
-
-Application updates do **not** silently update the privileged control plane. If a later
-PartFlow revision changes `pf-admin.py`, `compose.nas.yaml`, or another lifecycle source,
-review that revision and install it explicitly with `pf install control` (section 15).
-
-## 5. Install or migrate
-
-Every command below that names `<root>/bootstrap/pf` may be written `sudo pf …` only when the global
-launcher was created by `init` for this root. On a NAS that still runs v2.5, `/usr/local/bin/pf` is the
-v2.5 launcher (or another root's) and does not reach the new root.
+Until the global launcher exists, call the installed launcher by its full path, `<root>/bootstrap/pf`. `sudo pf`
+reaches the same root only when `init` created `/usr/local/bin/pf`; an existing file at that path, for example the
+launcher of an older installation, is never replaced.
 
 ### (a) New installation
 
-1. From a reviewed repository checkout, initialize a new root (absent or empty):
+1. From a reviewed checkout, create the installation root. The path must be absent, or an empty folder on its parent's
+   filesystem; a mount point or a DSM shared folder itself is refused (`root-exists`).
 
    ```sh
    sudo sh ./deploy/synology/install-control.sh init --root <root>
    ```
 
-   Missing inputs are asked; `--interpreter`, `--tool <id>=<path>`, `--launcher-path <path>` and
-   `--no-launcher` override the detected defaults shown in the summary. Confirm with
-   `INSTALL CONTROL <release-id>`. Any other verb of `install-control.sh` is refused with
-   `installer-verb-installed-only`. An existing empty root must be on its parent's filesystem: a mount
-   point or a DSM shared folder itself is refused (`root-exists`), because the root is published with one
-   atomic rename of a sibling build directory; name an absent path below it instead. If the publication
-   fails or is interrupted, nothing was published: the build directory is removed and you run the same
-   `install-control.sh init` again (there is no `resume` for a root that does not exist yet).
-2. Create the admin configuration with the pre-registration wizard (the directory must already exist,
-   root-owned, in protected ancestors; nothing is registered yet):
+   Missing values are asked; `--interpreter`, `--tool <id>=<path>`, `--launcher-path <path>` and `--no-launcher`
+   override the detected defaults. Confirm with `INSTALL CONTROL <release-id>`. The root is built beside the target and
+   published with one rename, so a failed or interrupted `init` publishes nothing: run it again.
+2. Create the administration configuration in an existing, root-owned configuration folder:
 
    ```sh
    sudo <root>/bootstrap/pf config admin --configuration <config> --project <project>
    ```
 
-   It asks the workspace and backup groups from the host's existing groups, shows the summary and writes
-   `<config>/pf-config.json` (schema 2, `root:<workspace group>`, `0660`) after `y`. It refuses a directory
-   that an open install operation, a pending registration or a registered instance uses
-   (`install-operation-pending`, `registry-pending`, `config-path-conflict`), and refuses any directory while
-   a registered instance record cannot be loaded (`registry-record-invalid`). An existing legacy schema 1 file
-   is left as it is (`admin-config-legacy-unregistered`). The completion line of `init` names this command.
-3. Register the instance with its existing directories:
+   It asks for the workspace group and the backup group from the host's existing groups and writes
+   `<config>/pf-config.json` after you answer `y` (§6).
+3. Register the instance with its four existing folders:
 
    ```sh
    sudo <root>/bootstrap/pf install register --slug <slug> --project <project> --workspace <checkout> \
      --configuration <config> --backups <backups> --recovery <recovery>
    ```
 
-   The preflight checks the paths (nothing is created), the admin configuration and its groups, the
-   managed-path inventory and the Docker daemon (one read-only `docker info`). Confirm with
-   `REGISTER <slug>`. The registry default is never changed.
-4. Create `.env` with `sudo <root>/bootstrap/pf --instance <slug> config app`, or let the first
-   `pf --instance <slug> deploy` ask the same questions.
+   The preflight checks the folders (it creates none), the configuration, the groups, overlaps with other instances and
+   the Docker daemon, and lists every conflict at once. Confirm with `REGISTER <slug>`.
+4. Create `.env` with `pf --instance <slug> config app`, or let the first `pf --instance <slug> deploy` ask the same
+   questions (§6, §7).
 
-### (b) v2.5 home
+### (b) Registering a v2.5 home
+
+An installation in the older v2.5 layout (a home folder with `repo/`, `control/`, `config/`, `backups/` and
+`recovery/`) can be registered without moving its data:
 
 ```sh
 sudo <root>/bootstrap/pf install migrate-legacy --legacy-home <home> --workspace <checkout> --slug <slug>
 ```
 
-- `configuration`, `backups` and `recovery` are `<home>/config`, `<home>/backups` and `<home>/recovery`;
-  the workspace is the checkout you name, whatever its name; the project comes from the effective
-  `pf-config.json`.
-- Conflicts are never resolved automatically: when `<checkout>/.env` and `<home>/config/.env` (or
-  `<checkout>/deploy/synology/pf-config.json` and `<home>/config/pf-config.json`) both exist and differ,
-  the preflight refuses and names both. A legacy-only file is copied byte for byte (source mode and group)
-  into a private staged name, validated, then published without overwriting; the legacy copy stays where
-  it was (v2.5 still reads it).
-- The v2.5 operation lock `<home>/.pf-state-<project>/operation.lock` is held during the operation; a v2.5
-  `pending.json` refuses the migration (finish or resolve it with v2.5 first). The other v2.5 state files
-  are reported, not imported.
-- What is migrated: the configuration copies and the registration. What is not: v2.5 state, Docker
-  resources (no adoption), permissions, the v2.5 `control/` directory and the v2.5 launcher.
-- v2.5 stays the control plane for every change to the instance; pf gives read-only views (`status`,
-  `doctor`, `ps`, `logs`) and refuses mutation with `legacy-control-active` until legacy adoption is
-  installed.
-- A migrated instance keeps its schema 1 `pf-config.json` (v2.5 reads the same file and would refuse
-  `schema_version`). `pf config` is refused like every mutating route (`legacy-control-active`) until
-  adoption, and the instance counts as deployed for `pf config app` (its database exists).
-
-> **Warning (PF-A2.1).** This is a development checkpoint. A live v2.5 NAS is not migrated before the PF-A2
-> adoption sub-slice (OD-A21-05) and the unattended-grant decision (OD-A14-13) exist. DSM shared-folder ACLs
-> and a group-writable `backups/` are refused by the preflight until PF-A2.3/PF-A5 (A1-T17).
-
-> **Warning (PF-A2.2).** The config wizards are a development checkpoint, proven offline only. A configuration
-> file that carries ACL entries (a DSM shared folder usually does) is refused (`config-file-acl`) and must be
-> edited by hand until PF-A2.3. A password that needs URL encoding still fails at the database migration step of
-> `deploy` and `update` (section 6, `.env`).
+The command copies a `.env` or `pf-config.json` that exists only in the checkout into `<home>/config/` byte for byte
+(the original stays where v2.5 reads it), refuses when two differing copies exist, and registers the instance after
+`MIGRATE <slug>`. It migrates nothing else: no v2.5 state, no Docker resources and no permissions. While the v2.5
+`control/` folder exists, v2.5 remains the control of that instance: `pf` refuses every change to it
+(`legacy-control-active`) and offers `status`, `doctor`, `ps` and `logs`. `pf` never adopts the Docker resources of a
+v2.5 installation.
 
 ## 6. Configuration files
 
-### `config/pf-config.json`
+### `pf-config.json`
 
-This is the actual NAS-local administration configuration. `pf config admin` creates, migrates or
-completes it (section 5 (a) before registration, `sudo pf --instance <slug> config admin` after it);
-`pf install migrate-legacy` only copies an existing legacy file byte for byte.
-
-Schema 2 template (the installed `pf-config.example.json`, immutable input of the wizard):
+The administration settings of one instance. `pf config admin` creates, migrates or completes the file (§5 before
+registration, `pf --instance <slug> config admin` after it). The current form, schema 2, lists every key:
 
 ```json
 {
@@ -786,89 +262,32 @@ Schema 2 template (the installed `pf-config.example.json`, immutable input of th
 }
 ```
 
-Trusted users may edit this file over SMB. The controller validates supported keys,
-project naming, booleans, positive numeric values, and configured DSM groups before using it.
+| Key | Meaning |
+| --- | --- |
+| `repository`, `branch` | The GitHub repository and the branch that `--latest` resolves. |
+| `project` | The Compose project; it must equal the registered one (`admin-config-mismatch`). |
+| `environment` | A label that must equal the instance's approved policy environment (`staging`); editing it never changes the policy. |
+| `release_channel` | The default channel, `stable` or `prerelease`, for `--release latest` and `release-check`. |
+| `auto_update` | A proposal only: nothing runs unattended (§13). |
+| `ci_workflow` | The continuous integration (CI) workflow file whose result `deploy` and `update` check. |
+| `health_timeout_seconds` | How long the health checks may wait. |
+| `minimum_free_mb` | The free space kept on every device (§10). |
+| `backup_read_group`, `workspace_write_group` | Group proposals (§2). |
 
-- **Two schemas.** A file without `schema_version` is legacy schema 1: every omitted key takes its frozen
-  schema 1 value (the values of the template above), and it keeps working everywhere. Schema 2 lists
-  every key; a missing, unknown, duplicate or mistyped key is refused. `branch` must be a branch name
-  (no `..`, `//` or trailing `/`), `ci_workflow` a workflow file name, the groups names without control
-  characters, `:` or surrounding whitespace. Any other `schema_version` (including an explicit `1`) is
-  `admin-config-version-unsupported`.
-- **Migration is explicit.** Only `sudo pf --instance <slug> config admin` turns schema 1 into schema 2: explicit
-  values are kept and the implicit ones are written as the frozen schema 1 values, never as the current
-  example. A value that schema 2 refuses blocks the migration (`admin-config-migration-blocked`) and is never
-  repaired. Neither `pf install control` nor `migrate-legacy` changes the file. An unregistered directory (it may
-  be a v2.5 home's `config/`) and a v2.5-active instance are never migrated.
-- **Questions.** The wizard asks only `workspace_write_group` and `backup_read_group`: both when it creates the
-  file, otherwise only a group that does not exist on this host (no default; a broader group is never picked
-  silently). The answer is a number from the list of the host's groups (`users`, then groups with gid 1000 or
-  more) or the exact name of any existing group. Groups are never created. `branch`, `ci_workflow`,
-  `release_channel`, `auto_update`, `health_timeout_seconds` and `minimum_free_mb` are shown but not asked;
-  change them by hand.
-- **Environment label.** `environment` must equal the approved policy environment of the instance. It is a
-  label: changing it never changes the policy (`admin-config-mismatch`); a policy change is a separate approval
-  (PF-A4.3). `project` must equal the registered Compose project.
-- **Groups are proposals (PF-A2.3).** `backup_read_group` is always a proposal: backups and recovery
-  bundles keep the group of their folders, or the group of permission policy revision N, until
-  `pf permissions apply` approves a change. `workspace_write_group` becomes a proposal once a permission policy
-  revision exists; before that it still sets the group of files pf creates in the workspace and the
-  configuration. The wizard summary states which case applies.
-- **Writes.** The file is replaced through a private temporary `.pf-config.json.pf-config-<8 hex>` (for `.env`:
-  `.env.pf-config-<8 hex>`) in the same directory, keeping the owner, group and mode of the file it replaces; a
-  new file of a registered instance gets the configuration target of the permission policy in force (owner root,
-  the configuration group, `0660`, `0640` or `0600`) and is checked after creation; before registration it is
-  `root:<workspace group>` `0660`. If the file changed after the summary, nothing is written
-  (`config-changed`). These temporary names are reserved: a leftover of an interrupted run is removed by the
-  next run, and a file with such a name that is not a leftover is refused (`config-file-unsafe`), never removed.
-- **Downgrade.** A control release older than PF-A2.2 refuses `schema_version`. Selecting such a release with
-  `pf install control --release` after a migration stops at its smoke check (`install-smoke-failed`), and nothing
-  is bound.
+- A file without `schema_version` is the legacy schema 1: omitted keys take their schema 1 values, and it keeps
+  working. Only `pf --instance <slug> config admin` migrates it to schema 2: explicit values are kept and the omitted ones
+  are written with their schema 1 values. A value that schema 2 refuses blocks the migration
+  (`admin-config-migration-blocked`).
+- The wizard asks only for the two groups: both when it creates the file, otherwise only a group that does not exist on
+  the host. Answer with a number from the list of the host's groups or with an existing group name; groups are never
+  created. Change the other keys by hand. `pf` checks every key before use and refuses a duplicate, unknown, missing or
+  mistyped key.
+- The file is replaced through a temporary file `.pf-config.json.pf-config-<8 hex>` beside it, keeps the owner, group and
+  mode of the file it replaces, and is not written when the file changed after the summary (`config-changed`).
 
-`auto_update` is a proposal only: unattended apply needs a protected policy grant, which this
-checkpoint does not provide (section 13).
+### `.env`
 
-### `config/.env`
-
-`sudo pf --instance <slug> config app` creates or completes it for the instance's profile, and the first
-`deploy` without `.env` runs the same wizard (inside `deploy` no `config-change.json` is written; the deploy
-operation's `operation.json` and frozen `app.env` snapshot are the evidence). A created file starts from the
-installed `nas.env.example` (comments kept); otherwise only the lines that change are rewritten and every
-other line keeps its exact bytes. The wizard needs a valid `pf-config.json` (`admin-config-required`). It asks
-only missing or invalid values, in this order: PostgreSQL user, PostgreSQL database, factory timezone, access
-mode (and the LAN address), HTTP port, and the Reverse Proxy hostname (asked only for the `127.0.0.1`
-binding, with no default; Direct LAN uses `localhost`). When the access mode is asked and you choose the
-DSM Reverse Proxy, a kept `PARTFLOW_ALLOWED_HOST=localhost` is asked again, because the proxy needs the
-exact internal hostname.
-
-- **Secrets.** An existing `POSTGRES_PASSWORD` is never shown, changed, regenerated or re-quoted (summary:
-  `unchanged`). A missing or empty one is generated as 64 hexadecimal characters from cryptographically
-  secure randomness (summary: `set`) only when the instance was never deployed.
-- **Deployed instances.** An instance counts as deployed when `state/deployed.json` exists, when a completed
-  v2.5 migration pins it, or when its state cannot be read. Then `POSTGRES_USER`, `POSTGRES_PASSWORD` and
-  `POSTGRES_DB` are never asked, generated or rewritten; a missing or unusable one is refused
-  (`app-credential-unusable`) with restore guidance. A full `purge` removes the state, so a purged instance
-  is new again; a purged migrated instance stays deployed.
-- **Password length.** A kept password shorter than 32 characters is reported
-  (`password-weak-for-new-deployment`): the first `deploy` refuses it. Set a longer one by hand, or leave the
-  line as `POSTGRES_PASSWORD=` (empty) and run `config app` again to generate one.
-- **Timezone.** A new or missing `SITE_TIMEZONE` must exist in this host's installed zone data. An existing
-  value that the host does not know is kept with a note (`zone-unknown-on-host`); an existing value that is
-  not a zone name at all (a `.` or `..` component) is asked like an invalid one; without host zone data an
-  existing value is kept with a note and a missing one is refused (`zone-data-unavailable`). The backend
-  checks the value with its own image's zone data at startup; that data is not checked by the wizard.
-- **ACLs.** A `.env` or `pf-config.json` that carries ACL entries is refused before the first question
-  (`config-file-acl`): replacing it would drop the ACL. Edit such a file by hand; an ACL-preserving replacement
-  belongs to PF-A5.1. A created `.env` gets the configuration target of the permission policy in force; the
-  reuse of an existing `.env` by the first `deploy` sets the same target on that file only.
-- **Database URL.** The controller passes `PARTFLOW_DATABASE_URL` with percent-encoded credentials; nothing
-  is spliced raw. Limit (until the app-lane fix of `backend/alembic/env.py`, P16-S3 or later, is deployed): the
-  backend migration step hands that URL to Alembic's configuration parser, which rejects `%`. A password
-  that needs encoding (any character outside letters, digits and `-._~`) therefore makes `deploy` and `update`
-  stop at the migration step, before the new version is activated. Generated passwords are unaffected; an
-  existing password is never changed to work around it.
-
-Typical content:
+`.env` holds exactly seven keys:
 
 ```dotenv
 POSTGRES_USER=partflow_staging
@@ -880,1836 +299,721 @@ PARTFLOW_HTTP_PORT=5173
 PARTFLOW_ALLOWED_HOST=localhost
 ```
 
-Changing `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after PostgreSQL has
-already initialized is **not** equivalent to changing the existing database credentials.
-Do not casually edit those values on a live instance. Use the managed deployment/recovery
-workflow or plan a credential/database migration explicitly; no wizard rotates credentials.
+`pf --instance <slug> config app` creates or completes it, and the first `deploy` without `.env` runs the same wizard. A
+new file starts from the installed `nas.env.example`; in an existing file only the changed lines are rewritten. The
+wizard asks only for missing or invalid values: the database user, the database name, the factory timezone, the access
+mode (direct access on a local area network (LAN) address, or the DSM Reverse Proxy on `127.0.0.1`), the HTTP port, and
+the Reverse Proxy host name.
 
-Since PF-A1.2 the file is parsed as data with a strict grammar: exactly these seven keys,
-each once, `KEY=VALUE` with no whitespace around `=` and no `export`; comment lines start
-with `#`; a value is unquoted (no whitespace, quotes or `#`; `$` and `\` are literal),
-single-quoted (`'...'`, literal, cannot contain `'`) or double-quoted (only `\\` and `\"`
-escapes, no `$` expansion). Values are never expanded, evaluated or rewritten. A value that
-cannot be rendered literally into the private snapshot (a single quote, a trailing backslash,
-control characters) is reported as `migration-issue` and blocks mutating commands until the
-file is fixed by hand; the existing password is never regenerated.
+- **Password.** An existing `POSTGRES_PASSWORD` is never shown, changed or regenerated. A missing one is generated (64
+  hexadecimal characters from a secure random source) only while the instance has never been deployed. A kept password
+  shorter than 32 characters is reported (`password-weak-for-new-deployment`), and the first `deploy` refuses it.
+- **Deployed instances.** Once an instance has been deployed (or migrated from v2.5), the three database values are
+  never asked, generated or rewritten; a missing or unusable one is refused (`app-credential-unusable`). Editing them by
+  hand does not change the credentials inside the existing database, and no wizard rotates them.
+- **Timezone.** A new `SITE_TIMEZONE` must exist in the host's time zone data.
+- **Strict format.** One `KEY=VALUE` per line, no spaces around `=`, no `export`, `#` at the start of a comment line; a
+  value is unquoted, single-quoted or double-quoted and is never expanded. A value that cannot be passed on literally (a
+  single quote, a trailing backslash, a control character) is reported as `migration-issue` and blocks the changing
+  commands until you fix the file by hand.
+- **ACLs.** A `.env` or `pf-config.json` that carries ACL entries is refused (`config-file-acl`); edit it by hand.
+- **URL encoding.** Application revisions older than commit `4313863` of 2026-10-07, such as the release
+  `v0.1.0-alpha.1`, cannot run their migrations with a password that needs URL encoding (any character other than
+  letters, digits and `-._~`); `deploy` and `update` of such a revision stop at the migration step. Generated passwords
+  are not affected.
 
 ## 7. First deployment
 
-For a brand-new staging instance, the usual command is:
-
 ```sh
-sudo pf deploy --latest
+pf deploy --latest                       # the tip of the configured branch
+pf deploy --commit <full commit hash>
+pf deploy --release <tag>                # or: --release latest [--channel prerelease]
+pf deploy                                # the current checkout, only when it is proven (§8)
 ```
 
-Other source selectors:
+`--skip-ci` skips the CI check as an explicit manual exception; it is not evidence that CI passed. `deploy`:
 
-```sh
-sudo pf deploy                         # current clean Git checkout
-sudo pf deploy --commit FULL_SHA
-sudo pf deploy --release TAG
-sudo pf deploy --release latest --channel prerelease
-```
+1. refuses when the target already has containers, volumes or networks (`resource-target-not-empty`);
+2. creates or reuses `.env` (§6);
+3. resolves the source to an exact commit, fetches it into the protected source store and checks its CI result;
+4. builds the backend and frontend images before the database exists;
+5. checks the free space (§10) and asks for `DEPLOY <first 12 characters of the commit>`;
+6. writes its plan and journal, then archives the exact source into a private staging folder;
+7. starts a new PostgreSQL database, runs `alembic upgrade head`, starts the backend and checks its health and schema,
+   then starts the frontend and checks `/api/health` through it;
+8. seals the **deployment record** (the source archive with its manifest, the resolved Compose model and the frozen
+   `.env`; root only, kept even by `purge`) and writes the deployment pointer `deployed.json`;
+9. switches the workspace to the deployed tree (§8).
 
-The new-deploy flow:
+If sealing fails after a healthy start, the application keeps running, the command exits 1 with
+`deployment-record-incomplete`, and the next `deploy`, `update`, `rollback` or `restore-instance` seals a record. After
+smoke testing the user interface and the workflows, take the first checkpoint with `pf backup` (§10).
 
-1. Verifies this Compose project has no managed deployment record, containers, or volumes.
-2. Creates/reuses `config/.env` (with the configuration permission target, PF-A2.3).
-3. Prompts only for deployment-specific values that cannot be safely inferred.
-4. Resolves the chosen source to an exact commit SHA.
-5. Verifies CI unless `--skip-ci` is explicitly used for manual staging.
-6. Builds backend/frontend candidate images before creating the database.
-7. Requires `DEPLOY <SHA12>` confirmation.
-8. Starts PostgreSQL and confirms it is new/uninitialized.
-9. Runs `alembic upgrade head`.
-10. Starts backend and verifies health/schema.
-11. Starts frontend and verifies `/api/health` through the frontend proxy.
-12. Writes the deployed revision to external `.pf-state-<project>/deployed.json`.
+An interrupted deploy continues with `pf resume`. To give up an incomplete first deployment, run `pf abort-deploy` and
+confirm `ABORT DEPLOY <project>`. It is allowed until the deployment pointer is written, removes only the containers,
+network and volume that this deployment created, and keeps the images, the workspace and `.env`, so `deploy` can run
+again. When the result of the first migration was lost, the deploy stops in `needs_operator` and `abort-deploy` is the
+route. If the frontend had already opened, users may have written data, so the abort first stops the application and
+preserves the current database as a `before-abort` checkpoint in the backups folder; the database must be reachable
+(`preservation-failed` otherwise). An interrupted abort continues after `RESUME ABORT DEPLOY <project>`.
 
-Since PF-A3.1 step 7 is preceded by a capacity check of the deployment artifact store (`artifact-capacity`: the
-source size plus 64 MiB must be free in `<root>/instances/<uuid>/artifacts/deployments`) and followed, before any
-change, by **staging** the deployment: the exact source tree is archived with its manifest into a private
-`.staging-<id>` folder. A staging failure (`deployment-stage-failed`) leaves the application, database and workspace
-unchanged. After the health checks pass the staging is **sealed**: the database image identity, the resolved
-Compose model and the frozen `.env` are added, the folder is renamed to its deployment ID and `deployed.json` gains
-`deployment_id` and `deployment_record_sha256`. The record holds secrets and is root-only; it is never placed in a
-checkpoint (checkpoints refer to it by ID and hash) and it survives a checkout change, the loss of `repo/.git` and
-`purge`.
+## 8. Workspace and deployed revision
 
-A seal failure after a healthy activation does not stop the application: the operation is closed, `deployed.json`
-records `deployment_seal_failed` instead of a record, the command exits 1 with `deployment-record-incomplete`, and
-`status` reports `Deployment: not recorded (…)`. The next `deploy`, `update`, `rollback` or `restore-instance` seals a
-record. The seal is not retried inside the same operation: when its workspace refresh was still pending, a later
-`resume` finishes the refresh and closes the operation `failed_preserved` with the same exit 1 and copy.
-A staging folder left by an interrupted run is reported by `status` (`Unsealed deployment staging: N`) and is
-never used; PF-A3.2 cleans it.
-
-Since PF-A2.3 the new source tree is copied content-only and only the names `deploy` copied get the workspace
-targets. The copy works through held, no-follow folder handles on both sides: a source entry swapped for a link
-or another file, or a new folder an editor swaps for a link while it is filled, stops the copy before anything is
-read or written through it; `deploy` without a selector (`--current`) changes no workspace permission and prints
-`Workspace permissions were not changed; check them with '<pf> permissions check --scope workspace'.`
-
-After UI/workflow/firewall smoke testing, create the first rollback baseline:
-
-```sh
-sudo pf backup
-```
-
-If initial deployment fails before frontend access could have opened:
-
-```sh
-sudo pf abort-deploy
-```
-
-The command requires confirmation and removes only resources from that incomplete first
-deployment. It keeps the repository and `config/.env` so deployment can be retried.
-
-Since PF-A1.3 an existing unlabeled or foreign Compose topology resource (container, volume or
-network) refuses `deploy` with `resource-target-not-empty` before any change, and
-`abort-deploy` prints and freezes the exact plan before `ABORT DEPLOY <project>`; it never
-runs `compose down --volumes`, keeps the images, and an interrupted abort resumes the same
-plan after `RESUME ABORT DEPLOY <project>`.
-
-Since PF-A3.2 the deploy writes its plan and journal right after `DEPLOY <SHA12>` (section 16, Incomplete lifecycle
-operation). The effects run in this order: staging, database start, initial migration, backend, frontend, seal,
-`deployed.json`, then the **workspace refresh** (section 8). An interrupted deploy is continued with
-`sudo pf --instance <slug> resume`; `abort-deploy` is legal only until the frontend effect started (afterwards it is
-refused with `operation-open` and `resume` completes the deploy). A lost result of the initial migration stops in
-`needs_operator`; `abort-deploy` then supersedes the deploy and removes only its own frozen resources, after which
-`deploy` can run again. The private staging of a cancelled operation is removed (`note: staging-removed`); an
-unreferenced `.staging-*` folder is removed by the next staging flow, except the staging of a running deployment
-whose seal failed (`note: unsealed-active-staging`). The staging of a superseded operation stays while the recovery
-that superseded it is open and is removed by the next staging flow once that recovery (or the last recovery of a
-chain of them) completed.
-
-## 8. Editable repository and deployed revision
-
-`repo/` is now a working tree, not the authoritative record of what is currently running.
-The running application uses previously built/pinned images; editing a source file over SMB
-does **not** immediately change the running application.
-
-Check both identities with:
-
-```sh
-sudo pf status
-```
-
-It reports:
+The workspace is a working copy, not the record of what runs: editing a file over SMB does not change the running
+application. `pf status` shows both identities:
 
 ```text
-Deployed source: <SHA>
-Workspace: provenance git_commit|unknown | manifest commit <SHA or none> | differs from deployed: True/False | changes: ...
-Deployment: <deployment-id> (git_commit <sha12>|unknown), sealed <stamp>
+Deployed source: <commit>
+Workspace: provenance git_commit|unknown | manifest commit <commit or none> | differs from deployed: True/False | changes: ...
+Deployment: <deployment-id> (git_commit <sha12>|unknown), sealed <time>
 ```
 
-Since PF-A3.1 the deployed source comes from the **deployment record** (section 7), not from `repo/` or its
-`.git`. `Deployed source:` prints the commit only when the protected source store proved it; otherwise it prints
-`unknown provenance (…)` and never a claimed commit. `deployed.json` `sha` is likewise written only for a proven
-commit (`null` otherwise); a pre-A3.1 `sha` written by a `rollback:` or `restore:` counts as the deployed commit only
-when the protected source manifest records that same commit. `pf release-check` prints the same `Deployed source:`
-line. The `Deployment:` line is one of:
+The deployed source comes from the deployment record and is printed as a commit only when the protected source store
+proved it; otherwise `status` prints `unknown provenance (…)`. The `Deployment:` line can also read
+`legacy (no deployment record; created before PF-A3.1)`, `not recorded (seal failed in operation <op>; …)` or
+`<id> deployment-artifact-mismatch: <file>: <detail>` (a damaged record, kept as evidence, §16).
 
-```text
-Deployment: <id> (git_commit <sha12>|unknown), sealed <stamp>
-Deployment: legacy (no deployment record; created before PF-A3.1)
-Deployment: not recorded (seal failed in operation <op>; the next deploy/update/rollback seals one)
-Deployment: <id> deployment-artifact-mismatch: <file>: <detail>
-```
+- `pf` compares the workspace byte for byte with the manifest it recorded when it deployed that tree. It never runs Git
+  in the workspace, and it never trusts the workspace's `.git` folder. A workspace without such a manifest, or one that
+  differs from it, has `unknown` provenance.
+- The comparison ignores untracked items named `.env`, `node_modules`, `.venv`, `__pycache__` or `.pytest_cache` (and
+  `.git`). A commit that tracks a path with one of those names is refused.
+- `pf deploy` without a selector proves the checkout first: it fetches the commit that the checkout claims into the
+  protected store and requires the workspace to match it exactly; otherwise it asks for `--commit`, `--latest` or
+  `--release`.
+- No lifecycle command changes the permissions of existing workspace files; use `pf permissions` (§2).
 
-followed by `Unsealed deployment staging: N` and `Unreferenced deployments: N` when they are not zero. A deployment
-whose files differ from its record is kept as evidence and never used as a source (section 16).
+**Workspace switch.** After activation, `deploy`, `update`, `rollback` and `restore-instance` do not copy files into the
+workspace. They stage the deployed tree in `<workspace parent>/.pf-generations-<instance-uuid>/`, rename the old
+workspace to a retained generation `wsg-<time>-<8 hex>` in that folder, and rename the staged tree to the workspace path.
+The old tree is kept whole, untracked files and `.git` included, and a file an editor saved during the switch lands
+there. Copy such work back as root, for example
+`sudo cp -a <workspace parent>/.pf-generations-<uuid>/<generation>/<path> <workspace>/<path>`. `pf status` counts the
+retained generations, and `pf cleanup --apply --generation` retires one (§16).
 
-No lifecycle command changes the permissions of existing workspace files (PF-A2.3); `pf permissions check
---scope workspace` reports them and `pf permissions apply` changes them under an editor freeze.
+- Between the two renames the workspace path is briefly absent. If the process stops there, only `pf resume` (bind the
+  new tree) or `pf resume --keep-workspace` (put the old tree back) can run.
+- When the switch is not possible (the workspace is a mount point or a shared-folder root, the generation folder is
+  unsafe, the workspace carries an ACL, or the device lacks room), the operation completes the activation, exits 1 with
+  `workspace-sync-pending` and stays open in `workspace_sync_pending` with the application running. Fix the cause and
+  run `pf resume`, or keep the current workspace with `pf resume --keep-workspace`.
+- A manual `pf backup` may run while a switch waits. While that backup is open, `status` shows
+  `waits: backup operation <op> is open; run 'pf --instance <slug> resume --operation <op>' (or add --abandon) first,
+  then this operation's routes apply`: finish or abandon the backup first.
+- `deploy`, `update`, `rollback` and `restore-instance` accept `--keep-workspace` to skip the switch from the start.
 
-This distinction prevents a local edit from being mistaken for deployed code. Since
-PF-A1.2 the workspace line comes from an fd-safe byte/mode comparison of `repo/` against
-the protected manifest the tool recorded when it deployed a tree
-(`instances/<uuid>/artifacts/source-manifest.json`); no Git command runs against `repo/`,
-its `.git` metadata (hooks, fsmonitor, filters, includes, alternates, remotes) is editor
-data and is never consulted. A workspace without such a manifest, or one that differs from
-it, has `unknown` provenance: `status` still works, but no commit SHA is invented.
-
-The comparison ignores *untracked* workspace artifacts by name only (`.env`,
-`node_modules`, `.venv`, `__pycache__`, `.pytest_cache`; `.git` is control metadata). That
-policy never hides tracked content: a commit that tracks a path with one of those names
-is refused by the source store before export (`unsupported source path (tracked reserved
-workspace artifact name)`), a candidate tree carrying one is refused before `repo/` is
-touched (in `rollback` and `restore-instance`, together with the store's provenance proof,
-before any confirmation, pending journal, `config/.env` change, pause, safety snapshot or
-database swap), and a manifest that lists one cannot be verified — the tool fails closed instead
-of reporting a match it did not prove.
-
-A manual update that finds a dirty/different workspace first includes that current
-workspace in the pre-update checkpoint as `workspace.tar.gz`, then replaces `repo/` with
-the selected revision exported from the protected source store. An unattended release
-update refuses a dirty/different workspace instead of deleting local work automatically.
-
-`deploy --current` proves the workspace instead of trusting it: the commit the checkout
-claims (`.git/HEAD`, read as data) is fetched into the protected store, exported to a private
-candidate, and the workspace must equal that tree byte for byte; otherwise the command stops
-with the differences and asks for an explicit `--commit`/`--latest`/`--release`. A tree
-copied in from a ZIP or an unverified checkout is therefore never deployed as "current".
-
-**Workspace generation switch (PF-A3.2).** `deploy`, `update`, `rollback` and `restore-instance` no longer copy the new
-tree into `repo/`. After activation, seal and `deployed.json`, they:
-
-1. stage the deployed tree as `stage-<generation>` inside the generation container
-   `<workspace parent>/.pf-generations-<instance-uuid>/` (root, `0700`, same filesystem as `repo/`),
-2. rename `repo/` to the retained generation `<container>/<generation>` (`wsg-<stamp>-<8 hex>`),
-3. rename the stage to `repo/`,
-4. rewrite the protected source manifest of the new workspace.
-
-The old tree is **kept** as a retained, unsealed generation; nothing in it is deleted, also untracked files and its
-`.git`. A file an editor had open, or saves while the switch runs, lands in the retained generation, not in the new
-`repo/`. Copy such work back as root, for example
-`sudo cp -a /volume1/partflow/.pf-generations-<uuid>/<generation>/<path> /volume1/partflow/repo/<path>`; the tool never
-runs Git or any other program inside a retained generation, so its `.git` hooks or `fsmonitor` settings are inert.
-`pf status` counts the retained generations (`Workspace generations: N unsealed in <container> (latest <generation>
-from operation <op>)`) and reports a leftover `stage-*` as `in progress` or `superseded-stage`; retention is PF-A5.1.
-
-Between the two renames `repo/` is briefly absent. If the process is interrupted exactly there, every command except
-`resume` is refused (the registered path is missing) and `status` prints `workspace: the registered workspace path may
-be absent between the two renames of the workspace switch; only 'resume' (or 'resume --keep-workspace') may continue`.
-`sudo pf --instance <slug> resume` binds the staged tree; `resume --keep-workspace` renames the old tree back instead.
-
-The switch is unavailable — the operation then completes activation, seal and pointer, exits 1 with
-`workspace-sync-pending` and stays open in `workspace_sync_pending` with the application running — when `repo/` is a
-mount point, subvolume or shared-folder root (`workspace-is-mount-point`), the container is unsafe or collides with a
-registered path (`generation-container-unsafe`, `generation-container-collision`), `repo/` itself carries an ACL
-(`workspace-root-acl`) or the device lacks room for the staged tree plus `minimum_free_mb`
-(`workspace-capacity`). Fix the cause and run `resume`, or run `resume --keep-workspace` to keep the current
-workspace (its manifest and provenance are then left as observed). A manual `pf backup` stays possible while the
-switch waits untouched. While that backup is open (it was interrupted), the waiting operation is held: `status` adds
-`waits: backup operation <op> is open; run 'pf --instance <slug> resume --operation <op>' (or add --abandon) first,
-then this operation's routes apply`, and `resume --operation <switch-op>` (also with `--keep-workspace`) is refused
-with `operation-open` naming the backup's `resume --operation <backup-op>` and its `--abandon`. Once the backup is
-closed, `resume` or `resume --keep-workspace` of the waiting operation apply again.
-`deploy`, `update`, `rollback` and `restore-instance` also accept `--keep-workspace` to skip
-the refresh from the start; the confirmation summary shows the choice and the number and size of retained
-generations.
-
-## 9. Manual update
-
-For active staging development:
+## 9. Updating
 
 ```sh
-sudo pf update --latest
+pf update --latest
+pf update --commit <full commit hash>
+pf update --release <tag>                # or: --release latest [--channel prerelease]
+pf update --latest --allow-migrations    # needed when the new revision adds migrations
 ```
 
-Or select an exact revision/release:
+`update` resolves an exact commit, checks CI (unless `--skip-ci`), builds candidate images and checks the migration
+contract: a changed or deleted existing migration is always refused. It checks that the running images are those of the
+current deployment record (`deployment-image-mismatch`) and that there is room, and asks for
+`UPDATE <first 12 characters of the commit>`. It then stages the new deployment, stops application writes, captures and
+restore-tests a pre-update checkpoint (a differing workspace is saved in it as `workspace.tar.gz`), rehearses new
+migrations on a copy of the database, migrates the live database, starts the new images, seals the deployment record
+and switches the workspace (§8). No command ever runs `alembic downgrade`.
 
-```sh
-sudo pf update --commit FULL_SHA
-sudo pf update --release TAG
-sudo pf update --release latest --channel prerelease
-```
+After an interruption, `pf resume`:
 
-The update resolves a fixed SHA, checks CI, clones a separate candidate, builds candidate
-images, checks the migration contract, asks for confirmation, stops application writes,
-creates a verified pre-update checkpoint, rehearses approved migrations when necessary,
-replaces the writable repository, then activates the new images.
+- before any database change, reopens the unchanged deployment and closes the update as `cancelled`; `pf resume
+  --abandon` (`ABANDON <op8>`) does the same;
+- after a live database change, continues forward;
+- when the result of the live migration was lost, reads the live Alembic heads: heads equal to the target count as done,
+  and any other heads stop in `needs_operator` (`effect-unknown`), because a partial change cannot be excluded. Recover
+  with `pf rollback <before-update checkpoint> --restore-db`, which preserves the current database first.
 
-Migration changes require explicit review:
-
-```sh
-sudo pf update --latest --allow-migrations
-```
-
-Existing historical migration files being modified or deleted remain refused. No lifecycle
-command automatically performs `alembic downgrade`.
-
-Since PF-A1.3 an existing unlabeled or foreign Compose topology resource refuses `update`
-with `resource-not-owned` right after the lock, before any confirmation or change.
-
-`--skip-ci` is a manual staging exception, not evidence that CI passed.
-
-Since PF-A3.1 the update checks, before its `UPDATE` confirmation, that the running backend/frontend images are the
-ones of the current deployment record (`deployment-image-mismatch`) and that the deployment artifact store has room
-(`artifact-capacity`); it stages the new deployment right after the confirmation, before application writes stop,
-and seals it after the health checks (section 7). The current commit is read from the deployment record (then from a
-proven `deployed.json` `sha`). When it is unknown, a **manual** update still runs — its pre-update checkpoint takes
-the source from the deployment record — while an automatic update is deferred (`Automatic update refuses a
-deployment whose source commit is unknown; run a manual update.`). The pre-update checkpoint is a schema-1 healthy
-checkpoint with a verification record (section 10).
-
-**Phases and resume (PF-A3.2).** An update runs `preparing` (staging), `preserving` (stop, pre-update checkpoint),
-`migrating` (rehearsal candidate restore, rehearsal migration, candidate drop, live migration), `activating`
-(backend, frontend, seal, pointer) and `syncing-workspace` (section 8). After an interruption `pf resume`:
-
-- **before any database effect** (staging, stop, checkpoint, rehearsal candidate): drops the operation's own candidate
-  by its planned name, reopens the unchanged deployment and closes the update `cancelled` (the former `pf resume`);
-  `pf resume --abandon` does the same (`ABANDON <op8>`);
-- **after a live database effect**: continues forward from the journal;
-- when the **live migration's result was lost**: reads the live Alembic heads. Heads equal to the target count as done
-  (the upgrade is never repeated); heads still at the previous revision, or any other heads, stop in
-  `needs_operator` (`effect-unknown`) because a partial non-transactional change cannot be excluded. The supported
-  route is then lossless: `sudo pf --instance <slug> rollback <before-update checkpoint> --restore-db` supersedes the
-  update, preserves the current database first and restores the checkpoint. The update is then listed as
-  `superseded`.
+`<op8>` is the last eight characters of the operation identifier that `status` prints.
 
 ## 10. Backups and rollback
 
-Create a verified revision checkpoint:
-
-```sh
-sudo pf backup
-```
-
-A checkpoint contains:
+`pf backup` captures a revision checkpoint in `<backups>/revisions/<project>/<checkpoint-id>/` and restore-tests its
+database dump in a temporary database:
 
 ```text
-source.tar.gz          exact deployed source revision
-workspace.tar.gz       only when the writable repo differs from deployed source
-database.dump          active PostgreSQL database
+source.tar.gz       the exact deployed source
+workspace.tar.gz    only when the workspace differs from the deployed source
+database.dump       the active PostgreSQL database
 database.list
-manifest.json
+manifest.json       what was captured, with every payload's size and hash
 manifest.sha256
 ```
 
-The active database dump is restored into a temporary database as part of verification.
-The runtime `.env` is no longer stored in the normal revision `source.tar.gz`; it is host
-configuration outside the repository. A full purge-recovery bundle preserves it separately.
+`.env` is not part of a checkpoint; purge recovery bundles keep it (§12).
 
-**Manifest schema 1 (PF-A3.1).** A new checkpoint's `manifest.json` follows the `recovery_manifest` record of
-`deploy/synology/contracts/lifecycle-records.schema.json`; `manifest.sha256` is the SHA-256 of the exact file bytes.
-It records:
+**Classes.** A capture is a *healthy checkpoint* (the live schema matches the deployed images and the exact source is
+known), an *emergency preservation* (the actual data, with the mismatch recorded) or *partial* (an emergency capture
+where an image or the source could not be identified). Only a healthy checkpoint is a rollback target
+(`checkpoint-not-rollback-target`).
 
-- the **capture class**: `healthy_checkpoint` (the live schema matches the deployed images, the exact deployed source
-  is known and every image is identified), `emergency_preservation` (the actual data, with the mismatch recorded as
-  evidence) or `partial` (an emergency capture where an image or the source could not be identified);
-- quiescence (whether backend/frontend were running), the source origin and provenance, the deployment it binds to
-  (ID and record hash; the record itself is never copied into a checkpoint because it holds secrets), the
-  backend/frontend/db image identities (ID, platform, repo digests), the PostgreSQL server version, and per database
-  store its owner, encoding/collation/ctype, extensions, Alembic heads and — only when writers were stopped (before
-  `update`, `reset-db`, `rollback`, `purge`) — exact row counts; `pf backup` with running writers records none;
-- every payload with its type, size and hash, plus the exclusions and manual prerequisites that a restore needs.
-
-**Verification level.** The restore test writes a separate **verification record** in
-`<root>/instances/<uuid>/artifacts/verifications/<bundle-id>/` (root only); the bundle is never edited afterwards.
-The level shown by `backup`, `backups` and `recoveries` is computed from these records: `captured` (sealed, no
-record yet), `failed` (the last restore test failed), `data-restore` (every store restored from the bundle's own
-dump, with heads, locale and row-count checks) and `functional` (since PF-A3.3: the exact purge bundle or a
-side-by-side target restored and checked in an isolated topology, section 12). A broken
-record is reported as `note: verification-record-invalid: …; ignored.` and does not raise the level. `pf backup` now
-prints:
+**Verification level.** A separate verification record in `<root>/instances/<uuid>/artifacts/verifications/` gives the
+level: `captured` (not tested yet), `failed` (the last restore test failed), `data-restore` (every database restored from
+the bundle's own dump and checked) or `functional` (restored and checked in an isolated copy of the application, §12).
+`pf backup` prints both:
 
 ```text
 Checkpoint class: healthy_checkpoint
 Verification level: data_restore_verified (record <verification-id>)
 ```
 
-**Strict reading.** Every consumer (listings, rollback, purge, restore) first reads the bundle strictly: the manifest
-bytes must match `manifest.sha256`, the manifest must validate, and every payload must be a regular, single-link file
-of the recorded size and hash; a file that the manifest does not list is refused. Nothing is extracted, confirmed or
-journaled before that. Archives are then extracted by a safe importer that refuses every link or special file,
-absolute or `..` paths, duplicate or oversized members and archives that change while being read
-(`archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`).
+**Strict reading.** Every command that uses a checkpoint or a bundle first checks the manifest hash, the manifest and the
+size and hash of every payload; a file that the manifest does not list is refused. Nothing is extracted or confirmed
+before that, and archives are extracted without links, special files, absolute paths or `..` paths.
 
-**Before a capture.** `pf backup`, `update`, `reset-db` and `purge` refuse a healthy checkpoint before any change
-when the running backend/frontend images are not the current deployment's (`deployment-image-mismatch`), or when the
-deployed source cannot be proven at all (`deployment-artifact-mismatch` refusal, or the existing "Cannot reconstruct
-the exact deployed source revision" refusal for a deployment without a record). When only the deployment record's
-files are damaged but the source can still be proven from the protected source store or the workspace, the capture
-proceeds with a `note: deployment-artifact-mismatch: …` and records the record as excluded.
+**Refusals before a capture.** `backup`, `update`, `reset-db` and `purge` refuse a healthy checkpoint when the running
+images are not those of the deployment record (`deployment-image-mismatch`) or when the deployed source cannot be proven
+(`deployment-artifact-mismatch`). They also refuse, in their preflight, a differing workspace that holds a link, a
+special file or more than the archive limits (`workspace-unsupported-entry`, `workspace-archive-limit`; §16).
 
-**Emergency preservation.** When a healthy checkpoint is refused but the data must be kept, run, interactively:
+**Emergency preservation.** When a healthy checkpoint is refused but the data must be kept, run interactively:
 
 ```sh
-sudo pf --instance <slug> backup --emergency
+pf --instance <slug> backup --emergency
 ```
 
-It prints the observed contract (live heads, image heads, running and expected image IDs), asks
-`EMERGENCY BACKUP <project>`, captures and restore-tests the current database and prints
-`Emergency preservation <id> captured (<level>). It is evidence and data for repair or export, not a rollback
-target.` When the drifted workspace exceeds the archive limits (section 16, `workspace-archive-limit`) it still
-preserves the data and records the workspace as excluded. It is refused without a terminal and is never run by
-`backup.sh`. While a deploy, update, rollback or
-reset-db is interrupted, `status` lists it as a legal route; it does not change the interrupted operation. An
-emergency or partial capture is **never a rollback target** (`checkpoint-not-rollback-target`).
+It shows the observed mismatch, asks for `EMERGENCY BACKUP <project>`, captures and restore-tests the current database,
+and is never a rollback target.
 
-**Rollback preservation.** Every `rollback`, code-only or `--restore-db`, now preserves the current database after
-application writes stop and before anything is restored or switched: a healthy checkpoint when the live contract
-matches, otherwise an emergency preservation. If the current database cannot be captured **and** restore-tested, the
-rollback stops with `preservation-failed`: nothing was restored or switched, the services stay stopped, and
-`pf resume` reopens the unchanged deployment (section 16 gives the manual `pg_dump` step).
+**Free space.** Before its confirmation every lifecycle command measures the space it needs on each device (backups,
+recovery, workspace, artifacts, private state and the Docker data root), adds the `minimum_free_mb` floor once per
+device, and refuses a shortfall with `capacity-insufficient`. `capacity-unmeasurable` means the Docker data root could
+not be measured; `backup --emergency` still works then. `pf` never deletes anything to make room.
 
-**Rollback checks.** The selected checkpoint must be a healthy checkpoint; its backend/frontend image IDs must still
-be retained; a different database image only prints `note: db-image-changed: …` when the PostgreSQL major matches.
-The source is extracted with the safe importer and compared with the recorded source manifest
-(`source-manifest-mismatch`). A code-only rollback does not use the dump, so a `failed` level is a note
-(`note: verification-failed: …`). `--restore-db` restores into a candidate created with the store's encoding and
-locale, checks heads, locale, available extensions, owner and (when recorded) row counts, writes a verification
-record **before** the switch, and on any difference drops the candidate and refuses with `checkpoint-incompatible`
-while the current database stays unchanged.
-
-**Legacy checkpoints.** Format 1 and 2 checkpoints written before PF-A3.1 are read through an explicit, deterministic
-migration (`note: legacy-manifest-migrated: <id> format <n> read as <class>; limitations: …`), never rewritten. A
-format-2 checkpoint is healthy only when it recorded a verified source, a passed restore test, both images and the
-migration fingerprint; it is listed with `legacy-format-2` and `source=claimed <sha12>`: the claimed commit is only a
-hypothesis that the protected store must prove again before it is used. Every format-1 checkpoint reads as `partial`
-(it was not rollbackable before either). No verification record is synthesized from a legacy `restore_test` claim:
-the level stays `captured` until a `--restore-db` verifies it on its candidate.
-
-Since PF-A2.3 a new checkpoint gets the backups target of the permission policy in force (the group of the
-backups folder, or of the approved revision; View and copy gives directories `0750` and files `0640`), set
-explicitly and verified. Only the new checkpoint is changed. A checkpoint entry that inherits an ACL from its
-folder stops the backup (`fresh-entry-acl`) before it is published.
-
-List checkpoints, newest first, ten per page:
-
-```sh
-sudo pf backups --page 1
-```
-
-Interactive rollback:
-
-```sh
-sudo pf rollback
-```
-
-Code-only rollback keeps current data and requires schema compatibility:
-
-```sh
-sudo pf rollback BACKUP_ID
-```
-
-Application + database rollback:
-
-```sh
-sudo pf rollback BACKUP_ID --restore-db
-```
-
-The database form requires a stronger confirmation, restores the old dump into a fresh
-database, and retains the previously active database under a `pf_keep_*` name rather than
-silently deleting newer writes.
-
-`pf backups` lists one line per checkpoint (PF-A3.1):
+**Listing.** `pf backups --page N` lists the checkpoints, newest first, ten per page:
 
 ```text
 <n>. <bundle-id>  [<healthy|emergency|partial>|<captured|failed|data-restore|functional>]  <reason>  DB=<heads>  source=<git_commit <sha12>|unknown|claimed <sha12>>  [legacy-format-N]
 <n>. <folder>  [invalid: <code>]
 ```
 
-**Journals for backups and rollbacks (PF-A3.2).** `pf backup` writes a plan (capture, then verification). A caught
-capture or verification failure closes it `failed_preserved` (not blocking; the partial folder is listed as a
-`bundle-attempt` and never selectable); only an interrupted process leaves it open, and `pf backup` or `pf resume`
-then makes a new attempt with a new bundle ID (a half-verified `pf_verify_*` candidate of the plan is dropped
-first). `pf rollback ... --restore-db` may **supersede** an open `update`, `rollback` or `reset-db` that stopped the
-application (or is in `needs_operator`); a code-only rollback may supersede only an update without any database
-effect, otherwise it is refused with `review recovery with --restore-db`. An interrupted rollback candidate restore
-is dropped and restored again from the same checkpoint; a checkpoint that changed meanwhile is refused with
-`plan-input-changed` before the `RESUME <op8>` confirmation (nothing is recorded). A superseding operation that is
-resumed before it changed anything **withdraws**: it starts no service, and the superseded operation and its routes
-apply again. `pf resume --abandon` of a rollback before its database switch drops its own `pf_restore_*` candidate,
-then reopens the unchanged deployment (or, for a superseding rollback, withdraws and leaves the services stopped).
+Checkpoints written before the deployment records existed (formats 1 and 2) are read through a fixed in-memory
+conversion and never rewritten; format 1 reads as partial, and the commit that a format 2 checkpoint claims is proven
+again before use.
 
-**Data choice and capacity (PF-A3.3).** The `rollback ... --restore-db` confirmation now ends with a data-choice line:
-the active database returns to the selected checkpoint (with its creation time); writes after that time stay in the
-retained `pf_keep_*` database and in the `before-rollback` preservation, and nothing is merged. The exact summary the
-operator confirmed is kept as `operations/<op>/confirmation-summary.txt` (0600; its SHA-256 is the plan's
-`confirmation.summary_sha256`) and `pf status --operation <op>` prints it. Before the confirmation every lifecycle
-command measures the free space it needs per device (`statvfs`): backups, recovery, workspace, artifacts, private state
-and the Docker root (`DockerRootDir` of the daemon). Needs of roles on one device are summed and the
-`minimum_free_mb` floor is counted once per device; a shortfall refuses with `capacity-insufficient` and changes
-nothing, and the measurement is recorded in `operations/<op>/capacity.json`. Every `pf backup` needs Docker-root space
-for its restore test; when the Docker root cannot be measured it refuses with `capacity-unmeasurable` and names
-`pf backup --emergency`, which preserves the database without that check. The need is re-checked before each effect;
-pf never deletes anything to make room.
+**Rollback.**
+
+```sh
+pf rollback                               # choose a checkpoint interactively
+pf rollback <checkpoint-id>               # code only, keeps the current data (ROLLBACK <checkpoint-id>)
+pf rollback <checkpoint-id> --restore-db  # code and database (RESTORE <database> <checkpoint-id>)
+```
+
+- Every rollback first stops application writes and preserves the current database: a healthy checkpoint, or an
+  emergency preservation when the schema does not match the images. If the database cannot be captured and
+  restore-tested, the rollback stops with `preservation-failed`: nothing was restored, the services stay stopped, and
+  `pf resume` reopens the unchanged deployment.
+- The checkpoint must be healthy, its backend and frontend images must still exist, and its source must match its
+  manifest (`source-manifest-mismatch`). A code-only rollback needs a compatible schema.
+- `--restore-db` restores into a new candidate database, checks the heads, locale, extensions, owner and row counts, and
+  only then switches; a difference drops the candidate (`checkpoint-incompatible`) and leaves the current database
+  unchanged. The previous active database is retained as `pf_keep_*`, so writes made after the checkpoint stay there and
+  in the preservation; nothing is merged. The confirmed summary is kept as `operations/<op>/confirmation-summary.txt`.
+- `rollback --restore-db` may supersede an open `update`, `rollback` or `reset-db` that stopped the application or needs
+  an operator; a code-only rollback may supersede only an update that changed no database.
+
+A new checkpoint gets the backups permissions of the policy in force (§2); an entry that inherits an ACL from its folder
+stops the backup (`fresh-entry-acl`). An interrupted backup leaves its operation open; `pf backup` or `pf resume` then
+makes a new attempt with a new checkpoint identifier.
 
 ## 11. Reset staging data
 
-To keep the installed application/version but activate a clean migrated database:
-
 ```sh
-sudo pf reset-db
+pf reset-db
 ```
 
-Confirmation uses the actual database name:
+`reset-db` keeps the deployed version and activates a clean database migrated to the current Alembic heads. It asks for
+`RESET <database>` (for example `RESET partflow_staging`), captures the current database first, creates and migrates a
+clean candidate database, switches the database names, and retains the previous active database as `pf_keep_*`, which
+is never dropped. It does not delete the PostgreSQL volume. Use `reset-db` to clear test data; use `purge` (§12) to
+return to a brand-new instance.
+
+Before the confirmation it decides from what it observes:
+
+- the live heads equal those of the running backend image: the capture is a healthy `before-reset` checkpoint;
+- the live heads differ, but the running image is the one that the deployment record names (a schema and image
+  mismatch): the capture is an **emergency preservation**, and the clean database is migrated to the running image's
+  heads. That preservation is data and evidence, never a rollback target. To bring the old data back, restore the
+  retained `pf_keep_*` database manually: `pf` has no command that switches back to it;
+- the running image is not the recorded one: refused with `reset-deployment-image-mismatch` (bring the deployment back in
+  line with `update` or `rollback` first);
+- the image contract cannot be read: refused with `reset-contract-unknown`.
+
+A capture failure stops with `preservation-failed` before anything changes. After an interruption `pf resume` redoes the
+candidate, and `pf resume --abandon` before the switch drops it and reopens the unchanged deployment. A switch whose
+names prove that it never started is redone; one that left the names half renamed stops in `needs_operator`
+(`database-switch-unknown`); recover with `pf rollback <checkpoint> --restore-db` to a healthy checkpoint. A reset
+started on a schema and image mismatch cannot reopen the old deployment: `pf resume` completes it, and
+`pf resume --abandon` drops the candidate and leaves the services stopped; then run `pf reset-db` again, or
+`pf rollback <checkpoint> --restore-db` to a healthy checkpoint.
+
+## 12. Purge, recovery and clean redeploy
+
+`pf purge` saves everything needed to rebuild the instance into a verified recovery bundle, then removes the instance's
+Docker resources:
+
+```sh
+pf instances                       # list the registered instances
+pf purge                           # asks whether to delete the checkpoint tree too
+pf purge --keep-backups            # keep the revision checkpoints
+pf purge --delete-backups          # delete them; they are archived in the bundle
+pf purge --reset-admin-config      # also delete pf-config.json
+```
+
+The sequence:
+
+1. **Plan.** `pf` lists the instance's containers, volume, network and image tags exactly, by their instance label. A
+   resource it cannot claim (unlabeled, foreign, shared or conflicting) refuses the purge with `resource-blocked` before
+   anything happens.
+2. **Summary and `PURGE <project>`.** Application writes stop.
+3. **Bundle.** The recovery bundle is captured and every database is restore-tested. The source database is checked
+   with the application's own invariant command (`app.cli reconcile`); an error stops the purge (`app-check-failed`).
+4. **Isolated verification.** The exact bundle is restored into a throwaway Compose project `pfverify-<12 hex>` with its
+   own volume, an internal network, no published port and a generated database password, and checked: databases,
+   health, images, source, configuration and the same reconcile result as the source. A failed check cancels the purge
+   (`functional-verification-failed`), reopens the application and keeps the stopped copy for inspection.
+5. **Final plan and confirmations.** The binding deletion plan is printed and frozen. Confirm `DELETE <database>`, then,
+   when chosen, `DELETE BACKUPS <project>` and `RESET ADMIN CONFIG <project>`, and finally
+   `ERASE <project> <random challenge>`. There is no bypass.
+6. **Deletion.** The containers, the network, the volume and the image tags that the bundle covers are removed one by
+   one, each inspected again right before its removal; a change stops with `plan-drift`. Nothing is pruned,
+   `compose down -v` is never used, image removal is never forced and bind-mounted paths are never deleted. The
+   guarantee assumes that no other Docker administrator acts at the same time.
+7. **Registry.** The instance record is marked `state: purged` and releases its Compose project, so another instance may
+   register it. The record, its identity and its permission policy remain.
+
+The bundle is stored in `<recovery>/<project>/purge-<time>-<sha12>-<suffix>/`:
 
 ```text
-RESET partflow_staging
+source.tar.gz, workspace.tar.gz          deployed source; the workspace when it differs
+configuration/.env                       the runtime environment (secrets)
+configuration/pf-config.json             the administration settings
+images.tar                               application and database images, by image ID
+postgres-globals.sql                     evidence only, never executed
+databases/active.dump, databases/<retained>.dump
+revision-checkpoints.tar.gz              the checkpoint history
+deployment/deployment-record.json, deployment/compose-resolved.json
+state/*.json, manifest.json, manifest.sha256
 ```
 
-`reset-db` creates and verifies a checkpoint first, initializes a new database with the
-current Alembic head, switches databases transactionally, and retains the previous active
-database. It does not delete the PostgreSQL Docker volume.
+**Interrupted purge.** Before `ERASE`, `pf resume` and `pf resume --abandon` both reopen the unchanged deployment. After
+`ERASE`, `pf purge` or `pf resume` continues after `RESUME PURGE <project> <bundle-id>` with the remaining planned items
+only; nothing new is ever added. When the recovery bundle no longer reads or verifies, deletion stays blocked (§16).
 
-Use `reset-db` for clearing test data while keeping the deployment. Use `purge` when the
-goal is to return the instance to a genuinely new-deployment state.
+**Brand-new deployment after a purge.** Run `pf deploy --latest`. The purge removed `.env`, so the wizard creates a new
+one with a new database password. After `--reset-admin-config`, run `pf --instance <slug> config admin` first.
 
-Since PF-A3.1 the `before-reset` checkpoint is a schema-1 healthy checkpoint with a verification record, and
-`reset-db` first runs the same deployment image binding check as `pf backup` (`deployment-image-mismatch` before any
-change).
-
-Since PF-A3.3 `reset-db` decides from the observed contract before its confirmation:
-
-- live heads equal to the running image's heads: the healthy `before-reset` checkpoint, as before;
-- a **schema/image mismatch** (live heads differ from the running backend image's heads, and the running image is the
-  one the deployment record names): the current database is captured as **emergency preservation** first (data and
-  evidence, never a rollback target), then the clean database is migrated to the **running image's heads**;
-- a **deployment-image mismatch** (the running backend image is not the one the deployment record names) refuses
-  with `reset-deployment-image-mismatch`; converge the deployment first (`update` or `rollback`);
-- an unreadable image contract refuses with `reset-contract-unknown`.
-
-The confirmation summary names the preservation and the retained database (`pf_keep_*`, the previous active database,
-which is never dropped) and is kept as `confirmation-summary.txt`. A preservation failure stops with
-`preservation-failed` before any candidate or switch. No `alembic downgrade` is ever run.
-
-Since PF-A3.2 an interrupted `reset-db` drops its own `pf_clean_*` candidate and redoes it; `pf resume --abandon`
-before the database switch drops the candidate and reopens the unchanged deployment instead. A database switch whose
-names prove it did not start is redone; one that left the names half renamed stops in `needs_operator`
-(`database-switch-unknown`) and is recovered with `rollback <before-reset checkpoint> --restore-db`.
-
-A `reset-db` started on a **schema/image mismatch** can never reopen the unchanged deployment, because its database
-is not at the running image's heads. When it is interrupted before the database switch, `pf resume` goes **forward**:
-it re-observes the emergency preservation (or captures it again) and completes the reset. `pf resume --abandon` drops
-the `pf_clean_*` candidate and closes the operation `cancelled` **without a reopen**: application services stay as the
-reset left them (normally stopped), and the message names the routes that remain: a new `pf reset-db` (it preserves
-the current data again) or `pf rollback <checkpoint> --restore-db` to a healthy checkpoint. The same applies after
-`reset-images-unidentified` on such a reset: its message names `resume --operation <op> --abandon`.
-
-## 12. Full purge, recovery, and clean redeploy
-
-### List/select instances
+**Exact restore of a purged instance.**
 
 ```sh
-sudo pf instances
+pf recoveries [--page N]
+pf restore-instance <bundle-id>
 ```
 
-If multiple managed PartFlow Compose projects exist, `purge` presents a paginated list
-(10 per page) unless `--project` selects one explicitly:
+The target must be empty (`resource-target-not-empty`). Confirm `RESTORE INSTANCE <project>`, then
+`RESTORE <database> <bundle-id>`. The restore recreates the workspace, `.env`, the images, every database and the
+checkpoint history, checks health, compares the application invariants with the bundle (`Application invariants: …`,
+evidence only) and seals a new deployment record that names the bundle. The current control release and the current
+`pf-config.json` stay in force; the bundle's copy of `pf-config.json` is kept for comparison. An existing `.env` with other
+content is kept as `.env.proposal-<op8>`, and a differing checkpoint history is moved aside to
+`<backups>/revisions/<project>.pre-restore-<op8>`. `pf resume` continues an interrupted restore forward;
+`pf resume --abandon` (`ABANDON RESTORE <project> <op8>`) is possible only while the target is being prepared.
+
+- A bundle restores only into the instance whose identity it records. A bundle of another instance, including one from a
+  lost host, is refused with `restore-target-mismatch`: it would need an import route with policy approval, which this
+  control does not provide. A legacy bundle without a recorded identity is accepted only for the same Compose project.
+- The paths recorded in a bundle are provenance only; the restore always writes the selected instance's folders.
+- When the daemon has no `postgres:16` image, the bundle's database image is loaded from `images.tar` and tagged
+  `postgres:16`; that tag is shared by every instance on the daemon.
+- A purged record is registered again, unless another instance holds the project (`instance-claim-taken`).
+
+**Side-by-side recovery.** To inspect or export the data of one of the instance's own bundles while the instance keeps
+running:
 
 ```sh
-sudo pf purge
-sudo pf purge --project partflow-staging
+pf restore-instance <bundle-id> --side-by-side
 ```
 
-### Purge safety sequence
-
-Since PF-A1.3 the sequence is:
-
-1. **Preliminary plan.** The controller inventories the bound daemon exactly (see the PF-A1.3
-   checkpoint note at the top) and builds an advisory deletion plan. Any blocker (a legacy, name-collided,
-   foreign-claimed, label-conflicting, shared or unsupported resource) refuses the purge with
-   `resource-blocked` here: no confirmation, no pause, no bundle.
-2. **Summary.** It prints project, repo, source revision, database, the exact containers,
-   volumes and networks, the image tags pending recovery-bundle coverage, every retained
-   exclusion and every retained bind path, checkpoints, state and environment presence.
-3. **First confirmation** `PURGE <project>`, then application writes stop.
-4. **Bundle and binding plan.** The verified recovery bundle is created. After `images.tar` is
-   verified the controller inventories again, builds the binding plan (image tags covered by
-   an image ID saved in the bundle become candidates; other owned tags are retained and
-   reported) and compares it with the preliminary plan, ignoring only the tags this purge
-   created itself. A difference stops with `plan-changed` and reopens the application; the
-   bundle folder then has no `manifest.json`. A resource that became a blocker in this window
-   is also `plan-changed` (never the pre-confirmation `resource-blocked` copy): a foreign user
-   of the volume or network (`resource-shared`) reopens the application, any other blocker
-   keeps the services stopped with the journal `paused`, because Compose could adopt or
-   recreate it; resolve it, then run `pf resume`. Otherwise `resources_before_purge` is sealed
-   into the manifest from the binding plan.
-5. **Destructive confirmations**, after the full binding plan is printed:
-
-   ```text
-   DELETE <database>
-   ERASE <project> <random-challenge>
-   ```
-
-   Deleting normal revision backups or resetting `pf-config.json` adds separate
-   confirmations. There is no `--yes` bypass.
-6. **Closed execution.** The plan is written durably (`deletion-plan.json`, its hash in the
-   journal) before the first deletion. Containers, then the network, the volume and the
-   covered image tags are removed one by one; each item, and every container that uses the
-   volume or network (stopped ones included), is reinspected immediately before its effect,
-   and a change (including a present item that is no longer owned) stops with `plan-drift`.
-   Nothing is pruned, `compose down -v` is never used,
-   image removal is never forced, and bind-mounted paths are never deleted.
-
-The guarantee assumes a quiescent, trusted daemon: Docker has no atomic compare-and-delete,
-so a concurrent Docker administrator is outside it.
-
-### Purge recovery bundle
-
-Stored under:
-
-```text
-recovery/<project>/purge-<timestamp>-<sha12>-<suffix>/
-```
-
-It preserves as much functional state as can be safely reconstructed:
-
-```text
-source.tar.gz                 exact deployed source
-workspace.tar.gz              current editable repo when it differs
-configuration/.env            external runtime environment
-configuration/pf-config.json  admin settings snapshot
-images.tar                    current/available PartFlow application images
-postgres-globals.sql
-databases/active.dump
-databases/<retained>.dump
-revision-checkpoints.tar.gz
-state/*.json
-manifest.json
-manifest.sha256
-```
-
-Database dumps are restore-tested. If the PostgreSQL data volume exists but a recoverable
-backup cannot be produced, purge refuses to delete that volume.
-
-Since PF-A3.1 the bundle is a schema-1 `purge-bundle` manifest and also contains:
-
-```text
-deployment/deployment-record.json    the current deployment record (when one is sealed and intact)
-deployment/compose-resolved.json     the resolved Compose model (sensitive)
-```
-
-`images.tar` now also holds the database image layers, saved by image ID (since PF-A3.3 they are used by
-`restore-instance` when `postgres:16` is absent, section "Exact instance restore"). Every payload copied from the `before-purge` checkpoint or the deployment record is re-hashed
-(`bundle-payload-mismatch` stops the purge before deletion and reopens the application). Retained `pf_keep_*`
-databases are dumped with their real heads (connections are allowed only for the dump and closed again);
-`postgres-globals.sql` and the role list are evidence only and are never executed. After the bundle is sealed every
-store is restored **from the bundle's own payloads** into temporary databases and checked; the resulting
-`data_restore_verified` record, bound to this bundle's manifest hash, is required before the first deletion
-(`purge-bundle-unverified` otherwise: the purge stops before deletion and the application is reopened). Since
-PF-A3.3 that check is replaced by the functional verification of the next subsection. The `pf recoveries` line is:
-
-```text
-<n>. <bundle-id>  [<level>]  project=<project>  db=<active database>  source=<git_commit <sha12>|unknown|claimed <sha12>>  derived_from=<checkpoint id>  [legacy-format-N]
-```
-
-The recovery bundle is intended to reconstruct **functional PartFlow state**, not Docker
-container IDs/network IDs bit-for-bit.
-
-Since PF-A2.3 the bundle files are content-only copies (no mode, owner or ACL is copied) and the bundle gets
-the recovery target of the permission policy in force. Purge keeps the permission policy record
-(`<root>/instances/<uuid>/permission-policy.json`); the redeployed or restored instance stays under it. The
-record is not part of a bundle: an instance registered anew starts with the derived policy.
-
-### Instance purge: isolated final-bundle verification
-
-Since PF-A3.3 the instance purge verifies the **exact final bundle** functionally before it deletes anything. The
-application stays stopped (backend and frontend) from the writer stop until the purge ends or is cancelled; nothing
-starts them in between.
-
-1. The preview refuses before `PURGE <project>` when a kept isolated topology of this instance still exists
-   (`isolated-topology-present`: it runs this instance's images, so their tags cannot be classified; remove it with
-   `pf cleanup --apply`, adding `--recovery-target <project>` for a side-by-side target), when the isolated model of
-   the current deployment cannot be rendered on this host (`verification-isolation-unsupported`), when the generated
-   project name is already used (`topology-name-collision`) or when space is short (`capacity-insufficient`).
-2. After the bundle is sealed, the source database is checked with the application's own invariant command
-   (`app.cli reconcile` in the running backend image). An image without that command is recorded as `unavailable:`;
-   an error or an unreadable report stops the instance purge (`app-check-failed`) and reopens the application.
-3. The bundle is restored into a throwaway Compose project `pfverify-<12 hex>`: its own data volume and internal
-   network, **no published port** (not even loopback), `restart: "no"`, images by ID from the bundle, and a
-   **generated database password** that exists only in `operations/<op>/isolated/<project>/app.env` and
-   `compose.json` until the final teardown (a topology that never got a container, for example after a refused
-   render-back, loses both files when the purge stops). The bundle's own password is never written into an operation
-   file.
-4. Checks (all recorded in a `functional_recovery_verified` record): isolation as the daemon reports it (internal
-   network, no host port binding, own volume, restart policy), every store (heads, locale, owner, extensions, row
-   counts), backend and frontend health, the running image IDs, the image archive proof, the source digest, the
-   configuration and the deployment record, and the application invariants: the restored database must give the
-   same reconcile result as the source (`clean`/`clean`, or the same mismatch counts); `unavailable` on both sides is
-   recorded as `not_run unavailable:`.
-5. The topology is torn down by its own frozen deletion plan (only resources carrying its project and topology UUID);
-   a teardown that cannot complete keeps the stack, records it as a retained `isolated-topology` and still cancels.
-6. The deletion gate (after `ERASE ...`) requires the passed functional record of **this bundle, this manifest hash
-   and this operation**, stopped writers and an unchanged source (databases, row counts, heads); otherwise
-   `purge-bundle-unverified`, `purge-writers-running` or `purge-source-changed`, and the application is reopened.
-
-A failed check closes the instance purge `cancelled` with `functional-verification-failed` naming the check, reopens
-the application and keeps the stopped topology for inspection; `pf cleanup --apply` removes it. Interrupted in
-`verifying`, `pf resume` tears the topology down by its plan and reopens the application.
-
-After the deletion, the instance purge marks the registry record `state: purged` through a registry transaction
-(owner decision OD-A33-08): the record keeps its UUID and history and releases its Compose project claim, so another
-instance may register that project. `pf status` prints `Lifecycle: purged by instance purge <op>` and `instances` shows
-`state=purged`. `restore-instance` of this instance's own bundle claims the project again (refused with
-`instance-claim-taken` while another instance holds it). A new `deploy` of the purged record does the same (it
-re-checks the claim under the registry lock before the first write); `pf abort-deploy` of that incomplete deployment, and
-`pf resume --abandon` of a restore that had already registered the record again, return it to `state: purged`. The
-state write needs the registry lock; while an installation transaction holds it the operation stops with
-`registry-busy` (nothing is changed) and `pf resume` continues it. If that abandon is interrupted after the record is
-back at `state: purged` but before the restore is closed, only `pf resume --abandon` continues it (`resume` refuses
-with `abandon-in-progress`); it closes the restore `cancelled` without writing the record again. Any other change of
-the record still refuses with `plan-authority-changed`.
-
-### Backup retention during purge
-
-Keep normal revision checkpoints:
-
-```sh
-sudo pf purge --keep-backups
-```
-
-Archive them into recovery then delete the normal checkpoint tree:
-
-```sh
-sudo pf purge --delete-backups
-```
-
-Reset the local admin config too:
-
-```sh
-sudo pf purge --reset-admin-config
-```
-
-The root-owned `control/` plane remains installed so a clean deployment can be started
-immediately afterward.
-
-### Interrupted purge
-
-If power/SSH fails after destructive deletion begins, run `purge` again. The operation
-journal identifies the incomplete purge and its frozen plan; after
-`RESUME PURGE <project> <recovery-id>` only the remaining planned items are processed (already
-removed ones are recorded as `already-absent`), a newly appeared resource is never added, and
-a missing, moved, symlinked or tampered plan is refused with `plan-invalid`. A journal written
-before PF-A1.3 (no frozen plan) is refused with `plan-missing`: review the remaining resources
-manually.
-
-Since PF-A3.2 the purge has a two-stage approval: its plan is written at `PURGE <project>`; the binding deletion plan
-and the backup/admin-config choices are frozen in the journal only after `ERASE ...`. A failure or a declined
-confirmation before that reopens the application at once and closes the purge `cancelled` (unchanged behaviour). A
-purge interrupted before that point is reopened by `pf resume` or `pf resume --abandon` alike: every store the plan
-listed as not connectable gets `ALLOW_CONNECTIONS false` again and the unchanged deployment is reopened. The
-journal and the instance lock live outside everything purge deletes, so `pf status` shows the purge (and its next
-step) even with no `.env` and no daemon. `pf purge` re-enters an open purge in `deleting` or `finalizing` (an alias of
-`pf resume`, `RESUME PURGE <project> <bundle-id>`); asking for other backup or admin-config choices than the approved
-ones is refused with `plan-inputs-conflict`. A purge removed with `--reset-admin-config` resumes from the admin
-configuration it froze. If the recovery bundle no longer reads or verifies, deletion stays blocked (section 16).
-
-### Brand-new redeploy after purge
-
-```sh
-sudo pf deploy --latest
-```
-
-Because purge removes `config/.env`, a normal full purge causes the deploy wizard to create
-a new environment and new PostgreSQL password. If the purge variant preserved an external
-configuration for a specific recovery path, the deploy flow validates it before reuse.
-`purge --reset-admin-config` also removes `pf-config.json`; the purge then names the next steps:
-`sudo pf --instance <slug> config admin`, then `sudo pf --instance <slug> deploy --latest` (with the launcher
-of section 5 when `sudo pf` does not reach this root).
-
-After smoke testing:
-
-```sh
-sudo pf backup
-```
-
-### Exact instance restore
-
-List recovery bundles:
-
-```sh
-sudo pf recoveries
-sudo pf recoveries --page 2
-sudo pf recoveries --project partflow-staging
-```
-
-Restore a purged instance into an empty target project:
-
-```sh
-sudo pf restore-instance RECOVERY_ID
-```
-
-Since PF-A1.3 the empty-target test is the exact inventory: any owned or blocking container,
-volume or network of the project refuses with `resource-target-not-empty` before any
-confirmation.
-
-The restore recreates the saved repository workspace, restores `config/.env`, loads saved
-application images, recreates/restores the database set, restores checkpoint history/state,
-and health-checks backend/frontend. Since PF-A3.1 the bundle is read strictly before any confirmation, the deployed
-source is extracted from the bundle's source payload with the safe importer and compared with its recorded manifest,
-and that source (not the saved workspace) is staged as a new deployment; after the health checks a new deployment
-record is sealed with `restored_from` naming the bundle, and a fresh `deployed.json` points to it. The bundle's own
-`state/deployed.json` stays evidence only. The current installed root-owned control plane is kept;
-recovery does not downgrade the lifecycle controller mid-operation. The current
-`config/pf-config.json` also remains authoritative. Its saved recovery copy is retained for
-manual comparison/reapplication rather than being activated in the middle of a restore.
-
-Since PF-A3.2 `restore-instance` writes a plan with the bundle ID and manifest hash and freezes the bundle's `.env`
-before its first effect. `pf resume` (or `pf restore-instance <same bundle>`) continues it forward; another bundle is
-refused with `plan-inputs-conflict`. While only the target is being prepared (staging, `.env`, image load, database
-start) `pf resume --abandon` (`ABANDON RESTORE <project> <op8>`) removes what this restore created — its frozen
-resources, the `.env` it wrote (only with unchanged bytes) and its staging — and gives an edited `.env` back; once the
-data restore started only forward is possible. An existing `config/.env` with other bytes is never overwritten: it is
-renamed to `config/.env.proposal-<op8>` (`note: env-proposal-preserved`). An existing checkpoint history that differs
-from the bundle's is renamed to `backups/revisions/<project>.pre-restore-<op8>` (never deleted, not listed by
-`backups`); an identical one is left as it is.
-
-Since PF-A3.3 the restore target is decided by **identity**, before any confirmation:
-
-- a bundle restores only into the instance whose UUID it records; another instance's bundle (including one carried
-  over from a lost host) is refused with `restore-target-mismatch` for the exact and the side-by-side restore alike, and
-  is not restorable by `pf` in this checkpoint (OD-A33-09: a declared deviation from design r3 LIFECYCLE §9, awaiting
-  owner approval). A legacy bundle without a UUID is accepted only for the same Compose project;
-- the workspace, repository and home paths recorded in the bundle are **provenance only**: the restore always writes
-  the paths of the selected instance and prints `note: bundle-workspace-differs` when they differ; nothing is written
-  under the recorded paths;
-- **database image**: when the daemon has no `postgres:16` tag, the bundle's database image is loaded from
-  `images.tar` (after an archive proof of its config and layer hashes) and tagged `postgres:16`
-  (`note: db-image-tagged`). The tag is daemon-wide: the summary lists the other registered instances on the same
-  daemon that use it. An existing tag with another image ID is kept (`note: db-image-changed`); a legacy bundle
-  without a recorded database image uses the local tag (`note: db-image-unrecorded`);
-- after the frontend starts the application invariants of the restored database are compared with the bundle's
-  oracle and printed as `Application invariants: <clean|mismatch …|could not run|unavailable>`; the line is evidence
-  and does not stop the restore;
-- a purged registry record is claimed again (`registry:state=registered` effect) unless another instance holds the
-  project (`instance-claim-taken`).
-
-### Side-by-side recovery
-
-If the instance is active but data of one of **its own** bundles is needed for inspection or export:
-
-```sh
-sudo pf restore-instance RECOVERY_ID --side-by-side
-```
-
-Since PF-A3.3 this creates a kept **recovery target**: a separate Compose project `pfrecover-<12 hex>` with its own
-data volume and internal network, **no listener (not even loopback)**, no scheduler and a generated database password.
-The exact bundle is restored into it and functionally verified as in the instance purge (the record keeps
-`removed: false`). The running instance, its data, listener, image override (`active-images.yaml`), image tags,
-workspace and deployment pointer are not changed. When an image of the bundle is no longer on the daemon, the
-`image-load` effect only loads `images.tar` (the archive proof and the retag check run again right before the load)
-and then requires every image ID of the target; it never writes the image override and verifies no tag against it.
-The load may add the bundle's own tags back; it never re-points an existing tag (`image-load-would-retag`). Confirm with `RESTORE COPY <bundle-id>`; it is journaled as a
-`restore-side-by-side` operation, `pf resume` continues it, the same command with the same bundle re-enters it, and
-`pf resume --abandon` (`ABANDON RECOVERY TARGET <project>`) tears the target down. A target whose data volume or
-data checks changed while the operation was interrupted is removed and reported as `recovery-target-lost`. The former
-`pf_recovery_*` database mode is gone; an existing `pf_recovery_*` database is only reported (`status`, `cleanup`),
-never dropped.
-
-`pf status` lists `Recovery targets: <project> from bundle <id> (operation <op> …)`. Inspect a target as root by its
-project label, for example:
+Confirm `RESTORE COPY <bundle-id>`. The bundle is restored into a kept recovery target, a separate Compose project
+`pfrecover-<12 hex>` with its own volume, an internal network, no listener and a generated database password, and it is
+checked as in the purge. The running instance is not changed. `pf status` lists the target; inspect it as root, for
+example:
 
 ```sh
 sudo docker ps --filter label=com.docker.compose.project=pfrecover-0123456789ab
 sudo docker exec -it <db container> psql -U <user> -d <database>
 ```
 
-Remove it with `sudo pf cleanup --apply --recovery-target <project>` (`REMOVE RECOVERY TARGET <project>`); a running
-target also blocks the instance purge (`isolated-topology-present`).
+Remove it with `pf cleanup --apply --recovery-target <project>` (`REMOVE RECOVERY TARGET <project>`); while it exists the
+instance cannot be purged (`isolated-topology-present`). `pf resume --abandon` of an interrupted side-by-side restore
+removes the target (`ABANDON RECOVERY TARGET <project>`).
 
-PartFlow does **not** perform a generic automatic merge between the recovered DB and the
-new active DB. `PartMovement`, quantity lineage, allocations, reversals, and derived current
-state have domain invariants that cannot be safely reconciled by generic SQL insertion.
-Recover old data side-by-side, then build an explicit domain-aware import/reconciliation
-procedure for any data that truly must be carried forward.
-
-### Aborting a first deployment after frontend access opened
-
-Since PF-A3.3 `pf abort-deploy` is also allowed after the incomplete first deployment opened frontend access (and
-before its deployment pointer was written). Users may have written data, so the abort **preserves the current
-database first**: it stops backend and frontend, captures a `before-abort` checkpoint (emergency preservation when the
-contract does not hold) under `backups/revisions/<project>/`, and only then deletes the frozen resources of the
-incomplete deployment. The checkpoint survives the abort. The database must be reachable, otherwise the abort is
-refused before the confirmation (`preservation-failed`); a capture failure leaves the abort open in `preserving` with
-nothing deleted (`pf resume` retries the preservation, `pf resume --abandon` closes it and the deploy blocks again).
-The confirmation summary is kept as `confirmation-summary.txt`. Before the frontend opened the abort is unchanged.
+PartFlow data is never merged automatically between databases: Part Movements, quantity lineage, allocations and
+reversals follow domain rules that generic SQL inserts would break. Recover old data side by side, and carry anything
+forward with an explicit, domain-aware procedure.
 
 ## 13. Release checks and scheduled tasks
 
-Check without applying, interactively:
+`pf --instance <slug> release-check [--channel stable|prerelease]` shows, interactively, whether an eligible newer
+release exists; apply one with `pf --instance <slug> update --release <tag>`.
+
+Nothing runs unattended on a `pf` instance. Started without a terminal, `backup` and `release-check` are refused with
+`policy-grant-required` (exit 20), and `release-check --apply` is always refused with `auto-apply-not-permitted` (exit
+20): unattended operation needs a protected policy grant, and no installed policy grants one. `"auto_update": true` in
+`pf-config.json` changes nothing. The scheduler wrappers in `<root>/bootstrap/` (`backup.sh --instance <slug>` and
+`release-check.sh --instance <slug>`) are refused the same way. Commands that ask for a typed confirmation are refused
+without a terminal (`terminal-required`). Take checkpoints by hand with `pf --instance <slug> backup` and copy them off
+the NAS.
+
+## 14. Compose views and raw Compose access
+
+`pf` offers two read-only Compose views and forwards no other Compose command:
 
 ```sh
-sudo pf --instance <slug> release-check
+pf --instance <slug> ps [-a] [-q] [--services] [--status STATUS] [--format table|json] [SERVICE...]
+pf --instance <slug> logs [--tail N] [-f] [-t] [--no-color] [--no-log-prefix] [--since V] [--until V] [SERVICE...]
 ```
 
-Apply a selected release manually with `sudo pf --instance <slug> update --release <tag>`.
+`SERVICE` is `db`, `backend` or `frontend`; `V` is a duration such as `30m` or an RFC 3339 date and time. `--tail`
+defaults to 200 lines (1 to 10000), and `logs -f` stops after one hour or 64 MiB of output with `logs-bound-reached`.
+Both views take no lock and hide the database password; `pf` without a command is `pf ps`. Any other Compose word is
+refused with `compose-route-removed`, which names the managed command to use instead. There is no managed route for an
+application command inside the backend container.
 
-**Scheduled tasks are not available on a pf-managed instance in this checkpoint.** Without a
-terminal, `backup` and `release-check` are refused with `policy-grant-required` (exit 20) and
-`release-check --apply` with `auto-apply-not-permitted` (exit 20): unattended operation needs a
-protected policy grant for that class of operation, and the grants arrive with PF-A4.3. The
-editable `"auto_update": true` in `config/pf-config.json` does not enable anything; it is a
-proposal only. Until then run the checkpoint interactively and copy it off-NAS:
-
-```sh
-sudo pf --instance <slug> backup
-```
-
-Once grants exist, a root-owned DSM task names its instance and runs the wrapper that
-`install-control.sh init` places in `<root>/bootstrap/` next to the installed launcher (PF-A2.1), or the
-launcher itself; until then the placed wrappers are refused like any other unattended command:
+When a raw Compose command is unavoidable, for example to run the reconciliation check of
+[`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md) §7 on a staging instance, give it every input explicitly:
 
 ```sh
-<root>/bootstrap/backup.sh --instance <slug>
-<root>/bootstrap/release-check.sh --instance <slug> [--channel stable|prerelease] [--apply]
-<root>/bootstrap/pf --instance <slug> backup
-```
-
-The wrappers accept exactly these arguments (anything else prints usage and exits 2), run with
-a fixed `PATH` and execute only their sibling launcher. Copies under a legacy `control/`
-directory reach the read-only legacy launcher, which refuses `backup` and `release-check` on an
-unregistered installation.
-
-Scheduled updates, once granted, stay stricter than manual updates: they require an eligible
-published release, matching successful CI for the exact SHA, no migration/config/dependency
-condition requiring human review, and a workspace that still exactly matches the deployed
-revision.
-
-Do not schedule `reset-db`, `purge`, `restore-instance`, or other interactive destructive
-commands; without a terminal they are refused anyway (`terminal-required`).
-
-Since PF-A3.1 the `backup` output gains the `Checkpoint class:` and `Verification level:` lines (section 10), and a
-scheduled `backup`, once granted, refuses `deployment-image-mismatch` exactly like a manual one. `backup --emergency`
-is never scheduled: it needs a terminal and `backup.sh` does not pass it.
-
-## 14. Advanced raw Compose access
-
-Prefer `sudo pf ...`. The controller pins all important paths and serializes state-changing
-operations.
-
-Since PF-A1.4 `pf` no longer forwards Compose commands. Two read-only views remain:
-
-```sh
-sudo pf --instance <slug> ps [-a] [-q] [--services] [--status STATUS] [--format table|json] [SERVICE...]
-sudo pf --instance <slug> logs [--tail N] [-f] [-t] [--no-color] [--no-log-prefix] [--since V] [--until V] [SERVICE...]
-```
-
-`SERVICE` is `db`, `backend` or `frontend`; `STATUS` is one of `paused`, `restarting`,
-`removing`, `running`, `dead`, `created`, `exited`; `V` is a duration such as `30m` or `2h`, or
-an RFC 3339 date/time. `--tail` defaults to 200 and allows 1–10000. `logs -f` ends after 1 hour
-or 64 MiB of output with `logs-bound-reached` (exit 1); the output shown until then is complete.
-Both views run through the validated context, the registered tools and the daemon binding, redact
-the database password, take no lock and create no operation. Any other Compose word or option is
-refused (section 16).
-
-There is no managed route for an application CLI inside the backend container (`exec` and `run`
-are refused; a managed route is PF-A4).
-
-Since PF-A2.2 `pf config` is the configuration wizard group (`pf config admin`, `pf config app`).
-`pf config` alone or with any other word (for example the former `pf config --services`) is still refused
-with `compose-route-removed`; the raw Compose model is not available (`pf doctor` validates it privately).
-
-If raw Compose access outside the controller is absolutely necessary, the equivalent shape is:
-
-```sh
-sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
-  PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<percent-encoded password>@db:5432/<db>' \
-  DEPLOY_ADMIN_INSTANCE_ID=<instance UUID from 'pf instances'> \
+sudo env PARTFLOW_REPO_ROOT=<workspace> \
+  PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<percent-encoded password>@db:5432/<database>' \
+  DEPLOY_ADMIN_INSTANCE_ID=<instance UUID> \
   docker compose \
-  --project-directory /volume1/docker/partflow/repo \
-  --env-file /volume1/docker/partflow/config/.env \
-  -p partflow-staging \
-  -f /volume1/docker/partflow/control/compose.nas.yaml \
+  --project-directory <workspace> \
+  --env-file <configuration>/.env \
+  -p <project> \
+  -f <root>/releases/<release-id>/compose.nas.yaml \
+  -f <root>/instances/<instance UUID>/state/active-images.yaml \
   ps
 ```
 
-Since PF-A1.2 `compose.nas.yaml` takes the backend connection URL from
-`PARTFLOW_DATABASE_URL`, which the controller generates with percent-encoded credentials;
-a raw invocation must supply it explicitly (the controller itself never passes `.env` to
-Compose as an editable file: it hands over a frozen snapshot or a registration-created empty
-env-file plus the allowlisted variables).
+`pf status` prints the instance UUID, the installation root and the control release identifier. Replace `ps` with the
+command you need, for example
+`run --rm --no-deps -T backend python -m app.cli reconcile` for the reconciliation check.
 
-Since PF-A1.3 `compose.nas.yaml` also requires `DEPLOY_ADMIN_INSTANCE_ID`. **A wrong UUID
-mislabels every resource Compose then creates**: those resources are classified
-`resource-foreign-claim` or `resource-label-conflict` and block `purge`, `abort-deploy` and every
-guarded command until they are reviewed.
-
-Using raw Docker/Compose bypasses controller locks, recovery checks, and destructive guards.
-Do not run it concurrently with `pf update`, `pf backup`, `pf reset-db`, `pf purge`, or
-`pf restore-instance`.
-
-**PF-A3.2:** do not run the raw form while `pf status` shows an open operation — in particular in
-`syncing-workspace` or `workspace_sync_pending`, where the workspace path passed as `--project-directory` and
-`PARTFLOW_REPO_ROOT` may be absent — and never with an edited `config/.env` that an open operation has not frozen (the
-controller uses each operation's frozen `app.env`).
-
-Never use broad cleanup commands such as:
-
-```text
-docker system prune --volumes
-docker volume prune
-```
-
-as a PartFlow reset mechanism on a NAS that may host other workloads.
+- A raw command bypasses the locks and guards of `pf`. Never run it while `pf status` shows an open operation, never at
+  the same time as a `pf` command, and never with a `.env` edited after an open operation froze it.
+- A wrong `DEPLOY_ADMIN_INSTANCE_ID` labels new resources with the wrong identity; `pf` then classifies them as foreign
+  or conflicting and refuses `purge`, `abort-deploy` and the other guarded commands until they are reviewed.
+- Never use `docker system prune --volumes` or `docker volume prune` on a host that may run other workloads.
 
 ## 15. Updating the control plane
 
-Application `update` intentionally does not update the control plane. Install a reviewed control
-release explicitly:
+An application `update` never updates the control. Install a reviewed control release explicitly:
 
 ```sh
 sudo <root>/bootstrap/pf install control --source <reviewed repository tree>
+sudo <root>/bootstrap/pf install control --release r-<16 hex>   # select a retained release again
 ```
 
-- The summary shows the bound and the new release (checkpoint, file count, inventory hash), every
-  instance that is rebound (one control release per root), the default (unchanged) and whether the
-  application needs a separate operation.
-- After `INSTALL CONTROL <release-id>` the release is staged privately and smoke-checked with the
-  registered interpreter: the new code must import, load the registry and every record, and accept the
-  live `pf-config.json` and `.env` of every instance that the running release accepts. It is verified
-  again, published, bound (`bootstrap.conf`, then every record) and verified end to end through the real
-  bootstrap. If that verification fails the previous binding is restored automatically
-  (`install-verify-failed`, operation `rolled_back`); the new release stays retained and inert.
-- `app_operation_required: update` means the new release changes `compose.nas.yaml`: the running
-  application keeps its containers, and the next `pf --instance <slug> update` applies the new topology.
-- Go back to (or forward to) a retained release with
-  `sudo <root>/bootstrap/pf install control --release r-<16 hex>` (`SELECT CONTROL <id>`), which runs the
-  same smoke, contract and bootstrap checks. A source tree whose release is already published is selected
-  the same way.
-- An interrupted operation is continued with `pf install resume` or undone with
-  `pf install resume --abandon`; an interrupted rollback always finishes the restore.
-- `--source` always names a source tree and `--release` a retained release id; a value of the wrong kind
-  is refused, never re-interpreted. Only an answer typed at the `candidate` prompt is classified (a
-  leading `/` is a source tree).
-- A candidate whose only change is a scheduler wrapper (`backup.sh`, `release-check.sh`) is
-  `control-unchanged` (exit 0): the message names the differing wrapper. A wrapper-only change is not
-  installed on its own; it is installed together with the next control release whose files change.
-- An interrupt during the automatic restore after a failed verification is `install-interrupted`: the
-  operation stays `rolling_back` and every instance route is refused until `pf install resume` finishes
-  the restore.
-- The launcher and verifier bytes are frozen: a candidate that changes `pf.sh` or `pf_bootstrap.py` is
-  refused with `bootstrap-change-unsupported` (a launcher migration is PF-A4.3).
-- Installing or selecting a release never migrates `pf-config.json`. Once an instance's file is schema 2,
-  a retained release older than PF-A2.2 rejects it in the smoke check (`install-smoke-failed`, nothing
-  bound); restore the schema 1 file first if you really need to go back.
-- The legacy `recovery/control-upgrades/` archive no longer applies; old releases stay under
-  `<root>/releases/`.
-- **PF-A2.2 → PF-A2.3.** The bootstrap bytes and the install contract are unchanged, so `pf install control
-  --source` is legal. Without an approval the derived policy keeps the A2.2 groups and modes, except that
-  backups and recovery keep the group already on their folders, `deploy --current` no longer changes the
-  workspace, fresh copies are content-only and bare `pf permissions` is refused. **Downgrade** after an
-  approval: an older control ignores `permission-policy.json` and goes back to the `pf-config.json` groups.
-  The installer refuses any control switch, upgrade or downgrade, while a permission apply is open
-  (`instance-operation-pending`): finish it with `--resume` or `--abandon` first.
+- The summary shows the bound release and the new one, every instance that will be bound to it (one control release
+  serves the whole root) and whether the application needs its own operation. Confirm `INSTALL CONTROL <release-id>` (or
+  `SELECT CONTROL <release-id>`).
+- The release is staged privately and smoke-checked with the registered interpreter: it must import, load the registry
+  and every record, and accept the live `pf-config.json` and `.env` of every instance. It is then bound and verified end
+  to end through the real bootstrap. If that fails, the previous binding is restored automatically
+  (`install-verify-failed`, operation `rolled_back`).
+- `app_operation_required: update` means the new release changes `compose.nas.yaml`; the next `pf update` of each
+  instance applies the new topology.
+- The launcher and the verifier are frozen: a candidate that changes `pf.sh` or `pf_bootstrap.py` is refused
+  (`bootstrap-change-unsupported`). A candidate that changes only a scheduler wrapper is `control-unchanged`.
+- Installing a release never migrates `pf-config.json`; an older release may refuse a schema 2 file in its smoke check
+  (`install-smoke-failed`, nothing bound).
+- An interrupted install operation continues with `pf install resume` or is undone with `pf install resume --abandon`.
+- `pf install control` is refused while any instance operation is open (`instance-operation-pending`), including an
+  invalid journal or an overflowing operation index. Going back to an older release is possible only without open
+  operations; an older release does not know the operation kinds and records of newer ones.
 
-- **PF-A3.1 → PF-A3.2.** The bootstrap bytes are unchanged. `pf install control` is refused while any instance
-  operation is open (`instance-operation-pending`, naming the operation; also for an invalid journal or an operation
-  index overflow). Runner records (`unresolved-effects.json`) of a journaled operation are reconciled by its closed
-  journal (`status --operation` shows `reconciled by journal sequence <n>`), and those of a superseded operation by
-  the closing journal of the last recovery of its supersession chain; records in an operation directory without a
-  journal still refuse with `instance-effects-unresolved`. Such directories come from a `backup --emergency`, a
-  side-by-side restore, a pre-A3.2 operation, and from any lifecycle command whose child process was
-  interrupted or timed out before the confirmation, when no plan exists yet (for example Ctrl-C during the candidate
-  `compose build`, the `compose run` contract checks of `deploy`, `update` and `rollback`, or
-  `ensure_local_contract`): inspect them with `pf status`, confirm that nothing of them still runs, and keep the
-  directory. Since PF-A3.3 acknowledge them with `sudo pf resume --operation <op> --acknowledge`
-  (`ACKNOWLEDGE <op8>`): pf first refuses while an owned one-off container still runs, or, when a record names a
-  database effect, while a client session is open on a database the records name (every client session when such a
-  record names no database; then stop the application before acknowledging) (`effect-still-running`). The running
-  application's own sessions on its database never block a record without a database effect. pf then prints what it
-  observes (identities only), and writes
-  `operations/<op>/acknowledgement-<hash12>.json` (0600, exclusive create) bound to the hash of the current records. The
-  records then no longer block `pf install`; `pf status` counts them as acknowledged. A record appended later is open
-  again. A journaled operation, a directory without records or one already acknowledged is refused with
-  `acknowledge-not-legal`.
-- **PF-A3.2 → PF-A3.3.** The bootstrap bytes are unchanged; `pf install control` is refused while any instance
-  operation is open. **Downgrade** to the PF-A3.2 control only with no open operation (including no open
-  `restore-side-by-side` or `cleanup`): the older control does not know the new operation kinds, recovery targets or
-  acknowledgement files (acknowledged records count as unresolved again there), and it does not write the `purged`
-  registry state itself (a record already marked `purged` stays so).
+This explicit step is the security boundary that lets the workspace stay writable by users: never install an unreviewed
+or unknown tree.
 
-This explicit step is the security boundary that permits `repo/` to remain users-writable.
-Do not install an unreviewed or unknown tree with `sudo`.
+**Runner records without a journal.** The runner records every changing child process that timed out or was interrupted
+(`unresolved-effects.json` in its operation folder). A closed journal settles the records of its own operation, but
+records in an operation folder without a journal keep refusing `pf install` with `instance-effects-unresolved`. Such
+folders come from operations of controls older than the operation journal, and from any lifecycle command whose child
+process was interrupted or timed out before the confirmation, while no plan existed yet (for example Ctrl-C during the
+candidate `compose build`, the `compose run` contract checks of `deploy`, `update` and `rollback`, or
+`ensure_local_contract`). Inspect them with `pf status`, make sure that nothing of them still runs, keep the folder, and
+acknowledge the records:
+
+```sh
+pf resume --operation <op> --acknowledge
+```
+
+Confirm `ACKNOWLEDGE <op8>`. `pf` first refuses while an owned one-off container still runs or, when a record names a
+database effect, while a client session is open on a database that the records name (`effect-still-running`). It then
+writes `operations/<op>/acknowledgement-<hash12>.json`, bound to the current records; a record added later blocks again.
+A journaled operation, a folder without records or one already acknowledged is refused with `acknowledge-not-legal`.
 
 ## 16. Troubleshooting
 
-### SMB can see `repo/` but cannot edit
-
-Compare first, then apply the permission policy (start from outside the folders, for example `cd /`):
+Start with:
 
 ```sh
-sudo pf --instance <slug> permissions check --scope workspace
-sudo pf --instance <slug> permissions apply --scope workspace
+pf --instance <slug> status
+pf --instance <slug> status --operation <operation-id>
 ```
 
-Then verify DSM Shared Folder permissions grant the account/group Read/Write access from the share root.
-
-### `pf permissions` codes
-
-- `permissions-verb-required` (exit 2): bare `pf permissions` no longer changes anything; use `check`, `plan` or
-  `apply`.
-- `permission-policy-invalid`: the policy (or the derived one, for example a group name with `/`) breaks a rule;
-  nothing was changed.
-- `permission-group-missing`: a group of the policy, or the gid on the backups/recovery folder, has no group on
-  this host. Groups are never created; choose an existing group in `pf permissions apply`.
-- `permission-policy-unsupported`: a valid choice this control does not activate (workspace script execution
-  "none").
-- `permission-approval-invalid`: `permission-policy.json` is not a root-owned `0600` single-link file or fails its
-  schema or chain. It is never replaced automatically and no derived policy is used: backups and the permission
-  commands stop. Manual route: as root, move it aside in the same directory under a name such as
-  `permission-policy.invalid-<UTC>.json`; the instance then uses the derived policy (backups keep the group of
-  their folders, so nothing widens), and `pf permissions apply` writes a new revision 1.
-- `permissions-context-refused`: a protected-context finding outside the scopes, or one on a folder above the
-  installation root (even when it is above a scope too); `check`/`plan` read no scope.
-  Fix the findings shown (`pf doctor`).
-- `scope-path-unsafe`, `scope-entry-link`, `scope-entry-special`, `scope-entry-hardlinked`,
-  `scope-mount-boundary`, `scope-contains-app-storage`, `scope-untrusted-owner`, `scope-entry-acl`,
-  `scope-too-large`: blockers; `apply` changes nothing while one exists. Remove the link, special file, hard
-  link or ACL, move the mount or application storage out of the folder, or deselect the scope with `--scope`.
-- `control-ceiling`: the installed control release breaks its ceiling; it is changed only by
-  `pf install control`.
-- `editor-freeze-unavailable` / `editor-freeze-refused`: see section 2 (Editor freeze).
-- `permissions-blocked`, `permissions-cancelled`, `permissions-current`, `permissions-changed-before-apply`:
-  nothing was changed; run the command again to review.
-- `permissions-apply-pending`: an interrupted apply is open; every other mutating command (scheduled `backup`
-  included) is refused until `pf permissions apply --resume` or `--abandon`.
-- `permissions-entry-changed`, `permissions-verify-failed`, `permissions-interrupted`: the apply is **not
-  complete**; `--resume` re-plans the remaining changes with the frozen policy, `--abandon` compensates the
-  recorded changes in reverse order.
-- `permissions-already-approved`: the interrupted apply already wrote its revision; only `--resume` can finish
-  it.
-- `permissions-abandon-conflicts` (exit 1): objects changed after the interruption are left as they are and
-  listed.
-- `permissions-journal-invalid`: an effect journal line cannot be read; nothing was changed and the journal
-  stays open. Review `<root>/instances/<uuid>/operations/<op-id>/permission-effects.jsonl` by hand.
-- `fresh-entry-acl`: a new backup or recovery entry inherited an ACL from its folder; the operation stopped
-  before publishing it. Remove the default ACL from that folder. In the workspace or the configuration the new
-  entry keeps the mode it was created with (a note).
-- `permissions-nothing-pending`: `apply --resume` or `--abandon` found no interrupted apply; nothing was changed.
-  Run `pf permissions check` to see the current state.
-- `permissions-option-invalid` (exit 2): `--resume` and `--abandon` act on the frozen plan of the interrupted
-  apply, so `--scope` cannot be combined with them. Run the command again without `--scope`.
-- `permission-policy-unapproved` (note): no policy is approved yet; the derived policy is in force (backups and
-  recovery groups come from their folders, workspace and configuration groups from `pf-config.json`). Run
-  `pf permissions apply` to approve one.
-- `permission-entry-unplanned` (note): an entry appeared after the plan was shown (in a fenced scope: after its
-  authoritative inventory, which already gave the earlier new entries their target) and was left as it is. Run
-  `pf permissions check` and apply again if it differs.
-- `permission-entry-gone` (note): an entry of the plan disappeared before it was verified; nothing else is needed.
-- `workspace-concurrent-entry` (note): an editor created an entry in the workspace while an operation (for
-  example `deploy` or `update`) published new workspace entries; it was left untouched. Review it, then run
-  `pf permissions check --scope workspace`.
-- `workspace-no-source-manifest` (note): no protected source manifest exists, so no workspace file is designated
-  executable. Deploy a source (`pf deploy`/`pf update`) to record one.
-- `permissions-applied`: the apply completed and verified every selected scope; the line names the policy
-  revision in force.
-
-### SMB cannot modify backups/recovery
-
-That is intentional. These are recovery artifacts and remain group read-only. Copy them
-elsewhere if an editable copy is needed.
-
-### `sudo sh ./pf.sh ...` refuses to run
-
-Expected. The repo copy is source only. Run the installed launcher:
-
-```sh
-sudo <root>/bootstrap/pf ...
-```
-
-or create a new installation root first (section 5 (a)):
-
-```sh
-sudo sh ./deploy/synology/install-control.sh init --root <root>
-```
-
-### `install-preflight-refused`
-
-The preflight lists every conflict at once, each as `code: subject: detail`, and nothing was changed.
-Resolve every item and run the same command again. Frequent codes: `root-exists`, `init-leftover-unknown`,
-`source-*`, `install-contract-incompatible`, `release-not-retained`, `release-id-collision`,
-`interpreter-*`, `free-space`, `registry-*`, `slug-*`, `project-*`, `daemon-*`, `registered-path-missing`,
-`path-*`, `storage-replaceable`, `acl-*`, `admin-config-*`, `group-missing`, `legacy-*`,
-`instance-operation-pending`, `instance-effects-unresolved`, `launcher-parent-untrusted`.
-`legacy-env-conflict`/`legacy-admin-config-conflict`: neither copy is chosen automatically; keep the
-correct one in `config/`, move the other out of both locations.
-
-### `install-operation-pending`, `legacy-control-active` or `control-binding-changed`
-
-`install-operation-pending`: an install operation is open (interrupted, crashed or `needs_operator`).
-Inspect it with `sudo <root>/bootstrap/pf install status` and follow its next step; until it is terminal an
-open `control` or `init` refuses every instance's mutating route, and an open `register`/`migrate-legacy`
-refuses its own instance. `legacy-control-active`: the instance was migrated from v2.5 and its v2.5
-`control/` still exists; keep using v2.5 for changes until legacy adoption is installed. `control-binding-
-changed`: a control installation completed while the command was starting; nothing was changed, run it
-again.
-
-### `install-needs-operator`, `bootstrap-change-unsupported` or `install-busy`
-
-`install-needs-operator`: resume found a target in a state the installer did not write; the message names
-the target, the expected hashes and what it found, and the journal records the evidence (for `.env` it
-names the planned copy and what was found, never the file's hash). Restore the target, then
-`pf install resume` (or `pf install resume --abandon` where offered). A global launcher that another
-writer created meanwhile is never a reason: resume leaves it in place with the note `launcher-left`.
-`bootstrap-change-unsupported`: the candidate changes the launcher or verifier; reinstall into a new root
-or keep those bytes. `install-busy`: another operation holds a needed lock (registry, instance, v2.5 or
-an init build directory); nothing was changed, retry after it finishes.
-
-### `install-smoke-failed`, `install-verify-failed` or `abandon-not-possible`
-
-`install-smoke-failed`: the candidate did not pass its smoke check (for example it rejects an instance's
-live configuration); it was not activated and its staging was removed. `install-verify-failed`: for
-`control` the previous binding was restored (`rolled_back`); for other kinds the operation stays in
-`needs_operator` with its next step. `abandon-not-possible`: an `init` that already published its root, or
-a registration that has been used (default set, operations recorded, record changed, lock held), cannot be
-abandoned; finish it with `pf install resume`.
-
-### `install-operation-unreadable` or `install-interrupted`
-
-`install-operation-unreadable`: an entry of `<root>/install-operations/` is not a readable install
-operation (for example a stray directory). It refuses every route, fail closed, and `resume` cannot
-continue it. Inspect it as root and move it out of `install-operations/` (keep a copy: an operation
-journal is evidence), then run the command again. `install status` and the gate message name the same
-step. `install-interrupted`: the operation stopped after its commit point or during the automatic
-restore; it stays open in the phase the message names. Run `pf install resume`. When the message says
-the operation is cancelled but its cleanup was interrupted, nothing else was changed: what remains stays
-in its operation directory or is recognized by the next run of the same command.
-
-### `pf config` refusals and notes
-
-Every refusal below changed nothing; the message names the next command.
-
-- `config-option-invalid` (exit 2): `--configuration [--project]` is the pre-registration form of
-  `config admin` only; it cannot be combined with `--instance` or used with `config app`, and `--project`
-  needs `--configuration`.
-- `config-cancelled`: `q`, end of input, Ctrl-C or any answer but `y`/`yes` at `Write …? [y/N]`. A generated
-  password was discarded.
-- `config-current` (exit 0): nothing to change. Notes after it still apply.
-- `admin-config-required`: `config app` needs a valid `pf-config.json`; run `config admin` first.
-- `admin-config-invalid`: the file has a parse, key, type or rule problem (the first one is shown, with the
-  count of the others). Fix it by hand; the wizard never repairs a file. Before registration the copy repeats
-  `--configuration <dir>` (and `--project`) so the next run re-checks the same directory.
-- `admin-config-version-unsupported`: the file declares another `schema_version`. A newer control wrote it:
-  select that control again (`pf install control --release <id>`) or restore the previous file.
-- `admin-config-migration-blocked`: an explicit schema 1 value is not valid in schema 2; correct it by hand.
-- `admin-config-mismatch`: `project` differs from the registration, or `environment` from the approved policy.
-  Restore the registered value; a policy change is a separate approval.
-- `admin-config-legacy-unregistered` (exit 0): a schema 1 file in a directory that is not registered was left
-  as it is; register first, then run `config admin` with `--instance`.
-- `admin-example-invalid`, `app-example-invalid`: the installed example is not usable; run `doctor` and
-  reinstall the control release.
-- `app-config-invalid`: `.env` does not parse (unknown or duplicate key, `export`, quoting, line endings).
-  The message names the line; it never shows a character of the value (an unsupported escape, invalid UTF-8
-  or a control character is described, not printed).
-- `app-credential-unusable`: the instance counts as deployed and a credential is missing or invalid; restore
-  it from the recovery bundle or your records.
-- `app-profile-undeclared`: the instance's profile declares no application variables in this control.
-- `migration-issue`: an existing value cannot be rendered literally (single quote, trailing backslash, control
-  character) or the password is shorter than 4 characters; fix the file by hand.
-- `zone-data-unavailable`: no host zone data to verify a new `SITE_TIMEZONE`; install it or write the value by
-  hand. As a note: an existing value was kept.
-- `config-file-acl`: the file carries ACL entries; apply the listed changes by hand (PF-A2.3).
-- `config-file-unsafe`: the file is a link, a special or hard-linked file, or the directory holds a reserved
-  temporary name that is not a leftover of an interrupted run; inspect it, nothing was removed.
-- `config-changed`: the file changed while the wizard ran; run the command again to review the new file.
-- `config-interrupted` (exit 1): an interrupt (Ctrl-C, `SIGTERM`, `SIGHUP` after an SSH drop) arrived while
-  the file was being published, and the file already holds the new content. Nothing else was changed and no
-  change record was written; run the command again to review the file (it reports `config-current`). An
-  interrupt before the publish is `config-cancelled` and leaves the file unchanged.
-- `config-audit-not-recorded` (exit 1): the file was written (the message says whether it still holds the new
-  content), but recording `config-change.json` failed or was interrupted. The change itself is complete;
-  run the command again to review the file.
-- `config-busy`: another registration holds the registry lock; try again.
-- `config-dir-invalid`, `config-path-conflict`: the pre-registration directory is missing, non-canonical, in
-  replaceable ancestors, or used by a registered instance (then use `--instance <slug> config admin`).
-- `registry-record-invalid`, `registry-invalid` (pre-registration): a registered instance record (or the
-  registry) cannot be loaded, so the wizard cannot tell whether the directory belongs to it; nothing is asked
-  or created. Repair the record first (as for `pf install register`).
-- `config-audit-invalid`: internal error; the change record failed its schema and nothing was written.
-- Notes: `config-temp-removed` (leftover temporary files of an interrupted run were removed),
-  `zone-unknown-on-host`, `password-weak-for-new-deployment`, `implicit-materialized`.
-
-### `compose-route-removed`, `compose-override-refused`, `unknown-option` or `unknown-command`
-
-`pf` no longer forwards Compose commands (PF-A1.4). `compose-route-removed` names the managed
-command that replaces the word (for example `pf resume`, `pf update` or `pf rollback` instead of
-`up`; `pf purge` or `pf abort-deploy` instead of `down`); `compose-override-refused` means a
-Compose or Docker global option such as `-f`, `-p` or `--env-file` (the project, files, env-file,
-directory and daemon are fixed); `unknown-option` means anything else before the command,
-including an abbreviation of `--instance`; `unknown-command` means an unknown word. Nothing was
-read or changed. Use `pf ps` and `pf logs` for read-only Compose views (section 14).
-
-### `terminal-required`
-
-The command asks for a typed confirmation and was started without a terminal (a scheduled task,
-a script, `ssh` without `-t`). Run it interactively: `sudo pf --instance <slug> <command>`.
-Nothing was changed.
-
-### `instance-required-unattended`
-
-`backup` or `release-check` ran without a terminal and the instance was selected
-by the protected default or as the only registration. An unattended command must name its
-instance: `pf --instance <slug|uuid> <command>`. Nothing was changed.
-
-### `policy-grant-required` or `auto-apply-not-permitted` (exit 20)
-
-An unattended `backup` or `release-check`, or any `release-check --apply`, needs a
-protected policy that permits that class of operation. No policy grants one in this checkpoint
-(grants arrive with PF-A4.3); `auto_update` in `pf-config.json` does not. Run the command
-interactively, and apply a release manually with `pf --instance <slug> update --release <tag>`.
-Nothing was changed.
-
-### `selection-conflict`, `recovery-outside-instance` or `recovery-state-file-refused`
-
-`selection-conflict`: `--project` names a different project than the instance selected with
-`--instance`; use `--instance` alone. `recovery-outside-instance`: the bundle is not a directory
-of the selected instance's own `recovery/<project>/`; bundles of other instances, copies
-elsewhere and links to them are never listed or restored. `recovery-state-file-refused`: the
-bundle manifest lists a state file other than `deployed.json`, `last-reset.json` or
-`observed-tags.json`, its state files are not a list, or it lists a state file without its verified
-`state/<name>` payload (a legacy bundle then reports `manifest-schema-unsupported`). Nothing was changed.
-
-### `logs-bound-reached`
-
-`pf logs` stopped at its bound (1 hour for `-f`, otherwise the diagnostic deadline, or 64 MiB of
-output). The output shown is complete up to that point; narrow it with `--since`, `--tail` or a
-service name.
-
-### `.env` exists but Compose says variables are missing
-
-Use `sudo pf doctor`. A raw Compose command does not automatically use the external config.
-The authoritative runtime file is:
+`status` prints every open operation before anything else:
 
 ```text
-/volume1/docker/partflow/config/.env
-```
-
-If `doctor` reports `migration-issue` or a parse error for that file, the controller refused
-the proposal (unknown/duplicate key, unsupported quoting, a secret that cannot be frozen
-literally); fix the file by hand — the controller never rewrites it. A raw Compose command
-additionally needs `PARTFLOW_DATABASE_URL` and `DEPLOY_ADMIN_INSTANCE_ID` (section 14);
-`DEPLOY_ADMIN_INSTANCE_ID` is never accepted in `config/.env`.
-
-### Docker daemon drift, unreachable or rootless refusal
-
-`daemon-drift`: the registered endpoint answers as a different engine ID than the one the
-instance is bound to. Every Docker/Compose step is refused; nothing was changed unless the
-message names an operation and phase. Re-binding a daemon is an explicit installation
-transaction (PF-A2); do not edit the record.
-
-`daemon-unreachable`: the socket is absent (daemon stopped) or the daemon did not answer.
-Start Docker (Container Manager) and rerun; `status` still prints every non-Docker section.
-
-`daemon-rootless` / `daemon-info-invalid`: only a local rootful daemon with a usable identity is
-supported.
-
-`daemon-endpoint-*` in the trust summary: the registered socket path is not a protected
-socket (symbolic link, untrusted owner, world-writable, replaceable ancestor). Nothing was
-contacted.
-
-### Compose envelope refused
-
-`envelope-*` lists each finding with its JSON path (values are never printed): a hostile or
-unexpected option in the resolved model, a changed protected image override
-(`envelope-override`), or a render that failed (`envelope-render-failed`: Compose exit, more
-than 4 MiB, invalid JSON or a duplicate key; Compose v1 cannot render `config --format json`
-and is unsupported). Nothing was built, created or started.
-
-### Resources blocked from purge or not owned
-
-`resource-blocked` (purge, abort-deploy), `resource-not-owned` (guarded commands) and
-`resource-target-not-empty` (deploy, exact restore) list each resource with its class. Review
-them with `sudo pf status`; legacy unlabeled resources (for example from a v2.5 installation),
-name collisions and resources claimed by another instance are never adopted or deleted
-automatically (adoption is PF-A2). `plan-drift` during a purge or abort means a planned
-resource or one of its users changed after the plan was frozen (or a present planned item is
-no longer owned); the journal keeps the plan. `inventory-unstable` means containers kept
-disappearing between `docker ps -a` and their inspect on three attempts; retry when the host is
-quieter (an interrupted purge or abort resumes its frozen plan).
-
-### Lifecycle bundle and deployment record codes (PF-A3.1)
-
-A refusal before any effect ends with `Nothing was changed.`; a later one names the actual state.
-
-- `manifest-checksum-mismatch`, `manifest-invalid`, `manifest-schema-unsupported`, `bundle-payload-mismatch`,
-  `bundle-unlisted-file`: the bundle folder was changed, damaged or written by an unsupported control. Do not edit
-  or "repair" it; copy it off-NAS as evidence and use another checkpoint or recovery bundle. `pf backups` and
-  `pf recoveries` list such a folder as `[invalid: <code>]` (a folder with more than 20000 entries is
-  `[invalid: bundle-unlisted-file]`). A bundle copied back from off-NAS must be byte-identical (no added files such as
-  `.DS_Store` or `Thumbs.db`).
-- `archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`: an archive payload contains a
-  link, special file, unsafe or duplicate path, exceeds the importer limits (a PAX or GNU long-name header above
-  64 KiB is refused before it is read), changed while it was read, or does not fit; nothing was extracted. For
-  `archive-capacity` free space on the volume and retry.
-- `workspace-archive-limit`: the editable workspace differs from the deployed source and holds a file over 128 MiB,
-  more than 512 MiB or 200000 files in total, or a path the archive cannot hold. `pf backup`, `update`, `reset-db`,
-  `purge` and `rollback` refuse in their preflight, before any confirmation or pause (the application keeps running):
-  their capture never proceeds without the drifted workspace, which a later source replacement would destroy. Move
-  the files out of the repository workspace and retry; `pf --instance <slug> backup --emergency` preserves the database meanwhile and records the
-  workspace as excluded.
-- `workspace-unsupported-entry` (PF-A3.4): the editable workspace differs from the deployed source and holds a symbolic
-  link or special file. Every capture of `pf backup`, `update`, `reset-db`, `purge` and `rollback` refuses such an entry,
-  so they refuse in their preflight, before any confirmation or pause (the application keeps running). Move the entry
-  out of the repository workspace and retry; `pf --instance <slug> backup --emergency` preserves the database meanwhile
-  and records the entry as excluded.
-- `source-manifest-mismatch`: the extracted source differs from the recorded source manifest; use another
-  checkpoint.
-- `checkpoint-not-rollback-target`: the selected checkpoint is an emergency or partial capture. Restore its data
-  manually or export from it; choose a healthy checkpoint for `rollback`.
-- `checkpoint-incompatible`: the `--restore-db` candidate failed a check (locale, extension, owner, heads or row
-  counts); the candidate was dropped and the current database is unchanged.
-- `preservation-failed`: the rollback could not capture and restore-test the current database; nothing was restored
-  or switched and the services stay stopped. Preserve the database manually — a `pg_dump --format=custom` of the
-  named database from the `db` service to a protected, root-only location — or fix the cause and run
-  `pf --instance <slug> backup --emergency`; then retry, or run `pf --instance <slug> resume` to reopen the unchanged
-  deployment. Once a rollback got past that point (`resume` is no longer a legal route), roll back again to a healthy
-  checkpoint with `--restore-db`: the preservation capture its journal records may be an emergency or partial
-  capture, which is evidence and data, never a rollback target.
-- `deployment-artifact-mismatch`: a file of the current deployment record differs from the record. **Do not delete
-  the folder**; keep it as evidence. As a note the capture continued with the source from the protected source store
-  or the proven workspace and the next `update` seals a fresh record. As a refusal the deployed source is
-  unprovable: restore the protected source store, or roll back to a healthy checkpoint (the rollback preserves the
-  current data first).
-- `deployment-image-mismatch`: the running backend/frontend image is not the current deployment's, so a healthy
-  checkpoint would bind the wrong images. Find out who changed the containers, preserve the data with
-  `pf backup --emergency` if needed, and redeploy or roll back. After a pause the copy names the stopped state and
-  `pf resume` reopens the unchanged deployment.
-- `deployment-stage-failed`: the deployment could not be staged; the application, database and workspace were not
-  changed. Fix the detail (often space or permissions in `artifacts/deployments`) and rerun.
-- `deployment-record-incomplete`: the application was activated and is healthy, but its record could not be sealed.
-  `status` shows `Deployment: not recorded (…)`; captures use the protected store or workspace proof meanwhile, and
-  when no commit is provable healthy checkpoints and `update` refuse in their preflight — use `rollback` (it falls
-  back to emergency preservation) or `backup --emergency`. The next deploy, update, rollback or restore-instance seals
-  a record.
-- `artifact-capacity`: the deployment artifact store needs the source size plus 64 MiB; free space and retry.
-  Nothing in PF-A3.1 deletes deployment artifacts (retention is PF-A5.1).
-- `purge-bundle-unverified`: the purge bundle has no passed `data_restore_verified` record for its manifest; deletion
-  is blocked and the application is reopened. Rerun `purge` after fixing the restore failure shown before it.
-- Notes: `verification-record-invalid` (a damaged verification record is ignored; the level falls back),
-  `legacy-manifest-migrated` (an older bundle was read through the migration), `db-image-changed` (a different
-  PostgreSQL image of the same major), `verification-failed` (code-only rollback of a checkpoint whose last restore
-  test failed; the dump is not used).
-
-### Local source edits exist before an update
-
-Check:
-
-```sh
-sudo pf status
-```
-
-A manual update preserves a differing workspace in `workspace.tar.gz` before replacement.
-An unattended update refuses the drift and waits for manual review.
-
-### Incomplete lifecycle operation
-
-Run:
-
-```sh
-sudo pf --instance <slug> status
-sudo pf --instance <slug> status --operation <operation-id>
-```
-
-`status` prints, before any live check, one block per open operation:
-
-```text
-Operations: <op> <kind> phase <phase> sequence <n> updated <stamp> [blocking|needs operator]
+Operations: <op> <kind> phase <phase> sequence <n> updated <time> [blocking|needs operator]
   last error: <code>: <message>
   unresolved effect: <eid> <type> <target> (<state>)
   next (recorded at sequence <n>): <command>: <description>; ...
 ```
 
-followed by `Recent operations:`, `Workspace generations:` and `Runner effects:` when present. `status --operation`
-lists every effect with its state and evidence, the attempts and the recorded child processes (no secret, no frozen
-value). Use only the printed next steps. **Never delete or edit a journal**: an operation directory is evidence and
-its plan is the approval.
+It then lists the recent operations, the workspace generations and the runner records; `status --operation` shows one
+operation's effects with their state and evidence. Follow only the printed next steps. **Never delete or edit a
+journal:** an operation folder is evidence, and its plan is the approval. A refusal that happened before any change ends
+with `Nothing was changed.`; a later one names the state it left. After a failed operation `pf` stops only this
+instance's own one-off jobs and then its application services, and its message names `pf --instance <slug> status`.
 
-Codes:
+### Operations, journals and resume
 
-- `operation-open` — another command than a legal next step for the open operation; the message lists them.
-- `operation-needs-operator` / `effect-unknown` / `database-switch-unknown` — no automatic continuation is safe;
-  use the printed recovery route (`rollback <checkpoint> --restore-db` for an update, rollback or reset, `abort-deploy`
-  for a first deployment, `backup --emergency` to preserve data first).
-- `effect-still-running` — a recorded child process group, an owned one-off container or a database session still
-  runs; `resume` never stops it. Wait, then run `resume` again. For `resume --operation <op> --acknowledge` only owned
-  one-off containers and the sessions on the databases its records name count (section 15). `effect-probe-unavailable` — processes were recorded
-  but `/proc` or the boot ID cannot be read here; nothing is decided without that probe.
-- `database-unavailable` — `resume` could not start the database service to observe an effect; the operation is
-  unchanged.
-- `note: db-started` (PF-A3.4) — the instance's db container was stopped or killed from outside (a manual stop or
-  kill disables `unless-stopped`). Every route that needs the database (`backup`, `backup --emergency`, `update`,
-  `rollback`, `reset-db`, `purge`, `abort-deploy`, and `resume` before it restarts the backend) starts that existing
-  container itself (`compose start db`: no other service, never a new container or volume) and waits until the final
-  server accepts connections. For `update`, `rollback`, `reset-db`, `purge`, `abort-deploy` and `backup --emergency`
-  the start precedes the confirmation, because their plan reads the live database; it changes no data. When the container
-  cannot be started, the route is refused and nothing else is changed; a missing db container is never recreated.
-- `plan-authority-changed` — the instance record, policy, control release, profile or daemon changed after the
-  approval; restore the approved state or have an administrator review it. `plan-input-changed` — a frozen input (a
-  bundle, a checkpoint, the frozen `app.env` or `admin-config.json`, the staged deployment) changed; restore it
-  byte-identically. `plan-inputs-conflict` — an alias asked for other choices than the approved ones.
-- `abandon-not-legal` (a live effect already started), `abandon-in-progress` (only `resume --abandon` continues an
-  accepted restore abandon), `keep-workspace-not-legal` (the new workspace is already bound). Where `--abandon` is
-  legal before a data effect it does what `resume` does there and then cancels: owned candidate databases are
-  dropped, a purge's non-connectable stores are closed again and the unchanged deployment is reopened (a superseding
-  rollback withdraws instead).
-- Refusals found while observing (`workspace-generation-mismatch`, `checkpoint-history-unknown`,
-  `keep-workspace-not-legal`, `plan-input-changed`) are decided before the typed confirmation: no attempt or approval
-  is recorded and the operation files are unchanged.
-- `workspace-generation-mismatch` — `repo/`, the retained generation or the stage is not what the journal recorded;
-  nothing was moved. Restore the recorded state (for example remove a folder created at `repo/` meanwhile) and run
-  `resume`, or `resume --keep-workspace`. `workspace-validation-failed` — the bound workspace does not validate; fix
-  the finding and run `resume`. `checkpoint-history-unknown` — move the foreign tree aside as root, then `resume`.
-- `journal-changed` — another writer changed the journal; the process stopped. Run `status`.
-- `operation-conflict` — more than one operation is open (not the allowed pair of a backup next to an update waiting
-  in `workspace_sync_pending`); every mutating route is refused until an administrator reviews them with `status
-  --operation`. For the pair, `resume` without `--operation` names the backup: finish or abandon it with `resume
-  --operation <backup-op> [--abandon]` first; the waiting operation stays untouched until then (section 8).
-- `operation-journal-invalid` / `journal-format-unsupported` — a journal or plan does not validate, or a
-  `state/pending.json` other than a permission apply exists (only an unsupported control change writes one). Every
-  mutating route is refused; `status`, `doctor`, `backups`, `recoveries`, `ps` and `logs` work. Keep the directory,
-  compare it with `status --operation`, and contact the control owner before moving anything.
-- `operation-index-overflow` — more than 20000 entries in `operations/`. Archive **closed** operations
-  (`completed`, `cancelled`, `failed_preserved`, as shown by `status --operation`) as root to a folder outside
-  `operations/`, never an open or superseded one; retention is PF-A5.1.
-- A purge in `deleting` whose recovery bundle no longer reads or verifies (`plan-input-changed: recovery bundle ...
-  no longer reads or verifies`) keeps deletion blocked: restore the bundle folder byte-identically from an off-NAS
-  copy, then run `resume`.
-- In the workspace-switch interval only `resume` and `resume --keep-workspace` run (section 8).
+| What you see | What to do |
+| --- | --- |
+| Another operation is open (`operation-open`). | Run one of the legal next steps that the message lists. |
+| No automatic continuation is safe (`operation-needs-operator`, `effect-unknown`, `database-switch-unknown`). | Use the printed recovery route: `rollback <checkpoint> --restore-db` after an update, rollback or reset; `abort-deploy` for a first deployment; `backup --emergency` to preserve the data first. |
+| A recorded process, an owned one-off container or a database session still runs (`effect-still-running`). | Wait, then run `resume` again; `resume` never stops it. With `effect-probe-unavailable`, `/proc` or the boot identifier cannot be read, so nothing is decided. |
+| `resume` could not start the database to observe an effect (`database-unavailable`). | Start Docker, then retry; the operation is unchanged. |
+| The note `db-started`. | The `db` container had been stopped from outside; `pf` started that existing container (never a new one) and continued. |
+| The instance record, policy, control release, profile or daemon changed after the approval (`plan-authority-changed`). | Restore the approved state. |
+| A frozen input changed: a bundle, a checkpoint, the frozen `.env` or settings, or the staged deployment (`plan-input-changed`). | Restore it byte for byte, then `resume`. When the message says that a recovery bundle no longer reads or verifies, deletion stays blocked and the operation stays open: restore the bundle folder byte-identically from an off-NAS copy, then run `resume`. |
+| A command asked for other choices than the open operation approved (`plan-inputs-conflict`). | Run it again without those choices, or use `resume`. |
+| `abandon-not-legal`, `abandon-in-progress`, `keep-workspace-not-legal`. | A live effect already started, so only `resume` continues; only `resume --abandon` continues an accepted abandon; the new workspace is already bound. |
+| The workspace, the retained generation or the stage is not what the journal recorded (`workspace-generation-mismatch`). | Restore the recorded state (for example remove a folder created at the workspace path), then `resume` or `resume --keep-workspace`. With `workspace-validation-failed`, fix the finding, then `resume`. |
+| The checkpoint history folder is neither the one from before the restore nor the restored one (`checkpoint-history-unknown`). | Move the foreign tree aside as root, then run `resume --operation <op>`. |
+| Another writer changed the journal (`journal-changed`). | Run `status`. |
+| More than one operation is open (`operation-conflict`). | Review them with `status --operation`. A backup next to an update that waits in `workspace_sync_pending` is the allowed pair: finish or abandon the backup first (§8). |
+| A journal or plan does not validate, or a `state/pending.json` written by an older control exists (`operation-journal-invalid`, `journal-format-unsupported`). | Every changing command is refused; `status`, `doctor`, `backups`, `recoveries`, `ps` and `logs` work. Keep the folder unchanged and review it with `status --operation`. |
+| More than 20000 entries in `operations/` (`operation-index-overflow`). | Archive **closed** operations (`completed`, `cancelled` or `failed_preserved`, as `status --operation` shows) as root to a folder outside `operations/`; never move an open or superseded one. Until then every changing command is refused and cleanup candidates are not listed. |
+| Runner records block `pf install` (`instance-effects-unresolved`, `acknowledge-not-legal`). | §15. |
 
-### Integrated operation codes (PF-A3.3)
+### Checkpoints, bundles and deployment records
 
-- `isolated-topology-present` — a kept `pfverify-*` stack or a `pfrecover-*` recovery target of this instance exists;
-  run `pf cleanup --apply` (add `--recovery-target <project>` for a recovery target), then the instance purge again.
-- `verification-isolation-unsupported` — the isolated model cannot be rendered or validated on this host (or a legacy
-  bundle has no usable image); nothing was deleted. `topology-name-collision` — run the command again.
-- `functional-verification-failed` — a check of the isolated verification failed (the message names it); the
-  instance purge was cancelled and the application reopened, or the side-by-side restore closed `failed_preserved`.
-  The stopped topology is kept for inspection; remove it with `pf cleanup --apply`.
-- `app-check-failed` — the application invariant command failed or gave an unreadable report on the source database;
-  nothing was deleted. Its output is never stored or printed (only counts per check). The command runs within the
-  runner's ten-minute child limit; a database where it takes longer stops the instance purge the same way.
-- `purge-bundle-unverified`, `purge-writers-running`, `purge-source-changed` — the deletion gate refused after
-  `ERASE`; the application was reopened (or, when the reopen itself cannot proceed, the purge stays open for
-  `resume`/`--abandon`).
-- `restore-target-mismatch` — the bundle belongs to another instance (section 12). `instance-claim-taken` — another
-  registered instance holds the project of this purged record. `registry-busy` — an installation transaction holds the
-  registry lock; run `resume` after it finishes.
-- `image-load-would-retag` — loading the bundle's `images.tar` would move a tag that names another image here;
-  nothing was loaded. Remove or rename that tag first.
-- `recovery-target-lost` — a side-by-side target changed while its operation was interrupted; it was removed. Run the
-  side-by-side restore again.
-- `reset-contract-unknown`, `reset-deployment-image-mismatch`, `preservation-failed` — section 11 and "Aborting a
-  first deployment after frontend access opened".
-- `effect-still-running`, `acknowledge-not-legal` — section 15.
+| What you see | What to do |
+| --- | --- |
+| The folder was changed or damaged (`manifest-checksum-mismatch`, `manifest-invalid`, `manifest-schema-unsupported`, `bundle-payload-mismatch`, `bundle-unlisted-file`). | Do not edit or repair it; copy it off the NAS as evidence and use another checkpoint or bundle. A folder copied back must be byte-identical (no added `.DS_Store` or `Thumbs.db`). Listings show it as `[invalid: <code>]`. |
+| An archive holds a link, a special file or an unsafe path, changed while being read, or does not fit (`archive-member-refused`, `archive-unreadable`, `archive-changed`, `archive-capacity`). | Nothing was extracted. For `archive-capacity`, free space and retry. |
+| The differing workspace holds a file over 128 MiB, more than 512 MiB or 200000 files, or a link or special file (`workspace-archive-limit`, `workspace-unsupported-entry`). | Move those files out of the workspace and retry; `backup --emergency` preserves the database meanwhile. |
+| The extracted source differs from its manifest (`source-manifest-mismatch`). | Use another checkpoint. |
+| The checkpoint is an emergency or partial capture (`checkpoint-not-rollback-target`). | Export its data by hand, and roll back to a healthy checkpoint. |
+| The `--restore-db` candidate failed a check (`checkpoint-incompatible`). | Nothing changed: the candidate was dropped and the current database is unchanged. |
+| The current database could not be captured and restore-tested (`preservation-failed`). | Preserve it by hand (a `pg_dump --format=custom` of the database from the `db` service to a root-only location) or fix the cause and run `backup --emergency`; then retry, or run `resume` to reopen the unchanged deployment. |
+| A file of the deployment record differs from the record (`deployment-artifact-mismatch`). | Keep the folder as evidence; never delete it. As a note, the capture continued with the source proven from the protected store or the workspace. As a refusal, restore the protected source store or roll back to a healthy checkpoint. |
+| The running images are not the recorded ones (`deployment-image-mismatch`). | Find out who changed the containers, preserve the data with `backup --emergency` if needed, then redeploy or roll back. |
+| The deployment could not be staged, or its store lacks room (`deployment-stage-failed`, `artifact-capacity`). | Fix the detail (often the space or the permissions of `artifacts/deployments`, which needs the source size plus 64 MiB) and retry; nothing changed. |
+| The application runs but its record was not sealed (`deployment-record-incomplete`). | The next `deploy`, `update`, `rollback` or `restore-instance` seals one. |
+| The purge deletion gate refused after `ERASE` (`purge-bundle-unverified`, `purge-writers-running`, `purge-source-changed`). | The application was reopened; fix the cause shown and run `purge` again. |
+| A check of the isolated verification, or the reconcile command on the source database, failed (`functional-verification-failed`, `app-check-failed`). | Nothing was deleted. Inspect the kept copy, then remove it with `cleanup --apply`. |
+| A kept `pfverify-*` or `pfrecover-*` project of this instance exists (`isolated-topology-present`). | Run `cleanup --apply`, adding `--recovery-target <project>` for a recovery target. |
+| The isolated copy cannot be built on this host, or its random name was taken (`verification-isolation-unsupported`, `topology-name-collision`). | Nothing was deleted; for a name collision, run the command again. |
+| `restore-target-mismatch`, `instance-claim-taken`, `registry-busy`. | The bundle belongs to another instance (§12); another instance holds the project; an installation holds the registry lock, so run `resume` after it finishes. |
+| Loading `images.tar` would move a tag that names another image (`image-load-would-retag`). | Remove or rename that tag first. |
+| A side-by-side target changed while its operation was interrupted and was removed (`recovery-target-lost`). | Run the side-by-side restore again. |
+| The notes `verification-record-invalid`, `legacy-manifest-migrated`, `db-image-changed`, `verification-failed`. | Information only. |
 
-### Capacity refusals
+### Permissions
 
-`capacity-insufficient: <phase> needs <n> MiB on device <d> (<roles>: <paths>), <m> MiB free including the <f> MiB
-safety floor` names every role that shares the short device. Free space on that device (an old `.pre-restore-*`
-history, exported files, or `pf cleanup --apply` leftovers); never delete the last healthy checkpoint or a purge
-bundle to make room. The Docker root is shared by every instance on the daemon, so another instance's images and
-volumes count there. The instance purge's recovery-device need includes the image archive of the final bundle (the
-`docker image inspect` sizes of the saved tags and the database image); an image without a size refuses with
-`capacity-unmeasurable`. `capacity-unmeasurable` means the daemon reported no usable `DockerRootDir` or it cannot be
-measured; `pf backup --emergency` still preserves the database. Lowering `minimum_free_mb` is an admin
-configuration change, not a recommended route.
+| What you see | What to do |
+| --- | --- |
+| `permissions-verb-required` (exit 2). | Use `check`, `plan` or `apply`. |
+| The policy breaks a rule, or asks for workspace script execution "none" (`permission-policy-invalid`, `permission-policy-unsupported`). | Nothing changed; choose again in `apply`. |
+| A group of the policy, or the group of the backups or recovery folder, does not exist on this host (`permission-group-missing`). | Choose an existing group in `apply`; groups are never created. |
+| `permission-policy.json` is not a root-owned `0600` single file or fails its checks (`permission-approval-invalid`). | It is never replaced automatically and no derived policy is used, so backups and the permission commands stop. As root, move it aside in the same folder, for example as `permission-policy.invalid-<UTC time>.json`; the instance then uses the derived policy, and `apply` writes a new revision 1. |
+| A protected-folder finding outside the scopes (`permissions-context-refused`). | Fix what `pf doctor` shows. |
+| A blocker in a scope: `scope-path-unsafe`, `scope-entry-link`, `scope-entry-special`, `scope-entry-hardlinked`, `scope-mount-boundary`, `scope-contains-app-storage`, `scope-untrusted-owner`, `scope-entry-acl`, `scope-too-large`. | Remove the link, special file, hard link or ACL, move the mount or the application storage out, or leave the scope out with `--scope`. |
+| The control release breaks its limits (`control-ceiling`). | Only `pf install control` changes it. |
+| `editor-freeze-unavailable`, `editor-freeze-refused`. | §2, Editor freeze. |
+| An apply is not complete (`permissions-apply-pending`, `permissions-entry-changed`, `permissions-verify-failed`, `permissions-interrupted`). | `apply --resume` plans the rest again with the frozen policy; `apply --abandon` undoes the recorded changes in reverse order. With `permissions-already-approved`, only `--resume` can finish it. |
+| A line of the permission effect journal cannot be read (`permissions-journal-invalid`). | Nothing changed and the apply stays open. Review `<root>/instances/<uuid>/operations/<op>/permission-effects.jsonl` by hand. |
+| A new backup or recovery entry inherited an ACL from its folder (`fresh-entry-acl`). | The operation stopped before publishing it. Remove the default ACL from that folder. |
+| `permissions-abandon-conflicts`, `permissions-option-invalid`, `permissions-nothing-pending`. | Objects changed after the interruption are listed and left as they are; `--scope` cannot be combined with `--resume` or `--abandon`; nothing was pending. |
+| Results and notes such as `permissions-current`, `permissions-applied`, `permission-policy-unapproved`, `workspace-concurrent-entry`. | Information; run `check` to see the state. |
+| SMB users can see the workspace but cannot edit it. | Run `pf permissions check --scope workspace`, then `pf permissions apply --scope workspace` from `cd /`, and check the DSM Shared Folder permissions. |
+| SMB users cannot change checkpoints or recovery bundles. | Intended: they stay read-only for the group. Copy them elsewhere for an editable copy. |
 
-### Cleaning up leftovers
+### Installation and control
 
-`sudo pf cleanup` is read-only (observe-only lock, no operation directory): it lists the leftovers that **closed**
-operations recorded: `pf_verify_*`, `pf_migrate_*`, `pf_restore_*` and `pf_clean_*` candidates, kept `pfverify-*`
-topologies, bundle-attempt folders and their image tags, superseded stages, and the selector-only items. A name that
-only matches a prefix is never authority: a database no operation recorded is not listed and never touched.
-`sudo pf cleanup --apply` removes the default set after `CLEANUP <project> <op8>` as a journaled `cleanup`
-operation; every item is re-observed right before its removal and kept when it changed (`cleanup-item-changed`) or is
-busy (`cleanup-item-busy`); the cleanup then continues and closes `failed_preserved` (`cleanup-items-kept`).
-Selector-only items need their selector and phrase:
+| What you see | What to do |
+| --- | --- |
+| `sudo sh ./pf.sh ...` refuses to run. | Expected: run `sudo <root>/bootstrap/pf ...`, or create a root first (§5). |
+| The preflight lists conflicts as `code: subject: detail` (`install-preflight-refused`). | Resolve every item and run the same command again. With `legacy-env-conflict` or `legacy-admin-config-conflict`, keep the right copy in `config/` and move the other one out. |
+| An install operation is open (`install-operation-pending`). | Follow the next step that `pf install status` shows. |
+| The instance was migrated from v2.5 and its v2.5 `control/` still exists (`legacy-control-active`). | Make changes with v2.5. |
+| `control-binding-changed`, `install-busy`. | A control installation completed while the command started, or another operation holds a lock; run the command again. |
+| `resume` found a target that the installer did not write (`install-needs-operator`). | Restore it as the message describes, then run `pf install resume` (or `--abandon` where offered). |
+| `install-smoke-failed`, `install-verify-failed`. | The candidate was not activated; for `control` the previous binding was restored. |
+| A published root or a used registration cannot be abandoned (`abandon-not-possible`). | Finish it with `pf install resume`. |
+| An entry of `<root>/install-operations/` is not a readable operation (`install-operation-unreadable`). | Inspect it as root and move it out of that folder (keep a copy), then retry. |
+| `install-interrupted`. | Run `pf install resume`. |
+
+### Configuration wizards
+
+Every refusal below changed nothing.
+
+| What you see | What to do |
+| --- | --- |
+| `config-option-invalid` (exit 2). | `--configuration` and `--project` belong to `config admin` before registration only. |
+| `config-cancelled`, `config-current`. | You declined, or nothing needed to change. |
+| `admin-config-required`, `admin-config-invalid`, `admin-config-migration-blocked`. | Create the file with `config admin`, or fix the problem shown by hand; the wizard never repairs a file. |
+| The file declares a newer schema (`admin-config-version-unsupported`). | Select the newer control again (`pf install control --release <id>`) or restore the previous file. |
+| `admin-config-mismatch`. | Restore the registered `project` or the policy's `environment`. |
+| A schema 1 file in an unregistered folder was left as it is (`admin-config-legacy-unregistered`, exit 0). | Register first, then run `config admin` with `--instance`. |
+| `.env` does not parse (`app-config-invalid`). | Fix the line that the message names; it never shows the value. |
+| The instance was deployed and a database value is missing or invalid (`app-credential-unusable`). | Restore it from the recovery bundle or your records. |
+| `migration-issue`, `config-file-acl`, `config-file-unsafe`. | Fix the file by hand (§6). |
+| The host has no time zone data to check a new timezone (`zone-data-unavailable`). | Install it, or write the value by hand. |
+| `config-changed`, `config-busy`. | The file changed during the wizard, or a registration holds the lock; run the command again. |
+| `config-interrupted`, `config-audit-not-recorded` (exit 1). | The file already holds the new content; run the command again to review it. |
+| `config-dir-invalid`, `config-path-conflict`, `registry-record-invalid`, `registry-invalid`. | The folder is missing, unsafe or used by a registered instance, or a record cannot be loaded; fix that first. |
+| `admin-example-invalid`, `app-example-invalid`, `app-profile-undeclared`, `config-audit-invalid`. | The installed control cannot run the wizard; run `doctor` and reinstall the control release. |
+
+### Command line, terminal and policy
+
+| What you see | What to do |
+| --- | --- |
+| `compose-route-removed`, `compose-override-refused`, `unknown-option`, `unknown-command`. | `pf` forwards no Compose command and accepts no Compose or Docker option such as `-f`, `-p` or `--env-file`, and abbreviated options are refused. Use the managed command that the message names, or `pf ps` and `pf logs` (§14). |
+| `terminal-required`. | Run the command interactively, for example over `ssh -t`. |
+| `instance-required-unattended`. | A command without a terminal must name its instance: `pf --instance <slug> <command>`. |
+| `policy-grant-required`, `auto-apply-not-permitted` (exit 20). | Unattended operation is not available (§13); run the command interactively. |
+| `selection-conflict`. | `--project` names another project than `--instance`; use `--instance` alone. |
+| `recovery-outside-instance`, `recovery-state-file-refused`. | Only bundles in the instance's own `<recovery>/<project>/` folder are listed or restored, and a bundle may restore only the state files `deployed.json`, `last-reset.json` and `observed-tags.json`. |
+| `logs-bound-reached`. | The output up to the bound is complete; narrow it with `--since`, `--tail` or a service name. |
+
+### Docker daemon, Compose and resources
+
+| What you see | What to do |
+| --- | --- |
+| Docker is stopped or does not answer (`daemon-unreachable`). | Start Container Manager (or Docker) and retry; `status` still prints every section that needs no Docker. |
+| The registered endpoint answers as another engine than the instance is bound to (`daemon-drift`). | Every Docker step is refused. Re-binding is an installation task; never edit the record. |
+| `daemon-rootless`, `daemon-info-invalid`, `daemon-endpoint-*`. | Only a local rootful daemon on a protected socket is supported. |
+| The resolved Compose model has an unexpected option or a changed image override, or could not be rendered (`envelope-*`). | Nothing was built or started; the message lists each finding with its location (never a value). |
+| `resource-blocked`, `resource-not-owned`, `resource-target-not-empty`. | Review the listed resources with `pf status`; unlabeled, colliding or foreign resources are never adopted or deleted automatically. |
+| A planned resource changed after the plan was frozen, or containers kept disappearing while being listed (`plan-drift`, `inventory-unstable`). | Retry when the host is quiet; an interrupted purge or abort resumes its frozen plan. |
+| `.env` exists, but a raw Compose command reports missing variables. | A raw command reads neither the configuration `.env` nor the generated values; use `pf doctor`, or the full form of §14. |
+
+### Space and leftovers
+
+`capacity-insufficient: <phase> needs <n> MiB on device <d> (<roles>: <paths>), <m> MiB free including the <f> MiB safety
+floor` names every role that shares the short device. Free space there (an old `.pre-restore-*` history, exported
+files, or the leftovers below); never delete the last healthy checkpoint or a purge bundle to make room. The Docker data
+root is shared by every instance on the daemon.
+
+`pf cleanup` lists, without changing anything, the leftovers that closed operations recorded: candidate databases
+(`pf_verify_*`, `pf_migrate_*`, `pf_restore_*`, `pf_clean_*`), kept `pfverify-*` projects, failed bundle attempts and
+their image tags, superseded stages, and the items that need a selector. A name that only matches a pattern is never
+touched. `pf cleanup --apply` removes the default set after `CLEANUP <project> <op8>`; an item that changed or is busy
+is kept (`cleanup-items-kept`). Items that need a selector:
 
 - `--recovery-target <project>` (`REMOVE RECOVERY TARGET <project>`);
-- `--checkpoint-history <name>` (`DELETE CHECKPOINT HISTORY <name>`): a displaced `.pre-restore-*` history, only when
-  every checkpoint in it is also in the active history with the same manifest and that active copy reads strictly
-  (payload hashes), and the history holds nothing else (`cleanup-history-unique-checkpoint` otherwise, naming the
-  checkpoint or the other entry; the folder is removed as a whole);
-- `--generation <wsg-…>`: a retained workspace generation (next subsection).
+- `--checkpoint-history <project>.pre-restore-<8 hex>` (`DELETE CHECKPOINT HISTORY <name>`), only when every checkpoint
+  in it also exists, unchanged and readable, in the active history;
+- `--generation wsg-<…>` retires a workspace generation. First close every editor or SMB session that has files open in
+  it (`generation-in-use`). The tree is archived with a seal to `<backups>/generations/<project>/<generation>/workspace.tar.gz`
+  and then removed; a link or special file inside refuses (`generation-unsupported-entry`). To get a file back, extract
+  it as root outside the workspace, for example `sudo tar -xzf <archive> -C /tmp/restore-<generation> <path>`.
 
-Never cleaned: `pf_keep_*` retained databases, `pf_recovery_*` databases of the former side-by-side mode, the live
-database, names of open operations, sealed checkpoints, purge bundles, sealed deployments, `unsealed-active-staging`
-and image tags loaded by an abandoned restore. `cleanup-nothing` and `cleanup-target-unknown` change nothing.
-
-### Retiring a retained workspace generation
-
-`sudo pf cleanup --apply --generation wsg-<…>` seals the generation before removing it: close every editor or SMB
-session that has files open in it first (an open handle refuses with `generation-in-use`; unreadable `/proc` with
-`generation-handles-unverifiable`). The tree is archived to `backups/generations/<project>/<generation>/workspace.tar.gz`
-with `seal.json` (hashes of the tree and the archive); a link or special file inside refuses with
-`generation-unsupported-entry`, a tree that changes while it is sealed with `generation-unstable`, and a write after
-the seal keeps the tree (`cleanup-item-changed`). A valid seal of an earlier cleanup is never replaced: when the tree
-still has the sealed content it is reused and the tree removed; when the tree changed since (for example after an
-interrupted removal) both are kept with `generation-seal-exists` — the earlier archive may be the only complete copy.
-Compare the two and remove the generation folder by hand only once nothing of it is needed. To get a file back, extract it from the archive as root to a
-location outside `repo/`, for example `sudo tar -xzf <archive> -C /tmp/restore-<generation> <path>`.
+Never cleaned: the `pf_keep_*` databases, the live database, sealed checkpoints, purge bundles, sealed deployments and
+the names of open operations.
 
 ## 17. Command reference
 
+Every command is run as root through the installed launcher (§1); a command started without a terminal needs
+`--instance <slug>`.
+
 | Command | Purpose |
 | --- | --- |
-| `sudo pf doctor` | Validate host tools, control security, Compose config, env, and basic capacity |
-| `sudo pf permissions check [--scope S]…` | Compare every scope with the permission policy in force (read-only; exit 1 on a difference) |
-| `sudo pf permissions plan [--scope S]… [--details]` | Preview groups, members, counts and the plan hash (read-only) |
-| `sudo pf permissions apply [--scope S]… [--details]` | Wizard, `APPLY PERMISSIONS <slug>`, fenced and verified apply; writes the next permission policy revision |
-| `sudo pf permissions apply --resume \| --abandon` | Finish (`RESUME PERMISSIONS <slug>`) or compensate (`ABANDON PERMISSIONS <slug>`) an interrupted apply |
-| `sudo pf status` | Show deployed revision, workspace drift, DB revision, containers, pending operation |
-| `sudo pf deploy --latest` | Brand-new staging deployment from latest configured branch SHA |
-| `sudo pf deploy --commit FULL_SHA` | Brand-new deployment from an explicit commit |
-| `sudo pf deploy --release TAG` | Brand-new deployment from a published release |
-| `sudo pf abort-deploy` | Remove an incomplete first deploy (confirm `ABORT DEPLOY <project>`; after frontend access opened the current database is preserved first; an interrupted abort resumes with `RESUME ABORT DEPLOY <project>`) |
-| `sudo pf update --latest` | Managed staging update from latest branch SHA |
-| `sudo pf update --commit FULL_SHA` | Managed staging update to exact commit |
-| `sudo pf update --release TAG` | Managed staging update to release |
-| `sudo pf backup` | Create and restore-test a healthy revision checkpoint (prints class and level) |
-| `sudo pf backup --emergency` | Preserve the actual data when a healthy checkpoint is refused (`EMERGENCY BACKUP <project>`; terminal only; never a rollback target) |
-| `sudo pf backups --page N` | List revision checkpoints, 10/page: `[class\|level]`, reason, DB heads, source provenance, legacy format |
-| `sudo pf rollback [BACKUP_ID]` | Code rollback with current DB retained |
-| `sudo pf rollback BACKUP_ID --restore-db` | Restore code + selected database state |
-| `sudo pf reset-db` | Activate a clean migrated DB while preserving recoverability |
-| `sudo pf instances` | List managed PartFlow instances |
-| `sudo pf purge [--project NAME]` | Full recoverable purge of one staging instance |
-| `sudo pf recoveries` | List purge recovery bundles: `[level]`, project, active database, source provenance, `derived_from` |
-| `sudo pf restore-instance RECOVERY_ID` | Recreate a purged functional instance |
-| `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore one of the instance's own bundles into a kept, isolated `pfrecover-*` recovery target beside it (`RESTORE COPY <bundle-id>`) |
-| `sudo pf release-check` | Check eligible release without applying |
-| `sudo pf release-check --apply` | Refused in this checkpoint (exit 20): needs a protected policy grant (PF-A4.3) |
-| `sudo pf resume [--operation ID]` | Re-enter the open operation from its journal: reopen unchanged, continue forward or stop in `needs_operator` (`RESUME <op8>`) |
-| `sudo pf resume --abandon` | Cancel an operation where it is legal (before data effects: owned candidates dropped, the unchanged deployment reopened, `ABANDON <op8>`; a restore while its target is prepared: `ABANDON RESTORE <project> <op8>`) |
-| `sudo pf resume --keep-workspace` | Finish an operation without refreshing `repo/` (`KEEP WORKSPACE <op8>`) |
-| `sudo pf status --operation ID` | One operation in detail: effects, evidence, attempts, children |
-| `sudo pf resume --operation ID --acknowledge` | Acknowledge runner records of an operation directory without a journal (`ACKNOWLEDGE <op8>`; section 15) |
-| `sudo pf cleanup` | Report recorded leftovers of closed operations (read-only) |
-| `sudo pf cleanup --apply` | Remove the default leftover set (`CLEANUP <project> <op8>`; section 16) |
-| `sudo pf cleanup --apply --recovery-target P \| --checkpoint-history NAME \| --generation WSG` | Also remove one selector-only item (its own phrase) |
-| `... deploy\|update\|rollback\|restore-instance --keep-workspace` | Run without the workspace generation switch |
-| `sudo pf ps [options] [SERVICE...]` | Read-only Compose container view of the instance (section 14) |
-| `sudo pf logs [options] [SERVICE...]` | Bounded, redacted service logs (section 14) |
-| `sudo sh ./deploy/synology/install-control.sh init --root <root>` | Initialize a new protected installation root (section 5 (a)) |
-| `sudo <root>/bootstrap/pf install status` | List install operations, their phase and next step (read-only) |
-| `sudo <root>/bootstrap/pf install register …` | Register an instance with existing directories (`REGISTER <slug>`) |
-| `sudo <root>/bootstrap/pf install migrate-legacy …` | Copy legacy v2.5 configuration and register it; v2.5 stays in control (`MIGRATE <slug>`) |
-| `sudo <root>/bootstrap/pf install control --source DIR \| --release ID` | Install or select a control release (`INSTALL CONTROL`/`SELECT CONTROL <id>`) |
-| `sudo <root>/bootstrap/pf install resume [--operation ID] [--abandon]` | Continue or abandon an open install operation (`RESUME`/`ABANDON <op>`) |
-| `sudo <root>/bootstrap/pf config admin --configuration DIR [--project P]` | Create or complete `pf-config.json` before registration (no `--instance`; schema 2 only) |
-| `sudo pf --instance <slug> config admin` | Create, migrate (schema 1 → 2) or complete the instance's `pf-config.json` (`[y/N]`) |
-| `sudo pf --instance <slug> config app` | Create or complete the instance's `.env` for its profile (`[y/N]`) |
-
-Commands started without a terminal must pass `--instance <slug|uuid>`; until PF-A4.3 policy
-grants exist every locked command is refused without a terminal (`terminal-required`,
-`policy-grant-required`). Bare `pf permissions` is refused (`permissions-verb-required`, exit 2); its
-former repair is `pf permissions apply`.
+| `pf doctor` | Check the host tools, the control security, the Compose model, `.env` and the free space. |
+| `pf status [--operation ID]` | Show the instance, the deployed revision, the workspace, the containers and the open operations; or one operation in detail. |
+| `pf instances` | List the registered instances. |
+| `pf ps [options] [SERVICE...]`, `pf logs [options] [SERVICE...]` | Read-only Compose views (§14). |
+| `pf permissions check \| plan \| apply [--scope S]...` | Compare, preview or apply the permission policy (§2). |
+| `pf permissions apply --resume \| --abandon` | Finish (`RESUME PERMISSIONS <slug>`) or undo (`ABANDON PERMISSIONS <slug>`) an interrupted apply. |
+| `pf config admin`, `pf config app` | Create, migrate or complete `pf-config.json` or `.env` (§6). |
+| `pf deploy [--latest \| --commit SHA \| --release TAG]` | First deployment of a new instance (§7). |
+| `pf abort-deploy` | Remove an incomplete first deployment (`ABORT DEPLOY <project>`). |
+| `pf update [--latest \| --commit SHA \| --release TAG] [--allow-migrations]` | Update to an exact revision (§9). |
+| `pf backup [--emergency]` | Capture and restore-test a checkpoint, or preserve the data when a healthy checkpoint is refused (§10). |
+| `pf backups [--page N]` | List the checkpoints. |
+| `pf rollback [ID] [--restore-db]` | Roll back the code, or the code and the database (§10). |
+| `pf reset-db` | Activate a clean migrated database and retain the previous one (§11). |
+| `pf purge [--keep-backups \| --delete-backups] [--reset-admin-config]` | Save a verified recovery bundle, then remove the instance (§12). |
+| `pf recoveries [--page N]` | List the purge recovery bundles. |
+| `pf restore-instance ID [--side-by-side]` | Restore a purged instance, or restore a bundle into a kept recovery target beside it (§12). |
+| `pf release-check [--channel C]` | Show whether an eligible release exists (§13). |
+| `pf resume [--operation ID] [--abandon \| --keep-workspace \| --acknowledge]` | Continue, cancel or finish an operation, or acknowledge runner records (`RESUME`, `ABANDON`, `KEEP WORKSPACE` or `ACKNOWLEDGE <op8>`). |
+| `pf cleanup [--apply] [--recovery-target P] [--checkpoint-history NAME] [--generation WSG]` | Report or remove recorded leftovers (§16). |
+| `... deploy \| update \| rollback \| restore-instance --keep-workspace` | Run without the workspace switch (§8). |
+| `sh ./deploy/synology/install-control.sh init --root <root>` | Create a new installation root (§5). |
+| `pf install status` | List the install operations and their next step. |
+| `pf install register ...`, `pf install migrate-legacy ...` | Register an instance (`REGISTER <slug>`), or register a v2.5 home (`MIGRATE <slug>`) (§5). |
+| `pf install control --source DIR \| --release ID` | Install or select a control release (§15). |
+| `pf install resume [--operation ID] [--abandon]` | Continue or undo an open install operation. |
 
 ## 18. Validation boundary
 
-The included offline tests simulate Docker/PostgreSQL behavior while exercising controller
-logic, filesystem/archive/checksum handling, permission policy, source/workspace separation,
-purge/recovery flow, and path construction. They do not replace a real DSM + Docker +
-PostgreSQL integration rehearsal.
+- The offline test suite (`python -B -m unittest discover -s deploy/synology/tests -p 'test*.py'`) simulates Docker and
+  PostgreSQL and covers the controller logic, the file and archive handling, the permission policy, the journals and the
+  purge and restore flows.
+- On 2026-10-08 the lifecycle ran once with a real Docker Engine 28.5.1, Docker Compose v2.40.3 and PostgreSQL 16 inside
+  an isolated, privileged Docker-in-Docker container on a generic Linux filesystem (the harness is in
+  `deploy/synology/integration/`, the results are summarized in `TEST_REPORT.md`). The mandatory lifecycle loops, the
+  side-by-side isolation and a crash matrix that interrupted every operation kind before and after its irreversible
+  effects recovered with intact data, except for the defects that this run found; each of them failed closed without
+  losing data. They were fixed afterwards with offline regression tests, and the fixed code has not been run again at
+  the real level.
+- Never tested: a real NAS, DSM, btrfs, SMB clients and DSM ACLs, a rootless Docker daemon, the real GitHub release
+  source over HTTPS, power loss and host reboot.
+- A refusal that comes after the contract probe of `update` (for example "Migration files differ" after the candidate
+  build) still leaves the probe's image tags behind; `purge` removes them.
+- Declared limits: a concurrent Docker or root administrator is outside every guarantee; `effective_access_verified` and
+  `future_file_behavior_verified` are never verified; checksums prove integrity, not authorship; nothing runs unattended
+  (§13); the Docker resources of a v2.5 installation are never adopted.
 
-PF-A1.3 limits (offline evidence only; the Docker-daemon and NAS host gates are not run):
-
-- a concurrent Docker or root administrator is outside the guarantee (no atomic
-  compare-and-delete; items and users are reinspected under a quiescent trusted daemon);
-- a volume recreated within the same second with identical metadata is indistinguishable;
-- the NAS Compose version is unverified; the envelope rules were calibrated on one real
-  Compose v2 render (Docker Desktop CLI);
-- the rendered JSON is validated, not reused as the executed `-f` input;
-- the Compose container-marker labels used for ownership are not calibrated on a real daemon *(superseded by PF-A3.4 on
-  Engine 28.5.1/Compose v2.40.3: pf's ownership inventory classified the real Compose containers, volumes and networks
-  by these labels in every run; see the PF-A3.4 block)*;
-- image coverage by image ID assumes a quiescent daemon between `image save` and the binding
-  inventory.
-
-PF-A1.4 adds these limits:
-
-- unattended detection is terminal-based (stdin absent, closed or not a TTY); `ssh` without `-t`
-  counts as unattended;
-- no unattended operation, scheduled backup or release check included, runs on a pf-managed
-  instance until a PF-A4.3 protected policy grant exists;
-- the Compose `run` one-off labels that `fail_closed` relies on are proven offline only *(superseded by PF-A3.4 on
-  Engine 28.5.1/Compose v2.40.3: the real `com.docker.compose.oneoff` labels of pf's migration and contract one-offs
-  were observed, and no one-off outlived an interrupted run; see the PF-A3.4 block)*;
-- there is no managed route for an application CLI in the backend container.
-
-PF-A2.1 limits:
-
-- offline only: nothing was installed on, or run against, a real NAS, DSM host or Docker daemon;
-- the real global launcher `/usr/local/bin/pf` is untested (tests use an isolated launcher path);
-- A2-T04 with a real Docker daemon is not run (offline identity evidence only);
-- no power-loss or reboot durability claim beyond fsync and rename on the tested filesystem;
-- one control release per installation root;
-- the launcher and verifier bytes are frozen until PF-A4.3 (`bootstrap-change-unsupported`);
-- no legacy Docker resource adoption, v2.5 control retirement or v2.5 state import;
-- no configuration creation (PF-A2.2) and no permission change (PF-A2.3);
-- old releases and discarded registrations are not cleaned up (PF-A5.1).
-
-PF-A2.2 limits:
-
-- offline only, as for PF-A2.1;
-- the backend image's zone data is not checked (owner unassigned); the backend still refuses an unknown zone
-  at startup;
-- configuration files with ACL entries are refused and need manual edits; the SMB race between the
-  wizard's final comparison and its rename cannot be closed by a lock;
-- a password that needs URL encoding fails at the backend migration step until the app-lane `env.py` fix is
-  deployed;
-- a `backup_read_group` change takes effect without revision-bound approval (PF-A2.3).
-
-PF-A2.3 limits (the permission compiler and the filesystem behaviour are tested offline on a real Linux
-filesystem as root in a throwaway container; no DSM or SMB claim):
-
-- `effective_access_verified` and `future_file_behavior_verified` are never verified: no SMB account test, DSM
-  Shared Folder permission, DSM ACL or share create mask was observed (PF-A5.1);
-- ACL-bearing scopes cannot be bulk-applied, no ACL is ever written, and fresh entries that inherit an ACL stop
-  protected flows and keep their creation mode in editable scopes;
-- the editor freeze does not stop root services or memory-mapped files; a custom Docker data root on the same
-  device inside a scope is not detected offline;
-- until the first approval `workspace_write_group` still sets the group of files pf creates in the editable
-  scopes; workspace script execution "none" is not activatable;
-- the control release is checked, never changed, and fixed at No group access;
-- ACL-bearing configuration files stay refused by the config wizards (PF-A5.1);
-- an invalid permission policy record has a manual recovery route only (section 16).
-
-PF-A3.1 limits (offline and filesystem evidence only; Docker and PostgreSQL are simulated):
-
-- no real Docker, Compose or PostgreSQL behaviour is claimed; the emergency-preservation case A3-T03 is blocked at its
-  required real Docker/PostgreSQL level (PF-A3.4) *(superseded by PF-A3.4 on Engine 28.5.1/Compose v2.40.3: A3-T03
-  passed at the real level)*;
-- *(superseded by PF-A3.3, see its limits below)* the instance purge was gated on a `data_restore_verified` record of
-  the purge bundle's own payloads; since PF-A3.3 it is gated on a `functional_recovery_verified` record from an
-  isolated topology (fake-daemon evidence only);
-- *(superseded by PF-A3.3)* emergency preservation was wired into `rollback` and `backup --emergency` only; since
-  PF-A3.3 it also covers `reset-db` and `abort-deploy`; the instance purge stays healthy-gated and `restore-instance`
-  has no current data to preserve;
-- unsealed staging and superseded deployments are never cleaned (PF-A3.2/PF-A5.1); the workspace replacement stays
-  in place (PF-A3.2); archived database image layers are used at restore since PF-A3.3;
-- a downgrade to the PF-A2.3 control is unsupported while any schema-1 bundle exists;
-- checksums prove integrity, not authorship: bundles have no trust anchor beyond the protected root-owned
-  directories.
-
-PF-A3.2 limits (offline, filesystem and installed-CLI evidence with a fake Docker daemon; nothing ran against DSM,
-btrfs, SMB, a real Docker daemon or PostgreSQL):
-
-- A3-T04 and A3-T05 are blocked at their real Docker/PostgreSQL level (PF-A3.4) *(superseded by PF-A3.4 on Engine
-  28.5.1/Compose v2.40.3: A3-T04 and A3-T05 ran at the real level as the crash matrix, with the open findings of the
-  PF-A3.4 block)*; A3-T10's DSM/btrfs/SMB part is blocked (PF-A5.1); the installed-CLI restart cases run against a
-  simulated application plane of the fake daemon under a test-only release source (see `TEST_REPORT.md`);
-- a lost live-migration result with unchanged heads is never retried (`needs_operator`) until a profile declares
-  transactional upgrades (PF-A4.1);
-- a SIGKILL between a child's start and its `children.json` record leaves only the daemon and database probes for
-  that child; the database probe counts every client session, so a transient one refuses until a later `resume`;
-- workspace staging durability relies on an fsync of every staged directory and file and of the generation
-  container before the renames (PF-A3.4: a global `os.sync()` never returned once an unrelated filesystem hung);
-  power loss is not proven;
-- an ACL-bearing workspace root, a mount-point workspace or an unsafe container ends updates in
-  `workspace_sync_pending` until `--keep-workspace` or a fix;
-- `restore-instance` has no abandon once its data restore started; `backup --emergency` stays journal-less
-  (*superseded by PF-A3.3*: `abort-deploy` after the frontend opened preserves first and is allowed; side-by-side
-  restore is a journaled `restore-side-by-side` operation);
-- *(superseded by PF-A3.3: `pf cleanup`, section 16)* partial capture folders, `pf_verify_*` leftovers of a failed
-  verification, superseded stages, a displaced checkpoint history and retained workspace generations are now removed
-  on request; image tags loaded by an abandoned restore are still only reported, never cleaned;
-- runner records of operations without a journal refused `pf install` until PF-A3.3, which adds the acknowledgement
-  route (section 15); besides `backup --emergency` they include every lifecycle child
-  interrupted or timed out before the confirmation (candidate `compose build`, `compose run` contract checks,
-  `ensure_local_contract`);
-- more than 20000 entries in `operations/` refuse every mutating route until closed operations are archived.
-
-PF-A3.3 limits (offline, filesystem and installed-CLI evidence with a fake Docker daemon; nothing ran against DSM, a
-real Docker daemon or PostgreSQL):
-
-- A3-T06, A3-T07, A3-T08, A3-T15, A3-T16 and the Docker-storage part of A3-T14 are blocked at their real Docker/
-  PostgreSQL level until PF-A3.4 *(superseded by PF-A3.4 on Engine 28.5.1/Compose v2.40.3: A3-T06, A3-T07, A3-T08 and
-  A3-T15 passed at the real level; A3-T16 passed except R65 (F-A34-03); the Docker-storage part of A3-T14 refused
-  correctly, but its no-effect checks failed (F-A34-04, F-A34-06))*; the filesystem part of A3-T14 uses the real
-  `statvfs`;
-- isolation of the `pfverify-*`/`pfrecover-*` topologies is proven from the daemon's reported configuration only
-  (internal network, port bindings, restart policy, mounts); real network, port and egress behaviour is unobserved
-  *(superseded by PF-A3.4 on Engine 28.5.1/Compose v2.40.3: LOOP-07 observed the internal network, no published port,
-  failed egress and unresolvable instance names from inside a real recovery target)*;
-- the application invariant oracle is `app.cli reconcile` of the deployed image; an image without it is recorded as
-  `unavailable`, and the reconcile output itself is never stored;
-- owner decision, applied: the instance purge writes the registry tombstone `state: purged` and releases the project
-  claim (OD-A33-08, design-conforming);
-- declared deviations from design r3 LIFECYCLE §9, **awaiting owner approval** (each fails closed): a recovery target
-  has no listener and is reached only with `docker exec` as root (OD-A33-06); it is recorded by its own
-  `restore-side-by-side` operation, not as a registered instance (OD-A33-07); another instance's bundle, including one
-  from a lost host, is refused before any confirmation (`restore-target-mismatch`, OD-A33-09). PF-A3.3 acceptance is
-  conditional on that approval;
-- the dispositions replace three PF-A3.2 limits above: `abort-deploy` after the frontend opened preserves first,
-  emergency preservation covers `reset-db` and `abort-deploy` (the instance purge stays healthy-gated because its
-  final bundle must be functionally verifiable; `restore-instance` has no current data to preserve, its target is
-  empty), and runner records without a journal have the acknowledgement route.
-
-PF-A3.4 results and limits (real Docker, Compose and PostgreSQL in an isolated generic-Linux container; nothing ran on
-a NAS, DSM, btrfs or SMB; evidence in `_claude_outputs/ops/PF-A3.4/`):
-
-- environment: a privileged `docker:28.5.1-dind` container (Docker Engine 28.5.1, Compose v2.40.3, PostgreSQL 16.15
-  from `postgres:16` pinned by digest, Alpine CPython 3.12 as pf's interpreter) on Docker Desktop for Windows; the
-  Docker root and the instance tree were loop-mounted sparse ext4 images; every base image was pinned by digest
-  (`evidence/<run>/base-images.json`). The installed launcher `/usr/local/bin/pf` ran at a scripted terminal as
-  container root. The host daemon's own containers, volumes, images and networks were proven unchanged by an
-  inventory diff of every evidence run;
-- passed at the real level: LOOP-01/A3-T11 and LOOP-02/A3-T12 (the mandatory loops), LOOP-03 with A3-T03,
-  LOOP-05 (no other instance changed around any alpha step), LOOP-06 (the A3-T10 generic-Linux part), LOOP-07/A3-T15
-  (side-by-side isolation observed for real: internal network, no published port, no egress, no shared credentials or
-  jobs), A1-T11, A1-T12, A1-T14, A1-T13 apart from its rootless part, A2-T04 (registration and the control-only upgrade
-  restart no application container), A3-T06, A3-T07, A3-T08 and C-CONC-01 (concurrent writers around capture and
-  service stop). The real crash matrix (`CRASH_MATRIX.json`, rows R01–R66 and boundary rows B01–B34) interrupted the
-  lifecycle kinds before and after their irreversible effects; every route that ran recovered with intact data and
-  schema oracles, except the rows named below. The R33 dead end left the instance purged in one run, so eleven
-  boundary rows and R43 of that run could not reach their precondition (A3-T05 is passed except R43);
-- defects the real runs found and this slice fixed (each with an offline regression test): the database
-  compatibility check refused the extension name `uuid-ossp` that `postgres:16` lists as available, so every
-  `rollback --restore-db` failed (F-A34-01); the purge bundle's globals archive passed `-d postgres` to `pg_dumpall`,
-  which libpq reads as a connection string, so every real purge was cancelled after its capture (F-A34-02); a purge
-  bundle retains every database of the instance, and `restore-instance` routed a retained leftover `pf_restore_*` or
-  `pf_migrate_*` database to the rollback/update branch, so every attempt ended `plan-input-changed … (unreadable)`
-  with the instance purged (F-A34-09, row R33; fixed after the evidence runs, so its real re-run is pending);
-- findings of the real runs (each failed closed; none lost data), **fixed in the PF-A3.4 fix round** with offline
-  regression tests that fail on the earlier bytes; their real re-run is pending (below): no pf route started an
-  instance's db container that was stopped or killed from outside (`unless-stopped` does not restart it), so `backup`,
-  `update` and `rollback` refused "The database container is not running." and a forward `resume` of an interrupted
-  activation restarted only the backend and failed its health check every time (F-A34-03; rows R10 and R65); every route
-  that needs the database now starts that existing container itself (`note: db-started`, section 16). `restore-instance`
-  onto a fresh volume once failed with "the database system is shutting down" two seconds after the new db container
-  reported healthy: the image's temporary initialization server answers the Unix-socket health check before it shuts
-  down (F-A34-07, R31); pf now waits until the server accepts TCP on 127.0.0.1, which only the final server does. A
-  purge's checkpoint verification once failed because `createdb` exited 1 on a healthy server, and pf reported every
-  such failure as "locale … is not available", which hid the real error (F-A34-08, R29); the detail now carries the
-  server's answer, and the cause of that one failure stays unproven. The capacity refusals of `purge` and `backup` came
-  after the contract probe (a probe container, retained `*-inspect-*` image tags, a rewritten
-  `state/inspect-images.yaml`; purge also wrote `inventory-preliminary.json`), and a refused `restore-instance` of a
-  purged instance created its empty `state/` directory (F-A34-04, F-A34-06); the capacity refusals now come first and a
-  command that wrote no runtime state leaves no empty `state/` behind. A link or special entry in a drifted workspace
-  was refused only by the capture after the services stopped (F-A34-05); it is now refused in the preflight
-  (`workspace-unsupported-entry`, section 16);
-- still open: a refusal that comes after the contract probe (for example `update`'s "Migration files differ" after its
-  candidate build) still leaves the probe's retained image tags (F-A34-04 remainder; they are covered PartFlow image
-  tags that `purge` removes). The `backup --emergency` `pg_dump` is a read-only child and never leaves a runner record, so
-  the A12r2-F06 acknowledgement was proven on a real `deploy` build record only (R41; R66 blocked);
-- validation of the fix round: the canonical offline suite on both images and the new regressions (see
-  `deploy/synology/TEST_REPORT.md`). The real re-run of R10, R29, R31, R33 and R65 and their loops with the final bytes
-  is **pending**: the Docker Desktop VM's global `sync()` hangs on its internal FUSE mount, and only a Docker Desktop
-  restart (an owner action) clears it;
-- declared limits: the release source is the test seam (a local `file://` approved remote with simulated GitHub
-  answers; no HTTPS or GitHub contact); no rootless daemon (A1-T13 rootless part blocked, PF-A5.1); the launcher ran
-  as container root only; a daemon restart is not a power loss or host reboot; an I8 stop at the first workspace
-  rename observed pf between the two renames (R51), and a late edit through an open file survived (L6); OD-A33-06,
-  OD-A33-07 and OD-A33-09 still await owner approval, and the shipped behaviour was tested as is;
-- OD-A33-12: with the db stopped, the forward resume and the superseding `rollback --restore-db` were both dead ends
-  (R65); once the db was started by hand the forward resume completed and the retained `pf_keep_*` held the pre-switch
-  data. The evidence points at the F-A34-03 route gap, which the fix round closes, rather than at a missing reverse
-  switch: the recommended disposition is "no reverse-switch abandon needed", confirmed only by the pending real re-run of
-  R65 and owner approval;
-- nothing here is production-ready; the DSM/SMB parts (A3-T10, A1-T17; PF-A5.1) are unchanged.
-
-**PF-A1 closure (offline).** With PF-A1.4 every entry route uses the A1 primitives (explicit
-instance, one runner, daemon binding, Compose envelope, exact inventory) and no catch-all Compose
-route remains; the PF-A1 safety scope is proven offline only. A1-T11…T14 stay blocked on a real
-Docker daemon (owners PF-A3.4/PF-A5.1, including the real Compose `run` one-off labels) and A1-T17
-on DSM ACL/SMB evidence (owners PF-A2.3/PF-A5.1). No finding is closed overall and nothing here
-is production-ready.
-
-Before relying on v2.5 recovery on important data, perform at least one disposable staging
-cycle on the actual NAS, interactively. A v2.5 NAS path requires legacy adoption (OD-A21-05) before a
-live v2.5 NAS is migrated.
+Before relying on recovery, run one disposable staging cycle interactively on the actual host:
 
 ```text
 install-control.sh init
 → pf config admin --configuration <config> --project <project>
 → pf install register
 → pf config app
-→ doctor
-→ backup
-→ update
-→ purge
-→ restore-instance
-→ verify UI/data
-→ purge
-→ deploy --latest
-→ restore old DB --side-by-side
+→ doctor → deploy --latest → backup → update → purge → restore-instance → check the user interface and the data
+→ purge → deploy --latest → restore-instance <bundle> --side-by-side
 ```
 
-Do not call a staging procedure production-ready until the repository's production phase
-and backup/disaster-recovery gates are completed separately.
+`pf` is not a production tool. Production follows [`DEPLOYMENT.md`](../DEPLOYMENT.md).
+
+## Change history
+
+| Date | Commit | Change |
+| --- | --- | --- |
+| 2026-11-11 | uncommitted | Rewritten as a short guide to what `pf` does today, with the section numbers that its messages cite kept; the stacked checkpoint notes, the v2.5 layout and the planned reusable-controller design were removed, and this table was added. |
+| 2026-11-09 | `b405c6e` | Corrected the facts of the planned reusable-controller design. |
+| 2026-10-14 | `2c360cb` | Recorded the planned reusable-controller design goal. |
+| 2026-10-08 | `182b265`, `91e28d6` | Real Docker, Compose and PostgreSQL integration run (PF-A3.4) and the fixes of its findings. |
+| 2026-10-08 | `3f0da91`, `1b44831`, `181a806` | Integrated operations (PF-A3.3): isolated bundle verification, side-by-side recovery targets, `pf cleanup` and the purged registry state. |
+| 2026-10-07 | `38a40cf`, `d2d99bf` | Operation journal, `resume` and `--abandon`, and the workspace switch (PF-A3.2). |
+| 2026-10-07 | `4d7fe76`, `af77172` | Deployment records, strict bundle manifests and emergency preservation (PF-A3.1). |
+| 2026-10-07 | `2155c95`, `26b6ed4` | Semantic permission policy with `check`, `plan` and `apply` (PF-A2.3). |
+| 2026-10-07 | `5d102d1`, `1244457` | Configuration wizards and the versioned administration settings (PF-A2.2). |
+| 2026-10-07 | `964aefb`, `3b81f3a` | Installer with a preflight and journaled control releases (PF-A2.1). |
+| 2026-10-06 | `4466ea8`, `53246a1`, `7d332e7`, `becd72a` | Daemon binding, Compose checks, exact resource inventory and removal of the Compose passthrough (PF-A1.3, PF-A1.4). |
+| 2026-09-15 | `cef57ea`, `59d8cc0`, `13807ca` | Controlled process runner, frozen application configuration and protected source store (PF-A1.2). |
+| 2026-09-14 | `6917c3f`, `5d59d2a`, `bc46deb` | Protected instance registration, registry, bootstrap verifier and locks (PF-A1.1). |
+| 2026-09-13 | `1ce5e19` | Writable workspace separated from the privileged control (v2.5). |
+| 2026-09-09 | `4f7ecd7`, `69c8664`, `e91adc3` | Guide created with updates, rollback, database reset and readable backups. |

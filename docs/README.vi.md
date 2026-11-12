@@ -38,9 +38,8 @@ runbook khi PartFlow đã chạy.
 | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) | Vì sao shared web hosting chỉ khả thi có điều kiện và nhà cung cấp phải xác nhận những gì trước, gồm cả kết quả đánh giá Hawk Host. | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) |
 
 Không cần cho production: [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)
-([bản tiếng Anh](./deployment/SYNOLOGY_ADMIN.md)) mô tả công cụ Deployment Admin (`pf`), dùng để quản lý các instance
-staging trên một máy chủ khác máy chủ production, gồm cả thiết kế dự kiến của nó như một controller triển khai dùng
-lại được.
+([bản tiếng Anh](./deployment/SYNOLOGY_ADMIN.md)) là hướng dẫn ngắn về công cụ Deployment Admin (`pf`), dùng để quản lý
+các instance staging trên một máy chủ khác máy chủ production; việc phát triển công cụ này đã dừng ngày 2026-10-14.
 
 ## Chính sách bản dịch
 
@@ -54,7 +53,8 @@ nằm trong phạm vi dịch.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Các tài liệu triển khai được liệt kê theo thứ tự đọc, có thêm hướng dẫn Cloudflare; hướng dẫn Deployment Admin được ghi rõ là không cần cho production; bộ công cụ staging đã bị thay thế được xóa. |
+| 2026-11-11 | uncommitted | Mục Deployment Admin mô tả hướng dẫn ngắn đã viết lại và không còn nhắc đến thiết kế controller dùng lại được đã bị bỏ. |
+| 2026-11-10 | `e0e5056` | Các tài liệu triển khai được liệt kê theo thứ tự đọc, có thêm hướng dẫn Cloudflare; hướng dẫn Deployment Admin được ghi rõ là không cần cho production; bộ công cụ staging đã bị thay thế được xóa. |
 | 2026-11-09 | `398c617` | Viết lại cho người mới đọc: phần giới thiệu, mô tả hiện tại một câu cho mỗi tài liệu, và bảng thay đổi này. |
 | 2026-10-14 | `2c360cb` | Mục Deployment Admin nêu mục tiêu thiết kế dự kiến là một controller dùng lại được. |
 | 2026-09-02 | `8e5ab18`, `6fae517` | Chuyển các bản dịch tiếng Việt về cạnh bản gốc tiếng Anh và trỏ lại mọi link. |
