@@ -1,13 +1,13 @@
 /* Administration — sidebar + configuration panels (GUI_DESIGN §9).
    The view root fills the shell content area through flex layout — no
    viewport-height calculation. */
-.ad {
+.admin {
   display: flex;
   flex-direction: column;
   flex: 1 0 auto;
 }
 
-.ad-wrap {
+.admin-wrap {
   display: grid;
   grid-template-columns: 242px 1fr;
   flex: 1 0 auto;
@@ -16,18 +16,18 @@
 }
 
 @media (max-width: 900px) {
-  .ad-wrap {
+  .admin-wrap {
     grid-template-columns: 1fr;
   }
 }
 
-.ad-nav {
+.admin-nav {
   background: var(--panel);
   border-right: 1px solid var(--border);
   padding: 16px 10px;
 }
 
-.ad-nav .grp {
+.admin-nav .grp {
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 1.1px;
@@ -36,7 +36,7 @@
   font-weight: 800;
 }
 
-.ad-nav button {
+.admin-nav button {
   display: block;
   width: 100%;
   text-align: left;
@@ -48,43 +48,43 @@
   color: var(--text);
 }
 
-.ad-nav button:hover {
+.admin-nav button:hover {
   background: var(--panel2);
 }
 
-.ad-nav button.active {
+.admin-nav button.active {
   background: var(--info-surface);
   color: var(--info-t);
   font-weight: 750;
 }
 
-.ad-main {
+.admin-main {
   padding: 24px 28px;
   min-width: 0;
 }
 
-.ad-main h1 {
+.admin-main h1 {
   font-size: 22px;
   margin-bottom: 4px;
 }
 
-.ad-main .sub {
+.admin-main .sub {
   color: var(--muted);
   font-size: 14px;
   margin-bottom: 18px;
 }
 
-.ad-top {
+.admin-top {
   display: flex;
   align-items: center;
   margin-bottom: 14px;
 }
 
-.ad-top .spacer {
+.admin-top .spacer {
   flex: 1;
 }
 
-.ad-table {
+.admin-table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
@@ -95,7 +95,7 @@
   box-shadow: var(--shadow);
 }
 
-.ad-table th {
+.admin-table th {
   font-size: 11.5px;
   text-transform: uppercase;
   letter-spacing: 0.8px;
@@ -106,17 +106,17 @@
   border-bottom: 1px solid var(--border);
 }
 
-.ad-table td {
+.admin-table td {
   padding: 12px 14px;
   border-bottom: 1px solid var(--hair);
   font-size: 14px;
 }
 
-.ad-table tr:last-child td {
+.admin-table tr:last-child td {
   border-bottom: none;
 }
 
-.ad-table .modecell {
+.admin-table .modecell {
   font-size: 12.5px;
   color: var(--muted);
 }
@@ -144,7 +144,7 @@
   color: var(--info-t);
 }
 
-.ad-notice {
+.admin-notice {
   background: var(--info-surface-weak);
   border: 1px solid var(--info-border);
   border-radius: 12px;
@@ -156,7 +156,7 @@
 }
 
 /* Barcode configuration — Machine Asset Tag format form + preview. */
-.ad-config {
+.admin-config {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -164,12 +164,12 @@
   max-width: 720px;
 }
 
-.ad-config h2 {
+.admin-config h2 {
   font-size: 16px;
   margin-bottom: 8px;
 }
 
-.ad-confighelp {
+.admin-confighelp {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
@@ -177,12 +177,12 @@
   max-width: 62ch;
 }
 
-.ad-confighelp code {
+.admin-confighelp code {
   font-family: var(--mono), monospace;
   white-space: nowrap;
 }
 
-.ad-configgrid {
+.admin-configgrid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px 16px;
@@ -190,12 +190,12 @@
 }
 
 @media (max-width: 640px) {
-  .ad-configgrid {
+  .admin-configgrid {
     grid-template-columns: 1fr;
   }
 }
 
-.ad-configgrid label {
+.admin-configgrid label {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -204,7 +204,7 @@
   color: var(--muted);
 }
 
-.ad-configgrid .field {
+.admin-configgrid .field {
   background-color: var(--bg);
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -213,29 +213,29 @@
   color: var(--text);
 }
 
-.ad-configgrid .field.mono {
+.admin-configgrid .field.mono {
   font-family: var(--mono), monospace;
 }
 
-.ad-configgrid .field:focus {
+.admin-configgrid .field:focus {
   outline: 2px solid var(--info-border);
   outline-offset: 1px;
 }
 
-.ad-config .err {
+.admin-config .err {
   color: var(--err-t);
   font-size: 13px;
   margin-bottom: 12px;
 }
 
-.ad-configpreview {
+.admin-configpreview {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 2px 14px;
   margin-bottom: 14px;
 }
 
-.ad-configpreview .prow {
+.admin-configpreview .prow {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
@@ -243,22 +243,22 @@
   padding: 8px 0;
 }
 
-.ad-configpreview .prow + .prow {
+.admin-configpreview .prow + .prow {
   border-top: 1px solid var(--hair);
 }
 
-.ad-configpreview .k {
+.admin-configpreview .k {
   font-size: 12px;
   color: var(--muted);
 }
 
-.ad-configpreview .v {
+.admin-configpreview .v {
   font-family: var(--mono), monospace;
   font-size: 14px;
   font-weight: 700;
 }
 
-.ad-placeholder {
+.admin-placeholder {
   background: var(--panel);
   border: 1px dashed var(--border);
   border-radius: var(--radius);
@@ -274,33 +274,33 @@
    per Area, non-self-evident cells carrying their column label via
    data-label (GUI_DESIGN §2.5). */
 @media (max-width: 800px) {
-  .ad-table,
-  .ad-table tbody,
-  .ad-table tr,
-  .ad-table td {
+  .admin-table,
+  .admin-table tbody,
+  .admin-table tr,
+  .admin-table td {
     display: block;
     width: 100%;
   }
 
-  .ad-table thead {
+  .admin-table thead {
     display: none;
   }
 
-  .ad-table tbody tr {
+  .admin-table tbody tr {
     border-bottom: 1px solid var(--border);
     padding: 10px 0;
   }
 
-  .ad-table tbody tr:last-child {
+  .admin-table tbody tr:last-child {
     border-bottom: none;
   }
 
-  .ad-table td {
+  .admin-table td {
     border-bottom: none;
     padding: 3px 14px;
   }
 
-  .ad-table td[data-label]::before {
+  .admin-table td[data-label]::before {
     content: attr(data-label);
     display: inline-block;
     margin-right: 8px;
@@ -313,7 +313,7 @@
 
   /* The empty Terminal cell of a non-terminal Area renders no pill —
      collapse the leftover block line. */
-  .ad-table td:empty {
+  .admin-table td:empty {
     display: none;
   }
 }
@@ -322,7 +322,7 @@
    slide-control language (role="switch", track + knob + written state,
    like the Production Board footer switches), one full-width row per
    sensitive action with its label and a quiet explanation. */
-.ad-switchlist {
+.admin-switchlist {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -330,7 +330,7 @@
   max-width: 640px;
 }
 
-.ad-switch {
+.admin-switch {
   display: flex;
   align-items: center;
   gap: 14px;
@@ -342,7 +342,7 @@
   background: var(--panel);
 }
 
-.ad-switch .swtext {
+.admin-switch .swtext {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -350,19 +350,19 @@
   gap: 2px;
 }
 
-.ad-switch .swlabel {
+.admin-switch .swlabel {
   font-size: 14px;
   font-weight: 750;
   color: var(--text);
 }
 
-.ad-switch .swdesc {
+.admin-switch .swdesc {
   font-size: 12px;
   color: var(--faint);
   line-height: 1.45;
 }
 
-.ad-switch .track {
+.admin-switch .track {
   position: relative;
   flex: none;
   width: 34px;
@@ -375,7 +375,7 @@
     border-color 0.15s;
 }
 
-.ad-switch .knob {
+.admin-switch .knob {
   position: absolute;
   top: 2px;
   left: 2px;
@@ -388,17 +388,17 @@
     background 0.15s;
 }
 
-.ad-switch.on .track {
+.admin-switch.on .track {
   border-color: var(--info-t);
   background: var(--info-surface);
 }
 
-.ad-switch.on .knob {
+.admin-switch.on .knob {
   transform: translateX(16px);
   background: var(--info-t);
 }
 
-.ad-switch .swstate {
+.admin-switch .swstate {
   flex: none;
   width: 24px;
   font-size: 12px;
@@ -406,7 +406,7 @@
   color: var(--muted);
 }
 
-.ad-switch.on .swstate {
+.admin-switch.on .swstate {
   color: var(--info-t);
 }
 
@@ -415,15 +415,15 @@
 /* Whole-row activation (the same pattern as the Machines and Part
    Numbers tables): the complete row opens the editor dialog and the
    name-cell button is the keyboard and screen-reader entry point. */
-.ad-table tr.selrow {
+.admin-table tr.selrow {
   cursor: pointer;
 }
 
-.ad-table tr.selrow:hover td {
+.admin-table tr.selrow:hover td {
   background: var(--row-hover);
 }
 
-.ad-table .rowbtn {
+.admin-table .rowbtn {
   display: inline-block;
   width: 100%;
   text-align: left;
@@ -435,12 +435,12 @@
   cursor: pointer;
 }
 
-.ad-table .rowbtn:focus-visible {
+.admin-table .rowbtn:focus-visible {
   outline: none;
 }
 
 /* Quiet mono Operation code beside the display name. */
-.ad-opcode {
+.admin-opcode {
   font-size: 12px;
   color: var(--muted);
   margin-left: 6px;
@@ -448,14 +448,14 @@
 
 /* Editor dialog form: stacked label + control rows, one shared
    control height (mirrors the Machines dialog form rhythm). */
-.ad-form {
+.admin-form {
   display: flex;
   flex-direction: column;
   gap: 12px;
   margin: 14px 0 4px;
 }
 
-.ad-form label:not(.ad-check) {
+.admin-form label:not(.admin-check) {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -464,12 +464,12 @@
   color: var(--muted);
 }
 
-.ad-form .field {
+.admin-form .field {
   height: 44px;
 }
 
-.ad-form .err,
-.ad-config .row + .err {
+.admin-form .err,
+.admin-config .row + .err {
   color: var(--err-t);
   font-size: 12.5px;
   font-weight: 700;
@@ -478,13 +478,13 @@
 
 /* Native color input: keep the shared field frame, let the swatch
    fill it. */
-.ad-form .ad-color {
+.admin-form .admin-color {
   padding: 4px 6px;
   width: 120px;
 }
 
 /* Labeled Active/Terminal checkbox row of the editor dialogs. */
-.ad-check {
+.admin-check {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -493,7 +493,7 @@
   cursor: pointer;
 }
 
-.ad-check input {
+.admin-check input {
   width: 18px;
   height: 18px;
   accent-color: var(--info);
@@ -502,7 +502,7 @@
 /* Read-only identity panel of an editor dialog (Area barcode and
    Department, Operation Area binding, Station ID): quiet key/value
    rows on the secondary surface with the stable-identity note. */
-.ad-identity {
+.admin-identity {
   background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -510,14 +510,14 @@
   margin: 12px 0 2px;
 }
 
-.ad-identity .idrow {
+.admin-identity .idrow {
   display: flex;
   gap: 12px;
   align-items: baseline;
   padding: 2px 0;
 }
 
-.ad-identity .k {
+.admin-identity .k {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.8px;
@@ -525,11 +525,11 @@
   min-width: 96px;
 }
 
-.ad-identity .v {
+.admin-identity .v {
   font-size: 13.5px;
 }
 
-.ad-idnote {
+.admin-idnote {
   font-size: 12px;
   color: var(--muted);
   line-height: 1.55;
@@ -537,7 +537,7 @@
 }
 
 /* Saved confirmation of the Barcode configuration settings form. */
-.ad-savednote {
+.admin-savednote {
   color: var(--ok-t);
   font-size: 12.5px;
   font-weight: 700;
@@ -545,7 +545,7 @@
 }
 
 /* The settings form's action row sits inside the panel. */
-.ad-config .row {
+.admin-config .row {
   display: flex;
   justify-content: flex-end;
   margin-top: 14px;
@@ -554,39 +554,39 @@
 /* --- Workers ----------------------------------------------------------- */
 
 /* Worker name cell: the shared avatar beside the bold name. */
-.ad-worker {
+.admin-worker {
   display: inline-flex;
   align-items: center;
   gap: 10px;
 }
 
 /* Live canonical-form preview and quiet help under an editor field. */
-.ad-fieldnotes {
+.admin-fieldnotes {
   display: flex;
   flex-direction: column;
   gap: 2px;
   margin-top: -6px;
 }
 
-.ad-fieldhelp,
-.ad-fieldnote {
+.admin-fieldhelp,
+.admin-fieldnote {
   font-size: 12px;
   line-height: 1.5;
   margin: 0;
 }
 
-.ad-fieldhelp {
+.admin-fieldhelp {
   color: var(--faint);
 }
 
-.ad-fieldnote {
+.admin-fieldnote {
   color: var(--muted);
   font-weight: 700;
 }
 
 /* Avatar block of the Worker editor: the current or staged avatar with
    its choose/remove actions beside it. */
-.ad-avatarlabel {
+.admin-avatarlabel {
   display: block;
   font-size: 12px;
   font-weight: 750;
@@ -594,24 +594,24 @@
   margin-bottom: 8px;
 }
 
-.ad-avatarrow {
+.admin-avatarrow {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
-.ad-avataractions {
+.admin-avataractions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 9px;
 }
 
-.ad-avatarblock .ad-fieldhelp {
+.admin-avatarblock .admin-fieldhelp {
   margin: 8px 0 0;
 }
 
-.ad-avatarblock .err {
+.admin-avatarblock .err {
   margin: 6px 0 0;
 }
 
@@ -619,7 +619,7 @@
 
 /* One permission group of the Roles editor: a quiet framed fieldset of
    checkbox rows under its group legend. */
-.ad-permgroup {
+.admin-permgroup {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -629,7 +629,7 @@
   border-radius: 12px;
 }
 
-.ad-permgroup legend {
+.admin-permgroup legend {
   padding: 0 6px;
   font-size: 12px;
   font-weight: 750;
@@ -638,24 +638,24 @@
 
 /* The role × correction-permission table sits inside the settings
    panel, below its help text. */
-.ad-config .ad-table {
+.admin-config .admin-table {
   margin-bottom: 14px;
 }
 
-.ad-table .ad-matrixcell input {
+.admin-table .admin-matrixcell input {
   width: 18px;
   height: 18px;
   accent-color: var(--info);
   cursor: pointer;
 }
 
-.ad-table .ad-matrixcell input:disabled {
+.admin-table .admin-matrixcell input:disabled {
   cursor: default;
 }
 
 /* Scan Station device enrollment code (Phase 14 slice 4): shown once,
    large enough to read across a desk and type at the station. */
-.ad-enrollcode {
+.admin-enrollcode {
   margin: 10px 0 6px;
   font-size: 30px;
   font-weight: 800;
@@ -663,7 +663,7 @@
   user-select: all;
 }
 
-.ad-devices {
+.admin-devices {
   display: inline-flex;
   align-items: center;
   gap: 10px;

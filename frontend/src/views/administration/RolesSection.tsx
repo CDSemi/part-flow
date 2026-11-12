@@ -94,7 +94,7 @@ export function RolesSection() {
         {roles.length === 0 ? (
           <EmptyState message="No roles configured yet." />
         ) : (
-          <table className="ad-table">
+          <table className="admin-table">
             <thead>
               <tr>
                 <th>Role</th>
@@ -135,7 +135,7 @@ export function RolesSection() {
             </tbody>
           </table>
         )}
-        <div className="ad-notice">
+        <div className="admin-notice">
           Each user holds one role. PartFlow checks the Administration and
           Management permissions; what an enrolled Scan Station may do follows
           the role marked Applied at Scan Stations. Correction permissions are
@@ -291,7 +291,7 @@ function RoleDialog({
   return (
     <ModalDialog label={title} onClose={requestClose} size="wide">
       <h3>{title}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         <AdminField label="Name">
           <input
             ref={nameField}
@@ -307,18 +307,18 @@ function RoleDialog({
           </div>
         ) : null}
         {role?.appliesAtScanStations ? (
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             The permissions of this role decide what every enrolled Scan Station
             device may do. Removing one stops that action at every Scan Station.
           </p>
         ) : null}
         {ROLE_PERMISSION_GROUPS.map((group) => (
-          <fieldset key={group.label} className="ad-permgroup">
+          <fieldset key={group.label} className="admin-permgroup">
             <legend>{group.label}</legend>
             {group.permissions
               .filter((key) => editable.includes(key))
               .map((key) => (
-                <label key={key} className="ad-check">
+                <label key={key} className="admin-check">
                   <input
                     type="checkbox"
                     checked={checked.has(key)}
@@ -331,11 +331,11 @@ function RoleDialog({
           </fieldset>
         ))}
         {role && showsManagementHeld ? (
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             {`Correction permissions: ${heldCorrectionLabels}; Manage correction permissions: held — set by a user who may manage correction permissions.`}
           </p>
         ) : role ? (
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             Correction permissions: {heldCorrectionLabels} — set in Policies →
             Correction permissions.
           </p>

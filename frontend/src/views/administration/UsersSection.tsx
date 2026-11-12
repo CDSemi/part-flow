@@ -164,7 +164,7 @@ export function UsersSection() {
         {users.length === 0 ? (
           <EmptyState message="No users configured yet." />
         ) : (
-          <table className="ad-table">
+          <table className="admin-table">
             <thead>
               <tr>
                 <th>User</th>
@@ -191,7 +191,7 @@ export function UsersSection() {
                       editable={administersUsers}
                       label={`Edit ${user.displayName}`}
                     >
-                      <span className="ad-worker">
+                      <span className="admin-worker">
                         <Avatar
                           name={user.displayName}
                           size="sm"
@@ -238,7 +238,7 @@ export function UsersSection() {
             </tbody>
           </table>
         )}
-        <div className="ad-notice">
+        <div className="admin-notice">
           Users sign in with their login name and a password. Use Set password…
           to give a user a password. PartFlow checks permissions in
           Administration and Management; Scan Station screens work only on
@@ -247,7 +247,7 @@ export function UsersSection() {
           deactivated, never deleted; deactivating a user signs them out.
         </div>
         {guarded && users.some(inProtectedRole) ? (
-          <p className="ad-confighelp">
+          <p className="admin-confighelp">
             Users whose role holds correction permissions or the permission to
             manage them can be renamed here; their role, whether they are active
             and their password can be changed only by a user who may manage
@@ -507,7 +507,7 @@ function UserDialog({
   return (
     <ModalDialog label={title} onClose={requestClose}>
       <h3>{title}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         <AdminField label="Name">
           <input
             ref={nameField}
@@ -532,15 +532,15 @@ function UserDialog({
             spellCheck={false}
           />
         </AdminField>
-        <div className="ad-fieldnotes">
+        <div className="admin-fieldnotes">
           <div aria-live="polite">
             {canonical && canonical !== login ? (
-              <p className="ad-fieldnote">
+              <p className="admin-fieldnote">
                 Saved as: <span className="mono">{canonical}</span>
               </p>
             ) : null}
           </div>
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             Saved in small letters — letter case does not matter.
           </p>
         </div>
@@ -550,7 +550,7 @@ function UserDialog({
           </div>
         ) : null}
         {roleFixed ? (
-          <div className="ad-identity">
+          <div className="admin-identity">
             <div className="idrow">
               <span className="k">Role</span>
               <span className="v">{savedRole?.name ?? saved?.roleName}</span>
@@ -583,8 +583,8 @@ function UserDialog({
               </select>
             </AdminField>
             {managesCorrections ? null : (
-              <div className="ad-fieldnotes">
-                <p className="ad-fieldhelp">{PROTECTED_ROLE_HINT}</p>
+              <div className="admin-fieldnotes">
+                <p className="admin-fieldhelp">{PROTECTED_ROLE_HINT}</p>
               </div>
             )}
           </>
@@ -594,13 +594,13 @@ function UserDialog({
             Choose a role.
           </div>
         ) : null}
-        <div className="ad-avatarblock">
-          <span className="ad-avatarlabel">
+        <div className="admin-avatarblock">
+          <span className="admin-avatarlabel">
             Avatar <span className="field-optional">(optional)</span>
           </span>
-          <div className="ad-avatarrow">
+          <div className="admin-avatarrow">
             <Avatar name={trimmedName} size="md" src={avatarSrc} />
-            <div className="ad-avataractions">
+            <div className="admin-avataractions">
               <button
                 type="button"
                 className="btn ghost"
@@ -633,7 +633,7 @@ function UserDialog({
               ) : null}
             </div>
           </div>
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             PNG, JPEG or WebP. Large images are resized before upload.
           </p>
           {imageError ? (

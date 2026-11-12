@@ -79,9 +79,9 @@ export function HistoryArchivalSection() {
   return (
     <>
       {header}
-      <div className="ad-config">
+      <div className="admin-config">
         <h2>Retention period</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           How long Movement history stays in the PartFlow database before
           archival maintenance may move it to archive files. Saving the period
           archives or deletes nothing, and it never affects production scanning.
@@ -109,7 +109,7 @@ export function HistoryArchivalSection() {
           />
         )}
         <h2>Archival and purge runs</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Archival and purge runs — by retention period, data-size threshold or
           manual request — are not available yet. Nothing is archived or purged:
           all Movement history stays in the database.
@@ -175,8 +175,8 @@ function RetentionPeriodForm({
 
   return (
     <>
-      <div className="ad-form">
-        <label className="ad-check">
+      <div className="admin-form">
+        <label className="admin-check">
           <input
             type="radio"
             name="retention-period-choice"
@@ -185,7 +185,7 @@ function RetentionPeriodForm({
           />
           <span>No retention period</span>
         </label>
-        <label className="ad-check">
+        <label className="admin-check">
           <input
             type="radio"
             name="retention-period-choice"
@@ -197,7 +197,7 @@ function RetentionPeriodForm({
       </div>
       {keepPeriod ? (
         <>
-          <div className="ad-configgrid">
+          <div className="admin-configgrid">
             <label>
               Retention period (months)
               <input
@@ -219,7 +219,7 @@ function RetentionPeriodForm({
               {PERIOD_ERROR}
             </div>
           ) : (
-            <p className="ad-confighelp">
+            <p className="admin-confighelp">
               {`Retention period: ${formatRetentionPeriod(months)}.`}
             </p>
           )}
@@ -227,7 +227,7 @@ function RetentionPeriodForm({
       ) : null}
       <ServerErrorNote message={serverError} />
       {savedNote ? (
-        <div className="ad-savednote" role="status">
+        <div className="admin-savednote" role="status">
           ✓ Retention period saved.
         </div>
       ) : null}

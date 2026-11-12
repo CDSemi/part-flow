@@ -103,9 +103,9 @@ export function SettingsSection() {
   return (
     <>
       {header}
-      <div className="ad-config">
+      <div className="admin-config">
         <h2>Due Soon warning</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           A due date reads as due soon when its days left fall within this
           window: the lead-time percentage of the Work Order&apos;s received →
           due lead time, never fewer than the minimum and never more than the
@@ -140,7 +140,7 @@ export function SettingsSection() {
         )}
         <SignInSettingsPanel />
         <h2>Other settings</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Other application settings are not available yet.
         </p>
       </div>
@@ -212,7 +212,7 @@ function DueSoonForm({
 
   return (
     <>
-      <div className="ad-configgrid">
+      <div className="admin-configgrid">
         <DayField
           label="Minimum warning days"
           range={DUE_SOON_DAYS_RANGE}
@@ -241,7 +241,7 @@ function DueSoonForm({
         </div>
       ) : null}
       {valid ? (
-        <ul className="ad-confighelp">
+        <ul className="admin-confighelp">
           {EXAMPLE_LEADS.map((lead) => {
             const days = dueSoonWindowDays(lead, policy);
             return (
@@ -254,7 +254,7 @@ function DueSoonForm({
       ) : null}
       <ServerErrorNote message={serverError} />
       {savedNote ? (
-        <div className="ad-savednote" role="status">
+        <div className="admin-savednote" role="status">
           ✓ Due Soon warning saved.
         </div>
       ) : null}

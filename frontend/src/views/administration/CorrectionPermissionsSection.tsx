@@ -60,9 +60,9 @@ export function CorrectionPermissionsSection() {
       {canWrite ? null : (
         <ViewOnlyNote permission="MANAGE_CORRECTION_PERMISSIONS" />
       )}
-      <div className="ad-config">
+      <div className="admin-config">
         <h2>Undo reason</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           When On, every Undo at a Scan Station asks for a reason before the
           reversal can be confirmed, and a reversal without a reason is refused.
           The reason is recorded with the reversal and shown in Tracking. When
@@ -70,7 +70,7 @@ export function CorrectionPermissionsSection() {
         </p>
         <UndoReasonPanel canWrite={canWrite} writeBlocked={writeBlocked} />
         <h2>Who may undo or correct</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Choose which roles hold each correction permission. Edit Work Order
           Allocation controls allocating stocked quantity from Management and
           reversing allocations; the Stockroom station&apos;s receiving
@@ -80,7 +80,7 @@ export function CorrectionPermissionsSection() {
           corrections grant nothing yet because PartFlow has no such correction.
         </p>
         <CorrectionRoleTable canWrite={canWrite} writeBlocked={writeBlocked} />
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Undo recent eligible scans covers exactly the actions the Scan
           Station&apos;s Undo offers — there is no extra time limit.
         </p>
@@ -156,7 +156,7 @@ function UndoReasonPanel({
 
   return (
     <>
-      <div className="ad-switchlist">
+      <div className="admin-switchlist">
         <PolicySwitch
           label="Require a reason for every Undo"
           description="Applies to every Area and every Scan Station."
@@ -232,7 +232,7 @@ function CorrectionRoleTable({
 
   return (
     <>
-      <table className="ad-table">
+      <table className="admin-table">
         <thead>
           <tr>
             <th>Role</th>
@@ -250,7 +250,7 @@ function CorrectionRoleTable({
               {CORRECTION_PERMISSIONS.map((key) => (
                 <td
                   key={key}
-                  className="ad-matrixcell"
+                  className="admin-matrixcell"
                   data-label={permissionChoiceLabel(key)}
                 >
                   {canWrite ? (

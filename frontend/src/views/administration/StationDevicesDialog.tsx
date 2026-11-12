@@ -102,15 +102,17 @@ export function StationDevicesDialog({
       {!manages ? (
         <ViewOnlyNote permission="MANAGE_SCAN_STATIONS" />
       ) : !canEnroll ? (
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Enrolling a device needs the Manage correction permissions permission
           while the role applied at Scan Stations holds correction permissions.
         </p>
       ) : null}
       {devices.length === 0 ? (
-        <p className="ad-fieldhelp">No device is enrolled for this station.</p>
+        <p className="admin-fieldhelp">
+          No device is enrolled for this station.
+        </p>
       ) : (
-        <table className="ad-table" aria-label="Devices">
+        <table className="admin-table" aria-label="Devices">
           <thead>
             <tr>
               <th>Device</th>
@@ -161,7 +163,7 @@ export function StationDevicesDialog({
           </tbody>
         </table>
       )}
-      <p className="ad-fieldhelp">
+      <p className="admin-fieldhelp">
         An enrolled device can use this Scan Station until it is revoked. Each
         device has its own enrollment; a device enrolled for another station
         cannot act here. Last seen is the device's most recent request to
@@ -276,7 +278,7 @@ function EnrollDeviceDialog({
       <ModalDialog label={title} onClose={onClose}>
         <h3>{title}</h3>
         <div
-          className="big mono ad-enrollcode"
+          className="big mono admin-enrollcode"
           aria-label={`Enrollment code ${spokenCode(issued.code)}`}
         >
           {issued.code}
@@ -298,7 +300,7 @@ function EnrollDeviceDialog({
   return (
     <ModalDialog label={title} onClose={busy ? () => undefined : onClose}>
       <h3>{title}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         <AdminField label="Device name">
           <input
             ref={field}
@@ -311,7 +313,7 @@ function EnrollDeviceDialog({
             }}
           />
         </AdminField>
-        <p className="ad-fieldhelp">
+        <p className="admin-fieldhelp">
           For example "Lathe cell PC" — shown in this list only.
         </p>
         {labelInvalid && attempted ? (
@@ -320,7 +322,7 @@ function EnrollDeviceDialog({
           </div>
         ) : null}
         {replaces ? (
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             When the new code is used, {replaces.label} stops working at once.
           </p>
         ) : null}

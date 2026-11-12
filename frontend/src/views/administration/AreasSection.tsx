@@ -177,7 +177,7 @@ export function AreasSection() {
           }
         />
       )}
-      <div className="ad-notice">
+      <div className="admin-notice">
         Area <b>identity and barcode are stable</b> — display name, description
         and color may change without affecting historical Movements. An Area
         supporting multiple Operations (e.g. External) requires Operation
@@ -257,7 +257,7 @@ function AreasTable({
       )
       .map((machine) => machine.name);
   return (
-    <table className="ad-table">
+    <table className="admin-table">
       <thead>
         <tr>
           <th>Area</th>
@@ -417,7 +417,7 @@ function AreaDialog({
     <ModalDialog label={area ? 'Edit Area' : 'New Area'} onClose={onCancel}>
       <h3>{area ? 'Edit Area' : 'New Area'}</h3>
       {area ? (
-        <div className="ad-identity">
+        <div className="admin-identity">
           <div className="idrow">
             <span className="k">Barcode</span>
             <span className="v barcodeval">{area.barcodeValue ?? '—'}</span>
@@ -426,13 +426,13 @@ function AreaDialog({
             <span className="k">Department</span>
             <span className="v">{departmentName}</span>
           </div>
-          <p className="ad-idnote">
+          <p className="admin-idnote">
             Area identity and barcode are stable — display properties may change
             without affecting historical Movements.
           </p>
         </div>
       ) : null}
-      <div className="ad-form">
+      <div className="admin-form">
         {!area ? (
           <AdminField label="Department">
             <select
@@ -477,7 +477,7 @@ function AreaDialog({
         </AdminField>
         <AdminField label="Identity color">
           <input
-            className="field ad-color"
+            className="field admin-color"
             type="color"
             value={color}
             onChange={(event) => {
@@ -499,8 +499,8 @@ function AreaDialog({
             <option value="SCANNED">{WORKER_ID_MODE_LABELS.SCANNED}</option>
           </select>
         </AdminField>
-        <div className="ad-fieldnotes">
-          <p className="ad-fieldhelp">
+        <div className="admin-fieldnotes">
+          <p className="admin-fieldhelp">
             {workerIdMode === 'FIXED'
               ? "Every production action at this Area's Scan Stations records the Fixed Worker."
               : workerIdMode === 'SCANNED'
@@ -539,8 +539,8 @@ function AreaDialog({
               </select>
             </AdminField>
             {activeWorkers.length === 0 ? (
-              <div className="ad-fieldnotes">
-                <p className="ad-fieldhelp">
+              <div className="admin-fieldnotes">
+                <p className="admin-fieldhelp">
                   No active Workers — add one in Administration → Workers.
                 </p>
               </div>

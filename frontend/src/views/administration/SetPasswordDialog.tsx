@@ -80,7 +80,7 @@ export function SetPasswordDialog({
         lock on the account is cleared.
       </p>
       <form
-        className="ad-form"
+        className="admin-form"
         noValidate
         onSubmit={(event) => {
           event.preventDefault();

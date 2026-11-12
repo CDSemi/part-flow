@@ -24,7 +24,7 @@ export function SectionHeader({
   action?: ReactNode;
 }) {
   return (
-    <div className="ad-top">
+    <div className="admin-top">
       <div>
         <h1>{title}</h1>
         <div className="sub">{subtitle}</div>
@@ -42,7 +42,7 @@ export function SectionHeader({
  */
 export function ViewOnlyNote({ permission }: { permission: Permission }) {
   return (
-    <p className="ad-confighelp">
+    <p className="admin-confighelp">
       View only — changing this needs the {PERMISSION_LABELS[permission]}{' '}
       permission.
     </p>
@@ -115,7 +115,7 @@ export function ActiveField({
   onChange: (next: boolean) => void;
 }) {
   return (
-    <label className="ad-check">
+    <label className="admin-check">
       <input
         type="checkbox"
         checked={checked}
@@ -127,7 +127,7 @@ export function ActiveField({
 }
 
 /**
- * One On/Off policy switch of a settings section (the `ad-switchlist`
+ * One On/Off policy switch of a settings section (the `admin-switchlist`
  * presentation). The owner saves on click and re-reads the stored
  * value; the switch only renders what it is given.
  */
@@ -152,7 +152,7 @@ export function PolicySwitch({
       role="switch"
       aria-checked={on}
       aria-label={ariaLabel}
-      className={`ad-switch${on ? ' on' : ''}`}
+      className={`admin-switch${on ? ' on' : ''}`}
       disabled={disabled}
       onClick={onToggle}
     >
@@ -178,7 +178,7 @@ export function ReadOnlyValues({
   rows: readonly { label: string; value: ReactNode }[];
 }) {
   return (
-    <div className="ad-configpreview">
+    <div className="admin-configpreview">
       {rows.map((row) => (
         <div key={row.label} className="prow">
           <span className="k">{row.label}</span>

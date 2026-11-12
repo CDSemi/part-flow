@@ -166,9 +166,9 @@ export function WorkerSessionsSection() {
   return (
     <>
       {header}
-      <div className="ad-config">
+      <div className="admin-config">
         <h2>Sliding inactivity timeout</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           A scanned Worker Session ends after this period without a valid
           production interaction — never at a shift boundary. One default value
           with optional per-Area overrides.
@@ -191,7 +191,7 @@ export function WorkerSessionsSection() {
           />
         )}
         <h2>Per-Area overrides</h2>
-        <table className="ad-table">
+        <table className="admin-table">
           <thead>
             <tr>
               <th>Area</th>
@@ -231,13 +231,13 @@ export function WorkerSessionsSection() {
             ))}
           </tbody>
         </table>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           The timeout applies at Scan Stations of Areas in Scanned session mode.
           A change takes effect at each session's next valid production
           interaction or badge scan.
         </p>
         <h2>Badge confirmation for sensitive actions</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Every sensitive action always ends in a final confirmation question
           restating the key facts. Each option below upgrades that final step to
           a required Worker badge scan in Areas with scanned Worker Sessions —
@@ -246,7 +246,7 @@ export function WorkerSessionsSection() {
           badge exists there.
         </p>
         {canWrite ? (
-          <div className="ad-switchlist">
+          <div className="admin-switchlist">
             {BADGE_CONFIRMATION_OPTIONS.map(
               ({ action, key, label, description }) => {
                 const on = policy.badgeConfirmation[key];
@@ -330,7 +330,7 @@ function DefaultTimeoutForm({
 
   return (
     <>
-      <div className="ad-configgrid">
+      <div className="admin-configgrid">
         <label>
           Default timeout (minutes)
           <input
@@ -354,7 +354,7 @@ function DefaultTimeoutForm({
       ) : null}
       <ServerErrorNote message={serverError} />
       {savedNote ? (
-        <div className="ad-savednote" role="status">
+        <div className="admin-savednote" role="status">
           ✓ Default timeout saved.
         </div>
       ) : null}
@@ -414,8 +414,8 @@ function AreaTimeoutDialog({
   return (
     <ModalDialog label={title} onClose={onCancel}>
       <h3>{title}</h3>
-      <div className="ad-form">
-        <label className="ad-check">
+      <div className="admin-form">
+        <label className="admin-check">
           <input
             type="radio"
             name="session-timeout-choice"
@@ -424,7 +424,7 @@ function AreaTimeoutDialog({
           />
           <span>Use the default ({defaultMinutes} minutes)</span>
         </label>
-        <label className="ad-check">
+        <label className="admin-check">
           <input
             type="radio"
             name="session-timeout-choice"

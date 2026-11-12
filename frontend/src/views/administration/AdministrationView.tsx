@@ -56,14 +56,14 @@ export function AdministrationView() {
 
   if (preview === 'loading') {
     return (
-      <section className="ad" aria-label="Administration">
+      <section className="admin" aria-label="Administration">
         <LoadingState label="Loading Administration" />
       </section>
     );
   }
   if (preview === 'error') {
     return (
-      <section className="ad" aria-label="Administration">
+      <section className="admin" aria-label="Administration">
         <ErrorState
           message="Administration data could not be loaded."
           detail="Check the backend connection and try again."
@@ -78,7 +78,7 @@ export function AdministrationView() {
   // A sign-in from the panel moves focus to the active section's
   // navigation button.
   return (
-    <section className="ad" aria-label="Administration">
+    <section className="admin" aria-label="Administration">
       <SignInGate
         area="Administration"
         onSignedIn={() =>
@@ -108,8 +108,12 @@ function SectionsWrap({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="ad-wrap">
-      <nav ref={navRef} className="ad-nav" aria-label="Administration sections">
+    <div className="admin-wrap">
+      <nav
+        ref={navRef}
+        className="admin-nav"
+        aria-label="Administration sections"
+      >
         {ADMIN_GROUPS.map((group) => (
           <div key={group}>
             <div className="grp">{group}</div>
@@ -126,7 +130,7 @@ function SectionsWrap({
           </div>
         ))}
       </nav>
-      <div className="ad-main">
+      <div className="admin-main">
         <SectionBody section={section} />
       </div>
     </div>
@@ -203,7 +207,7 @@ function PlaceholderSection({
           ) : undefined
         }
       />
-      <div className="ad-placeholder">
+      <div className="admin-placeholder">
         The <b>{section.label}</b> configuration is not available yet. Its
         settings have not been defined. Machines, Planned Routes and Part
         Numbers are managed in <b>Management</b> by authorized production roles.

@@ -122,7 +122,7 @@ export function WorkersSection() {
         {workers.length === 0 ? (
           <EmptyState message="No Workers configured yet." />
         ) : (
-          <table className="ad-table">
+          <table className="admin-table">
             <thead>
               <tr>
                 <th>Worker</th>
@@ -148,7 +148,7 @@ export function WorkersSection() {
                         editable={editable}
                         label={`Edit ${worker.name}`}
                       >
-                        <span className="ad-worker">
+                        <span className="admin-worker">
                           <WorkerAvatar worker={worker} size="sm" />
                           <b>{worker.name}</b>
                         </span>
@@ -168,7 +168,7 @@ export function WorkersSection() {
             </tbody>
           </table>
         )}
-        <div className="ad-notice">
+        <div className="admin-notice">
           A Worker is the Scan Station identity of a person operating the
           stations — separate from application Users. The badge barcode is the
           barcode already printed on the employee badge: it is saved in capital
@@ -380,7 +380,7 @@ function WorkerDialog({
   return (
     <ModalDialog label={title} onClose={requestClose}>
       <h3>{title}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         <AdminField label="Name">
           <input
             className="field"
@@ -404,15 +404,15 @@ function WorkerDialog({
             spellCheck={false}
           />
         </AdminField>
-        <div className="ad-fieldnotes">
+        <div className="admin-fieldnotes">
           <div aria-live="polite">
             {canonical && canonical !== badge ? (
-              <p className="ad-fieldnote">
+              <p className="admin-fieldnote">
                 Saved as: <span className="mono">{canonical}</span>
               </p>
             ) : null}
           </div>
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             Saved in capital letters — letter case does not matter when
             scanning.
           </p>
@@ -422,17 +422,17 @@ function WorkerDialog({
             {badgeInvalid}
           </div>
         ) : null}
-        <div className="ad-avatarblock">
-          <span className="ad-avatarlabel">
+        <div className="admin-avatarblock">
+          <span className="admin-avatarlabel">
             Avatar <span className="field-optional">(optional)</span>
           </span>
-          <div className="ad-avatarrow">
+          <div className="admin-avatarrow">
             <WorkerAvatar
               worker={avatarWorker}
               size="md"
               src={staged?.kind === 'upload' ? staged.previewUrl : undefined}
             />
-            <div className="ad-avataractions">
+            <div className="admin-avataractions">
               <button
                 type="button"
                 className="btn ghost"
@@ -465,7 +465,7 @@ function WorkerDialog({
               ) : null}
             </div>
           </div>
-          <p className="ad-fieldhelp">
+          <p className="admin-fieldhelp">
             PNG, JPEG or WebP. Large images are resized before upload.
           </p>
           {imageError ? (

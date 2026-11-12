@@ -2837,7 +2837,7 @@ test('FA-S1: Scan behavior is not available yet and promises no phase', async ()
   await screen.findByRole('button', { name: 'Edit Lathe' });
   openSection('Scan behavior');
 
-  const main = document.querySelector('.ad-main') as HTMLElement;
+  const main = document.querySelector('.admin-main') as HTMLElement;
   expect(main.textContent).toContain(
     'The Scan behavior configuration is not available yet.',
   );
@@ -2884,7 +2884,7 @@ test('FA-M1: Machine assignment is a read-only statement of the two Area modes',
       cell.getAttribute('data-label'),
     ),
   ).toEqual(['Area has', 'Mode', 'At the Scan Station']);
-  const main = document.querySelector('.ad-main') as HTMLElement;
+  const main = document.querySelector('.admin-main') as HTMLElement;
   expect(main.textContent).toContain(
     'Machine assignment is not configured per Area. Each Area works in one of two modes, decided only by whether it has Machines.',
   );
@@ -3347,7 +3347,7 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
   expect(screen.getAllByRole('switch')).toHaveLength(1);
   expect(screen.queryByRole('button', { name: /New entry/ })).toBeNull();
   expect(screen.queryByRole('note')).toBeNull();
-  const main = document.querySelector('.ad-main')!;
+  const main = document.querySelector('.admin-main')!;
   expect(main.textContent).not.toContain('not available yet');
   expect(main.textContent).not.toContain('Roles & permissions');
   expect(main.textContent).not.toMatch(/sign-in/i);
@@ -4053,9 +4053,9 @@ function fillUser(dialog: HTMLElement, name: string, login: string) {
 test('FA-U1: Users is real — empty state, the honest note after it, an enabled entry action', async () => {
   await openUsers();
 
-  const main = document.querySelector('.ad-main') as HTMLElement;
+  const main = document.querySelector('.admin-main') as HTMLElement;
   expect(screen.getByText('No users configured yet.')).toBeInTheDocument();
-  const note = main.querySelector('.ad-notice') as HTMLElement;
+  const note = main.querySelector('.admin-notice') as HTMLElement;
   expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(USERS_NOTE);
   expect(
     screen.getByText('No users configured yet.').compareDocumentPosition(note) &
@@ -4104,7 +4104,9 @@ test('FA-U1: the Users table lists name, login name, role and status, with the n
   expect(within(tuanRow).getByText('Inactive')).toBeInTheDocument();
   expect(tuanRow.querySelector('.worker-avatar')?.textContent).toBe('TL');
 
-  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  const note = document.querySelector(
+    '.admin-main .admin-notice',
+  ) as HTMLElement;
   expect(
     screen.getByRole('table').compareDocumentPosition(note) &
       Node.DOCUMENT_POSITION_FOLLOWING,
@@ -4430,13 +4432,15 @@ test('FA-RO1: Roles & permissions lists the seeded roles with permission and use
       td.getAttribute('data-label'),
     ),
   ).toEqual(['Permissions', 'Users']);
-  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  const note = document.querySelector(
+    '.admin-main .admin-notice',
+  ) as HTMLElement;
   expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(ROLES_NOTE);
   expect(
     screen.getByRole('table').compareDocumentPosition(note) &
       Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
-  const main = document.querySelector('.ad-main') as HTMLElement;
+  const main = document.querySelector('.admin-main') as HTMLElement;
   expect(main.textContent).toContain(
     'Named roles and the permissions each one grants',
   );
@@ -4876,7 +4880,9 @@ test('FA-U6: without the permission neither the Sign-in column nor Set password�
   ).toEqual(['User', 'Login name', 'Role', 'Status']);
   expect(screen.queryByText('Locked')).toBeNull();
   expect(screen.queryByRole('button', { name: /^Set password/ })).toBeNull();
-  const note = document.querySelector('.ad-main .ad-notice') as HTMLElement;
+  const note = document.querySelector(
+    '.admin-main .admin-notice',
+  ) as HTMLElement;
   expect(note.textContent?.replace(/\s+/g, ' ').trim()).toBe(USERS_NOTE);
   expect(document.body.textContent).not.toContain('Users cannot sign in yet');
 });
@@ -5029,7 +5035,7 @@ test('FA-U7: Set password… closes without a request, ignores closing in flight
 /** The User sign-in panel's values: the last read-only value list of
  * Settings (a view-only Due Soon panel lists its values first). */
 function signInPolicyRows(): Record<string, string> {
-  const lists = document.querySelectorAll('.ad-configpreview');
+  const lists = document.querySelectorAll('.admin-configpreview');
   return readOnlyRows(lists[lists.length - 1]);
 }
 
@@ -5081,7 +5087,7 @@ test('FA-S2: signed in without the permission, the settings read without an edit
     screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
   ).toEqual(['Due Soon warning', 'User sign-in', 'Other settings']);
   // User sign-in never says "sessions" (those are Worker Sessions).
-  expect(document.querySelector('.ad-config')?.textContent).not.toMatch(
+  expect(document.querySelector('.admin-config')?.textContent).not.toMatch(
     /session/i,
   );
 });
@@ -5269,7 +5275,7 @@ function adminRequests(): string[] {
 /** Open a section and wait until every one of its reads answered. */
 async function openLoadedSection(label: string) {
   openSection(label);
-  const main = document.querySelector('.ad-main') as HTMLElement;
+  const main = document.querySelector('.admin-main') as HTMLElement;
   await waitFor(() =>
     expect(within(main).queryAllByRole('status')).toEqual([]),
   );
@@ -5668,11 +5674,13 @@ test('FA-3: without its permission every section is view-only — values as text
   expect(screen.getByText('3 s')).toBeInTheDocument();
 
   await openLoadedSection('Settings');
-  expect(readOnlyRows(document.querySelector('.ad-configpreview')!)).toEqual({
-    'Minimum warning days': '2',
-    'Lead-time warning percentage (%)': '15',
-    'Maximum warning days': '7',
-  });
+  expect(readOnlyRows(document.querySelector('.admin-configpreview')!)).toEqual(
+    {
+      'Minimum warning days': '2',
+      'Lead-time warning percentage (%)': '15',
+      'Maximum warning days': '7',
+    },
+  );
   expect(writes).toEqual([]);
 });
 

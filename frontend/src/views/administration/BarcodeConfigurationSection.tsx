@@ -148,15 +148,15 @@ function FormatPanel({
   };
 
   return (
-    <div className="ad-config">
+    <div className="admin-config">
       <h2>Machine Asset Tag format</h2>
       {saved === null ? (
-        <div className="ad-notice">
+        <div className="admin-notice">
           The Machine Asset Tag format has not been configured yet. Machines
           cannot be created until it is saved here.
         </div>
       ) : null}
-      <p className="ad-confighelp">
+      <p className="admin-confighelp">
         Every Machine receives its Asset Tag automatically when it is created in
         Management → Machines: the configured prefix followed by the next number
         in sequence, zero-padded to the configured length. Asset Tags are
@@ -176,7 +176,7 @@ function FormatPanel({
         />
       )}
       {canWrite ? (
-        <div className="ad-configgrid">
+        <div className="admin-configgrid">
           <label>
             Prefix
             <input
@@ -215,7 +215,7 @@ function FormatPanel({
           {digitsError}
         </div>
       ) : null}
-      <div className="ad-configpreview">
+      <div className="admin-configpreview">
         <div className="prow">
           <span className="k">Asset Tags</span>
           <span className="v">
@@ -236,13 +236,13 @@ function FormatPanel({
           </span>
         </div>
       </div>
-      <p className="ad-confighelp">
+      <p className="admin-confighelp">
         A format change applies to Machines created afterwards only — existing
         Asset Tags are never renamed or regenerated.
       </p>
       <ServerErrorNote message={serverError} />
       {savedNote ? (
-        <div className="ad-savednote" role="status">
+        <div className="admin-savednote" role="status">
           ✓ Format saved.
         </div>
       ) : null}

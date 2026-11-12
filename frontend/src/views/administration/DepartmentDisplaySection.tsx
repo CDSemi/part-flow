@@ -97,20 +97,20 @@ export function DepartmentDisplaySection() {
   return (
     <>
       {header}
-      <div className="ad-config">
+      <div className="admin-config">
         <h2>Production Board rotation</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Each page of a Department&apos;s Production Board stays on screen for
           a time proportional to the rows it shows, and never shorter than the
           minimum page dwell. Configured per Department; a running board applies
           a change at its next refresh.
         </p>
         {departments.length === 0 ? (
-          <p className="ad-confighelp">
+          <p className="admin-confighelp">
             No Departments yet. Create one in Departments.
           </p>
         ) : (
-          <table className="ad-table">
+          <table className="admin-table">
             <thead>
               <tr>
                 <th>Department</th>
@@ -247,7 +247,7 @@ function RotationTimingDialog({
   return (
     <ModalDialog label={title} onClose={requestClose}>
       <h3>{title}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         <AdminField label="Seconds per displayed row">
           <input
             className="field mono"
@@ -282,7 +282,7 @@ function RotationTimingDialog({
           </div>
         ) : null}
         {rotation !== null ? (
-          <p className="ad-confighelp">
+          <p className="admin-confighelp">
             {`A page showing 1 row stays ${rotationDurationMs(1, rotation) / 1000} s; a page showing 10 rows stays ${rotationDurationMs(10, rotation) / 1000} s.`}
           </p>
         ) : null}

@@ -117,7 +117,7 @@ export function DepartmentsSection() {
       {departments.length === 0 ? (
         <EmptyState message="No Departments configured yet." />
       ) : (
-        <table className="ad-table">
+        <table className="admin-table">
           <thead>
             <tr>
               <th>Department</th>
@@ -155,7 +155,7 @@ export function DepartmentsSection() {
           </tbody>
         </table>
       )}
-      <div className="ad-notice">
+      <div className="admin-notice">
         A Department groups Areas for organization and display settings. A
         Department with active Areas cannot be deactivated — deactivate its
         Areas first.
@@ -229,7 +229,7 @@ function DepartmentDialog({
       onClose={onCancel}
     >
       <h3>{department ? 'Edit Department' : 'New Department'}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         <AdminField label="Name">
           <input
             className="field"

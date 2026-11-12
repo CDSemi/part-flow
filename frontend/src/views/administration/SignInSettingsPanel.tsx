@@ -45,7 +45,7 @@ export function SignInSettingsPanel() {
   return (
     <>
       <h2>User sign-in</h2>
-      <p className="ad-confighelp">
+      <p className="admin-confighelp">
         How long a user&apos;s sign-in lasts, when repeated failed sign-ins lock
         a user&apos;s account, and whether users must replace a password an
         administrator set.
@@ -75,7 +75,7 @@ function SignInPolicyView({ canEdit }: { canEdit: boolean }) {
   const policy = policyData.state.data;
   return (
     <>
-      <div className="ad-configpreview">
+      <div className="admin-configpreview">
         <div className="prow">
           <span className="k">User sign-ins expire</span>
           <span className="v">
@@ -201,8 +201,8 @@ function SignInPolicyDialog({
   return (
     <ModalDialog label={title} onClose={requestClose}>
       <h3>{title}</h3>
-      <div className="ad-form">
-        <div className="ad-switchlist">
+      <div className="admin-form">
+        <div className="admin-switchlist">
           <PolicySwitch
             label="User sign-ins expire"
             description="When Off, a user stays signed in until they sign out."
@@ -263,7 +263,7 @@ function SignInPolicyDialog({
             {MINUTES_ERROR}
           </div>
         ) : null}
-        <div className="ad-switchlist">
+        <div className="admin-switchlist">
           <PolicySwitch
             label="Require a new password at first sign-in"
             description="Applies to passwords set by an administrator."

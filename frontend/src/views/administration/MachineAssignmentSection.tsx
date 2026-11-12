@@ -32,13 +32,13 @@ export function MachineAssignmentSection() {
   return (
     <>
       <SectionHeader title="Machine assignment" subtitle={SUBTITLE} />
-      <div className="ad-config">
+      <div className="admin-config">
         <h2>Machine assignment follows from the Area&apos;s Machines</h2>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Machine assignment is not configured per Area. Each Area works in one
           of two modes, decided only by whether it has Machines.
         </p>
-        <table className="ad-table">
+        <table className="admin-table">
           <thead>
             <tr>
               <th>Area has</th>
@@ -60,7 +60,7 @@ export function MachineAssignmentSection() {
             ))}
           </tbody>
         </table>
-        <p className="ad-confighelp">
+        <p className="admin-confighelp">
           Machines are managed in Management → Machines; an Area&apos;s mode
           changes only when its Machines change. The Areas section shows each
           Area&apos;s current mode.

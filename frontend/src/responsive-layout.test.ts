@@ -56,7 +56,7 @@ test('the wide Management tables collapse to stacked rows with inline captions',
     ['views/work-orders/work-orders.css', 'wolist'],
     ['views/work-orders/work-orders.css', 'wo-import-table'],
     ['views/planned-routes/planned-routes.css', 'rt-table'],
-    ['views/administration/administration.css', 'ad-table'],
+    ['views/administration/administration.css', 'admin-table'],
   ] as const;
   for (const [file, table] of tables) {
     const sheet = css(file);

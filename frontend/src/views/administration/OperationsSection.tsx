@@ -133,7 +133,7 @@ export function OperationsSection() {
       {operations.length === 0 ? (
         <EmptyState message="No Operations configured yet." />
       ) : (
-        <table className="ad-table">
+        <table className="admin-table">
           <thead>
             <tr>
               <th>Operation</th>
@@ -162,7 +162,9 @@ export function OperationsSection() {
                       label={`Edit ${operation.name ?? operation.code}`}
                     >
                       <b>{operation.name ?? operation.code}</b>{' '}
-                      <span className="mono ad-opcode">{operation.code}</span>
+                      <span className="mono admin-opcode">
+                        {operation.code}
+                      </span>
                     </RowOpener>
                   </td>
                   <td data-label="Area">
@@ -186,7 +188,7 @@ export function OperationsSection() {
           </tbody>
         </table>
       )}
-      <div className="ad-notice">
+      <div className="admin-notice">
         An Operation belongs to exactly one Area — the binding is fixed after
         creation, because Movement history references Operations in their Area
         context. Codes stay unique within one Area. External Operations mark
@@ -317,9 +319,9 @@ function OperationDialog({
       onClose={onCancel}
     >
       <h3>{operation ? 'Edit Operation' : 'New Operation'}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         {operation ? (
-          <div className="ad-identity">
+          <div className="admin-identity">
             <div className="idrow">
               <span className="k">Area</span>
               <span className="v">
@@ -327,7 +329,7 @@ function OperationDialog({
                 {fixedArea?.name ?? '—'}
               </span>
             </div>
-            <p className="ad-idnote">
+            <p className="admin-idnote">
               The Area binding is fixed — Movement history references this
               Operation in its Area context.
             </p>

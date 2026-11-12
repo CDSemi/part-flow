@@ -153,7 +153,7 @@ export function ScanStationsSection() {
       {stations.length === 0 ? (
         <EmptyState message="No Scan Stations configured yet." />
       ) : (
-        <table className="ad-table">
+        <table className="admin-table">
           <thead>
             <tr>
               <th>Station ID</th>
@@ -191,7 +191,7 @@ export function ScanStationsSection() {
                     <StatusPill active={station.isActive} />
                   </td>
                   <td data-label="Devices">
-                    <span className="ad-devices">
+                    <span className="admin-devices">
                       {devicesSummary(station.stationId)}
                       <button
                         className="rowbtn"
@@ -215,7 +215,7 @@ export function ScanStationsSection() {
           </tbody>
         </table>
       )}
-      <div className="ad-notice">
+      <div className="admin-notice">
         The Station ID is the station's stable identity and its address (Scan
         Station → <span className="mono">/scan-station/&lt;id&gt;</span>) — it
         is never renamed. Stations are identified by this ID and their Area
@@ -348,14 +348,14 @@ function ScanStationDialog({
       onClose={onCancel}
     >
       <h3>{station ? 'Edit Scan Station' : 'New Scan Station'}</h3>
-      <div className="ad-form">
+      <div className="admin-form">
         {station ? (
-          <div className="ad-identity">
+          <div className="admin-identity">
             <div className="idrow">
               <span className="k">Station ID</span>
               <span className="v mono">{station.stationId}</span>
             </div>
-            <p className="ad-idnote">
+            <p className="admin-idnote">
               The Station ID is the stable identity and is never renamed.
             </p>
           </div>
