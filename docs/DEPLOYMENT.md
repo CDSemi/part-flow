@@ -476,7 +476,7 @@ Strict Transport Security (HSTS) is the reverse proxy's job; `web` does not set 
 | Script in `deploy/production/` | Purpose | Procedure |
 | --- | --- | --- |
 | `release.sh` | Installs a new release: backup, build, migration, switch and checks. | runbook §5 |
-| `smoke.sh` | Checks a running release through `web` on the loopback port. | runbook §5 |
+| `smoke.sh` | Checks a running release through `web` on the loopback port. It first waits, up to 120 s, while `web` does not accept connections yet or answers 502/504 for a backend that is still starting, because `up -d` returns before they answer. | runbook §5 |
 | `backup.sh` | Takes, verifies and rotates a backup. | runbook §3 |
 | `restore-test.sh` | Restores a backup into a throwaway stack and checks it. | runbook §4 |
 | `check.sh` | Run every 15 minutes by the host scheduler, whose failure notification is the alert. It checks HTTPS readiness, the certificate, the containers, restarts, backend errors, the disks and the read-only `status` report, never changes anything, and exits non-zero when there is something to report. | runbook §2 |
@@ -727,7 +727,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Rewritten as the starting point: a task table, one list of terms and safety rules, and a reference-only §3.1; the installation, release and rollback steps now live only in the platform guides and the runbook; access from the Internet is supported through Cloudflare. |
+| 2026-11-12 | uncommitted | `smoke.sh` waits for a starting `web` and backend before its checks. |
+| 2026-11-10 | `e0e5056` | Rewritten as the starting point: a task table, one list of terms and safety rules, and a reference-only §3.1; the installation, release and rollback steps now live only in the platform guides and the runbook; access from the Internet is supported through Cloudflare. |
 | 2026-11-09 | `398c617` | Restored rules the rewrite had dropped: the configuration key test, setup-token log access, device credentials and revocation, security updates and the version-suffix caveat. |
 | 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-14 | `2c360cb` | Pointed to the Deployment Admin's planned reusable-controller design goal. |

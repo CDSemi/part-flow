@@ -6,6 +6,9 @@
 # with no route, so nothing is written whatever the answer. Exit 0 = every check passed, 1 = a check failed,
 # 2 = the smoke could not run. It never starts, stops, builds, removes or re-tags anything.
 # The authorization, designated write/read-back and scan-focus checks of the runbook stay manual.
+# Before the checks it waits, up to WAIT_ATTEMPTS x WAIT_INTERVAL seconds, while `web` is still starting (no
+# connection) or answers 502/504 for a backend that is still starting: `up -d` returns as soon as a container has
+# started, before nginx accepts connections, so a check right after a switch saw only HTTP 000.
 set -eu
 
 usage() {
@@ -64,6 +67,32 @@ BASE="http://127.0.0.1:$PORT"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 FAILED=0
+
+# Wait while the stack is still starting: no connection to `web` yet (000), or `web` answers its own 502/504 because
+# the backend behind it is not up yet. Any other answer ends the wait at once, and the checks below judge it.
+WAIT_ATTEMPTS=60
+WAIT_INTERVAL=2
+attempt=0
+waited=0
+while :; do
+    attempt=$((attempt + 1))
+    web=$(curl -sS -o "$WORK/probe" --max-time 5 -w '%{http_code}' "$BASE/web-health" 2>/dev/null) || web=000
+    live=000
+    if [ "$web" = 200 ]; then
+        live=$(curl -sS -o "$WORK/probe" --max-time 5 -w '%{http_code}' "$BASE/api/health/live" 2>/dev/null) || live=000
+    fi
+    case "$web:$live" in
+        200:000 | 200:502 | 200:504) ;;
+        200:*) break ;;
+    esac
+    if [ "$attempt" -ge "$WAIT_ATTEMPTS" ]; then
+        echo "smoke: web or the backend did not answer within $((WAIT_ATTEMPTS * WAIT_INTERVAL)) s; the checks show the state." >&2
+        break
+    fi
+    sleep "$WAIT_INTERVAL"
+    waited=$((waited + WAIT_INTERVAL))
+done
+[ "$waited" -eq 0 ] || echo "smoke: waited $waited s for web and the backend to answer." >&2
 
 # fetch METHOD PATH [curl header arguments...]: STATUS, the headers in $WORK/headers, the body in $WORK/body.
 fetch() {

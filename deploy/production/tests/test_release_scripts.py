@@ -338,6 +338,7 @@ def default_rules():
             rule(r"^rev-parse -q --verify refs/tags/", out(HEAD + "\n")),
         ],
         "curl": [
+            rule(r"^GET /web-health$", http(200, "live\n", content_type="text/plain")),
             rule(r"^GET /api/health$", http(200, health_body(), content_type="application/json")),
             rule(r"^GET /api/health/live$", http(200, json.dumps({"status": "live", "service": "partflow-api", "release": TAG, "commit": HEAD}, separators=(",", ":")), content_type="application/json")),
             rule(r"^GET /$", http(200, shell_body(), content_type="text/html", cache_control="no-cache")),
@@ -1043,6 +1044,19 @@ class ReleaseAfterSwitch(Harness):
         self.assertIs(record["refrozen"], True)
         self.assertIn("writes were open for its duration", self.result.stderr)
 
+    def test_rs12_smoke_waits_for_the_new_web_container(self):
+        # The switched web container needs a moment before nginx accepts connections (seen on a NAS): the release
+        # completes instead of re-freezing a healthy release on HTTP 000.
+        self.prepend("curl", rule(r"^GET /web-health$", {"rc": 7}, {"rc": 7}, http(200, "live\n")))
+        self.release()
+        self.assertExit(0, "completed")
+        self.assertNotEqual(self.docker()[-1], "stop backend")
+        record = self.record()
+        self.assertEqual(record["smoke"], {"file": "smoke.txt", "exit_code": 0})
+        self.assertIs(record["refrozen"], False)
+        self.assertIn("smoke: waited 4 s for web and the backend to answer.",
+                      (self.record_dir() / "smoke.txt").read_text(encoding="utf-8"))
+
     # RS-21
     def test_rs21_backend_still_running_after_stop(self):
         self.prepend("docker", rule(r"ps --status running -q backend$", out("cid-backend\n")))
@@ -1594,6 +1608,28 @@ class Smoke(Harness):
         self.assertEqual(len([line for line in self.lines() if line.startswith("FAIL")]), 7)
         compose = [" ".join(c["argv"]) for c in self.calls("docker") if c["argv"][0] == "compose"]
         self.assertTrue(compose and all(c.startswith("compose -p partflow-s3-x ") for c in compose), compose)
+        # The wait for a starting stack is bounded: 60 probes, 59 pauses, then the checks report the state.
+        self.assertEqual(len(self.calls("sleep")), 59)
+        self.assertIn("smoke: web or the backend did not answer within 120 s", self.result.stderr)
+
+    # Observed on a NAS: right after `up -d --no-deps web` nginx did not accept connections yet, so every HTTP check
+    # read 000 and release.sh re-froze a healthy release. smoke.sh now waits while web refuses connections or answers
+    # 502/504 for a backend that is still starting.
+    def test_smoke_waits_for_a_starting_web_and_backend(self):
+        self.prepend("curl", rule(r"^GET /web-health$", {"rc": 7}, {"rc": 7}, http(200, "live\n")))
+        self.prepend("curl", rule(r"^GET /api/health/live$", http(502, '{"server_unavailable":true}'),
+                                  http(200, json.dumps({"status": "live", "release": TAG}, separators=(",", ":")))))
+        self.smoke()
+        self.assertOnlyFailure(set())
+        self.assertEqual(len(self.calls("sleep")), 3)
+        self.assertIn("smoke: waited 6 s for web and the backend to answer.", self.result.stderr)
+
+    def test_smoke_does_not_wait_for_an_answering_backend(self):
+        # A real answer that is not "still starting" ends the wait at once; the checks judge it.
+        self.prepend("curl", rule(r"^GET /api/health/live$", http(500, "{}")))
+        self.smoke()
+        self.assertOnlyFailure({"S-4"})
+        self.assertEqual(self.calls("sleep"), [])
 
     def test_smoke_cannot_run(self):
         self.smoke("--env-file", "missing.env")

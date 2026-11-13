@@ -1,7 +1,7 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
-> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này là điểm khởi đầu để cài đặt và vận hành PartFlow trong môi trường production. Hãy đọc §1 và §2 trước: hai
@@ -482,7 +482,7 @@ Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
 | Script trong `deploy/production/` | Mục đích | Quy trình |
 | --- | --- | --- |
 | `release.sh` | Cài một bản phát hành mới: sao lưu, build, migration, chuyển đổi và kiểm tra. | runbook §5 |
-| `smoke.sh` | Kiểm tra một bản phát hành đang chạy thông qua `web` trên port loopback. | runbook §5 |
+| `smoke.sh` | Kiểm tra một bản phát hành đang chạy thông qua `web` trên port loopback. Trước đó nó chờ tối đa 120 giây chừng nào `web` chưa nhận kết nối, hoặc trả 502/504 vì backend còn đang khởi động, vì `up -d` trả về trước khi chúng sẵn sàng. | runbook §5 |
 | `backup.sh` | Tạo, xác minh và xoay vòng một bản sao lưu. | runbook §3 |
 | `restore-test.sh` | Khôi phục một bản sao lưu vào một stack dùng một lần và kiểm tra nó. | runbook §4 |
 | `check.sh` | Được trình lập lịch của máy chủ chạy mỗi 15 phút, và thông báo lỗi của trình lập lịch chính là cảnh báo. Nó kiểm tra readiness qua HTTPS, chứng chỉ, các container, số lần restart, lỗi backend, các ổ đĩa và báo cáo `status` chỉ đọc, không bao giờ thay đổi gì, và thoát với mã khác 0 khi có điều cần báo cáo. | runbook §2 |
@@ -737,7 +737,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Viết lại thành điểm khởi đầu: bảng tác vụ, một danh sách thuật ngữ và quy tắc an toàn, và §3.1 chỉ để tham chiếu; các bước cài đặt, phát hành và quay lui nay chỉ nằm trong các hướng dẫn theo nền tảng và runbook; truy cập từ Internet được hỗ trợ thông qua Cloudflare. |
+| 2026-11-12 | uncommitted | `smoke.sh` chờ `web` và backend khởi động xong trước khi kiểm tra. |
+| 2026-11-10 | `e0e5056` | Viết lại thành điểm khởi đầu: bảng tác vụ, một danh sách thuật ngữ và quy tắc an toàn, và §3.1 chỉ để tham chiếu; các bước cài đặt, phát hành và quay lui nay chỉ nằm trong các hướng dẫn theo nền tảng và runbook; truy cập từ Internet được hỗ trợ thông qua Cloudflare. |
 | 2026-11-09 | `398c617` | Khôi phục các quy tắc mà lần viết lại đã bỏ sót: bài kiểm thử key cấu hình, quyền truy cập log của setup token, thông tin xác thực thiết bị và việc thu hồi, cập nhật bảo mật và lưu ý về hậu tố phiên bản. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và các cổng phát hành theo quyết định của owner. |
 | 2026-10-14 | `2c360cb` | Trỏ đến mục tiêu thiết kế bộ điều khiển tái sử dụng đã lên kế hoạch của Deployment Admin. |
