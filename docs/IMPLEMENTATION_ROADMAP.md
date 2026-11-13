@@ -1194,8 +1194,9 @@ The full description is in DEPLOYMENT §3.1. In short:
   freeze, migrates, switches `backend` then `web`, runs `smoke.sh` and writes `record.json` (exit codes 0 completed,
   1 stopped, 2 could not run, 3 frozen, 4 needs review). It is never scheduled and refuses while a `partflow-staging`
   project exists on the same Docker daemon.
-- The frontend shows the `UPDATED` notice and blocks writes on an outdated page, and reloads itself only on Scan
-  Station and Production Board routes with no dialog open (GUI_DESIGN §3 rule 13).
+- The frontend shows the `UPDATED` notice and blocks writes on an outdated page. With no dialog open it reloads itself:
+  on Scan Station and Production Board routes after 60 s, on every other route once nobody has used the page for
+  2 minutes and nothing on it is unsaved (GUI_DESIGN §3 rule 13).
 - Rollback without a schema change switches the release tag back, so the previous release's images must stay on the
   host. A schema rollback restores the pre-release backup (below). There is never a down-migration.
 
@@ -1265,9 +1266,10 @@ run on Docker Desktop and in a Linux container.
   HTTP Strict Transport Security (HSTS).
 - Secret-file permissions, measured resource limits and worker count, and the worst-case import duration through the
   real hostname.
-- A release and a rollback executed on the NAS, and the browser checks that need a configured Area, Operation and
+- A release and a rollback executed on the NAS; the browser checks that need a configured Area, Operation and
   enrolled Scan Station (automatic reload on a Scan Station production route, no reload while a production dialog or
-  the Worker sign-in modal is open, the in-modal `Reload page`, and the `● Live` feed under the update notice).
+  the Worker sign-in modal is open, the in-modal `Reload page`, and the `● Live` feed under the update notice); and an
+  open page on any other route reloading itself once nobody has used it for 2 minutes.
 - The privilege probe and `reconcile --check h` on the production database, and a record that `backend` holds only
   `partflow_app_password`.
 - The backup directory, the daily backup task and the encrypted off-host copy, the first backup, a check that an
@@ -1412,7 +1414,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Lowered the minimum length of a new password from 12 to 6 characters (owner decision). |
+| 2026-11-12 | uncommitted | Phase 16 release flow: every outdated page reloads itself once idle, not only the Scan Station and Production Board, and the browser checks after a release on the NAS cover it. |
+| 2026-11-12 | `a7949e3` | Lowered the minimum length of a new password from 12 to 6 characters (owner decision). |
 | 2026-11-10 | `e0e5056` | The go-live step points to the rewritten NAS installation guide (§1 to §10). |
 | 2026-11-09 | `398c617` | Rewritten as current state for new readers; pilot replaced by direct go-live (owner decision). |
 | 2026-11-09 | `b405c6e` | Recorded the owner's direct go-live decision with no pilot and no release gates. |

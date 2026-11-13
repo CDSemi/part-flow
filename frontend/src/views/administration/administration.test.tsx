@@ -14,6 +14,7 @@ import { ConnectivityContext } from '../../app/connectivity-context';
 import type { ConnectivityStatus } from '../../app/connectivity-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
+import { hasUnsavedWork } from '../../app/unsaved-work';
 import { prepareImageUpload } from '../../components/image-upload';
 import { formatTimeOfDay } from '../dates';
 import { AdministrationView } from './AdministrationView';
@@ -3863,6 +3864,24 @@ test('AD-5: the Due Soon warning panel loads, explains, validates and PUTs exact
   ]);
   expect(state.dueSoon).toEqual({ min: 1, percent: 20, max: 5 });
   await waitFor(() => expect(save).toBeDisabled());
+});
+
+test('AD-5: an unsaved Due Soon edit holds the reload of an outdated page until it is saved or undone (GUI_DESIGN §3 rule 13)', async () => {
+  const min = await openSettings();
+  expect(hasUnsavedWork()).toBe(false);
+
+  fireEvent.change(min, { target: { value: '3' } });
+  expect(hasUnsavedWork()).toBe(true);
+  fireEvent.change(min, { target: { value: '2' } });
+  expect(hasUnsavedWork()).toBe(false);
+
+  fireEvent.change(min, { target: { value: '3' } });
+  expect(hasUnsavedWork()).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    '✓ Due Soon warning saved.',
+  );
+  await waitFor(() => expect(hasUnsavedWork()).toBe(false));
 });
 
 test('AD-5: a Due Soon save whose answer is lost is an unknown outcome and re-reads the stored policy', async () => {

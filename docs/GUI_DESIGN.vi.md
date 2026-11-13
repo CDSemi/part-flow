@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-12.
+> Đồng bộ với bản tiếng Anh tại commit `a7949e3` cộng các thay đổi chưa commit ngày 2026-11-12.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -546,10 +546,13 @@ Các quy tắc này áp dụng cho mọi view. Chúng diễn đạt các nguyên
       và thanh action rail `Reload page`. Việc gửi ghi dữ liệu sản xuất bị vô hiệu hóa đúng như khi mất kết nối, các thao
       tác đọc vẫn tiếp tục, và connectivity chip hiển thị `UPDATED`. Trong khi mất kết nối, banner OFFLINE hiển thị thay
       vào đó. Notice không lấy focus.
-    - **Tải lại.** **Trang không bao giờ tự tải lại khi một dialog đang mở.** Trên các route Scan Station và Production
-      Board (các station không người trông và màn hình treo tường), trang tự tải lại khi notice đã hiển thị được 60 s mà
-      không có dialog nào mở, tối đa một lần mỗi 10 phút cho mỗi tab trình duyệt, và chỉ khi server đã phục vụ trang mới.
-      Ở những nơi khác chỉ `Reload page` mới tải lại, sau cơ chế bảo vệ thay đổi chưa lưu sẵn có.
+    - **Tải lại.** **Trang không bao giờ tự tải lại khi một dialog đang mở.** Mọi trang tự tải lại khi notice đã hiển
+      thị được 60 s mà không có dialog nào mở, tối đa một lần mỗi 10 phút cho mỗi tab trình duyệt, và chỉ khi server đã
+      phục vụ trang mới. Trên các route Scan Station và Production Board (các station không người trông và màn hình treo
+      tường), chừng ấy điều kiện là đủ. Trên mọi route khác, trang còn chờ tới khi không ai dùng nó trong 2 phút (không
+      có thao tác bàn phím, con trỏ, con lăn hay chạm) và không form nào trên trang còn dữ liệu chưa lưu, kể cả
+      bản nháp chưa lưu hoặc lần import đang chạy của màn hình Work Orders; form nằm trong dialog đã được quy tắc dialog
+      bảo vệ. `Reload page` tải lại bất cứ lúc nào, sau cơ chế bảo vệ thay đổi chưa lưu sẵn có.
     - **Các dialog không thể đóng.** Modal đăng nhập Worker / `Worker session expired`, dialog đăng ký thiết bị
       (enrollment) (§4.12, §4.13) và dialog `Choose a new password` (§1.2) không thể bị đóng, nên trong khi trang đã lỗi
       thời, mỗi dialog hiển thị nút `Reload page` riêng của nó; dialog mật khẩu còn hiển thị
@@ -3924,7 +3927,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-12 | uncommitted | Mọi dialog nhập liệu đóng ngay khi chưa thay đổi và hỏi trước khi bỏ dữ liệu đã thay đổi; các select bị ghim chiều cao cố định bỏ padding dọc để phần chân chữ không bao giờ bị cắt; một Scan Station mới đề xuất Station ID từ Area của nó, và ô Devices của nó nêu tên các thiết bị đã enroll và cả ô mở danh sách thiết bị; panel enroll trở thành một card căn giữa với ô nhập code lớn. |
+| 2026-11-12 | uncommitted | §3 quy tắc 13: sau một bản cập nhật, mọi trang tự tải lại khi đã rảnh 2 phút mà không có dialog nào mở và không có dữ liệu chưa lưu; Scan Station và Production Board vẫn tự tải lại sau 60 s. |
+| 2026-11-12 | a7949e3 | Mọi dialog nhập liệu đóng ngay khi chưa thay đổi và hỏi trước khi bỏ dữ liệu đã thay đổi; các select bị ghim chiều cao cố định bỏ padding dọc để phần chân chữ không bao giờ bị cắt; một Scan Station mới đề xuất Station ID từ Area của nó, và ô Devices của nó nêu tên các thiết bị đã enroll và cả ô mở danh sách thiết bị; panel enroll trở thành một card căn giữa với ô nhập code lớn. |
 | 2026-11-09 | 398c617 | Căn chỉnh theo code: các vùng action Undo và Retry trong suốt khi nghỉ với đường kẻ phân cách thụt vào, và một transfer `ON_MACHINE` thông báo `AREA_COMPLETED, then TRANSFERRED (one command)`. |
 | 2026-11-09 | 398c617 | Viết lại thành nội dung hiện tại cho người đọc mới; các yêu cầu chỉ nằm trong ghi chú phiên bản cũ (§15.1–§15.17 trước đây) được chuyển vào phần thân; không có quy tắc nào thay đổi. |
 | 2026-10-06 to 2026-10-08 | 702ab1c … 7b24d10 | Thêm đăng nhập User với Management và Administration nhận biết permission, đăng ký thiết bị Scan Station, điều chỉnh allocation, chỉnh sửa assigned route, audit trail của PN, theme theo từng User, import file Work Order và thông báo cập nhật phiên bản phát hành. |

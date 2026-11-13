@@ -21,12 +21,15 @@ import {
   RELEASE_AUTO_RELOAD_STORAGE_KEY,
 } from './release-reload';
 import { RouterProvider } from './router-provider';
+import { hasUnsavedWork, useUnsavedWork } from './unsaved-work';
 
 // The update notice (GUI_DESIGN §3 rule 13, OD-16-07): the persistent
-// banner with its manual `Reload page`, and the automatic reload of the
-// Scan Station and Production Board routes — after 60 s outdated, never
-// while any dialog is open, at most once per 10 minutes per tab, and
-// only into a served shell of the server's release.
+// banner with its manual `Reload page`, and the automatic reload — after
+// 60 s outdated, never while any dialog is open, at most once per 10
+// minutes per tab, and only into a served shell of the server's release.
+// The Scan Station and Production Board routes reload on those
+// conditions alone; every other route also waits for 2 minutes without
+// input and for no unsaved work on the page.
 
 const SERVER_RELEASE = 'v2.0.0';
 const NOTICE =
@@ -174,12 +177,109 @@ test('FR-11: the notice shows the exact copy and Reload page, takes no focus, an
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-test('FR-12: Management routes never reload themselves', async () => {
+test('FR-12: an attended route reloads itself only after 2 minutes without input', async () => {
   at('/management/work-orders');
   render(<Harness initial="outdated" />);
-  await advance(11 * 60_000);
+  await advance(119_000);
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
+
+  await advance(1_000);
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(markerAtReload[0]).not.toBeNull();
+});
+
+test('FR-34: input on an attended page postpones its reload; an unattended route ignores input', async () => {
+  at('/administration');
+  const attended = render(<Harness initial="outdated" />);
+  await advance(100_000);
+  fireEvent.keyDown(window, { key: 'Shift' });
+  await advance(60_000);
+  fireEvent.pointerMove(window);
+  await advance(119_000);
+  expect(reload).not.toHaveBeenCalled();
+  await advance(1_000);
+  expect(reload).toHaveBeenCalledTimes(1);
+  attended.unmount();
+
+  window.sessionStorage.clear();
+  at('/scan-station/S1/production');
+  render(<Harness initial="outdated" />);
+  await advance(30_000);
+  fireEvent.keyDown(window, { key: 'Shift' });
+  await advance(30_000);
+  expect(reload).toHaveBeenCalledTimes(2);
+});
+
+test('FR-37: a scroll alone is not use, because the page also scrolls by itself', async () => {
+  at('/administration');
+  render(<Harness initial="outdated" />);
+  await advance(100_000);
+  fireEvent.scroll(window);
+  fireEvent.scroll(document.body);
+  await advance(20_000);
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+/** A form on the page with an unsaved edit while `unsaved` is set. */
+let setUnsaved: (unsaved: boolean) => void = () => undefined;
+function DraftForm() {
+  const [unsaved, set] = useState(true);
+  setUnsaved = set;
+  useUnsavedWork(unsaved);
+  return null;
+}
+
+test('FR-35: unsaved work or an open dialog holds the reload of an idle attended page', async () => {
+  at('/administration');
+  render(
+    <Harness initial="outdated">
+      <DraftForm />
+    </Harness>,
+  );
+  await advance(10 * 60_000);
+  expect(reload).not.toHaveBeenCalled();
+  expect(shellChecks()).toBe(0);
+
+  const dialog = openDialogElement();
+  act(() => setUnsaved(false));
+  await advance(60_000);
+  expect(reload).not.toHaveBeenCalled();
+
+  dialog.remove();
+  await advance(1_000);
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+test('FR-36: unsaved work is reported while any reporter holds it and ends with the reporter', () => {
+  function Reporter({ unsaved }: { unsaved: boolean }) {
+    useUnsavedWork(unsaved);
+    return null;
+  }
+  expect(hasUnsavedWork()).toBe(false);
+  const view = render(
+    <>
+      <Reporter unsaved />
+      <Reporter unsaved={false} />
+    </>,
+  );
+  expect(hasUnsavedWork()).toBe(true);
+  view.rerender(
+    <>
+      <Reporter unsaved={false} />
+      <Reporter unsaved={false} />
+    </>,
+  );
+  expect(hasUnsavedWork()).toBe(false);
+  view.rerender(
+    <>
+      <Reporter unsaved />
+      <Reporter unsaved />
+    </>,
+  );
+  expect(hasUnsavedWork()).toBe(true);
+  view.unmount();
+  expect(hasUnsavedWork()).toBe(false);
 });
 
 test('FR-13: a Scan Station route reloads itself after 60 s outdated, marker first', async () => {

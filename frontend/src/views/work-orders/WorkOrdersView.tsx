@@ -13,6 +13,7 @@ import { connectionReason } from '../../app/release-copy';
 import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
 import { useRouter } from '../../app/router-context';
 import { useSession } from '../../app/session-context';
+import { useUnsavedWork } from '../../app/unsaved-work';
 import { getViewStatePreview } from '../../app/view-state';
 import { useDueSoonPolicy } from '../../components/due-soon-policy-context';
 import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
@@ -184,6 +185,8 @@ function ActiveWorkOrdersView() {
     (newWorkOrderOpen && newWorkOrderDirty) ||
     (detailId !== null && detailDirty);
   const guarded = dirty || importBusy;
+  // An outdated page never reloads itself over the same unsaved work.
+  useUnsavedWork(guarded);
 
   // Unsaved-change protection for top-level navigation, Management
   // sub-navigation and browser back/forward (the router consults the

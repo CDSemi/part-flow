@@ -13,6 +13,7 @@ import type { SensitiveAction } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useUnsavedWork } from '../../app/unsaved-work';
 import { useCloseGuard } from '../../components/close-guard';
 import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { AreaDot } from '../../components/indicators';
@@ -311,6 +312,7 @@ function DefaultTimeoutForm({
 
   const minutes = parseTimeout(text);
   const dirty = minutes !== savedMinutes;
+  useUnsavedWork(dirty);
 
   const submit = async () => {
     if (minutes === null) return;

@@ -551,8 +551,9 @@ deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --appr
 ```
 
 - Exit code 0 means the new release runs and its automatic checks passed. Then check by hand with test data: sign in,
-  scan at a Scan Station, and save a change and read it back. Open pages show an update notice and must be reloaded;
-  an unattended Scan Station or Production Board reloads itself.
+  scan at a Scan Station, and save a change and read it back. Open pages show an update notice and reload themselves:
+  a Scan Station or Production Board after about a minute, every other page once nobody has used it for 2 minutes and
+  nothing on it is unsaved. Whoever is working on a page can click **Reload page** sooner.
 - Any other exit code: read the message and follow the runbook §5 (the exit code table). Nothing reopens by itself
   when `release.sh` has stopped writes.
 - `.env.production` is not tracked by git, so it stays in place; `release.sh` writes the new tag into it at the switch.
@@ -589,7 +590,8 @@ storage (images and container logs). `/root/partflow-monitoring/growth.tsv` reco
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Rewritten as one linear installation from an empty NAS to people working in PartFlow, with every DSM path and command in order; the HTTPS step offers the LAN option or the Cloudflare guide; added the check for kernels without processor quota support and the firewall check of the container networks; the optional NAS staging and the move procedure were removed (the move is now in the runbook §6). |
+| 2026-11-12 | uncommitted | §12: pages open during a release now reload themselves (a Scan Station or Production Board after about a minute, every other page once idle for 2 minutes with nothing unsaved). |
+| 2026-11-10 | `e0e5056` | Rewritten as one linear installation from an empty NAS to people working in PartFlow, with every DSM path and command in order; the HTTPS step offers the LAN option or the Cloudflare guide; added the check for kernels without processor quota support and the firewall check of the container networks; the optional NAS staging and the move procedure were removed (the move is now in the runbook §6). |
 | 2026-11-09 | `398c617` | Restored small items the rewrite had dropped: the health check in the staging smoke test, the off-NAS copy and restore test of staging dumps, the staging reconciliation, the full name of reconcile check (h) and the full `revision` command; step 1 now covers a NAS where staging was never installed. |
 | 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | `03bd90c` | Added the monitoring tasks and the disk thresholds of the host checks. |

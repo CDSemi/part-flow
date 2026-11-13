@@ -6,6 +6,7 @@ import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useUnsavedWork } from '../../app/unsaved-work';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   DUE_SOON_DAYS_RANGE,
@@ -181,6 +182,7 @@ function DueSoonForm({
     minDays !== saved.minDays ||
     leadTimePercent !== saved.leadTimePercent ||
     maxDays !== saved.maxDays;
+  useUnsavedWork(dirty);
 
   const edited = (set: (text: string) => void) => (text: string) => {
     set(text);

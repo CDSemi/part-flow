@@ -573,9 +573,10 @@ watch errors, response times, lock waits, restarts, disk and what users report: 
 - The release recreates `backend`, which deletes its log: run `check.sh --only errors --no-state` before the release
   (§2).
 - Keep the previous release's images and the pre-release backup (which is never rotated) until the rollback deadline.
-- Pages that were open during the switch show the update notice and must be reloaded
-  ([`../GUI_DESIGN.md`](../GUI_DESIGN.md) §3 rule 13); an unattended Scan Station or Production Board reloads itself
-  once no dialog is open.
+- Pages that were open during the switch show the update notice and reload themselves
+  ([`../GUI_DESIGN.md`](../GUI_DESIGN.md) §3 rule 13): a Scan Station or Production Board after 60 s, every other page
+  once nobody has used it for 2 minutes and nothing on it is unsaved, and never while a dialog is open. Nobody needs
+  to visit each computer; whoever is working on a page can click `Reload page` sooner.
 
 ## 6. Rolling back
 
@@ -1129,7 +1130,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Added sign-in and user accounts: recovering a forgotten password or login name, renaming a user, removing a user's access, and the recovery when no Administrator is left. |
+| 2026-11-12 | uncommitted | §5 Observe: pages open during a release now reload themselves (a Scan Station or Production Board after 60 s, every other page once idle for 2 minutes with nothing unsaved), so nobody visits each computer. |
+| 2026-11-12 | `3fb7201` | Added sign-in and user accounts: recovering a forgotten password or login name, renaming a user, removing a user's access, and the recovery when no Administrator is left. |
 | 2026-11-10 | `e0e5056` | Rewritten for new operators: a task index and the setup of every session up front, a table of common problems, step-by-step rollback paths 1 and 2 with the checkout switch, the move to another host (moved here from the NAS guide), and shorter reference detail; section numbers and the path 3 scripts are unchanged. |
 | 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | `4271f61` | Added Work Order Demand log searches and the error check to run before recreating `backend`. |

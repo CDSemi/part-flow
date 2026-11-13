@@ -6,6 +6,7 @@ import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useUnsavedWork } from '../../app/unsaved-work';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   RETENTION_MONTHS_MAX,
@@ -144,6 +145,8 @@ function RetentionPeriodForm({
   const months = keepPeriod ? parseRetentionMonths(text) : null;
   const invalid = keepPeriod && months === null;
   const dirty = months !== savedMonths;
+  // An entry that is not a valid period yet is unsaved input as well.
+  useUnsavedWork(dirty || invalid);
 
   const choose = (keep: boolean) => {
     setKeepPeriod(keep);

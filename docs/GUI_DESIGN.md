@@ -518,10 +518,13 @@ These rules apply to every view. They express the core principles of PROJECT_PRO
       and the action rail `Reload page`. Production write submission is disabled exactly as while disconnected, reads
       continue, and the connectivity chip reads `UPDATED`. While the connection is lost, the OFFLINE banner shows
       instead. The notice takes no focus.
-    - **Reloading.** **The page never reloads itself while a dialog is open.** On the Scan Station and Production Board
-      routes (unattended stations and wall displays), the page reloads itself once the notice has shown for 60 s with
-      no dialog open, at most once per 10 minutes per browser tab, and only when the server already serves the new
-      page. Elsewhere only `Reload page` reloads, after the existing unsaved-change guard.
+    - **Reloading.** **The page never reloads itself while a dialog is open.** Every page reloads itself once the
+      notice has shown for 60 s with no dialog open, at most once per 10 minutes per browser tab, and only when the
+      server already serves the new page. On the Scan Station and Production Board routes (unattended stations and
+      wall displays) these conditions are enough. On every other route the page also waits until nobody has used it
+      for 2 minutes (no keyboard, pointer, wheel or touch input) and no form on the page holds unsaved input,
+      including the Work Orders view's unsaved draft or running import; a form inside a dialog is covered by the
+      dialog rule. `Reload page` reloads at any time, after the existing unsaved-change guard.
     - **Dialogs that cannot be dismissed.** The Worker sign-in / `Worker session expired` modal, the enrollment dialog
       (§4.12, §4.13) and the `Choose a new password` dialog (§1.2) cannot be dismissed, so while the page is outdated
       each shows its own `Reload page` button; the password dialog also shows
@@ -3884,7 +3887,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-12 | uncommitted | Every data-entry dialog closes at once while unchanged and asks before discarding changed input; selects pinned to a fixed height lose their vertical padding so descenders are never cut; a new Scan Station proposes its Station ID from its Area, and its Devices cell names the enrolled devices and opens them as a whole; the enrollment panel became a centered card with a large code field. |
+| 2026-11-12 | uncommitted | §3 rule 13: every page reloads itself after an update once it has been idle for 2 minutes with no dialog and no unsaved input; the Scan Station and Production Board keep reloading after 60 s. |
+| 2026-11-12 | a7949e3 | Every data-entry dialog closes at once while unchanged and asks before discarding changed input; selects pinned to a fixed height lose their vertical padding so descenders are never cut; a new Scan Station proposes its Station ID from its Area, and its Devices cell names the enrolled devices and opens them as a whole; the enrollment panel became a centered card with a large code field. |
 | 2026-11-09 | 398c617 | Aligned with the code: the Undo and Retry action zones are transparent at rest with an inset divider rule, and an `ON_MACHINE` transfer announces `AREA_COMPLETED, then TRANSFERRED (one command)`. |
 | 2026-11-09 | 398c617 | Rewritten as current content for new readers; requirements that only the old version notes (former §15.1–§15.17) held were moved into the body; no rule changed. |
 | 2026-10-06 to 2026-10-08 | 702ab1c … 7b24d10 | Added User sign-in with permission-aware Management and Administration, Scan Station device enrollment, allocation adjustment, assigned-route editing, the PN audit trail, the per-User theme, Work Order file import and the release-update notice. |

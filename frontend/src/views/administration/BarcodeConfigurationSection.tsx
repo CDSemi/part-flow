@@ -8,6 +8,7 @@ import {
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useUnsavedWork } from '../../app/unsaved-work';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   MACHINE_BARCODE_NAMESPACE,
@@ -130,6 +131,13 @@ function FormatPanel({
   const next = format ? formatAssetTag(format, saved?.nextSequence ?? 1) : null;
   const dirty =
     saved === null || prefix !== saved.prefix || parsedDigits !== saved.digits;
+  // Unsaved work is input that differs from what the form opened with:
+  // `dirty` is true before anything is typed while no format is saved.
+  useUnsavedWork(
+    canWrite &&
+      (prefix !== (saved?.prefix ?? '') ||
+        digitsText !== String(saved?.digits ?? 4)),
+  );
 
   const submit = async () => {
     if (prefixError !== null || !digitsValid) return;

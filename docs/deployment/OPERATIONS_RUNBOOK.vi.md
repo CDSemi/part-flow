@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `3fb7201` cộng các thay đổi chưa
 > commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -587,9 +587,10 @@ gì người dùng báo: các dòng `errors`, `restarts` và `disk_*` của `che
   (§2).
 - Giữ các image của bản phát hành trước và bản sao lưu trước phát hành (không bao giờ bị xoay vòng) cho đến hạn chót
   quay lui.
-- Các trang đang mở trong lúc chuyển hiển thị thông báo cập nhật và phải được tải lại
-  ([`../GUI_DESIGN.vi.md`](../GUI_DESIGN.vi.md) §3 rule 13); một Scan Station hoặc Production Board không có người
-  trông tự tải lại khi không còn hộp thoại nào đang mở.
+- Các trang đang mở trong lúc chuyển hiển thị thông báo cập nhật và tự tải lại
+  ([`../GUI_DESIGN.vi.md`](../GUI_DESIGN.vi.md) §3 rule 13): Scan Station hoặc Production Board sau 60 giây, mọi trang
+  khác khi không ai dùng nó trong 2 phút và trên trang không còn gì chưa lưu, và không bao giờ khi đang có hộp thoại mở.
+  Không ai phải đi tới từng máy; người đang làm việc trên một trang có thể bấm `Reload page` sớm hơn.
 
 ## 6. Quay lui
 
@@ -1147,7 +1148,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Thêm mục đăng nhập và tài khoản người dùng: lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập, thu hồi quyền truy cập của một user, và cách khôi phục khi không còn Administrator nào. |
+| 2026-11-12 | uncommitted | §5 Observe: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau 60 giây, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu), nên không ai phải đi tới từng máy. |
+| 2026-11-12 | `3fb7201` | Thêm mục đăng nhập và tài khoản người dùng: lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập, thu hồi quyền truy cập của một user, và cách khôi phục khi không còn Administrator nào. |
 | 2026-11-10 | `e0e5056` | Viết lại cho người vận hành mới: mục lục tác vụ và thiết lập mỗi phiên ngay từ đầu, bảng các vấn đề thường gặp, các đường quay lui 1 và 2 từng bước kèm việc chuyển checkout, việc chuyển sang máy chủ khác (chuyển về đây từ hướng dẫn NAS), và phần tham chiếu chi tiết ngắn gọn hơn; số mục và các script của path 3 không đổi. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ các cổng pilot và phát hành theo quyết định của chủ sở hữu. |
 | 2026-10-09 | `4271f61` | Thêm các tìm kiếm log theo Work Order Demand và kiểm tra lỗi cần chạy trước khi tạo lại `backend`. |

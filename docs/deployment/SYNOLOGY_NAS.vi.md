@@ -1,7 +1,7 @@
 # Cài đặt PartFlow trên Synology NAS
 
-> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
-> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này cài PartFlow production trên Synology NAS của công ty, từng bước, từ một NAS trống đến khi mọi người làm
@@ -554,7 +554,9 @@ deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --appr
 
 - Mã thoát 0 nghĩa là bản phát hành mới đang chạy và các kiểm tra tự động của nó đã đạt. Sau đó hãy kiểm tra bằng tay
   với dữ liệu thử: đăng nhập, quét ở một Scan Station, và lưu một thay đổi rồi đọc lại. Các trang đang mở hiển thị
-  thông báo cập nhật và phải được tải lại; một Scan Station hoặc Production Board không có người trông tự tải lại.
+  thông báo cập nhật và tự tải lại: Scan Station hoặc Production Board sau khoảng một phút, mọi trang khác khi không ai
+  dùng nó trong 2 phút và trên trang không còn gì chưa lưu. Người đang làm việc trên một trang có thể bấm
+  **Reload page** sớm hơn.
 - Mọi mã thoát khác: đọc thông báo và làm theo runbook §5 (bảng mã thoát). Không có gì tự mở lại khi `release.sh` đã
   dừng việc ghi.
 - `.env.production` không được git theo dõi, nên nó ở nguyên chỗ; `release.sh` ghi tag mới vào đó lúc chuyển. Các tác vụ
@@ -592,7 +594,8 @@ ghi kích thước database mỗi ngày một lần.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Viết lại thành một quy trình cài đặt tuyến tính từ NAS trống đến khi mọi người làm việc trong PartFlow, với mọi đường dẫn DSM và mọi lệnh theo thứ tự; bước HTTPS đưa ra phương án mạng LAN hoặc hướng dẫn Cloudflare; thêm kiểm tra kernel không hỗ trợ giới hạn bộ xử lý và kiểm tra firewall đối với các mạng của container; phần NAS staging tùy chọn và quy trình chuyển máy được loại bỏ (việc chuyển máy nay nằm trong runbook §6). |
+| 2026-11-12 | uncommitted | §12: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau khoảng một phút, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu). |
+| 2026-11-10 | `e0e5056` | Viết lại thành một quy trình cài đặt tuyến tính từ NAS trống đến khi mọi người làm việc trong PartFlow, với mọi đường dẫn DSM và mọi lệnh theo thứ tự; bước HTTPS đưa ra phương án mạng LAN hoặc hướng dẫn Cloudflare; thêm kiểm tra kernel không hỗ trợ giới hạn bộ xử lý và kiểm tra firewall đối với các mạng của container; phần NAS staging tùy chọn và quy trình chuyển máy được loại bỏ (việc chuyển máy nay nằm trong runbook §6). |
 | 2026-11-09 | `398c617` | Khôi phục các mục nhỏ mà bản viết lại đã bỏ sót: kiểm tra tình trạng trong smoke test của staging, bản sao ngoài NAS và kiểm thử khôi phục của các dump staging, đối soát staging, tên đầy đủ của reconcile check (h) và lệnh `revision` đầy đủ; bước 1 nay bao gồm cả NAS chưa từng cài staging. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ các cổng pilot và release theo quyết định của chủ sở hữu. |
 | 2026-10-09 | `03bd90c` | Thêm các tác vụ giám sát và ngưỡng đĩa của các kiểm tra máy chủ. |

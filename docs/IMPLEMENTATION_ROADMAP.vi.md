@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `a7949e3` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1185,8 +1185,9 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
   lúc đóng băng, migrate, chuyển `backend` rồi `web`, chạy `smoke.sh` và ghi `record.json` (mã thoát 0 hoàn tất, 1 đã
   dừng, 2 không chạy được, 3 đang đóng băng, 4 cần xem xét). Nó không bao giờ được lên lịch và từ chối chạy khi có một
   project `partflow-staging` trên cùng Docker daemon.
-- Frontend hiển thị thông báo `UPDATED` và chặn thao tác ghi trên một trang đã cũ, và chỉ tự tải lại trên các route Scan
-  Station và Production Board khi không có hộp thoại nào mở (GUI_DESIGN §3 quy tắc 13).
+- Frontend hiển thị thông báo `UPDATED` và chặn thao tác ghi trên một trang đã cũ. Khi không có hộp thoại nào mở, trang
+  tự tải lại: trên các route Scan Station và Production Board sau 60 s, trên mọi route khác khi không ai dùng trang
+  trong 2 phút và trên trang không còn gì chưa lưu (GUI_DESIGN §3 quy tắc 13).
 - Rollback không đổi lược đồ thì chuyển release tag về bản cũ, nên image của release trước phải được giữ trên máy chủ.
   Rollback lược đồ thì restore backup trước-release (bên dưới). Không bao giờ có down-migration.
 
@@ -1258,10 +1259,10 @@ git tag.
   Security (HSTS) hay không.
 - Quyền của secret file, giới hạn tài nguyên và số worker đo được, và thời gian import trường hợp xấu nhất qua tên máy
   chủ thật.
-- Một lần release và một lần rollback thực hiện trên NAS, và các kiểm tra trên trình duyệt cần một Area, Operation đã
+- Một lần release và một lần rollback thực hiện trên NAS; các kiểm tra trên trình duyệt cần một Area, Operation đã
   cấu hình và một Scan Station đã enroll (tự tải lại trên route production của Scan Station, không tải lại khi một hộp
   thoại sản xuất hay modal đăng nhập Worker đang mở, `Reload page` trong modal, và feed `● Live` dưới thông báo cập
-  nhật).
+  nhật); và một trang đang mở trên route khác tự tải lại khi không ai dùng nó trong 2 phút.
 - Phép dò quyền và `reconcile --check h` trên database production, và một ghi nhận rằng `backend` chỉ giữ
   `partflow_app_password`.
 - Thư mục backup, tác vụ backup hằng ngày và bản sao mã hóa ngoài máy chủ, bản backup đầu tiên, một lần kiểm tra rằng
@@ -1406,7 +1407,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Hạ độ dài tối thiểu của mật khẩu mới từ 12 xuống 6 ký tự (quyết định của chủ sở hữu). |
+| 2026-11-12 | uncommitted | Release flow của Phase 16: mọi trang đã cũ tự tải lại khi rảnh, không chỉ Scan Station và Production Board, và các kiểm tra trên trình duyệt sau một lần release trên NAS bao gồm việc này. |
+| 2026-11-12 | `a7949e3` | Hạ độ dài tối thiểu của mật khẩu mới từ 12 xuống 6 ký tự (quyết định của chủ sở hữu). |
 | 2026-11-10 | `e0e5056` | Bước go-live trỏ tới hướng dẫn cài đặt NAS đã viết lại (§1 đến §10). |
 | 2026-11-09 | `398c617` | Viết lại thành trạng thái hiện tại cho người đọc mới; pilot được thay bằng go-live trực tiếp (quyết định của chủ sở hữu). |
 | 2026-11-09 | `b405c6e` | Ghi nhận quyết định go-live trực tiếp của chủ sở hữu, không có pilot và không có release gate. |

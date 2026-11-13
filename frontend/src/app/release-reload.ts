@@ -1,13 +1,18 @@
 // Automatic reload of an outdated page (GUI_DESIGN §3 rule 13,
-// OD-16-07): only on the unattended Scan Station and Production Board
-// routes, once the page has been outdated for 60 s, NEVER while any
+// OD-16-07): once the page has been outdated for 60 s, NEVER while any
 // dialog is open, at most once per 10 minutes per browser tab, and only
 // when the server already serves the shell of the release it reports.
+// The unattended Scan Station and Production Board routes reload on
+// those conditions alone; every other route also waits until nobody has
+// used the page for 2 minutes and no form on it holds unsaved work.
 
 import type { Route } from './router-core';
 
 export const RELEASE_AUTO_RELOAD_DELAY_MS = 60_000;
 export const RELEASE_AUTO_RELOAD_MIN_INTERVAL_MS = 600_000;
+/** How long an attended page must go without keyboard, pointer, wheel
+ * or touch input before it may reload itself. */
+export const RELEASE_IDLE_RELOAD_AFTER_MS = 120_000;
 export const RELEASE_AUTO_RELOAD_STORAGE_KEY =
   'partflow.release-auto-reload-at';
 
@@ -19,7 +24,8 @@ export function noDialogOpen(doc: Document): boolean {
   return doc.querySelector(OPEN_DIALOG_SELECTOR) === null;
 }
 
-/** The route families that may reload themselves (kiosk-style use). */
+/** The unattended route families (kiosk-style use), which reload
+ * themselves without waiting for the page to be idle. */
 export function autoReloadRoute(route: Route): boolean {
   return route.view === 'scan-station' || route.view === 'production-board';
 }
