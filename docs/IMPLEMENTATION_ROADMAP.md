@@ -26,7 +26,8 @@ is, and the Hot list (Priority) ranks urgent demand. Administration configures D
 Stations, Machines, Workers and their badge sessions, Users, roles and permissions, and the application policies.
 Users sign in, every Management and Administration action is checked against permissions, and only enrolled devices
 can act as Scan Stations. The complete production stack (images, Compose file, release script, backups, restore
-drill, database roles, monitoring and reconciliation) is ready; it has not yet been installed on the company host.
+drill, database roles, monitoring and reconciliation) runs on the company Synology NAS, where PartFlow went live on
+2026-11-09 with release `v1.0.0`; later releases are installed from git tags with `release.sh`.
 
 **Phases.**
 
@@ -49,15 +50,16 @@ drill, database roles, monitoring and reconciliation) is ready; it has not yet b
 | Phase 13 — Full Administration and Production Identity Configuration | Closed (2026-10-07) | Workers, Worker identification and sessions, master-data management, policies, Users and roles as configuration. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented; go-live on the company NAS is next; Movement-history archival is planned. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, the open follow-ups and Movement-history archival remain. |
 
 **Database schema.** The current Alembic migration head is `0032_phase14_route_adjusted`
 (`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phases 15 and 16 added no migration.
 
-**Owner decision of 2026-11-09: direct go-live.** PartFlow goes into real use on the company Synology NAS as soon as
-the production stack is installed. There is no pilot phase and no list of release gates; problems are fixed in later
-releases while the system is in use. Only what the software needs in order to work is required; backups, monitoring
-and the host checks are set up after go-live, when convenient, and block nothing (DEPLOYMENT §1 and §5).
+**Owner decision of 2026-11-09: direct go-live.** PartFlow went into real use on the company Synology NAS on
+2026-11-09, as soon as the production stack was installed. There is no pilot phase and no list of release gates;
+problems are fixed in later releases while the system is in use. Only what the software needs in order to work is
+required; backups, monitoring and the host checks are set up after go-live, when convenient, and block nothing
+(DEPLOYMENT §1 and §5).
 
 **Where the other documents are.**
 
@@ -1122,7 +1124,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - observability
 - rollback
 - reconciliation checks
-- go-live on the NAS (owner decision 2026-11-09: direct production use, with no pilot phase and no release gates; DEPLOYMENT §1 and §5)
+- go-live on the NAS — done on 2026-11-09 with release `v1.0.0` (owner decision of the same day: direct production use, with no pilot phase and no release gates; DEPLOYMENT §1 and §5)
 - production database-role hardening, including the intended application-role UPDATE/DELETE restrictions on append-only production/audit history
 - platform-upgrade identity checks: canonical PN and Worker badge identity follow the backend Python's Unicode Character Database (UCD), pinned to `15.0.0`, and the Asset Tag prefix check refuses Python's `\s` whitespace set, a strict superset of PostgreSQL's libc `[[:space:]]`; before any Python upgrade that changes the UCD, or a glibc change, a read-only check lists every stored PN, badge and Asset Tag prefix whose canonical form or CHECK outcome would change, and the owner decides on re-canonicalization before the upgrade
 - PN entry canonical form: the Work Orders typed-PN and demand-label paths submit the trimmed raw input and display the server's canonical form, so the browser's Unicode tables never decide a stored PN (today they can diverge from the server only on about 27 Unicode-version-sensitive code points)
@@ -1248,17 +1250,18 @@ The full description is in DEPLOYMENT §3.1. In short:
   any backend error record; a repeated failure is notified every 6 hours). `deploy/production/scheduled-reconcile.sh`
   runs `reconcile` daily.
 
-### Next step: go-live on the NAS
+### Go-live on the NAS
 
-PartFlow goes live directly on the company Synology NAS. The installation follows
-[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §1 to §10. Only what the software needs in order to work is
-required (DEPLOYMENT §5): HTTPS at the platform proxy (request bodies of at least 5 MiB, timeouts of at least 300
-seconds, the certificate trusted by every workstation and Scan Station), first-run setup with one backend worker until
-the first Administrator exists, each Scan Station device enrolled, no `partflow-staging` project on the production
-Docker daemon, and releases from a git tag.
+PartFlow went live on the company Synology NAS on 2026-11-09 with release `v1.0.0`. The installation followed
+[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §1 to §10, and later releases are installed with
+`release.sh` from a git tag (§12 of that guide). Only what the software needs in order to work was required
+(DEPLOYMENT §5): HTTPS at the platform proxy (request bodies of at least 5 MiB, timeouts of at least 300 seconds, the
+certificate trusted by every workstation and Scan Station), first-run setup with one backend worker until the first
+Administrator exists, each Scan Station device enrolled, no `partflow-staging` project on the production Docker
+daemon, and releases from a git tag.
 
-**After go-live, when convenient (blocks nothing).** None of these has been run on a real host yet; the scripts were
-run on Docker Desktop and in a Linux container.
+**After go-live, when convenient (blocks nothing).** Apart from installing releases with `release.sh`, none of these
+is recorded as done on the real host yet; the scripts were run on Docker Desktop and in a Linux container.
 
 - The platform proxy: it supplies the client address last in `X-Forwarded-For`, its body and timeout settings, the
   loopback peer matching the `edge` gateway (otherwise set `PARTFLOW_TRUSTED_PROXY`), the filtering of the station
@@ -1266,10 +1269,11 @@ run on Docker Desktop and in a Linux container.
   HTTP Strict Transport Security (HSTS).
 - Secret-file permissions, measured resource limits and worker count, and the worst-case import duration through the
   real hostname.
-- A release and a rollback executed on the NAS; the browser checks that need a configured Area, Operation and
-  enrolled Scan Station (automatic reload on a Scan Station production route, no reload while a production dialog or
-  the Worker sign-in modal is open, the in-modal `Reload page`, and the `● Live` feed under the update notice); and an
-  open page on any other route counting down and reloading itself once nobody has used it for 1 minute.
+- A rollback executed on the NAS (releases already run there); the browser checks that need a configured Area,
+  Operation and enrolled Scan Station (automatic reload on a Scan Station production route, no reload while a
+  production dialog or the Worker sign-in modal is open, the in-modal `Reload page`, and the `● Live` feed under the
+  update notice); and an open page on any other route counting down and reloading itself once nobody has used it for
+  1 minute.
 - The privilege probe and `reconcile --check h` on the production database, and a record that `backend` holds only
   `partflow_app_password`.
 - The backup directory, the daily backup task and the encrypted off-host copy, the first backup, a check that an
@@ -1335,20 +1339,21 @@ Owner decisions needed before this work starts:
 - Whether to send HSTS from the platform proxy.
 - Recommended defaults in force that the owner has not explicitly confirmed and may change: readiness answering 503 on
   a schema mismatch; the backend write gate; the two database roles and the accepted superuser limit of check (h);
-  encryption and off-host replication by the platform tool; the monitoring thresholds above; and the update notice of
-  GUI_DESIGN §3 rule 13.
+  encryption and off-host replication by the platform tool; and the monitoring thresholds above.
 
 ### Open follow-ups
 
 - PN entry canonical form (scope bullet above) — not implemented.
 - Platform-upgrade identity checks: the Python side is implemented by check (j); before any Python or glibc upgrade the
   owner reviews the check's list and decides on re-canonicalization.
-- Deployment Admin (the separate `pf` tool used for staging): its container health checks and frontend probes must
-  move to `GET /api/health/live` before staging runs a commit whose schema head differs from the staging database,
-  because `/api/health` is readiness; how it provisions database roles and whether it adopts the backup artifact are
-  decided in its PartFlow profile step (PF-A4.1), and under either option `apply-grants` runs after every restore and
-  check (h) passes before the application starts; a managed route for running an application command on staging
-  (PF-A4).
+- Deployment Admin (the separate `pf` tool used for staging): development stopped on 2026-10-14, when the owner chose
+  to rebuild the deployment kit as a separate project
+  ([`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)), so its open steps will not be built: moving its
+  container health checks and frontend probes to `GET /api/health/live` (needed before staging runs a commit whose
+  schema head differs from the staging database, because `/api/health` is readiness), its database-role provisioning
+  and backup adoption (PF-A4.1), and a managed route for running an application command on staging (PF-A4). The
+  replacement keeps the rule that `apply-grants` runs after every restore and that check (h) passes before the
+  application starts.
 - Movement-history archival and purge — planned above.
 
 ## Deferred
@@ -1412,7 +1417,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Phase 16 snapshot copy lock order delivered: a split or merge copy locks its Areas and Operations in ascending order, together with a partial transfer's target Area, so crossing releases and partial transfers no longer deadlock. |
+| 2026-11-12 | uncommitted | Current State and Phase 16: PartFlow is live on the company NAS since 2026-11-09; the update notice left the unconfirmed defaults, and the Deployment Admin follow-ups record that its development stopped. |
+| 2026-11-12 | `b413c96` | Phase 16 snapshot copy lock order delivered: a split or merge copy locks its Areas and Operations in ascending order, together with a partial transfer's target Area, so crossing releases and partial transfers no longer deadlock. |
 | 2026-11-12 | `de4d99f` | Phase 16 release flow: an outdated page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; the Production Board refreshes every 5 seconds instead of 15 (owner decisions). |
 | 2026-11-12 | `77a2dfb` | Phase 16 release flow: every outdated page reloads itself once idle, not only the Scan Station and Production Board, and the browser checks after a release on the NAS cover it. |
 | 2026-11-12 | `a7949e3` | Lowered the minimum length of a new password from 12 to 6 characters (owner decision). |

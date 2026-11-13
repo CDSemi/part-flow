@@ -25,8 +25,8 @@ cho thấy mỗi số lượng đang ở đâu, và Hot list (Priority) xếp h�
 Area, Operation, Scan Station, Machine, Worker cùng phiên badge của họ, User, role và permission, và các chính sách
 ứng dụng. User đăng nhập, mọi thao tác Management và Administration được kiểm tra theo permission, và chỉ thiết bị
 đã enroll mới hoạt động được như Scan Station. Bộ production stack đầy đủ (image, file Compose, script release,
-backup, diễn tập restore, database role, giám sát và đối soát (reconciliation)) đã sẵn sàng; nó chưa được cài lên
-máy chủ của công ty.
+backup, diễn tập restore, database role, giám sát và đối soát (reconciliation)) đang chạy trên Synology NAS của công
+ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release sau được cài từ git tag bằng `release.sh`.
 
 **Các phase.**
 
@@ -49,16 +49,16 @@ máy chủ của công ty.
 | Phase 13 — Full Administration and Production Identity Configuration | Đã đóng (2026-10-07) | Worker, nhận diện Worker và phiên, quản lý master data, chính sách, User và role dưới dạng cấu hình. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong; bước tiếp theo là go-live trên NAS của công ty; lưu trữ (archival) lịch sử Movement đã lên kế hoạch. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 
 **Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0032_phase14_route_adjusted`
 (`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phase 15 và 16 không thêm migration nào.
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
-NAS của công ty ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh sách release gate;
-lỗi được sửa ở các bản phát hành sau trong khi hệ thống đang được dùng. Chỉ những gì phần mềm cần để chạy là bắt
-buộc; backup, giám sát và các kiểm tra trên máy chủ được thiết lập sau go-live, khi thuận tiện, và không chặn điều gì
-(DEPLOYMENT §1 và §5).
+NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
+sách release gate; lỗi được sửa ở các bản phát hành sau trong khi hệ thống đang được dùng. Chỉ những gì phần mềm cần
+để chạy là bắt buộc; backup, giám sát và các kiểm tra trên máy chủ được thiết lập sau go-live, khi thuận tiện, và
+không chặn điều gì (DEPLOYMENT §1 và §5).
 
 **Các tài liệu khác ở đâu.**
 
@@ -1113,7 +1113,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - khả năng quan sát (observability)
 - rollback
 - kiểm tra đối soát
-- go-live trên NAS (quyết định của chủ sở hữu ngày 2026-11-09: dùng thật trực tiếp, không có giai đoạn pilot và không có release gate; DEPLOYMENT §1 và §5)
+- go-live trên NAS — đã xong ngày 2026-11-09 với release `v1.0.0` (quyết định của chủ sở hữu cùng ngày: dùng thật trực tiếp, không có giai đoạn pilot và không có release gate; DEPLOYMENT §1 và §5)
 - gia cố database role cho production, gồm các hạn chế UPDATE/DELETE theo dự định đối với role của ứng dụng trên lịch sử sản xuất/audit chỉ-ghi-thêm
 - kiểm tra định danh khi nâng cấp nền tảng: định danh PN chuẩn và badge Worker theo Cơ sở dữ liệu ký tự Unicode (UCD) của Python ở backend, được ghim ở `15.0.0`, và kiểm tra tiền tố Asset Tag từ chối tập khoảng trắng `\s` của Python, một tập cha thực sự của `[[:space:]]` trong libc của PostgreSQL; trước mọi lần nâng cấp Python làm đổi UCD, hoặc một thay đổi glibc, một kiểm tra chỉ đọc liệt kê mọi PN, badge và tiền tố Asset Tag đã lưu mà dạng chuẩn hay kết quả CHECK của nó sẽ thay đổi, và chủ sở hữu quyết định việc chuẩn hóa lại trước khi nâng cấp
 - dạng chuẩn khi nhập PN: các đường nhập PN bằng tay và nhãn demand của Work Orders gửi đầu vào thô đã cắt khoảng trắng và hiển thị dạng chuẩn của server, để bảng Unicode của trình duyệt không bao giờ quyết định một PN được lưu (hiện nay chúng chỉ có thể khác server ở khoảng 27 code point nhạy với phiên bản Unicode)
@@ -1241,17 +1241,18 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
   động lại nào, bất kỳ bản ghi lỗi backend nào; một lỗi lặp lại được thông báo mỗi 6 giờ).
   `deploy/production/scheduled-reconcile.sh` chạy `reconcile` hằng ngày.
 
-### Bước tiếp theo: go-live trên NAS
+### Go-live trên NAS
 
-PartFlow go-live trực tiếp trên Synology NAS của công ty. Việc cài đặt theo
-[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §1 đến §10. Chỉ những gì phần mềm cần để chạy là bắt buộc
-(DEPLOYMENT §5): HTTPS tại proxy của nền tảng (thân request ít nhất 5 MiB, timeout ít nhất 300 giây, chứng chỉ được mọi
-máy trạm và Scan Station tin cậy), thiết lập lần đầu với một worker backend cho tới khi có Administrator đầu tiên, mỗi
-thiết bị Scan Station được enroll, không có project `partflow-staging` trên Docker daemon production, và release từ một
-git tag.
+PartFlow go-live trên Synology NAS của công ty ngày 2026-11-09 với release `v1.0.0`. Việc cài đặt theo
+[`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md) §1 đến §10, và các release sau được cài bằng `release.sh`
+từ một git tag (§12 của hướng dẫn đó). Chỉ những gì phần mềm cần để chạy là bắt buộc (DEPLOYMENT §5): HTTPS tại proxy
+của nền tảng (thân request ít nhất 5 MiB, timeout ít nhất 300 giây, chứng chỉ được mọi máy trạm và Scan Station tin
+cậy), thiết lập lần đầu với một worker backend cho tới khi có Administrator đầu tiên, mỗi thiết bị Scan Station được
+enroll, không có project `partflow-staging` trên Docker daemon production, và release từ một git tag.
 
-**Sau go-live, khi thuận tiện (không chặn điều gì).** Chưa việc nào trong số này được chạy trên máy chủ thật; các script
-đã được chạy trên Docker Desktop và trong một container Linux.
+**Sau go-live, khi thuận tiện (không chặn điều gì).** Ngoài việc cài các release bằng `release.sh`, chưa việc nào trong
+số này được ghi nhận là đã làm trên máy chủ thật; các script đã được chạy trên Docker Desktop và trong một container
+Linux.
 
 - Proxy của nền tảng: nó đặt địa chỉ client ở cuối `X-Forwarded-For`, các thiết lập thân request và timeout của nó,
   peer loopback khớp với gateway `edge` (nếu không thì đặt `PARTFLOW_TRUSTED_PROXY`), việc lọc header thiết bị trạm khỏi
@@ -1259,10 +1260,10 @@ git tag.
   Security (HSTS) hay không.
 - Quyền của secret file, giới hạn tài nguyên và số worker đo được, và thời gian import trường hợp xấu nhất qua tên máy
   chủ thật.
-- Một lần release và một lần rollback thực hiện trên NAS; các kiểm tra trên trình duyệt cần một Area, Operation đã
-  cấu hình và một Scan Station đã enroll (tự tải lại trên route production của Scan Station, không tải lại khi một hộp
-  thoại sản xuất hay modal đăng nhập Worker đang mở, `Reload page` trong modal, và feed `● Live` dưới thông báo cập
-  nhật); và một trang đang mở trên route khác đếm ngược rồi tự tải lại khi không ai dùng nó trong 1 phút.
+- Một lần rollback thực hiện trên NAS (các lần release đã chạy ở đó); các kiểm tra trên trình duyệt cần một Area,
+  Operation đã cấu hình và một Scan Station đã enroll (tự tải lại trên route production của Scan Station, không tải lại
+  khi một hộp thoại sản xuất hay modal đăng nhập Worker đang mở, `Reload page` trong modal, và feed `● Live` dưới thông
+  báo cập nhật); và một trang đang mở trên route khác đếm ngược rồi tự tải lại khi không ai dùng nó trong 1 phút.
 - Phép dò quyền và `reconcile --check h` trên database production, và một ghi nhận rằng `backend` chỉ giữ
   `partflow_app_password`.
 - Thư mục backup, tác vụ backup hằng ngày và bản sao mã hóa ngoài máy chủ, bản backup đầu tiên, một lần kiểm tra rằng
@@ -1328,19 +1329,20 @@ Các quyết định của chủ sở hữu cần có trước khi bắt đầu 
 - Có gửi HSTS từ proxy của nền tảng hay không.
 - Các mặc định được khuyến nghị đang có hiệu lực mà chủ sở hữu chưa xác nhận tường minh và có thể thay đổi: readiness trả
   503 khi lược đồ không khớp; write gate của backend; hai database role và giới hạn superuser được chấp nhận của kiểm
-  tra (h); mã hóa và sao chép ra ngoài máy chủ bằng công cụ của nền tảng; các ngưỡng giám sát ở trên; và thông báo cập
-  nhật của GUI_DESIGN §3 quy tắc 13.
+  tra (h); mã hóa và sao chép ra ngoài máy chủ bằng công cụ của nền tảng; và các ngưỡng giám sát ở trên.
 
 ### Việc còn mở
 
 - Dạng chuẩn khi nhập PN (gạch đầu dòng phạm vi ở trên) — chưa triển khai.
 - Kiểm tra định danh khi nâng cấp nền tảng: phía Python đã được kiểm tra (j) triển khai; trước mọi lần nâng cấp Python
   hay glibc, chủ sở hữu xem danh sách của kiểm tra đó và quyết định việc chuẩn hóa lại.
-- Deployment Admin (công cụ `pf` riêng dùng cho staging): các health check container và các probe frontend của nó phải
-  chuyển sang `GET /api/health/live` trước khi staging chạy một commit có head lược đồ khác với database staging, vì
-  `/api/health` là readiness; cách nó cấp database role và việc nó có dùng artifact backup hay không được quyết định ở
-  bước profile PartFlow của nó (PF-A4.1), và với phương án nào thì `apply-grants` cũng chạy sau mọi lần restore và kiểm
-  tra (h) phải đạt trước khi ứng dụng khởi động; một route được quản lý để chạy một lệnh ứng dụng trên staging (PF-A4).
+- Deployment Admin (công cụ `pf` riêng dùng cho staging): việc phát triển nó đã dừng ngày 2026-10-14, khi chủ sở hữu
+  chọn xây lại bộ công cụ triển khai thành một dự án riêng
+  ([`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)), nên các bước còn mở của nó sẽ không được làm:
+  chuyển các health check container và các probe frontend của nó sang `GET /api/health/live` (cần trước khi staging
+  chạy một commit có head lược đồ khác với database staging, vì `/api/health` là readiness), việc cấp database role và
+  dùng artifact backup (PF-A4.1), và một route được quản lý để chạy một lệnh ứng dụng trên staging (PF-A4). Bộ công cụ
+  thay thế giữ quy tắc `apply-grants` chạy sau mọi lần restore và kiểm tra (h) phải đạt trước khi ứng dụng khởi động.
 - Archival và purge lịch sử Movement — đã lên kế hoạch ở trên.
 
 ## Deferred
@@ -1405,7 +1407,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Thứ tự khóa khi sao chép snapshot của Phase 16 đã có: một bản sao khi tách hay gộp khóa các Area và Operation của nó theo thứ tự tăng dần, cùng với Area đích của một lần chuyển một phần, nên các lần release và chuyển một phần cắt chéo không còn deadlock. |
+| 2026-11-12 | uncommitted | Current State và Phase 16: PartFlow chạy thật trên NAS của công ty từ 2026-11-09; thông báo cập nhật không còn trong danh sách mặc định chưa xác nhận, và mục Deployment Admin ghi rằng việc phát triển nó đã dừng. |
+| 2026-11-12 | `b413c96` | Thứ tự khóa khi sao chép snapshot của Phase 16 đã có: một bản sao khi tách hay gộp khóa các Area và Operation của nó theo thứ tự tăng dần, cùng với Area đích của một lần chuyển một phần, nên các lần release và chuyển một phần cắt chéo không còn deadlock. |
 | 2026-11-12 | `de4d99f` | Release flow của Phase 16: một trang đã cũ tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 s, và một trang có người dùng sau 1 phút không thao tác thay vì 2 phút; Production Board làm mới mỗi 5 giây thay vì 15 giây (quyết định của chủ sở hữu). |
 | 2026-11-12 | `77a2dfb` | Release flow của Phase 16: mọi trang đã cũ tự tải lại khi rảnh, không chỉ Scan Station và Production Board, và các kiểm tra trên trình duyệt sau một lần release trên NAS bao gồm việc này. |
 | 2026-11-12 | `a7949e3` | Hạ độ dài tối thiểu của mật khẩu mới từ 12 xuống 6 ký tự (quyết định của chủ sở hữu). |
