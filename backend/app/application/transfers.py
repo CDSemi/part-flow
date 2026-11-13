@@ -75,7 +75,10 @@ Rules owned here:
   quantity under the same lock) and a transfer into that Area have one
   serial outcome; the selected Operation, re-validated under its lock,
   so Operation deactivation and a transfer recording it also have one
-  serial outcome.
+  serial outcome. A partial transfer of a flow with a snapshot takes
+  the target Area in one ascending pass with the Areas its split copy
+  names (FOR KEY SHARE), exactly like the release's snapshot Areas, so
+  crossing releases and partial transfers never deadlock (Phase 16).
 - Implicit Area completion (Phase 6 and 7; PROJECT_PROFILE §8.11,
   §15): a transfer of quantity that is still actively processing —
   ON_MACHINE in a Machine Area, or PROCESSING in an Area without
@@ -140,7 +143,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import station_access, station_identity
+from app.application import route_templates, station_access, station_identity
 from app.application.common import device_event_id_text, optional_text, required_flag
 from app.application.errors import (
     ConflictError,
@@ -149,7 +152,7 @@ from app.application.errors import (
     NotFoundError,
     RouteDeviationConfirmationRequiredError,
 )
-from app.application.lineage import split_prefix, stage_split
+from app.application.lineage import snapshot_steps, split_prefix, stage_split
 from app.application.machine_processing import (
     FINGERPRINT_KEY,
     command_metadata,
@@ -841,7 +844,8 @@ def record_arrival(
 
     Both kinds share every rule of this module verbatim — explicit
     source and confirmed destination, the lock order flow → station →
-    source Machine → target Area → Operation, the route assessment and
+    source Machine → target Area (in one ascending pass with a split
+    copy's Areas) → Operation, the route assessment and
     deviation confirmation, partial quantity through the in-command
     SPLIT, the implicit AREA_COMPLETED of actively processing quantity,
     whole-command idempotency with fingerprint conflicts, and zero
@@ -980,8 +984,21 @@ def record_arrival(
     # under this lock, so an inactive Area can never receive a flow.
     # The Area flags are judged ONLY on this locked re-read — the
     # unlocked station read above may predate a concurrent Area edit
-    # (deactivation or a terminal flag set meanwhile).
-    session.refresh(target, with_for_update=True)
+    # (deactivation or a terminal flag set meanwhile). A partial
+    # quantity of a PLANNED flow splits below, and each child's snapshot
+    # copy names the Areas of the source snapshot (fixed under the flow
+    # lock): they are taken FOR KEY SHARE in ONE ascending pass with the
+    # target (Phase 16), so this command never holds the target while
+    # the copy waits on another Area in step order.
+    copied_steps = (
+        snapshot_steps(session, flow.assigned_route_id)
+        if partial and flow.assigned_route_id is not None
+        else []
+    )
+    locked_target = route_templates.lock_assignment_areas(session, target.id, copied_steps)
+    if locked_target is None:  # pragma: no cover - the station's FK guarantees the row
+        raise NotFoundError(f"Area {station.area_id} does not exist.")
+    target = locked_target
     if not target.is_active:
         raise ConflictError(
             f"Area '{target.name}' is inactive and cannot accept"

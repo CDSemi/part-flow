@@ -41,7 +41,12 @@ here:
   starting Area FOR UPDATE at its place, the others FOR KEY SHARE
   (``lock_assignment_areas``) — and its Operations FOR KEY SHARE,
   ascending, before the snapshot INSERT, so two assignments whose routes
-  cross Areas in opposite order serialize instead of deadlocking.
+  cross Areas in opposite order serialize instead of deadlocking. The
+  split and merge copy follows the same order (Phase 16): a partial
+  transfer locks its target Area in that pass together with the Areas
+  of the snapshot its split copies, and every copy locks its Areas,
+  then its Operations, FOR KEY SHARE ascending before its INSERT
+  (``lock_snapshot_references``).
 
 Each write commits its own transaction (2xx = committed) and appends
 exactly one ``audit_events`` row in it (entity ``RouteTemplate``,
@@ -69,6 +74,7 @@ from app.domain.enums import AuditEntityType, AuditEventType, MovementType
 from app.infrastructure.models import (
     Area,
     AssignedRoute,
+    AssignedRouteStep,
     Machine,
     Operation,
     PartMovement,
@@ -337,7 +343,9 @@ def assignment_steps(session: Session, template_id: int) -> list[RouteStep]:
 
 
 def lock_assignment_areas(
-    session: Session, starting_area_id: int, steps: Sequence[RouteStep]
+    session: Session,
+    starting_area_id: int,
+    steps: Sequence[RouteStep] | Sequence[AssignedRouteStep],
 ) -> Area | None:
     """The starting Area FOR UPDATE and the other step Areas FOR KEY SHARE,
     all ascending by id; the starting Area RE-READ under its lock.
@@ -348,6 +356,8 @@ def lock_assignment_areas(
     cross Areas in opposite order would each hold one Area and wait on
     the other. Taking every Area here in ONE ascending pass — before any
     Operation row — leaves the FK checks only re-requesting held locks.
+    A partial transfer passes its target Area and the steps of the
+    snapshot its split copies (``steps`` are template or snapshot steps).
     """
     others = {step.area_id for step in steps} - {starting_area_id}
     _locked_rows(session, Area, {area_id for area_id in others if area_id < starting_area_id})
@@ -363,6 +373,23 @@ def lock_assignment_operations(session: Session, operation_ids: set[int]) -> Non
     acquired in id order instead of step order.
     """
     _locked_rows(session, Operation, operation_ids)
+
+
+def lock_snapshot_references(session: Session, steps: Sequence[AssignedRouteStep]) -> None:
+    """A snapshot copy's Areas, then its Operations, FOR KEY SHARE, each
+    ascending by id (the split and merge copy, `lineage.copy_assigned_route`).
+
+    Exactly the locks the copy INSERT's FK checks take, acquired in the
+    production order instead of step order, so a copy never holds one
+    Area while it waits on another that a crossing command holds
+    FOR UPDATE. A partial transfer already holds these Areas from its
+    target-Area pass (``lock_assignment_areas``): re-requesting a held
+    lock never waits.
+    """
+    _locked_rows(session, Area, {step.area_id for step in steps})
+    lock_assignment_operations(
+        session, {step.operation_id for step in steps if step.operation_id is not None}
+    )
 
 
 # ---------------------------------------------------------------------------

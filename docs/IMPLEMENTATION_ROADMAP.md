@@ -1031,7 +1031,6 @@ A route deviation already recorded on the actual `TRANSFERRED` Movement is not d
 **Open follow-ups.**
 
 - The permission key that authorizes Movement-history archival and purge execution — Phase 16.
-- The AssignedRoute snapshot copy lock order (a hazard since Phase 8) — Phase 16.
 - Not planned, no canonical requirement: an audit row for a demand-line deletion, for a completion caused by an
   allocation or for a reopen caused by a reversal; user sign-in at the Scan Station; recording the device on Movements
   or allocations; an editor for which role is applied at Scan Stations (edit that role's grants instead); per-station
@@ -1127,7 +1126,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - production database-role hardening, including the intended application-role UPDATE/DELETE restrictions on append-only production/audit history
 - platform-upgrade identity checks: canonical PN and Worker badge identity follow the backend Python's Unicode Character Database (UCD), pinned to `15.0.0`, and the Asset Tag prefix check refuses Python's `\s` whitespace set, a strict superset of PostgreSQL's libc `[[:space:]]`; before any Python upgrade that changes the UCD, or a glibc change, a read-only check lists every stored PN, badge and Asset Tag prefix whose canonical form or CHECK outcome would change, and the owner decides on re-canonicalization before the upgrade
 - PN entry canonical form: the Work Orders typed-PN and demand-label paths submit the trimmed raw input and display the server's canonical form, so the browser's Unicode tables never decide a stored PN (today they can diverge from the server only on about 27 Unicode-version-sensitive code points)
-- AssignedRoute snapshot copy lock order: `lineage.copy_assigned_route` (the snapshot copy of a split child and of a merge result) inserts the copied steps in step order with no ascending lock pass, so each INSERT takes `FOR KEY SHARE` on its Area through the foreign key while a partial-quantity transfer already holds its target Area `FOR UPDATE`; a crossing release or a second crossing partial transfer can then deadlock (PostgreSQL aborts one side: no write, an unknown outcome at the station, replayable). Lock the copy's Areas and Operations in one ascending pass together with the target Area before the snapshot INSERT, as `route_templates.lock_assignment_areas` does for release and receipt, with a crossing-route concurrency test
+- AssignedRoute snapshot copy lock order — delivered: a partial-quantity transfer locks its target Area in one ascending pass with the Areas of the snapshot its split copies (`route_templates.lock_assignment_areas`, as for release and receipt), and every snapshot copy of a split child or a merge result (`lineage.copy_assigned_route`) locks its Areas, then its Operations, `FOR KEY SHARE` in ascending id order before its INSERT (`route_templates.lock_snapshot_references`); a crossing release or a second crossing partial transfer therefore waits instead of deadlocking, which the crossing-route concurrency tests in `backend/tests/test_route_template_management_api.py` prove
 - **administrative Movement-history archival/purge maintenance** (PROJECT_PROFILE §28): configurable retention period, select-by-cutoff → lossless archive export → verify → purge exactly the verified archived rows through a separate privileged maintenance path; keep reversal/reference chains and atomic-command groups whole so no retained row references purged history; include policy / size-threshold / manual triggers, scope preview, mandatory reason, and full audit; normal runtime remains append-only; no full retention/archival engine is built before this phase; the retention period is already stored by Phase 13 (`application_policy.retention_period_months`, whole months or none), and the data-size threshold's measure and unit are defined here together with its trigger
 
 PartNumber master hard deletion is **not** a Phase 16 maintenance operation. It belongs to Phase 13 Management → Part
@@ -1342,8 +1341,6 @@ Owner decisions needed before this work starts:
 ### Open follow-ups
 
 - PN entry canonical form (scope bullet above) — not implemented.
-- AssignedRoute snapshot copy lock order (scope bullet above) — not implemented; today a crossing deadlock aborts one
-  side with nothing written and an unknown outcome at the station, which a retry replays.
 - Platform-upgrade identity checks: the Python side is implemented by check (j); before any Python or glibc upgrade the
   owner reviews the check's list and decides on re-canonicalization.
 - Deployment Admin (the separate `pf` tool used for staging): its container health checks and frontend probes must
@@ -1415,7 +1412,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Phase 16 release flow: an outdated page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; the Production Board refreshes every 5 seconds instead of 15 (owner decisions). |
+| 2026-11-12 | uncommitted | Phase 16 snapshot copy lock order delivered: a split or merge copy locks its Areas and Operations in ascending order, together with a partial transfer's target Area, so crossing releases and partial transfers no longer deadlock. |
+| 2026-11-12 | `de4d99f` | Phase 16 release flow: an outdated page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; the Production Board refreshes every 5 seconds instead of 15 (owner decisions). |
 | 2026-11-12 | `77a2dfb` | Phase 16 release flow: every outdated page reloads itself once idle, not only the Scan Station and Production Board, and the browser checks after a release on the NAS cover it. |
 | 2026-11-12 | `a7949e3` | Lowered the minimum length of a new password from 12 to 6 characters (owner decision). |
 | 2026-11-10 | `e0e5056` | The go-live step points to the rewritten NAS installation guide (§1 to §10). |

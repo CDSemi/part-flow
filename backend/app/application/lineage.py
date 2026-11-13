@@ -3,10 +3,14 @@
 The in-transaction building blocks the production commands use to
 split one QuantityFlow or merge several (PROJECT_PROFILE §8.7, §8.11,
 §11 Quantity Splitting / Quantity Merging / Quantity Integrity). Nothing
-here commits or locks: the calling command holds the flow row lock(s)
-and the station lock, has validated the action, and commits the staged
-rows together with its own action Movement as ONE application command
-under ONE `device_event_id`.
+here commits: the calling command holds the flow row lock(s) and the
+station lock (a partial transfer also its target Area, in one ascending
+pass with the Areas of the snapshot it splits), has validated the
+action, and commits the staged rows together with its own action
+Movement as ONE application command under ONE `device_event_id`. The
+only locks taken here are the FOR KEY SHARE locks a snapshot copy's
+INSERT takes anyway, acquired before it in ascending id order
+(`copy_assigned_route`).
 
 What a SPLIT records (`stage_split`):
 
@@ -52,6 +56,7 @@ from typing import Any, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.application import route_templates
 from app.application.common import flush
 from app.application.projections import reversed_movement_ids
 from app.domain.enums import LineageRelation, MovementType, QuantityFlowStatus, RouteMode
@@ -149,6 +154,13 @@ def copy_assigned_route(
     else NULL — never one source's provenance picked arbitrarily. The
     copy is otherwise as independent of the original as the original is
     of its template (PROJECT_PROFILE §8.10).
+
+    Before the step INSERT, the copy's Areas and then its Operations are
+    locked FOR KEY SHARE in ascending id order
+    (`route_templates.lock_snapshot_references`): the INSERT's FK checks
+    then only re-request held locks instead of taking them in step order,
+    which could deadlock against a crossing release, receipt, transfer
+    or Undo that holds one of those Areas FOR UPDATE (Phase 16).
     """
     original = session.get(AssignedRoute, assigned_route_id)
     if original is None:  # pragma: no cover - FK guarantees the row
@@ -156,6 +168,8 @@ def copy_assigned_route(
     route = AssignedRoute(source_route_template_id=source_route_template_id)
     session.add(route)
     flush(session, {})
+    originals = snapshot_steps(session, assigned_route_id)
+    route_templates.lock_snapshot_references(session, originals)
     steps = [
         AssignedRouteStep(
             assigned_route_id=route.id,
@@ -166,7 +180,7 @@ def copy_assigned_route(
             preferred_machine_id=step.preferred_machine_id,
             instructions=step.instructions,
         )
-        for step in snapshot_steps(session, assigned_route_id)
+        for step in originals
     ]
     session.add_all(steps)
     flush(session, {})

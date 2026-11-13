@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1025,7 +1025,6 @@ Một lần lệch route đã ghi trên Movement `TRANSFERRED` thực tế khôn
 **Việc còn mở.**
 
 - Permission key cho phép thực thi archival và purge lịch sử Movement — Phase 16.
-- Thứ tự khóa khi sao chép snapshot AssignedRoute (một rủi ro có từ Phase 8) — Phase 16.
 - Không lên kế hoạch, không có yêu cầu chuẩn: một dòng audit cho việc xóa dòng demand, cho việc hoàn tất do phân bổ hay
   việc mở lại do đảo ngược; đăng nhập user tại Scan Station; ghi thiết bị vào Movement hay phân bổ; một trình sửa để chọn
   role áp dụng tại Scan Station (hãy sửa quyền của role đó); bộ permission theo trạm hay theo thiết bị; cho thấy trình
@@ -1118,7 +1117,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - gia cố database role cho production, gồm các hạn chế UPDATE/DELETE theo dự định đối với role của ứng dụng trên lịch sử sản xuất/audit chỉ-ghi-thêm
 - kiểm tra định danh khi nâng cấp nền tảng: định danh PN chuẩn và badge Worker theo Cơ sở dữ liệu ký tự Unicode (UCD) của Python ở backend, được ghim ở `15.0.0`, và kiểm tra tiền tố Asset Tag từ chối tập khoảng trắng `\s` của Python, một tập cha thực sự của `[[:space:]]` trong libc của PostgreSQL; trước mọi lần nâng cấp Python làm đổi UCD, hoặc một thay đổi glibc, một kiểm tra chỉ đọc liệt kê mọi PN, badge và tiền tố Asset Tag đã lưu mà dạng chuẩn hay kết quả CHECK của nó sẽ thay đổi, và chủ sở hữu quyết định việc chuẩn hóa lại trước khi nâng cấp
 - dạng chuẩn khi nhập PN: các đường nhập PN bằng tay và nhãn demand của Work Orders gửi đầu vào thô đã cắt khoảng trắng và hiển thị dạng chuẩn của server, để bảng Unicode của trình duyệt không bao giờ quyết định một PN được lưu (hiện nay chúng chỉ có thể khác server ở khoảng 27 code point nhạy với phiên bản Unicode)
-- thứ tự khóa khi sao chép snapshot AssignedRoute: `lineage.copy_assigned_route` (bản sao snapshot của một flow con và của một kết quả gộp) chèn các bước được sao theo thứ tự bước mà không có lượt khóa tăng dần, nên mỗi INSERT lấy `FOR KEY SHARE` trên Area của nó qua khóa ngoại trong khi một lần chuyển số lượng một phần đã giữ Area đích `FOR UPDATE`; một lần release cắt chéo hoặc một lần chuyển một phần cắt chéo thứ hai khi đó có thể deadlock (PostgreSQL hủy một bên: không ghi gì, kết quả không rõ tại trạm, phát lại được). Hãy khóa các Area và Operation của bản sao trong một lượt tăng dần cùng với Area đích trước lệnh INSERT snapshot, như `route_templates.lock_assignment_areas` làm cho release và receipt, kèm một test đồng thời với route cắt chéo
+- thứ tự khóa khi sao chép snapshot AssignedRoute — đã có: một lần chuyển số lượng một phần khóa Area đích của nó trong một lượt tăng dần cùng với các Area của snapshot mà lần tách của nó sao chép (`route_templates.lock_assignment_areas`, như với release và receipt), và mọi bản sao snapshot của một flow con hay của một kết quả gộp (`lineage.copy_assigned_route`) khóa các Area của nó, rồi các Operation của nó, `FOR KEY SHARE` theo thứ tự id tăng dần trước lệnh INSERT của nó (`route_templates.lock_snapshot_references`); vì vậy một lần release cắt chéo hoặc một lần chuyển một phần cắt chéo thứ hai sẽ chờ thay vì deadlock, điều mà các test đồng thời với route cắt chéo trong `backend/tests/test_route_template_management_api.py` chứng minh
 - **bảo trì archival/purge lịch sử Movement có tính quản trị** (PROJECT_PROFILE §28): thời hạn lưu giữ cấu hình được, chọn theo mốc cắt → xuất archive không mất mát → kiểm tra → purge đúng các dòng đã được archive và kiểm tra qua một đường bảo trì đặc quyền riêng; giữ nguyên vẹn các chuỗi đảo ngược/tham chiếu và các nhóm lệnh nguyên tử để không dòng nào được giữ lại tham chiếu tới lịch sử đã purge; gồm các cơ chế kích hoạt theo chính sách / ngưỡng kích thước / thủ công, xem trước phạm vi, lý do bắt buộc và audit đầy đủ; runtime thông thường vẫn chỉ-ghi-thêm; không xây một engine lưu giữ/archival đầy đủ trước phase này; thời hạn lưu giữ đã được Phase 13 lưu (`application_policy.retention_period_months`, số tháng nguyên hoặc không có), và thước đo cùng đơn vị của ngưỡng kích thước dữ liệu được định nghĩa ở đây cùng với cơ chế kích hoạt của nó
 
 Xóa cứng PartNumber master **không** phải là một thao tác bảo trì của Phase 16. Nó thuộc Management → Part Numbers của
@@ -1335,8 +1334,6 @@ Các quyết định của chủ sở hữu cần có trước khi bắt đầu 
 ### Việc còn mở
 
 - Dạng chuẩn khi nhập PN (gạch đầu dòng phạm vi ở trên) — chưa triển khai.
-- Thứ tự khóa khi sao chép snapshot AssignedRoute (gạch đầu dòng phạm vi ở trên) — chưa triển khai; hiện nay một
-  deadlock cắt chéo hủy một bên mà không ghi gì và cho kết quả không rõ tại trạm, và một lần thử lại sẽ phát lại.
 - Kiểm tra định danh khi nâng cấp nền tảng: phía Python đã được kiểm tra (j) triển khai; trước mọi lần nâng cấp Python
   hay glibc, chủ sở hữu xem danh sách của kiểm tra đó và quyết định việc chuẩn hóa lại.
 - Deployment Admin (công cụ `pf` riêng dùng cho staging): các health check container và các probe frontend của nó phải
@@ -1408,7 +1405,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Release flow của Phase 16: một trang đã cũ tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 s, và một trang có người dùng sau 1 phút không thao tác thay vì 2 phút; Production Board làm mới mỗi 5 giây thay vì 15 giây (quyết định của chủ sở hữu). |
+| 2026-11-12 | uncommitted | Thứ tự khóa khi sao chép snapshot của Phase 16 đã có: một bản sao khi tách hay gộp khóa các Area và Operation của nó theo thứ tự tăng dần, cùng với Area đích của một lần chuyển một phần, nên các lần release và chuyển một phần cắt chéo không còn deadlock. |
+| 2026-11-12 | `de4d99f` | Release flow của Phase 16: một trang đã cũ tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 s, và một trang có người dùng sau 1 phút không thao tác thay vì 2 phút; Production Board làm mới mỗi 5 giây thay vì 15 giây (quyết định của chủ sở hữu). |
 | 2026-11-12 | `77a2dfb` | Release flow của Phase 16: mọi trang đã cũ tự tải lại khi rảnh, không chỉ Scan Station và Production Board, và các kiểm tra trên trình duyệt sau một lần release trên NAS bao gồm việc này. |
 | 2026-11-12 | `a7949e3` | Hạ độ dài tối thiểu của mật khẩu mới từ 12 xuống 6 ký tự (quyết định của chủ sở hữu). |
 | 2026-11-10 | `e0e5056` | Bước go-live trỏ tới hướng dẫn cài đặt NAS đã viết lại (§1 đến §10). |

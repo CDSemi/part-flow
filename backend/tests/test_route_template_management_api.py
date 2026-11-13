@@ -15,7 +15,11 @@
   (template FOR SHARE before the Area), the writer's reference lock
   order (Machines → Areas → Operations, FOR KEY SHARE, ascending), no
   Machine lock through the snapshot, independence from the PN lock,
-  and atomicity with the audit row.
+  and atomicity with the audit row;
+- the split and merge snapshot copy's lock order (Phase 16): a partial
+  transfer takes its target Area in one ascending pass with the copied
+  Areas, and every copy locks its Areas in ascending order, so crossing
+  releases and partial transfers never deadlock.
 
 The API commits real transactions, so tests isolate through unique
 names, PNs and Areas; the module database is dropped afterwards.
@@ -42,6 +46,7 @@ from alembic import command
 from app.application import (
     audit,
     intake,
+    merges,
     part_numbers,
     production_release,
     route_templates,
@@ -607,6 +612,30 @@ def _receipt_call(cell: _Cell, template_id: int) -> Callable[[Session], Any]:
             route_mode="PLANNED",
             route_template_id=template_id,
             scanned_at=datetime.datetime.now(datetime.UTC),
+            device_event_id=str(uuid.uuid4()),
+        )
+
+    return action
+
+
+def _partial_transfer_call(
+    source: _Cell, target: _Cell, flow_id: int, pn: str, quantity: int
+) -> Callable[[Session], Any]:
+    assert target.station_id is not None
+    station_id = target.station_id
+
+    def action(session: Session) -> Any:
+        return transfers.transfer_to_station_area(
+            session,
+            station_id=station_id,
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            source_area_id=source.area_id,
+            target_area_id=target.area_id,
+            quantity=quantity,
+            operation_id=None,
+            confirm_route_deviation=False,
+            route_deviation_reason=None,
             device_event_id=str(uuid.uuid4()),
         )
 
@@ -1724,8 +1753,8 @@ def _crossing_assignments(
 
     ``first`` reaches the gate holding its Area locks; ``second`` then
     either blocks on an Area lock (the ascending protocol) or reaches the
-    gate too, holding its own starting Area — the state in which
-    step-order snapshot FK locks deadlock once the gate opens.
+    gate too, holding its own starting or target Area — the state in
+    which step-order snapshot FK locks deadlock once the gate opens.
     """
     runner = _Runner(engine)
     try:
@@ -1787,6 +1816,107 @@ def test_receipt_and_release_over_crossing_routes_never_deadlock(
     results = _crossing_assignments(db_engine, gate, _receipt_call(low, forward["id"]), release)
     assert isinstance(results["first"], intake.IntakeReceipt), results["first"]
     assert isinstance(results["second"], production_release.ProductionRelease), results["second"]
+
+
+def _assert_split_copies(engine: Engine, result: Any, template_id: int) -> None:
+    """A partial transfer of 4 out of 10: both children carry a full copy."""
+    assert isinstance(result, transfers.AreaTransfer), result
+    assert result.remainder_quantity == 6
+    for child in (result.quantity_flow_id, result.remainder_quantity_flow_id):
+        assert child is not None
+        assert _snapshot_steps(engine, _flow_route(engine, child)) == _template_steps(
+            engine, template_id
+        )
+
+
+def test_partial_transfer_and_release_over_crossing_routes_never_deadlock(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The partial transfer holds its target (the higher Area) and its
+    split copy names the lower Area, where the release starts: the
+    transfer takes both in one ascending pass, so the release waits on
+    the lower Area instead of holding it while the copy asks for it."""
+    low = _Cell(client)
+    high = _Cell(client)
+    forward = _created(client, [_step(low), _step(high)])
+    flow_id, pn = _release(client, low, forward["id"])
+    release_pn, release = _release_call(client, low, forward["id"])
+    gate = _Gate()
+    monkeypatch.setattr(transfers, "assess_route", gate.wrap(transfers.assess_route))
+    results = _crossing_assignments(
+        db_engine, gate, _partial_transfer_call(low, high, flow_id, pn, 4), release
+    )
+    _assert_split_copies(db_engine, results["first"], forward["id"])
+    assert isinstance(results["second"], production_release.ProductionRelease), results["second"]
+    assert _flows_of(db_engine, release_pn) == 1
+
+
+def test_partial_transfers_over_crossing_routes_never_deadlock(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two partial transfers in opposite directions: each target Area is
+    an Area the other transfer's split copy names."""
+    low = _Cell(client)
+    high = _Cell(client)
+    forward = _created(client, [_step(low), _step(high)])
+    backward = _created(client, [_step(high), _step(low)])
+    up_flow, up_pn = _release(client, low, forward["id"])
+    down_flow, down_pn = _release(client, high, backward["id"])
+    gate = _Gate()
+    monkeypatch.setattr(transfers, "assess_route", gate.wrap(transfers.assess_route))
+    results = _crossing_assignments(
+        db_engine,
+        gate,
+        _partial_transfer_call(low, high, up_flow, up_pn, 4),
+        _partial_transfer_call(high, low, down_flow, down_pn, 4),
+    )
+    _assert_split_copies(db_engine, results["first"], forward["id"])
+    _assert_split_copies(db_engine, results["second"], backward["id"])
+
+
+def test_snapshot_copy_locks_areas_in_ascending_order(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A merge holds no Area lock of its own: its result's copy of a route
+    from the higher Area to the lower one waits on the lower Area before
+    it takes the higher."""
+    low = _Cell(client)
+    high = _Cell(client)
+    assert low.area_id < high.area_id
+    backward = _created(client, [_step(high), _step(low)])
+    flow_a, pn = _release(client, high, backward["id"])
+    flow_b, _ = _release(client, high, backward["id"], part_number=pn)
+    assert high.station_id is not None
+    station_id = high.station_id
+    runner = _Runner(db_engine)
+    with db_engine.connect() as holder:
+        transaction = holder.begin()
+        holder.execute(
+            sa.text("SELECT id FROM areas WHERE id = :id FOR UPDATE"), {"id": low.area_id}
+        )
+        runner.start(
+            "merge",
+            lambda s: merges.merge_flows(
+                s,
+                station_id=station_id,
+                part_number=pn,
+                quantity_flow_ids=[flow_a, flow_b],
+                device_event_id=str(uuid.uuid4()),
+            ),
+        )
+        _await_lock_waiters(db_engine, 1)
+        # An Undo restoring both Areas locks the higher one next: granted.
+        holder.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
+        holder.execute(
+            sa.text("SELECT id FROM areas WHERE id = :id FOR UPDATE"), {"id": high.area_id}
+        )
+        transaction.commit()
+    runner.join()
+    merged = runner.results["merge"]
+    assert isinstance(merged, merges.MergeResult), merged
+    assert _snapshot_steps(db_engine, _flow_route(db_engine, merged.quantity_flow_id)) == (
+        _template_steps(db_engine, backward["id"])
+    )
 
 
 # ---------------------------------------------------------------------------
