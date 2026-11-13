@@ -434,6 +434,17 @@ main {
   padding: 5px 16px 5px 22px;
 }
 
+/* The update notice's countdown to its automatic reload (GUI_DESIGN §3
+   rule 13): right before the rail, on one line, with digits of one
+   width so the text does not shift as it counts. */
+.offbanner .countdown {
+  flex: none;
+  align-self: center;
+  padding: 5px 16px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Retry rail: the WHOLE right region is the button — full banner
    height, flush right edge, text centered vertically, no button
    chrome of its own (surface and the shared hover / focus-visible /
@@ -476,6 +487,33 @@ main {
 
 .offbanner.outdated .retry::before {
   background: var(--warning-border);
+}
+
+/* Narrow screens: the countdown sits under the message instead of
+   beside it, so the message keeps its width; the rail still spans the
+   notice's full height. */
+@media (max-width: 760px) {
+  .offbanner.outdated {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .offbanner.outdated .msg {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .offbanner.outdated .countdown {
+    grid-column: 1;
+    grid-row: 2;
+    align-self: start;
+    padding: 0 16px 5px 22px;
+  }
+
+  .offbanner.outdated .retry {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
 }
 
 /* ============ Not-found state ============ */

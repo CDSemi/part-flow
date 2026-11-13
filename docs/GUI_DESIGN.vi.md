@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `a7949e3` cộng các thay đổi chưa commit ngày 2026-11-12.
+> Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa commit ngày 2026-11-12.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -546,13 +546,16 @@ Các quy tắc này áp dụng cho mọi view. Chúng diễn đạt các nguyên
       và thanh action rail `Reload page`. Việc gửi ghi dữ liệu sản xuất bị vô hiệu hóa đúng như khi mất kết nối, các thao
       tác đọc vẫn tiếp tục, và connectivity chip hiển thị `UPDATED`. Trong khi mất kết nối, banner OFFLINE hiển thị thay
       vào đó. Notice không lấy focus.
-    - **Tải lại.** **Trang không bao giờ tự tải lại khi một dialog đang mở.** Mọi trang tự tải lại khi notice đã hiển
-      thị được 60 s mà không có dialog nào mở, tối đa một lần mỗi 10 phút cho mỗi tab trình duyệt, và chỉ khi server đã
-      phục vụ trang mới. Trên các route Scan Station và Production Board (các station không người trông và màn hình treo
-      tường), chừng ấy điều kiện là đủ. Trên mọi route khác, trang còn chờ tới khi không ai dùng nó trong 2 phút (không
-      có thao tác bàn phím, con trỏ, con lăn hay chạm) và không form nào trên trang còn dữ liệu chưa lưu, kể cả
-      bản nháp chưa lưu hoặc lần import đang chạy của màn hình Work Orders; form nằm trong dialog đã được quy tắc dialog
-      bảo vệ. `Reload page` tải lại bất cứ lúc nào, sau cơ chế bảo vệ thay đổi chưa lưu sẵn có.
+    - **Tải lại.** **Trang không bao giờ tự tải lại khi một dialog đang mở.** Mọi trang tự tải lại sau 10 giây đếm
+      ngược, mà notice hiển thị cạnh `Reload page` dưới dạng `Reloading in {n} s`. Việc đếm ngược chỉ chạy khi không có
+      dialog nào mở và trang chưa tự tải lại trong 10 phút vừa qua (tính cho mỗi tab trình duyệt); mỗi khi bị dừng, nó
+      bắt đầu lại từ 10 giây. Khi về 0, trang tải lại ngay khi server phục vụ trang mới, và notice hiển thị `Reloading…`
+      cho tới lúc đó. Trên các route Scan Station và Production Board (các station không người trông và màn hình treo
+      tường), chừng ấy điều kiện là đủ. Trên mọi route khác, dữ liệu chưa lưu trong một form trên trang cũng dừng việc
+      đếm ngược, kể cả bản nháp chưa lưu hoặc lần import đang chạy của màn hình Work Orders (form nằm trong dialog đã
+      được quy tắc dialog bảo vệ), và trang chỉ tải lại khi không ai dùng nó trong 1 phút (không có thao tác bàn phím,
+      con trỏ, con lăn hay chạm): việc đếm ngược hiển thị trong 10 giây cuối của phút đó, và mọi thao tác đều dừng nó.
+      `Reload page` tải lại bất cứ lúc nào, sau cơ chế bảo vệ thay đổi chưa lưu sẵn có.
     - **Các dialog không thể đóng.** Modal đăng nhập Worker / `Worker session expired`, dialog đăng ký thiết bị
       (enrollment) (§4.12, §4.13) và dialog `Choose a new password` (§1.2) không thể bị đóng, nên trong khi trang đã lỗi
       thời, mỗi dialog hiển thị nút `Reload page` riêng của nó; dialog mật khẩu còn hiển thị
@@ -1439,7 +1442,7 @@ kiểm tra.
 | Đang tải        | Các panel skeleton; ô quét bị vô hiệu hóa với placeholder "Connecting…" |
 | Inventory trống | Row placeholder "No production in this Area" |
 | Mất kết nối     | Banner OFFLINE cố định (§3 rule 6: đúng câu chữ một câu với action trầm `Retry connection`); việc gửi production write bị vô hiệu hóa; các ô quét hiển thị `Disconnected — scanning disabled`; dữ liệu chỉ đọc đã tải vẫn hiển thị |
-| Đã cập nhật     | Thông báo cập nhật cố định (§3 rule 13: đúng câu chữ với `Reload page`); việc gửi production write bị vô hiệu hóa; ô quét `PartFlow was updated — reload to continue scanning`; tự tải lại sau 60 s khi không có dialog nào đang mở (§3 rule 13) |
+| Đã cập nhật     | Thông báo cập nhật cố định (§3 rule 13: đúng câu chữ với `Reload page`); việc gửi production write bị vô hiệu hóa; ô quét `PartFlow was updated — reload to continue scanning`; tự tải lại khi notice đếm ngược xong, không bao giờ khi một dialog đang mở (§3 rule 13) |
 | Đã kết nối lại  | Banner biến mất; ô quét được bật lại và nhận lại focus, sẵn sàng cho lần quét tiếp theo |
 | Lỗi             | Thông báo nổi màu đỏ (khoảng 8 s, có thể đóng); ô nhập được xóa và nhận lại focus, sẵn sàng cho lần quét tiếp theo |
 
@@ -2589,7 +2592,9 @@ sau:
 Mỗi section là một mẫu bảng-cộng-editor chuẩn. Bảng Areas là ví dụ tham chiếu: Area (màu và tên), Operations, Machine
 assignment (Direct processing — no Machines / Queue → assign (one-shot); mode suy ra từ việc Area có Machine nào hay
 không, một Machine hoạt động như nhiều Machine, không bao giờ từ một cấu hình theo số lượng), Machines, Worker ID mode
-(Disabled / Fixed Worker / Scanned session), cờ Terminal, trạng thái Active.
+(Disabled / Fixed Worker / Scanned session), cờ Terminal, trạng thái Active. Ở mọi bảng Administration hiển thị một
+Area bằng màu và tên của nó (các bảng Areas, Operations và Worker sessions), màu và tên luôn nằm trên một dòng: cột nới
+rộng để chứa cả hai, và chỉ cách trình bày xếp chồng mới cho một tên dài xuống dòng.
 
 Operations được quản lý như mô tả trong PROJECT_PROFILE §8.5: mỗi Operation thuộc về một Area, và bảng Areas liệt kê các
 Operation mà một Area hỗ trợ.
@@ -3927,7 +3932,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-12 | uncommitted | §3 quy tắc 13: sau một bản cập nhật, mọi trang tự tải lại khi đã rảnh 2 phút mà không có dialog nào mở và không có dữ liệu chưa lưu; Scan Station và Production Board vẫn tự tải lại sau 60 s. |
+| 2026-11-12 | uncommitted | §3 quy tắc 13 và §4.11: trang tự tải lại sau 10 giây đếm ngược trong notice thay vì sau 60 s, và một trang có người dùng tự tải lại sau 1 phút không thao tác thay vì 2 phút; §9: màu và tên của một Area luôn nằm trên một dòng trong các bảng Administration. |
+| 2026-11-12 | 77a2dfb | §3 quy tắc 13: sau một bản cập nhật, mọi trang tự tải lại khi đã rảnh 2 phút mà không có dialog nào mở và không có dữ liệu chưa lưu; Scan Station và Production Board vẫn tự tải lại sau 60 s. |
 | 2026-11-12 | a7949e3 | Mọi dialog nhập liệu đóng ngay khi chưa thay đổi và hỏi trước khi bỏ dữ liệu đã thay đổi; các select bị ghim chiều cao cố định bỏ padding dọc để phần chân chữ không bao giờ bị cắt; một Scan Station mới đề xuất Station ID từ Area của nó, và ô Devices của nó nêu tên các thiết bị đã enroll và cả ô mở danh sách thiết bị; panel enroll trở thành một card căn giữa với ô nhập code lớn. |
 | 2026-11-09 | 398c617 | Căn chỉnh theo code: các vùng action Undo và Retry trong suốt khi nghỉ với đường kẻ phân cách thụt vào, và một transfer `ON_MACHINE` thông báo `AREA_COMPLETED, then TRANSFERRED (one command)`. |
 | 2026-11-09 | 398c617 | Viết lại thành nội dung hiện tại cho người đọc mới; các yêu cầu chỉ nằm trong ghi chú phiên bản cũ (§15.1–§15.17 trước đây) được chuyển vào phần thân; không có quy tắc nào thay đổi. |

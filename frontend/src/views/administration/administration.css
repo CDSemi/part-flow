@@ -121,6 +121,13 @@
   color: var(--muted);
 }
 
+/* An Area shown by its color and name keeps both on one line: the
+   column grows to hold them instead of wrapping the name under its
+   color (the stacked layout below lets a long name wrap). */
+.admin-table td.admin-areacell {
+  white-space: nowrap;
+}
+
 .pillnav {
   display: inline-block;
   font-size: 11.5px;
@@ -320,6 +327,11 @@
   /* Stacked, a long Station ID or Area name wraps within the card (this
      out-ranks the table's own no-wrap rule further down). */
   .admin-table.admin-stationtable td {
+    white-space: normal;
+  }
+
+  /* Stacked, a long Area name wraps within the card as well. */
+  .admin-table td.admin-areacell {
     white-space: normal;
   }
 

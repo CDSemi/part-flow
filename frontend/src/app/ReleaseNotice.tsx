@@ -1,14 +1,18 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { useConnectivity } from './connectivity-context';
-import { RELEASE_NOTICE_MESSAGE, RELOAD_PAGE_LABEL } from './release-copy';
+import {
+  RELEASE_NOTICE_MESSAGE,
+  RELOAD_PAGE_LABEL,
+  reloadCountdownLabel,
+} from './release-copy';
 import {
   autoReloadAllowed,
+  autoReloadDueAt,
   autoReloadRoute,
   markAutoReload,
   noDialogOpen,
-  RELEASE_AUTO_RELOAD_DELAY_MS,
-  RELEASE_IDLE_RELOAD_AFTER_MS,
+  RELEASE_RELOAD_COUNTDOWN_MS,
   servedShellIs,
 } from './release-reload';
 import { useRouter } from './router-context';
@@ -39,14 +43,18 @@ const INPUT_EVENTS = [
  * takes focus. `Reload page` reloads at once — Work Orders' leave guard
  * still asks first.
  *
- * The page also reloads itself once it has been outdated for 60 s, only
- * while no dialog is open (OD-16-07), at most once per 10 minutes per
- * tab, and only when the server already serves the shell of the release
- * its health answer reports. The Scan Station and Production Board
- * routes (unattended stations and wall displays, whose writes all
- * happen in dialogs) reload on those conditions alone. Every other
- * route also waits until nobody has used the page for 2 minutes and no
- * form on it reports unsaved work (unsaved-work.ts).
+ * The page also reloads itself after a 10 s countdown shown beside
+ * `Reload page`. The countdown runs only while no dialog is open
+ * (OD-16-07) and the per-tab limit allows a reload (at most once per 10
+ * minutes), and starts over once nothing holds it back any more. At
+ * zero the page reloads as soon as the server serves the shell of the
+ * release its health answer reports (`Reloading…` until then). The Scan
+ * Station and Production Board routes (unattended stations and wall
+ * displays, whose writes all happen in dialogs) need nothing more.
+ * Every other route also holds the countdown while a form on it reports
+ * unsaved work (unsaved-work.ts), and reloads only once nobody has used
+ * the page for 1 minute: the countdown shows the last 10 s of that
+ * minute, and any input stops it at once.
  */
 export function ReleaseNotice() {
   const { status, serverRelease } = useConnectivity();
@@ -54,17 +62,21 @@ export function ReleaseNotice() {
   const unattended = autoReloadRoute(route);
   const unattendedRef = useRef(unattended);
   unattendedRef.current = unattended;
-  // When the current outdated period began (null while not outdated).
-  const outdatedSince = useRef<number | null>(null);
   const serverReleaseRef = useRef(serverRelease ?? null);
   serverReleaseRef.current = serverRelease ?? null;
   // When somebody last used the page (null until it has mounted).
   const lastInput = useRef<number | null>(null);
+  // The countdown beside `Reload page`: the whole seconds left, 0 once
+  // it has run out, null while it is not shown.
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
   useEffect(() => {
     lastInput.current = Date.now();
     const used = () => {
       lastInput.current = Date.now();
+      // Input stops the countdown of an attended page at once (while no
+      // countdown shows, the unchanged state renders nothing).
+      if (!unattendedRef.current) setSecondsLeft(null);
     };
     for (const name of INPUT_EVENTS) {
       window.addEventListener(name, used, { capture: true, passive: true });
@@ -78,44 +90,60 @@ export function ReleaseNotice() {
 
   useEffect(() => {
     if (status !== 'outdated') {
-      outdatedSince.current = null;
+      setSecondsLeft(null);
       return undefined;
     }
-    if (outdatedSince.current === null) outdatedSince.current = Date.now();
     let cancelled = false;
     let attempting = false;
-    // No dialog is open, and an attended page is idle with nothing unsaved.
-    const mayReload = (now: number) =>
-      noDialogOpen(document) &&
-      (unattendedRef.current ||
-        (lastInput.current !== null &&
-          now - lastInput.current >= RELEASE_IDLE_RELOAD_AFTER_MS &&
-          !hasUnsavedWork()));
-    const intervalId = setInterval(() => {
-      const since = outdatedSince.current;
-      const release = serverReleaseRef.current;
+    // Set when the per-tab marker could not be written: without it the
+    // limit cannot hold, so this outdated period never reloads itself.
+    let markerRefused = false;
+    // Since when nothing has held the reload back (null while something
+    // does): the countdown runs from here.
+    let clearSince: number | null = null;
+    const heldBack = (now: number) =>
+      markerRefused ||
+      !noDialogOpen(document) ||
+      (!unattendedRef.current && hasUnsavedWork()) ||
+      !autoReloadAllowed(now);
+    const dueAt = (from: number) =>
+      autoReloadDueAt(from, lastInput.current, !unattendedRef.current);
+    const tick = () => {
       const now = Date.now();
-      if (
-        attempting ||
-        since === null ||
-        release === null ||
-        now - since < RELEASE_AUTO_RELOAD_DELAY_MS ||
-        !mayReload(now) ||
-        !autoReloadAllowed(now)
-      ) {
+      const release = serverReleaseRef.current;
+      if (release === null || heldBack(now)) {
+        clearSince = null;
+        setSecondsLeft(null);
         return;
       }
+      clearSince ??= now;
+      const left = dueAt(clearSince) - now;
+      setSecondsLeft(
+        left > RELEASE_RELOAD_COUNTDOWN_MS
+          ? null
+          : Math.max(0, Math.ceil(left / 1000)),
+      );
+      if (left > 0 || attempting) return;
       attempting = true;
       void servedShellIs(release).then((served) => {
         attempting = false;
-        // A dialog may have opened, or somebody may have used the page,
-        // while the shell was checked.
-        if (cancelled || !served || !mayReload(Date.now())) return;
+        if (cancelled || !served) return;
+        // Something may have held the reload back, or somebody may have
+        // used the page, while the shell was checked.
         const at = Date.now();
-        if (!autoReloadAllowed(at) || !markAutoReload(at)) return;
+        if (clearSince === null || heldBack(at) || dueAt(clearSince) > at) {
+          return;
+        }
+        if (!markAutoReload(at)) {
+          markerRefused = true;
+          setSecondsLeft(null);
+          return;
+        }
         window.location.reload();
       });
-    }, AUTO_RELOAD_TICK_MS);
+    };
+    tick();
+    const intervalId = setInterval(tick, AUTO_RELOAD_TICK_MS);
     return () => {
       cancelled = true;
       clearInterval(intervalId);
@@ -126,6 +154,13 @@ export function ReleaseNotice() {
   return (
     <div className="offbanner outdated" role="alert">
       <span className="msg">{RELEASE_NOTICE_MESSAGE}</span>
+      {secondsLeft === null ? null : (
+        // A timer is not read out as it ticks, so the alert around it is
+        // not announced again every second.
+        <span className="countdown" role="timer" aria-live="off">
+          {reloadCountdownLabel(secondsLeft)}
+        </span>
+      )}
       <button
         className="retry zone-action"
         onClick={() => window.location.reload()}

@@ -1,6 +1,6 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `878822f` cộng các thay đổi chưa
 > commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -474,8 +474,8 @@ Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
 - **Không bao giờ ghi log:** cookie, query string, các header của PartFlow, request body, token, badge, mật khẩu và các
   giá trị đã quét. Setup token của thiết lập lần đầu là ngoại lệ duy nhất đã được thông báo.
 - **Dung lượng.** Mỗi container giữ tối đa 5 tệp log 10 MiB. Để ước chừng, 1,000 lệnh production ghi khoảng 1.1 MB log
-  backend và 0.6 MB log `web`, và mỗi board hoặc màn hình Tracking đang mở thêm một bản ghi `web` mỗi 15 s, nên log chỉ
-  bao phủ được ít ngày hơn trên một bản cài đặt bận rộn (runbook §2).
+  backend và 0.6 MB log `web`, mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s, và mỗi Area Board hoặc màn
+  hình Tracking đang mở thêm mỗi 15 s, nên log chỉ bao phủ được ít ngày hơn trên một bản cài đặt bận rộn (runbook §2).
 
 #### Script và giám sát
 
@@ -737,7 +737,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | `smoke.sh` chờ `web` và backend khởi động xong trước khi kiểm tra. |
+| 2026-11-12 | uncommitted | §3.1 Log: mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s thay vì 15 s. |
+| 2026-11-12 | `878822f` | `smoke.sh` chờ `web` và backend khởi động xong trước khi kiểm tra. |
 | 2026-11-10 | `e0e5056` | Viết lại thành điểm khởi đầu: bảng tác vụ, một danh sách thuật ngữ và quy tắc an toàn, và §3.1 chỉ để tham chiếu; các bước cài đặt, phát hành và quay lui nay chỉ nằm trong các hướng dẫn theo nền tảng và runbook; truy cập từ Internet được hỗ trợ thông qua Cloudflare. |
 | 2026-11-09 | `398c617` | Khôi phục các quy tắc mà lần viết lại đã bỏ sót: bài kiểm thử key cấu hình, quyền truy cập log của setup token, thông tin xác thực thiết bị và việc thu hồi, cập nhật bảo mật và lưu ý về hậu tố phiên bản. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và các cổng phát hành theo quyết định của owner. |

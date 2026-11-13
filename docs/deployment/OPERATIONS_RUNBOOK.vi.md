@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `3fb7201` cộng các thay đổi chưa
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa
 > commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -185,9 +185,9 @@ thử lại một lệnh sản xuất đã hết thời gian chờ bằng một 
 bằng `device_event_id` gốc, để một phản hồi không chắc chắn không bao giờ ghi nhận một thay đổi hai lần.
 
 **Log chỉ được giữ trong vài ngày.** Mỗi container giữ tối đa 5 tệp log, mỗi tệp 10 MB. Với 5.000 lệnh mỗi ngày, đó
-là khoảng 9 ngày log backend và 18 ngày log `web`; mỗi Production Board đang mở thêm khoảng 3 MB log `web` mỗi ngày,
-nên khi mở nhiều board, log `web` chỉ bao phủ vài ngày. **Hãy sao chép những gì một cuộc điều tra cần ngay khi bắt
-đầu.**
+là khoảng 9 ngày log backend và 18 ngày log `web`; mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày,
+nên khi mở một board, log `web` chỉ bao phủ khoảng 4 ngày, và khi mở nhiều board thì chỉ một hai ngày. **Hãy sao chép
+những gì một cuộc điều tra cần ngay khi bắt đầu.**
 
 ### Lỗi quyền database (Database permission errors)
 
@@ -588,9 +588,10 @@ gì người dùng báo: các dòng `errors`, `restarts` và `disk_*` của `che
 - Giữ các image của bản phát hành trước và bản sao lưu trước phát hành (không bao giờ bị xoay vòng) cho đến hạn chót
   quay lui.
 - Các trang đang mở trong lúc chuyển hiển thị thông báo cập nhật và tự tải lại
-  ([`../GUI_DESIGN.vi.md`](../GUI_DESIGN.vi.md) §3 rule 13): Scan Station hoặc Production Board sau 60 giây, mọi trang
-  khác khi không ai dùng nó trong 2 phút và trên trang không còn gì chưa lưu, và không bao giờ khi đang có hộp thoại mở.
-  Không ai phải đi tới từng máy; người đang làm việc trên một trang có thể bấm `Reload page` sớm hơn.
+  ([`../GUI_DESIGN.vi.md`](../GUI_DESIGN.vi.md) §3 rule 13): Scan Station hoặc Production Board sau 10 giây đếm ngược
+  trong thông báo, mọi trang khác khi không ai dùng nó trong 1 phút và trên trang không còn gì chưa lưu (thông báo đếm
+  ngược 10 giây cuối của phút đó), và không bao giờ khi đang có hộp thoại mở. Không ai phải đi tới từng máy; người đang
+  làm việc trên một trang có thể bấm `Reload page` sớm hơn.
 
 ## 6. Quay lui
 
@@ -1148,7 +1149,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | §5 Observe: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau 60 giây, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu), nên không ai phải đi tới từng máy. |
+| 2026-11-12 | uncommitted | §5 Observe: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 giây, và mọi trang khác khi rảnh 1 phút thay vì 2 phút; §2: mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày thay vì 3 MB. |
+| 2026-11-12 | `77a2dfb` | §5 Observe: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau 60 giây, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu), nên không ai phải đi tới từng máy. |
 | 2026-11-12 | `3fb7201` | Thêm mục đăng nhập và tài khoản người dùng: lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập, thu hồi quyền truy cập của một user, và cách khôi phục khi không còn Administrator nào. |
 | 2026-11-10 | `e0e5056` | Viết lại cho người vận hành mới: mục lục tác vụ và thiết lập mỗi phiên ngay từ đầu, bảng các vấn đề thường gặp, các đường quay lui 1 và 2 từng bước kèm việc chuyển checkout, việc chuyển sang máy chủ khác (chuyển về đây từ hướng dẫn NAS), và phần tham chiếu chi tiết ngắn gọn hơn; số mục và các script của path 3 không đổi. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ các cổng pilot và phát hành theo quyết định của chủ sở hữu. |

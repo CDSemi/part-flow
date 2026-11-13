@@ -283,7 +283,7 @@ function AreasTable({
               className={onOpenEdit ? 'selrow' : undefined}
               onClick={onOpenEdit ? () => onOpenEdit(area) : undefined}
             >
-              <td>
+              <td className="admin-areacell">
                 <RowOpener
                   editable={onOpenEdit !== null}
                   label={`Edit ${area.name}`}

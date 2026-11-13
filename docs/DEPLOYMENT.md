@@ -468,8 +468,8 @@ Strict Transport Security (HSTS) is the reverse proxy's job; `web` does not set 
 - **Never logged:** cookies, query strings, PartFlow headers, request bodies, tokens, badges, passwords and scanned
   values. The first-run setup token is the one announced exception.
 - **Size.** Each container keeps at most 5 log files of 10 MiB. As a rough guide, 1,000 production commands write about
-  1.1 MB of backend log and 0.6 MB of `web` log, and every open board or Tracking screen adds a `web` record every
-  15 s, so the logs cover fewer days on a busy installation (runbook §2).
+  1.1 MB of backend log and 0.6 MB of `web` log, every open Production Board adds `web` records every 5 s, and every
+  open Area Board or Tracking screen every 15 s, so the logs cover fewer days on a busy installation (runbook §2).
 
 #### Scripts and monitoring
 
@@ -727,7 +727,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | `smoke.sh` waits for a starting `web` and backend before its checks. |
+| 2026-11-12 | uncommitted | §3.1 Logs: an open Production Board adds `web` records every 5 s instead of 15 s. |
+| 2026-11-12 | `878822f` | `smoke.sh` waits for a starting `web` and backend before its checks. |
 | 2026-11-10 | `e0e5056` | Rewritten as the starting point: a task table, one list of terms and safety rules, and a reference-only §3.1; the installation, release and rollback steps now live only in the platform guides and the runbook; access from the Internet is supported through Cloudflare. |
 | 2026-11-09 | `398c617` | Restored rules the rewrite had dropped: the configuration key test, setup-token log access, device credentials and revocation, security updates and the version-suffix caveat. |
 | 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |

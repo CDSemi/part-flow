@@ -75,7 +75,7 @@ export function isBoardRotationTiming(
  * A refresh that fails keeps the last complete data on screen and
  * marks the feed stale; nothing partial is ever shown.
  */
-export const BOARD_REFRESH_MS = 15_000;
+export const BOARD_REFRESH_MS = 5_000;
 
 /** Rotation dwell of a page showing `rowCount` rows: proportional, with
  * the Department's floor. */

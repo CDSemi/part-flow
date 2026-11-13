@@ -172,7 +172,7 @@ export function OperationsSection() {
                       </span>
                     </RowOpener>
                   </td>
-                  <td data-label="Area">
+                  <td className="admin-areacell" data-label="Area">
                     <AreaDot colorVar={areaColor(area)} size={11} />{' '}
                     {area?.name ?? '—'}
                   </td>

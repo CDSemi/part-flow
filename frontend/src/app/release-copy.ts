@@ -13,6 +13,15 @@ export const RELEASE_NOTICE_MESSAGE =
 /** The manual reload control of the notice and the non-dismissable modals. */
 export const RELOAD_PAGE_LABEL = 'Reload page';
 
+/**
+ * The notice's countdown to the automatic reload, beside `Reload page`:
+ * the whole seconds left, then `Reloading…` while the page waits for the
+ * server to serve the new release.
+ */
+export function reloadCountdownLabel(secondsLeft: number): string {
+  return secondsLeft > 0 ? `Reloading in ${secondsLeft} s` : 'Reloading…';
+}
+
 /** Scan inputs (main input, badge gate, Worker sign-in) while outdated. */
 export const OUTDATED_SCAN_PLACEHOLDER =
   'PartFlow was updated — reload to continue scanning';

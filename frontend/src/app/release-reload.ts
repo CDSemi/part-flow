@@ -1,18 +1,22 @@
 // Automatic reload of an outdated page (GUI_DESIGN §3 rule 13,
-// OD-16-07): once the page has been outdated for 60 s, NEVER while any
-// dialog is open, at most once per 10 minutes per browser tab, and only
-// when the server already serves the shell of the release it reports.
-// The unattended Scan Station and Production Board routes reload on
-// those conditions alone; every other route also waits until nobody has
-// used the page for 2 minutes and no form on it holds unsaved work.
+// OD-16-07): after a 10 s countdown in the update notice, NEVER while
+// any dialog is open, at most once per 10 minutes per browser tab, and
+// only when the server already serves the shell of the release it
+// reports. The unattended Scan Station and Production Board routes
+// count down on those conditions alone; every other route also waits
+// until nobody has used the page for 1 minute and no form on it holds
+// unsaved work.
 
 import type { Route } from './router-core';
 
-export const RELEASE_AUTO_RELOAD_DELAY_MS = 60_000;
+/** The countdown before an automatic reload. It starts over whenever
+ * something that holds the reload back (an open dialog, the per-tab
+ * limit, unsaved work) is gone again. */
+export const RELEASE_RELOAD_COUNTDOWN_MS = 10_000;
 export const RELEASE_AUTO_RELOAD_MIN_INTERVAL_MS = 600_000;
 /** How long an attended page must go without keyboard, pointer, wheel
  * or touch input before it may reload itself. */
-export const RELEASE_IDLE_RELOAD_AFTER_MS = 120_000;
+export const RELEASE_IDLE_RELOAD_AFTER_MS = 60_000;
 export const RELEASE_AUTO_RELOAD_STORAGE_KEY =
   'partflow.release-auto-reload-at';
 
@@ -28,6 +32,24 @@ export function noDialogOpen(doc: Document): boolean {
  * themselves without waiting for the page to be idle. */
 export function autoReloadRoute(route: Route): boolean {
   return route.view === 'scan-station' || route.view === 'production-board';
+}
+
+/**
+ * When an outdated page reloads itself, given that nothing has held the
+ * reload back since `clearSince`: the full countdown after that moment,
+ * and on an attended page never before nobody has used it for
+ * RELEASE_IDLE_RELOAD_AFTER_MS since `lastInput` (null: not known yet,
+ * so never).
+ */
+export function autoReloadDueAt(
+  clearSince: number,
+  lastInput: number | null,
+  attended: boolean,
+): number {
+  const counted = clearSince + RELEASE_RELOAD_COUNTDOWN_MS;
+  if (!attended) return counted;
+  if (lastInput === null) return Number.POSITIVE_INFINITY;
+  return Math.max(counted, lastInput + RELEASE_IDLE_RELOAD_AFTER_MS);
 }
 
 /**

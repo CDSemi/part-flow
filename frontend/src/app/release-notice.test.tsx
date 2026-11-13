@@ -25,11 +25,13 @@ import { hasUnsavedWork, useUnsavedWork } from './unsaved-work';
 
 // The update notice (GUI_DESIGN §3 rule 13, OD-16-07): the persistent
 // banner with its manual `Reload page`, and the automatic reload — after
-// 60 s outdated, never while any dialog is open, at most once per 10
-// minutes per tab, and only into a served shell of the server's release.
-// The Scan Station and Production Board routes reload on those
-// conditions alone; every other route also waits for 2 minutes without
-// input and for no unsaved work on the page.
+// a 10 s countdown beside `Reload page`, never while any dialog is open,
+// at most once per 10 minutes per tab, and only into a served shell of
+// the server's release. The countdown starts over once nothing holds it
+// back any more. The Scan Station and Production Board routes count down
+// on those conditions alone; every other route also waits for 1 minute
+// without input (counting down its last 10 s) and for no unsaved work on
+// the page.
 
 const SERVER_RELEASE = 'v2.0.0';
 const NOTICE =
@@ -172,15 +174,23 @@ test('FR-11: the notice shows the exact copy and Reload page, takes no focus, an
   expect(notice).toHaveTextContent(NOTICE);
   const button = within(notice).getByRole('button', { name: 'Reload page' });
   expect(field).toHaveFocus();
+  // A page in use shows no countdown.
+  expect(within(notice).queryByRole('timer')).toBeNull();
 
   fireEvent.click(button);
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-test('FR-12: an attended route reloads itself only after 2 minutes without input', async () => {
+test('FR-12: an attended route counts down the last 10 s of 1 minute without input, then reloads itself', async () => {
   at('/management/work-orders');
   render(<Harness initial="outdated" />);
-  await advance(119_000);
+  await advance(49_000);
+  expect(screen.queryByRole('timer')).toBeNull();
+
+  await advance(1_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 10 s');
+  await advance(9_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 1 s');
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
 
@@ -189,14 +199,16 @@ test('FR-12: an attended route reloads itself only after 2 minutes without input
   expect(markerAtReload[0]).not.toBeNull();
 });
 
-test('FR-34: input on an attended page postpones its reload; an unattended route ignores input', async () => {
+test('FR-34: input on an attended page stops its countdown at once and postpones the reload; an unattended route ignores input', async () => {
   at('/administration');
   const attended = render(<Harness initial="outdated" />);
-  await advance(100_000);
+  await advance(55_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 5 s');
   fireEvent.keyDown(window, { key: 'Shift' });
-  await advance(60_000);
+  expect(screen.queryByRole('timer')).toBeNull();
+  await advance(30_000);
   fireEvent.pointerMove(window);
-  await advance(119_000);
+  await advance(59_000);
   expect(reload).not.toHaveBeenCalled();
   await advance(1_000);
   expect(reload).toHaveBeenCalledTimes(1);
@@ -205,19 +217,21 @@ test('FR-34: input on an attended page postpones its reload; an unattended route
   window.sessionStorage.clear();
   at('/scan-station/S1/production');
   render(<Harness initial="outdated" />);
-  await advance(30_000);
+  await advance(5_000);
   fireEvent.keyDown(window, { key: 'Shift' });
-  await advance(30_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 5 s');
+  await advance(5_000);
   expect(reload).toHaveBeenCalledTimes(2);
 });
 
 test('FR-37: a scroll alone is not use, because the page also scrolls by itself', async () => {
   at('/administration');
   render(<Harness initial="outdated" />);
-  await advance(100_000);
+  await advance(50_000);
   fireEvent.scroll(window);
   fireEvent.scroll(document.body);
-  await advance(20_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 10 s');
+  await advance(10_000);
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
@@ -230,7 +244,7 @@ function DraftForm() {
   return null;
 }
 
-test('FR-35: unsaved work or an open dialog holds the reload of an idle attended page', async () => {
+test('FR-35: unsaved work or an open dialog holds the countdown of an idle attended page', async () => {
   at('/administration');
   render(
     <Harness initial="outdated">
@@ -240,13 +254,19 @@ test('FR-35: unsaved work or an open dialog holds the reload of an idle attended
   await advance(10 * 60_000);
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
+  expect(screen.queryByRole('timer')).toBeNull();
 
   const dialog = openDialogElement();
   act(() => setUnsaved(false));
   await advance(60_000);
   expect(reload).not.toHaveBeenCalled();
+  expect(screen.queryByRole('timer')).toBeNull();
 
   dialog.remove();
+  await advance(1_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 10 s');
+  await advance(9_000);
+  expect(reload).not.toHaveBeenCalled();
   await advance(1_000);
   expect(reload).toHaveBeenCalledTimes(1);
 });
@@ -282,10 +302,19 @@ test('FR-36: unsaved work is reported while any reporter holds it and ends with 
   expect(hasUnsavedWork()).toBe(false);
 });
 
-test('FR-13: a Scan Station route reloads itself after 60 s outdated, marker first', async () => {
+test('FR-13: a Scan Station route counts down 10 s beside Reload page, then reloads itself, marker first', async () => {
   at('/scan-station/S1/production');
   render(<Harness initial="outdated" />);
-  await advance(59_000);
+  const notice = screen.getByRole('alert');
+  const timer = within(notice).getByRole('timer');
+  expect(timer).toHaveTextContent('Reloading in 10 s');
+  // Right before the action rail, and never read out as it ticks.
+  expect(timer.nextElementSibling).toBe(
+    within(notice).getByRole('button', { name: 'Reload page' }),
+  );
+  expect(timer).toHaveAttribute('aria-live', 'off');
+  await advance(9_000);
+  expect(timer).toHaveTextContent('Reloading in 1 s');
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
 
@@ -296,23 +325,35 @@ test('FR-13: a Scan Station route reloads itself after 60 s outdated, marker fir
   expect(fetchMock).toHaveBeenCalledWith('/', { cache: 'no-store' });
 });
 
-test('FR-14: an open dialog holds the reload until it closes', async () => {
+test('FR-14: an open dialog holds the countdown, which starts over once the dialog closes', async () => {
   at('/scan-station/S1/production');
-  const dialog = openDialogElement();
   render(<Harness initial="outdated" />);
+  await advance(5_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 5 s');
+
+  const dialog = openDialogElement();
+  await advance(1_000);
+  expect(screen.queryByRole('timer')).toBeNull();
   await advance(90_000);
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
 
   dialog.remove();
   await advance(1_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 10 s');
+  await advance(9_000);
+  expect(reload).not.toHaveBeenCalled();
+  await advance(1_000);
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-test('FR-15: the Production Board kiosk reloads itself after 60 s', async () => {
+test('FR-15: the Production Board kiosk reloads itself after the 10 s countdown', async () => {
   at('/production-board/kiosk');
   render(<Harness initial="outdated" />);
-  await advance(60_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 10 s');
+  await advance(9_000);
+  expect(reload).not.toHaveBeenCalled();
+  await advance(1_000);
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
@@ -325,6 +366,7 @@ test('FR-16: a recent marker or an unusable sessionStorage blocks the automatic 
   const first = render(<Harness initial="outdated" />);
   await advance(4 * 60_000);
   expect(reload).not.toHaveBeenCalled();
+  expect(screen.queryByRole('timer')).toBeNull();
   first.unmount();
 
   window.sessionStorage.clear();
@@ -335,12 +377,13 @@ test('FR-16: a recent marker or an unusable sessionStorage blocks the automatic 
   await advance(2 * 60_000);
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
+  expect(screen.queryByRole('timer')).toBeNull();
 
   fireEvent.click(screen.getByRole('button', { name: 'Reload page' }));
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-test('FR-16: a marker that cannot be written blocks the automatic reload', async () => {
+test('FR-16: a marker that cannot be written blocks the automatic reload and ends the countdown', async () => {
   at('/production-board/kiosk');
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
     throw new Error('quota');
@@ -348,19 +391,23 @@ test('FR-16: a marker that cannot be written blocks the automatic reload', async
   render(<Harness initial="outdated" />);
   await advance(2 * 60_000);
   expect(reload).not.toHaveBeenCalled();
+  expect(shellChecks()).toBe(1);
+  expect(screen.queryByRole('timer')).toBeNull();
 });
 
-test('FR-17: returning to connected restarts the 60 s window', async () => {
+test('FR-17: returning to connected ends the countdown; the next outdated period counts down from 10 s again', async () => {
   at('/production-board/kiosk');
   render(<Harness initial="outdated" />);
-  await advance(30_000);
+  await advance(5_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 5 s');
   act(() => setStatus('connected'));
   expect(screen.queryByText(NOTICE)).toBeNull();
   await advance(40_000);
   expect(reload).not.toHaveBeenCalled();
 
   act(() => setStatus('outdated'));
-  await advance(59_000);
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading in 10 s');
+  await advance(9_000);
   expect(reload).not.toHaveBeenCalled();
   await advance(1_000);
   expect(reload).toHaveBeenCalledTimes(1);
@@ -380,9 +427,11 @@ test('FR-28: the reload waits for a served shell of the server release; failed c
   at('/production-board/kiosk');
   shellAnswer = () => shell('v1.0.0');
   render(<Harness initial="outdated" />);
-  await advance(62_000);
+  await advance(12_000);
   expect(shellChecks()).toBeGreaterThan(0);
   expect(reload).not.toHaveBeenCalled();
+  // The countdown has run out: the page waits for the new shell.
+  expect(screen.getByRole('timer')).toHaveTextContent('Reloading…');
 
   shellAnswer = () =>
     new Response(JSON.stringify({ detail: 'down' }), { status: 502 });
@@ -452,6 +501,7 @@ test('FR-25: a station with only the Worker sign-in modal open never reloads its
   await advance(10 * 60_000);
   expect(reload).not.toHaveBeenCalled();
   expect(shellChecks()).toBe(0);
+  expect(screen.queryByText(/Reloading/)).toBeNull();
   expect(
     within(dialog).getByRole('button', { name: 'Reload page' }),
   ).toBeEnabled();
@@ -487,6 +537,7 @@ test('FR-26: a station with only the enrollment dialog open never reloads itself
   ).toBeInTheDocument();
   await advance(10 * 60_000);
   expect(reload).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Reloading/)).toBeNull();
   // The in-dialog control sits before the disabled Enroll device.
   const buttons = within(dialog).getAllByRole('button');
   const reloadAt = buttons.findIndex((b) => b.textContent === 'Reload page');

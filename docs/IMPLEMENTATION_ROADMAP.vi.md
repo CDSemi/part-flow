@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `a7949e3` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -666,7 +666,7 @@ ra dùng chung (`projections.effective_positions`), nên không có hai bề m�
   Các dòng theo đúng thứ tự demand chuẩn của demand đang mở đầu tiên của chúng; một Work Order đã hoàn tất không bao giờ
   cung cấp ngữ cảnh cho dòng, và một dòng không có ngữ cảnh giữ due date null và lấy ngày nhận từ flow đang hoạt động cũ
   nhất của nó. Department là Department đang hoạt động duy nhất hoặc Department được nêu bằng `?department=<id>` trên
-  địa chỉ của màn hình (không có thì 404, nhiều thì 409). View làm mới mỗi 15 giây với một request đang chạy và hiển thị
+  địa chỉ của màn hình (không có thì 404, nhiều thì 409). View làm mới mỗi 5 giây với một request đang chạy và hiển thị
   `Feed stale — reconnecting` bất cứ khi nào không có board đầy đủ trên màn hình.
 - **Area Board** (`app/application/area_board.py`, `GET /api/area-board`). Nó trả các Area đang hoạt động của
   Department với cùng mô hình giám sát Area mà Scan Station đọc (`scan_station.area_inventory`, schema dùng chung trong
@@ -1186,8 +1186,9 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
   dừng, 2 không chạy được, 3 đang đóng băng, 4 cần xem xét). Nó không bao giờ được lên lịch và từ chối chạy khi có một
   project `partflow-staging` trên cùng Docker daemon.
 - Frontend hiển thị thông báo `UPDATED` và chặn thao tác ghi trên một trang đã cũ. Khi không có hộp thoại nào mở, trang
-  tự tải lại: trên các route Scan Station và Production Board sau 60 s, trên mọi route khác khi không ai dùng trang
-  trong 2 phút và trên trang không còn gì chưa lưu (GUI_DESIGN §3 quy tắc 13).
+  tự tải lại sau 10 giây đếm ngược trong thông báo: trên các route Scan Station và Production Board việc đếm ngược bắt
+  đầu ngay, còn trên mọi route khác trang tự tải lại khi không ai dùng nó trong 1 phút và trên trang không còn gì chưa
+  lưu (GUI_DESIGN §3 quy tắc 13).
 - Rollback không đổi lược đồ thì chuyển release tag về bản cũ, nên image của release trước phải được giữ trên máy chủ.
   Rollback lược đồ thì restore backup trước-release (bên dưới). Không bao giờ có down-migration.
 
@@ -1262,7 +1263,7 @@ git tag.
 - Một lần release và một lần rollback thực hiện trên NAS; các kiểm tra trên trình duyệt cần một Area, Operation đã
   cấu hình và một Scan Station đã enroll (tự tải lại trên route production của Scan Station, không tải lại khi một hộp
   thoại sản xuất hay modal đăng nhập Worker đang mở, `Reload page` trong modal, và feed `● Live` dưới thông báo cập
-  nhật); và một trang đang mở trên route khác tự tải lại khi không ai dùng nó trong 2 phút.
+  nhật); và một trang đang mở trên route khác đếm ngược rồi tự tải lại khi không ai dùng nó trong 1 phút.
 - Phép dò quyền và `reconcile --check h` trên database production, và một ghi nhận rằng `backend` chỉ giữ
   `partflow_app_password`.
 - Thư mục backup, tác vụ backup hằng ngày và bản sao mã hóa ngoài máy chủ, bản backup đầu tiên, một lần kiểm tra rằng
@@ -1407,7 +1408,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Release flow của Phase 16: mọi trang đã cũ tự tải lại khi rảnh, không chỉ Scan Station và Production Board, và các kiểm tra trên trình duyệt sau một lần release trên NAS bao gồm việc này. |
+| 2026-11-12 | uncommitted | Release flow của Phase 16: một trang đã cũ tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 s, và một trang có người dùng sau 1 phút không thao tác thay vì 2 phút; Production Board làm mới mỗi 5 giây thay vì 15 giây (quyết định của chủ sở hữu). |
+| 2026-11-12 | `77a2dfb` | Release flow của Phase 16: mọi trang đã cũ tự tải lại khi rảnh, không chỉ Scan Station và Production Board, và các kiểm tra trên trình duyệt sau một lần release trên NAS bao gồm việc này. |
 | 2026-11-12 | `a7949e3` | Hạ độ dài tối thiểu của mật khẩu mới từ 12 xuống 6 ký tự (quyết định của chủ sở hữu). |
 | 2026-11-10 | `e0e5056` | Bước go-live trỏ tới hướng dẫn cài đặt NAS đã viết lại (§1 đến §10). |
 | 2026-11-09 | `398c617` | Viết lại thành trạng thái hiện tại cho người đọc mới; pilot được thay bằng go-live trực tiếp (quyết định của chủ sở hữu). |

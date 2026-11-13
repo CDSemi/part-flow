@@ -671,7 +671,7 @@ quantity.
   context. Rows follow exactly the canonical demand ordering of their first open demand; a completed Work Order never
   supplies a row's context, and a row without one keeps a null due date and takes its received date from its oldest
   active flow. The Department is the single active one or the one named by `?department=<id>` on the display's address
-  (none 404, several 409). The view refreshes every 15 seconds with one request in flight and shows
+  (none 404, several 409). The view refreshes every 5 seconds with one request in flight and shows
   `Feed stale — reconnecting` whenever no complete board is on screen.
 - **Area Board** (`app/application/area_board.py`, `GET /api/area-board`). It returns the Department's active Areas with
   the same Area monitoring model the Scan Station reads (`scan_station.area_inventory`, shared schemas in
@@ -1194,9 +1194,10 @@ The full description is in DEPLOYMENT §3.1. In short:
   freeze, migrates, switches `backend` then `web`, runs `smoke.sh` and writes `record.json` (exit codes 0 completed,
   1 stopped, 2 could not run, 3 frozen, 4 needs review). It is never scheduled and refuses while a `partflow-staging`
   project exists on the same Docker daemon.
-- The frontend shows the `UPDATED` notice and blocks writes on an outdated page. With no dialog open it reloads itself:
-  on Scan Station and Production Board routes after 60 s, on every other route once nobody has used the page for
-  2 minutes and nothing on it is unsaved (GUI_DESIGN §3 rule 13).
+- The frontend shows the `UPDATED` notice and blocks writes on an outdated page. With no dialog open it reloads itself
+  after a 10-second countdown in the notice: on Scan Station and Production Board routes the countdown starts at once,
+  and on every other route the page reloads once nobody has used it for 1 minute and nothing on it is unsaved
+  (GUI_DESIGN §3 rule 13).
 - Rollback without a schema change switches the release tag back, so the previous release's images must stay on the
   host. A schema rollback restores the pre-release backup (below). There is never a down-migration.
 
@@ -1269,7 +1270,7 @@ run on Docker Desktop and in a Linux container.
 - A release and a rollback executed on the NAS; the browser checks that need a configured Area, Operation and
   enrolled Scan Station (automatic reload on a Scan Station production route, no reload while a production dialog or
   the Worker sign-in modal is open, the in-modal `Reload page`, and the `● Live` feed under the update notice); and an
-  open page on any other route reloading itself once nobody has used it for 2 minutes.
+  open page on any other route counting down and reloading itself once nobody has used it for 1 minute.
 - The privilege probe and `reconcile --check h` on the production database, and a record that `backend` holds only
   `partflow_app_password`.
 - The backup directory, the daily backup task and the encrypted off-host copy, the first backup, a check that an
@@ -1414,7 +1415,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Phase 16 release flow: every outdated page reloads itself once idle, not only the Scan Station and Production Board, and the browser checks after a release on the NAS cover it. |
+| 2026-11-12 | uncommitted | Phase 16 release flow: an outdated page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; the Production Board refreshes every 5 seconds instead of 15 (owner decisions). |
+| 2026-11-12 | `77a2dfb` | Phase 16 release flow: every outdated page reloads itself once idle, not only the Scan Station and Production Board, and the browser checks after a release on the NAS cover it. |
 | 2026-11-12 | `a7949e3` | Lowered the minimum length of a new password from 12 to 6 characters (owner decision). |
 | 2026-11-10 | `e0e5056` | The go-live step points to the rewritten NAS installation guide (§1 to §10). |
 | 2026-11-09 | `398c617` | Rewritten as current state for new readers; pilot replaced by direct go-live (owner decision). |

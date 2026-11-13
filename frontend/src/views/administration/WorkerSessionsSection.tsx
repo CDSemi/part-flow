@@ -206,7 +206,7 @@ export function WorkerSessionsSection() {
           <tbody>
             {areas.map((area) => (
               <tr key={area.id}>
-                <td>
+                <td className="admin-areacell">
                   <AreaDot colorVar={areaColor(area)} size={14} />{' '}
                   <b>{area.name}</b>
                   {area.isActive ? null : ' (inactive)'}
