@@ -40,6 +40,8 @@ import { MANAGEMENT_WRITE_ACCESS } from '../../app/management-access';
 import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { Avatar } from '../../components/Avatar';
+import { useCloseGuard } from '../../components/close-guard';
+import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
@@ -2271,8 +2273,15 @@ function StartMaintenanceDialog({
       setBusy(false);
     }
   };
+  // Both fields open empty. While the start is in flight a close request
+  // still closes at once, as it always has: the entries are already sent.
+  const guard = useCloseGuard({
+    dirty: note !== '' || expectedReturn !== '',
+    onClose: onCancel,
+  });
+  const requestClose = busy ? onCancel : guard.requestClose;
   return (
-    <ModalDialog label="Start maintenance" onClose={onCancel}>
+    <ModalDialog label="Start maintenance" onClose={requestClose}>
       <h3>Start maintenance</h3>
       <div className="sub">
         <b>{machine.name}</b> will switch to <b>Maintenance</b>.{' '}
@@ -2317,7 +2326,7 @@ function StartMaintenanceDialog({
         ) : null}
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button className="bigbtn ghost" onClick={requestClose}>
           Cancel (Esc)
         </button>
         <button
@@ -2328,6 +2337,13 @@ function StartMaintenanceDialog({
           Start maintenance
         </button>
       </div>
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard maintenance details?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }
@@ -2376,12 +2392,14 @@ function ReactivateMachineDialog({
     reason: string;
   }) => Promise<void>;
 }) {
-  const [name, setName] = useState(machine.name);
-  const [areaId, setAreaId] = useState(
-    areaChoices.some((choice) => choice.id === machine.areaId)
+  const initial = {
+    name: machine.name,
+    areaId: areaChoices.some((choice) => choice.id === machine.areaId)
       ? machine.areaId
       : (areaChoices[0]?.id ?? machine.areaId),
-  );
+  };
+  const [name, setName] = useState(initial.name);
+  const [areaId, setAreaId] = useState(initial.areaId);
   const [reason, setReason] = useState('');
   const [samePhysical, setSamePhysical] = useState(false);
   // Validation errors render AT the failing field, never as one
@@ -2468,9 +2486,33 @@ function ReactivateMachineDialog({
     }
   };
 
+  // Leaving the workflow from any stage drops the entries, so changed
+  // ones ask first. While the reactivation is in flight a close request
+  // still leaves at once, as it always has: the entries are already sent.
+  const guard = useCloseGuard({
+    dirty:
+      name !== initial.name ||
+      areaId !== initial.areaId ||
+      reason !== '' ||
+      samePhysical,
+    onClose: onCancel,
+  });
+  const requestClose = busy ? onCancel : guard.requestClose;
+  const discardDecision = guard.asking ? (
+    <DiscardInputDialog
+      title="Discard reactivation?"
+      onKeepEditing={guard.keepEditing}
+      onDiscard={onCancel}
+    />
+  ) : null;
+
   if (stage === 'summary' || stage === 'final') {
     return (
-      <ModalDialog label="Confirm reactivation" onClose={onCancel} size="wide">
+      <ModalDialog
+        label="Confirm reactivation"
+        onClose={requestClose}
+        size="wide"
+      >
         <h3>Confirm reactivation</h3>
         <div className="sub">
           Final check — nothing has changed yet. <b>{machine.name}</b> returns
@@ -2563,12 +2605,13 @@ function ReactivateMachineDialog({
             remains part of that history.
           </ConfirmDialog>
         ) : null}
+        {discardDecision}
       </ModalDialog>
     );
   }
 
   return (
-    <ModalDialog label="Reactivate Machine" onClose={onCancel} size="wide">
+    <ModalDialog label="Reactivate Machine" onClose={requestClose} size="wide">
       <h3>Reactivate Machine</h3>
       {/* The read-only identity header (§12.3) leads the dialog like
           New/Edit Machine: Asset Tag, derived barcode and the asset
@@ -2726,7 +2769,7 @@ function ReactivateMachineDialog({
         <LifecycleTimeline state={events.state} areaById={areaById} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button className="bigbtn ghost" onClick={requestClose}>
           {cancelLabel}
         </button>
         <button
@@ -2737,6 +2780,7 @@ function ReactivateMachineDialog({
           Continue
         </button>
       </div>
+      {discardDecision}
     </ModalDialog>
   );
 }

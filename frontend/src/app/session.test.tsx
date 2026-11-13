@@ -343,14 +343,12 @@ test('hasPermission: no user holds nothing; a user holds exactly the role keys',
   expect(hasPermission(user, 'MANAGE_USERS_AND_ROLES')).toBe(false);
 });
 
-test('newPasswordError mirrors the 12–256 character rule after NFKC and the repetition', () => {
-  expect(newPasswordError('', '')).toBe('At least 12 characters.');
-  expect(newPasswordError('elevenchars', 'elevenchars')).toBe(
-    'At least 12 characters.',
-  );
-  expect(newPasswordError('twelve chars', 'twelve chars')).toBeNull();
+test('newPasswordError mirrors the 6–256 character rule after NFKC and the repetition', () => {
+  expect(newPasswordError('', '')).toBe('At least 6 characters.');
+  expect(newPasswordError('five5', 'five5')).toBe('At least 6 characters.');
+  expect(newPasswordError('six ch', 'six ch')).toBeNull();
   // NFKC: the ligature "ﬁ" counts as the two characters "fi".
-  expect(newPasswordError('ﬁﬁﬁﬁﬁﬁ', 'ﬁﬁﬁﬁﬁﬁ')).toBeNull();
+  expect(newPasswordError('ﬁﬁﬁ', 'ﬁﬁﬁ')).toBeNull();
   const long = 'x'.repeat(257);
   expect(newPasswordError(long, long)).toBe(
     'A password can be at most 256 characters long.',

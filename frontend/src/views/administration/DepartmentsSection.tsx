@@ -11,6 +11,11 @@ import type { Department } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
   EmptyState,
@@ -200,11 +205,18 @@ function DepartmentDialog({
   /** Persist the entry. Rejects with the server's message. */
   onSave: (input: { name: string; isActive: boolean }) => Promise<void>;
 }) {
-  const [name, setName] = useState(department?.name ?? '');
-  const [isActive, setIsActive] = useState(department?.isActive ?? true);
+  const initialName = department?.name ?? '';
+  const initialActive = department?.isActive ?? true;
+  const [name, setName] = useState(initialName);
+  const [isActive, setIsActive] = useState(initialActive);
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  const guard = useCloseGuard({
+    dirty: name !== initialName || isActive !== initialActive,
+    busy,
+    onClose: onCancel,
+  });
 
   const trimmedName = name.trim();
   const submit = async () => {
@@ -226,7 +238,7 @@ function DepartmentDialog({
   return (
     <ModalDialog
       label={department ? 'Edit Department' : 'New Department'}
-      onClose={onCancel}
+      onClose={guard.requestClose}
     >
       <h3>{department ? 'Edit Department' : 'New Department'}</h3>
       <div className="admin-form">
@@ -253,7 +265,11 @@ function DepartmentDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -264,6 +280,23 @@ function DepartmentDialog({
           {department ? 'Save changes' : 'Add Department'}
         </button>
       </div>
+      {guard.asking && department ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={onCancel}
+        >
+          You have unsaved changes to <b>{department.name}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !department ? (
+        <DiscardInputDialog
+          title="Discard new Department?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

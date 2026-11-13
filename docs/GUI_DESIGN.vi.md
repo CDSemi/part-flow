@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09.
+> Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-12.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -352,9 +352,29 @@ Các quy tắc trình bày sau áp dụng cho form trong dialog của mọi view
 - **Mũi tên của select.** Mọi select native vẽ một mũi tên thả xuống (chevron) nhất quán, mang tông muted theo theme:
   một token `--select-arrow` theo từng theme được dùng bởi một rule `select` dùng chung với `appearance: none`. Các rule
   bề mặt select đặt `background-color`, không bao giờ dùng thuộc tính viết tắt `background` vốn sẽ xóa mất mũi tên.
+- **Chiều cao của select.** Một select cắt giá trị của nó theo content box, và một giá trị cao hơn box đó được căn lên
+  trên thay vì căn giữa. Vì vậy một select bị ghim vào một chiều cao cố định (các form cho mọi control cùng một chiều
+  cao: các editor của Administration và các dialog Machines) không có padding dọc: giá trị được căn giữa trong toàn bộ
+  chiều cao, và các chữ có phần chân (p, q, g, y) không bao giờ bị cắt. Một select có kích thước theo `min-height` không
+  cần gì thêm.
 - **Tông của Discard.** Trong `UnsavedChoiceDialog` dùng chung, action **Discard** mang tông nguy hiểm (danger) ở mọi nơi
-  gọi (Work Orders, Machines, Planned Routes, Part Numbers): action này luôn vứt bỏ các chỉnh sửa đã nhập, nên nó không
-  bao giờ được trông như lựa chọn trung tính bên cạnh Cancel.
+  gọi (Work Orders, Machines, Planned Routes, Part Numbers, Administration): action này luôn vứt bỏ các chỉnh sửa đã
+  nhập, nên nó không bao giờ được trông như lựa chọn trung tính bên cạnh Cancel.
+- **Đóng khi còn dữ liệu chưa lưu.** Escape, một cú click vào nền (backdrop) và `Cancel (Esc)` là các yêu cầu đóng. Trên
+  mọi dialog nhập dữ liệu để lưu hoặc thêm mới (các editor của Administration, `Change password`, `Set up PartFlow` và
+  các dialog Management), một dialog có các giá trị vẫn bằng các giá trị lúc mở sẽ đóng ngay,
+  không hỏi gì; một giá trị đã gõ rồi khôi phục lại được tính là không thay đổi. Khi có giá trị đã thay đổi, dialog hỏi
+  trước, nên dữ liệu đã nhập không bao giờ bị mất một cách âm thầm:
+  - một bản ghi đã có: `UnsavedChoiceDialog` dùng chung với tiêu đề `Unsaved changes` (thân
+    `You have unsaved changes to {name}.`) cùng `Save changes` (lưu, và đóng khi lưu thành công; một lần lưu bị từ chối
+    giữ dialog mở kèm thông báo của nó), `Discard changes` và `Cancel (Esc)`;
+  - một bản ghi mới hoặc một lần nhập dùng một lần: một xác nhận `Discard …?` (ví dụ `Discard new Area?`,
+    `Discard new password?`, `Discard this enrollment?`) với thân `Your entered information will not be saved.`,
+    `Keep editing` và `Discard input`.
+
+  Escape hoặc click vào nền của chính câu hỏi đó quay về dialog với mọi giá trị còn nguyên. Các dialog Administration bỏ
+  qua yêu cầu đóng trong khi một lần lưu đang chạy. Các dialog workflow của Scan Station giữ nguyên §4.6 (Escape luôn hủy
+  toàn bộ workflow), và dialog đăng nhập đóng ngay.
 
 ---
 
@@ -1670,6 +1690,11 @@ Một Scan Station chỉ hoạt động từ một trình duyệt mà administra
   (Administration → Scan Stations, §9). Code gồm mười ký tự hiển thị dạng `XXXXX-XXXXX`; nó được chấp nhận ở mọi kiểu
   chữ hoa hay thường và có hoặc không có dấu gạch nối hay khoảng trắng. Một Station ID chưa biết hoặc không active vẫn
   hiển thị lỗi station không khả dụng tường minh (§4.1) thay vì panel.
+- **Cách trình bày enroll.** Panel là một card căn giữa trên bề mặt station, dựng giống khung dialog. Ô nhập code của
+  nó, dùng chung với dialog chặn mô tả bên dưới, hiển thị giá trị nhập bằng cùng kiểu chữ monospace lớn, đậm, giãn
+  cách như code mà Administration hiển thị khi phát hành (§9), căn giữa trong một ô cao giữ toàn bộ code nhìn thấy được
+  đến tận bề rộng điện thoại. Các action của panel (`Station Selector`, `Enroll device`) chia nhau một hàng với độ rộng
+  bằng nhau và khoảng cách rõ ràng, và xếp chồng lên nhau trên màn hình hẹp thay vì ép nhãn của chúng.
 - **Trong khi làm việc.** Khi một request bị từ chối vì thiết bị đã bị revoke hoặc bị thay thế trong lúc station đang
   mở, cùng màn hình enroll đó xuất hiện như một dialog chặn, giống modal badge Worker (§4.12). Các bản nháp đang mở, các
   lựa chọn và Worker Session được giữ nguyên bên dưới, và không có gì được ghi thêm cho đến khi thiết bị được enroll
@@ -2682,12 +2707,25 @@ trong Management bởi các production role được cấp quyền.
 - Chỗ nào tài liệu này nói "Admin-only" (History archival & purge), nó có nghĩa là permission cấu hình system settings,
   ban đầu được cấp cho role Administrator (PROJECT_PROFILE §20).
 
+### Scan Stations
+
+Editor `New Scan Station` hỏi Area trước và **đề xuất Station ID** từ Area đó: tên Area viết hoa (bỏ dấu, mỗi đoạn ký
+tự khác được thay bằng một dấu `-`), tiếp theo là `-ST-` và một số có ít nhất hai chữ số. Số này lớn hơn một so với số
+cao nhất mà bất kỳ station hiện có nào đã dùng với cùng tiền tố đó, không phân biệt chữ hoa thường, kể cả các station
+inactive và các station đã được gắn sang Area khác, vì một Station ID không bao giờ được đổi tên hay dùng lại
+(`CUT-ST-01`, rồi `CUT-ST-02`). Đề xuất đi theo Area đang chọn cho đến khi người dùng gõ một ID của riêng mình; một ID
+đã gõ được giữ nguyên, và một ô đã xóa trống lại đi theo Area. Server vẫn kiểm tra ID được nhập.
+
 ### Thiết bị Scan Station
 
 Production setup → **Scan Stations** cho mỗi station một action `Devices…` mở các thiết bị đã enroll và các enrollment
 code chưa hết hạn của nó, liệt kê tên, trạng thái (`Enrolled`, hoặc `Code issued` kèm thời điểm hết hạn) và last seen
 (request gần nhất của thiết bị, kể cả các request bị từ chối). Một thiết bị đã bị revoke hoặc một code đã hết hạn không
-còn được liệt kê khi danh sách được tải lại.
+còn được liệt kê khi danh sách được tải lại. Ô Devices của bảng hiển thị, trên một dòng trải ngang ô, tên các thiết bị đã
+enroll của station (`Not enrolled` khi chưa có thiết bị nào, kèm `· code issued` trong khi có một code đang chờ) và
+nút `Devices…`. Khi các tên không vừa, chúng kết thúc bằng dấu ba chấm và hiện đầy đủ khi rê chuột; Station ID, Area
+và trạng thái không bao giờ bị xuống dòng vì chúng. Một cú click ở bất kỳ đâu trong ô đó mở danh sách thiết bị, còn
+phần còn lại của hàng mở editor của station.
 
 - `Enroll device…` hỏi tên thiết bị và hiển thị một enrollment code dùng một lần (hiệu lực 15 phút, dùng một lần, chỉ
   hiển thị một lần) để nhập trên thiết bị của station (§4.13).
@@ -3886,8 +3924,9 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-09 | uncommitted | Căn chỉnh theo code: các vùng action Undo và Retry trong suốt khi nghỉ với đường kẻ phân cách thụt vào, và một transfer `ON_MACHINE` thông báo `AREA_COMPLETED, then TRANSFERRED (one command)`. |
-| 2026-11-09 | uncommitted | Viết lại thành nội dung hiện tại cho người đọc mới; các yêu cầu chỉ nằm trong ghi chú phiên bản cũ (§15.1–§15.17 trước đây) được chuyển vào phần thân; không có quy tắc nào thay đổi. |
+| 2026-11-12 | uncommitted | Mọi dialog nhập liệu đóng ngay khi chưa thay đổi và hỏi trước khi bỏ dữ liệu đã thay đổi; các select bị ghim chiều cao cố định bỏ padding dọc để phần chân chữ không bao giờ bị cắt; một Scan Station mới đề xuất Station ID từ Area của nó, và ô Devices của nó nêu tên các thiết bị đã enroll và cả ô mở danh sách thiết bị; panel enroll trở thành một card căn giữa với ô nhập code lớn. |
+| 2026-11-09 | 398c617 | Căn chỉnh theo code: các vùng action Undo và Retry trong suốt khi nghỉ với đường kẻ phân cách thụt vào, và một transfer `ON_MACHINE` thông báo `AREA_COMPLETED, then TRANSFERRED (one command)`. |
+| 2026-11-09 | 398c617 | Viết lại thành nội dung hiện tại cho người đọc mới; các yêu cầu chỉ nằm trong ghi chú phiên bản cũ (§15.1–§15.17 trước đây) được chuyển vào phần thân; không có quy tắc nào thay đổi. |
 | 2026-10-06 to 2026-10-08 | 702ab1c … 7b24d10 | Thêm đăng nhập User với Management và Administration nhận biết permission, đăng ký thiết bị Scan Station, điều chỉnh allocation, chỉnh sửa assigned route, audit trail của PN, theme theo từng User, import file Work Order và thông báo cập nhật phiên bản phát hành. |
 | 2026-10-04 to 2026-10-06 | 9f466fa … 69b8ec1 | Đặc tả Workers, các chế độ Worker ID, badge session và các chốt chặn, lý do Undo, Part Numbers, Planned Routes, cài đặt hiển thị và Due Soon, lưu giữ dữ liệu, Users và vai trò; các mục Hot đã được allocate đầy đủ tự động rời khỏi danh sách. |
 | 2026-08-25 to 2026-09-13 | d7bcd06 … f016d41 | Đưa các quy trình của Scan Station, Production Board, Area Board, PN Tracking và Completed Work Orders lên dữ liệu server, với trạng thái feed, phân trang, Receive Quantity bên cạnh số lượng hiện có và cảnh báo về thời lượng dự kiến. |

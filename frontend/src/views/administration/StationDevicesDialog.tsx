@@ -9,6 +9,8 @@ import {
 } from '../../api/station-devices';
 import type { StationDevice } from '../../api/station-devices';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ModalDialog } from '../../components/ModalDialog';
 import { useUiClock } from '../../components/ui-clock';
@@ -243,6 +245,14 @@ function EnrollDeviceDialog({
   const trimmed = label.trim();
   const labelInvalid = trimmed.length < 1 || trimmed.length > DEVICE_LABEL_MAX;
   const title = replaces ? `Re-enroll ${replaces.label}` : 'Enroll a device';
+  // The name entry: ignored while the code is being created, and a
+  // changed name asks before closing (useCloseGuard). The code view
+  // below closes as it always did — its code exists already.
+  const guard = useCloseGuard({
+    dirty: label !== (replaces?.label ?? ''),
+    busy,
+    onClose,
+  });
 
   const submit = async () => {
     if (busy || writeBlocked) return;
@@ -298,7 +308,7 @@ function EnrollDeviceDialog({
   }
 
   return (
-    <ModalDialog label={title} onClose={busy ? () => undefined : onClose}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <div className="admin-form">
         <AdminField label="Device name">
@@ -329,7 +339,11 @@ function EnrollDeviceDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={onClose}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -340,6 +354,13 @@ function EnrollDeviceDialog({
           Create enrollment code
         </button>
       </div>
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard this enrollment?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onClose}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

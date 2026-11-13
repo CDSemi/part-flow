@@ -13,6 +13,11 @@ import type { Area, Operation } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -261,20 +266,44 @@ function OperationDialog({
     isActive: boolean;
   }) => Promise<void>;
 }) {
-  const [areaId, setAreaId] = useState(operation?.areaId ?? areas[0]?.id ?? 0);
-  const [code, setCode] = useState(operation?.code ?? '');
-  const [name, setName] = useState(operation?.name ?? '');
-  const [description, setDescription] = useState(operation?.description ?? '');
-  const [minutesText, setMinutesText] = useState(() => {
-    if (!operation?.defaultExpectedDuration) return '';
-    const minutes = isoDurationToMinutes(operation.defaultExpectedDuration);
-    return minutes === null ? '' : String(minutes);
+  // The values the editor opened with — a close request compares the
+  // entries against them (useCloseGuard).
+  const [initial] = useState(() => {
+    const minutes = operation?.defaultExpectedDuration
+      ? isoDurationToMinutes(operation.defaultExpectedDuration)
+      : null;
+    return {
+      areaId: operation?.areaId ?? areas[0]?.id ?? 0,
+      code: operation?.code ?? '',
+      name: operation?.name ?? '',
+      description: operation?.description ?? '',
+      minutesText: minutes === null ? '' : String(minutes),
+      isExternal: operation?.isExternal ?? false,
+      isActive: operation?.isActive ?? true,
+    };
   });
-  const [isExternal, setIsExternal] = useState(operation?.isExternal ?? false);
-  const [isActive, setIsActive] = useState(operation?.isActive ?? true);
+  const [areaId, setAreaId] = useState(initial.areaId);
+  const [code, setCode] = useState(initial.code);
+  const [name, setName] = useState(initial.name);
+  const [description, setDescription] = useState(initial.description);
+  const [minutesText, setMinutesText] = useState(initial.minutesText);
+  const [isExternal, setIsExternal] = useState(initial.isExternal);
+  const [isActive, setIsActive] = useState(initial.isActive);
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  const guard = useCloseGuard({
+    dirty:
+      areaId !== initial.areaId ||
+      code !== initial.code ||
+      name !== initial.name ||
+      description !== initial.description ||
+      minutesText !== initial.minutesText ||
+      isExternal !== initial.isExternal ||
+      isActive !== initial.isActive,
+    busy,
+    onClose: onCancel,
+  });
 
   const trimmedCode = code.trim();
   // The COMPLETE entered value must be a whole minute count above zero
@@ -316,7 +345,7 @@ function OperationDialog({
   return (
     <ModalDialog
       label={operation ? 'Edit Operation' : 'New Operation'}
-      onClose={onCancel}
+      onClose={guard.requestClose}
     >
       <h3>{operation ? 'Edit Operation' : 'New Operation'}</h3>
       <div className="admin-form">
@@ -427,7 +456,11 @@ function OperationDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -438,6 +471,23 @@ function OperationDialog({
           {operation ? 'Save changes' : 'Add Operation'}
         </button>
       </div>
+      {guard.asking && operation ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={onCancel}
+        >
+          You have unsaved changes to <b>{operation.name ?? operation.code}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !operation ? (
+        <DiscardInputDialog
+          title="Discard new Operation?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

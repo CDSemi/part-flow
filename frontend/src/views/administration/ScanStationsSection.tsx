@@ -13,6 +13,11 @@ import { listStationDevices } from '../../api/station-devices';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { useToastNotice } from '../../components/toast-notice';
@@ -31,6 +36,7 @@ import {
   ViewOnlyNote,
 } from './section-widgets';
 import { StationDevicesDialog } from './StationDevicesDialog';
+import { suggestStationId } from './station-id';
 
 // Administration → Scan Stations (Phase 3.5): stations bound to one
 // Area, identified by their stable Station ID (one URL path segment —
@@ -135,12 +141,16 @@ export function ScanStationsSection() {
     devicesData.state.status === 'ready' ? devicesData.state.data : null;
   const devicesOf = (stationId: string) =>
     devices?.devices.filter((device) => device.stationId === stationId) ?? [];
+  // The names of the station's enrolled devices (the cell cuts a list
+  // too long for it short with an ellipsis and shows it whole on hover).
   const devicesSummary = (stationId: string) => {
     if (devices === null) return '—';
     const own = devicesOf(stationId);
-    const enrolled = own.filter((device) => device.state === 'ACTIVE').length;
+    const enrolled = own
+      .filter((device) => device.state === 'ACTIVE')
+      .map((device) => device.label);
     const codeIssued = own.some((device) => device.state === 'PENDING');
-    return `${enrolled > 0 ? `${enrolled} enrolled` : 'Not enrolled'}${codeIssued ? ' · code issued' : ''}`;
+    return `${enrolled.length > 0 ? enrolled.join(', ') : 'Not enrolled'}${codeIssued ? ' · code issued' : ''}`;
   };
   const devicesStation =
     dialog?.kind === 'devices'
@@ -153,7 +163,7 @@ export function ScanStationsSection() {
       {stations.length === 0 ? (
         <EmptyState message="No Scan Stations configured yet." />
       ) : (
-        <table className="admin-table">
+        <table className="admin-table admin-stationtable">
           <thead>
             <tr>
               <th>Station ID</th>
@@ -190,20 +200,31 @@ export function ScanStationsSection() {
                   <td>
                     <StatusPill active={station.isActive} />
                   </td>
-                  <td data-label="Devices">
+                  {/* The whole Devices cell opens the station's devices,
+                      never the row's editor; its button is the keyboard
+                      and screen-reader entry point (its click lands
+                      here too). */}
+                  <td
+                    data-label="Devices"
+                    className="admin-devicescell"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setDialog({
+                        kind: 'devices',
+                        stationId: station.stationId,
+                      });
+                    }}
+                  >
                     <span className="admin-devices">
-                      {devicesSummary(station.stationId)}
+                      <span
+                        className="admin-devicenames"
+                        title={devicesSummary(station.stationId)}
+                      >
+                        {devicesSummary(station.stationId)}
+                      </span>
                       <button
-                        className="rowbtn"
+                        className="btn ghost"
                         aria-label={`Devices of ${station.stationId}`}
-                        onClick={(event) => {
-                          // The row itself opens the station editor.
-                          event.stopPropagation();
-                          setDialog({
-                            kind: 'devices',
-                            stationId: station.stationId,
-                          });
-                        }}
                       >
                         Devices…
                       </button>
@@ -248,6 +269,7 @@ export function ScanStationsSection() {
         <ScanStationDialog
           areas={activeAreas}
           areaById={areaById}
+          stationIds={stations.map((station) => station.stationId)}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={async (input) => {
@@ -288,6 +310,7 @@ function ScanStationDialog({
   station,
   areas,
   areaById,
+  stationIds = [],
   writeBlocked,
   onCancel,
   onSave,
@@ -295,6 +318,9 @@ function ScanStationDialog({
   station?: ScanStation;
   areas: Area[];
   areaById: Map<number, Area>;
+  /** Every existing Station ID (new station only): the proposed ID
+   * continues their numbering. */
+  stationIds?: readonly string[];
   writeBlocked: boolean;
   onCancel: () => void;
   /** Persist the entry. Rejects with the server's message. */
@@ -304,8 +330,23 @@ function ScanStationDialog({
     isActive: boolean;
   }) => Promise<void>;
 }) {
-  const [stationId, setStationId] = useState(station?.stationId ?? '');
-  const [areaId, setAreaId] = useState(station?.areaId ?? areas[0]?.id ?? 0);
+  // A new station's ID is proposed from its Area (`CUT-ST-01`, …).
+  const proposedId = (forAreaId: number): string => {
+    const area = areaById.get(forAreaId);
+    return area ? suggestStationId(area, stationIds) : '';
+  };
+  // The values the editor opened with — a close request compares the
+  // entries against them (useCloseGuard).
+  const [initial] = useState(() => {
+    const startAreaId = station?.areaId ?? areas[0]?.id ?? 0;
+    return {
+      stationId: station?.stationId ?? proposedId(startAreaId),
+      areaId: startAreaId,
+      isActive: station?.isActive ?? true,
+    };
+  });
+  const [stationId, setStationId] = useState(initial.stationId);
+  const [areaId, setAreaId] = useState(initial.areaId);
   // Rebinding targets active Areas; a station currently bound to an
   // inactive Area still shows that binding as a selectable no-change
   // choice instead of a blank select.
@@ -314,10 +355,30 @@ function ScanStationDialog({
       ? areaById.get(station.areaId)
       : undefined;
   const choices = currentInactiveArea ? [currentInactiveArea, ...areas] : areas;
-  const [isActive, setIsActive] = useState(station?.isActive ?? true);
+  const [isActive, setIsActive] = useState(initial.isActive);
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  const guard = useCloseGuard({
+    dirty:
+      stationId !== initial.stationId ||
+      areaId !== initial.areaId ||
+      isActive !== initial.isActive,
+    busy,
+    onClose: onCancel,
+  });
+
+  // While the new Station ID is still the proposal (or blank), it
+  // follows the chosen Area; an ID the user typed stays as typed.
+  const chooseArea = (nextAreaId: number) => {
+    if (
+      !station &&
+      (stationId.trim() === '' || stationId === proposedId(areaId))
+    ) {
+      setStationId(proposedId(nextAreaId));
+    }
+    setAreaId(nextAreaId);
+  };
 
   const trimmedId = stationId.trim();
   const idInvalid = trimmedId !== '' && !STATION_ID_PATTERN.test(trimmedId);
@@ -345,7 +406,7 @@ function ScanStationDialog({
   return (
     <ModalDialog
       label={station ? 'Edit Scan Station' : 'New Scan Station'}
-      onClose={onCancel}
+      onClose={guard.requestClose}
     >
       <h3>{station ? 'Edit Scan Station' : 'New Scan Station'}</h3>
       <div className="admin-form">
@@ -359,7 +420,23 @@ function ScanStationDialog({
               The Station ID is the stable identity and is never renamed.
             </p>
           </div>
-        ) : (
+        ) : null}
+        {/* A new station chooses its Area first: the proposed Station
+            ID below follows it. */}
+        <AdminField label="Area">
+          <select
+            className="field"
+            value={String(areaId)}
+            onChange={(event) => chooseArea(Number(event.target.value))}
+          >
+            {choices.map((area) => (
+              <option key={area.id} value={String(area.id)}>
+                {area.isActive ? area.name : `${area.name} (inactive)`}
+              </option>
+            ))}
+          </select>
+        </AdminField>
+        {station ? null : (
           <>
             <AdminField label="Station ID">
               <input
@@ -367,8 +444,16 @@ function ScanStationDialog({
                 value={stationId}
                 onChange={(event) => setStationId(event.target.value)}
                 placeholder="e.g. LATHE-ST-02"
+                autoComplete="off"
+                spellCheck={false}
               />
             </AdminField>
+            <div className="admin-fieldnotes">
+              <p className="admin-fieldhelp">
+                Proposed from the Area name with the next number — change it if
+                needed. A Station ID is never renamed once added.
+              </p>
+            </div>
             {idInvalid || (!trimmedId && attempted) ? (
               <div className="err" role="alert">
                 {idInvalid
@@ -378,19 +463,6 @@ function ScanStationDialog({
             ) : null}
           </>
         )}
-        <AdminField label="Area">
-          <select
-            className="field"
-            value={String(areaId)}
-            onChange={(event) => setAreaId(Number(event.target.value))}
-          >
-            {choices.map((area) => (
-              <option key={area.id} value={String(area.id)}>
-                {area.isActive ? area.name : `${area.name} (inactive)`}
-              </option>
-            ))}
-          </select>
-        </AdminField>
         <ActiveField
           label="Active — the station accepts scans"
           checked={isActive}
@@ -399,7 +471,11 @@ function ScanStationDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -410,6 +486,24 @@ function ScanStationDialog({
           {station ? 'Save changes' : 'Add Scan Station'}
         </button>
       </div>
+      {guard.asking && station ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={onCancel}
+        >
+          You have unsaved changes to{' '}
+          <b className="mono">{station.stationId}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !station ? (
+        <DiscardInputDialog
+          title="Discard new Scan Station?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

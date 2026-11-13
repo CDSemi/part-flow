@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -930,7 +930,7 @@ Một lần lệch route đã ghi trên Movement `TRANSFERRED` thực tế khôn
   giờ giữ chính token. Administration → Settings → User sign-in cấu hình thời hạn (mặc định bật, 30 ngày, hoặc không bao
   giờ; tính tuyệt đối từ lúc đăng nhập), việc khóa (10 lần đăng nhập sai thì khóa 15 phút) và yêu cầu mật khẩu mới ở lần
   đăng nhập đầu (mặc định bật); khoảng cấu hình được là 1 đến 365 ngày, 3 đến 100 lần đăng nhập sai và 1 đến 1440 phút.
-  Mật khẩu có 12 đến 256 ký tự sau chuẩn hóa NFKC và không có quy tắc thành phần. API:
+  Mật khẩu có 6 đến 256 ký tự sau chuẩn hóa NFKC và không có quy tắc thành phần. API:
   `GET`/`POST`/`DELETE /api/session`, `PUT /api/session/password`, `PUT /api/users/{id}/password` (mật khẩu tạm; kết
   thúc các phiên đăng nhập của User và gỡ khóa) và `GET`/`PUT /api/policies/sign-in`. Mọi thao tác ghi cần header
   `X-PartFlow-CSRF: 1`; cookie phiên `partflow_session` là `HttpOnly`, `SameSite=Strict` và `Secure` khi đặt
@@ -1406,7 +1406,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Bước go-live trỏ tới hướng dẫn cài đặt NAS đã viết lại (§1 đến §10). |
+| 2026-11-12 | uncommitted | Hạ độ dài tối thiểu của mật khẩu mới từ 12 xuống 6 ký tự (quyết định của chủ sở hữu). |
+| 2026-11-10 | `e0e5056` | Bước go-live trỏ tới hướng dẫn cài đặt NAS đã viết lại (§1 đến §10). |
 | 2026-11-09 | `398c617` | Viết lại thành trạng thái hiện tại cho người đọc mới; pilot được thay bằng go-live trực tiếp (quyết định của chủ sở hữu). |
 | 2026-11-09 | `b405c6e` | Ghi nhận quyết định go-live trực tiếp của chủ sở hữu, không có pilot và không có release gate. |
 | 2026-10-09 | `03bd90c`, `4271f61` | Giám sát của Phase 16: log có cấu trúc, request id, lệnh status, kiểm tra máy chủ và reconcile theo lịch. |

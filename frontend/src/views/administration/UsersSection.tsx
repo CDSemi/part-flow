@@ -16,6 +16,11 @@ import type { SignInState, User } from '../../api/users';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
 import { Avatar } from '../../components/Avatar';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
   ImageUploadError,
@@ -371,16 +376,25 @@ function UserDialog({
     onClose(wroteAny.current);
   };
 
-  // Cancel, Escape and the backdrop are ignored while a save is in
-  // flight: its writes cannot be recalled, so the editor stays open
-  // until they settle.
-  const requestClose = () => {
-    if (busy) return;
-    close();
-  };
-
   const trimmedName = name.trim();
   const canonical = canonicalLoginName(login);
+  // Cancel, Escape and the backdrop are ignored while a save is in
+  // flight: its writes cannot be recalled, so the editor stays open
+  // until they settle. Otherwise entries a save would still write ask
+  // first (useCloseGuard): they differ from the record the server last
+  // confirmed, or a new user has any entry at all.
+  const guard = useCloseGuard({
+    dirty:
+      staged !== null ||
+      (saved
+        ? trimmedName !== saved.displayName ||
+          canonical !== saved.loginName ||
+          roleId !== saved.roleId ||
+          isActive !== saved.isActive
+        : trimmedName !== '' || canonical !== '' || roleId !== null),
+    busy,
+    onClose: close,
+  });
   const nameInvalid = !trimmedName;
   const loginInvalid = loginNameError(login);
   const roleInvalid = roleId === null;
@@ -505,7 +519,7 @@ function UserDialog({
   };
 
   return (
-    <ModalDialog label={title} onClose={requestClose}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <div className="admin-form">
         <AdminField label="Name">
@@ -652,7 +666,11 @@ function UserDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -663,6 +681,23 @@ function UserDialog({
           {saved ? 'Save changes' : 'Add user'}
         </button>
       </div>
+      {guard.asking && saved ? (
+        <UnsavedChangesDialog
+          saveDisabled={controlsBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={close}
+        >
+          You have unsaved changes to <b>{saved.displayName}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !saved ? (
+        <DiscardInputDialog
+          title="Discard new user?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={close}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

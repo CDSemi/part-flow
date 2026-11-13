@@ -11,6 +11,11 @@ import type { Permission, Role } from '../../api/roles';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
   EmptyState,
@@ -219,10 +224,19 @@ function RoleDialog({
     nameField.current?.focus();
   }, []);
 
-  const requestClose = () => {
-    if (busy) return;
-    onClose(wroteAny.current);
-  };
+  // Cancel, Escape and the backdrop are ignored while a save is in
+  // flight; otherwise a changed name or permission asks first
+  // (useCloseGuard).
+  const guard = useCloseGuard({
+    dirty:
+      name !== (role?.name ?? '') ||
+      EDITABLE_PERMISSIONS.some(
+        (key) =>
+          checked.has(key) !== (role?.permissions.includes(key) ?? false),
+      ),
+    busy,
+    onClose: () => onClose(wroteAny.current),
+  });
 
   const trimmedName = name.trim();
   const nameInvalid = !trimmedName;
@@ -289,7 +303,7 @@ function RoleDialog({
   };
 
   return (
-    <ModalDialog label={title} onClose={requestClose} size="wide">
+    <ModalDialog label={title} onClose={guard.requestClose} size="wide">
       <h3>{title}</h3>
       <div className="admin-form">
         <AdminField label="Name">
@@ -343,7 +357,11 @@ function RoleDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -354,6 +372,23 @@ function RoleDialog({
           {role ? 'Save changes' : 'Add role'}
         </button>
       </div>
+      {guard.asking && role ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={() => onClose(wroteAny.current)}
+        >
+          You have unsaved changes to <b>{role.name}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !role ? (
+        <DiscardInputDialog
+          title="Discard new role?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={() => onClose(wroteAny.current)}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

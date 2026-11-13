@@ -13,6 +13,8 @@ import type { SensitiveAction } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
@@ -384,17 +386,25 @@ function AreaTimeoutDialog({
   onCancel: () => void;
   onSaved: () => void;
 }) {
-  const [override, setOverride] = useState(
-    area.workerSessionTimeoutMinutes !== null,
+  const initialOverride = area.workerSessionTimeoutMinutes !== null;
+  const initialText = String(
+    area.workerSessionTimeoutMinutes ?? defaultMinutes,
   );
-  const [text, setText] = useState(
-    String(area.workerSessionTimeoutMinutes ?? defaultMinutes),
-  );
+  const [override, setOverride] = useState(initialOverride);
+  const [text, setText] = useState(initialText);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
   const minutes = override ? parseTimeout(text) : null;
   const invalid = override && minutes === null;
+  // A changed choice — or a changed override value — asks before
+  // closing (useCloseGuard); the hidden value of a dropped override is
+  // never saved, so it does not count.
+  const guard = useCloseGuard({
+    dirty: override !== initialOverride || (override && text !== initialText),
+    busy,
+    onClose: onCancel,
+  });
 
   const submit = async () => {
     if (invalid) return;
@@ -412,7 +422,7 @@ function AreaTimeoutDialog({
 
   const title = `Session timeout — ${area.name}`;
   return (
-    <ModalDialog label={title} onClose={onCancel}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <div className="admin-form">
         <label className="admin-check">
@@ -454,7 +464,11 @@ function AreaTimeoutDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -465,6 +479,16 @@ function AreaTimeoutDialog({
           Save
         </button>
       </div>
+      {guard.asking ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked || invalid}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={onCancel}
+        >
+          You have unsaved changes to the session timeout of <b>{area.name}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
     </ModalDialog>
   );
 }

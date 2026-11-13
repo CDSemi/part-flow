@@ -135,7 +135,7 @@ export function StationEnrollment({
         <span className="ss-enroll-label">Enrollment code</span>
         <input
           ref={fieldRef}
-          className="field mono"
+          className="field ss-enroll-code"
           value={code}
           autoComplete="off"
           spellCheck={false}

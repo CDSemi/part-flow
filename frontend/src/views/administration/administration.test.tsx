@@ -1284,6 +1284,17 @@ function openSection(label: string) {
   );
 }
 
+/** Confirm `Discard changes` in the `Unsaved changes` decision that a
+ * close request on a changed editor opens. */
+function discardChanges() {
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Unsaved changes' })).getByRole(
+      'button',
+      { name: 'Discard changes' },
+    ),
+  );
+}
+
 /* ============ Areas (reference table) ============ */
 
 test('the Areas table renders the real environment with derived Machine columns', async () => {
@@ -1796,6 +1807,67 @@ test('Scan Stations validate the canonical Station ID and create through the API
   expect(edit.textContent).toContain('never renamed');
 });
 
+test('a new Scan Station proposes its Station ID from the chosen Area and the next number', async () => {
+  // An inactive station still holds its number.
+  state.stations.push({
+    station_id: 'stockroom-st-3',
+    area_id: 2,
+    is_active: false,
+  });
+  renderAdmin();
+  openSection('Scan Stations');
+  fireEvent.click(
+    await screen.findByRole('button', { name: '+ New Scan Station' }),
+  );
+  let dialog = screen.getByRole('dialog', { name: 'New Scan Station' });
+  const stationId = () => within(dialog).getByLabelText('Station ID');
+  const chooseArea = (areaId: number) =>
+    fireEvent.change(within(dialog).getByLabelText('Area'), {
+      target: { value: String(areaId) },
+    });
+
+  // The first Area (Lathe) already has LATHE-ST-77.
+  expect(stationId()).toHaveValue('LATHE-ST-78');
+  expect(dialog.textContent).toContain(
+    'Proposed from the Area name with the next number — change it if needed.',
+  );
+  // The proposal follows the chosen Area.
+  chooseArea(2);
+  expect(stationId()).toHaveValue('STOCKROOM-ST-04');
+  chooseArea(1);
+  expect(stationId()).toHaveValue('LATHE-ST-78');
+  // Back at the values it opened with, closing asks nothing.
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // A typed Station ID stays when the Area changes; a cleared one
+  // follows the Area again.
+  fireEvent.click(screen.getByRole('button', { name: '+ New Scan Station' }));
+  dialog = screen.getByRole('dialog', { name: 'New Scan Station' });
+  fireEvent.change(stationId(), { target: { value: 'SHIP-1' } });
+  chooseArea(2);
+  expect(stationId()).toHaveValue('SHIP-1');
+  fireEvent.change(stationId(), { target: { value: '' } });
+  chooseArea(1);
+  expect(stationId()).toHaveValue('LATHE-ST-78');
+  chooseArea(2);
+  expect(stationId()).toHaveValue('STOCKROOM-ST-04');
+
+  // The proposal is what is added.
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Scan Station' }),
+  );
+  expect(await screen.findByText('STOCKROOM-ST-04')).toBeInTheDocument();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/scan-stations',
+      body: { station_id: 'STOCKROOM-ST-04', area_id: 2, is_active: true },
+    },
+  ]);
+});
+
 /* ============ Scan Station devices (Phase 14 slice 4) ============ */
 
 const DEVICES_HELP =
@@ -1870,7 +1942,7 @@ test('FS-10: each station shows its devices; the Devices dialog lists state and 
     await screen.findByRole('button', { name: 'Devices of LATHE-ST-77' })
   ).closest('td') as HTMLElement;
   expect(lathe).toHaveAttribute('data-label', 'Devices');
-  expect(lathe.textContent).toBe('1 enrolled · code issuedDevices…');
+  expect(lathe.textContent).toBe('Lathe cell PC · code issuedDevices…');
   const mill = screen
     .getByRole('button', { name: 'Devices of MILL-ST-01' })
     .closest('td') as HTMLElement;
@@ -1900,6 +1972,44 @@ test('FS-10: each station shows its devices; the Devices dialog lists state and 
   expect(dialog.textContent).toContain(DEVICES_HELP);
   // A reader writes nothing.
   expect(writes).toEqual([]);
+});
+
+test('FS-10: the Devices cell names the enrolled devices and opens them, never the station editor', async () => {
+  seedDevices();
+  state.devices.push(deviceRow({ id: 63, label: 'Desk PC' }));
+  renderAdmin();
+  openSection('Scan Stations');
+  const cell = (
+    await screen.findByRole('button', { name: 'Devices of LATHE-ST-77' })
+  ).closest('td') as HTMLElement;
+  const devicesDialog = () =>
+    screen.queryByRole('dialog', {
+      name: 'Devices of Scan Station LATHE-ST-77',
+    });
+
+  // The enrolled devices by name (whole on hover, however narrow)…
+  const names = await within(cell).findByText(
+    'Lathe cell PC, Desk PC · code issued',
+  );
+  expect(names).toHaveAttribute(
+    'title',
+    'Lathe cell PC, Desk PC · code issued',
+  );
+  // …open the devices when clicked…
+  fireEvent.click(names);
+  expect(devicesDialog()).not.toBeNull();
+  expect(
+    screen.queryByRole('dialog', { name: 'Edit Scan Station' }),
+  ).toBeNull();
+  fireEvent.keyDown(devicesDialog() as HTMLElement, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // …and so does the cell around them.
+  fireEvent.click(cell);
+  expect(devicesDialog()).not.toBeNull();
+  expect(
+    screen.queryByRole('dialog', { name: 'Edit Scan Station' }),
+  ).toBeNull();
 });
 
 test('FS-10: enrolling shows the one-time code once; closing requests nothing; re-enrolling names the replaced device', async () => {
@@ -2169,7 +2279,7 @@ test('FS-10: an inactive station cannot enroll; a failed device list keeps the s
       screen
         .getByRole('button', { name: 'Devices of LATHE-ST-77' })
         .closest('td')?.textContent,
-    ).toBe('1 enrolled · code issuedDevices…'),
+    ).toBe('Lathe cell PC · code issuedDevices…'),
   );
 });
 
@@ -2797,7 +2907,9 @@ test('an unanswered avatar upload keeps the editor open with an outcome-neutral 
   expect(workerListReads).toBe(1);
 
   // Closing refreshes the list — which now fails into the error state.
+  // The avatar still staged asks first.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  discardChanges();
   expect(
     await screen.findByText('Worker data could not be loaded.'),
   ).toBeInTheDocument();
@@ -3206,6 +3318,8 @@ test('Worker sessions renders server refusals in place, a failed load with Retry
   );
   expect(within(dialog).getByLabelText('Timeout (minutes)')).toHaveValue(45);
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  discardChanges();
+  expect(screen.queryByRole('dialog')).toBeNull();
 
   // A server refusal of the default keeps the panel and the draft.
   policyFailure = {
@@ -3640,7 +3754,9 @@ test('AD-4: a rotation save whose answer is lost is an unknown outcome, and clos
   expect(dialog).not.toHaveTextContent('Nothing was changed');
   expect(state.departments[0].board_seconds_per_row).toBe(5);
 
+  // The changed entry still asks before the editor closes.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  discardChanges();
   expect(screen.queryByRole('dialog')).toBeNull();
   await waitFor(() =>
     expect(rotationRow('Machine Shop').slice(1, 3)).toEqual(['5 s', '6 s']),
@@ -4912,11 +5028,11 @@ test('FA-U7: Set password… sends exactly the new password; a mismatch or a sho
   expect(next).toHaveFocus();
   const submit = within(dialog).getByRole('button', { name: 'Set password' });
 
-  fireEvent.change(next, { target: { value: 'short-pass' } });
-  fireEvent.change(repeat, { target: { value: 'short-pass' } });
+  fireEvent.change(next, { target: { value: 'short' } });
+  fireEvent.change(repeat, { target: { value: 'short' } });
   fireEvent.click(submit);
   expect(within(dialog).getByRole('alert')).toHaveTextContent(
-    'At least 12 characters.',
+    'At least 6 characters.',
   );
   fireEvent.change(next, { target: { value: 'correct horse battery' } });
   fireEvent.change(repeat, { target: { value: 'correct horse battery!' } });
@@ -5231,7 +5347,9 @@ test('FA-S4: invalid values are refused in place, offline blocks editing and a f
   );
   signInPolicyFailure = null;
   const readsBefore = signInPolicyReads();
+  // The changed switch still asks before the editor closes.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  discardChanges();
   expect(screen.queryByRole('dialog')).toBeNull();
   await waitFor(() => expect(signInPolicyReads()).toBe(readsBefore + 1));
   cleanup();
@@ -5915,6 +6033,335 @@ test('FA-7: a refused user save shows the server detail and keeps the editor ope
     fireEvent.click(
       within(dialog).getByRole('button', { name: 'Cancel (Esc)' }),
     );
+    discardChanges();
+    expect(screen.queryByRole('dialog')).toBeNull();
   }
   expect(state.users[0].is_active).toBe(true);
 });
+
+/* ============ Closing an editor with unsaved input ============ */
+
+// Every Administration editor (GUI_DESIGN "Forms and dialogs"): Escape,
+// a backdrop click and Cancel (Esc) close an unchanged editor at once;
+// changed entries ask first — `Unsaved changes` (Save changes / Discard
+// changes / Cancel) for an existing record, `Discard …?` (Keep editing /
+// Discard input) for a new record or a one-time entry.
+
+test('an unchanged Area editor closes on Escape, the backdrop or Cancel without asking, also once a change is undone', async () => {
+  renderAdmin();
+  const openLathe = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+    return screen.getByRole('dialog', { name: 'Edit Area' });
+  };
+
+  fireEvent.keyDown(await openLathe(), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.mouseDown((await openLathe()).parentElement as HTMLElement);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.click(
+    within(await openLathe()).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // A value typed and restored again is no change.
+  const dialog = await openLathe();
+  const name = within(dialog).getByLabelText('Name');
+  fireEvent.change(name, { target: { value: 'Lathe Cell' } });
+  fireEvent.change(name, { target: { value: 'Lathe' } });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Area' }));
+  fireEvent.keyDown(screen.getByRole('dialog', { name: 'New Area' }), {
+    key: 'Escape',
+  });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+test('a new Area with entered input asks before closing; Keep editing keeps the input, Discard input closes without a write', async () => {
+  renderAdmin();
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  fireEvent.click(screen.getByRole('button', { name: '+ New Area' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Area' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Saw' },
+  });
+  const decision = () =>
+    screen.getByRole('dialog', { name: 'Discard new Area?' });
+
+  // Escape asks; Escape in the decision returns to the form.
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(decision()).toHaveTextContent(
+    'Your entered information will not be saved.',
+  );
+  fireEvent.keyDown(decision(), { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard new Area?' }),
+  ).toBeNull();
+  expect(within(dialog).getByLabelText('Name')).toHaveValue('Saw');
+
+  // The backdrop asks the same; Keep editing returns with the input.
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  fireEvent.click(
+    within(decision()).getByRole('button', { name: 'Keep editing' }),
+  );
+  expect(screen.getByRole('dialog', { name: 'New Area' })).toBe(dialog);
+  expect(within(dialog).getByLabelText('Name')).toHaveValue('Saw');
+
+  // Cancel (Esc) asks too; Discard input closes without a write.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  fireEvent.click(
+    within(decision()).getByRole('button', { name: 'Discard input' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+test('a changed Area asks before closing; Discard changes closes without a write, Save changes saves and closes', async () => {
+  renderAdmin();
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  let dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  fireEvent.change(within(dialog).getByLabelText(/Description/), {
+    target: { value: 'CNC turning' },
+  });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(
+    screen.getByRole('dialog', { name: 'Unsaved changes' }),
+  ).toHaveTextContent('You have unsaved changes to Lathe.');
+  discardChanges();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toEqual([]);
+
+  // Reopened, the editor shows the stored values again.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Lathe' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  const description = within(dialog).getByLabelText(/Description/);
+  expect(description).toHaveValue('Turning cell');
+  fireEvent.change(description, { target: { value: 'CNC turning' } });
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Unsaved changes' })).getByRole(
+      'button',
+      { name: 'Save changes' },
+    ),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({
+    method: 'PATCH',
+    url: '/api/areas/1',
+    body: { description: 'CNC turning' },
+  });
+});
+
+interface GuardCase {
+  editor: string;
+  /** Seed the fake, render Administration and open the section. */
+  render: () => Promise<unknown>;
+  /** Open the editor from the section; resolves to it. */
+  open: () => Promise<HTMLElement>;
+  /** Change one entry of the open editor. */
+  change: (dialog: HTMLElement) => void;
+  /** The title of the decision a close request then opens. */
+  decision: string;
+}
+
+async function renderSection(section: string) {
+  renderAdmin();
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  openSection(section);
+}
+
+/** Opens an editor by its button once the section enabled it. */
+function opener(button: string, editor: string) {
+  return async () => {
+    const control = await screen.findByRole('button', { name: button });
+    await waitFor(() => expect(control).toBeEnabled());
+    fireEvent.click(control);
+    return screen.getByRole('dialog', { name: editor });
+  };
+}
+
+function typeInto(label: string | RegExp, value: string) {
+  return (dialog: HTMLElement) =>
+    fireEvent.change(within(dialog).getByLabelText(label), {
+      target: { value },
+    });
+}
+
+const GUARD_CASES: GuardCase[] = [
+  {
+    editor: 'New Department',
+    render: () => renderSection('Departments'),
+    open: opener('+ New Department', 'New Department'),
+    change: typeInto('Name', 'Paint'),
+    decision: 'Discard new Department?',
+  },
+  {
+    editor: 'Edit Department',
+    render: () => renderSection('Departments'),
+    open: opener('Edit Machine Shop', 'Edit Department'),
+    change: typeInto('Name', 'Machining'),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'New Operation',
+    render: () => renderSection('Operations'),
+    open: opener('+ New Operation', 'New Operation'),
+    change: typeInto('Code', 'MILL'),
+    decision: 'Discard new Operation?',
+  },
+  {
+    editor: 'Edit Operation',
+    render: () => renderSection('Operations'),
+    open: opener('Edit Turning', 'Edit Operation'),
+    change: typeInto(/Expected duration/, '60'),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'New Worker',
+    render: () => openWorkers(),
+    open: opener('+ New Worker', 'New Worker'),
+    change: typeInto('Name', 'Kim Le'),
+    decision: 'Discard new Worker?',
+  },
+  {
+    editor: 'Edit Worker',
+    render: () => openWorkers(),
+    open: opener('Edit Alex Tran', 'Edit Worker'),
+    change: typeInto('Badge barcode', '100483'),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'New user',
+    render: () => openUsers(),
+    open: opener('+ New user', 'New user'),
+    change: typeInto('Login name', 'kle'),
+    decision: 'Discard new user?',
+  },
+  {
+    editor: 'Edit user',
+    render: async () => {
+      seedJane();
+      await openUsers();
+    },
+    open: opener('Edit Jane Doe', 'Edit user'),
+    change: typeInto('Name', 'Jane Smith'),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'Set password',
+    render: async () => {
+      signInUserAdministrator();
+      seedJane();
+      await openUsers();
+    },
+    open: opener('Set password for Jane Doe', 'Set password for Jane Doe'),
+    change: typeInto('New password', 'correct horse'),
+    decision: 'Discard new password?',
+  },
+  {
+    editor: 'New role',
+    render: () => openRoles(),
+    open: opener('+ New role', 'New role'),
+    change: typeInto('Name', 'Planner'),
+    decision: 'Discard new role?',
+  },
+  {
+    editor: 'Edit role',
+    render: () => openRoles(),
+    open: opener('Edit Manager', 'Edit role'),
+    change: (dialog) =>
+      fireEvent.click(within(dialog).getAllByRole('checkbox')[0]),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'New Scan Station',
+    render: () => renderSection('Scan Stations'),
+    open: opener('+ New Scan Station', 'New Scan Station'),
+    change: typeInto('Station ID', 'SHIP-1'),
+    decision: 'Discard new Scan Station?',
+  },
+  {
+    editor: 'Edit Scan Station',
+    render: () => renderSection('Scan Stations'),
+    open: opener('Edit LATHE-ST-77', 'Edit Scan Station'),
+    change: (dialog) =>
+      fireEvent.click(
+        within(dialog).getByRole('checkbox', {
+          name: 'Active — the station accepts scans',
+        }),
+      ),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'Enroll a device',
+    render: () => openDevices(),
+    open: opener('Enroll device…', 'Enroll a device'),
+    change: typeInto('Device name', 'Desk PC'),
+    decision: 'Discard this enrollment?',
+  },
+  {
+    editor: 'Session timeout',
+    render: () => openWorkerSessions(),
+    open: opener('Edit session timeout — Lathe', 'Session timeout — Lathe'),
+    change: (dialog) =>
+      fireEvent.click(within(dialog).getByRole('radio', { name: 'Override' })),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'Production Board rotation',
+    render: () => openDepartmentDisplay(),
+    open: opener(
+      'Edit rotation timing — Machine Shop',
+      'Production Board rotation — Machine Shop',
+    ),
+    change: typeInto('Seconds per displayed row', '5'),
+    decision: 'Unsaved changes',
+  },
+  {
+    editor: 'User sign-in settings',
+    render: () => openSignInSettings(),
+    open: opener('Edit user sign-in settings…', 'User sign-in settings'),
+    change: typeInto('Failed sign-ins before a lock', '12'),
+    decision: 'Unsaved changes',
+  },
+];
+
+test.each(GUARD_CASES)(
+  '$editor closes unchanged at once and asks before discarding changed input',
+  async ({ render: renderEditor, open, change, decision }) => {
+    await renderEditor();
+    const existing = decision === 'Unsaved changes';
+
+    // Unchanged: Escape closes at once.
+    let dialog = await open();
+    const editor = dialog.getAttribute('aria-label') as string;
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: editor })).toBeNull();
+
+    // Changed: Escape asks; staying keeps the editor and its entry.
+    dialog = await open();
+    change(dialog);
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    const ask = () => screen.getByRole('dialog', { name: decision });
+    fireEvent.click(
+      within(ask()).getByRole('button', {
+        name: existing ? 'Cancel (Esc)' : 'Keep editing',
+      }),
+    );
+    expect(screen.queryByRole('dialog', { name: decision })).toBeNull();
+    expect(screen.getByRole('dialog', { name: editor })).toBe(dialog);
+
+    // The backdrop asks too; discarding closes the editor unwritten.
+    fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+    fireEvent.click(
+      within(ask()).getByRole('button', {
+        name: existing ? 'Discard changes' : 'Discard input',
+      }),
+    );
+    expect(screen.queryByRole('dialog', { name: editor })).toBeNull();
+    expect(writes).toEqual([]);
+  },
+);

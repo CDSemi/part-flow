@@ -3,6 +3,8 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { resolvePartNumber, searchPartNumbers } from '../../api/part-numbers';
 import type { PartNumberMaster } from '../../api/part-numbers';
 import { useApiData } from '../../api/use-api-data';
+import { useCloseGuard } from '../../components/close-guard';
+import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
@@ -49,8 +51,9 @@ const SERVER_SEARCH_LIMIT = 50;
  * ② quantity with the same keypad + physical-keyboard interaction as
  * the Scan Station quantity dialog, ③ due date (defaults to the WO due
  * date; `No due date` is an explicit, valid choice), ④ optional
- * metadata. Back never loses entered values. Completing the flow only
- * creates an editable draft row — nothing is saved until `Save demand`.
+ * metadata. Back never loses entered values, and closing with entered
+ * values asks first. Completing the flow only creates an editable draft
+ * row — nothing is saved until `Save demand`.
  */
 export function AddPartDialog({
   workOrderDue,
@@ -169,6 +172,21 @@ export function AddPartDialog({
   const qtyValid = isPositiveInteger(qty);
   const dueValid = dueMode !== 'custom' || customDue !== '';
 
+  // Any entry or choice that differs from the opening state asks before
+  // a close drops it (the steps themselves are only navigation).
+  const guard = useCloseGuard({
+    dirty:
+      query !== '' ||
+      pn !== null ||
+      qty !== '' ||
+      dueMode !== 'inherit' ||
+      customDue !== '' ||
+      type !== 'NEW' ||
+      job !== '' ||
+      notes !== '',
+    onClose: onCancel,
+  });
+
   // Header context for the selected PN: the derived barcode for an
   // existing PN master, a `new Part Number` marker otherwise; the
   // final step adds the entered quantity and due-date choice. The
@@ -205,7 +223,9 @@ export function AddPartDialog({
   }
 
   function handleQuantityKeys(event: React.KeyboardEvent) {
-    if (step !== 1) return;
+    // Keys inside the open discard decision bubble up to here; they
+    // must never edit the quantity behind it.
+    if (step !== 1 || guard.asking) return;
     if (event.target instanceof HTMLButtonElement) {
       // Focusable buttons (Back / Cancel) keep native activation;
       // keypad buttons are non-focusable and never receive keys.
@@ -236,7 +256,7 @@ export function AddPartDialog({
   const dialog = (
     <ModalDialog
       labelledBy={headingId}
-      onClose={onCancel}
+      onClose={guard.requestClose}
       size="wide"
       onKeyDown={handleQuantityKeys}
     >
@@ -439,7 +459,7 @@ export function AddPartDialog({
         )}
 
         <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
+          <button className="bigbtn ghost" onClick={guard.requestClose}>
             Cancel (Esc)
           </button>
           {step > 0 ? (
@@ -475,6 +495,13 @@ export function AddPartDialog({
           ) : null}
         </div>
       </div>
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard this Part?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 

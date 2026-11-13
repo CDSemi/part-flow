@@ -47,6 +47,8 @@ import {
   workOrderLabel,
 } from './allocation-adjustment';
 import { Avatar } from './Avatar';
+import { useCloseGuard } from './close-guard';
+import { DiscardInputDialog } from './close-guard-dialogs';
 import { ModalDialog } from './ModalDialog';
 import { ErrorState, LoadingState } from './view-states';
 
@@ -118,10 +120,11 @@ function Actor({ actor }: { actor: AllocationUserRef }) {
  * When the server did not answer, the outcome is unknown: they stay
  * locked, so the next submit can only repeat the same intent (PartFlow
  * records it once); an explicit refusal of that resubmit proves nothing
- * was recorded and unlocks. Closing while the outcome is unknown (or
- * a request is still running) tells the host (`onClose(true)`), which
- * then reloads and says so; that request's late answer never reaches
- * the host. Presentation only:
+ * was recorded and unlocks. Closing a step with changed input asks
+ * first. Closing while the outcome is unknown (or a request is still
+ * running) tells the host at once (`onClose(true)`), which then reloads
+ * and says so; that request's late answer never reaches the host.
+ * Presentation only:
  * the server judges every write again under its locks.
  */
 export function AllocationAdjustmentDialog({
@@ -231,15 +234,25 @@ export function AllocationAdjustmentDialog({
 
   const range = line !== null ? beyondRange(line, available) : null;
   const limit = line !== null ? routineLimit(line, available) : 0;
-  const qtyText =
-    qty ??
-    (shown?.kind === 'allocate'
+  const defaultQty =
+    shown?.kind === 'allocate'
       ? limit > 0
         ? String(limit)
         : ''
       : shown?.kind === 'beyond' && range !== null
         ? String(range.min)
-        : '');
+        : '';
+  const qtyText = qty ?? defaultQty;
+
+  // Input the shown step holds beyond its defaults asks before a close
+  // drops it; the Overview holds none.
+  const guard = useCloseGuard({
+    dirty:
+      shown !== null &&
+      shown.kind !== 'overview' &&
+      (qtyText !== defaultQty || note !== '' || reason !== ''),
+    onClose: () => onClose(false),
+  });
 
   // Focus: each step's first field; the Overview its opener (Back) or
   // its first action.
@@ -304,7 +317,10 @@ export function AllocationAdjustmentDialog({
   }
 
   function requestClose() {
-    onClose(outcomeUnknown || busy);
+    // A request in flight or an unknown outcome closes at once, as it
+    // always has: the host reloads and says so.
+    if (locked) onClose(true);
+    else guard.requestClose();
   }
 
   function workOrderNumberOf(workOrderId: number): string | null {
@@ -845,6 +861,13 @@ export function AllocationAdjustmentDialog({
         renderBeyond(context, line)
       ) : allocation !== null ? (
         renderReverse(line, allocation)
+      ) : null}
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard this adjustment?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={() => onClose(false)}
+        />
       ) : null}
     </ModalDialog>
   );

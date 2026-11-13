@@ -78,7 +78,7 @@ _A5 = (
     "Sign-in failed. Check your login name and password. If it keeps failing, ask an"
     " administrator — the account may be locked or inactive."
 )
-_P1 = "A password must be at least 12 characters long."
+_P1 = "A password must be at least 6 characters long."
 _P3 = "The current password is not correct."
 _P4 = "Choose a new password that is different from the current one."
 _P5 = "Use Change password to change your own password."
@@ -682,7 +682,7 @@ def test_own_password_change_refusals(client: TestClient, db_engine: Engine) -> 
     _refused(_change_own(client, token, _WRONG, _NEW_PASSWORD), 422, _P3)
     assert _credential(db_engine, account.user_id)["failed_attempts"] == 1
     _refused(_change_own(client, token, _PASSWORD, _PASSWORD), 422, _P4)
-    _refused(_change_own(client, token, _PASSWORD, "x" * 11), 422, _P1)
+    _refused(_change_own(client, token, _PASSWORD, "x" * 5), 422, _P1)
     assert _credential(db_engine, account.user_id)["failed_attempts"] == 1
 
 
@@ -825,7 +825,7 @@ def test_administrator_password_set_refusals_write_nothing(
         404,
         f"User {missing} does not exist.",
     )
-    _refused(_set_password(client, admin_token, target.user_id, "x" * 11), 422, _P1)
+    _refused(_set_password(client, admin_token, target.user_id, "x" * 5), 422, _P1)
     assert _credential(db_engine, target.user_id) == before
     assert _audit_count(db_engine) == count
 

@@ -12,6 +12,11 @@ import type { Worker } from '../../api/workers';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { WorkerAvatar } from '../../components/WorkerAvatar';
 import {
@@ -256,17 +261,26 @@ function WorkerDialog({
     onClose(wroteAny.current);
   };
 
+  const trimmedName = name.trim();
+  const canonical = canonicalBadge(badge);
   // Cancel, Escape and the backdrop are ignored while a save is in
   // flight: its writes cannot be recalled, so the editor stays open
   // until they settle — success closes it (reloading the list after
-  // the commits), a failure keeps it open with the error.
-  const requestClose = () => {
-    if (busy) return;
-    close();
-  };
-
-  const trimmedName = name.trim();
-  const canonical = canonicalBadge(badge);
+  // the commits), a failure keeps it open with the error. Otherwise
+  // entries a save would still write ask first (useCloseGuard): they
+  // differ from the record the server last confirmed, or a new Worker
+  // has any entry at all.
+  const guard = useCloseGuard({
+    dirty:
+      staged !== null ||
+      (saved
+        ? trimmedName !== saved.name ||
+          canonical !== (saved.badgeBarcode ?? '') ||
+          isActive !== saved.isActive
+        : trimmedName !== '' || canonical !== ''),
+    busy,
+    onClose: close,
+  });
   const nameInvalid = !trimmedName;
   const badgeInvalid = badgeError(canonical);
   const title = saved ? 'Edit Worker' : 'New Worker';
@@ -378,7 +392,7 @@ function WorkerDialog({
   };
 
   return (
-    <ModalDialog label={title} onClose={requestClose}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <div className="admin-form">
         <AdminField label="Name">
@@ -484,7 +498,11 @@ function WorkerDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -495,6 +513,23 @@ function WorkerDialog({
           {saved ? 'Save changes' : 'Add Worker'}
         </button>
       </div>
+      {guard.asking && saved ? (
+        <UnsavedChangesDialog
+          saveDisabled={controlsBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={close}
+        >
+          You have unsaved changes to <b>{saved.name}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !saved ? (
+        <DiscardInputDialog
+          title="Discard new Worker?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={close}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

@@ -75,7 +75,14 @@ textarea {
    arrow differs per browser/OS and ignores the theme). The chevron is
    the theme's muted color via --select-arrow (tokens.css). Rules that
    surface selects must set `background-color`, never the `background`
-   shorthand — the shorthand would erase this arrow. */
+   shorthand — the shorthand would erase this arrow.
+   A select clips its label to its content box, and when the label is
+   taller than that box the browser aligns it to the top instead of
+   centering it — so a select pinned to a fixed `height` with vertical
+   padding cuts off descenders (p, q, g, y). Forms that pin their
+   controls to one height give their selects no vertical padding: the
+   label is then centered in the full height (administration.css,
+   machines.css). `min-height` never clips. */
 select {
   appearance: none;
   background-image: var(--select-arrow);

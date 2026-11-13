@@ -522,12 +522,12 @@ test('a temporary password opens the forced dialog: no Cancel, Escape ignored, S
   expect(screen.getByRole('dialog')).toBe(dialog);
 
   // Client checks: nothing is sent.
-  fillChange(dialog, PASSWORD, 'too short');
+  fillChange(dialog, PASSWORD, 'short');
   fireEvent.click(
     within(dialog).getByRole('button', { name: 'Change password' }),
   );
   expect(within(dialog).getByRole('alert')).toHaveTextContent(
-    'At least 12 characters.',
+    'At least 6 characters.',
   );
   fillChange(dialog, PASSWORD, NEW_PASSWORD, `${NEW_PASSWORD}!`);
   fireEvent.click(
@@ -677,6 +677,47 @@ test('the voluntary dialog cancels; server refusals (P3, P7, B1) show in place',
   }
   // A definite refusal never re-reads the sign-in.
   expect(sent('GET', '/api/session')).toHaveLength(1);
+});
+
+test('the voluntary dialog closes unchanged at once; typed input asks Discard password change? first', async () => {
+  const chip = await signInAsJane();
+  fireEvent.click(chip);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change password…' }));
+  let dialog = screen.getByRole('dialog', { name: 'Change password' });
+  // Typed and removed again is unchanged: Escape closes at once.
+  const current = within(dialog).getByLabelText('Current password');
+  fireEvent.change(current, { target: { value: PASSWORD } });
+  fireEvent.change(current, { target: { value: '' } });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  fireEvent.click(chip);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change password…' }));
+  dialog = screen.getByRole('dialog', { name: 'Change password' });
+  fireEvent.change(within(dialog).getByLabelText('New password'), {
+    target: { value: NEW_PASSWORD },
+  });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', { name: 'Discard password change?' });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(screen.getByRole('dialog', { name: 'Change password' })).toBe(dialog);
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard password change?' }),
+  ).toBeNull();
+  expect(within(dialog).getByLabelText('New password')).toHaveValue(
+    NEW_PASSWORD,
+  );
+
+  // The backdrop and Cancel (Esc) ask the same.
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  ask = screen.getByRole('dialog', { name: 'Discard password change?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  ask = screen.getByRole('dialog', { name: 'Discard password change?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(sent('PUT', '/api/session/password')).toHaveLength(0);
 });
 
 test('an unanswered change is never resent: signed out afterwards opens Sign in with the same text', async () => {
@@ -903,6 +944,13 @@ test('Set up PartFlow: no eligible role or offline disables creating; Cancel sen
     within(dialog).getByRole('button', { name: 'Create administrator' }),
   ).toBeDisabled();
   fireEvent.keyDown(dialog, { key: 'Escape' });
+  // The entered input asks first; discarding it closes the dialog.
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Discard setup?' })).getByRole(
+      'button',
+      { name: 'Discard input' },
+    ),
+  );
   expect(screen.queryByRole('dialog')).toBeNull();
   dialog = openSetup();
   await within(dialog).findByLabelText('Setup token');
@@ -937,4 +985,35 @@ test('Set up PartFlow ignores Cancel, Escape and the backdrop while creating', a
   expect(
     await screen.findByRole('button', { name: 'Account: Ada Admin' }),
   ).toBeInTheDocument();
+});
+
+test('Set up PartFlow closes unchanged at once; entered input asks Discard setup? first', async () => {
+  fake.setupOpen = true;
+  await renderShell();
+  let dialog = openSetup();
+  // The one eligible role is preselected: that is the opening form.
+  await within(dialog).findByLabelText('Setup token');
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  dialog = openSetup();
+  const token = await within(dialog).findByLabelText('Setup token');
+  fireEvent.change(token, { target: { value: TOKEN } });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', { name: 'Discard setup?' });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(screen.getByRole('dialog', { name: 'Set up PartFlow' })).toBe(dialog);
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(screen.queryByRole('dialog', { name: 'Discard setup?' })).toBeNull();
+  expect(within(dialog).getByLabelText('Setup token')).toHaveValue(TOKEN);
+
+  // The backdrop and Cancel (Esc) ask the same.
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  ask = screen.getByRole('dialog', { name: 'Discard setup?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  ask = screen.getByRole('dialog', { name: 'Discard setup?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(sent('POST', '/api/setup/administrator')).toHaveLength(0);
 });

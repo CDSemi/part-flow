@@ -651,6 +651,13 @@ test('FC-6: an explicit refusal of the resubmit ends the unknown outcome; anothe
   expect(posts[2].body.device_event_id).not.toBe(posts[0].body.device_event_id);
   await screen.findByText(C52);
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+  // The changed quantity asks first; discarding it closes.
+  expect(onClose).not.toHaveBeenCalled();
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Discard this adjustment?' }),
+    ).getByRole('button', { name: 'Discard input' }),
+  );
   expect(onClose).toHaveBeenCalledWith(false);
 });
 
@@ -668,6 +675,68 @@ test('FC-6: another user’s request id after an unknown outcome keeps the lock'
   expect(qtyField()).toHaveAttribute('readonly');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(onClose).toHaveBeenCalledWith(true);
+});
+
+test('a step closes unchanged at once; changed input asks Discard this adjustment? first and records nothing', async () => {
+  const closed = vi.fn();
+  function Host() {
+    const [open, setOpen] = useState(true);
+    return open ? (
+      <AllocationAdjustmentDialog
+        scope={{ workOrderDemandId: 7 }}
+        start={{ step: 'allocate', workOrderDemandId: 7 }}
+        writeBlocked={false}
+        onClose={(outcomeUnknown) => {
+          closed(outcomeUnknown);
+          setOpen(false);
+        }}
+        onCommitted={vi.fn()}
+      />
+    ) : null;
+  }
+  const host = render(<Host />);
+  await screen.findByLabelText('Quantity to allocate (pcs)');
+  // The default quantity, changed and restored, is unchanged: Escape
+  // closes at once.
+  fireEvent.change(qtyField(), { target: { value: '2' } });
+  fireEvent.change(qtyField(), { target: { value: '4' } });
+  const unchanged = screen.getByRole('dialog', { name: 'Allocate from stock' });
+  fireEvent.keyDown(unchanged, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(closed).toHaveBeenCalledWith(false);
+  host.unmount();
+
+  render(<Host />);
+  await screen.findByLabelText('Quantity to allocate (pcs)');
+  const form = screen.getByRole('dialog', { name: 'Allocate from stock' });
+  fireEvent.change(screen.getByLabelText('Note (optional)'), {
+    target: { value: 'left for later' },
+  });
+  fireEvent.keyDown(form, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', { name: 'Discard this adjustment?' });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(screen.getByRole('dialog', { name: 'Allocate from stock' })).toBe(
+    form,
+  );
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard this adjustment?' }),
+  ).toBeNull();
+  expect(screen.getByLabelText('Note (optional)')).toHaveValue(
+    'left for later',
+  );
+
+  // The backdrop and Cancel (Esc) ask the same.
+  fireEvent.mouseDown(form.parentElement as HTMLElement);
+  ask = screen.getByRole('dialog', { name: 'Discard this adjustment?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  fireEvent.click(within(form).getByRole('button', { name: 'Cancel (Esc)' }));
+  ask = screen.getByRole('dialog', { name: 'Discard this adjustment?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(closed).toHaveBeenCalledTimes(2);
+  expect(closed).toHaveBeenLastCalledWith(false);
+  expect(posts).toEqual([]);
 });
 
 const RELEASE_MISMATCH =

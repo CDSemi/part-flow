@@ -936,7 +936,7 @@ A route deviation already recorded on the actual `TRANSFERRED` Movement is not d
   hash, the temporary-password flag, the failure counter and the lock; `user_sessions` holds a digest of an opaque
   token, never the token. Administration → Settings → User sign-in configures expiry (default on, 30 days, or never;
   absolute from sign-in), the lock (10 failed sign-ins lock for 15 minutes) and a new password at first sign-in
-  (default on); the configurable ranges are 1 to 365 days, 3 to 100 failed sign-ins and 1 to 1440 minutes. Passwords have 12 to 256 characters after NFKC normalization and no composition rules. API:
+  (default on); the configurable ranges are 1 to 365 days, 3 to 100 failed sign-ins and 1 to 1440 minutes. Passwords have 6 to 256 characters after NFKC normalization and no composition rules. API:
   `GET`/`POST`/`DELETE /api/session`, `PUT /api/session/password`, `PUT /api/users/{id}/password` (temporary password;
   ends the User's sign-ins and clears a lock) and `GET`/`PUT /api/policies/sign-in`. Every write needs the header
   `X-PartFlow-CSRF: 1`; the session cookie `partflow_session` is `HttpOnly`, `SameSite=Strict` and `Secure` when
@@ -1412,7 +1412,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | The go-live step points to the rewritten NAS installation guide (§1 to §10). |
+| 2026-11-12 | uncommitted | Lowered the minimum length of a new password from 12 to 6 characters (owner decision). |
+| 2026-11-10 | `e0e5056` | The go-live step points to the rewritten NAS installation guide (§1 to §10). |
 | 2026-11-09 | `398c617` | Rewritten as current state for new readers; pilot replaced by direct go-live (owner decision). |
 | 2026-11-09 | `b405c6e` | Recorded the owner's direct go-live decision with no pilot and no release gates. |
 | 2026-10-09 | `03bd90c`, `4271f61` | Phase 16 monitoring: structured logs, request ids, status command, host checks and scheduled reconcile. |

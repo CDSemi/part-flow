@@ -743,6 +743,53 @@ test('starting maintenance persists the override with its note', async () => {
   expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'true');
 });
 
+test('Start maintenance closes unchanged at once; entered details ask Discard maintenance details? first', async () => {
+  await renderMachines();
+
+  fireEvent.click(maintenanceSwitch('Lathe 2'));
+  let dialog = screen.getByRole('dialog', { name: 'Start maintenance' });
+  // Typed and removed again is unchanged: Escape closes at once.
+  const note = within(dialog).getByLabelText(/Reason \/ note/);
+  fireEvent.change(note, { target: { value: 'Coolant leak' } });
+  fireEvent.change(note, { target: { value: '' } });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  fireEvent.click(maintenanceSwitch('Lathe 2'));
+  dialog = screen.getByRole('dialog', { name: 'Start maintenance' });
+  fireEvent.change(within(dialog).getByLabelText(/Expected return date/), {
+    target: { value: '2026-08-30' },
+  });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', {
+    name: 'Discard maintenance details?',
+  });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(screen.getByRole('dialog', { name: 'Start maintenance' })).toBe(
+    dialog,
+  );
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard maintenance details?' }),
+  ).toBeNull();
+  expect(within(dialog).getByLabelText(/Expected return date/)).toHaveValue(
+    '2026-08-30',
+  );
+
+  // The backdrop and Cancel (Esc) ask the same.
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  ask = screen.getByRole('dialog', { name: 'Discard maintenance details?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  ask = screen.getByRole('dialog', { name: 'Discard maintenance details?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'false');
+  expect(
+    state.machines.find((m) => m.id === 105)?.maintenance_since,
+  ).toBeNull();
+});
+
 test('clearing maintenance returns the Machine to Idle', async () => {
   await renderMachines();
 
@@ -1567,6 +1614,91 @@ test('the details dialog leads to Reactivate and ‹ Back returns to the details
   expect(
     screen.getByRole('dialog', { name: 'Retired Machine Details' }),
   ).toBeInTheDocument();
+});
+
+test('Reactivate leaves unchanged at once; changed entries ask Discard reactivation? at every stage', async () => {
+  await renderMachines();
+  const openReactivate = () => {
+    fireEvent.click(
+      within(retiredTable())
+        .getByText('Retired on 2025-11-03')
+        .closest('tr') as HTMLElement,
+    );
+    fireEvent.click(
+      within(
+        screen.getByRole('dialog', { name: 'Retired Machine Details' }),
+      ).getByRole('button', { name: 'Reactivate' }),
+    );
+    return screen.getByRole('dialog', { name: 'Reactivate Machine' });
+  };
+  const events = state.events.length;
+
+  // The prefilled name, renamed and restored, is unchanged: Escape
+  // leaves the workflow at once, back to the details.
+  let dialog = openReactivate();
+  const nameField = within(dialog).getByLabelText('Display name');
+  fireEvent.change(nameField, { target: { value: 'Saw 2B' } });
+  fireEvent.change(nameField, { target: { value: 'Saw 2' } });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', { name: 'Reactivate Machine' }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard reactivation?' }),
+  ).toBeNull();
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Retired Machine Details' }),
+    ).getByRole('button', { name: 'Close (Esc)' }),
+  );
+
+  // Form stage: a typed reason asks first.
+  dialog = openReactivate();
+  fireEvent.change(within(dialog).getByLabelText('Reason (required)'), {
+    target: { value: 'Back from gearbox overhaul' },
+  });
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', { name: 'Discard reactivation?' });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(screen.getByRole('dialog', { name: 'Reactivate Machine' })).toBe(
+    dialog,
+  );
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(within(dialog).getByLabelText('Reason (required)')).toHaveValue(
+    'Back from gearbox overhaul',
+  );
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  ask = screen.getByRole('dialog', { name: 'Discard reactivation?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  // The form's own leave action (‹ Back here) asks the same.
+  fireEvent.click(within(dialog).getByRole('button', { name: '‹ Back' }));
+  ask = screen.getByRole('dialog', { name: 'Discard reactivation?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+
+  // Summary stage: Escape and the backdrop ask too.
+  fireEvent.click(within(dialog).getByRole('checkbox'));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  const summary = screen.getByRole('dialog', { name: 'Confirm reactivation' });
+  fireEvent.keyDown(summary, { key: 'Escape' });
+  ask = screen.getByRole('dialog', { name: 'Discard reactivation?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Confirm reactivation' }),
+  ).toBeInTheDocument();
+  fireEvent.mouseDown(summary.parentElement as HTMLElement);
+  ask = screen.getByRole('dialog', { name: 'Discard reactivation?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Confirm reactivation' }),
+  ).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'Retired Machine Details' }),
+  ).toBeInTheDocument();
+  // Nothing was reactivated.
+  expect(state.machines.find((m) => m.id === 202)?.retired_on).toBe(
+    '2025-11-03',
+  );
+  expect(state.events).toHaveLength(events);
 });
 
 test('the maintenance note and expected return date are editable from Edit Machine', async () => {

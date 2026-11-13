@@ -1728,6 +1728,62 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
   expect(lineDue).toHaveValue('');
 });
 
+test('Add Part closes unchanged at once; an entered value asks Discard this Part? first and adds nothing', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+  let addPart = screen.getByRole('dialog', { name: /Add Part — step 1/ });
+  // Typed and cleared again is unchanged: Escape closes only Add Part.
+  const search = within(addPart).getByLabelText('Search PartNumber');
+  fireEvent.change(search, { target: { value: '309' } });
+  fireEvent.change(search, { target: { value: '' } });
+  fireEvent.keyDown(addPart, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard this Part?' }),
+  ).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: '309' },
+  });
+  fireEvent.click(await screen.findByRole('button', { name: /309-127/ }));
+  addPart = screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ });
+  fireEvent.keyDown(addPart, { key: '5' });
+  fireEvent.keyDown(addPart, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', { name: 'Discard this Part?' });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ })).toBe(
+    addPart,
+  );
+  // Keys typed in the decision never reach the quantity behind it.
+  fireEvent.keyDown(ask, { key: '7' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard this Part?' }),
+  ).toBeNull();
+  expect(screen.getByLabelText('Quantity: 5')).toBeInTheDocument();
+
+  // The backdrop and Cancel (Esc) ask the same.
+  fireEvent.mouseDown(addPart.parentElement!);
+  ask = screen.getByRole('dialog', { name: 'Discard this Part?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  fireEvent.click(
+    within(addPart).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  ask = screen.getByRole('dialog', { name: 'Discard this Part?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText('Quantity for 309-127')).toBeNull();
+  expect(state.calls.filter((call) => call.startsWith('POST'))).toHaveLength(0);
+});
+
 test('a one-character PN that already exists is found, not offered as new', async () => {
   // The Add Part minimum search length bounds the contains-SEARCH; it
   // is not a rule about what a Part Number may be. A short existing PN
@@ -2781,6 +2837,101 @@ test('cancelling the release creates nothing', async () => {
   ).toBeInTheDocument();
   expect(releaseCalls()).toEqual([]);
   expect(state.committedReleases.size).toBe(0);
+});
+
+test('the release closes unchanged at once; a changed input asks Discard this release? first and releases nothing', async () => {
+  await renderWorkOrders();
+  let release = await openRelease('E-500');
+  // Changed and restored is unchanged: Escape closes at once.
+  const qty = within(release).getByLabelText('Release quantity');
+  fireEvent.change(qty, { target: { value: '3' } });
+  fireEvent.change(qty, { target: { value: '7' } });
+  fireEvent.keyDown(release, { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', {
+      name: 'Release to production — explicit action',
+    }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard this release?' }),
+  ).toBeNull();
+  expect(
+    await screen.findByText('✕ Release cancelled — nothing was created.'),
+  ).toBeInTheDocument();
+
+  const details = screen.getByRole('dialog', { name: 'Work Order Details' });
+  fireEvent.click(
+    within(lineRow(details, 'E-500')).getByRole('button', {
+      name: 'Release to production…',
+    }),
+  );
+  release = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  fireEvent.change(await within(release).findByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.keyDown(release, { key: 'Escape' });
+  let ask = screen.getByRole('dialog', { name: 'Discard this release?' });
+  expect(ask).toHaveTextContent('Your entered information will not be saved.');
+  expect(
+    screen.getByRole('dialog', {
+      name: 'Release to production — explicit action',
+    }),
+  ).toBe(release);
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard this release?' }),
+  ).toBeNull();
+  expect(within(release).getByLabelText('Starting Area')).toHaveValue('1');
+
+  // The backdrop and Cancel (Esc) ask the same.
+  fireEvent.mouseDown(release.parentElement!);
+  ask = screen.getByRole('dialog', { name: 'Discard this release?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  ask = screen.getByRole('dialog', { name: 'Discard this release?' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
+  expect(
+    screen.queryByRole('dialog', {
+      name: 'Release to production — explicit action',
+    }),
+  ).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
+  expect(releaseCalls()).toEqual([]);
+  expect(state.committedReleases.size).toBe(0);
+});
+
+test('the committed release result still closes at once on Escape', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500');
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  const result = await screen.findByRole('dialog', {
+    name: 'Release committed',
+  });
+
+  // The release is recorded: nothing is left to discard.
+  fireEvent.keyDown(result, { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', { name: 'Release committed' }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole('dialog', { name: 'Discard this release?' }),
+  ).toBeNull();
+  await screen.findByText(/E-500 released to production × 7/);
+  expect(state.committedReleases.size).toBe(1);
 });
 
 /* ============ View states ============ */

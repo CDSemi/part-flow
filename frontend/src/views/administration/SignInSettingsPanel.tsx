@@ -7,6 +7,8 @@ import { signInWriteOutcomeUnknown } from '../../api/session';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { AdminField, PolicySwitch, ServerErrorNote } from './section-widgets';
@@ -154,29 +156,35 @@ function SignInPolicyDialog({
   // kept: whatever it holds neither blocks the save nor is sent.
   const daysInvalid = expires && days === null;
   const invalid = daysInvalid || attempts === null || minutes === null;
+  // Only the valid settings whose value differs from the stored policy
+  // (an invalid entry blocks the save on its own).
+  const patch = {
+    ...(expires !== saved.sessionExpires ? { sessionExpires: expires } : {}),
+    ...(expires && days !== null && days !== saved.sessionDays
+      ? { sessionDays: days }
+      : {}),
+    ...(attempts !== null && attempts !== saved.lockoutAttempts
+      ? { lockoutAttempts: attempts }
+      : {}),
+    ...(minutes !== null && minutes !== saved.lockoutMinutes
+      ? { lockoutMinutes: minutes }
+      : {}),
+    ...(requireChange !== saved.requirePasswordChange
+      ? { requirePasswordChange: requireChange }
+      : {}),
+  };
 
   // Cancel, Escape and the backdrop are ignored while a save is in
-  // flight.
-  const requestClose = () => {
-    if (!busy) onClose(wrote);
-  };
+  // flight; otherwise a setting a save would change — or an entry that
+  // is not a valid value at all — asks first (useCloseGuard).
+  const guard = useCloseGuard({
+    dirty: invalid || Object.keys(patch).length > 0,
+    busy,
+    onClose: () => onClose(wrote),
+  });
 
   const submit = async () => {
     if (busy || writeBlocked || invalid) return;
-    // Only the settings whose value differs from the stored policy.
-    const patch = {
-      ...(expires !== saved.sessionExpires ? { sessionExpires: expires } : {}),
-      ...(expires && days !== null && days !== saved.sessionDays
-        ? { sessionDays: days }
-        : {}),
-      ...(attempts !== saved.lockoutAttempts
-        ? { lockoutAttempts: attempts }
-        : {}),
-      ...(minutes !== saved.lockoutMinutes ? { lockoutMinutes: minutes } : {}),
-      ...(requireChange !== saved.requirePasswordChange
-        ? { requirePasswordChange: requireChange }
-        : {}),
-    };
     if (Object.keys(patch).length === 0) {
       onClose(wrote);
       return;
@@ -199,7 +207,7 @@ function SignInPolicyDialog({
 
   const title = 'User sign-in settings';
   return (
-    <ModalDialog label={title} onClose={requestClose}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <div className="admin-form">
         <div className="admin-switchlist">
@@ -276,7 +284,11 @@ function SignInPolicyDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -287,6 +299,16 @@ function SignInPolicyDialog({
           Save changes
         </button>
       </div>
+      {guard.asking ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked || invalid}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={() => onClose(wrote)}
+        >
+          You have unsaved changes to the user sign-in settings.
+        </UnsavedChangesDialog>
+      ) : null}
     </ModalDialog>
   );
 }

@@ -9,11 +9,13 @@ import { createFirstAdministrator, getSetupStatus } from '../api/setup';
 import type { SetupRole } from '../api/setup';
 import { useApiData } from '../api/use-api-data';
 import { useConnectivity } from '../app/connectivity-context';
-import { newPasswordError } from '../app/password-rules';
+import { PASSWORD_LENGTH_HINT, newPasswordError } from '../app/password-rules';
 import {
   canonicalLoginName,
   loginNameError,
 } from '../views/administration/user-login';
+import { useCloseGuard } from './close-guard';
+import { DiscardInputDialog } from './close-guard-dialogs';
 import { ModalDialog } from './ModalDialog';
 import { ErrorState, LoadingState } from './view-states';
 
@@ -55,6 +57,7 @@ export function FirstRunSetupDialog({
   const statusData = useApiData(getSetupStatus);
   const [closed, setClosed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [formDirty, setFormDirty] = useState(false);
 
   const setupClosed =
     closed ||
@@ -65,9 +68,14 @@ export function FirstRunSetupDialog({
     if (setupClosed) void onRefresh();
   }, [setupClosed, onRefresh]);
 
-  const requestClose = () => {
-    if (!busy) onCancel();
-  };
+  // Only the setup form holds input: the loading, error and closed
+  // states close at once.
+  const formShown = !setupClosed && statusData.state.status === 'ready';
+  const guard = useCloseGuard({
+    dirty: formShown && formDirty,
+    busy,
+    onClose: onCancel,
+  });
 
   let body;
   if (setupClosed) {
@@ -106,7 +114,8 @@ export function FirstRunSetupDialog({
         roles={statusData.state.data.eligibleRoles}
         busy={busy}
         onBusyChange={setBusy}
-        onCancel={requestClose}
+        onDirtyChange={setFormDirty}
+        onCancel={guard.requestClose}
         onCreated={onCreated}
         onClosed={() => setClosed(true)}
         onRefresh={onRefresh}
@@ -115,9 +124,20 @@ export function FirstRunSetupDialog({
   }
 
   return (
-    <ModalDialog label="Set up PartFlow" size="wide" onClose={requestClose}>
+    <ModalDialog
+      label="Set up PartFlow"
+      size="wide"
+      onClose={guard.requestClose}
+    >
       <h3>Set up PartFlow</h3>
       {body}
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard setup?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }
@@ -126,6 +146,7 @@ function SetupForm({
   roles,
   busy,
   onBusyChange,
+  onDirtyChange,
   onCancel,
   onCreated,
   onClosed,
@@ -134,6 +155,8 @@ function SetupForm({
   roles: SetupRole[];
   busy: boolean;
   onBusyChange: (busy: boolean) => void;
+  /** Whether any entry differs from the opening form. */
+  onDirtyChange: (dirty: boolean) => void;
   onCancel: () => void;
   onCreated: (state: SessionState) => void;
   onClosed: () => void;
@@ -141,16 +164,29 @@ function SetupForm({
 }) {
   const { status } = useConnectivity();
   const offline = status !== 'connected';
+  // A single eligible role is preselected.
+  const initialRoleId = roles.length === 1 ? roles[0].id : null;
   const [token, setToken] = useState('');
   const [name, setName] = useState('');
   const [login, setLogin] = useState('');
-  const [roleId, setRoleId] = useState<number | null>(
-    roles.length === 1 ? roles[0].id : null,
-  );
+  const [roleId, setRoleId] = useState<number | null>(initialRoleId);
   const [password, setPassword] = useState('');
   const [repeat, setRepeat] = useState('');
   const [attempted, setAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The dialog's close requests (Escape, the backdrop, Cancel) belong to
+  // the host, so it learns whether they would drop entered input.
+  const dirty =
+    token !== '' ||
+    name !== '' ||
+    login !== '' ||
+    roleId !== initialRoleId ||
+    password !== '' ||
+    repeat !== '';
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
 
   const tokenField = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -311,7 +347,7 @@ function SetupForm({
           autoComplete="new-password"
         />
       </label>
-      <p className="acct-help">At least 12 characters.</p>
+      <p className="acct-help">{PASSWORD_LENGTH_HINT}</p>
       <label>
         <span>Repeat password</span>
         <input

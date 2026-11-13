@@ -63,7 +63,7 @@ _A4 = (
     "This request was refused because it did not come from the PartFlow application."
     " Reload the page and try again."
 )
-_P1 = "A password must be at least 12 characters long."
+_P1 = "A password must be at least 6 characters long."
 _P8 = "A password can contain only valid text characters."
 _FALLBACK = (
     "First-run state could not be determined at startup; the setup token is announced when"
@@ -469,7 +469,7 @@ def test_setup_refusals_write_nothing_and_keep_the_token(
         ),
         (_body(token, 2**31 - 1), _CSRF, 422, f"Role {2**31 - 1} does not exist."),
         (_body(token, str(role_id)), _CSRF, 422, None),
-        (_body(token, role_id, password="x" * 11), _CSRF, 422, _P1),
+        (_body(token, role_id, password="x" * 5), _CSRF, 422, _P1),
         (
             _body(token, role_id, login_name=holder["login_name"]),
             _CSRF,

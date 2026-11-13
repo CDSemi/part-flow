@@ -1,10 +1,11 @@
 """Password rule for application Users (Phase 14 slice 1).
 
 A User signs in with a login name and a password (owner decision OD-P1:
-local accounts). A new password must hold 12 to 256 characters, counted
-on its Unicode NFKC form (PLAN OD-P3 default, slice 1 decision OD-S1-9):
-no composition rules, no banned list, and nothing is stripped — a space
-is a character like any other. The same NFKC form is what gets hashed,
+local accounts). A new password must hold 6 to 256 characters, counted
+on its Unicode NFKC form (the minimum is the owner's decision of
+2026-11-12; slice 1 decision OD-S1-9 for the rest): no composition
+rules, no banned list, and nothing is stripped — a space is a character
+like any other. The same NFKC form is what gets hashed,
 so a password typed with full-width characters verifies against its
 ASCII spelling. A password must also be valid text: a lone UTF-16
 surrogate (which JSON can carry but UTF-8 cannot encode) can never be
@@ -19,7 +20,7 @@ import unicodedata
 from typing import Final
 
 #: Fewest characters a new password may have (after NFKC).
-MIN_PASSWORD_LENGTH: Final = 12
+MIN_PASSWORD_LENGTH: Final = 6
 #: Most characters any password may have (after NFKC); a longer password
 #: given at sign-in can match no stored hash.
 MAX_PASSWORD_LENGTH: Final = 256

@@ -19,24 +19,24 @@ from app.domain.password_policy import (
     validate_new_password,
 )
 
-_P1 = "A password must be at least 12 characters long."
+_P1 = "A password must be at least 6 characters long."
 _P2 = "A password can be at most 256 characters long."
 _P8 = "A password can contain only valid text characters."
 _DOMAIN_DIR = Path(__file__).resolve().parent.parent / "app" / "domain"
 
 
 def test_bounds() -> None:
-    assert (MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH) == (12, 256)
+    assert (MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH) == (6, 256)
 
 
-@pytest.mark.parametrize(("length", "message"), [(11, _P1), (257, _P2)])
+@pytest.mark.parametrize(("length", "message"), [(5, _P1), (257, _P2)])
 def test_lengths_outside_the_rule_are_refused(length: int, message: str) -> None:
     with pytest.raises(InvalidPasswordError) as raised:
         validate_new_password("x" * length)
     assert str(raised.value) == message
 
 
-@pytest.mark.parametrize("length", [12, 256])
+@pytest.mark.parametrize("length", [6, 256])
 def test_lengths_inside_the_rule_are_admitted(length: int) -> None:
     assert validate_new_password("x" * length) == "x" * length
 
@@ -44,7 +44,7 @@ def test_lengths_inside_the_rule_are_admitted(length: int) -> None:
 def test_length_counts_the_nfkc_form() -> None:
     # U+FB03 (ﬃ) is one character that NFKC expands to three.
     assert len(normalize_password("ﬃ")) == 3
-    assert validate_new_password("ﬃ" * 4) == "ffi" * 4  # 4 raw, 12 after NFKC
+    assert validate_new_password("ﬃ" * 2) == "ffi" * 2  # 2 raw, 6 after NFKC
     with pytest.raises(InvalidPasswordError):
         validate_new_password("ﬃ" * 86)  # 86 raw, 258 after NFKC
     assert is_over_long("ﬃ" * 86)

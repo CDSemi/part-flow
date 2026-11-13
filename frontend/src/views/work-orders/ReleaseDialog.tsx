@@ -13,6 +13,8 @@ import type {
 } from '../../api/production-release';
 import { listRouteTemplates } from '../../api/route-templates';
 import { useApiData } from '../../api/use-api-data';
+import { useCloseGuard } from '../../components/close-guard';
+import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { isPositiveInteger } from './demand-lines';
@@ -66,7 +68,8 @@ export function ReleaseDialog({
   const operationsData = useApiData(listOperations);
   const templatesData = useApiData(listRouteTemplates);
 
-  const [qty, setQty] = useState(String(demand.remainingQuantity || ''));
+  const initialQty = String(demand.remainingQuantity || '');
+  const [qty, setQty] = useState(initialQty);
   const [routeMode, setRouteMode] = useState<'FLOATING' | 'PLANNED'>(
     'FLOATING',
   );
@@ -196,6 +199,22 @@ export function ReleaseDialog({
       (template !== null && template.steps.length > 0)) &&
     (distribution === null || confirmActive);
 
+  // Any release input that differs from its opening default asks before
+  // a close drops it (an Area's single Operation is derived, not
+  // entered). While a submission is in flight a close request still
+  // closes at once, as it always has.
+  const guard = useCloseGuard({
+    dirty:
+      qty !== initialQty ||
+      routeMode !== 'FLOATING' ||
+      templateId !== null ||
+      areaId !== null ||
+      operationId !== null ||
+      confirmActive,
+    onClose: onCancel,
+  });
+  const requestClose = busy ? onCancel : guard.requestClose;
+
   async function submit() {
     if (
       parsedQty === null ||
@@ -318,7 +337,7 @@ export function ReleaseDialog({
   return (
     <ModalDialog
       label="Release to production — explicit action"
-      onClose={onCancel}
+      onClose={requestClose}
       size="wide"
     >
       <h3>Release to production — explicit action</h3>
@@ -538,7 +557,7 @@ export function ReleaseDialog({
             </div>
           ) : null}
           <div className="row">
-            <button className="bigbtn ghost" onClick={onCancel}>
+            <button className="bigbtn ghost" onClick={requestClose}>
               Cancel (Esc)
             </button>
             <button
@@ -555,6 +574,13 @@ export function ReleaseDialog({
           </div>
         </>
       )}
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard this release?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

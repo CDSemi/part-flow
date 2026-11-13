@@ -336,9 +336,28 @@ These presentation rules apply to the dialog forms of every view:
 - **Select chevron.** Every native select draws one consistent theme-muted dropdown chevron: a per-theme
   `--select-arrow` token consumed by a shared `select` rule with `appearance: none`. Select-surface rules set
   `background-color`, never the `background` shorthand that would erase the arrow.
+- **Select height.** A select clips its value to its content box, and a value taller than that box is aligned to the top
+  instead of centered. A select pinned to a fixed height (the forms that give every control one height: the
+  Administration editors and the Machines dialogs) therefore has no vertical padding: the value is centered in the full
+  height, and letters with descenders (p, q, g, y) are never cut off. A select sized by `min-height` needs nothing extra.
 - **Discard tone.** In the shared `UnsavedChoiceDialog`, the **Discard** action takes the danger tone in every caller
-  (Work Orders, Machines, Planned Routes, Part Numbers): it always throws the entered edits away, so it never reads as
-  the neutral option beside Cancel.
+  (Work Orders, Machines, Planned Routes, Part Numbers, Administration): it always throws the entered edits away, so it
+  never reads as the neutral option beside Cancel.
+- **Closing with unsaved input.** Escape, a backdrop click and `Cancel (Esc)` are close requests. On every dialog where
+  data is entered to be saved or added (the Administration editors, `Change password`, `Set up PartFlow` and the
+  Management dialogs), a dialog whose entries still equal the values it opened with closes at once, without a question;
+  a value typed and then restored counts as unchanged. Changed entries ask first, so entered input is never lost
+  silently:
+  - an existing record: the shared `UnsavedChoiceDialog` titled `Unsaved changes` (body
+    `You have unsaved changes to {name}.`) with `Save changes` (saves, and closes once the save succeeds; a refused save
+    keeps the dialog open with its message), `Discard changes` and `Cancel (Esc)`;
+  - a new record or a one-time entry: a `Discard …?` confirmation (for example `Discard new Area?`,
+    `Discard new password?`, `Discard this enrollment?`) with the body `Your entered information will not be saved.`,
+    `Keep editing` and `Discard input`.
+
+  Escape or a backdrop click on the question itself returns to the dialog with every entry intact. The Administration
+  dialogs ignore close requests while a save is in flight. Scan Station workflow dialogs keep §4.6 (Escape always
+  cancels the whole workflow), and the sign-in dialog closes at once.
 
 ---
 
@@ -1642,6 +1661,11 @@ Worker badge never authorizes anything.
   (Administration → Scan Stations, §9). The code is ten characters shown as `XXXXX-XXXXX`; it is accepted in any letter
   case and with or without the hyphen or spaces. An unknown or inactive Station ID still shows the explicit
   unavailable-station error (§4.1) instead of the panel.
+- **Enrollment presentation.** The panel is one centered card on the station surface, built like the dialog shell. Its
+  code field, shared with the blocking dialog below, shows the entry in the same large, bold, spaced monospace as the
+  code Administration shows when it issues one (§9), centered in a tall field that keeps the whole code visible down to
+  phone width. The panel's actions (`Station Selector`, `Enroll device`) share one row in equal widths with a clear gap,
+  and stack on a narrow screen instead of squeezing their labels.
 - **During work.** When a request is refused because the device was revoked or replaced while the station is open, the
   same enrollment appears as a blocking dialog, like the Worker badge modal (§4.12). Open drafts, selections and the
   Worker Session are preserved underneath, and nothing further is recorded until the device is enrolled again. If the
@@ -2659,12 +2683,25 @@ authorized production roles.
 - Where this document says "Admin-only" (History archival & purge), it means the permission to configure system
   settings, initially granted to the Administrator role (PROJECT_PROFILE §20).
 
+### Scan Stations
+
+The `New Scan Station` editor asks for the Area first and **proposes the Station ID** from it: the Area name in capital
+letters (accents removed, every other run of characters turned into one `-`), then `-ST-` and a number of at least two
+digits. The number is one above the highest number that any existing station already uses with that prefix, in any
+letter case, including inactive stations and stations rebound to another Area, because a Station ID is never renamed or
+reused (`CUT-ST-01`, then `CUT-ST-02`). The proposal follows the chosen Area until the user types an ID of their own; a
+typed ID stays as typed, and a cleared field follows the Area again. The server still checks the entered ID.
+
 ### Scan Station devices
 
 Production setup → **Scan Stations** gives each station a `Devices…` action that opens its enrolled devices and
 unexpired enrollment codes, listing name, state (`Enrolled`, or `Code issued` with its expiry) and last seen (the
 device's most recent request, including refused ones). A revoked device or an expired code is no longer listed once the
-list is loaded again.
+list is loaded again. The table's Devices cell shows, on one line across the cell, the names of the station's enrolled
+devices (`Not enrolled` when it has none, followed by `· code issued` while a code is pending) and the `Devices…`
+button. When the names do not fit, they end in an ellipsis and show in full on hover; the Station ID, Area and status
+never wrap for them. A click anywhere in that cell opens the devices, while the rest of the row opens the station
+editor.
 
 - `Enroll device…` asks for a device name and shows a one-time enrollment code (valid 15 minutes, single use, shown
   once) to enter on the station device (§4.13).
@@ -3847,8 +3884,9 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-09 | uncommitted | Aligned with the code: the Undo and Retry action zones are transparent at rest with an inset divider rule, and an `ON_MACHINE` transfer announces `AREA_COMPLETED, then TRANSFERRED (one command)`. |
-| 2026-11-09 | uncommitted | Rewritten as current content for new readers; requirements that only the old version notes (former §15.1–§15.17) held were moved into the body; no rule changed. |
+| 2026-11-12 | uncommitted | Every data-entry dialog closes at once while unchanged and asks before discarding changed input; selects pinned to a fixed height lose their vertical padding so descenders are never cut; a new Scan Station proposes its Station ID from its Area, and its Devices cell names the enrolled devices and opens them as a whole; the enrollment panel became a centered card with a large code field. |
+| 2026-11-09 | 398c617 | Aligned with the code: the Undo and Retry action zones are transparent at rest with an inset divider rule, and an `ON_MACHINE` transfer announces `AREA_COMPLETED, then TRANSFERRED (one command)`. |
+| 2026-11-09 | 398c617 | Rewritten as current content for new readers; requirements that only the old version notes (former §15.1–§15.17) held were moved into the body; no rule changed. |
 | 2026-10-06 to 2026-10-08 | 702ab1c … 7b24d10 | Added User sign-in with permission-aware Management and Administration, Scan Station device enrollment, allocation adjustment, assigned-route editing, the PN audit trail, the per-User theme, Work Order file import and the release-update notice. |
 | 2026-10-04 to 2026-10-06 | 9f466fa … 69b8ec1 | Specified Workers, Worker ID modes, badge sessions and gates, the Undo reason, Part Numbers, Planned Routes, display and Due Soon settings, retention, Users and roles; fully allocated Hot entries leave the list automatically. |
 | 2026-08-25 to 2026-09-13 | d7bcd06 … f016d41 | Put the Scan Station workflows, Production Board, Area Board, PN Tracking and Completed Work Orders on server data, with feed status, paging, Receive Quantity beside existing quantity and expected-duration warnings. |

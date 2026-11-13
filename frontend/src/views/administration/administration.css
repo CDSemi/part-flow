@@ -316,6 +316,25 @@
   .admin-table td:empty {
     display: none;
   }
+
+  /* Stacked, a long Station ID or Area name wraps within the card (this
+     out-ranks the table's own no-wrap rule further down). */
+  .admin-table.admin-stationtable td {
+    white-space: normal;
+  }
+
+  /* Stacked, the Devices cell stays one line like every other cell: its
+     caption, the device names (cut short with an ellipsis) and the
+     button. */
+  .admin-table td.admin-devicescell {
+    display: flex;
+    align-items: center;
+  }
+
+  .admin-table .admin-devices {
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 /* Worker sessions — badge-confirmation switches (post-v18): the shared
@@ -466,6 +485,13 @@
 
 .admin-form .field {
   height: 44px;
+}
+
+/* The pinned height leaves no room for the select's vertical padding:
+   it would clip the descenders of the chosen value (global.css). */
+.admin-form select.field {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .admin-form .err,
@@ -663,9 +689,35 @@
   user-select: all;
 }
 
+/* Scan Stations table: the Station ID, Area and status never wrap — a
+   long device list gives way first (its ellipsis, below). */
+.admin-stationtable td {
+  white-space: nowrap;
+}
+
+/* Scan Stations → Devices cell: the whole cell opens the station's
+   devices (also for a view-only user, whose rows open nothing else);
+   the summary and its `Devices…` button share one line across the
+   cell's width. */
+.admin-table td.admin-devicescell {
+  cursor: pointer;
+}
+
+/* The names track asks for its whole text but may shrink to nothing:
+   the table gives the column room for every name when it can, and a
+   narrow table ends the names in an ellipsis instead of overflowing.
+   The button keeps its size at the cell's end. */
 .admin-devices {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) auto;
+  justify-content: space-between;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 12px;
+  white-space: nowrap;
+}
+
+.admin-devicenames {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

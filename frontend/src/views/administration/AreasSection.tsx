@@ -23,6 +23,11 @@ import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { useCloseGuard } from '../../components/close-guard';
+import {
+  DiscardInputDialog,
+  UnsavedChangesDialog,
+} from '../../components/close-guard-dialogs';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -349,24 +354,46 @@ function AreaDialog({
     fixedWorkerId?: number | null;
   }) => Promise<void>;
 }) {
-  const [departmentId, setDepartmentId] = useState(
-    area?.departmentId ?? departments[0]?.id ?? 0,
-  );
-  const [name, setName] = useState(area?.name ?? '');
-  const [description, setDescription] = useState(area?.description ?? '');
-  const [color, setColor] = useState(area?.color ?? '#8899aa');
+  // The values the editor opened with — a close request compares the
+  // entries against them (useCloseGuard).
+  const [initial] = useState(() => ({
+    departmentId: area?.departmentId ?? departments[0]?.id ?? 0,
+    name: area?.name ?? '',
+    description: area?.description ?? '',
+    color: area?.color ?? '#8899aa',
+    isTerminal: area?.isTerminal ?? false,
+    isActive: area?.isActive ?? true,
+    workerIdMode: (area?.workerIdentificationMode ??
+      'DISABLED') as WorkerIdentificationMode,
+    fixedWorkerId: area?.fixedWorkerId ?? null,
+  }));
+  const [departmentId, setDepartmentId] = useState(initial.departmentId);
+  const [name, setName] = useState(initial.name);
+  const [description, setDescription] = useState(initial.description);
+  const [color, setColor] = useState(initial.color);
   const [colorTouched, setColorTouched] = useState(false);
-  const [isTerminal, setIsTerminal] = useState(area?.isTerminal ?? false);
-  const [isActive, setIsActive] = useState(area?.isActive ?? true);
+  const [isTerminal, setIsTerminal] = useState(initial.isTerminal);
+  const [isActive, setIsActive] = useState(initial.isActive);
   const [workerIdMode, setWorkerIdMode] = useState<WorkerIdentificationMode>(
-    area?.workerIdentificationMode ?? 'DISABLED',
+    initial.workerIdMode,
   );
   const [fixedWorkerId, setFixedWorkerId] = useState<number | null>(
-    area?.fixedWorkerId ?? null,
+    initial.fixedWorkerId,
   );
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+
+  const dirty =
+    departmentId !== initial.departmentId ||
+    name !== initial.name ||
+    description !== initial.description ||
+    color !== initial.color ||
+    isTerminal !== initial.isTerminal ||
+    isActive !== initial.isActive ||
+    workerIdMode !== initial.workerIdMode ||
+    fixedWorkerId !== initial.fixedWorkerId;
+  const guard = useCloseGuard({ dirty, busy, onClose: onCancel });
 
   const trimmedName = name.trim();
   const departmentName =
@@ -414,7 +441,10 @@ function AreaDialog({
   };
 
   return (
-    <ModalDialog label={area ? 'Edit Area' : 'New Area'} onClose={onCancel}>
+    <ModalDialog
+      label={area ? 'Edit Area' : 'New Area'}
+      onClose={guard.requestClose}
+    >
       <h3>{area ? 'Edit Area' : 'New Area'}</h3>
       {area ? (
         <div className="admin-identity">
@@ -567,7 +597,11 @@ function AreaDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -578,6 +612,23 @@ function AreaDialog({
           {area ? 'Save changes' : 'Add Area'}
         </button>
       </div>
+      {guard.asking && area ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={onCancel}
+        >
+          You have unsaved changes to <b>{area.name}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
+      {guard.asking && !area ? (
+        <DiscardInputDialog
+          title="Discard new Area?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

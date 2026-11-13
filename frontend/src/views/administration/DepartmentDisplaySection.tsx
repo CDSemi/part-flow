@@ -7,6 +7,8 @@ import { useApiData } from '../../api/use-api-data';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
+import { useCloseGuard } from '../../components/close-guard';
+import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
@@ -233,11 +235,14 @@ function RotationTimingDialog({
   // Cancel, Escape and the backdrop are ignored while a save is in
   // flight: the write cannot be recalled, so the editor stays open until
   // it settles — success closes it (reloading the table after the
-  // commit), a failure keeps it open with the error.
-  const requestClose = () => {
-    if (busy) return;
-    onClose(outcomeUnknown.current);
-  };
+  // commit), a failure keeps it open with the error. Otherwise a value
+  // a save would change — or an entry that is not a valid value at all —
+  // asks first (useCloseGuard).
+  const guard = useCloseGuard({
+    dirty: dirty || invalid,
+    busy,
+    onClose: () => onClose(outcomeUnknown.current),
+  });
 
   const title = `Production Board rotation — ${department.name}`;
   const rotation =
@@ -245,7 +250,7 @@ function RotationTimingDialog({
       ? { secondsPerRow, minPageSeconds }
       : null;
   return (
-    <ModalDialog label={title} onClose={requestClose}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <div className="admin-form">
         <AdminField label="Seconds per displayed row">
@@ -289,7 +294,11 @@ function RotationTimingDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
           Cancel (Esc)
         </button>
         <button
@@ -300,6 +309,17 @@ function RotationTimingDialog({
           Save
         </button>
       </div>
+      {guard.asking ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked || invalid}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={() => onClose(outcomeUnknown.current)}
+        >
+          You have unsaved changes to the rotation timing of{' '}
+          <b>{department.name}</b>.
+        </UnsavedChangesDialog>
+      ) : null}
     </ModalDialog>
   );
 }

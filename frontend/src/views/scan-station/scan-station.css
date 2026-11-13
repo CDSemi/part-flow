@@ -1602,16 +1602,20 @@
 
 /* Device enrollment (Phase 14 slice 4, GUI_DESIGN §4.13): the panel
    that replaces the station content while this browser is not an
-   enrolled device of the station, and the code field it shares with
-   the blocking enrollment dialog. */
+   enrolled device of the station — one centered card on the station
+   surface, built like the dialog shell — and the large code field it
+   shares with the blocking enrollment dialog. */
 .ss-enroll {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 640px;
-  margin: 32px auto;
-  padding: 0 22px;
-  width: 100%;
+  gap: 14px;
+  width: min(560px, calc(100% - 32px));
+  margin: 40px auto;
+  padding: 28px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
 }
 
 .ss-enroll h2 {
@@ -1619,10 +1623,16 @@
   font-weight: 800;
 }
 
+.ss-enroll .sub {
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
 .ss-enroll-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   margin-top: 4px;
 }
 
@@ -1630,4 +1640,49 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--muted);
+}
+
+/* The code reads like the one Administration shows when it issues a
+   code (`.admin-enrollcode`): large, bold, spaced monospace, centered —
+   easy to compare character by character while typing it. Out-ranks
+   the dialog's own `.dlg .field` sizing in the dialog form. */
+.ss-enroll-field input.ss-enroll-code {
+  width: 100%;
+  height: 68px;
+  margin: 0;
+  padding: 0 16px;
+  background-color: var(--field-bg);
+  border: 2px solid var(--border2);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--mono), monospace;
+  /* The whole code stays visible down to a 320 px phone. */
+  font-size: clamp(22px, 7vw, 28px);
+  font-weight: 800;
+  letter-spacing: 3px;
+  text-align: center;
+  outline: none;
+}
+
+.ss-enroll-field input.ss-enroll-code::placeholder {
+  color: var(--faint);
+  font-weight: 700;
+}
+
+.ss-enroll-field input.ss-enroll-code:focus {
+  border-color: var(--info-t);
+}
+
+/* The panel's actions: equal widths with a clear gap and inner padding;
+   on a narrow screen they stack instead of squeezing their labels. */
+.ss-enroll .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.ss-enroll .row .bigbtn {
+  flex: 1 1 200px;
+  padding: 0 20px;
 }

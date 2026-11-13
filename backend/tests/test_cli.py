@@ -211,8 +211,8 @@ def test_reset_password_refusals(
     unknown = f"nobody-{uuid.uuid4().hex[:8]}"
     assert _run(monkeypatch, unknown, _RESET) == 1
     assert capsys.readouterr().err.strip() == f"No user has the login name {unknown}."
-    assert _run(monkeypatch, _login(db_engine, target), "x" * 11) == 1
-    assert capsys.readouterr().err.strip() == "A password must be at least 12 characters long."
+    assert _run(monkeypatch, _login(db_engine, target), "x" * 5) == 1
+    assert capsys.readouterr().err.strip() == "A password must be at least 6 characters long."
     assert _write_counts(db_engine) == before
 
     # A User without a password — even in the Administrator role — is never given one.

@@ -6,8 +6,10 @@ import { ApiError } from '../api/client';
 import { changeOwnPassword, signInWriteOutcomeUnknown } from '../api/session';
 import type { SessionState } from '../api/session';
 import { useConnectivity } from '../app/connectivity-context';
-import { newPasswordError } from '../app/password-rules';
+import { PASSWORD_LENGTH_HINT, newPasswordError } from '../app/password-rules';
 import { OUTDATED_REASON, RELOAD_PAGE_LABEL } from '../app/release-copy';
+import { useCloseGuard } from './close-guard';
+import { DiscardInputDialog } from './close-guard-dialogs';
 import { ModalDialog } from './ModalDialog';
 
 const UNKNOWN_OUTCOME =
@@ -90,8 +92,15 @@ export function ChangePasswordDialog({
   const currentMissing = current === '';
   const nextError = newPasswordError(next, repeat);
 
+  // The fields open empty: any typed password asks before a close drops
+  // it. The forced dialog cannot be closed at all.
+  const guard = useCloseGuard({
+    dirty: current !== '' || next !== '' || repeat !== '',
+    busy,
+    onClose: onCancel,
+  });
   const requestClose = () => {
-    if (!forced && !busy) onCancel();
+    if (!forced) guard.requestClose();
   };
 
   const submit = async () => {
@@ -167,7 +176,7 @@ export function ChangePasswordDialog({
             autoComplete="new-password"
           />
         </label>
-        <p className="acct-help">At least 12 characters.</p>
+        <p className="acct-help">{PASSWORD_LENGTH_HINT}</p>
         <label>
           <span>Repeat new password</span>
           <input
@@ -232,6 +241,14 @@ export function ChangePasswordDialog({
           </button>
         </div>
       </form>
+      {/* Outside the form: its buttons must never submit it. */}
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard password change?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }

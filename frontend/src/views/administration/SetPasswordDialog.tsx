@@ -5,6 +5,8 @@ import { signInWriteOutcomeUnknown } from '../../api/session';
 import { setUserPassword } from '../../api/users';
 import type { User } from '../../api/users';
 import { newPasswordError } from '../../app/password-rules';
+import { useCloseGuard } from '../../components/close-guard';
+import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { AdminField, ServerErrorNote } from './section-widgets';
 
@@ -44,10 +46,12 @@ export function SetPasswordDialog({
   const passwordInvalid = newPasswordError(password, repeat);
 
   // Cancel, Escape and the backdrop are ignored while the write is in
-  // flight.
-  const requestClose = () => {
-    if (!busy) onCancel();
-  };
+  // flight; an entered password asks first (useCloseGuard).
+  const guard = useCloseGuard({
+    dirty: password !== '' || repeat !== '',
+    busy,
+    onClose: onCancel,
+  });
 
   const submit = async () => {
     if (busy || writeBlocked) return;
@@ -71,7 +75,7 @@ export function SetPasswordDialog({
 
   const title = `Set password for ${user.displayName}`;
   return (
-    <ModalDialog label={title} onClose={requestClose}>
+    <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <p className="sub">
         This replaces the password and signs {user.displayName} out everywhere.
@@ -117,7 +121,7 @@ export function SetPasswordDialog({
             type="button"
             className="bigbtn ghost"
             disabled={busy}
-            onClick={requestClose}
+            onClick={guard.requestClose}
           >
             Cancel (Esc)
           </button>
@@ -130,6 +134,13 @@ export function SetPasswordDialog({
           </button>
         </div>
       </form>
+      {guard.asking ? (
+        <DiscardInputDialog
+          title="Discard new password?"
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
     </ModalDialog>
   );
 }
