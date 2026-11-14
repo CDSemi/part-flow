@@ -3419,9 +3419,9 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     [
       'Role',
       'Undo recent eligible scans',
-      'Perform quantity corrections — grants nothing yet',
+      'Perform quantity corrections (reserved)',
       'Edit Work Order Allocation',
-      'Perform authorized historical corrections — grants nothing yet',
+      'Perform authorized historical corrections (reserved)',
     ],
     ['Administrator', '-', '-', '✓', '✓'],
     ['Manager', '-', '✓', '✓', '-'],
@@ -3434,27 +3434,30 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
     'data-label',
     'Undo recent eligible scans',
   );
-  // The inert mark stays where the header is not shown: the stacked
-  // layout's cell caption and the checkbox name.
+  expect(operatorUndo).toBeEnabled();
+  // The reserved mark stays where the header is not shown: the stacked
+  // layout's cell caption and the checkbox name. A reserved permission is
+  // never chosen, and a grant that already exists stays shown.
   const managerQuantity = screen.getByRole('checkbox', {
-    name: 'Perform quantity corrections — grants nothing yet — Manager',
+    name: 'Perform quantity corrections (reserved) — Manager',
   });
   expect(managerQuantity.closest('td')).toHaveAttribute(
     'data-label',
-    'Perform quantity corrections — grants nothing yet',
+    'Perform quantity corrections (reserved)',
   );
-  expect(
-    screen
-      .getByRole('checkbox', {
-        name: 'Perform authorized historical corrections — grants nothing yet — Operator',
-      })
-      .closest('td'),
-  ).toHaveAttribute(
+  expect(managerQuantity).toBeChecked();
+  expect(managerQuantity).toBeDisabled();
+  const operatorHistorical = screen.getByRole('checkbox', {
+    name: 'Perform authorized historical corrections (reserved) — Operator',
+  });
+  expect(operatorHistorical.closest('td')).toHaveAttribute(
     'data-label',
-    'Perform authorized historical corrections — grants nothing yet',
+    'Perform authorized historical corrections (reserved)',
   );
+  expect(operatorHistorical).not.toBeChecked();
+  expect(operatorHistorical).toBeDisabled();
   expect(document.body.textContent).toContain(
-    "Choose which roles hold each correction permission. Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations; Perform quantity corrections and Perform authorized historical corrections grant nothing yet because PartFlow has no such correction.",
+    "Choose which roles hold each correction permission. Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations; Perform quantity corrections and Perform authorized historical corrections are reserved: PartFlow has no such correction yet, so they cannot be chosen.",
   );
   expect(document.body.textContent).toContain(
     "Undo recent eligible scans covers exactly the actions the Scan Station's Undo offers — there is no extra time limit.",
@@ -4611,11 +4614,13 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
   expect(dialog.textContent).toContain(
     'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Policies → Correction permissions.',
   );
-  expect(
-    within(dialog).getByRole('checkbox', {
-      name: 'Export and print reports — grants nothing yet',
-    }),
-  ).toBeChecked();
+  // A reserved grant the role already holds stays shown and cannot be
+  // changed.
+  const reserved = within(dialog).getByRole('checkbox', {
+    name: 'Export and print reports (reserved)',
+  });
+  expect(reserved).toBeChecked();
+  expect(reserved).toBeDisabled();
   expect(
     within(dialog).getByRole('checkbox', { name: 'Manage Machines' }),
   ).not.toBeChecked();
@@ -4628,9 +4633,7 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
   fireEvent.click(screen.getByRole('button', { name: 'Edit Manager' }));
   const edit = screen.getByRole('dialog', { name: 'Edit role' });
   fireEvent.click(
-    within(edit).getByRole('checkbox', {
-      name: 'Export and print reports — grants nothing yet',
-    }),
+    within(edit).getByRole('checkbox', { name: 'Reorder Hot items' }),
   );
   fireEvent.click(
     within(edit).getByRole('checkbox', { name: 'Manage Machines' }),
@@ -4647,16 +4650,18 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
       body: {
         name: 'Production Manager',
         grant_permissions: ['MANAGE_MACHINES'],
-        revoke_permissions: ['EXPORT_REPORTS'],
+        revoke_permissions: ['REORDER_HOT_ITEMS'],
       },
     },
   ]);
   expect(
     await screen.findByRole('button', { name: 'Edit Production Manager' }),
   ).toBeInTheDocument();
-  // The correction permissions the role holds are untouched.
+  // The correction permissions and the reserved grants the role holds are
+  // untouched.
   expect(state.roles[1].permissions).toContain('PERFORM_QUANTITY_CORRECTIONS');
   expect(state.roles[1].permissions).toContain('EDIT_WORK_ORDER_ALLOCATION');
+  expect(state.roles[1].permissions).toContain('EXPORT_REPORTS');
 });
 
 test('FA-RO3: a new role posts its name and checked permissions; a duplicate keeps the entry; offline blocks writes', async () => {
@@ -4818,28 +4823,28 @@ test('FA-C6: a click grants or revokes exactly that permission of that role, dis
 
 test('FA-C6: a refused grant shows the reason and the stored value; offline disables the table', async () => {
   await openCorrectionPermissions();
-  roleFailures.PATCH = { status: 404, detail: 'Role 2 does not exist.' };
+  roleFailures.PATCH = { status: 404, detail: 'Role 3 does not exist.' };
   const box = await screen.findByRole('checkbox', {
-    name: 'Perform authorized historical corrections — grants nothing yet — Manager',
+    name: 'Edit Work Order Allocation — Operator',
   });
   fireEvent.click(box);
   expect(await screen.findByRole('alert')).toHaveTextContent(
-    'Role 2 does not exist.',
+    'Role 3 does not exist.',
   );
   await waitFor(() =>
     expect(
       screen.getByRole('checkbox', {
-        name: 'Perform authorized historical corrections — grants nothing yet — Manager',
+        name: 'Edit Work Order Allocation — Operator',
       }),
     ).toBeEnabled(),
   );
   expect(
     screen.getByRole('checkbox', {
-      name: 'Perform authorized historical corrections — grants nothing yet — Manager',
+      name: 'Edit Work Order Allocation — Operator',
     }),
   ).not.toBeChecked();
-  expect(state.roles[1].permissions).not.toContain(
-    'PERFORM_HISTORICAL_CORRECTIONS',
+  expect(state.roles[2].permissions).not.toContain(
+    'EDIT_WORK_ORDER_ALLOCATION',
   );
   cleanup();
 
@@ -4881,7 +4886,7 @@ test('FA-C6: an unanswered grant is an unknown outcome; a failed re-read keeps t
     PATCH: 'network',
     'GET list': { status: 500, detail: 'Database unavailable.' },
   };
-  const other = 'Perform quantity corrections — grants nothing yet — Operator';
+  const other = 'Edit Work Order Allocation — Operator';
   fireEvent.click(screen.getByRole('checkbox', { name: other }));
   await waitFor(() =>
     expect(screen.getByRole('checkbox', { name: other })).toBeEnabled(),
@@ -6017,20 +6022,26 @@ test('FA-4: the correction matrix works for a user who may manage correction per
   );
 });
 
-test('FA-5: only the inert permissions are marked in the Roles editor', async () => {
+test('FA-5: only the reserved permissions are marked in the Roles editor, and they cannot be chosen', async () => {
   await openRoles();
   fireEvent.click(screen.getByRole('button', { name: '+ New role' }));
   const dialog = screen.getByRole('dialog', { name: 'New role' });
+  const boxes = within(dialog).getAllByRole('checkbox');
+  const label = (box: HTMLElement) => box.closest('label')?.textContent ?? '';
   expect(
-    within(dialog)
-      .getAllByRole('checkbox')
-      .map((box) => box.closest('label')?.textContent ?? '')
-      .filter((label) => label.endsWith(' — grants nothing yet')),
+    boxes.map(label).filter((text) => text.endsWith(' (reserved)')),
   ).toEqual([
-    'Manage scan behavior — grants nothing yet',
-    'Resolve exceptional production situations — grants nothing yet',
-    'Export and print reports — grants nothing yet',
+    'Manage scan behavior (reserved)',
+    'Resolve exceptional production situations (reserved)',
+    'Export and print reports (reserved)',
   ]);
+  for (const box of boxes) {
+    if (label(box).endsWith(' (reserved)')) expect(box).toBeDisabled();
+    else expect(box).toBeEnabled();
+  }
+  expect(dialog.textContent).toContain(
+    'Permissions marked (reserved) belong to features PartFlow does not have yet, so they cannot be chosen.',
+  );
 });
 
 test('FA-7: a refused user save shows the server detail and keeps the editor open', async () => {

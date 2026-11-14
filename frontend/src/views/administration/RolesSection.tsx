@@ -26,6 +26,7 @@ import {
   CORRECTION_PERMISSIONS,
   PERMISSION_LABELS,
   ROLE_PERMISSION_GROUPS,
+  isReservedPermission,
   permissionChoiceLabel,
 } from './permissions';
 import {
@@ -336,7 +337,7 @@ function RoleDialog({
                   <input
                     type="checkbox"
                     checked={checked.has(key)}
-                    disabled={busy}
+                    disabled={busy || isReservedPermission(key)}
                     onChange={(event) => toggle(key, event.target.checked)}
                   />
                   <span>{permissionChoiceLabel(key)}</span>
@@ -344,6 +345,10 @@ function RoleDialog({
               ))}
           </fieldset>
         ))}
+        <p className="admin-fieldhelp">
+          Permissions marked (reserved) belong to features PartFlow does not
+          have yet, so they cannot be chosen.
+        </p>
         {role && showsManagementHeld ? (
           <p className="admin-fieldhelp">
             {`Correction permissions: ${heldCorrectionLabels}; Manage correction permissions: held — set by a user who may manage correction permissions.`}

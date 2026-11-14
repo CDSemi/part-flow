@@ -8,10 +8,11 @@ import { PERMISSIONS } from '../../api/roles';
 import type { Role } from '../../api/roles';
 import {
   CORRECTION_PERMISSIONS,
-  INERT_PERMISSIONS,
   PERMISSION_LABELS,
   PROTECTED_PERMISSIONS,
+  RESERVED_PERMISSIONS,
   ROLE_PERMISSION_GROUPS,
+  isReservedPermission,
   permissionChoiceLabel,
   roleHoldsProtected,
 } from './permissions';
@@ -113,7 +114,7 @@ test('labels are unique and non-empty, with the GUI-vocabulary renames', () => {
   );
 });
 
-test('the protected and inert permissions are the contract literals', () => {
+test('the protected and reserved permissions are the contract literals', () => {
   expect(PROTECTED_PERMISSIONS).toEqual([
     'UNDO_RECENT_SCANS',
     'PERFORM_QUANTITY_CORRECTIONS',
@@ -121,27 +122,23 @@ test('the protected and inert permissions are the contract literals', () => {
     'PERFORM_HISTORICAL_CORRECTIONS',
     'MANAGE_CORRECTION_PERMISSIONS',
   ]);
-  expect(INERT_PERMISSIONS).toEqual([
+  const reserved = [
     'MANAGE_SCAN_BEHAVIOR',
     'RESOLVE_EXCEPTIONAL_SITUATIONS',
     'EXPORT_REPORTS',
     'PERFORM_QUANTITY_CORRECTIONS',
     'PERFORM_HISTORICAL_CORRECTIONS',
-  ]);
-  // Exactly the inert keys are marked where a permission is chosen.
+  ];
+  expect(RESERVED_PERMISSIONS).toEqual(reserved);
+  expect(PERMISSIONS.filter(isReservedPermission)).toEqual(reserved);
+  // Exactly the reserved keys are marked where a permission is chosen.
   expect(
     PERMISSIONS.filter((key) =>
-      permissionChoiceLabel(key).endsWith(' — grants nothing yet'),
+      permissionChoiceLabel(key).endsWith(' (reserved)'),
     ),
-  ).toEqual([
-    'MANAGE_SCAN_BEHAVIOR',
-    'RESOLVE_EXCEPTIONAL_SITUATIONS',
-    'EXPORT_REPORTS',
-    'PERFORM_QUANTITY_CORRECTIONS',
-    'PERFORM_HISTORICAL_CORRECTIONS',
-  ]);
+  ).toEqual(reserved);
   expect(permissionChoiceLabel('EXPORT_REPORTS')).toBe(
-    'Export and print reports — grants nothing yet',
+    'Export and print reports (reserved)',
   );
   expect(permissionChoiceLabel('MANAGE_MACHINES')).toBe('Manage Machines');
 });

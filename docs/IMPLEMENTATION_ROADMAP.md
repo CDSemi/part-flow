@@ -1349,8 +1349,8 @@ history.
 The owner decided these changes on 2026-11-12 and 2026-11-13, after go-live. None is implemented yet; each lands as a
 change of its own, in this order:
 
-1. **Reserved permission keys.** The keys that no route requires yet show `(reserved)` beside their name and cannot be
-   ticked, in Roles & permissions and in Correction permissions; grants that already exist stay.
+1. **Reserved permission keys — delivered.** The keys that no route requires yet show `(reserved)` beside their name
+   and cannot be ticked, in Roles & permissions and in Correction permissions; grants that already exist stay.
 2. **Length limit on manual entry.** Work Order Number, Part Number and Job Number accept at most 200 characters in the
    manual Work Order create and edit, as file import already does, so a longer value is refused with a clear message
    instead of failing as a database error.
@@ -1404,7 +1404,7 @@ Each item below waits for an owner decision or a canonical requirement; none has
   section, once one exists in Administration); `Resolve exceptional production situations` (until PROJECT_PROFILE
   defines a command); `Export and print reports` (until a report surface is defined); `Perform quantity corrections`
   and `Perform authorized historical corrections` (until the quantity-adjustment and historical-correction commands
-  exist). Phase 17 shows them as reserved and not selectable.
+  exist). Administration shows them as reserved and not selectable.
 - directory or single sign-on (SSO) sign-in for application Users (no canonical requirement; the separate credential
   table keeps it additive); optional multi-factor sign-in and email recovery are Phase 17
 - Phase 13 follow-ups with no canonical requirement:
@@ -1419,7 +1419,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | Phase 16: the `web` access log no longer records the Production Board's successful automatic refreshes. |
+| 2026-11-13 | uncommitted | Phase 17 item 1 delivered: reserved permission keys show `(reserved)` and cannot be chosen. |
+| 2026-11-13 | `4a99914` | Phase 16: the `web` access log no longer records the Production Board's successful automatic refreshes. |
 | 2026-11-13 | `6c0fa6c` | Owner decisions of 2026-11-13: Phase 17 added; Phase 16 gains backups set in Administration, a quieter `web` log and a minimal `pf`; the archival decisions are recorded and the open owner decisions are closed. |
 | 2026-11-12 | `42ea4be` | Current State and Phase 16: PartFlow is live on the company NAS since 2026-11-09; the update notice left the unconfirmed defaults, and the Deployment Admin follow-ups record that its development stopped. |
 | 2026-11-12 | `b413c96` | Phase 16 snapshot copy lock order delivered: a split or merge copy locks its Areas and Operations in ascending order, together with a partial transfer's target Area, so crossing releases and partial transfers no longer deadlock. |

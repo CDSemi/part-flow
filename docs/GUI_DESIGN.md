@@ -2685,7 +2685,8 @@ authorized production roles.
   Correction permissions are edited with that permission.
 - **Last-holder rule.** PartFlow refuses a change that would leave no active user with a password who may manage users
   and roles, or who may manage correction permissions.
-- Permissions that grant nothing yet are marked as such in Roles & permissions.
+- Permissions that no PartFlow action requires yet show `(reserved)` beside their name and cannot be chosen, in Roles &
+  permissions and in Correction permissions; a grant that already exists stays shown.
 - **Applied at Scan Stations.** The role marked **Applied at Scan Stations** (initially Operator) decides what every
   enrolled Scan Station may do.
 - Where this document says "Admin-only" (History archival & purge), it means the permission to configure system
@@ -3892,7 +3893,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-13 | uncommitted | §3: offline scan synchronization refers to PROJECT_PROFILE §30 and §32, where no decision remains open. |
+| 2026-11-13 | uncommitted | §9: reserved permissions show `(reserved)` and cannot be chosen. |
+| 2026-11-13 | 6c0fa6c | §3: offline scan synchronization refers to PROJECT_PROFILE §30 and §32, where no decision remains open. |
 | 2026-11-12 | de4d99f | §3 rule 13 and §4.11: the page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; §9: an Area's color and name stay on one line in the Administration tables. |
 | 2026-11-12 | 77a2dfb | §3 rule 13: every page reloads itself after an update once it has been idle for 2 minutes with no dialog and no unsaved input; the Scan Station and Production Board keep reloading after 60 s. |
 | 2026-11-12 | a7949e3 | Every data-entry dialog closes at once while unchanged and asks before discarding changed input; selects pinned to a fixed height lose their vertical padding so descenders are never cut; a new Scan Station proposes its Station ID from its Area, and its Devices cell names the enrolled devices and opens them as a whole; the enrollment panel became a centered card with a large code field. |

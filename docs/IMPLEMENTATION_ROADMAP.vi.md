@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `6c0fa6c` cộng các thay đổi chưa commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `4a99914` cộng các thay đổi chưa commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1339,8 +1339,8 @@ Chủ sở hữu duyệt bản thiết kế của ba bước này trước khi b
 Chủ sở hữu quyết định các thay đổi này ngày 2026-11-12 và 2026-11-13, sau go-live. Chưa thay đổi nào được triển khai;
 mỗi thay đổi được đưa vào riêng, theo thứ tự sau:
 
-1. **Permission key để dành.** Các key chưa route nào cần hiển thị `(reserved)` cạnh tên và không tick được, trong Roles
-   & permissions và Correction permissions; các quyền đã cấp vẫn giữ nguyên.
+1. **Permission key để dành — đã có.** Các key chưa route nào cần hiển thị `(reserved)` cạnh tên và không tick được,
+   trong Roles & permissions và Correction permissions; các quyền đã cấp vẫn giữ nguyên.
 2. **Giới hạn độ dài khi nhập tay.** Work Order Number, Part Number và Job Number nhận tối đa 200 ký tự khi tạo và sửa
    Work Order bằng tay, như import file đã làm, nên một giá trị dài hơn bị từ chối với thông báo rõ ràng thay vì thất
    bại thành lỗi database.
@@ -1392,7 +1392,7 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
   có một mục như vậy trong Administration); `Resolve exceptional production situations` (cho tới khi PROJECT_PROFILE
   định nghĩa một lệnh); `Export and print reports` (cho tới khi có một bề mặt báo cáo được định nghĩa);
   `Perform quantity corrections` và `Perform authorized historical corrections` (cho tới khi có các lệnh điều chỉnh số
-  lượng và hiệu chỉnh lịch sử). Phase 17 hiển thị chúng là để dành và không chọn được.
+  lượng và hiệu chỉnh lịch sử). Administration hiển thị chúng là để dành và không chọn được.
 - đăng nhập qua thư mục hoặc đăng nhập một lần (SSO) cho User của ứng dụng (không có yêu cầu chuẩn; bảng thông tin
   đăng nhập riêng giữ cho nó có thể thêm vào mà không phá gì); đăng nhập đa yếu tố tùy chọn và khôi phục qua email
   thuộc Phase 17
@@ -1408,7 +1408,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | Phase 16: log truy cập `web` không còn ghi các lần Production Board tự làm mới thành công. |
+| 2026-11-13 | uncommitted | Phase 17 mục 1 đã có: các permission key để dành hiển thị `(reserved)` và không chọn được. |
+| 2026-11-13 | `4a99914` | Phase 16: log truy cập `web` không còn ghi các lần Production Board tự làm mới thành công. |
 | 2026-11-13 | `6c0fa6c` | Quyết định của chủ sở hữu ngày 2026-11-13: thêm Phase 17; Phase 16 có thêm backup cấu hình trong Administration, log `web` gọn hơn và một `pf` tối giản; các quyết định archival được ghi lại và các quyết định mở của chủ sở hữu đã đóng. |
 | 2026-11-12 | `42ea4be` | Current State và Phase 16: PartFlow chạy thật trên NAS của công ty từ 2026-11-09; thông báo cập nhật không còn trong danh sách mặc định chưa xác nhận, và mục Deployment Admin ghi rằng việc phát triển nó đã dừng. |
 | 2026-11-12 | `b413c96` | Thứ tự khóa khi sao chép snapshot của Phase 16 đã có: một bản sao khi tách hay gộp khóa các Area và Operation của nó theo thứ tự tăng dần, cùng với Area đích của một lần chuyển một phần, nên các lần release và chuyển một phần cắt chéo không còn deadlock. |

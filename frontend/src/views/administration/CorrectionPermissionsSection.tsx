@@ -12,7 +12,11 @@ import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { CORRECTION_PERMISSIONS, permissionChoiceLabel } from './permissions';
+import {
+  CORRECTION_PERMISSIONS,
+  isReservedPermission,
+  permissionChoiceLabel,
+} from './permissions';
 import {
   PolicySwitch,
   ReadOnlyValues,
@@ -77,7 +81,8 @@ export function CorrectionPermissionsSection() {
           allocation does not need it. Undo recent eligible scans applies at the
           Scan Stations through the role marked Applied at Scan Stations;
           Perform quantity corrections and Perform authorized historical
-          corrections grant nothing yet because PartFlow has no such correction.
+          corrections are reserved: PartFlow has no such correction yet, so they
+          cannot be chosen.
         </p>
         <CorrectionRoleTable canWrite={canWrite} writeBlocked={writeBlocked} />
         <p className="admin-confighelp">
@@ -258,7 +263,9 @@ function CorrectionRoleTable({
                       type="checkbox"
                       aria-label={`${permissionChoiceLabel(key)} — ${role.name}`}
                       checked={role.permissions.includes(key)}
-                      disabled={writeBlocked || busy}
+                      disabled={
+                        writeBlocked || busy || isReservedPermission(key)
+                      }
                       onChange={() => void toggle(role, key)}
                     />
                   ) : role.permissions.includes(key) ? (

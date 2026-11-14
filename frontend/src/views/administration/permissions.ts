@@ -5,9 +5,9 @@
 // PartNumber master is Part Numbers), the four groups the Roles editor
 // shows, the correction subset edited only in Correction permissions,
 // the protected keys whose holders only a user who may manage correction
-// permissions changes, and the keys that grant nothing yet. Presentation
-// only: the server checks every permission itself, and nothing here
-// allows or refuses anything.
+// permissions changes, and the reserved keys that no PartFlow action
+// requires yet. Presentation only: the server checks every permission
+// itself, and nothing here allows or refuses anything.
 
 import type { Permission, Role } from '../../api/roles';
 
@@ -133,15 +133,21 @@ export const PROTECTED_PERMISSIONS: readonly Permission[] = [
   'MANAGE_CORRECTION_PERMISSIONS',
 ];
 
-/** Permissions no PartFlow action requires yet; marked as granting
- * nothing yet wherever they are chosen. */
-export const INERT_PERMISSIONS: readonly Permission[] = [
+/** Permissions no PartFlow action requires yet (reserved for later
+ * features): shown `(reserved)` and never chosen in Roles & permissions
+ * or Correction permissions; a grant that already exists stays. */
+export const RESERVED_PERMISSIONS: readonly Permission[] = [
   'MANAGE_SCAN_BEHAVIOR',
   'RESOLVE_EXCEPTIONAL_SITUATIONS',
   'EXPORT_REPORTS',
   'PERFORM_QUANTITY_CORRECTIONS',
   'PERFORM_HISTORICAL_CORRECTIONS',
 ];
+
+/** Whether `key` is reserved: shown, never chosen. */
+export function isReservedPermission(key: Permission): boolean {
+  return RESERVED_PERMISSIONS.includes(key);
+}
 
 /** Whether the role holds a correction permission or the permission to
  * manage them. */
@@ -150,9 +156,9 @@ export function roleHoldsProtected(role: Role): boolean {
 }
 
 /** The operator-facing label of a permission where it is chosen: the
- * label, marked when the permission grants nothing yet. */
+ * label, followed by `(reserved)` for a reserved permission. */
 export function permissionChoiceLabel(key: Permission): string {
-  return INERT_PERMISSIONS.includes(key)
-    ? `${PERMISSION_LABELS[key]} — grants nothing yet`
+  return isReservedPermission(key)
+    ? `${PERMISSION_LABELS[key]} (reserved)`
     : PERMISSION_LABELS[key];
 }

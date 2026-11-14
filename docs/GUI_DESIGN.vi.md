@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa commit ngày 2026-11-13.
+> Đồng bộ với bản tiếng Anh tại commit `6c0fa6c` cộng các thay đổi chưa commit ngày 2026-11-13.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2709,7 +2709,8 @@ trong Management bởi các production role được cấp quyền.
   permissions được sửa bằng permission đó.
 - **Quy tắc người giữ cuối cùng.** PartFlow từ chối một thay đổi khiến không còn người dùng active nào có mật khẩu được quản
   lý người dùng và role, hoặc được quản lý correction permission.
-- Các permission chưa cấp quyền gì được đánh dấu như vậy trong Roles & permissions.
+- Các permission chưa thao tác nào của PartFlow cần tới hiển thị `(reserved)` cạnh tên và không chọn được, trong Roles &
+  permissions và Correction permissions; một quyền đã cấp trước đó vẫn được hiển thị.
 - **Applied at Scan Stations.** Role được đánh dấu **Applied at Scan Stations** (ban đầu là Operator) quyết định mọi Scan
   Station đã enroll được làm gì.
 - Chỗ nào tài liệu này nói "Admin-only" (History archival & purge), nó có nghĩa là permission cấu hình system settings,
@@ -3932,7 +3933,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-13 | uncommitted | §3: đồng bộ lượt quét offline tham chiếu PROJECT_PROFILE §30 và §32, nơi không còn quyết định nào để mở. |
+| 2026-11-13 | uncommitted | §9: các permission để dành hiển thị `(reserved)` và không chọn được. |
+| 2026-11-13 | 6c0fa6c | §3: đồng bộ lượt quét offline tham chiếu PROJECT_PROFILE §30 và §32, nơi không còn quyết định nào để mở. |
 | 2026-11-12 | de4d99f | §3 quy tắc 13 và §4.11: trang tự tải lại sau 10 giây đếm ngược trong notice thay vì sau 60 s, và một trang có người dùng tự tải lại sau 1 phút không thao tác thay vì 2 phút; §9: màu và tên của một Area luôn nằm trên một dòng trong các bảng Administration. |
 | 2026-11-12 | 77a2dfb | §3 quy tắc 13: sau một bản cập nhật, mọi trang tự tải lại khi đã rảnh 2 phút mà không có dialog nào mở và không có dữ liệu chưa lưu; Scan Station và Production Board vẫn tự tải lại sau 60 s. |
 | 2026-11-12 | a7949e3 | Mọi dialog nhập liệu đóng ngay khi chưa thay đổi và hỏi trước khi bỏ dữ liệu đã thay đổi; các select bị ghim chiều cao cố định bỏ padding dọc để phần chân chữ không bao giờ bị cắt; một Scan Station mới đề xuất Station ID từ Area của nó, và ô Devices của nó nêu tên các thiết bị đã enroll và cả ô mở danh sách thiết bị; panel enroll trở thành một card căn giữa với ô nhập code lớn. |
