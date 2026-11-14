@@ -421,7 +421,7 @@ These rules apply to every view. They express the core principles of PROJECT_PRO
      request, the request fails as "nothing recorded"; the UI must never display a false recorded result
      (PROJECT_PROFILE §15).
    - This rule must be preserved unchanged in the production phases. Offline scan synchronization remains deferred and
-     unapproved (PROJECT_PROFILE §30, §32.4).
+     unapproved (PROJECT_PROFILE §30 and §32).
 
 7. **PartFlow vocabulary everywhere.** UI labels use the canonical names: PN, WO / Work Order, Work Order Demand,
    Request Type (`NEW` / `MODIFY`), Route Mode (`FLOATING` / `PLANNED`), Quantity Flow, Route, the Movement types
@@ -3892,7 +3892,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-12 | uncommitted | §3 rule 13 and §4.11: the page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; §9: an Area's color and name stay on one line in the Administration tables. |
+| 2026-11-13 | uncommitted | §3: offline scan synchronization refers to PROJECT_PROFILE §30 and §32, where no decision remains open. |
+| 2026-11-12 | de4d99f | §3 rule 13 and §4.11: the page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; §9: an Area's color and name stay on one line in the Administration tables. |
 | 2026-11-12 | 77a2dfb | §3 rule 13: every page reloads itself after an update once it has been idle for 2 minutes with no dialog and no unsaved input; the Scan Station and Production Board keep reloading after 60 s. |
 | 2026-11-12 | a7949e3 | Every data-entry dialog closes at once while unchanged and asks before discarding changed input; selects pinned to a fixed height lose their vertical padding so descenders are never cut; a new Scan Station proposes its Station ID from its Area, and its Devices cell names the enrolled devices and opens them as a whole; the enrollment panel became a centered card with a large code field. |
 | 2026-11-09 | 398c617 | Aligned with the code: the Undo and Retry action zones are transparent at rest with an inset divider rule, and an `ON_MACHINE` transfer announces `AREA_COMPLETED, then TRANSFERRED (one command)`. |

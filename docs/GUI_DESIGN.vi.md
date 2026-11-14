@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa commit ngày 2026-11-12.
+> Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa commit ngày 2026-11-13.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -442,7 +442,7 @@ Các quy tắc này áp dụng cho mọi view. Chúng diễn đạt các nguyên
      cùng và một request ghi, request đó thất bại với kết quả "không có gì được ghi nhận"; UI không bao giờ được hiển thị
      một kết quả đã ghi nhận sai sự thật (PROJECT_PROFILE §15).
    - Quy tắc này phải được giữ nguyên không đổi trong các giai đoạn sản xuất. Việc đồng bộ lượt quét offline vẫn bị hoãn
-     và chưa được duyệt (PROJECT_PROFILE §30, §32.4).
+     và chưa được duyệt (PROJECT_PROFILE §30 và §32).
 
 7. **Dùng từ vựng PartFlow ở mọi nơi.** Nhãn UI dùng các tên chuẩn: PN, WO / Work Order, Work Order Demand,
    Request Type (`NEW` / `MODIFY`), Route Mode (`FLOATING` / `PLANNED`), Quantity Flow, Route, các loại Movement
@@ -3932,7 +3932,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-12 | uncommitted | §3 quy tắc 13 và §4.11: trang tự tải lại sau 10 giây đếm ngược trong notice thay vì sau 60 s, và một trang có người dùng tự tải lại sau 1 phút không thao tác thay vì 2 phút; §9: màu và tên của một Area luôn nằm trên một dòng trong các bảng Administration. |
+| 2026-11-13 | uncommitted | §3: đồng bộ lượt quét offline tham chiếu PROJECT_PROFILE §30 và §32, nơi không còn quyết định nào để mở. |
+| 2026-11-12 | de4d99f | §3 quy tắc 13 và §4.11: trang tự tải lại sau 10 giây đếm ngược trong notice thay vì sau 60 s, và một trang có người dùng tự tải lại sau 1 phút không thao tác thay vì 2 phút; §9: màu và tên của một Area luôn nằm trên một dòng trong các bảng Administration. |
 | 2026-11-12 | 77a2dfb | §3 quy tắc 13: sau một bản cập nhật, mọi trang tự tải lại khi đã rảnh 2 phút mà không có dialog nào mở và không có dữ liệu chưa lưu; Scan Station và Production Board vẫn tự tải lại sau 60 s. |
 | 2026-11-12 | a7949e3 | Mọi dialog nhập liệu đóng ngay khi chưa thay đổi và hỏi trước khi bỏ dữ liệu đã thay đổi; các select bị ghim chiều cao cố định bỏ padding dọc để phần chân chữ không bao giờ bị cắt; một Scan Station mới đề xuất Station ID từ Area của nó, và ô Devices của nó nêu tên các thiết bị đã enroll và cả ô mở danh sách thiết bị; panel enroll trở thành một card căn giữa với ô nhập code lớn. |
 | 2026-11-09 | 398c617 | Căn chỉnh theo code: các vùng action Undo và Retry trong suốt khi nghỉ với đường kẻ phân cách thụt vào, và một transfer `ON_MACHINE` thông báo `AREA_COMPLETED, then TRANSFERRED (one command)`. |

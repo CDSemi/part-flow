@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-13.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -1637,6 +1637,8 @@ Khi số lượng được quét vào Stockroom:
 
 Movement sản xuất và Work Order Allocation luôn tách biệt nhau.
 
+Số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động: không lệnh nào chuyển nó từ Stockroom về lại một Area (quyết định của chủ sở hữu ngày 2026-11-13).
+
 ---
 
 ## Thứ tự phân bổ (Allocation Order)
@@ -2412,12 +2414,7 @@ Không đưa vào các trách nhiệm này nếu không có quyết định dự
 
 # 32. Các quyết định còn mở (Remaining Open Decisions)
 
-Chỉ còn các quyết định chưa được giải quyết sau:
-
-1. Số lượng đã nhập kho có được đưa trở lại sản xuất đang hoạt động qua một thao tác đảo ngược có kiểm soát hay không.
-2. Việc đồng bộ lần quét ngoại tuyến có được đưa vào một bản phát hành sau hay không.
-
-Việc triển khai phải tránh những giả định khiến các quyết định này khó thay đổi.
+Không còn quyết định sản phẩm nào để mở. Ngày 2026-11-13 chủ sở hữu đã chốt hai quyết định cuối: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động (§18), và việc đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch (§30) trừ khi mất mạng xảy ra thường xuyên, nên thao tác ghi sản xuất vẫn bị chặn khi mất kết nối.
 
 ---
 
@@ -2446,7 +2443,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Viết lại thành nội dung hiện hành cho người mới đọc. Hai câu nói chung được thu hẹp theo đúng các quy tắc cụ thể mà chúng mâu thuẫn (và code đang thực hiện): Work Order MODIFY nội bộ được tái sử dụng thì tăng dòng hiện có, và việc tăng số lượng của một dòng đã phát hành chỉ hợp lệ khi Work Order chưa hoàn tất. |
+| 2026-11-13 | uncommitted | §18 và §32: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động, đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch, và không còn quyết định sản phẩm nào để mở. |
+| 2026-11-09 | 398c617 | Viết lại thành nội dung hiện hành cho người mới đọc. Hai câu nói chung được thu hẹp theo đúng các quy tắc cụ thể mà chúng mâu thuẫn (và code đang thực hiện): Work Order MODIFY nội bộ được tái sử dụng thì tăng dòng hiện có, và việc tăng số lượng của một dòng đã phát hành chỉ hợp lệ khi Work Order chưa hoàn tất. |
 | 2026-10-08 | e13574f | Ngày nhận Work Order bị bỏ trống mặc định là ngày theo lịch của site, kể cả với Work Order được import. |
 | 2026-10-07 | 918f025 | Import từ tệp có thể cập nhật Work Order Open và Released hiện có sau danh sách thay đổi và xác nhận bằng cách gõ lại. |
 | 2026-10-07 | e1dee40 | Thêm import Work Order mới từ tệp CSV hoặc Excel. |

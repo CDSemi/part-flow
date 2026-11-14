@@ -226,8 +226,11 @@ that one. When everything works, return to [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md
 - Keep the PartFlow host name **Proxied**, the encryption mode **Full (strict)**, the API token limited to the zone,
   the NAS on its fixed address, and port `18080` bound to `127.0.0.1`.
 - Turn off UPnP on the router unless another documented need requires it, and review the router's firewall rules.
-- Turn on HSTS (on the DSM rule or in Cloudflare) only after HTTPS has worked reliably for a while: browsers then
-  refuse plain HTTP for that name for a long time, even if you later need it.
+- Turn on HSTS in Cloudflare (**SSL/TLS → Edge Certificates → HTTP Strict Transport Security**) once HTTPS has worked
+  reliably for two to four weeks, with the shortest max-age offered (about one month), without `includeSubDomains`
+  and without preload. Turning it off stops Cloudflare sending it at once, but a browser that has already seen it
+  keeps refusing plain HTTP for that name until its max-age ends; to retire it, set the max-age to 0 for one max-age
+  period before turning it off.
 
 ## 13. Known limitations
 
@@ -272,5 +275,6 @@ that one. When everything works, return to [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Restructured as one numbered path from the public address check to the outside test; the DSM reverse proxy rule now comes from the NAS guide instead of being repeated; the per-vendor checklists were folded into the steps; added the known limitations (Internet dependency, Cloudflare's 100-second limit, shared rate limits, unmonitored Origin certificate), the exposure of the forwarded port with the recommendation to admit only Cloudflare, the Cloudflare errors 522 to 524, and the optional HTTPS redirect. |
+| 2026-11-13 | uncommitted | §12: HSTS is turned on in Cloudflare after two to four weeks of reliable HTTPS, with a one-month max-age and neither `includeSubDomains` nor preload (owner decision). |
+| 2026-11-10 | `e0e5056` | Restructured as one numbered path from the public address check to the outside test; the DSM reverse proxy rule now comes from the NAS guide instead of being repeated; the per-vendor checklists were folded into the steps; added the known limitations (Internet dependency, Cloudflare's 100-second limit, shared rate limits, unmonitored Origin certificate), the exposure of the forwarded port with the recommendation to admit only Cloudflare, the Cloudflare errors 522 to 524, and the optional HTTPS redirect. |
 | 2026-11-10 | `8a7e2b5` | First version: Cloudflare DDNS with a scoped API token, the Origin CA certificate and Full (strict), UniFi port forwarding for a free or occupied WAN port 443, the DSM reverse proxy, troubleshooting and end-to-end checks. |

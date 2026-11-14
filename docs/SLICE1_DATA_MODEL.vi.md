@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `b405c6e` cộng các thay đổi chưa commit ngày 2026-11-09. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -1302,8 +1302,8 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Khả năng | Trạng thái | Hướng đi |
 |---|---|---|
 | Trường và đồng bộ ERP | hoãn và chưa được duyệt (IMPLEMENTATION_ROADMAP Deferred) | một ranh giới tích hợp tách biệt; `device_event_id` vẫn tương thích |
-| Đồng bộ quét offline | một quyết định còn mở (PROJECT_PROFILE §32 mục 2); các lần ghi sản xuất vẫn bị chặn khi mất kết nối | `device_event_id` được chọn để một thiết kế offline được duyệt trong tương lai không cần đổi tên (§20) |
-| Đưa số lượng đã nhập kho trở lại sản xuất active | một quyết định còn mở (PROJECT_PROFILE §32 mục 1) | về sau có thể mở rộng check movement-type theo kiểu chỉ-thêm (§20) |
+| Đồng bộ quét offline | không lên kế hoạch (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §32); các lần ghi sản xuất vẫn bị chặn khi mất kết nối | `device_event_id` được chọn để một thiết kế offline được duyệt trong tương lai không cần đổi tên (§20) |
+| Đưa số lượng đã nhập kho trở lại sản xuất active | không thuộc PartFlow (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §18) | không có |
 | Lưu trữ và xóa (archival và purge) lịch sử Movement bởi quản trị | được lên kế hoạch trong IMPLEMENTATION_ROADMAP Phase 16; khoảng retention đã được lưu (`application_policy.retention_period_months`) nhưng không đường sản xuất nào đọc | một đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
 | Các khả năng import file bổ sung | hoãn cho tới khi một quyết định của owner yêu cầu (IMPLEMENTATION_ROADMAP Deferred) | không có thay đổi schema nào được lên kế hoạch |
 
@@ -1370,12 +1370,12 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 
 ## 20. Remaining Uncertainty
 
-Chỉ các quyết định còn mở của PROJECT_PROFILE §32 liên quan tới slice này, và không cái nào chặn nó:
+Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới slice này; ngày 2026-11-13 chủ sở hữu đã chốt hai quyết
+định cuối:
 
-- **Đưa số lượng từ kho trở lại sản xuất active** (PROJECT_PROFILE §32 mục 1) về sau có thể mở rộng check movement-type;
-  thay đổi sẽ theo kiểu chỉ-thêm. Cho tới khi được quyết định, một command `STOCKED` không bao giờ bị undo; điều chỉnh
-  allocation là đường correction.
-- **Đồng bộ quét offline** (PROJECT_PROFILE §32 mục 2): slice này giả định ngữ nghĩa online đồng bộ (§14).
+- **Đưa số lượng từ kho trở lại sản xuất active** không thuộc PartFlow (PROJECT_PROFILE §18): một command `STOCKED`
+  không bao giờ bị undo, và điều chỉnh allocation là đường correction.
+- **Đồng bộ quét offline** không được lên kế hoạch (PROJECT_PROFILE §32): slice này giữ ngữ nghĩa online đồng bộ (§14).
   `device_event_id` được chọn để một thiết kế offline được duyệt trong tương lai không cần đổi tên.
 
 ---
@@ -1384,7 +1384,8 @@ Chỉ các quyết định còn mở của PROJECT_PROFILE §32 liên quan tới
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-09 | uncommitted | Viết lại thành nội dung hiện tại cho người đọc mới; phần mô tả schema nay khớp với migration head `0032_phase14_route_adjusted` và code release; không thay đổi rule nào. |
+| 2026-11-13 | uncommitted | §18 và §20: việc trả số lượng đã nhập kho và đồng bộ quét offline đã được chốt bởi các quyết định của chủ sở hữu ngày 2026-11-13. |
+| 2026-11-09 | `398c617` | Viết lại thành nội dung hiện tại cho người đọc mới; phần mô tả schema nay khớp với migration head `0032_phase14_route_adjusted` và code release; không thay đổi rule nào. |
 | 2026-10-08 | `1116b07` | Database role và grant cho production, với việc thu hồi chỉ-append do `apply-grants` áp dụng. |
 | 2026-10-07 tới 2026-10-08 | `e1dee40`, `918f025`, `e13574f` | Import Work Order từ file: dấu hiệu intake, idempotency theo Work Order Number, ngày nhận mặc định theo lịch nhà máy. |
 | 2026-10-07 | `961c0a1`, `1c9d755`, `582baf0` | Bộ đọc audit trail theo PN chỉ-đọc; tầng theme của User. |

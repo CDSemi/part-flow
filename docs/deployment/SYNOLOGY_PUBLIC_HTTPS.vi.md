@@ -1,7 +1,7 @@
 # Truy cập PartFlow từ Internet qua Cloudflare
 
-> **Bản gốc:** [`SYNOLOGY_PUBLIC_HTTPS.md`](./SYNOLOGY_PUBLIC_HTTPS.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
-> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`SYNOLOGY_PUBLIC_HTTPS.md`](./SYNOLOGY_PUBLIC_HTTPS.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn tùy chọn này giúp truy cập PartFlow trên NAS Synology của công ty từ bất cứ đâu, qua một địa chỉ như
@@ -228,8 +228,10 @@ Cloudflare kiểm tra. Khi mọi thứ hoạt động, quay lại [`SYNOLOGY_NAS
 - Giữ tên miền truy cập của PartFlow ở **Proxied**, chế độ mã hóa ở **Full (strict)**, API token chỉ giới hạn trong
   zone, NAS ở địa chỉ cố định, và cổng `18080` chỉ bind vào `127.0.0.1`.
 - Tắt UPnP trên router trừ khi có nhu cầu khác đã được tài liệu hóa, và rà soát các rule tường lửa của router.
-- Chỉ bật HSTS (trên rule DSM hoặc trong Cloudflare) sau khi HTTPS đã hoạt động ổn định một thời gian: khi đó trình
-  duyệt từ chối HTTP thường cho tên đó trong thời gian dài, ngay cả khi sau này bạn cần dùng lại.
+- Bật HSTS trong Cloudflare (**SSL/TLS → Edge Certificates → HTTP Strict Transport Security**) khi HTTPS đã hoạt động
+  ổn định hai tới bốn tuần, với max-age ngắn nhất có thể chọn (khoảng một tháng), không bật `includeSubDomains` và
+  không preload. Tắt nó thì Cloudflare ngừng gửi ngay, nhưng trình duyệt nào đã nhận thì vẫn từ chối HTTP thường cho
+  tên đó tới khi hết max-age; muốn gỡ hẳn, đặt max-age về 0 trong một khoảng max-age rồi mới tắt.
 
 ## 13. Các hạn chế đã biết
 
@@ -274,5 +276,6 @@ Cloudflare kiểm tra. Khi mọi thứ hoạt động, quay lại [`SYNOLOGY_NAS
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Cấu trúc lại thành một lộ trình đánh số từ bước kiểm tra địa chỉ public đến bước kiểm tra từ bên ngoài; rule reverse proxy của DSM nay lấy từ hướng dẫn NAS thay vì lặp lại; các checklist theo từng nhà cung cấp được gộp vào các bước; thêm các hạn chế đã biết (phụ thuộc Internet, giới hạn 100 giây của Cloudflare, giới hạn tần suất dùng chung, chứng chỉ Origin không được giám sát), việc cổng được chuyển tiếp bị lộ cùng khuyến nghị chỉ cho phép Cloudflare, các lỗi Cloudflare 522 đến 524, và tùy chọn chuyển hướng HTTPS. |
+| 2026-11-13 | uncommitted | §12: bật HSTS trong Cloudflare sau hai tới bốn tuần HTTPS ổn định, với max-age một tháng, không `includeSubDomains` và không preload (quyết định của chủ sở hữu). |
+| 2026-11-10 | `e0e5056` | Cấu trúc lại thành một lộ trình đánh số từ bước kiểm tra địa chỉ public đến bước kiểm tra từ bên ngoài; rule reverse proxy của DSM nay lấy từ hướng dẫn NAS thay vì lặp lại; các checklist theo từng nhà cung cấp được gộp vào các bước; thêm các hạn chế đã biết (phụ thuộc Internet, giới hạn 100 giây của Cloudflare, giới hạn tần suất dùng chung, chứng chỉ Origin không được giám sát), việc cổng được chuyển tiếp bị lộ cùng khuyến nghị chỉ cho phép Cloudflare, các lỗi Cloudflare 522 đến 524, và tùy chọn chuyển hướng HTTPS. |
 | 2026-11-10 | `8a7e2b5` | Phiên bản đầu: Cloudflare DDNS với API token giới hạn phạm vi, chứng chỉ Origin CA và Full (strict), chuyển tiếp cổng UniFi cho trường hợp cổng WAN 443 còn trống hoặc đã bị dùng, reverse proxy DSM, xử lý sự cố và kiểm tra đầu-cuối. |

@@ -1311,8 +1311,8 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 | Capability | State | Path |
 |---|---|---|
 | ERP fields and synchronization | deferred and not approved (IMPLEMENTATION_ROADMAP Deferred) | an isolated integration boundary; `device_event_id` stays compatible |
-| Offline scan synchronization | an open decision (PROJECT_PROFILE §32 item 2); production writes stay blocked while disconnected | `device_event_id` was chosen so that a future approved offline design needs no renaming (§20) |
-| Return of stocked quantity to active production | an open decision (PROJECT_PROFILE §32 item 1) | it may later widen the movement-type check additively (§20) |
+| Offline scan synchronization | not planned (owner decision of 2026-11-13, PROJECT_PROFILE §32); production writes stay blocked while disconnected | `device_event_id` was chosen so that a future approved offline design needs no renaming (§20) |
+| Return of stocked quantity to active production | not part of PartFlow (owner decision of 2026-11-13, PROJECT_PROFILE §18) | none |
 | Administrative Movement-history archival and purge | planned in IMPLEMENTATION_ROADMAP Phase 16; the retention period is stored (`application_policy.retention_period_months`) but read by no production path | a separate privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
 | Further file-import capabilities | deferred until an owner decision asks for them (IMPLEMENTATION_ROADMAP Deferred) | no schema change is planned |
 
@@ -1379,13 +1379,12 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 
 ## 20. Remaining Uncertainty
 
-Only the open decisions of PROJECT_PROFILE §32 touch this slice, and neither blocks it:
+No open decision of PROJECT_PROFILE touches this slice any more; the owner settled the last two on 2026-11-13:
 
-- **Return from stock to active production** (PROJECT_PROFILE §32 item 1) may later widen the movement-type check;
-  the change would be additive. Until it is decided, a `STOCKED` command is never undone; allocation adjustments are
-  the correction path.
-- **Offline scan synchronization** (PROJECT_PROFILE §32 item 2): this slice assumes synchronous online semantics (§14).
-  `device_event_id` was chosen so that a future approved offline design would not require renaming.
+- **Return from stock to active production** is not part of PartFlow (PROJECT_PROFILE §18): a `STOCKED` command is
+  never undone, and allocation adjustments are the correction path.
+- **Offline scan synchronization** is not planned (PROJECT_PROFILE §32): this slice keeps synchronous online semantics
+  (§14). `device_event_id` was chosen so that a future approved offline design would not require renaming.
 
 ---
 
@@ -1393,7 +1392,8 @@ Only the open decisions of PROJECT_PROFILE §32 touch this slice, and neither bl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-09 | uncommitted | Rewritten as current content for new readers; the schema description now matches migration head `0032_phase14_route_adjusted` and the release code; no rule changed. |
+| 2026-11-13 | uncommitted | §18 and §20: the return of stocked quantity and offline scan synchronization are settled by the owner decisions of 2026-11-13. |
+| 2026-11-09 | `398c617` | Rewritten as current content for new readers; the schema description now matches migration head `0032_phase14_route_adjusted` and the release code; no rule changed. |
 | 2026-10-08 | `1116b07` | Production database roles and grants, with the append-only revocation applied by `apply-grants`. |
 | 2026-10-07 to 2026-10-08 | `e1dee40`, `918f025`, `e13574f` | File-based Work Order import: intake marker, idempotency by Work Order Number, received-date default on the site calendar. |
 | 2026-10-07 | `961c0a1`, `1c9d755`, `582baf0` | Read-only PN audit trail reader; User theme tier. |

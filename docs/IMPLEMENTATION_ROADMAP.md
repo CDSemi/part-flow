@@ -50,7 +50,8 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 13 — Full Administration and Production Identity Configuration | Closed (2026-10-07) | Workers, Worker identification and sessions, master-data management, policies, Users and roles as configuration. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, the open follow-ups and Movement-history archival remain. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, backups set in Administration, a quieter `web` log, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
+| Phase 17 — Owner Decisions After Go-Live | Planned | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
 **Database schema.** The current Alembic migration head is `0032_phase14_route_adjusted`
 (`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phases 15 and 16 added no migration.
@@ -590,8 +591,8 @@ the Stockroom (Phase 10) arrived in their own phases.
 
 **Temporary limitations.** None.
 
-**Open follow-ups.** Whether stocked quantity may be returned to active production through a controlled reversal is
-an open owner decision (PROJECT_PROFILE §32); until it is decided, stocked quantity never returns to production.
+**Open follow-ups.** None. Stocked quantity never returns to active production (owner decision of 2026-11-13,
+PROJECT_PROFILE §18).
 
 ## Phase 10.5 — Scan Station Receive Quantity Gap Closure (named corrective prerequisite — no later phases renumbered)
 
@@ -1047,9 +1048,9 @@ A route deviation already recorded on the actual `TRANSFERRED` Movement is not d
   station reversal row; a deep link into Priority or the trail; auditing reads of the trail; a Hot list actor in the
   Priority view itself; clearing a saved User theme, showing or editing it in Administration, and live theme sync
   between open browsers.
-- Directory or single sign-on (SSO) sign-in, multi-factor authentication, self-service password reset, the Tracking
-  `Quantity adjustment` and historical-correction commands, and the permission keys no route requires yet — listed
-  under `Deferred`. Returning stocked quantity to production stays an open owner decision (PROJECT_PROFILE §32).
+- Directory or single sign-on (SSO) sign-in, the Tracking `Quantity adjustment` and historical-correction commands,
+  and the permission keys no route requires yet — listed under `Deferred`; optional multi-factor sign-in and email
+  recovery are Phase 17. Stocked quantity never returns to active production (PROJECT_PROFILE §18).
 
 ## Phase 15 — File-Based Work Order Import
 
@@ -1129,6 +1130,9 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - platform-upgrade identity checks: canonical PN and Worker badge identity follow the backend Python's Unicode Character Database (UCD), pinned to `15.0.0`, and the Asset Tag prefix check refuses Python's `\s` whitespace set, a strict superset of PostgreSQL's libc `[[:space:]]`; before any Python upgrade that changes the UCD, or a glibc change, a read-only check lists every stored PN, badge and Asset Tag prefix whose canonical form or CHECK outcome would change, and the owner decides on re-canonicalization before the upgrade
 - PN entry canonical form: the Work Orders typed-PN and demand-label paths submit the trimmed raw input and display the server's canonical form, so the browser's Unicode tables never decide a stored PN (today they can diverge from the server only on about 27 Unicode-version-sensitive code points)
 - AssignedRoute snapshot copy lock order — delivered: a partial-quantity transfer locks its target Area in one ascending pass with the Areas of the snapshot its split copies (`route_templates.lock_assignment_areas`, as for release and receipt), and every snapshot copy of a split child or a merge result (`lineage.copy_assigned_route`) locks its Areas, then its Operations, `FOR KEY SHARE` in ascending id order before its INSERT (`route_templates.lock_snapshot_references`); a crossing release or a second crossing partial transfer therefore waits instead of deadlocking, which the crossing-route concurrency tests in `backend/tests/test_route_template_management_api.py` prove
+- backups set in Administration (owner decision of 2026-11-13): the backup interval and the numbers of hourly, daily and weekly backups kept are edited in Administration, by default one backup every hour with 48 hourly, 30 daily and 52 weekly backups kept (a recovery point objective of one hour); the host task runs every hour and takes and rotates backups by those values, and the backup-age threshold of `check.sh` follows the interval
+- a `web` access log without the successful automatic refreshes of the Production Board feed (owner decision of 2026-11-13), so a board refreshing every 5 seconds no longer shortens the log; a failed refresh is still logged
+- a minimal `pf` (owner decision of 2026-11-13): one small command on top of `deploy/production` with `install`, `update`, `backup`, `restore` and `status` for the production stack, where `update` runs `release.sh` (so every update keeps the candidate's check (j)); it replaces the staging-only Deployment Admin (`deploy/synology/`, `compose.nas.yaml` and `deployment/SYNOLOGY_ADMIN.md`), which is removed, and the separate deployment-kit project is paused
 - **administrative Movement-history archival/purge maintenance** (PROJECT_PROFILE §28): configurable retention period, select-by-cutoff → lossless archive export → verify → purge exactly the verified archived rows through a separate privileged maintenance path; keep reversal/reference chains and atomic-command groups whole so no retained row references purged history; include policy / size-threshold / manual triggers, scope preview, mandatory reason, and full audit; normal runtime remains append-only; no full retention/archival engine is built before this phase; the retention period is already stored by Phase 13 (`application_policy.retention_period_months`, whole months or none), and the data-size threshold's measure and unit are defined here together with its trigger
 
 PartNumber master hard deletion is **not** a Phase 16 maintenance operation. It belongs to Phase 13 Management → Part
@@ -1286,35 +1290,35 @@ is recorded as done on the real host yet; the scripts were run on Docker Desktop
 
 ### Planned: Movement-history archival and purge
 
-Archival and purge follow when the data volume needs them; nothing of it is implemented. Today the retention period is
-stored but read by nothing, all Movement history stays in the database, Administration states that archival and
-purge runs are not available yet, check (g) is `not_applicable`, and `check.sh` reports `archival_proposal` as
+The owner decided on 2026-11-13 to build archival and purge now; nothing of it is implemented yet. Today the retention
+period is stored but read by nothing, all Movement history stays in the database, Administration states that archival
+and purge runs are not available yet, check (g) is `not_applicable`, and `check.sh` reports `archival_proposal` as
 `SKIP`. The planned work has three steps: (1) the run record, the authorization, the preview, request and approval
-screen, and the archive export and verification, with no deletion; (2) the privileged purge with a carry-forward
-record of purged flows, so derived quantities stay correct; (3) the policy and size-threshold triggers, which only
-propose runs. Constraints already fixed by the implemented work: the archive directory lies outside
-`PARTFLOW_BACKUP_DIR` and is never rotated or pruned by any tool; the purge precondition is a backup checked by
-`backup-verify` whose dump started after the run's verification; the maintenance role gets DELETE on `part_movements`
-only, with its new trigger and function added to the pinned guard set of check (h) in the same commit as their
-migration; the new run tables get a grant class and a `maintenance` service is added; and a Movement purge deletes
-Movements only, never `worker_sessions` rows.
+screen, and the archive export and verification, with no deletion; (2) the privileged purge with a carry-forward record
+of purged flows, so derived quantities stay correct; (3) the policy and size-threshold triggers, which only propose
+runs. Constraints already fixed by the implemented work: the archive directory lies outside `PARTFLOW_BACKUP_DIR` and is
+never rotated or pruned by any tool; the purge precondition is a backup checked by `backup-verify` whose dump started
+after the run's verification; the maintenance role gets DELETE on `part_movements` only, with its new trigger and
+function added to the pinned guard set of check (h) in the same commit as their migration; the new run tables get a
+grant class and a `maintenance` service is added; and a Movement purge deletes Movements only, never `worker_sessions`
+rows.
 
-Owner decisions needed before this work starts:
+Owner decisions of 2026-11-13; the History archival & purge section of Administration edits each setting:
 
-- the deletion scope (proposed default: Movement rows only, with a carry-forward record of purged flows as a second
-  evidence source for released, stocked and route-usage quantities, which needs PROJECT_PROFILE §13 and §28
-  amendments);
-- the archive format, storage, verification and durability (including off-host replication with a recorded checksum
-  before any purge);
-- the permission key that authorizes archival and purge execution (a new key, or an existing one such as
-  `CONFIGURE_SYSTEM_SETTINGS`);
-- the manual cutoff rule (no newer than the configured retention period, or a fixed 12-month floor when no period is
-  set);
-- the execution model (approval in the application with a reason and preview, executed by an out-of-band maintenance
-  job, optionally with a second approval by the host operator);
-- the meaning and unit of the data-size threshold (for example the live Movement row count);
-- whether a configured policy may ever run without a per-run approval (proposed default: no);
-- whether the audit rows written by file import are ever retained or purged (proposed default: deferred).
+- the deletion scope: the Movement history of closed flows with the carry-forward record (which needs the
+  PROJECT_PROFILE §13 and §28 amendments), plus optional groups chosen in Administration (completed Work Orders with
+  their demands and allocations, Worker session history, Machine lifecycle history); the audit trail, including the
+  rows written by file import, is never purged (proposed; confirmed with the design);
+- the archive: compressed text files (CSV or JSON Lines) with a SHA-256 checksum, copied off the host before any purge;
+- the permission: a new key, `Run history archival and purge` (proposed; confirmed with the design);
+- the cutoff: the retention period, 24 months by default, never newer than 12 months;
+- the execution: approval in the application with a reason and a preview, carried out by an out-of-band maintenance
+  job, with no second approval; the approval step can be switched off;
+- the threshold: the live Movement row count by default, or the age of the history, or the database size;
+- automatic runs: a policy may start runs by itself, switched on or off in Administration.
+
+The owner reviews the design of these three steps before the build starts, because a purge deletes production
+history.
 
 ### Temporary limitations
 
@@ -1328,33 +1332,49 @@ Owner decisions needed before this work starts:
   against every projection, and the owner may check by hand (`restore-test.sh --keep`).
 - Writes made outside the application are outside the backup freshness guarantee.
 - Backups hold every table, including credential hashes, so the backup directory and every copy are secret.
-- Until the daily backup task runs, the only backups are those `release.sh` takes before each release.
-
-### Open owner decisions
-
-- Accept the implemented rollback-by-restore target: a new, empty database inside the same PostgreSQL instance instead
-  of "a clean instance" (if rejected, a new volume replaces that step of the procedure; no data repair follows).
-- The real backup retention counts (placeholders: 14 daily and 8 weekly) and, if wanted, an approved recovery point
-  objective (RPO) and recovery time objective (RTO); the daily schedule gives an RPO of 24 hours until then.
-- Whether to send HSTS from the platform proxy.
-- Recommended defaults in force that the owner has not explicitly confirmed and may change: readiness answering 503 on
-  a schema mismatch; the backend write gate; the two database roles and the accepted superuser limit of check (h);
-  encryption and off-host replication by the platform tool; and the monitoring thresholds above.
+- Until the host backup task runs, the only backups are those `release.sh` takes before each release.
 
 ### Open follow-ups
 
 - PN entry canonical form (scope bullet above) — not implemented.
 - Platform-upgrade identity checks: the Python side is implemented by check (j); before any Python or glibc upgrade the
   owner reviews the check's list and decides on re-canonicalization.
-- Deployment Admin (the separate `pf` tool used for staging): development stopped on 2026-10-14, when the owner chose
-  to rebuild the deployment kit as a separate project
-  ([`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)), so its open steps will not be built: moving its
-  container health checks and frontend probes to `GET /api/health/live` (needed before staging runs a commit whose
-  schema head differs from the staging database, because `/api/health` is readiness), its database-role provisioning
-  and backup adoption (PF-A4.1), and a managed route for running an application command on staging (PF-A4). The
-  replacement keeps the rule that `apply-grants` runs after every restore and that check (h) passes before the
-  application starts.
+- Deployment Admin (the staging-only `pf`, [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)): its
+  development stopped on 2026-10-14 and the minimal `pf` (scope bullet above) replaces it; until then it stays in its
+  last state and its open steps are not built.
 - Movement-history archival and purge — planned above.
+
+## Phase 17 — Owner Decisions After Go-Live
+
+The owner decided these changes on 2026-11-12 and 2026-11-13, after go-live. None is implemented yet; each lands as a
+change of its own, in this order:
+
+1. **Reserved permission keys.** The keys that no route requires yet show `(reserved)` beside their name and cannot be
+   ticked, in Roles & permissions and in Correction permissions; grants that already exist stay.
+2. **Length limit on manual entry.** Work Order Number, Part Number and Job Number accept at most 200 characters in the
+   manual Work Order create and edit, as file import already does, so a longer value is refused with a clear message
+   instead of failing as a database error.
+3. **Super User role.** A fourth seeded role, `Super User`, holds every permission key, and a migration that adds a key
+   later grants it to this role too. An existing role named `Super User` is completed, not duplicated.
+4. **Unique names.** Area names are unique within a Department, and Planned Route names are unique. A read-only check
+   lists existing duplicates so that the owner renames them before installing the release, because the migration
+   refuses while one exists.
+5. **The allocating Worker.** An allocation recorded at a Scan Station shows the Worker whose badge recorded it, in the
+   Work Order details and in PN Tracking, as a Management allocation shows its user.
+6. **Add to Hot list at intake.** The New Work Order dialog can put its demand lines on the Hot list. They join at the
+   bottom through the Hot-list command (no typed rank), for users who may set demand priority.
+7. **Settings previews.** Scan behavior and General settings show their candidate settings as disabled controls, each
+   marked as not available yet. Scan behavior: success and error sounds, ignoring a repeated scan of the same code
+   within a set time, allowing typed entry at Scan Stations, the scanner's ending key and the prefix or suffix to strip,
+   confirming automatically when exactly one result matches, and the default quantity. General settings: the site name
+   and logo, the time zone and date format, the board refresh intervals and the update countdown.
+8. **Optional multi-factor sign-in.** Each user may add one-time codes (TOTP) and passkeys (for example kept in
+   1Password), which make signing in easier; neither is ever required, Administrators included. A user who loses them
+   signs in with a one-time recovery code or recovers by email, which needs an outgoing mail server set in General
+   settings and an email address on the user.
+
+This phase changes GUI_DESIGN §9 (a section not available yet shows disabled previews instead of only a statement) and
+PROJECT_PROFILE §20 (four seeded roles); each item updates its owning documents when it lands.
 
 ## Deferred
 
@@ -1369,55 +1389,38 @@ Each item below waits for an owner decision or a canonical requirement; none has
   clearing a due date or Job Number with a blank cell, adding lines to a Released Work Order by import, changing a Work
   Order header field from a file, and per-Work-Order confirmation digests (which would need a non-stateless
   transport).
-- Retention or purge of the audit rows a file import writes: PROJECT_PROFILE §28 scopes retention to PartMovement and
-  the import keeps no import record; the Phase 16 archival decisions carry it with the default "deferred".
-- A shared length cap for Work Order Number, Part Number and Job Number on the manual Work Order create and edit: the
-  import refuses text cells over 200 characters, while the manual path accepts any length, so a value beyond the
-  database index entry limit (about 2.7 KB of poorly compressible text) fails as an unhandled database error (HTTP 500,
-  rolled back, nothing written) instead of a 422. The owner decides the shared cap before one rule is applied to both
-  paths.
-- offline scan synchronization (not part of the MVP; production writes stay blocked while disconnected; an open
-  decision in PROJECT_PROFILE §32)
+- offline scan synchronization (not part of the MVP; production writes stay blocked while disconnected; the owner
+  decided on 2026-11-13 not to plan it unless network outages become frequent)
 - WebSocket/SSE push connectivity (event-driven + polled health detection is the approved mechanism)
 - advanced analytics
 - speculative automation
 - broad ERP and manufacturing execution system (MES) features
-- priority entry at Work Order intake (PROJECT_PROFILE §21 Work Orders item 5, GUI_DESIGN §11.2 "priority when
-  applicable") — deferred by the owner on 2026-10-04; the Hot list (Management → Priority) stays the only place priority
-  is set; when picked up, an "add to Hot list" entry point through the same command, appended at the bottom (no typed
-  rank), because a typed rank at intake would be a second writer of the dense list
-- scan-behavior policies and general application settings beyond the Due Soon warning and the User sign-in settings —
-  no canonical setting is defined (PROJECT_PROFILE §20 and §21 and GUI_DESIGN §9 only name the sections);
-  Administration shows them as not available yet until the owner defines their content (owner default, 2026-10-04)
+- working scan-behavior policies and general application settings beyond the Due Soon warning, the User sign-in
+  settings and the outgoing mail server — no canonical setting is defined (PROJECT_PROFILE §20 and §21 and GUI_DESIGN
+  §9 only name the sections); Phase 17 shows the candidate settings as disabled previews, and each becomes a working
+  setting only when the owner asks for it
 - the Tracking `Quantity adjustment` and historical-correction commands (owner decision of 2026-10-06)
 - permission keys that no route requires yet, with their owners: `Manage scan behavior` (with the Scan behavior
   section, once one exists in Administration); `Resolve exceptional production situations` (until PROJECT_PROFILE
   defines a command); `Export and print reports` (until a report surface is defined); `Perform quantity corrections`
   and `Perform authorized historical corrections` (until the quantity-adjustment and historical-correction commands
-  exist). Administration marks them as granting nothing yet.
-- directory or single sign-on (SSO) sign-in, multi-factor authentication and self-service password reset for
-  application Users (no canonical requirement; the separate credential table keeps them additive)
+  exist). Phase 17 shows them as reserved and not selectable.
+- directory or single sign-on (SSO) sign-in for application Users (no canonical requirement; the separate credential
+  table keeps it additive); optional multi-factor sign-in and email recovery are Phase 17
 - Phase 13 follow-ups with no canonical requirement:
-  - `POST /api/areas` retry safety: Area names are not unique and there is no idempotency key, so a fix needs an
-    idempotency key, an API change or a canonical Area-name rule;
-  - a display surface for the Worker recorded on allocation rows (`allocated_by_worker_id`; GUI_DESIGN §7.2 defines no
-    Worker field there);
   - a surface for Worker Session history and `scan_session_id`;
   - retiring the development-only Scan Station mock preview (`ScanStationMockView.tsx`, `?preview=mock` and its mock
     datasets; never in a production build);
   - showing in Tracking whether a badge gate confirmed an action;
   - Undo reason categories or per-Area scope;
   - suggesting the snapshot's preferred Machine during Machine assignment;
-  - unique Planned Route names (needs a canonical rule first);
-  - snapshotting the Route Template name at release, so PN Tracking shows the release-time name;
-  - admitting inactive Areas on Planned Route steps (an Application and UI rule change with no data repair; today an
-    inactive Area is refused at save and shown `{name} (unavailable)` in the editor).
 
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Current State and Phase 16: PartFlow is live on the company NAS since 2026-11-09; the update notice left the unconfirmed defaults, and the Deployment Admin follow-ups record that its development stopped. |
+| 2026-11-13 | uncommitted | Owner decisions of 2026-11-13: Phase 17 added; Phase 16 gains backups set in Administration, a quieter `web` log and a minimal `pf`; the archival decisions are recorded and the open owner decisions are closed. |
+| 2026-11-12 | `42ea4be` | Current State and Phase 16: PartFlow is live on the company NAS since 2026-11-09; the update notice left the unconfirmed defaults, and the Deployment Admin follow-ups record that its development stopped. |
 | 2026-11-12 | `b413c96` | Phase 16 snapshot copy lock order delivered: a split or merge copy locks its Areas and Operations in ascending order, together with a partial transfer's target Area, so crossing releases and partial transfers no longer deadlock. |
 | 2026-11-12 | `de4d99f` | Phase 16 release flow: an outdated page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; the Production Board refreshes every 5 seconds instead of 15 (owner decisions). |
 | 2026-11-12 | `77a2dfb` | Phase 16 release flow: every outdated page reloads itself once idle, not only the Scan Station and Production Board, and the browser checks after a release on the NAS cover it. |

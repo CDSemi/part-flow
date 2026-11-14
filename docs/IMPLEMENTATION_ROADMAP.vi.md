@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `42ea4be` cộng các thay đổi chưa commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -49,7 +49,8 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 13 — Full Administration and Production Identity Configuration | Đã đóng (2026-10-07) | Worker, nhận diện Worker và phiên, quản lý master data, chính sách, User và role dưới dạng cấu hình. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, backup cấu hình trong Administration, log `web` gọn hơn, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
+| Phase 17 — Owner Decisions After Go-Live | Đã lên kế hoạch | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
 **Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0032_phase14_route_adjusted`
 (`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phase 15 và 16 không thêm migration nào.
@@ -584,9 +585,8 @@ Stockroom (Phase 10) đến ở các phase riêng của chúng.
 
 **Giới hạn tạm thời.** Không có.
 
-**Việc còn mở.** Việc số lượng đã nhập kho có được trả lại sản xuất qua một lần đảo ngược có kiểm soát hay không là một
-quyết định mở của chủ sở hữu (PROJECT_PROFILE §32); cho tới khi được quyết, số lượng đã nhập kho không bao giờ quay lại
-sản xuất.
+**Việc còn mở.** Không có. Số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động (quyết định của chủ sở
+hữu ngày 2026-11-13, PROJECT_PROFILE §18).
 
 ## Phase 10.5 — Scan Station Receive Quantity Gap Closure (named corrective prerequisite — no later phases renumbered)
 
@@ -1037,10 +1037,10 @@ Một lần lệch route đã ghi trên Movement `TRANSFERRED` thực tế khôn
   của Stockroom trên dòng đảo ngược tại trạm; liên kết sâu vào Priority hay vào trail; audit việc đọc trail; tác nhân Hot
   list ngay trong view Priority; xóa tùy chọn theme đã lưu của User, hiển thị hay sửa nó trong Administration, và đồng bộ
   theme trực tiếp giữa các trình duyệt đang mở.
-- Đăng nhập qua thư mục hoặc đăng nhập một lần (SSO), xác thực đa yếu tố, tự đặt lại mật khẩu, các lệnh
-  `Quantity adjustment` và hiệu chỉnh lịch sử trong Tracking, và các permission key chưa route nào cần — được liệt kê
-  trong `Deferred`. Việc trả số lượng đã nhập kho về sản xuất vẫn là một quyết định mở của chủ sở hữu (PROJECT_PROFILE
-  §32).
+- Đăng nhập qua thư mục hoặc đăng nhập một lần (SSO), các lệnh `Quantity adjustment` và hiệu chỉnh lịch sử trong
+  Tracking, và các permission key chưa route nào cần — được liệt kê trong `Deferred`; đăng nhập đa yếu tố tùy chọn và
+  khôi phục qua email thuộc Phase 17. Số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động
+  (PROJECT_PROFILE §18).
 
 ## Phase 15 — File-Based Work Order Import
 
@@ -1118,6 +1118,9 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - kiểm tra định danh khi nâng cấp nền tảng: định danh PN chuẩn và badge Worker theo Cơ sở dữ liệu ký tự Unicode (UCD) của Python ở backend, được ghim ở `15.0.0`, và kiểm tra tiền tố Asset Tag từ chối tập khoảng trắng `\s` của Python, một tập cha thực sự của `[[:space:]]` trong libc của PostgreSQL; trước mọi lần nâng cấp Python làm đổi UCD, hoặc một thay đổi glibc, một kiểm tra chỉ đọc liệt kê mọi PN, badge và tiền tố Asset Tag đã lưu mà dạng chuẩn hay kết quả CHECK của nó sẽ thay đổi, và chủ sở hữu quyết định việc chuẩn hóa lại trước khi nâng cấp
 - dạng chuẩn khi nhập PN: các đường nhập PN bằng tay và nhãn demand của Work Orders gửi đầu vào thô đã cắt khoảng trắng và hiển thị dạng chuẩn của server, để bảng Unicode của trình duyệt không bao giờ quyết định một PN được lưu (hiện nay chúng chỉ có thể khác server ở khoảng 27 code point nhạy với phiên bản Unicode)
 - thứ tự khóa khi sao chép snapshot AssignedRoute — đã có: một lần chuyển số lượng một phần khóa Area đích của nó trong một lượt tăng dần cùng với các Area của snapshot mà lần tách của nó sao chép (`route_templates.lock_assignment_areas`, như với release và receipt), và mọi bản sao snapshot của một flow con hay của một kết quả gộp (`lineage.copy_assigned_route`) khóa các Area của nó, rồi các Operation của nó, `FOR KEY SHARE` theo thứ tự id tăng dần trước lệnh INSERT của nó (`route_templates.lock_snapshot_references`); vì vậy một lần release cắt chéo hoặc một lần chuyển một phần cắt chéo thứ hai sẽ chờ thay vì deadlock, điều mà các test đồng thời với route cắt chéo trong `backend/tests/test_route_template_management_api.py` chứng minh
+- backup cấu hình trong Administration (quyết định của chủ sở hữu ngày 2026-11-13): khoảng cách giữa các lần backup và số bản backup theo giờ, theo ngày và theo tuần được giữ lại được sửa trong Administration, mặc định mỗi giờ một bản với 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần được giữ (mục tiêu điểm khôi phục một giờ); tác vụ trên máy chủ chạy mỗi giờ, lấy và xoay vòng backup theo các giá trị đó, và ngưỡng tuổi backup của `check.sh` đi theo khoảng cách đó
+- log truy cập `web` không ghi các lần Production Board tự làm mới thành công (quyết định của chủ sở hữu ngày 2026-11-13), để một board làm mới mỗi 5 giây không còn làm log ngắn lại; một lần làm mới thất bại vẫn được ghi
+- một `pf` tối giản (quyết định của chủ sở hữu ngày 2026-11-13): một lệnh nhỏ dựa trên `deploy/production` với `install`, `update`, `backup`, `restore` và `status` cho production stack, trong đó `update` chạy `release.sh` (nên mọi lần cập nhật vẫn có kiểm tra (j) trên bản ứng viên); nó thay cho Deployment Admin chỉ dành cho staging (`deploy/synology/`, `compose.nas.yaml` và `deployment/SYNOLOGY_ADMIN.md`), vốn bị gỡ bỏ, và dự án bộ công cụ triển khai riêng được tạm dừng
 - **bảo trì archival/purge lịch sử Movement có tính quản trị** (PROJECT_PROFILE §28): thời hạn lưu giữ cấu hình được, chọn theo mốc cắt → xuất archive không mất mát → kiểm tra → purge đúng các dòng đã được archive và kiểm tra qua một đường bảo trì đặc quyền riêng; giữ nguyên vẹn các chuỗi đảo ngược/tham chiếu và các nhóm lệnh nguyên tử để không dòng nào được giữ lại tham chiếu tới lịch sử đã purge; gồm các cơ chế kích hoạt theo chính sách / ngưỡng kích thước / thủ công, xem trước phạm vi, lý do bắt buộc và audit đầy đủ; runtime thông thường vẫn chỉ-ghi-thêm; không xây một engine lưu giữ/archival đầy đủ trước phase này; thời hạn lưu giữ đã được Phase 13 lưu (`application_policy.retention_period_months`, số tháng nguyên hoặc không có), và thước đo cùng đơn vị của ngưỡng kích thước dữ liệu được định nghĩa ở đây cùng với cơ chế kích hoạt của nó
 
 Xóa cứng PartNumber master **không** phải là một thao tác bảo trì của Phase 16. Nó thuộc Management → Part Numbers của
@@ -1276,34 +1279,35 @@ Linux.
 
 ### Đã lên kế hoạch: archival và purge lịch sử Movement
 
-Archival và purge sẽ làm khi khối lượng dữ liệu cần tới; chưa phần nào được triển khai. Hiện nay thời hạn lưu giữ được
-lưu nhưng không có gì đọc nó, toàn bộ lịch sử Movement ở lại trong database, Administration nói rõ các lần chạy archival
-và purge chưa có, kiểm tra (g) là `not_applicable`, và `check.sh` báo `archival_proposal` là `SKIP`. Phần việc đã lên kế
-hoạch có ba bước: (1) bản ghi lần chạy, phân quyền, màn hình xem trước, yêu cầu và phê duyệt, và việc xuất cùng kiểm tra
-archive, không xóa gì; (2) purge đặc quyền với một bản ghi chuyển tiếp (carry-forward) cho các flow đã purge, để các số
-lượng suy ra vẫn đúng; (3) các cơ chế kích hoạt theo chính sách và ngưỡng kích thước, chỉ đề xuất lần chạy. Các ràng buộc
-đã được phần việc đã triển khai cố định: thư mục archive nằm ngoài `PARTFLOW_BACKUP_DIR` và không bao giờ bị công cụ nào
-xoay vòng hay dọn bớt; điều kiện tiên quyết của purge là một backup được `backup-verify` kiểm tra mà dump của nó bắt đầu
-sau bước kiểm tra của lần chạy; role bảo trì nhận DELETE chỉ trên `part_movements`, với trigger và function mới của nó
-được thêm vào tập chốt chặn được ghim của kiểm tra (h) trong cùng commit với migration của chúng; các bảng lần chạy mới
-nhận một lớp grant và một service `maintenance` được thêm; và một lần purge Movement chỉ xóa Movement, không bao giờ xóa
-dòng `worker_sessions`.
+Chủ sở hữu quyết định ngày 2026-11-13 làm archival và purge ngay; chưa phần nào được triển khai. Hiện nay thời hạn lưu
+giữ được lưu nhưng không có gì đọc nó, toàn bộ lịch sử Movement ở lại trong database, Administration nói rõ các lần chạy
+archival và purge chưa có, kiểm tra (g) là `not_applicable`, và `check.sh` báo `archival_proposal` là `SKIP`. Phần việc
+đã lên kế hoạch có ba bước: (1) bản ghi lần chạy, phân quyền, màn hình xem trước, yêu cầu và phê duyệt, và việc xuất
+cùng kiểm tra archive, không xóa gì; (2) purge đặc quyền với một bản ghi chuyển tiếp (carry-forward) cho các flow đã
+purge, để các số lượng suy ra vẫn đúng; (3) các cơ chế kích hoạt theo chính sách và ngưỡng kích thước, chỉ đề xuất lần
+chạy. Các ràng buộc đã được phần việc đã triển khai cố định: thư mục archive nằm ngoài `PARTFLOW_BACKUP_DIR` và không
+bao giờ bị công cụ nào xoay vòng hay dọn bớt; điều kiện tiên quyết của purge là một backup được `backup-verify` kiểm tra
+mà dump của nó bắt đầu sau bước kiểm tra của lần chạy; role bảo trì nhận DELETE chỉ trên `part_movements`, với trigger
+và function mới của nó được thêm vào tập chốt chặn được ghim của kiểm tra (h) trong cùng commit với migration của chúng;
+các bảng lần chạy mới nhận một lớp grant và một service `maintenance` được thêm; và một lần purge Movement chỉ xóa
+Movement, không bao giờ xóa dòng `worker_sessions`.
 
-Các quyết định của chủ sở hữu cần có trước khi bắt đầu phần việc này:
+Các quyết định của chủ sở hữu ngày 2026-11-13; mục History archival & purge trong Administration sửa từng thiết lập:
 
-- phạm vi xóa (mặc định đề xuất: chỉ dòng Movement, với một bản ghi chuyển tiếp cho các flow đã purge làm nguồn bằng
-  chứng thứ hai cho số lượng đã release, đã nhập kho và mức sử dụng route, điều này cần sửa đổi PROJECT_PROFILE §13 và
-  §28);
-- định dạng, nơi lưu, cách kiểm tra và độ bền của archive (gồm sao chép ra ngoài máy chủ với checksum được ghi lại trước
-  mọi lần purge);
-- permission key cho phép thực thi archival và purge (một key mới, hoặc một key có sẵn như `CONFIGURE_SYSTEM_SETTINGS`);
-- quy tắc mốc cắt thủ công (không mới hơn thời hạn lưu giữ đã cấu hình, hoặc một mức sàn cố định 12 tháng khi chưa đặt
-  thời hạn);
-- mô hình thực thi (phê duyệt trong ứng dụng kèm lý do và bản xem trước, thực thi bởi một job bảo trì ngoài luồng, có thể
-  kèm lần phê duyệt thứ hai của người vận hành máy chủ);
-- ý nghĩa và đơn vị của ngưỡng kích thước dữ liệu (ví dụ số dòng Movement hiện có);
-- một chính sách đã cấu hình có bao giờ được chạy mà không cần phê duyệt từng lần hay không (mặc định đề xuất: không);
-- các dòng audit do import file ghi có bao giờ được lưu giữ có thời hạn hay purge hay không (mặc định đề xuất: hoãn).
+- phạm vi xóa: lịch sử Movement của các flow đã đóng kèm bản ghi chuyển tiếp (cần sửa đổi PROJECT_PROFILE §13 và §28),
+  cộng các nhóm tùy chọn chọn trong Administration (Work Order đã hoàn thành kèm demand và phân bổ của chúng, lịch sử
+  phiên Worker, lịch sử vòng đời Machine); nhật ký audit, kể cả các dòng do import file ghi, không bao giờ bị purge (đề
+  xuất; xác nhận cùng bản thiết kế);
+- archive: các tệp văn bản nén (CSV hoặc JSON Lines) kèm checksum SHA-256, được sao chép ra ngoài máy chủ trước mọi lần
+  purge;
+- permission: một key mới, `Run history archival and purge` (đề xuất; xác nhận cùng bản thiết kế);
+- mốc cắt: thời hạn lưu giữ, mặc định 24 tháng, không bao giờ mới hơn 12 tháng;
+- cách thực thi: phê duyệt trong ứng dụng kèm lý do và bản xem trước, do một job bảo trì ngoài luồng thực hiện, không có
+  lần phê duyệt thứ hai; bước phê duyệt có thể tắt;
+- ngưỡng: mặc định là số dòng Movement hiện có, hoặc tuổi của lịch sử, hoặc dung lượng database;
+- chạy tự động: một chính sách có thể tự bắt đầu lần chạy, bật hay tắt trong Administration.
+
+Chủ sở hữu duyệt bản thiết kế của ba bước này trước khi bắt đầu xây, vì một lần purge xóa lịch sử production.
 
 ### Giới hạn tạm thời
 
@@ -1317,33 +1321,49 @@ Các quyết định của chủ sở hữu cần có trước khi bắt đầu 
   đối chiếu với mọi projection, và chủ sở hữu có thể kiểm tra bằng tay (`restore-test.sh --keep`).
 - Các thao tác ghi thực hiện bên ngoài ứng dụng nằm ngoài cam kết độ mới của backup.
 - Backup chứa mọi bảng, kể cả hash thông tin đăng nhập, nên thư mục backup và mọi bản sao là bí mật.
-- Cho tới khi tác vụ backup hằng ngày chạy, các bản backup duy nhất là những bản `release.sh` lấy trước mỗi lần
+- Cho tới khi tác vụ backup trên máy chủ chạy, các bản backup duy nhất là những bản `release.sh` lấy trước mỗi lần
   release.
-
-### Quyết định mở của chủ sở hữu
-
-- Chấp nhận đích rollback-bằng-restore đã triển khai: một database mới, rỗng, bên trong cùng instance PostgreSQL thay vì
-  "một instance sạch" (nếu bị bác, một volume mới thay bước đó của quy trình; không cần sửa dữ liệu).
-- Số lượng bản backup lưu giữ thật (giá trị tạm: 14 hằng ngày và 8 hằng tuần) và, nếu muốn, một mục tiêu điểm khôi phục
-  (RPO) và mục tiêu thời gian khôi phục (RTO) được duyệt; lịch hằng ngày cho RPO 24 giờ cho tới khi đó.
-- Có gửi HSTS từ proxy của nền tảng hay không.
-- Các mặc định được khuyến nghị đang có hiệu lực mà chủ sở hữu chưa xác nhận tường minh và có thể thay đổi: readiness trả
-  503 khi lược đồ không khớp; write gate của backend; hai database role và giới hạn superuser được chấp nhận của kiểm
-  tra (h); mã hóa và sao chép ra ngoài máy chủ bằng công cụ của nền tảng; và các ngưỡng giám sát ở trên.
 
 ### Việc còn mở
 
 - Dạng chuẩn khi nhập PN (gạch đầu dòng phạm vi ở trên) — chưa triển khai.
 - Kiểm tra định danh khi nâng cấp nền tảng: phía Python đã được kiểm tra (j) triển khai; trước mọi lần nâng cấp Python
   hay glibc, chủ sở hữu xem danh sách của kiểm tra đó và quyết định việc chuẩn hóa lại.
-- Deployment Admin (công cụ `pf` riêng dùng cho staging): việc phát triển nó đã dừng ngày 2026-10-14, khi chủ sở hữu
-  chọn xây lại bộ công cụ triển khai thành một dự án riêng
-  ([`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)), nên các bước còn mở của nó sẽ không được làm:
-  chuyển các health check container và các probe frontend của nó sang `GET /api/health/live` (cần trước khi staging
-  chạy một commit có head lược đồ khác với database staging, vì `/api/health` là readiness), việc cấp database role và
-  dùng artifact backup (PF-A4.1), và một route được quản lý để chạy một lệnh ứng dụng trên staging (PF-A4). Bộ công cụ
-  thay thế giữ quy tắc `apply-grants` chạy sau mọi lần restore và kiểm tra (h) phải đạt trước khi ứng dụng khởi động.
+- Deployment Admin (`pf` chỉ dành cho staging, [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)): việc
+  phát triển nó đã dừng ngày 2026-10-14 và `pf` tối giản (gạch đầu dòng phạm vi ở trên) thay thế nó; cho tới lúc đó nó
+  giữ nguyên trạng thái cuối và các bước còn mở của nó không được làm.
 - Archival và purge lịch sử Movement — đã lên kế hoạch ở trên.
+
+## Phase 17 — Owner Decisions After Go-Live
+
+Chủ sở hữu quyết định các thay đổi này ngày 2026-11-12 và 2026-11-13, sau go-live. Chưa thay đổi nào được triển khai;
+mỗi thay đổi được đưa vào riêng, theo thứ tự sau:
+
+1. **Permission key để dành.** Các key chưa route nào cần hiển thị `(reserved)` cạnh tên và không tick được, trong Roles
+   & permissions và Correction permissions; các quyền đã cấp vẫn giữ nguyên.
+2. **Giới hạn độ dài khi nhập tay.** Work Order Number, Part Number và Job Number nhận tối đa 200 ký tự khi tạo và sửa
+   Work Order bằng tay, như import file đã làm, nên một giá trị dài hơn bị từ chối với thông báo rõ ràng thay vì thất
+   bại thành lỗi database.
+3. **Role Super User.** Một role tạo sẵn thứ tư, `Super User`, giữ mọi permission key, và một migration thêm key sau này
+   cũng cấp key đó cho role này. Một role đã có tên `Super User` được bổ sung cho đủ, không bị tạo trùng.
+4. **Tên duy nhất.** Tên Area là duy nhất trong một Department, và tên Planned Route là duy nhất. Một kiểm tra chỉ đọc
+   liệt kê các tên trùng hiện có để chủ sở hữu đổi tên trước khi cài release, vì migration từ chối khi còn tên trùng.
+5. **Worker đã phân bổ.** Một lần phân bổ ghi tại Scan Station hiển thị Worker có badge đã ghi nó, trong chi tiết Work
+   Order và trong PN Tracking, như một lần phân bổ của Management hiển thị user của nó.
+6. **Add to Hot list khi tạo Work Order.** Dialog New Work Order có thể đưa các dòng demand của nó vào Hot list. Chúng
+   vào cuối danh sách qua lệnh của Hot list (không gõ hạng), cho user có quyền đặt priority của demand.
+7. **Bản xem trước các thiết lập.** Scan behavior và General settings hiển thị các thiết lập ứng viên thành control bị
+   vô hiệu hóa, mỗi cái ghi là chưa có. Scan behavior: âm báo quét đúng và sai, bỏ qua lần quét lặp lại cùng mã trong
+   một khoảng thời gian, cho phép gõ tay ở Scan Station, phím kết thúc của máy quét và tiền tố hay hậu tố cần bỏ, tự xác
+   nhận khi chỉ đúng một kết quả khớp, và số lượng mặc định. General settings: tên và logo của xưởng, múi giờ và định
+   dạng ngày, nhịp làm mới của các board và thời gian đếm ngược khi có bản cập nhật.
+8. **Đăng nhập đa yếu tố tùy chọn.** Mỗi user có thể thêm mã một lần (TOTP) và passkey (ví dụ lưu trong 1Password), giúp
+   đăng nhập tiện hơn; không bao giờ bắt buộc, kể cả với Administrator. User mất chúng thì đăng nhập bằng một mã khôi
+   phục dùng một lần hoặc khôi phục qua email, việc này cần một máy chủ gửi mail được đặt trong General settings và một
+   địa chỉ email trên user.
+
+Phase này thay đổi GUI_DESIGN §9 (một mục chưa có hiển thị bản xem trước bị vô hiệu hóa thay vì chỉ một câu thông báo)
+và PROJECT_PROFILE §20 (bốn role tạo sẵn); mỗi mục cập nhật các tài liệu sở hữu nó khi được đưa vào.
 
 ## Deferred
 
@@ -1357,57 +1377,39 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
   mỗi việc cho tới khi có một quyết định của chủ sở hữu yêu cầu: gỡ các dòng demand không có trong file, xóa due date
   hay Job Number bằng một ô trống, thêm dòng vào Work Order Released bằng import, đổi một trường header của Work Order từ
   file, và digest xác nhận theo từng Work Order (vốn cần một cách truyền có trạng thái).
-- Lưu giữ có thời hạn hay purge các dòng audit mà một lần import file ghi: PROJECT_PROFILE §28 giới hạn việc lưu giữ cho
-  PartMovement và việc import không giữ bản ghi import nào; các quyết định archival của Phase 16 mang mục này với mặc định
-  "hoãn".
-- Một giới hạn độ dài dùng chung cho Work Order Number, Part Number và Job Number khi tạo và sửa Work Order bằng tay:
-  import từ chối ô văn bản dài hơn 200 ký tự, trong khi đường nhập tay chấp nhận mọi độ dài, nên một giá trị vượt giới
-  hạn mục index của database (khoảng 2,7 KB văn bản khó nén) thất bại thành một lỗi database không được xử lý (HTTP 500,
-  rollback, không ghi gì) thay vì 422. Chủ sở hữu quyết định giới hạn dùng chung trước khi áp một quy tắc cho cả hai
-  đường.
-- đồng bộ scan offline (không thuộc MVP; thao tác ghi sản xuất vẫn bị chặn khi mất kết nối; một quyết định mở trong
-  PROJECT_PROFILE §32)
+- đồng bộ scan offline (không thuộc MVP; thao tác ghi sản xuất vẫn bị chặn khi mất kết nối; ngày 2026-11-13 chủ sở
+  hữu quyết định không lên kế hoạch trừ khi mất mạng xảy ra thường xuyên)
 - kết nối push qua WebSocket/SSE (phát hiện health theo sự kiện + polling là cơ chế đã duyệt)
 - phân tích nâng cao
 - tự động hóa mang tính suy đoán
 - các tính năng ERP và hệ thống điều hành sản xuất (MES) diện rộng
-- nhập priority khi tạo Work Order (PROJECT_PROFILE §21 Work Orders mục 5, GUI_DESIGN §11.2 "priority when
-  applicable") — được chủ sở hữu hoãn ngày 2026-10-04; Hot list (Management → Priority) vẫn là nơi duy nhất đặt priority;
-  khi được làm, sẽ là một điểm vào "thêm vào Hot list" qua cùng lệnh, nối vào cuối (không gõ hạng), vì một hạng gõ tay lúc
-  tạo sẽ là bên ghi thứ hai của danh sách liền mạch
-- chính sách hành vi scan và các thiết lập ứng dụng chung ngoài cảnh báo Due Soon và thiết lập đăng nhập User — chưa có
-  thiết lập chuẩn nào được định nghĩa (PROJECT_PROFILE §20 và §21 và GUI_DESIGN §9 chỉ nêu tên các mục); Administration
-  hiển thị chúng là chưa có cho tới khi chủ sở hữu định nghĩa nội dung (mặc định của chủ sở hữu, 2026-10-04)
+- chính sách hành vi scan và các thiết lập ứng dụng chung hoạt động thật, ngoài cảnh báo Due Soon, thiết lập đăng nhập
+  User và máy chủ gửi mail — chưa có thiết lập chuẩn nào được định nghĩa (PROJECT_PROFILE §20 và §21 và GUI_DESIGN §9
+  chỉ nêu tên các mục); Phase 17 hiển thị các thiết lập ứng viên thành bản xem trước bị vô hiệu hóa, và mỗi thiết lập
+  chỉ hoạt động khi chủ sở hữu yêu cầu
 - các lệnh `Quantity adjustment` và hiệu chỉnh lịch sử của Tracking (quyết định của chủ sở hữu ngày 2026-10-06)
 - các permission key chưa route nào cần, cùng chủ sở hữu của chúng: `Manage scan behavior` (cùng mục Scan behavior, khi
   có một mục như vậy trong Administration); `Resolve exceptional production situations` (cho tới khi PROJECT_PROFILE
   định nghĩa một lệnh); `Export and print reports` (cho tới khi có một bề mặt báo cáo được định nghĩa);
   `Perform quantity corrections` và `Perform authorized historical corrections` (cho tới khi có các lệnh điều chỉnh số
-  lượng và hiệu chỉnh lịch sử). Administration đánh dấu chúng là chưa cấp quyền gì.
-- đăng nhập qua thư mục hoặc đăng nhập một lần (SSO), xác thực đa yếu tố và tự đặt lại mật khẩu cho User của ứng dụng
-  (không có yêu cầu chuẩn; bảng thông tin đăng nhập riêng giữ cho chúng có thể thêm vào mà không phá gì)
+  lượng và hiệu chỉnh lịch sử). Phase 17 hiển thị chúng là để dành và không chọn được.
+- đăng nhập qua thư mục hoặc đăng nhập một lần (SSO) cho User của ứng dụng (không có yêu cầu chuẩn; bảng thông tin
+  đăng nhập riêng giữ cho nó có thể thêm vào mà không phá gì); đăng nhập đa yếu tố tùy chọn và khôi phục qua email
+  thuộc Phase 17
 - Các việc còn lại của Phase 13 không có yêu cầu chuẩn:
-  - tính an toàn khi thử lại của `POST /api/areas`: tên Area không duy nhất và không có khóa idempotency, nên một bản
-    sửa cần một khóa idempotency, một thay đổi API hoặc một quy tắc tên Area chuẩn;
-  - một bề mặt hiển thị Worker được ghi trên dòng phân bổ (`allocated_by_worker_id`; GUI_DESIGN §7.2 không định nghĩa
-    trường Worker ở đó);
   - một bề mặt cho lịch sử Worker Session và `scan_session_id`;
   - gỡ bản preview Scan Station mock chỉ dành cho phát triển (`ScanStationMockView.tsx`, `?preview=mock` và các dataset
     mock của nó; không bao giờ có trong bản build production);
   - cho thấy trong Tracking liệu một cổng badge đã xác nhận một thao tác hay không;
   - danh mục lý do Undo hoặc phạm vi theo Area;
   - gợi ý Machine ưu tiên của snapshot khi giao Machine;
-  - tên Planned Route duy nhất (cần một quy tắc chuẩn trước);
-  - snapshot tên Route Template tại thời điểm release, để PN Tracking hiển thị tên tại lúc release;
-  - cho phép Area ngưng hoạt động trên các bước của Planned Route (một thay đổi quy tắc ở Application và UI, không cần
-    sửa dữ liệu; hiện nay một Area ngưng hoạt động bị từ chối khi lưu và hiển thị `{name} (unavailable)` trong trình
-    sửa).
 
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | Current State và Phase 16: PartFlow chạy thật trên NAS của công ty từ 2026-11-09; thông báo cập nhật không còn trong danh sách mặc định chưa xác nhận, và mục Deployment Admin ghi rằng việc phát triển nó đã dừng. |
+| 2026-11-13 | uncommitted | Quyết định của chủ sở hữu ngày 2026-11-13: thêm Phase 17; Phase 16 có thêm backup cấu hình trong Administration, log `web` gọn hơn và một `pf` tối giản; các quyết định archival được ghi lại và các quyết định mở của chủ sở hữu đã đóng. |
+| 2026-11-12 | `42ea4be` | Current State và Phase 16: PartFlow chạy thật trên NAS của công ty từ 2026-11-09; thông báo cập nhật không còn trong danh sách mặc định chưa xác nhận, và mục Deployment Admin ghi rằng việc phát triển nó đã dừng. |
 | 2026-11-12 | `b413c96` | Thứ tự khóa khi sao chép snapshot của Phase 16 đã có: một bản sao khi tách hay gộp khóa các Area và Operation của nó theo thứ tự tăng dần, cùng với Area đích của một lần chuyển một phần, nên các lần release và chuyển một phần cắt chéo không còn deadlock. |
 | 2026-11-12 | `de4d99f` | Release flow của Phase 16: một trang đã cũ tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 s, và một trang có người dùng sau 1 phút không thao tác thay vì 2 phút; Production Board làm mới mỗi 5 giây thay vì 15 giây (quyết định của chủ sở hữu). |
 | 2026-11-12 | `77a2dfb` | Release flow của Phase 16: mọi trang đã cũ tự tải lại khi rảnh, không chỉ Scan Station và Production Board, và các kiểm tra trên trình duyệt sau một lần release trên NAS bao gồm việc này. |

@@ -1634,6 +1634,8 @@ When quantity is scanned into Stockroom:
 
 Production Movement and Work Order Allocation remain separate.
 
+Stocked quantity never returns to active production: no command moves it from the Stockroom back into an Area (owner decision of 2026-11-13).
+
 ---
 
 ## Allocation Order
@@ -2409,12 +2411,7 @@ Do not introduce these responsibilities without an explicit project decision.
 
 # 32. Remaining Open Decisions
 
-Only the following unresolved decisions remain:
-
-1. Whether stocked quantity may be returned to active production through a controlled reversal.
-2. Whether offline scan synchronization will be included in a later release.
-
-Implementations must avoid assumptions that make these decisions difficult to change.
+No product decision remains open. The owner settled the last two on 2026-11-13: stocked quantity never returns to active production (§18), and offline scan synchronization stays outside the planned scope (§30) unless network outages become frequent, so production writes stay blocked while disconnected.
 
 ---
 
@@ -2443,7 +2440,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-09 | uncommitted | Rewritten as current content for new readers. Two general sentences were narrowed to the specific rules they contradicted (and that the code implements): a reused internal MODIFY Work Order raises its existing line, and raising a released line's quantity is valid only while the Work Order is not completed. |
+| 2026-11-13 | uncommitted | §18 and §32: stocked quantity never returns to active production, offline scan synchronization stays outside the planned scope, and no product decision remains open. |
+| 2026-11-09 | 398c617 | Rewritten as current content for new readers. Two general sentences were narrowed to the specific rules they contradicted (and that the code implements): a reused internal MODIFY Work Order raises its existing line, and raising a released line's quantity is valid only while the Work Order is not completed. |
 | 2026-10-08 | e13574f | An omitted Work Order received date defaults to the site calendar date, also for imported Work Orders. |
 | 2026-10-07 | 918f025 | File import may update existing Open and Released Work Orders after a change list and a typed confirmation. |
 | 2026-10-07 | e1dee40 | Added file-based import of new Work Orders from CSV or Excel files. |
