@@ -179,9 +179,9 @@ production command that timed out with a new `device_event_id`** before its resu
 original one, so that an uncertain answer can never record a change twice.
 
 **Logs are kept only for a few days.** Each container keeps at most 5 log files of 10 MB. With 5,000 commands a day,
-that is about 9 days of backend log and 18 days of `web` log; every open Production Board adds about 9 MB of `web`
-log a day, so with one board open the `web` log covers about 4 days, and with several boards only a day or two.
-**Copy what an investigation needs as soon as it starts.**
+that is about 9 days of backend log and 18 days of `web` log. The successful automatic refreshes of the Production
+Board are not logged, but every open Area Board or Tracking screen adds `web` records every 15 seconds, so with
+several of them open the `web` log covers fewer days. **Copy what an investigation needs as soon as it starts.**
 
 ### Database permission errors
 
@@ -1131,7 +1131,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | §5 Observe: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after 60 s, and every other page once idle for 1 minute instead of 2; §2: an open Production Board adds about 9 MB of `web` log a day instead of 3 MB. |
+| 2026-11-13 | uncommitted | §2: the successful automatic refreshes of the Production Board are no longer in the `web` log. |
+| 2026-11-12 | `de4d99f` | §5 Observe: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after 60 s, and every other page once idle for 1 minute instead of 2; §2: an open Production Board adds about 9 MB of `web` log a day instead of 3 MB. |
 | 2026-11-12 | `77a2dfb` | §5 Observe: pages open during a release now reload themselves (a Scan Station or Production Board after 60 s, every other page once idle for 2 minutes with nothing unsaved), so nobody visits each computer. |
 | 2026-11-12 | `3fb7201` | Added sign-in and user accounts: recovering a forgotten password or login name, renaming a user, removing a user's access, and the recovery when no Administrator is left. |
 | 2026-11-10 | `e0e5056` | Rewritten for new operators: a task index and the setup of every session up front, a table of common problems, step-by-step rollback paths 1 and 2 with the checkout switch, the move to another host (moved here from the NAS guide), and shorter reference detail; section numbers and the path 3 scripts are unchanged. |

@@ -107,6 +107,12 @@ PROXY_API_LINES = [
 ]
 # P16-S6: the request-id map (NX-13) and the JSON access-log keys in order (NX-14).
 REQUEST_ID_MAP = [("~^[A-Za-z0-9._-]{1,64}$", ["$http_x_request_id"]), ("default", ["$request_id"])]
+# NX-15: the access-log condition; the successful automatic refreshes of the Production Board feed are not logged.
+LOGGABLE_MAP = [
+    ("~^GET:/api/production-board:(200|304)$", ["0"]),
+    ("~^GET:/api/policies/due-soon:(200|304)$", ["0"]),
+    ("default", ["1"]),
+]
 LOG_KEYS = ["ts", "source", "request_id", "client", "method", "path", "status", "bytes", "duration_s",
             "upstream_status", "user_agent"]
 # A sample value per log_format variable; the user agent carries a quote, escaped as nginx `escape=json` does.
@@ -1065,7 +1071,10 @@ class WebTier(unittest.TestCase):
         for forbidden in ("$http_cookie", "$http_x_partflow", "$request_uri", "$args", "$query_string", "$request_body"):
             self.assertNotIn(forbidden, text)
         self.assertIsNone(re.search(r"\$request(?![_a-z])", text), "bare $request logs the query string")
-        self.assertEqual(self.value(self.server.block, "access_log"), ["/var/log/nginx/access.log", "partflow"])
+        self.assertEqual(
+            self.value(self.server.block, "access_log"),
+            ["/var/log/nginx/access.log", "partflow", "if=$partflow_loggable"],
+        )
         # P16-S6: JSON lines with the request id.
         self.assertEqual(formats[0].args[1], "escape=json")
         self.assertIn("$partflow_request_id", text)
@@ -1100,6 +1109,41 @@ class WebTier(unittest.TestCase):
         self.assertEqual(record["source"], "web")
         self.assertEqual(record["status"], 409)
         self.assertEqual(record["user_agent"], 'Mozilla/5.0 "quoted"')
+
+    # NX-15 (owner decision of 2026-11-13): a board refreshing every few seconds does not shorten the web log.
+    def test_nx15_board_refreshes_not_logged(self):
+        maps = [d for d in self.http_level("map") if d.args == ["$request_method:$uri:$status", "$partflow_loggable"]]
+        self.assertEqual(len(maps), 1)
+        entries = [(e.name, e.args) for e in maps[0].block]
+        self.assertEqual(entries, LOGGABLE_MAP)
+
+        def loggable(request):
+            for key, value in entries:
+                if key != "default" and re.search(key[1:], request):
+                    return value[0]
+            return dict(entries)["default"][0]
+
+        for request in (
+            "GET:/api/production-board:200",
+            "GET:/api/production-board:304",
+            "GET:/api/policies/due-soon:200",
+        ):
+            self.assertEqual(loggable(request), "0", request)
+        for request in (
+            "GET:/api/production-board:502",
+            "GET:/api/production-board:504",
+            "GET:/api/policies/due-soon:500",
+            "PUT:/api/policies/due-soon:200",
+            "GET:/api/production-boards:200",
+            "GET:/api/area-board:200",
+            "POST:/api/scan-stations/3/transfers:200",
+        ):
+            self.assertEqual(loggable(request), "1", request)
+        # Every access log that is on carries the condition; only the health locations switch it off.
+        logs = [d.args for d in self.everything if d.name == "access_log"]
+        self.assertTrue(logs)
+        for args in logs:
+            self.assertTrue(args == ["off"] or args[-1] == "if=$partflow_loggable", args)
 
     # NX-7
     def test_nx7_static_caching(self):

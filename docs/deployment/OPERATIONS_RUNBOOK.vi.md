@@ -1,7 +1,7 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa
-> commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa
+> commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Runbook này gồm các thủ tục vận hành PartFlow production sau khi đã cài đặt: kiểm tra tình trạng, sao lưu và thử
@@ -185,9 +185,9 @@ thử lại một lệnh sản xuất đã hết thời gian chờ bằng một 
 bằng `device_event_id` gốc, để một phản hồi không chắc chắn không bao giờ ghi nhận một thay đổi hai lần.
 
 **Log chỉ được giữ trong vài ngày.** Mỗi container giữ tối đa 5 tệp log, mỗi tệp 10 MB. Với 5.000 lệnh mỗi ngày, đó
-là khoảng 9 ngày log backend và 18 ngày log `web`; mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày,
-nên khi mở một board, log `web` chỉ bao phủ khoảng 4 ngày, và khi mở nhiều board thì chỉ một hai ngày. **Hãy sao chép
-những gì một cuộc điều tra cần ngay khi bắt đầu.**
+là khoảng 9 ngày log backend và 18 ngày log `web`. Các lần Production Board tự làm mới thành công không được ghi log,
+nhưng mỗi Area Board hoặc màn hình Tracking đang mở thêm các bản ghi `web` mỗi 15 giây, nên khi mở nhiều màn hình như
+vậy, log `web` bao phủ ít ngày hơn. **Hãy sao chép những gì một cuộc điều tra cần ngay khi bắt đầu.**
 
 ### Lỗi quyền database (Database permission errors)
 
@@ -1149,7 +1149,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | §5 Observe: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 giây, và mọi trang khác khi rảnh 1 phút thay vì 2 phút; §2: mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày thay vì 3 MB. |
+| 2026-11-13 | uncommitted | §2: các lần Production Board tự làm mới thành công không còn nằm trong log `web`. |
+| 2026-11-12 | `de4d99f` | §5 Observe: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 giây, và mọi trang khác khi rảnh 1 phút thay vì 2 phút; §2: mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày thay vì 3 MB. |
 | 2026-11-12 | `77a2dfb` | §5 Observe: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau 60 giây, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu), nên không ai phải đi tới từng máy. |
 | 2026-11-12 | `3fb7201` | Thêm mục đăng nhập và tài khoản người dùng: lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập, thu hồi quyền truy cập của một user, và cách khôi phục khi không còn Administrator nào. |
 | 2026-11-10 | `e0e5056` | Viết lại cho người vận hành mới: mục lục tác vụ và thiết lập mỗi phiên ngay từ đầu, bảng các vấn đề thường gặp, các đường quay lui 1 và 2 từng bước kèm việc chuyển checkout, việc chuyển sang máy chủ khác (chuyển về đây từ hướng dẫn NAS), và phần tham chiếu chi tiết ngắn gọn hơn; số mục và các script của path 3 không đổi. |

@@ -1,7 +1,7 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `878822f` cộng các thay đổi chưa
-> commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa
+> commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này là điểm khởi đầu để cài đặt và vận hành PartFlow trong môi trường production. Hãy đọc §1 và §2 trước: hai
@@ -459,7 +459,9 @@ Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
   được giữ lại; nếu không thì một giá trị được sinh ra. `web` truyền nó cho backend, và mọi bản ghi log của yêu cầu đó
   mang nó dưới dạng `request_id`.
 - **Log của `web`.** Một bản ghi JSON cho mỗi yêu cầu: địa chỉ client, method, path không kèm query string, status,
-  số byte, thời lượng, status của upstream, user agent và `request_id`. Các lần thăm dò sức khỏe không được ghi log.
+  số byte, thời lượng, status của upstream, user agent và `request_id`. Các lần thăm dò sức khỏe và các lần Production
+  Board tự làm mới thành công (`GET /api/production-board` và `GET /api/policies/due-soon`) không được ghi log; một lần
+  làm mới thất bại thì có.
 - **Log của backend.** Một dòng JSON cho mỗi bản ghi trên standard error: `ts`, `level`, `logger`, `message`,
   `request_id`, rồi các trường riêng của bản ghi. Một traceback không bao giờ chứa thông báo lỗi database, nên không câu
   lệnh hay giá trị nào lọt vào log.
@@ -474,8 +476,8 @@ Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
 - **Không bao giờ ghi log:** cookie, query string, các header của PartFlow, request body, token, badge, mật khẩu và các
   giá trị đã quét. Setup token của thiết lập lần đầu là ngoại lệ duy nhất đã được thông báo.
 - **Dung lượng.** Mỗi container giữ tối đa 5 tệp log 10 MiB. Để ước chừng, 1,000 lệnh production ghi khoảng 1.1 MB log
-  backend và 0.6 MB log `web`, mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s, và mỗi Area Board hoặc màn
-  hình Tracking đang mở thêm mỗi 15 s, nên log chỉ bao phủ được ít ngày hơn trên một bản cài đặt bận rộn (runbook §2).
+  backend và 0.6 MB log `web`, và mỗi Area Board hoặc màn hình Tracking đang mở thêm các bản ghi `web` mỗi 15 s, nên log
+  chỉ bao phủ được ít ngày hơn trên một bản cài đặt bận rộn (runbook §2).
 
 #### Script và giám sát
 
@@ -737,7 +739,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | §3.1 Log: mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s thay vì 15 s. |
+| 2026-11-13 | uncommitted | §3.1 Log: các lần Production Board tự làm mới thành công không được ghi log. |
+| 2026-11-12 | `de4d99f` | §3.1 Log: mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s thay vì 15 s. |
 | 2026-11-12 | `878822f` | `smoke.sh` chờ `web` và backend khởi động xong trước khi kiểm tra. |
 | 2026-11-10 | `e0e5056` | Viết lại thành điểm khởi đầu: bảng tác vụ, một danh sách thuật ngữ và quy tắc an toàn, và §3.1 chỉ để tham chiếu; các bước cài đặt, phát hành và quay lui nay chỉ nằm trong các hướng dẫn theo nền tảng và runbook; truy cập từ Internet được hỗ trợ thông qua Cloudflare. |
 | 2026-11-09 | `398c617` | Khôi phục các quy tắc mà lần viết lại đã bỏ sót: bài kiểm thử key cấu hình, quyền truy cập log của setup token, thông tin xác thực thiết bị và việc thu hồi, cập nhật bảo mật và lưu ý về hậu tố phiên bản. |

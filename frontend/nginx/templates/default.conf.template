@@ -36,11 +36,20 @@ log_format partflow escape=json '{"ts":"$time_iso8601","source":"web","request_i
     '"bytes":$body_bytes_sent,"duration_s":$request_time,"upstream_status":"$upstream_status",'
     '"user_agent":"$http_user_agent"}';
 
+# The successful automatic refreshes of the Production Board feed (the board and the Due Soon
+# policy it reads, every few seconds per open board) are not logged, so open boards do not
+# shorten the log; every other request is logged, a failed refresh included.
+map $request_method:$uri:$status $partflow_loggable {
+    "~^GET:/api/production-board:(200|304)$" 0;
+    "~^GET:/api/policies/due-soon:(200|304)$" 0;
+    default 1;
+}
+
 server {
     listen 80;
     server_name _;
     root /usr/share/nginx/html;
-    access_log /var/log/nginx/access.log partflow;
+    access_log /var/log/nginx/access.log partflow if=$partflow_loggable;
 
     # The real client address is the last X-Forwarded-For entry, and only when
     # the TCP peer is the one trusted hop; otherwise the TCP peer itself.
