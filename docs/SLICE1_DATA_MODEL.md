@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0032_phase14_route_adjusted`. The slice's own tables
+The schema described here is the current schema at migration head `0033_phase17_super_user_role`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -774,7 +774,9 @@ The constraints are listed in §17.
 - Every role and user write first takes the `partflow:user-administration` advisory lock and then re-reads the acting
   user's permissions. The permission-management guard and the holder counts are plain reads under that lock. The role
   or user row is locked next, so consecutive rows of one entity chain.
-- The three seeded roles have no `CREATED` row; the first edit's `before_data` is the seed.
+- The seeded roles have no `CREATED` row; the first edit's `before_data` is the seed. Where
+  `0033_phase17_super_user_role` completes an existing role named Super User instead of seeding one, it appends one
+  `UPDATED` row with no actor and the metadata `{"source": "migration", "revision": "0033_phase17_super_user_role"}`.
 - The User theme preference (`users.theme_preference`) is a display preference written only by the User's own toggle
   (`PUT /api/session/theme-preference`). It is never audited, never in the `User` snapshot, and does not change
   `users.updated_at`. Its write locks only the User row (`FOR NO KEY UPDATE`) and does not take the user-administration
@@ -1247,7 +1249,7 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0032_phase14_route_adjusted`) |
+| Class | `partflow_app` privileges | Tables (29 at head `0033_phase17_super_user_role`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
@@ -1392,7 +1394,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-13 | uncommitted | §18 and §20: the return of stocked quantity and offline scan synchronization are settled by the owner decisions of 2026-11-13. |
+| 2026-11-14 | uncommitted | Migration head `0033_phase17_super_user_role`; completing an existing Super User role appends one `UPDATED` audit row. |
+| 2026-11-13 | `6c0fa6c` | §18 and §20: the return of stocked quantity and offline scan synchronization are settled by the owner decisions of 2026-11-13. |
 | 2026-11-09 | `398c617` | Rewritten as current content for new readers; the schema description now matches migration head `0032_phase14_route_adjusted` and the release code; no rule changed. |
 | 2026-10-08 | `1116b07` | Production database roles and grants, with the append-only revocation applied by `apply-grants`. |
 | 2026-10-07 to 2026-10-08 | `e1dee40`, `918f025`, `e13574f` | File-based Work Order import: intake marker, idempotency by Work Order Number, received-date default on the site calendar. |

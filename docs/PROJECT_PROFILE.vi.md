@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-13.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `6c0fa6c` cộng các thay đổi chưa commit ngày 2026-11-14.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -1744,7 +1744,7 @@ Trạng thái phiên giúp giảm việc quét lặp lại nhưng không bao gi�
 
 PartFlow dùng cơ chế phân quyền dựa trên vai trò.
 
-Các vai trò **có tên và có thể chỉnh sửa**. Mỗi năng lực bên dưới là một **permission key**; một vai trò cấp một tập permission key và mỗi User giữ một vai trò. **Permission key là thẩm quyền duy nhất**: việc phân quyền được quyết định bởi các key mà vai trò của User cấp — không bao giờ bởi tên của vai trò — và không vai trò nào là siêu người dùng (superuser) ngầm định. Các danh sách Administrator, Manager và Operator bên dưới là **các vai trò ban đầu cùng các quyền được cấp ban đầu của chúng**, được khởi tạo (seed) đúng như đã liệt kê; một quản trị viên được ủy quyền có thể đổi tên các vai trò này hoặc thay đổi những gì bất kỳ vai trò nào cấp, và mọi thay đổi như vậy đều được ghi audit.
+Các vai trò **có tên và có thể chỉnh sửa**. Mỗi năng lực bên dưới là một **permission key**; một vai trò cấp một tập permission key và mỗi User giữ một vai trò. **Permission key là thẩm quyền duy nhất**: việc phân quyền được quyết định bởi các key mà vai trò của User cấp — không bao giờ bởi tên của vai trò — và không vai trò nào là siêu người dùng (superuser) ngầm định. Các danh sách Administrator, Manager, Operator và Super User bên dưới là **các vai trò ban đầu cùng các quyền được cấp ban đầu của chúng**, được khởi tạo (seed) đúng như đã liệt kê; một quản trị viên được ủy quyền có thể đổi tên các vai trò này hoặc thay đổi những gì bất kỳ vai trò nào cấp, và mọi thay đổi như vậy đều được ghi audit.
 
 **Các câu nêu tên vai trò và cơ chế bảo vệ việc quản lý quyền.** "Admin" trong tài liệu hồ sơ này là cách viết tắt của vai trò Administrator. Ở bất cứ chỗ nào tài liệu này nêu tên một vai trò là bên thực hiện hoặc cấu hình một việc gì đó trong ứng dụng (ví dụ "Admin or Manager", "Admin-configured"), nó chỉ quyền được cấp ban đầu của vai trò đó: quyền mà thao tác yêu cầu mới là yếu tố quyết định. Việc thay đổi ai giữ một quyền sửa sai (correction permission) hoặc quyền quản lý các quyền sửa sai — bằng cách thay đổi quyền của một vai trò, hoặc vai trò, trạng thái hoạt động hay mật khẩu của một User — tự nó yêu cầu quyền quản lý các quyền sửa sai, và PartFlow không bao giờ cho phép một thay đổi khiến không còn User đang hoạt động nào có mật khẩu mà giữ quyền quản lý người dùng và vai trò, hoặc giữ quyền quản lý các quyền sửa sai.
 
@@ -1809,6 +1809,12 @@ Vai trò Operator ban đầu cấp các quyền:
 - Undo các lần quét gần đây đủ điều kiện.
 
 Không có quyền nào ghi đè trực tiếp lên dữ liệu lịch sử: vai trò Operator ban đầu không giữ quyền sửa sai lịch sử nào, và mọi sửa sai đều dùng các cơ chế bù trừ có thể audit (§16) — lịch sử Movement luôn bất biến.
+
+---
+
+## Super User
+
+Vai trò Super User ban đầu cấp mọi permission key: mọi năng lực được liệt kê trong mục này. Các quyền đó là quyền cấp bình thường, không phải siêu người dùng ngầm định: một quản trị viên được ủy quyền có thể đổi tên vai trò này hoặc thay đổi những gì nó cấp như mọi vai trò khác. Khi một bản phát hành thêm một permission key, mọi vai trò đang giữ tất cả các key khác vào lúc đó cũng nhận key mới, nên một vai trò giữ mọi key vẫn tiếp tục giữ mọi key, còn một vai trò đã bị quản trị viên thu hẹp thì vẫn bị thu hẹp.
 
 ---
 
@@ -2443,7 +2449,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | §18 và §32: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động, đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch, và không còn quyết định sản phẩm nào để mở. |
+| 2026-11-14 | uncommitted | §20: vai trò ban đầu thứ tư, Super User, cấp mọi permission key, và một bản phát hành thêm một key sẽ cấp key đó cho mọi vai trò đang giữ tất cả các key khác. |
+| 2026-11-13 | 6c0fa6c | §18 và §32: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động, đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch, và không còn quyết định sản phẩm nào để mở. |
 | 2026-11-09 | 398c617 | Viết lại thành nội dung hiện hành cho người mới đọc. Hai câu nói chung được thu hẹp theo đúng các quy tắc cụ thể mà chúng mâu thuẫn (và code đang thực hiện): Work Order MODIFY nội bộ được tái sử dụng thì tăng dòng hiện có, và việc tăng số lượng của một dòng đã phát hành chỉ hợp lệ khi Work Order chưa hoàn tất. |
 | 2026-10-08 | e13574f | Ngày nhận Work Order bị bỏ trống mặc định là ngày theo lịch của site, kể cả với Work Order được import. |
 | 2026-10-07 | 918f025 | Import từ tệp có thể cập nhật Work Order Open và Released hiện có sau danh sách thay đổi và xác nhận bằng cách gõ lại. |

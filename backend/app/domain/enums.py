@@ -371,7 +371,11 @@ class Permission(StrEnum):
     Enforced route by route from Phase 14 slice 1 (every Administration
     route since slice 2, ``app.api.route_access``). Keys are stable
     identifiers: a later capability is added (CHECK widening), never
-    renamed. The correction permissions — UNDO_RECENT_SCANS,
+    renamed, and the revision that adds a key grants it in the same
+    transaction to every role that holds every other key, so the seeded
+    Super User role keeps holding every key (Phase 17, PROJECT_PROFILE
+    §20; ``tests/test_phase17_schema.py`` checks it at head). The
+    correction permissions — UNDO_RECENT_SCANS,
     PERFORM_QUANTITY_CORRECTIONS, EDIT_WORK_ORDER_ALLOCATION,
     PERFORM_HISTORICAL_CORRECTIONS — are edited in Administration →
     Correction permissions; changing who holds one of them or

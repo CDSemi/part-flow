@@ -53,8 +53,9 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, backups set in Administration, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
 | Phase 17 — Owner Decisions After Go-Live | In progress | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
-**Database schema.** The current Alembic migration head is `0032_phase14_route_adjusted`
-(`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phases 15 and 16 added no migration.
+**Database schema.** The current Alembic migration head is `0033_phase17_super_user_role`
+(`backend/alembic/versions/20261114_0033_phase17_super_user_role.py`), which seeds the Super User role and adds no
+schema. Phases 15 and 16 added no migration.
 
 **Owner decision of 2026-11-09: direct go-live.** PartFlow went into real use on the company Synology NAS on
 2026-11-09, as soon as the production stack was installed. There is no pilot phase and no list of release gates;
@@ -1138,7 +1139,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 PartNumber master hard deletion is **not** a Phase 16 maintenance operation. It belongs to Phase 13 Management → Part
 Numbers and removes metadata only.
 
-**Delivered.** None of the work below added a migration; the schema head stays `0032_phase14_route_adjusted`.
+**Delivered.** None of the work below added a migration.
 
 ### Reconciliation command
 
@@ -1356,8 +1357,10 @@ order, and a delivered item says so:
    a clear message instead of failing as a database error. The limit applies to what is entered (a Work Order Number,
    the PN of a new line, a Job Number the line does not hold yet), never to a value already saved, and a NUL character
    is refused as in the import.
-3. **Super User role.** A fourth seeded role, `Super User`, holds every permission key, and a migration that adds a key
-   later grants it to this role too. An existing role named `Super User` is completed, not duplicated.
+3. **Super User role — delivered.** A fourth seeded role, `Super User`, holds every permission key (migration
+   `0033_phase17_super_user_role`). A later migration that adds a key grants it to every role that holds every other
+   key, so this role keeps every key under whatever name it has, unless an administrator has narrowed it. An existing
+   role named `Super User` in any letter case is completed, not duplicated, and the completion is audited.
 4. **Unique names.** Area names are unique within a Department, and Planned Route names are unique. A read-only check
    lists existing duplicates so that the owner renames them before installing the release, because the migration
    refuses while one exists.
@@ -1421,7 +1424,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | Phase 17 item 2 delivered: manual Work Order entry refuses a Work Order Number, Part Number or Job Number longer than 200 characters; Phase 17 is in progress. |
+| 2026-11-14 | uncommitted | Phase 17 item 3 delivered: migration `0033_phase17_super_user_role` seeds the Super User role with every permission key and becomes the schema head. |
+| 2026-11-14 | `277a512` | Phase 17 item 2 delivered: manual Work Order entry refuses a Work Order Number, Part Number or Job Number longer than 200 characters; Phase 17 is in progress. |
 | 2026-11-13 | `c0f0b0c` | Phase 17 item 1 delivered: reserved permission keys show `(reserved)` and cannot be chosen. |
 | 2026-11-13 | `4a99914` | Phase 16: the `web` access log no longer records the Production Board's successful automatic refreshes. |
 | 2026-11-13 | `6c0fa6c` | Owner decisions of 2026-11-13: Phase 17 added; Phase 16 gains backups set in Administration, a quieter `web` log and a minimal `pf`; the archival decisions are recorded and the open owner decisions are closed. |

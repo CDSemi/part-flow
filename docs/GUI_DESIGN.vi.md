@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `c0f0b0c` cộng các thay đổi chưa commit ngày 2026-11-14.
+> Đồng bộ với bản tiếng Anh tại commit `277a512` cộng các thay đổi chưa commit ngày 2026-11-14.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2760,12 +2760,12 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
   rằng `Set password…` cấp cho một người dùng một mật khẩu, và những permission nào đã được kiểm tra cho đến nay. Với quản trị viên
   người dùng, bảng Users còn có cột `Sign-in` hiển thị trạng thái đăng nhập của từng người dùng, và `Set password…` đặt một
   mật khẩu tạm, kết thúc các phiên đăng nhập của người dùng và xóa khóa.
-- **Roles & permissions** liệt kê các role có tên (ban đầu là Administrator, Manager và Operator, với đúng các capability
-  mà PROJECT_PROFILE §20 liệt kê là quyền cấp ban đầu) và sửa tên của từng role cùng các permission của nó, nhóm thành
-  Administration, Production master data, Work Orders, priority and reports, và Scan Station. Bốn correction permission
-  (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform authorized historical
-  corrections) chỉ được sửa trong Policies → **Correction permissions**, dưới dạng một bảng role × permission bên dưới
-  công tắc Undo reason.
+- **Roles & permissions** liệt kê các role có tên (ban đầu là Administrator, Manager, Operator và Super User, với đúng
+  các capability mà PROJECT_PROFILE §20 liệt kê là quyền cấp ban đầu) và sửa tên của từng role cùng các permission của
+  nó, nhóm thành Administration, Production master data, Work Orders, priority and reports, và Scan Station. Bốn
+  correction permission (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform
+  authorized historical corrections) chỉ được sửa trong Policies → **Correction permissions**, dưới dạng một bảng role ×
+  permission bên dưới công tắc Undo reason.
 
 ### History archival & purge
 
@@ -3937,7 +3937,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-14 | uncommitted | §11.2: một WO Number, PN của một line chưa lưu và một Job Number mới dài hơn 200 ký tự là lỗi field, và Add Part không đề xuất tạo một PN mới như vậy. |
+| 2026-11-14 | uncommitted | §9: các role ban đầu có thêm Super User. |
+| 2026-11-14 | 277a512 | §11.2: một WO Number, PN của một line chưa lưu và một Job Number mới dài hơn 200 ký tự là lỗi field, và Add Part không đề xuất tạo một PN mới như vậy. |
 | 2026-11-13 | c0f0b0c | §9: các permission để dành hiển thị `(reserved)` và không chọn được. |
 | 2026-11-13 | 6c0fa6c | §3: đồng bộ lượt quét offline tham chiếu PROJECT_PROFILE §30 và §32, nơi không còn quyết định nào để mở. |
 | 2026-11-12 | de4d99f | §3 quy tắc 13 và §4.11: trang tự tải lại sau 10 giây đếm ngược trong notice thay vì sau 60 s, và một trang có người dùng tự tải lại sau 1 phút không thao tác thay vì 2 phút; §9: màu và tên của một Area luôn nằm trên một dòng trong các bảng Administration. |

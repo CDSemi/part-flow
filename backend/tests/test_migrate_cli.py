@@ -56,7 +56,10 @@ pytestmark = pytest.mark.database_owner
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0031_phase14_beyond_demand"
+_PREVIOUS = "0032_phase14_route_adjusted"
+# The revision before the last one that alters audit_events (0032): the
+# lock case needs a pending migration that waits for that table.
+_BEFORE_AUDIT_ALTER = "0031_phase14_beyond_demand"
 _ALL = schema_revision.pending_revisions(None)
 _KEYS = [
     "report_version",
@@ -360,7 +363,7 @@ def test_a_non_transactional_revision_refuses(
     real = schema_revision.read_revision_source
 
     def source(path: str) -> str:
-        if Path(path).name.endswith(f"{_HEAD[:4]}_phase14_route_adjusted.py"):
+        if Path(path).name.endswith(f"{_HEAD}.py"):
             return 'op.execute("CREATE INDEX CONCURRENTLY ix ON t (c)")'
         return real(path)
 
@@ -452,7 +455,7 @@ def test_a_commit_failure_is_an_unknown_outcome(
 
 def test_a_held_table_lock_times_out(database: URL, capsys: pytest.CaptureFixture[str]) -> None:
     """M-14: 0032 alters audit_events; a reconciliation's ACCESS SHARE lock blocks it."""
-    _at_previous(database)
+    command.upgrade(_alembic_config(database), _BEFORE_AUDIT_ALTER)
     other = create_engine(database)
     try:
         with other.connect() as connection, connection.begin():
@@ -466,7 +469,7 @@ def test_a_held_table_lock_times_out(database: URL, capsys: pytest.CaptureFixtur
     assert document["result"] == "failed"
     assert document["error"]["code"] == "lock_not_available"
     assert document["error"]["message"] == migration.MIGRATE_MESSAGES["lock_not_available"]
-    assert _revision(database) == _PREVIOUS
+    assert _revision(database) == _BEFORE_AUDIT_ALTER
 
 
 def test_no_existing_revision_is_non_transactional() -> None:

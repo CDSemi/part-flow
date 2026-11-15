@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `c0f0b0c` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `277a512` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -52,8 +52,9 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, backup cấu hình trong Administration, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0032_phase14_route_adjusted`
-(`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phase 15 và 16 không thêm migration nào.
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0033_phase17_super_user_role`
+(`backend/alembic/versions/20261114_0033_phase17_super_user_role.py`), migration seed role Super User và không thêm
+schema. Phase 15 và 16 không thêm migration nào.
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
 NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
@@ -1126,7 +1127,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 Xóa cứng PartNumber master **không** phải là một thao tác bảo trì của Phase 16. Nó thuộc Management → Part Numbers của
 Phase 13 và chỉ gỡ metadata.
 
-**Đã có.** Không phần việc nào dưới đây thêm migration; head lược đồ vẫn là `0032_phase14_route_adjusted`.
+**Đã có.** Không phần việc nào dưới đây thêm migration.
 
 ### Lệnh đối soát
 
@@ -1345,8 +1346,11 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    và sửa Work Order bằng tay, như import file đã làm, nên một giá trị dài hơn bị từ chối với thông báo rõ ràng thay vì
    thất bại thành lỗi database. Giới hạn áp dụng cho giá trị được nhập (một Work Order Number, PN của một line mới, một
    Job Number mà line chưa có), không bao giờ cho một giá trị đã lưu, và ký tự NUL bị từ chối như trong import.
-3. **Role Super User.** Một role tạo sẵn thứ tư, `Super User`, giữ mọi permission key, và một migration thêm key sau này
-   cũng cấp key đó cho role này. Một role đã có tên `Super User` được bổ sung cho đủ, không bị tạo trùng.
+3. **Role Super User — đã có.** Một role tạo sẵn thứ tư, `Super User`, giữ mọi permission key (migration
+   `0033_phase17_super_user_role`). Một migration sau này thêm key sẽ cấp key đó cho mọi role đang giữ tất cả các key
+   khác, nên role này giữ mọi key dù được đổi tên thế nào, trừ khi quản trị viên đã thu hẹp nó. Một role đã có tên
+   `Super User` (không phân biệt chữ hoa, chữ thường) được bổ sung cho đủ, không bị tạo trùng, và việc bổ sung được
+   ghi audit.
 4. **Tên duy nhất.** Tên Area là duy nhất trong một Department, và tên Planned Route là duy nhất. Một kiểm tra chỉ đọc
    liệt kê các tên trùng hiện có để chủ sở hữu đổi tên trước khi cài release, vì migration từ chối khi còn tên trùng.
 5. **Worker đã phân bổ.** Một lần phân bổ ghi tại Scan Station hiển thị Worker có badge đã ghi nó, trong chi tiết Work
@@ -1409,7 +1413,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | Phase 17 mục 2 đã có: nhập Work Order bằng tay từ chối Work Order Number, Part Number hoặc Job Number dài hơn 200 ký tự; Phase 17 đang làm. |
+| 2026-11-14 | uncommitted | Phase 17 mục 3 đã có: migration `0033_phase17_super_user_role` seed role Super User với mọi permission key và trở thành head lược đồ. |
+| 2026-11-14 | `277a512` | Phase 17 mục 2 đã có: nhập Work Order bằng tay từ chối Work Order Number, Part Number hoặc Job Number dài hơn 200 ký tự; Phase 17 đang làm. |
 | 2026-11-13 | `c0f0b0c` | Phase 17 mục 1 đã có: các permission key để dành hiển thị `(reserved)` và không chọn được. |
 | 2026-11-13 | `4a99914` | Phase 16: log truy cập `web` không còn ghi các lần Production Board tự làm mới thành công. |
 | 2026-11-13 | `6c0fa6c` | Quyết định của chủ sở hữu ngày 2026-11-13: thêm Phase 17; Phase 16 có thêm backup cấu hình trong Administration, log `web` gọn hơn và một `pf` tối giản; các quyết định archival được ghi lại và các quyết định mở của chủ sở hữu đã đóng. |

@@ -29,7 +29,7 @@ from app.main import create_app
 from tests.conftest import owner_engine
 
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0031_phase14_beyond_demand"
+_PREVIOUS = "0032_phase14_route_adjusted"
 _UNKNOWN = "9999_unknown_to_this_image"
 _OTHER_UNKNOWN = "9998_unknown_to_this_image"
 _NOT_READY_DETAIL = (

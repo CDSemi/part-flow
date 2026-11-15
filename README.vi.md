@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-10.
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa commit ngày 2026-11-14.
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -272,7 +272,7 @@ docker compose up --build -V
 ## Migration database (Alembic)
 
 Áp dụng các migration (từ baseline no-op của repository foundation đến head hiện
-tại, `0032_phase14_route_adjusted`):
+tại, `0033_phase17_super_user_role`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -541,8 +541,10 @@ Bộ test pytest gồm ba loại:
   migration Alembic thật (upgrade → downgrade → upgrade), mỗi module dừng ở revision
   ranh giới của nó, còn `tests/test_phase13_schema.py` và
   `tests/test_phase14_schema.py` bao phủ các revision từ `0014_phase13_workers` đến
-  head duy nhất `0032_phase14_route_adjusted`: các ràng buộc, bộ từ vựng audit được
-  mở rộng, các downgrade từ chối và sự tương đồng giữa model và migration.
+  `0032_phase14_route_adjusted`: các ràng buộc, bộ từ vựng audit được mở rộng, các
+  downgrade từ chối và sự tương đồng giữa model và migration.
+  `tests/test_phase17_schema.py` bao phủ head duy nhất
+  `0033_phase17_super_user_role`, migration seed role Super User.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` và
   `tests/test_revision_cli.py` bao phủ write gate (409 `release_mismatch`, 503
   `not_ready`), job `migrate` (một transaction, các từ chối, lock) và báo cáo
@@ -768,7 +770,8 @@ docs/              canonical project documentation
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Các liên kết production trỏ tới bộ hướng dẫn triển khai đã viết lại, với `docs/DEPLOYMENT.md` §1 là điểm bắt đầu. |
+| 2026-11-14 | uncommitted | Head migration là `0033_phase17_super_user_role`, được `tests/test_phase17_schema.py` kiểm tra. |
+| 2026-11-10 | `e0e5056` | Các liên kết production trỏ tới bộ hướng dẫn triển khai đã viết lại, với `docs/DEPLOYMENT.md` §1 là điểm bắt đầu. |
 | 2026-11-09 | `398c617` | Viết lại thành phần giới thiệu cho người mới cộng hướng dẫn cho lập trình viên; bỏ phần tường thuật trạng thái theo từng phase, rút gọn mục production thành phần định hướng, và sửa các lệnh và nhận định đã lỗi thời. |
 | 2026-10-09 | `03bd90c` | Giám sát production: log có cấu trúc, mã định danh request, lệnh `status`, kiểm tra host và reconciliation định kỳ. |
 | 2026-10-08 | `a330383` | Sao lưu production, bản sao lưu trước phát hành có kiểm chứng, diễn tập khôi phục và rollback path 3. |

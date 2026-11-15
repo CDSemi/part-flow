@@ -1741,7 +1741,7 @@ Session state reduces repetitive scanning but must never replace persistent Move
 
 PartFlow uses role-based authorization.
 
-Roles are **named and editable**. Every capability below is a **permission key**; a role grants a set of permission keys and a User holds one role. **Permission keys are the only authority**: authorization is decided by the keys the User's role grants — never by a role's name — and no role is an implicit superuser. The Administrator, Manager and Operator lists below are the **initial roles with their initial grants**, seeded exactly as listed; an authorized administrator may rename these roles or change what any role grants, and every such change is audited.
+Roles are **named and editable**. Every capability below is a **permission key**; a role grants a set of permission keys and a User holds one role. **Permission keys are the only authority**: authorization is decided by the keys the User's role grants — never by a role's name — and no role is an implicit superuser. The Administrator, Manager, Operator and Super User lists below are the **initial roles with their initial grants**, seeded exactly as listed; an authorized administrator may rename these roles or change what any role grants, and every such change is audited.
 
 **Role-named sentences and the permission-management guard.** "Admin" in this profile is short for the Administrator role. Wherever this profile names a role as the one who performs or configures something in the application (for example "Admin or Manager", "Admin-configured"), it names that role's initial grant: the permission the action requires decides. Changing who holds a correction permission or the permission to manage correction permissions — by changing a role's permissions, or a User's role, activity or password — itself requires the permission to manage correction permissions, and PartFlow never lets a change leave no active User with a password holding the permission to manage users and roles, or the permission to manage correction permissions.
 
@@ -1806,6 +1806,12 @@ The initial Operator role grants:
 - undo recent eligible scans.
 
 No permission rewrites historical data directly: the initial Operator role holds no historical-correction permission, and every correction uses the auditable compensating mechanisms (§16) — Movement history stays immutable.
+
+---
+
+## Super User
+
+The initial Super User role grants every permission key: every capability listed in this section. Its grants are ordinary grants, not an implicit superuser: an authorized administrator may rename the role or change what it grants like any other role's. When a release adds a permission key, every role that holds every other key at that moment receives the new key too, so a role that holds every key keeps holding every key, and a role an administrator has narrowed stays narrowed.
 
 ---
 
@@ -2440,7 +2446,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | §18 and §32: stocked quantity never returns to active production, offline scan synchronization stays outside the planned scope, and no product decision remains open. |
+| 2026-11-14 | uncommitted | §20: a fourth initial role, Super User, grants every permission key, and a release that adds a key grants it to every role that holds every other key. |
+| 2026-11-13 | 6c0fa6c | §18 and §32: stocked quantity never returns to active production, offline scan synchronization stays outside the planned scope, and no product decision remains open. |
 | 2026-11-09 | 398c617 | Rewritten as current content for new readers. Two general sentences were narrowed to the specific rules they contradicted (and that the code implements): a reused internal MODIFY Work Order raises its existing line, and raising a released line's quantity is valid only while the Work Order is not completed. |
 | 2026-10-08 | e13574f | An omitted Work Order received date defaults to the site calendar date, also for imported Work Orders. |
 | 2026-10-07 | 918f025 | File import may update existing Open and Released Work Orders after a change list and a typed confirmation. |

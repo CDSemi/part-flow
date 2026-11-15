@@ -33,7 +33,7 @@ from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0031_phase14_beyond_demand"
+_PREVIOUS = "0032_phase14_route_adjusted"
 _ALL = schema_revision.pending_revisions(None)
 
 

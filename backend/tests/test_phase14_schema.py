@@ -9,10 +9,11 @@ what `0030_phase14_station_devices` adds (owner decisions OD-P6,
 OD-S4-1) — pinned to `0030` since slice 5 added the next revision — and
 what `0031_phase14_beyond_demand` adds (owner decisions OD-P12/P13) —
 pinned to `0031` since slice 6 added the next revision — and what
-`0032_phase14_route_adjusted` adds (owner decision OD-P11):
+`0032_phase14_route_adjusted` adds (owner decision OD-P11) — pinned to
+`0032` since Phase 17 added the next revision (`test_phase17_schema.py`
+checks the single head):
 
-- exact head boundary: `0032_phase14_route_adjusted` is the single
-  head (the 0029, 0030 and 0031 cases run against their own revision);
+- exact revision boundaries: every case runs against its own revision;
 - the sign-in policy columns on `application_policy` (types, server
   defaults, the seeded row's values) with their exact range CHECKs;
 - the `user_credentials` and `user_sessions` shapes with their exact
@@ -67,7 +68,6 @@ from types import ModuleType
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError, ProgrammingError
@@ -241,11 +241,6 @@ def _refused_by(connection: Connection, constraint: str, statement: Callable[[],
 # ---------------------------------------------------------------------------
 # Head and shape
 # ---------------------------------------------------------------------------
-
-
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
 
 
 def test_the_sign_in_revision_boundary(migrated_engine: Engine) -> None:
@@ -1274,13 +1269,13 @@ def _load_route_migration() -> ModuleType:
 
 @pytest.fixture(scope="module")
 def route_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → 0031 → head through real Alembic runs."""
+    """Temporary database migrated 0032 → 0031 → 0032 through real Alembic runs."""
     name = "partflow_test_phase14_route_schema"
     _create_temp_database(admin_engine, name)
     config = _alembic_config(_url(name))
-    command.upgrade(config, "head")
+    command.upgrade(config, _ROUTE_REVISION)
     command.downgrade(config, _CORRECTION_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, _ROUTE_REVISION)
     engine = create_engine(_url(name))
     yield engine
     engine.dispose()
@@ -1299,7 +1294,7 @@ def route_connection(route_engine: Engine) -> Iterator[Connection]:
 @pytest.fixture(scope="module")
 def route_template(admin_engine: Engine) -> Iterator[str]:
     _create_temp_database(admin_engine, _ROUTE_TEMPLATE_DATABASE)
-    command.upgrade(_alembic_config(_url(_ROUTE_TEMPLATE_DATABASE)), "head")
+    command.upgrade(_alembic_config(_url(_ROUTE_TEMPLATE_DATABASE)), _ROUTE_REVISION)
     yield _ROUTE_TEMPLATE_DATABASE
     _drop_temp_database(admin_engine, _ROUTE_TEMPLATE_DATABASE)
 
@@ -1532,7 +1527,7 @@ def test_clean_route_downgrade_restores_the_correction_boundary(
             for index in inspector.get_indexes(table)
         }
         assert not indexes & {_ADJUSTMENT_INDEX, _STEP_REFERENCE_INDEX}
-        command.upgrade(config, "head")
+        command.upgrade(config, _ROUTE_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _ROUTE_REVISION
     finally:

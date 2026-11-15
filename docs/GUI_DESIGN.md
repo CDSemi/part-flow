@@ -2736,7 +2736,7 @@ entity (§4.12, PROJECT_PROFILE §8.13).
   name and password, that `Set password…` gives a user a password, and which permissions are checked so far. For user
   administrators the Users table also has a `Sign-in` column showing each user's sign-in state, and `Set password…` sets
   a temporary password, ends the user's sign-ins and clears a lock.
-- **Roles & permissions** lists named roles (initially Administrator, Manager and Operator, with exactly the
+- **Roles & permissions** lists named roles (initially Administrator, Manager, Operator and Super User, with exactly the
   capabilities PROJECT_PROFILE §20 lists as initial grants) and edits each role's name and its permissions, grouped as
   Administration, Production master data, Work Orders, priority and reports, and Scan Station. The four correction
   permissions (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform authorized
@@ -3897,7 +3897,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-14 | uncommitted | §11.2: a WO Number, the PN of an unsaved line and a new Job Number longer than 200 characters are field errors, and Add Part offers no such new PN. |
+| 2026-11-14 | uncommitted | §9: the initial roles include Super User. |
+| 2026-11-14 | 277a512 | §11.2: a WO Number, the PN of an unsaved line and a new Job Number longer than 200 characters are field errors, and Add Part offers no such new PN. |
 | 2026-11-13 | c0f0b0c | §9: reserved permissions show `(reserved)` and cannot be chosen. |
 | 2026-11-13 | 6c0fa6c | §3: offline scan synchronization refers to PROJECT_PROFILE §30 and §32, where no decision remains open. |
 | 2026-11-12 | de4d99f | §3 rule 13 and §4.11: the page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; §9: an Area's color and name stay on one line in the Administration tables. |

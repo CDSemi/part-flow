@@ -260,7 +260,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0032_phase14_route_adjusted`):
+current head, `0033_phase17_super_user_role`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -533,9 +533,11 @@ The pytest suite holds three kinds of tests:
   (`tests/test_phase<N>_schema.py`) run the real Alembic migrations (upgrade →
   downgrade → upgrade), each stopping at its own boundary revision, while
   `tests/test_phase13_schema.py` and `tests/test_phase14_schema.py` cover the
-  revisions from `0014_phase13_workers` to the single head
-  `0032_phase14_route_adjusted`: the constraints, the widened audit vocabulary,
-  the refusing downgrades and the parity between the models and the migrations.
+  revisions from `0014_phase13_workers` to `0032_phase14_route_adjusted`: the
+  constraints, the widened audit vocabulary, the refusing downgrades and the
+  parity between the models and the migrations. `tests/test_phase17_schema.py`
+  covers the single head `0033_phase17_super_user_role`, which seeds the Super
+  User role.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -762,7 +764,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Production links point to the rewritten deployment guides, with `docs/DEPLOYMENT.md` §1 as the starting point. |
+| 2026-11-14 | uncommitted | The migration head is `0033_phase17_super_user_role`, covered by `tests/test_phase17_schema.py`. |
+| 2026-11-10 | `e0e5056` | Production links point to the rewritten deployment guides, with `docs/DEPLOYMENT.md` §1 as the starting point. |
 | 2026-11-09 | `398c617` | Rewritten as a newcomer introduction plus the developer guide; the phase-by-phase status narrative was removed, the production section shortened to an orientation, and stale commands and statements were corrected. |
 | 2026-10-09 | `03bd90c` | Production monitoring: structured logs, request identifiers, the `status` command, host checks and the scheduled reconciliation. |
 | 2026-10-08 | `a330383` | Production backups, the verified pre-release backup, the restore drill and rollback path 3. |
