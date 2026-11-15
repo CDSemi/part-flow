@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `4a99914` cộng các thay đổi chưa commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `c0f0b0c` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -50,7 +50,7 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, backup cấu hình trong Administration, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
-| Phase 17 — Owner Decisions After Go-Live | Đã lên kế hoạch | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
+| Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
 **Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0032_phase14_route_adjusted`
 (`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phase 15 và 16 không thêm migration nào.
@@ -1336,14 +1336,15 @@ Chủ sở hữu duyệt bản thiết kế của ba bước này trước khi b
 
 ## Phase 17 — Owner Decisions After Go-Live
 
-Chủ sở hữu quyết định các thay đổi này ngày 2026-11-12 và 2026-11-13, sau go-live. Chưa thay đổi nào được triển khai;
-mỗi thay đổi được đưa vào riêng, theo thứ tự sau:
+Chủ sở hữu quyết định các thay đổi này ngày 2026-11-12 và 2026-11-13, sau go-live. Mỗi thay đổi được đưa vào riêng,
+theo thứ tự sau, và mục nào đã có thì ghi rõ:
 
 1. **Permission key để dành — đã có.** Các key chưa route nào cần hiển thị `(reserved)` cạnh tên và không tick được,
    trong Roles & permissions và Correction permissions; các quyền đã cấp vẫn giữ nguyên.
-2. **Giới hạn độ dài khi nhập tay.** Work Order Number, Part Number và Job Number nhận tối đa 200 ký tự khi tạo và sửa
-   Work Order bằng tay, như import file đã làm, nên một giá trị dài hơn bị từ chối với thông báo rõ ràng thay vì thất
-   bại thành lỗi database.
+2. **Giới hạn độ dài khi nhập tay — đã có.** Work Order Number, Part Number và Job Number nhận tối đa 200 ký tự khi tạo
+   và sửa Work Order bằng tay, như import file đã làm, nên một giá trị dài hơn bị từ chối với thông báo rõ ràng thay vì
+   thất bại thành lỗi database. Giới hạn áp dụng cho giá trị được nhập (một Work Order Number, PN của một line mới, một
+   Job Number mà line chưa có), không bao giờ cho một giá trị đã lưu, và ký tự NUL bị từ chối như trong import.
 3. **Role Super User.** Một role tạo sẵn thứ tư, `Super User`, giữ mọi permission key, và một migration thêm key sau này
    cũng cấp key đó cho role này. Một role đã có tên `Super User` được bổ sung cho đủ, không bị tạo trùng.
 4. **Tên duy nhất.** Tên Area là duy nhất trong một Department, và tên Planned Route là duy nhất. Một kiểm tra chỉ đọc
@@ -1408,7 +1409,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | Phase 17 mục 1 đã có: các permission key để dành hiển thị `(reserved)` và không chọn được. |
+| 2026-11-14 | uncommitted | Phase 17 mục 2 đã có: nhập Work Order bằng tay từ chối Work Order Number, Part Number hoặc Job Number dài hơn 200 ký tự; Phase 17 đang làm. |
+| 2026-11-13 | `c0f0b0c` | Phase 17 mục 1 đã có: các permission key để dành hiển thị `(reserved)` và không chọn được. |
 | 2026-11-13 | `4a99914` | Phase 16: log truy cập `web` không còn ghi các lần Production Board tự làm mới thành công. |
 | 2026-11-13 | `6c0fa6c` | Quyết định của chủ sở hữu ngày 2026-11-13: thêm Phase 17; Phase 16 có thêm backup cấu hình trong Administration, log `web` gọn hơn và một `pf` tối giản; các quyết định archival được ghi lại và các quyết định mở của chủ sở hữu đã đóng. |
 | 2026-11-12 | `42ea4be` | Current State và Phase 16: PartFlow chạy thật trên NAS của công ty từ 2026-11-09; thông báo cập nhật không còn trong danh sách mặc định chưa xác nhận, và mục Deployment Admin ghi rằng việc phát triển nó đã dừng. |

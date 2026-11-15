@@ -107,8 +107,9 @@ REQUIRED_IMPORT_COLUMNS: Final = (
 MAX_IMPORT_DATA_ROWS: Final = 2000
 #: Spreadsheet columns read, A–BL (OD-S1-15).
 MAX_IMPORT_COLUMNS: Final = 64
-#: Characters per Work Order Number, Part Number and Job Number cell (OD-S1-11).
-MAX_IMPORT_TEXT_LENGTH: Final = 200
+#: Characters per Work Order Number, Part Number and Job Number cell
+#: (OD-S1-11): the manual entry limit, so both intake paths accept the same.
+MAX_IMPORT_TEXT_LENGTH: Final = work_orders.MAX_ENTRY_LENGTH
 #: Lines one imported Work Order may hold (OD-S1-13): bounds the PN
 #: advisory locks one transaction takes.
 MAX_IMPORT_LINES_PER_WORK_ORDER: Final = 500

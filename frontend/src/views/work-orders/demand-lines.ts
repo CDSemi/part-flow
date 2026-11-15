@@ -43,6 +43,10 @@ export interface DemandLineDraft {
   dueTouched: boolean;
   /** Job Numbers as entered — comma-separated display text. */
   job: string;
+  /** The Job Numbers the saved line holds ([] for a draft line). Only a
+   * Job Number entered beyond these is judged against the entry limit:
+   * the server keeps a saved one as it is. */
+  savedJobNumbers: readonly string[];
   notes: string;
   /** True when the line exists in saved server state. */
   saved: boolean;
@@ -78,13 +82,33 @@ export interface DemandLineDraft {
   savedQty: number | null;
 }
 
-export type LineField = 'pn' | 'qty' | 'due';
+export type LineField = 'pn' | 'qty' | 'due' | 'job';
 
 export interface LineError {
   lineId: number;
   field: LineField;
   message: string;
 }
+
+/**
+ * Characters a Work Order Number, the PN of a new line and a newly
+ * entered Job Number may have (Phase 17). The server refuses a longer
+ * entry, as the file import does; the dialogs say so before anything
+ * travels. Counted in Unicode code points, as the server counts.
+ */
+export const MAX_ENTRY_LENGTH = 200;
+
+/** True when the entry has more than MAX_ENTRY_LENGTH characters. */
+export function isTooLong(value: string): boolean {
+  // A UTF-16 length within the limit is within it in code points too.
+  return (
+    value.length > MAX_ENTRY_LENGTH &&
+    Array.from(value).length > MAX_ENTRY_LENGTH
+  );
+}
+
+/** The field error of a WO Number entry over the limit. */
+export const WORK_ORDER_NUMBER_TOO_LONG = `WO Number is longer than ${MAX_ENTRY_LENGTH} characters`;
 
 /** Human status of the server-derived read value (`OPEN` → `Open`,
  * `RELEASED` → `Released`). */
@@ -161,6 +185,7 @@ export function createDraftLine(
     qty: '',
     dueTouched: false,
     job: '',
+    savedJobNumbers: [],
     notes: '',
     saved: false,
     released: false,
@@ -212,6 +237,7 @@ export function draftFromDemand(
     // a line with its own date (or explicit No due date) keeps it.
     dueTouched: (demand.dueDate ?? '') !== (workOrderDue ?? ''),
     job: jobNumbersToText(demand.jobNumbers),
+    savedJobNumbers: demand.jobNumbers,
     notes: demand.notes ?? '',
     saved: true,
     released,
@@ -283,15 +309,27 @@ export function isPositiveInteger(raw: string): boolean {
   return /^\d+$/.test(raw.trim()) && Number.parseInt(raw, 10) >= 1;
 }
 
+/** The Job Numbers a Save would send for this line that it does not
+ * hold yet: none when the entry is unchanged (`buildLineEdits` then
+ * sends no Job Numbers at all). */
+function enteredJobNumbers(line: DemandLineDraft): string[] {
+  const entered = textToJobNumbers(line.job);
+  if (jobNumbersToText(entered) === jobNumbersToText(line.savedJobNumbers)) {
+    return [];
+  }
+  return entered.filter((job) => !line.savedJobNumbers.includes(job));
+}
+
 /**
  * Pre-flight validation before Save demand travels: every line needs a
  * PN and a positive whole quantity; duplicate PNs are rejected. A
  * released line keeps its (unchangeable) PN and is validated too — its
  * quantity may not drop below what production already committed
- * (PROJECT_PROFILE §13). A missing due date is NOT a validation error
- * — it is summarized by the Save Demand confirmation instead.
- * Incomplete rows are never silently filtered out. The backend
- * re-validates everything transactionally.
+ * (PROJECT_PROFILE §13). The PN of an unsaved line and a newly entered
+ * Job Number stay within MAX_ENTRY_LENGTH characters. A missing due
+ * date is NOT a validation error — it is summarized by the Save Demand
+ * confirmation instead. Incomplete rows are never silently filtered
+ * out. The backend re-validates everything transactionally.
  */
 export function validateDemandLines(
   lines: readonly DemandLineDraft[],
@@ -313,6 +351,14 @@ export function validateDemandLines(
       });
     } else {
       seen.set(line.pn, line.id);
+      // Only a line that is not saved yet sends its PN.
+      if (line.demandId === null && isTooLong(line.pn)) {
+        errors.push({
+          lineId: line.id,
+          field: 'pn',
+          message: `PN is longer than ${MAX_ENTRY_LENGTH} characters — remove this line`,
+        });
+      }
     }
     if (!isPositiveInteger(line.qty)) {
       errors.push({
@@ -325,6 +371,13 @@ export function validateDemandLines(
         lineId: line.id,
         field: 'qty',
         message: belowCommittedMessage(line),
+      });
+    }
+    if (enteredJobNumbers(line).some((job) => isTooLong(job))) {
+      errors.push({
+        lineId: line.id,
+        field: 'job',
+        message: `a Job Number is longer than ${MAX_ENTRY_LENGTH} characters`,
       });
     }
   }

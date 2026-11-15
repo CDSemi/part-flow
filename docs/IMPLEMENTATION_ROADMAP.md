@@ -51,7 +51,7 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, backups set in Administration, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
-| Phase 17 — Owner Decisions After Go-Live | Planned | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
+| Phase 17 — Owner Decisions After Go-Live | In progress | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
 **Database schema.** The current Alembic migration head is `0032_phase14_route_adjusted`
 (`backend/alembic/versions/20261007_0032_phase14_route_adjusted.py`). Phases 15 and 16 added no migration.
@@ -1346,14 +1346,16 @@ history.
 
 ## Phase 17 — Owner Decisions After Go-Live
 
-The owner decided these changes on 2026-11-12 and 2026-11-13, after go-live. None is implemented yet; each lands as a
-change of its own, in this order:
+The owner decided these changes on 2026-11-12 and 2026-11-13, after go-live. Each lands as a change of its own, in this
+order, and a delivered item says so:
 
 1. **Reserved permission keys — delivered.** The keys that no route requires yet show `(reserved)` beside their name
    and cannot be ticked, in Roles & permissions and in Correction permissions; grants that already exist stay.
-2. **Length limit on manual entry.** Work Order Number, Part Number and Job Number accept at most 200 characters in the
-   manual Work Order create and edit, as file import already does, so a longer value is refused with a clear message
-   instead of failing as a database error.
+2. **Length limit on manual entry — delivered.** Work Order Number, Part Number and Job Number accept at most 200
+   characters in the manual Work Order create and edit, as file import already does, so a longer value is refused with
+   a clear message instead of failing as a database error. The limit applies to what is entered (a Work Order Number,
+   the PN of a new line, a Job Number the line does not hold yet), never to a value already saved, and a NUL character
+   is refused as in the import.
 3. **Super User role.** A fourth seeded role, `Super User`, holds every permission key, and a migration that adds a key
    later grants it to this role too. An existing role named `Super User` is completed, not duplicated.
 4. **Unique names.** Area names are unique within a Department, and Planned Route names are unique. A read-only check
@@ -1419,7 +1421,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | Phase 17 item 1 delivered: reserved permission keys show `(reserved)` and cannot be chosen. |
+| 2026-11-14 | uncommitted | Phase 17 item 2 delivered: manual Work Order entry refuses a Work Order Number, Part Number or Job Number longer than 200 characters; Phase 17 is in progress. |
+| 2026-11-13 | `c0f0b0c` | Phase 17 item 1 delivered: reserved permission keys show `(reserved)` and cannot be chosen. |
 | 2026-11-13 | `4a99914` | Phase 16: the `web` access log no longer records the Production Board's successful automatic refreshes. |
 | 2026-11-13 | `6c0fa6c` | Owner decisions of 2026-11-13: Phase 17 added; Phase 16 gains backups set in Administration, a quieter `web` log and a minimal `pf`; the archival decisions are recorded and the open owner decisions are closed. |
 | 2026-11-12 | `42ea4be` | Current State and Phase 16: PartFlow is live on the company NAS since 2026-11-09; the update notice left the unconfirmed defaults, and the Deployment Admin follow-ups record that its development stopped. |

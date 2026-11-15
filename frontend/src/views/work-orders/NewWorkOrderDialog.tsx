@@ -15,11 +15,13 @@ import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
 import type { AddPartResult } from './AddPartDialog';
 import {
+  WORK_ORDER_NUMBER_TOO_LONG,
   applyWorkOrderDueDateChange,
   collectMissingDemandInfo,
   createDraftLine,
   draftToNewLine,
   isPositiveInteger,
+  isTooLong,
   processScan,
   validateDemandLines,
 } from './demand-lines';
@@ -219,6 +221,9 @@ export function NewWorkOrderDialog({
   // resolves duplicates) exactly as entered, surrounding whitespace
   // included.
   const numberIsBlank = workOrderNumber.trim() === '';
+  // An entry over the limit is a pure judgement about the entry itself,
+  // so the field says so as it is typed; Save refuses it.
+  const numberTooLong = !numberIsBlank && isTooLong(workOrderNumber);
 
   async function saveWorkOrder() {
     // A blank number is saved as NULL — displayed as `—` (the
@@ -259,7 +264,7 @@ export function NewWorkOrderDialog({
 
   async function handleSave() {
     if (busy) return;
-    if (!numberIsBlank) {
+    if (!numberIsBlank && !numberTooLong) {
       // An entered WO Number that already exists is opened, never
       // duplicated (exact verbatim resolution on the server). With
       // entered lines, opening discards them — confirm explicitly.
@@ -288,11 +293,12 @@ export function NewWorkOrderDialog({
     const lineErrs = validateDemandLines(lines);
     setHeaderErrors(headerErr);
     setLineErrors(lineErrs);
-    if (headerErr.received || lineErrs.length) {
+    if (numberTooLong || headerErr.received || lineErrs.length) {
       showNotice(
         '✕ The form has invalid fields — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.',
       );
-      focusFirstInvalid(headerErr, lineErrs);
+      if (numberTooLong) workOrderNumRef.current?.focus();
+      else focusFirstInvalid(headerErr, lineErrs);
       return;
     }
     if (lines.length === 0) {
@@ -337,8 +343,12 @@ export function NewWorkOrderDialog({
                 className="mono"
                 placeholder="e.g. 007482"
                 value={workOrderNumber}
+                aria-invalid={numberTooLong ? true : undefined}
                 onChange={(e) => setWorkOrderNumber(e.target.value)}
               />
+              {numberTooLong ? (
+                <div className="rowerr">{WORK_ORDER_NUMBER_TOO_LONG}</div>
+              ) : null}
             </div>
             <div className="nwo-field">
               <label htmlFor="nwo-recv">Received date</label>
@@ -515,17 +525,33 @@ export function NewWorkOrderDialog({
                           }}
                         />
                       </td>
-                      <td data-label="Job Numbers">
+                      <td
+                        data-label="Job Numbers"
+                        className={errorFor(line.id, 'job') ? 'err-cell' : ''}
+                      >
                         <input
+                          ref={(el) => {
+                            if (el) fieldRefs.current.set(`${line.id}:job`, el);
+                            else fieldRefs.current.delete(`${line.id}:job`);
+                          }}
                           className="mono"
                           size={10}
                           placeholder="job #…"
                           value={line.job}
                           aria-label={`Job Numbers for ${line.pn ?? 'new line'}`}
-                          onChange={(e) =>
-                            updateLine(line.id, { job: e.target.value })
+                          aria-invalid={
+                            errorFor(line.id, 'job') ? true : undefined
                           }
+                          onChange={(e) => {
+                            clearLineError(line.id, 'job');
+                            updateLine(line.id, { job: e.target.value });
+                          }}
                         />
+                        {errorFor(line.id, 'job') ? (
+                          <div className="rowerr">
+                            {errorFor(line.id, 'job')}
+                          </div>
+                        ) : null}
                       </td>
                       <td data-label="Notes">
                         <input

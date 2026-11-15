@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `6c0fa6c` cộng các thay đổi chưa commit ngày 2026-11-13.
+> Đồng bộ với bản tiếng Anh tại commit `c0f0b0c` cộng các thay đổi chưa commit ngày 2026-11-14.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -3023,12 +3023,16 @@ audit chỉ nằm trên các surface audit đã được phê duyệt (§3 rule 
   field:** trong khi giá trị nhập vẫn đang ổn định hoặc lần tra cứu của nó đang chạy, step nói `Searching Part Numbers…`
   và không đề xuất tạo mới, nên một PN đã tồn tại (đặc biệt là PN một ký tự, được phân giải qua tra cứu chính xác chứ
   không phải contains-search) không bao giờ thoáng bị trình bày như mới. Khi lần tra cứu cho đúng giá trị nhập hiện tại đã
-  trả lời rằng PN không tồn tại, step đề xuất `＋ Create new PN "…"`. PN master không có trạng thái active hay inactive:
-  một PN chuẩn luôn dùng được, có hay không có bản ghi master.
-- **Trạng thái validation.** Lỗi theo từng field (thiếu PN, quantity không phải số nguyên dương, PN trùng). Một dòng có
-  lỗi không thể được lưu và **không bao giờ bị âm thầm lọc bỏ**. **Thiếu due date không phải là lỗi và không bao giờ chặn
-  việc lưu** (PROJECT_PROFILE §8.3); thay vào đó các ngày bị thiếu được tóm tắt trong xác nhận lưu (§11.3). Sau một
-  lần lưu thất bại, control không hợp lệ đầu tiên nhận focus và mọi giá trị đã nhập được giữ lại.
+  trả lời rằng PN không tồn tại, step đề xuất `＋ Create new PN "…"`. Một giá trị nhập dài hơn 200 ký tự không bao giờ
+  được đề xuất tạo: step nói ngay rằng một Part Number có tối đa 200 ký tự. PN master không có trạng thái active hay
+  inactive: một PN chuẩn luôn dùng được, có hay không có bản ghi master.
+- **Trạng thái validation.** Lỗi theo từng field (thiếu PN, quantity không phải số nguyên dương, PN trùng, và một giá
+  trị nhập dài hơn 200 ký tự: PN của một line chưa lưu hoặc một Job Number chưa được lưu). Một dòng có lỗi không thể
+  được lưu và **không bao giờ bị âm thầm lọc bỏ**. Một WO Number nhập dài hơn 200 ký tự (ở đây và ở §11.3) được đánh dấu
+  ngay khi đang gõ, và Save bị từ chối cho đến khi nó được rút ngắn. Server từ chối tất cả các giá trị này với giới hạn
+  mà import từ file áp dụng (§11.7). **Thiếu due date không phải là lỗi và không bao giờ chặn việc lưu**
+  (PROJECT_PROFILE §8.3); thay vào đó các ngày bị thiếu được tóm tắt trong xác nhận lưu (§11.3). Sau một lần lưu thất
+  bại, control không hợp lệ đầu tiên nhận focus và mọi giá trị đã nhập được giữ lại.
 - **Thay đổi chưa lưu** được đánh dấu rõ ("● Unsaved changes") và được bảo vệ. Rời khỏi Work Order (qua action quay lại,
   điều hướng cấp cao nhất, điều hướng phụ của Management, back/forward của trình duyệt, hoặc reload hay đóng tab,
   `beforeunload`) bắt buộc phải có xác nhận tường minh trước khi bản nháp bị hủy. Trạng thái có đúng nghĩa như tên
@@ -3933,7 +3937,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-13 | uncommitted | §9: các permission để dành hiển thị `(reserved)` và không chọn được. |
+| 2026-11-14 | uncommitted | §11.2: một WO Number, PN của một line chưa lưu và một Job Number mới dài hơn 200 ký tự là lỗi field, và Add Part không đề xuất tạo một PN mới như vậy. |
+| 2026-11-13 | c0f0b0c | §9: các permission để dành hiển thị `(reserved)` và không chọn được. |
 | 2026-11-13 | 6c0fa6c | §3: đồng bộ lượt quét offline tham chiếu PROJECT_PROFILE §30 và §32, nơi không còn quyết định nào để mở. |
 | 2026-11-12 | de4d99f | §3 quy tắc 13 và §4.11: trang tự tải lại sau 10 giây đếm ngược trong notice thay vì sau 60 s, và một trang có người dùng tự tải lại sau 1 phút không thao tác thay vì 2 phút; §9: màu và tên của một Area luôn nằm trên một dòng trong các bảng Administration. |
 | 2026-11-12 | 77a2dfb | §3 quy tắc 13: sau một bản cập nhật, mọi trang tự tải lại khi đã rảnh 2 phút mà không có dialog nào mở và không có dữ liệu chưa lưu; Scan Station và Production Board vẫn tự tải lại sau 60 s. |

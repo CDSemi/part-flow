@@ -2995,12 +2995,16 @@ the approved audit surfaces (§3 rule 10).
   in the field:** while the entry is still settling or its lookup is in flight, the step says `Searching Part Numbers…`
   and offers no creation, so an existing PN (a one-character PN especially, which resolves through the exact lookup
   rather than the contains-search) is never momentarily presented as new. Once the lookup for exactly the current entry
-  has answered that the PN does not exist, the step offers `＋ Create new PN "…"`. The PN master has no active or
-  inactive state: a canonical PN is always usable, with or without a master record.
-- **Validation states.** Per-field errors (missing PN, quantity not a positive integer, duplicate PN). A row with errors
-  cannot be saved and is **never silently filtered out**. A **missing due date is not an error and never blocks
-  saving** (PROJECT_PROFILE §8.3); absent dates are summarized in the save confirmation instead (§11.3). After a failed
-  save the first invalid control receives focus and all entered values are preserved.
+  has answered that the PN does not exist, the step offers `＋ Create new PN "…"`. An entry longer than 200 characters
+  is never offered for creation: the step says at once that a Part Number has at most 200 characters. The PN master has
+  no active or inactive state: a canonical PN is always usable, with or without a master record.
+- **Validation states.** Per-field errors (missing PN, quantity not a positive integer, duplicate PN, and an entry
+  longer than 200 characters: the PN of an unsaved line or a Job Number not saved yet). A row with errors cannot be
+  saved and is **never silently filtered out**. A WO Number entry longer than 200 characters (here and in §11.3) is
+  marked as it is typed, and Save is refused until it is shortened. The server refuses all of these with the limit the
+  file import applies (§11.7). A **missing due date is not an error and never blocks saving** (PROJECT_PROFILE §8.3);
+  absent dates are summarized in the save confirmation instead (§11.3). After a failed save the first invalid control
+  receives focus and all entered values are preserved.
 - **Unsaved changes** are visibly marked ("● Unsaved changes") and guarded. Leaving the Work Order (through the back
   action, top-level navigation, Management sub-navigation, browser back/forward, or reload or tab close,
   `beforeunload`) requires explicit confirmation before the draft is discarded. The state means what it says: it is the
@@ -3893,7 +3897,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-13 | uncommitted | §9: reserved permissions show `(reserved)` and cannot be chosen. |
+| 2026-11-14 | uncommitted | §11.2: a WO Number, the PN of an unsaved line and a new Job Number longer than 200 characters are field errors, and Add Part offers no such new PN. |
+| 2026-11-13 | c0f0b0c | §9: reserved permissions show `(reserved)` and cannot be chosen. |
 | 2026-11-13 | 6c0fa6c | §3: offline scan synchronization refers to PROJECT_PROFILE §30 and §32, where no decision remains open. |
 | 2026-11-12 | de4d99f | §3 rule 13 and §4.11: the page reloads itself after a 10-second countdown in the notice instead of after 60 s, and an attended page after 1 minute without input instead of 2; §9: an Area's color and name stay on one line in the Administration tables. |
 | 2026-11-12 | 77a2dfb | §3 rule 13: every page reloads itself after an update once it has been idle for 2 minutes with no dialog and no unsaved input; the Scan Station and Production Board keep reloading after 60 s. |

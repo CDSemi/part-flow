@@ -12,7 +12,7 @@ import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { normalizePartNumber } from '../scan-station/barcode';
 import { formatIsoDate } from '../dates';
 import type { RequestType } from '../view-models';
-import { isPositiveInteger } from './demand-lines';
+import { MAX_ENTRY_LENGTH, isPositiveInteger, isTooLong } from './demand-lines';
 
 export interface AddPartResult {
   pn: string;
@@ -147,15 +147,20 @@ export function AddPartDialog({
   // The server bounds the listing; a full page means "refine", not
   // "these are all of them".
   const bounded = matches.length >= SERVER_SEARCH_LIMIT;
-  // The whitespace rejection is a pure client-side judgement about the
-  // entry itself — no server answer is involved, so it stays immediate
-  // and reads the live entry.
+  // The whitespace and length rejections are pure client-side judgements
+  // about the entry itself — no server answer is involved, so they stay
+  // immediate and read the live entry.
   const liveCanonical = normalizePartNumber(query);
+  const liveTooLong = liveCanonical !== null && isTooLong(liveCanonical);
   const canonical = settledCanonical;
   const exactMatch =
     canonical !== null &&
     matches.some((entry) => entry.partNumber === canonical);
-  const offerCreate = lookupAnswered && canonical !== null && !exactMatch;
+  const offerCreate =
+    lookupAnswered &&
+    canonical !== null &&
+    !exactMatch &&
+    !isTooLong(canonical);
 
   function choosePn(value: string, asNewPn: boolean) {
     // `value` is a canonical PN; existing line PNs are canonical too.
@@ -360,6 +365,12 @@ export function AddPartDialog({
               <div className="ap-empty">
                 A Part Number cannot contain spaces or other whitespace inside
                 the value, so “{query.trim()}” cannot be created as a new PN.
+              </div>
+            ) : null}
+            {liveTooLong ? (
+              <div className="ap-empty">
+                A Part Number has at most {MAX_ENTRY_LENGTH} characters, so this
+                entry cannot be created as a new PN.
               </div>
             ) : null}
           </>

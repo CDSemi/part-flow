@@ -1553,6 +1553,65 @@ test('an invalid quantity still blocks save and keeps entered values', async () 
   ).toHaveLength(0);
 });
 
+test('a WO Number over 200 characters is marked as it is typed and blocks Save before anything travels', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  fireEvent.change(await screen.findByLabelText('Quantity for NEW-PLATE-9'), {
+    target: { value: '4' },
+  });
+
+  const number = screen.getByLabelText(/^WO Number/);
+  fireEvent.change(number, { target: { value: 'W'.repeat(200) } });
+  expect(
+    screen.queryByText('WO Number is longer than 200 characters'),
+  ).toBeNull();
+  fireEvent.change(number, { target: { value: 'W'.repeat(201) } });
+  expect(
+    screen.getByText('WO Number is longer than 200 characters'),
+  ).toBeInTheDocument();
+  expect(number).toHaveAttribute('aria-invalid', 'true');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+  expect(document.activeElement).toBe(number);
+  expect(number).toHaveValue('W'.repeat(201));
+  // Nothing traveled: no number lookup and no create POST.
+  expect(
+    state.calls.filter(
+      (call) =>
+        call.startsWith('GET /api/work-orders?number=') ||
+        call === 'POST /api/work-orders',
+    ),
+  ).toHaveLength(0);
+});
+
+test('a Job Number over 200 characters blocks Save at its field, and editing it clears the error', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  fireEvent.change(await screen.findByLabelText('Quantity for NEW-PLATE-9'), {
+    target: { value: '4' },
+  });
+  const jobs = screen.getByLabelText('Job Numbers for NEW-PLATE-9');
+  fireEvent.change(jobs, { target: { value: `17555, ${'J'.repeat(201)}` } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+
+  expect(
+    await screen.findByText('a Job Number is longer than 200 characters'),
+  ).toBeInTheDocument();
+  expect(document.activeElement).toBe(jobs);
+  expect(jobs).toHaveAttribute('aria-invalid', 'true');
+  expect(
+    state.calls.filter((call) => call === 'POST /api/work-orders'),
+  ).toHaveLength(0);
+
+  fireEvent.change(jobs, { target: { value: '17555' } });
+  expect(
+    screen.queryByText('a Job Number is longer than 200 characters'),
+  ).toBeNull();
+});
+
 test('an existing WO Number is opened instead of duplicated', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
@@ -1857,6 +1916,24 @@ test('Add Part canonicalizes manual entry like the backend — trim + uppercase,
     screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
   ).toBeInTheDocument();
   expect(screen.getByText('new Part Number')).toBeInTheDocument();
+});
+
+test('Add Part never offers a new PN over 200 characters and says why', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'p'.repeat(201) },
+  });
+  expect(
+    screen.getByText(
+      'A Part Number has at most 200 characters, so this entry cannot be created as a new PN.',
+    ),
+  ).toBeInTheDocument();
+  // The lookup answers that no PN matches, and still nothing is offered.
+  expect(await screen.findByText(/No existing PN matches/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Create new PN/ })).toBeNull();
 });
 
 test('the Add Part flow rejects a PN already on the Work Order', async () => {
@@ -3612,6 +3689,33 @@ test('an internal Work Order receives its external number through the audited ed
   expect(
     screen.queryByText('internal Work Order — no external number yet'),
   ).toBeNull();
+});
+
+test('an external WO Number over 200 characters is marked and never travels', async () => {
+  await renderWorkOrders();
+  fireEvent.click(screen.getByRole('button', { name: 'Open Work Order —' }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('C-300');
+
+  const number = within(dialog).getByLabelText(/External WO Number/);
+  fireEvent.change(number, { target: { value: 'W'.repeat(201) } });
+  expect(
+    within(dialog).getByText('WO Number is longer than 200 characters'),
+  ).toBeInTheDocument();
+  expect(number).toHaveAttribute('aria-invalid', 'true');
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  expect(
+    await screen.findByText(
+      /WO Number is longer than 200 characters — shorten it to save/,
+    ),
+  ).toBeInTheDocument();
+  expect(document.activeElement).toBe(number);
+  expect(state.calls.filter((call) => call.startsWith('PATCH'))).toHaveLength(
+    0,
+  );
 });
 
 test('an external-number conflict keeps the draft and shows the server message', async () => {

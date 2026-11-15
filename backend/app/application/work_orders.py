@@ -38,6 +38,11 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
 - Request Type is ``NEW``/``MODIFY`` with manual entry defaulting to
   ``NEW``; ``requested_quantity`` is a positive integer; external Job
   Numbers are preserved verbatim as metadata (never a Job aggregate).
+- A Work Order Number new to its Work Order, the PN of a new demand
+  line and a Job Number a line does not hold yet follow the file
+  import's text-cell rule (Phase 17): no NUL character and at most 200
+  characters, so an overlong value is refused with a clear message
+  before any write. A value already saved is never judged again.
 - One Save from the UI is ONE transaction: the Work Order header, its
   new and edited demand lines, any first-use PN masters, and every
   ``audit_events`` row commit together or roll back together — no
@@ -135,6 +140,26 @@ _WORK_ORDER_CONFLICTS: Final = {
 # Input normalization
 # ---------------------------------------------------------------------------
 
+#: Characters an entered Work Order Number, the Part Number of a new demand
+#: line and a new Job Number may have (Phase 17) — the limit the file import
+#: applies to the same text cells (OD-S1-11). A Work Order Number or Part
+#: Number of a few kilobytes can exceed what a row of its unique index may
+#: hold, and would then fail as a server error instead of a clear message.
+MAX_ENTRY_LENGTH: Final = 200
+
+
+def _entered_text(value: str, label: str) -> str:
+    """One entered value under the file import's text-cell rule.
+
+    No NUL character (PostgreSQL text cannot hold one, so the driver
+    would fail the write) and at most ``MAX_ENTRY_LENGTH`` characters.
+    """
+    if "\x00" in value:
+        raise InvalidInputError(f"{label} must not contain a NUL character.")
+    if len(value) > MAX_ENTRY_LENGTH:
+        raise InvalidInputError(f"{label} is longer than {MAX_ENTRY_LENGTH} characters.")
+    return value
+
 
 def _normalized_work_order_number(value: object) -> str | None:
     """Blank confirmed input persists NULL; an entered number stays verbatim.
@@ -142,7 +167,9 @@ def _normalized_work_order_number(value: object) -> str | None:
     PROJECT_PROFILE §7 Work Order: an entered number is an opaque
     arbitrary string that is never reformatted or normalized — not even
     surrounding whitespace is touched. Only a value that is blank
-    (empty or whitespace-only — nothing was entered) becomes NULL.
+    (empty or whitespace-only — nothing was entered) becomes NULL. A
+    number that is new to the Work Order is judged by
+    ``_check_new_work_order_number``.
     """
     if value is None:
         return None
@@ -151,6 +178,19 @@ def _normalized_work_order_number(value: object) -> str | None:
     if not value.strip():
         return None
     return value
+
+
+def _check_new_work_order_number(
+    session: Session, number: str, exclude_id: int | None = None
+) -> None:
+    """Judge a Work Order Number new to its Work Order before it is written.
+
+    It follows ``_entered_text`` and must not exist yet. An unchanged
+    number is never judged again, so a value already saved is never
+    refused.
+    """
+    _entered_text(number, "Work Order Number")
+    _reject_duplicate_work_order_number(session, number, exclude_id)
 
 
 def validated_quantity(value: object) -> int:
@@ -180,12 +220,21 @@ def _validated_request_type(value: object) -> RequestType:
     raise InvalidInputError("Request Type must be NEW or MODIFY.")
 
 
-def _validated_job_numbers(value: object) -> list[str]:
-    """External Job Numbers are metadata preserved verbatim (§8.3)."""
+def _validated_job_numbers(value: object, saved: Collection[str] = ()) -> list[str]:
+    """External Job Numbers are metadata preserved verbatim (§8.3).
+
+    A Job Number the line does not hold yet follows ``_entered_text``;
+    one in ``saved`` (the line's stored Job Numbers) is kept as it is,
+    so an edit that sends the whole list back is never refused for a
+    value that was already accepted.
+    """
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise InvalidInputError("Job Numbers must be a list of text values.")
+    for item in value:
+        if item not in saved:
+            _entered_text(item, "Job Number")
     return list(value)
 
 
@@ -601,9 +650,10 @@ def _stage_new_line(
     Stages only — the caller owns the transaction. The master is
     created on first valid use through ``ensure_part_number`` (which
     also stages the PN ``CREATED`` audit row); the demand keeps the
-    canonical PN by value.
+    canonical PN by value, which follows ``_entered_text``.
     """
-    master, _ = ensure_part_number(session, draft.get("part_number"), actor_user_id=actor_user_id)
+    part_number = _entered_text(canonical_part_number(draft.get("part_number")), "Part Number")
+    master, _ = ensure_part_number(session, part_number, actor_user_id=actor_user_id)
     if master.part_number in taken_part_numbers:
         raise InvalidInputError(
             f"Part Number '{master.part_number}' is already on this Work Order."
@@ -659,7 +709,7 @@ def _apply_line_edit(demand: WorkOrderDemand, edit: Mapping[str, Any]) -> bool:
         demand.due_date = edit["due_date"]
         changed = True
     if "job_numbers" in edit:
-        job_numbers = _validated_job_numbers(edit["job_numbers"])
+        job_numbers = _validated_job_numbers(edit["job_numbers"], demand.job_numbers)
         if job_numbers != list(demand.job_numbers):
             demand.job_numbers = job_numbers
             changed = True
@@ -826,7 +876,7 @@ def create_work_order(
     """
     number = _normalized_work_order_number(work_order_number)
     if number is not None:
-        _reject_duplicate_work_order_number(session, number)
+        _check_new_work_order_number(session, number)
     if not lines:
         # PROJECT_PROFILE §8.2: a Work Order contains one or more
         # Work Order Demand records.
@@ -1100,7 +1150,7 @@ def update_work_order(
         number = _normalized_work_order_number(work_order_number)
         if number != work_order.work_order_number:
             if number is not None:
-                _reject_duplicate_work_order_number(session, number, exclude_id=work_order.id)
+                _check_new_work_order_number(session, number, exclude_id=work_order.id)
             work_order.work_order_number = number
             header_changed = True
     if not isinstance(due_date, UnsetType) and due_date != work_order.due_date:

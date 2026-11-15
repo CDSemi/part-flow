@@ -6,6 +6,7 @@ import {
   createDraftLine,
   draftFromDemand,
   hotListExitNotices,
+  isTooLong,
   lineRemoveRule,
   qtyEntryError,
   validateDemandLines,
@@ -179,4 +180,65 @@ test('FC-8: an unsaved draft line is always judged — it has no saved Qty', () 
   const draft = createDraftLine({ due: '', allocatedQuantity: 5 });
   expect(draft.savedQty).toBeNull();
   expect(qtyEntryError(draft, '4')).toBe('≥ 5 pcs allocated');
+});
+
+// Phase 17: the entry limit the server and the file import apply.
+
+test('the entry limit counts characters, not UTF-16 units', () => {
+  expect(isTooLong('A'.repeat(200))).toBe(false);
+  expect(isTooLong('A'.repeat(201))).toBe(true);
+  // 200 emoji are 400 UTF-16 units but 200 characters.
+  expect(isTooLong('😀'.repeat(200))).toBe(false);
+  expect(isTooLong('😀'.repeat(201))).toBe(true);
+});
+
+test('the PN of an unsaved line over the limit is an error; a saved line is never judged', () => {
+  const longPn = 'P'.repeat(201);
+  const draft = createDraftLine({
+    due: '',
+    pn: longPn,
+    isNewPn: true,
+    qty: '1',
+  });
+  expect(validateDemandLines([draft])).toEqual([
+    {
+      lineId: draft.id,
+      field: 'pn',
+      message: 'PN is longer than 200 characters — remove this line',
+    },
+  ]);
+  const saved = draftFromDemand(savedDemand(1, longPn, {}), null);
+  expect(validateDemandLines([saved])).toEqual([]);
+});
+
+test('a newly entered Job Number over the limit is an error; a saved one is kept', () => {
+  const tooLong = {
+    field: 'job',
+    message: 'a Job Number is longer than 200 characters',
+  };
+  const draft = createDraftLine({
+    due: '',
+    pn: 'A-100',
+    qty: '1',
+    job: `17555, ${'J'.repeat(201)}`,
+  });
+  expect(validateDemandLines([draft])).toEqual([
+    { lineId: draft.id, ...tooLong },
+  ]);
+
+  // A line saved with a longer Job Number: unchanged, or with a Job
+  // Number added, the saved one is never judged — a new long one is.
+  const saved = draftFromDemand(
+    savedDemand(1, 'A-100', { jobNumbers: ['S'.repeat(300)] }),
+    null,
+  );
+  expect(validateDemandLines([saved])).toEqual([]);
+  expect(
+    validateDemandLines([{ ...saved, job: `${saved.job}, 17556` }]),
+  ).toEqual([]);
+  expect(
+    validateDemandLines([
+      { ...saved, job: `${saved.job}, ${'K'.repeat(201)}` },
+    ]),
+  ).toEqual([{ lineId: saved.id, ...tooLong }]);
 });

@@ -370,6 +370,150 @@ def test_a_work_order_needs_at_least_one_demand_line(client: TestClient, db_engi
 
 
 # ---------------------------------------------------------------------------
+# Entry limit — the file import's text-cell rule (Phase 17)
+# ---------------------------------------------------------------------------
+
+
+def _text_of_length(prefix: str, length: int) -> str:
+    """A unique uppercase text of exactly ``length`` characters."""
+    unique = _unique(prefix)
+    return unique + "X" * (length - len(unique))
+
+
+def _random_text(length: int) -> str:
+    """Random uppercase hex of ``length`` characters. PostgreSQL compresses
+    a repetitive value in an index entry, but not this one, so a few
+    kilobytes of it exceed the 2704-byte limit of a btree index row."""
+    return "".join(uuid.uuid4().hex.upper() for _ in range(length // 32 + 1))[:length]
+
+
+def test_entries_of_200_characters_are_accepted(client: TestClient) -> None:
+    """200 characters is still an entry — counted in characters, not in
+    bytes (`Ж` takes two bytes in UTF-8)."""
+    number = _text_of_length("WO", 199) + "Ж"
+    part_number = _text_of_length("PN", 200)
+    job = "Ж" * 200
+    body = _create_work_order(
+        client,
+        work_order_number=number,
+        lines=[_line(part_number=part_number, job_numbers=[job])],
+    )
+    assert body["work_order_number"] == number
+    assert body["demands"][0]["part_number"] == part_number
+    assert body["demands"][0]["job_numbers"] == [job]
+
+
+def test_create_refuses_an_overlong_entry_with_zero_writes(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """201 characters is refused with the file import's message, and so
+    is a value of a few kilobytes, which the unique index of the Work
+    Order Number or the Part Number would otherwise fail as a server
+    error. A NUL character is refused like in the import. Nothing is
+    written."""
+    counts_before = _write_counts(db_engine)
+    cases: list[tuple[dict[str, Any], str]] = [
+        (
+            {"work_order_number": _text_of_length("WO", 201)},
+            "Work Order Number is longer than 200 characters.",
+        ),
+        (
+            {"work_order_number": _random_text(3200)},
+            "Work Order Number is longer than 200 characters.",
+        ),
+        (
+            {"lines": [_line(part_number=_text_of_length("PN", 201))]},
+            "Part Number is longer than 200 characters.",
+        ),
+        (
+            {"lines": [_line(part_number=_random_text(3200))]},
+            "Part Number is longer than 200 characters.",
+        ),
+        (
+            {"lines": [_line(job_numbers=["17555", "J" * 201])]},
+            "Job Number is longer than 200 characters.",
+        ),
+        (
+            {"work_order_number": f"WO\x00{uuid.uuid4().hex[:6]}"},
+            "Work Order Number must not contain a NUL character.",
+        ),
+        (
+            {"lines": [_line(job_numbers=["17\x0055"])]},
+            "Job Number must not contain a NUL character.",
+        ),
+    ]
+    for overrides, message in cases:
+        payload: dict[str, Any] = {"lines": [_line()]}
+        payload.update(overrides)
+        rejected = admin_of(client).post("/api/work-orders", json=payload)
+        assert rejected.status_code == 422, rejected.text
+        assert rejected.json()["detail"] == message
+    assert _write_counts(db_engine) == counts_before
+
+
+def test_edit_refuses_an_overlong_entry_with_zero_writes(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The audited number edit of an internal Work Order, a new demand
+    line and a Job Number added to a saved line follow the same rule."""
+    body = _create_work_order(client)
+    url = f"/api/work-orders/{body['id']}"
+    line_id = body["demands"][0]["id"]
+    counts_before = _write_counts(db_engine)
+    cases: list[tuple[dict[str, Any], str]] = [
+        (
+            {"work_order_number": _text_of_length("WO", 201)},
+            "Work Order Number is longer than 200 characters.",
+        ),
+        (
+            {"new_lines": [_line(part_number=_text_of_length("PN", 201))]},
+            "Part Number is longer than 200 characters.",
+        ),
+        (
+            {"line_edits": [{"id": line_id, "job_numbers": ["J" * 201]}]},
+            "Job Number is longer than 200 characters.",
+        ),
+    ]
+    for payload, message in cases:
+        rejected = admin_of(client).patch(url, json=payload)
+        assert rejected.status_code == 422, rejected.text
+        assert rejected.json()["detail"] == message
+    assert _write_counts(db_engine) == counts_before
+
+
+def test_a_value_already_saved_is_never_refused(client: TestClient, db_engine: Engine) -> None:
+    """The limit applies to what is entered, never to what is stored: a
+    Work Order Number and a Job Number longer than 200 characters
+    (seeded directly, as no entry path accepts one any more) survive an
+    edit that sends them back unchanged, and the line still takes an
+    added Job Number."""
+    body = _create_work_order(client, lines=[_line(job_numbers=["17555"])])
+    line_id = int(body["demands"][0]["id"])
+    number = _random_text(300)
+    stored_job = "S" * 300
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.text("UPDATE work_orders SET work_order_number = :number WHERE id = :id"),
+            {"number": number, "id": body["id"]},
+        )
+        connection.execute(
+            sa.text("UPDATE work_order_demands SET job_numbers = :jobs WHERE id = :id"),
+            {"jobs": [stored_job], "id": line_id},
+        )
+
+    edited = admin_of(client).patch(
+        f"/api/work-orders/{body['id']}",
+        json={
+            "work_order_number": number,
+            "line_edits": [{"id": line_id, "job_numbers": [stored_job, "17556"]}],
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["work_order_number"] == number
+    assert edited.json()["demands"][0]["job_numbers"] == [stored_job, "17556"]
+
+
+# ---------------------------------------------------------------------------
 # Demand save is business demand only
 # ---------------------------------------------------------------------------
 

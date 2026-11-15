@@ -35,6 +35,7 @@ import { AddPartDialog } from './AddPartDialog';
 import type { AddPartResult } from './AddPartDialog';
 import {
   RELEASED_REMOVE_EXPLANATION,
+  WORK_ORDER_NUMBER_TOO_LONG,
   applyWorkOrderDueDateChange,
   buildLineEdits,
   collectMissingDemandInfo,
@@ -44,6 +45,7 @@ import {
   hotListExitNotices,
   hotRemoveTitle,
   isPositiveInteger,
+  isTooLong,
   lineRemoveRule,
   processScan,
   qtyEntryError,
@@ -207,6 +209,7 @@ export function WorkOrderDetailPanel({
   const [numberDraft, setNumberDraft] = useState('');
 
   const scanRef = useRef<HTMLInputElement>(null);
+  const numberRef = useRef<HTMLInputElement>(null);
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
   const [focusField, setFocusField] = useState<{
     id: number;
@@ -223,6 +226,8 @@ export function WorkOrderDetailPanel({
     detail.workOrderNumber === null &&
     (detail.status === 'OPEN' || detail.status === 'RELEASED');
   const numberEntered = numberEditVisible && numberDraft.trim() !== '';
+  // Judged on the entry itself as it is typed; Save refuses it.
+  const numberTooLong = numberEntered && isTooLong(numberDraft);
 
   // "Unsaved changes" is DERIVED from the draft against the loaded
   // server state — never a sticky flag set by the first keystroke.
@@ -614,6 +619,13 @@ export function WorkOrderDetailPanel({
     }
     const errors = validateDemandLines(display);
     setLineErrors(errors);
+    if (numberTooLong) {
+      showNotice(
+        `✕ ${WORK_ORDER_NUMBER_TOO_LONG} — shorten it to save. Entered values are preserved.`,
+      );
+      numberRef.current?.focus();
+      return;
+    }
     if (errors.length) {
       showNotice(
         '✕ The Work Order has invalid demand lines — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.',
@@ -673,11 +685,16 @@ export function WorkOrderDetailPanel({
             </label>
             <input
               id="wo-extnum"
+              ref={numberRef}
               className="mono"
               placeholder="e.g. 007482"
               value={numberDraft}
+              aria-invalid={numberTooLong ? true : undefined}
               onChange={(e) => setNumberDraft(e.target.value)}
             />
+            {numberTooLong ? (
+              <div className="rowerr">{WORK_ORDER_NUMBER_TOO_LONG}</div>
+            ) : null}
           </div>
         ) : null}
         <p className="wo-sub">
@@ -979,20 +996,39 @@ export function WorkOrderDetailPanel({
                           </span>
                         )}
                       </td>
-                      <td data-label="Job Numbers">
+                      <td
+                        data-label="Job Numbers"
+                        className={errorFor(line.id, 'job') ? 'err-cell' : ''}
+                      >
                         {valueEditable ? (
-                          <input
-                            className="mono"
-                            size={10}
-                            placeholder="job #…"
-                            value={line.job}
-                            aria-label={`Job Numbers for ${line.pn ?? 'new line'}`}
-                            onChange={(e) =>
-                              updateLine(line.id, {
-                                job: e.target.value,
-                              })
-                            }
-                          />
+                          <>
+                            <input
+                              ref={(el) => {
+                                if (el)
+                                  fieldRefs.current.set(`${line.id}:job`, el);
+                                else fieldRefs.current.delete(`${line.id}:job`);
+                              }}
+                              className="mono"
+                              size={10}
+                              placeholder="job #…"
+                              value={line.job}
+                              aria-label={`Job Numbers for ${line.pn ?? 'new line'}`}
+                              aria-invalid={
+                                errorFor(line.id, 'job') ? true : undefined
+                              }
+                              onChange={(e) => {
+                                clearLineError(line.id, 'job');
+                                updateLine(line.id, {
+                                  job: e.target.value,
+                                });
+                              }}
+                            />
+                            {errorFor(line.id, 'job') ? (
+                              <div className="rowerr">
+                                {errorFor(line.id, 'job')}
+                              </div>
+                            ) : null}
+                          </>
                         ) : (
                           <span className="mono">{line.job || '—'}</span>
                         )}
@@ -1249,9 +1285,11 @@ export function WorkOrderDetailPanel({
             // A release never saves the draft silently and never runs
             // on it either — the same three-way decision Machines and
             // Planned Routes use before their own server actions.
-            const problem = validateDemandLines(display).length
-              ? 'the Work Order has invalid demand lines'
-              : undefined;
+            const problem = numberTooLong
+              ? `the ${WORK_ORDER_NUMBER_TOO_LONG}`
+              : validateDemandLines(display).length
+                ? 'the Work Order has invalid demand lines'
+                : undefined;
             return (
               <UnsavedChoiceDialog
                 title="Unsaved changes"
