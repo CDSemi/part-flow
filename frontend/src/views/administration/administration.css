@@ -224,6 +224,11 @@
   font-family: var(--mono), monospace;
 }
 
+/* A select keeps the right padding of the shared chevron (global.css). */
+.admin-configgrid select.field {
+  padding-right: 28px;
+}
+
 .admin-configgrid .field:focus {
   outline: 2px solid var(--info-border);
   outline-offset: 1px;

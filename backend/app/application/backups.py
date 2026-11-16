@@ -6,9 +6,10 @@ One backup is one directory ``<backup-dir>/<NAME>/`` holding exactly
 (schema v1) and ``SHA256SUMS``. ``deploy/production/backup.sh`` writes the
 dump files to ``<backup-dir>/.partial/<NAME>/``; this module turns them into
 a published backup, verifies one, decides whether one is fresh enough for a
-migration, and applies the daily retention. It never connects to a
-database: everything comes from the artifact and the host-supplied
-identity.
+migration, decides whether a scheduled backup is due, and applies the
+retention of the scheduled backups. It never connects to a database:
+everything comes from the artifact and the host-supplied identity, and the
+interval and retention of Administration → Backups come as arguments.
 
 - ``publish_backup`` (``backup-manifest``): checks the dump files,
   assembles ``.partial/<NAME>.publish/`` (manifest, checksums), verifies it
@@ -19,9 +20,14 @@ identity.
   ``dump_header``, ``list``, ``expect_database``.
 - ``check_freshness`` (``migrate``): the dump started at or after a
   not-before instant, or is at most N minutes old.
-- ``rotate_backups`` (``backup-rotate``): keeps the newest verified daily
-  backups and the newest verified daily of each of the newest ISO weeks;
-  never touches pre-release, manual, unknown or invalid entries.
+- ``rotate_backups`` (``backup-rotate``): of the verified scheduled backups
+  (and the daily backups of earlier releases), keeps the newest of each of
+  the newest N hours, days and ISO weeks (UTC) that hold one; never touches
+  pre-release, manual, unknown or invalid entries.
+- ``check_due`` (``backup-due``): whether the host's hourly task takes a
+  scheduled backup now — none was published yet, or the newest started at
+  least the interval ago (less a ten-minute tolerance for the task's own
+  start time).
 """
 
 import datetime
@@ -62,7 +68,7 @@ SUMMED_FILES: Final = (MANIFEST_FILE, DUMP_FILE, LIST_FILE)
 REQUIRED_FILES: Final = (DUMP_FILE, LIST_FILE, MANIFEST_FILE, SUMS_FILE)
 
 NAME_PATTERN: Final = re.compile(
-    r"^(?P<stamp>[0-9]{8}T[0-9]{6}Z)-(?P<kind>daily|manual|pre-release)"
+    r"^(?P<stamp>[0-9]{8}T[0-9]{6}Z)-(?P<kind>scheduled|daily|manual|pre-release)"
     r"(?:-(?P<label>[A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$"
 )
 RELEASE_TAG_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -81,7 +87,14 @@ _MAX_ALEMBIC_ROW_LENGTH: Final = 64
 _PARTIAL_MAX_AGE: Final = datetime.timedelta(hours=24)
 _FUTURE_TOLERANCE: Final = datetime.timedelta(minutes=2)
 
-BackupKind = Literal["daily", "manual", "pre-release"]
+BackupKind = Literal["scheduled", "daily", "manual", "pre-release"]
+#: Every backup kind a name or manifest may carry. ``scheduled`` is the
+#: host's hourly task (Phase 16, Administration → Backups); ``daily`` is the
+#: scheduled kind of earlier releases, still read, verified, restored and
+#: rotated, never written again.
+BACKUP_KINDS: Final = ("scheduled", "daily", "manual", "pre-release")
+#: The kinds the retention of the scheduled backups applies to.
+ROTATED_KINDS: Final = ("scheduled", "daily")
 CheckStatus = Literal["pass", "fail", "not_run", "skipped"]
 CHECK_IDS: Final = (
     "directory",
@@ -123,6 +136,8 @@ def parse_name(value: str) -> BackupName | None:
         stamp = datetime.datetime.strptime(match.group("stamp"), "%Y%m%dT%H%M%SZ")
     except ValueError:
         return None
+    if kind == "scheduled":
+        return BackupName(value, stamp.replace(tzinfo=datetime.UTC), "scheduled", None)
     if kind == "daily":
         return BackupName(value, stamp.replace(tzinfo=datetime.UTC), "daily", None)
     if kind == "manual":
@@ -693,7 +708,7 @@ def _invalid_key(raw: dict[str, object]) -> str | None:
     rows = raw.get("alembic_rows")
     checks: list[tuple[str, bool]] = [
         ("name", _is_str(raw.get("name"))),
-        ("kind", raw.get("kind") in ("daily", "manual", "pre-release")),
+        ("kind", raw.get("kind") in BACKUP_KINDS),
         ("label", _is_optional_str(raw.get("label"), RELEASE_TAG_PATTERN)),
         ("environment", _is_str(raw.get("environment"), ENVIRONMENT_PATTERN)),
         ("host", _is_str(raw.get("host"), HOST_PATTERN)),
@@ -831,7 +846,7 @@ def _manifest_of(raw: dict[str, object]) -> Manifest:
     started = parse_utc(str(raw["dump_started_at"]))
     assert started is not None
     kind = raw["kind"]
-    assert kind in ("daily", "manual", "pre-release")
+    assert kind in BACKUP_KINDS
     rows = raw["alembic_rows"]
     revision = raw["alembic_revision"]
     return Manifest(
@@ -1045,7 +1060,7 @@ def verify_document(result: VerifyResult) -> dict[str, object]:
         "result": result.result,
         "exit_code": result.exit_code,
         "name": result.name,
-        "kind": kind if kind in ("daily", "manual", "pre-release") else None,
+        "kind": kind if kind in BACKUP_KINDS else None,
         "release_tag": _flat_str(raw, "release", "tag"),
         "alembic_revision": _flat_str(raw, "alembic_revision"),
         "database_name": _flat_str(raw, "database", "name"),
@@ -1150,8 +1165,8 @@ def check_freshness(
 
 ROTATE_MESSAGES: Final = {
     "backup_invalid": (
-        "Daily backups {names} failed verification; they were not counted or deleted. Review"
-        " and remove them by hand (OPERATIONS_RUNBOOK §9)."
+        "Scheduled backups {names} failed verification; they were not counted or deleted."
+        " Review and remove them by hand (OPERATIONS_RUNBOOK §9)."
     ),
     "delete_failed": (
         "Some backups could not be removed ({names}: {reason}). The kept backups are unchanged."
@@ -1164,6 +1179,7 @@ ROTATE_MESSAGES: Final = {
 @dataclass
 class RotateReport:
     dry_run: bool
+    keep_hourly: int
     keep_daily: int
     keep_weekly: int
     kept: list[str] = field(default_factory=list)
@@ -1184,23 +1200,36 @@ class RotateReport:
         return {"rotated": 0, "rotated_with_invalid": 1, "failed": 2}[self.result]
 
 
+def _hour(stamp: datetime.datetime) -> tuple[int, ...]:
+    return (stamp.year, stamp.month, stamp.day, stamp.hour)
+
+
+def _day(stamp: datetime.datetime) -> tuple[int, ...]:
+    return (stamp.year, stamp.month, stamp.day)
+
+
+def _iso_week(stamp: datetime.datetime) -> tuple[int, ...]:
+    iso = stamp.isocalendar()
+    return (iso.year, iso.week)
+
+
 def select_keep(
-    stamps: dict[str, datetime.datetime], keep_daily: int, keep_weekly: int
+    stamps: dict[str, datetime.datetime], keep_hourly: int, keep_daily: int, keep_weekly: int
 ) -> set[str]:
-    """The kept names: the newest ``keep_daily`` ∪ the newest of each of the newest
-    ``keep_weekly`` ISO weeks (UTC) that hold one — weeks overlap the daily window,
-    as restic ``forget --keep-daily D --keep-weekly W``."""
+    """The kept names: the newest backup of each of the newest ``keep_hourly`` hours,
+    ``keep_daily`` days and ``keep_weekly`` ISO weeks (UTC) that hold one. The periods
+    overlap, as restic ``forget --keep-hourly H --keep-daily D --keep-weekly W``."""
     newest_first = sorted(stamps, key=lambda name: (stamps[name], name), reverse=True)
-    keep = set(newest_first[:keep_daily])
-    weeks: set[tuple[int, int]] = set()
-    for name in newest_first:
-        if len(weeks) >= keep_weekly:
-            break
-        iso = stamps[name].isocalendar()
-        week = (iso.year, iso.week)
-        if week not in weeks:
-            weeks.add(week)
-            keep.add(name)
+    keep: set[str] = set()
+    for count, period in ((keep_hourly, _hour), (keep_daily, _day), (keep_weekly, _iso_week)):
+        seen: set[tuple[int, ...]] = set()
+        for name in newest_first:
+            if len(seen) >= count:
+                break
+            bucket = period(stamps[name])
+            if bucket not in seen:
+                seen.add(bucket)
+                keep.add(name)
     return keep
 
 
@@ -1236,13 +1265,17 @@ def _rotate(backup_dir: Path, report: RotateReport, now: datetime.datetime) -> N
     for entry in backup_files.entry_names(backup_dir):
         parsed = parse_name(entry)
         path = backup_dir / entry
-        if parsed is None or parsed.kind != "daily" or not backup_files.is_real_directory(path):
+        if (
+            parsed is None
+            or parsed.kind not in ROTATED_KINDS
+            or not backup_files.is_real_directory(path)
+        ):
             continue
         identity = _manifest_identity(path)
         if identity is None:
             report.skipped.append({"name": entry, "reason": "manifest unreadable"})
             continue
-        if identity != ("daily", entry):
+        if identity != (parsed.kind, entry):
             report.skipped.append({"name": entry, "reason": "manifest disagrees with the name"})
             continue
         result = verify_directory(path)
@@ -1258,7 +1291,7 @@ def _rotate(backup_dir: Path, report: RotateReport, now: datetime.datetime) -> N
             failure = (running, f"cannot be read ({reason})")
         report.invalid.append({"name": entry, "check": failure[0], "detail": failure[1]})
 
-    keep = select_keep(verified, report.keep_daily, report.keep_weekly)
+    keep = select_keep(verified, report.keep_hourly, report.keep_daily, report.keep_weekly)
     report.kept = sorted(keep)
     to_delete = sorted(set(verified) - keep)
     partial_root = backup_dir / PARTIAL_DIR
@@ -1300,13 +1333,16 @@ def _rotate(backup_dir: Path, report: RotateReport, now: datetime.datetime) -> N
 def rotate_backups(
     backup_dir: Path,
     *,
+    keep_hourly: int = 0,
     keep_daily: int,
     keep_weekly: int,
     dry_run: bool = False,
     now: datetime.datetime | None = None,
 ) -> RotateReport:
-    """``backup-rotate``: apply the daily retention; always a report."""
-    report = RotateReport(dry_run=dry_run, keep_daily=keep_daily, keep_weekly=keep_weekly)
+    """``backup-rotate``: apply the retention of the scheduled backups; always a report."""
+    report = RotateReport(
+        dry_run=dry_run, keep_hourly=keep_hourly, keep_daily=keep_daily, keep_weekly=keep_weekly
+    )
     try:
         _rotate(backup_dir, report, now or _now())
     except OSError as exc:
@@ -1336,6 +1372,7 @@ def rotate_document(report: RotateReport) -> dict[str, object]:
         "result": report.result,
         "exit_code": report.exit_code,
         "dry_run": report.dry_run,
+        "keep_hourly": report.keep_hourly,
         "keep_daily": report.keep_daily,
         "keep_weekly": report.keep_weekly,
         "kept": list(report.kept),
@@ -1351,9 +1388,128 @@ def rotate_summary(report: RotateReport) -> str:
     if report.result == "failed":
         message = report.error.message if report.error is not None else report.result
         return f"backup-rotate: {message}"
-    summary = f"backup-rotate: kept {len(report.kept)} daily backups, deleted {len(report.deleted)}"
+    summary = (
+        f"backup-rotate: kept {len(report.kept)} scheduled backups, deleted {len(report.deleted)}"
+    )
     if report.invalid:
         summary += f", {len(report.invalid)} failed verification and were kept for review"
     if report.dry_run:
         summary += " (dry run)"
     return summary
+
+
+# ---------------------------------------------------------------------------
+# backup-due (Phase 16, Administration → Backups)
+# ---------------------------------------------------------------------------
+
+#: The host task runs every hour, a little later or earlier each time: a
+#: scheduled backup is due this much before its interval has fully passed,
+#: so an hourly interval never skips an hour.
+DUE_TOLERANCE: Final = datetime.timedelta(minutes=10)
+
+DUE_MESSAGES: Final = {
+    "io_error": "The backup directory {dir} could not be read ({reason}).",
+    "internal_error": "backup-due failed unexpectedly (internal error).",
+}
+
+
+@dataclass
+class DueReport:
+    interval_hours: int
+    newest: BackupName | None = None
+    age_minutes: int | None = None
+    due: bool = False
+    error: BackupError | None = None
+
+    @property
+    def result(self) -> Literal["due", "not_due", "failed"]:
+        if self.error is not None:
+            return "failed"
+        return "due" if self.due else "not_due"
+
+    @property
+    def exit_code(self) -> int:
+        return {"due": 0, "not_due": 1, "failed": 2}[self.result]
+
+
+def _newest_scheduled(backup_dir: Path) -> BackupName | None:
+    """The newest published scheduled (or earlier daily) backup whose manifest names it."""
+    candidates = [
+        parsed
+        for parsed in (parse_name(entry) for entry in backup_files.entry_names(backup_dir))
+        if parsed is not None and parsed.kind in ROTATED_KINDS
+    ]
+    candidates.sort(key=lambda parsed: (parsed.stamp, parsed.name), reverse=True)
+    for parsed in candidates:
+        path = backup_dir / parsed.name
+        if backup_files.is_real_directory(path) and _manifest_identity(path) == (
+            parsed.kind,
+            parsed.name,
+        ):
+            return parsed
+    return None
+
+
+def check_due(
+    backup_dir: Path, *, interval_hours: int, now: datetime.datetime | None = None
+) -> DueReport:
+    """``backup-due``: whether a scheduled backup is due now; always a report.
+
+    Due when no scheduled backup was published yet, or the newest started at
+    least ``interval_hours`` ago less ``DUE_TOLERANCE``, or its name lies in
+    the future (a clock error: a backup of now is taken). The manifest is
+    read for its name and kind only; no digest is computed.
+    """
+    report = DueReport(interval_hours=interval_hours)
+    try:
+        newest = _newest_scheduled(backup_dir)
+    except OSError as exc:
+        message = DUE_MESSAGES["io_error"].format(dir=backup_dir, reason=_reason(exc))
+        report.error = BackupError("io_error", message, exc)
+        return report
+    except Exception as exc:
+        report.error = BackupError("internal_error", DUE_MESSAGES["internal_error"], exc)
+        return report
+    report.newest = newest
+    if newest is None:
+        report.due = True
+        return report
+    age = (now or _now()) - newest.stamp
+    report.age_minutes = int(age.total_seconds() // 60)
+    interval = datetime.timedelta(hours=interval_hours)
+    report.due = age >= interval - DUE_TOLERANCE or -age > _FUTURE_TOLERANCE
+    return report
+
+
+def due_document(report: DueReport) -> dict[str, object]:
+    """The JSON document of one backup-due run (keys in the contract order)."""
+    newest: dict[str, object] | None = None
+    if report.newest is not None:
+        newest = {
+            "name": report.newest.name,
+            "started_at": utc_text(report.newest.stamp),
+            "age_minutes": report.age_minutes,
+        }
+    return {
+        "report_version": REPORT_VERSION,
+        "command": "backup-due",
+        "result": report.result,
+        "exit_code": report.exit_code,
+        "interval_hours": report.interval_hours,
+        "newest": newest,
+        "error": _error_document(report.error),
+    }
+
+
+def due_summary(report: DueReport) -> str:
+    if report.result == "failed":
+        message = report.error.message if report.error is not None else report.result
+        return f"backup-due: {message}"
+    if report.newest is None:
+        return "backup-due: due (no scheduled backup was published yet)"
+    every = "hour" if report.interval_hours == 1 else f"{report.interval_hours} hours"
+    state = "due" if report.due else "not due"
+    return (
+        f"backup-due: {state} (the newest scheduled backup, {report.newest.name}, started"
+        f" {report.age_minutes} minutes ago; one is due every {every})"
+    )

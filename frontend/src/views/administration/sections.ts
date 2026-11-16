@@ -150,6 +150,15 @@ export const ADMIN_SECTIONS: AdminSection[] = [
       'Admin-only Movement-history retention maintenance: configurable retention period, size threshold or manual request — lossless archive export, verification, then purge exactly the archived rows, with scope preview, reason and full audit; normal workflows never delete history',
   },
   {
+    id: 'backups',
+    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
+    phase: 'full',
+    group: 'Policies',
+    label: 'Backups',
+    subtitle:
+      'How often the server takes a scheduled backup, and how many hourly, daily and weekly backups it keeps',
+  },
+  {
     id: 'department-display',
     writePermission: 'MANAGE_DEPARTMENTS',
     phase: 'full',

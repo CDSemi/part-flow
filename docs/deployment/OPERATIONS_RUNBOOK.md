@@ -13,7 +13,7 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | I want to … | Section |
 | --- | --- |
 | Check that PartFlow is healthy, or find the cause of an error | §2 |
-| Take a backup by hand, verify one, or understand the backup folder | §3 |
+| Take a backup by hand, verify one, understand the backup folder or the hourly backup task | §3 |
 | Prove that a backup can be restored | §4 |
 | Install a new release | §5 |
 | Undo a release | §6 |
@@ -116,7 +116,7 @@ It prints one line per check, `PASS|FAIL|SKIP <id> <reason>`, in this order, the
 | `disk_archive` | the archive folder has less than 15 % free; `SKIP` while no archive folder is given (`--archive-dir`) |
 | `database` | the `status` report could not run, did not answer within 120 s, or reported a database error |
 | `schema` | `status` reports the schema as not ready |
-| `backup_age` | no published backup is found, the backup folder cannot be read, or the newest backup of any kind completed more than 26 hours ago (`--max-backup-age-hours`) |
+| `backup_age` | no published backup is found, the backup folder cannot be read, or the newest backup of any kind completed longer ago than the scheduled backup interval of Administration → Backups plus 2 hours (3 hours initially; `--max-backup-age-hours` sets another limit) |
 | `archival_proposal` | always `SKIP`: the archival of Movement history is not implemented yet |
 
 - The last four lines come from one read-only `status` run. While a release holds its lock, or `release.sh` holds the
@@ -198,12 +198,13 @@ of a release checkout: the running release's for scheduled and manual backups, t
 calls it. One backup is one folder `<backup-dir>/<NAME>/`:
 
 ```text
-NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-daily
+NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-scheduled
                                          and 20261008T140000Z-pre-release-v1.0.0-rc.2
 ```
 
-- `kind` is `daily` (the scheduled backup), `manual` (taken by hand, with a reason) or `pre-release` (taken by
-  `release.sh`, with the target release tag as `label`).
+- `kind` is `scheduled` (the backup task that runs every hour), `manual` (taken by hand, with a reason) or
+  `pre-release` (taken by `release.sh`, with the target release tag as `label`). `daily` is the scheduled kind of
+  earlier releases: such backups are still verified, restored and rotated like scheduled ones.
 - The folder holds exactly four files: `partflow.dump` (the database, dumped inside `db` with
   `pg_dump --format=custom --no-owner --no-privileges`), `partflow.dump.list` (its table of contents), `manifest.json`
   (when, where and from which release and database revision the backup was taken, the PostgreSQL version, the
@@ -226,19 +227,19 @@ deploy/production/backup.sh --kind manual --operator "<your name>" --reason "<wh
 ```
 
 On success, the standard output is exactly one line, `BACKUP <NAME> <absolute path>`; progress lines such as
-`backup: dump ok (1234 ms)` go to standard error. The scheduled daily backup is
-`deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8`
-([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.2). `release.sh` takes the pre-release backup itself; its manual form, for
+`backup: dump ok (1234 ms)` go to standard error. The backup task runs
+`deploy/production/backup.sh --kind scheduled --operator scheduler` every hour ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md)
+§11.2); Scheduled backups, below, explains it. `release.sh` takes the pre-release backup itself; its manual form, for
 a release by hand, is
 `deploy/production/backup.sh --kind pre-release --label <target tag> --tools-release <target tag> --operator "<your name>"`.
 
 | Option | Meaning |
 | --- | --- |
-| `--kind daily\|manual\|pre-release`, `--operator NAME` | Required. |
+| `--kind scheduled\|manual\|pre-release`, `--operator NAME` | Required. `--kind daily`, `--keep-daily` and `--keep-weekly` of earlier releases are refused with the command to use instead. |
 | `--reason TEXT` | Required for `manual`. |
 | `--label TAG` | The target release tag: required for `pre-release`, refused otherwise. |
 | `--tools-release TAG` | The release whose `backup-tools` image writes and verifies the manifest (default: `PARTFLOW_RELEASE`). |
-| `--keep-daily N --keep-weekly N`, or `--no-rotate` | `daily` only, and one of the two is required: the retention (below). There is no default. |
+| `--no-rotate` | `scheduled` only: keep every scheduled backup this run. |
 | `--reserve-mib N` | Free space kept beyond twice the newest dump (default 1024). |
 
 Text values are 1 to 500 characters without control characters, `"` or `\`. Before writing, `backup.sh` requires free
@@ -246,11 +247,11 @@ space of twice the newest dump (or the database size when there is no dump yet) 
 
 | Exit | Meaning | What to do |
 | --- | --- | --- |
-| 0 | Completed and verified. | Nothing. |
+| 0 | Completed and verified, or (`scheduled`) no backup was due: the standard output is then `NOT_DUE <NAME>`, the newest scheduled backup. | Nothing. |
 | 1 | Refused before writing: `backup_running`, `backup_lock_stale`, `insufficient_space` or `name_exists`. | Read the reason; nothing was written. |
-| 2 | Could not run: options, tools, configuration, `db` not running, or the backup lock cannot be created. | Fix the cause and run it again. |
+| 2 | Could not run: options, tools, configuration, `db` not running, the backup lock cannot be created, or (`scheduled`) the backup policy cannot be read from the database. | Fix the cause and run it again. |
 | 3 | Failed: no backup was published, or the published backup failed verification. | Never use a backup that the message names; remove it after review. |
-| 4 | The backup is complete and verified, but the rotation failed or found a daily backup that fails verification. | Read the rotation report on standard error (Retention, below). |
+| 4 | The backup is complete and verified, but the rotation failed or found a scheduled backup that fails verification. | Read the rotation report on standard error (Retention, below). |
 
 ### Verifying a backup
 
@@ -266,23 +267,47 @@ $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-ver
 (could not check). Put `PARTFLOW_RELEASE=<tag>` in front of the first command to use another release's
 `backup-tools` image.
 
+### Scheduled backups
+
+The backup task runs `backup.sh --kind scheduled` every hour ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.2,
+[`VPS.md`](./VPS.md) §8). **Administration → Backups** in PartFlow sets how often it takes a backup and how many
+scheduled backups it keeps; a change applies from the task's next run. Each run:
+
+1. takes the backup lock, then reads the backup policy from the database (`python -m app.cli backup-policy` in a
+   one-off `backend` container, as the application role); when the policy cannot be read, it exits with 2;
+2. asks `backup-due` whether a backup is due: when the newest scheduled backup started less than the interval ago
+   (less ten minutes, so that an hourly task never skips an hour), it writes nothing, prints `NOT_DUE <NAME>` and
+   exits with 0;
+3. otherwise takes and verifies the backup, then applies the retention (below).
+
+| Administration → Backups | Initial value | Allowed |
+| --- | --- | --- |
+| Scheduled backup | Every hour | every 1, 2, 3, 4, 6, 8, 12 or 24 hours |
+| Hourly backups kept | 48 | 0 to 720 |
+| Daily backups kept | 30 | 1 to 3650 |
+| Weekly backups kept | 52 | 0 to 520 |
+
+Changing these needs the permission Configure system settings, and every change is audited.
+
 ### Retention, the off-host copy and alerts
 
-A `daily` backup ends with the rotation of the daily backups. To preview it without deleting anything:
+A scheduled backup ends with the rotation of the scheduled backups, with the values of Administration → Backups. To
+preview it without deleting anything (here with the initial values):
 
 ```sh
-$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-daily 14 --keep-weekly 8 --dry-run
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-hourly 48 --keep-daily 30 --keep-weekly 52 --dry-run
 ```
 
-- It keeps the newest `--keep-daily` verified daily backups, plus the newest daily backup of each of the newest
-  `--keep-weekly` calendar weeks (ISO weeks in UTC; the weeks overlap the daily window).
-- It verifies every candidate first. A daily backup that fails verification is not counted and **never deleted**:
+- It keeps the newest verified scheduled backup of each of the newest `--keep-hourly` hours, `--keep-daily` days and
+  `--keep-weekly` calendar weeks that hold one (hours, days and ISO weeks in UTC; the periods overlap), so the newest
+  scheduled backup is always kept. The daily backups of earlier releases count as scheduled backups.
+- It verifies every candidate first. A scheduled backup that fails verification is not counted and **never deleted**:
   `backup.sh` exits with 4 and you review it (§9).
 - **Pre-release and manual backups are never rotated**: you remove them after review (§9). No tool ever rotates or
   deletes an archive folder.
 - Leftovers in `.partial/` older than 24 hours are removed.
-- 14 and 8 are examples; the owner chooses the real values in the scheduled command. They are required options,
-  never built-in defaults.
+- With the initial values the backup folder holds at most 130 scheduled backups (48 + 30 + 52, fewer while the
+  periods overlap). Plan its space for that many dumps, plus the pre-release and manual backups.
 
 The platform's backup tool encrypts the backup folder and copies it off the host, never a hand-made copy: Hyper Backup
 with client-side encryption on the NAS ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.3), restic to object storage on a
@@ -290,8 +315,9 @@ VPS ([`VPS.md`](./VPS.md) §8).
 
 Alerts, once the schedules are set up: a failed scheduled backup (any non-zero exit) raises the scheduler's failure
 notification; a failed off-host copy raises the backup tool's own notification; and the `check.sh` check
-`backup_age` fails when the newest backup is older than 26 hours (§2). With a daily backup, at most 24 hours of work
-can be lost (the recovery point objective, RPO). Until the daily backup is scheduled, the only backups are the ones
+`backup_age` fails when the newest backup is older than the interval of Administration → Backups plus 2 hours (§2).
+With a backup every hour, at most one hour of work can be lost (the recovery point objective, RPO); after the loss of
+the host, everything since its last off-host copy. Until the backup task is scheduled, the only backups are the ones
 `release.sh` takes before each release and any manual backup.
 
 ### Backup lock and release lock
@@ -299,10 +325,12 @@ can be lost (the recovery point objective, RPO). Until the daily backup is sched
 Backups never run at the same time. The folder `<backup-dir>/.backup.lock` is the lock; its file `owner` holds
 `host`, `pid`, `started_at`, `by` (`backup.sh` or `release.sh`) and the backup `name` or the `release`. A second run is
 refused, never queued: `backup_running` means that a backup, or a release holding the lock, is in progress, so wait.
-`release.sh` holds the lock from the write freeze (or from its backup) until the new `backend` runs. **Keep the daily
-backup away from release times:** a running backup stops a release before the freeze with nothing changed, and a
-daily backup that starts during a release is refused. A lock that cannot be created at all (a full, read-only or
-inode-exhausted backup folder) is reported as could-not-run (exit 2), never as `backup_running`.
+`release.sh` holds the lock from the write freeze (or from its backup) until the new `backend` runs. **Start a release
+right after a scheduled backup:** a running backup stops a release before the freeze with nothing changed (start it
+again once the backup has finished), and a scheduled backup that starts during a release is refused (exit 1, with its
+failure email; the release takes its own backup, and the next run backs up as usual). A lock that cannot be created at
+all (a full, read-only or inode-exhausted backup folder) is reported as could-not-run (exit 2), never as
+`backup_running`.
 
 `backup_lock_stale` means that the lock was left by a run that no longer exists: it was killed, ran out of memory, or
 the power failed. **It is never removed automatically.** Remove it by hand after these checks:
@@ -423,7 +451,8 @@ what to do when `release.sh` stops.
   can be written between the backup and the migration, otherwise just before the switch.
 - Confirm that the images of the running release are still on the host: rollback path 1 needs them (§6), and
   `release.sh` refuses to start without them.
-- Choose a time when no Work Order import runs and no backup runs (the daily backup at 02:00 on the NAS).
+- Choose a time when no Work Order import runs, and start right after a scheduled backup has finished (the backup
+  task starts at every full hour on the NAS).
 - Tell the users when the change starts and when you will decide on a rollback, and ask the stations to finish their
   open dialogs.
 - `release.sh` runs the reconciliation on the running release before it changes anything, and treats its findings as
@@ -893,8 +922,8 @@ trigger can show a finding that then disappears: run it again before acting.
 
 ### Scheduled reconciliation
 
-`deploy/production/scheduled-reconcile.sh` is the daily form, recommended at 04:00, after the daily backup, from the
-running release's checkout, as the operating account ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.5).
+`deploy/production/scheduled-reconcile.sh` is the daily form, recommended at 04:00, from the running release's
+checkout, as the operating account ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.5).
 
 - It runs the full reconciliation and writes the report to
   `~/partflow-monitoring/reconcile/<UTC timestamp>-reconcile.json` (`--reports-dir`; folder mode 0700, report mode
@@ -924,7 +953,7 @@ emails. No tool deletes them; remove them by hand after review (§9).
 | The browser shows a certificate warning | The device does not trust the root certificate, the certificate has expired, or the address differs from the certificate's name ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §9.1). |
 | `check.sh`: `FAIL https ... (curl 60)` | The NAS does not trust the certificate: add `--cacert <root certificate>` (option A). Behind Cloudflare, remove `--resolve-to`. |
 | `check.sh`: `FAIL https host name ... not resolved (curl 6)` | The host cannot resolve its own PartFlow name: add `--resolve-to 127.0.0.1` (option A), or fix the DNS. |
-| `check.sh`: `FAIL backup_age` | The daily backup did not run or failed: check its task and its emails, then run a manual backup (§3). |
+| `check.sh`: `FAIL backup_age` | The scheduled backup did not run or failed: check its task and its emails, then run a manual backup (§3). |
 | `check.sh`: `FAIL disk_...` | Database or storage pressure, below. |
 | `check.sh` or `release.sh`: a lock is older than 4 hours, another release holds the lock, or `backup_lock_stale` | A killed run left its lock: §3, Backup lock and release lock. |
 | `backup_running` | A backup, or a release holding the backup lock, is running: wait and run it again. |
@@ -1076,16 +1105,16 @@ working examples.
 | When | Tasks |
 | --- | --- |
 | Every 15 minutes (automatic) | `check.sh`: health, restarts, disks, certificate, backup age and backend errors (§2). An unchanged failure is repeated every 6 hours. |
-| Daily | The scheduled backup at 02:00 and the scheduled reconciliation at 04:00 run by themselves. Read every failure email, including those of the off-host copy; exit 4 of a backup includes a daily backup that fails verification. |
+| Daily | The scheduled backups (every hour) and the scheduled reconciliation at 04:00 run by themselves. Read every failure email, including those of the off-host copy; exit 4 of a backup includes a scheduled backup that fails verification. |
 | Weekly | Review the database growth (`~/partflow-monitoring/growth.tsv`) and `docker stats --no-stream`. Review failed sign-ins and refused permissions: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` and `refusal.code` tell a refused or locked sign-in, a permission refusal, `station_device_required`, `station_device_mismatch` and `csrf_rejected` apart). Check pending security updates of the host. |
-| Monthly | Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and daily backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
+| Monthly | Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and scheduled backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
 | Quarterly, and after a large schema change | The restore drill (§4); compare its `restore_to_ready` and `total` times with how long the factory can work without PartFlow. |
 | Before a change of the PostgreSQL image or of the host's glibc | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Before every release | Review the migrations, the rollback decision and the checks (§5); `release.sh` takes the backup. |
 
-**Removing old backups and reports.** No tool deletes pre-release backups, manual backups, daily backups that fail
+**Removing old backups and reports.** No tool deletes pre-release backups, manual backups, scheduled backups that fail
 verification, or reconciliation reports. After review, remove each one by name; never remove the newest verified
-daily backup or anything in an archive folder:
+scheduled backup or anything in an archive folder:
 
 ```sh
 rm -r "<backup-dir>/<NAME>"
@@ -1133,7 +1162,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | §5: the release stops before the write freeze when the new image's `revision` reports `blocked_by_data`. |
+| 2026-11-16 | uncommitted | §2, §3, §5, §8, §9: the backup task runs `backup.sh --kind scheduled` every hour; Administration → Backups sets the interval and the hourly, daily and weekly backups kept; the `backup_age` limit follows the interval. |
+| 2026-11-14 | `2a24c2a` | §5: the release stops before the write freeze when the new image's `revision` reports `blocked_by_data`. |
 | 2026-11-13 | `4a99914` | §2: the successful automatic refreshes of the Production Board are no longer in the `web` log. |
 | 2026-11-12 | `de4d99f` | §5 Observe: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after 60 s, and every other page once idle for 1 minute instead of 2; §2: an open Production Board adds about 9 MB of `web` log a day instead of 3 MB. |
 | 2026-11-12 | `77a2dfb` | §5 Observe: pages open during a release now reload themselves (a Scan Station or Production Board after 60 s, every other page once idle for 2 minutes with nothing unsaved), so nobody visits each computer. |

@@ -2562,7 +2562,7 @@ as follows:
 | **Organization**     | Departments, Areas, Operations, Workers |
 | **Production setup** | Scan Stations, Barcode configuration, Scan behavior |
 | **Access**           | Users, Roles & permissions |
-| **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Department display settings, Settings |
+| **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Backups, Department display settings, Settings |
 
 Each section is a standard table-plus-editor pattern. The Areas table is the reference example: Area (color and name),
 Operations, Machine assignment (Direct processing — no Machines / Queue → assign (one-shot); the mode follows from
@@ -2597,6 +2597,7 @@ confirmed through.
   checked for Management allocation and allocation reversal, and Undo recent eligible scans applies at the Scan
   Stations through the role marked Applied at Scan Stations; the other correction permissions are not checked yet.
 - **History archival & purge** (Admin-only) is described under its own heading below.
+- **Backups** (Configure system settings) is described under its own heading below.
 - **Department display settings** are configured **per Department, never globally**: a table of Departments with an
   editor for the Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; defaults
   3 and 6).
@@ -2652,8 +2653,8 @@ write the live environment with explicit loading, error and retry states; server
 editor configure the Worker ID mode: Disabled, Fixed Worker with its Fixed Worker, or Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, the Department display settings, the
-Settings section's Due Soon warning and User sign-in panels, the History archival & purge retention period and the
-Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users sign
+Settings section's Due Soon warning and User sign-in panels, the History archival & purge retention period, the
+Backups policy and the Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users sign
 in with a login name and password and which permissions are checked so far.
 
 Everything else presents itself honestly: nothing that is not available yet is made to appear functional.
@@ -2691,8 +2692,8 @@ Routes and Part Numbers stay managed in Management by authorized production role
   the `Choose a new password` dialog (the same user's open work stays).
 - **Viewing and changing.** Any signed-in user may view the sections. Each section's changes need its own permission
   (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, and Roles & permissions / Users each name theirs). Without it the section is view-only: its
-  controls are hidden and a `View only` line names the permission. The server checks these permissions.
+  permissions, Settings, Backups, and Roles & permissions / Users each name theirs). Without it the section is
+  view-only: its controls are hidden and a `View only` line names the permission. The server checks these permissions.
 - Worker badges are shown only to users who may manage Workers.
 - **Correction permissions guard.** Changing correction permissions, the permission to manage them, or users whose role
   holds them needs the permission to manage correction permissions. The correction permissions in Policies →
@@ -2775,6 +2776,23 @@ Purge).
 - **Not available yet.** Archival and purge runs (archive export, verification, purge, the scope and impact preview,
   the reason), the data-size threshold and manual requests are not available yet (IMPLEMENTATION_ROADMAP). Until they
   are, the section states that they are not available yet and that all Movement history stays in the database.
+
+### Backups
+
+Backups sets the policy of the server's backup task, which runs every hour (OPERATIONS_RUNBOOK §3). Changing it needs
+Configure system settings.
+
+- A **Scheduled backup** select offers `Every hour` (the initial value), `Every 2 hours`, `Every 3 hours`,
+  `Every 4 hours`, `Every 6 hours`, `Every 8 hours`, `Every 12 hours` and `Every 24 hours`.
+- **Hourly backups kept** (0–720, initially 48), **Daily backups kept** (1–3650, initially 30) and **Weekly backups
+  kept** (0–520, initially 52) are whole numbers, each with its own inline error. The rotation keeps the newest
+  scheduled backup of each of that many hours, days and weeks (UTC).
+- A neutral line restates the retention and its upper bound, for example `Keeps one scheduled backup per hour for the
+  last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups.`
+- The help text states that the task takes a backup when the interval has passed since the newest scheduled backup,
+  that backups taken by hand or before an update are never removed, and that a change applies from the task's next
+  run. Saving is one audited full replace, asks for no confirmation and takes or removes no backup.
+- Without the permission, the four values read as text.
 
 ---
 
@@ -3917,7 +3935,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-16 | uncommitted | §9: Scan behavior and Other settings show their candidate settings as disabled previews tagged `Not available yet`. |
+| 2026-11-16 | uncommitted | §9: Administration → Backups sets the scheduled backup interval and the hourly, daily and weekly backups kept. |
+| 2026-11-16 | 0e983ec | §9: Scan behavior and Other settings show their candidate settings as disabled previews tagged `Not available yet`. |
 | 2026-11-16 | a04179f | §11.3: Add to Hot list in the New Work Order header. |
 | 2026-11-15 | a3a7e87 | §7.2 item 7 and §11.6: a Stockroom station allocation entry names the Worker its station identified. |
 | 2026-11-14 | 2a24c2a | §13.2: a Duplicate whose `{name} (variant)` an active route already holds opens `New Planned Route` with the refusal. |

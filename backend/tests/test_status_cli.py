@@ -37,7 +37,7 @@ from tests.conftest import owner_engine
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_status_cli"
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0033_phase17_super_user_role"
+_PREVIOUS = "0034_phase17_unique_names"
 _UNKNOWN = "9999_unknown_to_this_image"
 _NOW = datetime.datetime(2026, 10, 8, 12, 0, tzinfo=datetime.UTC)
 _TOP_KEYS = [
@@ -107,6 +107,9 @@ def _collect(engine: Engine | None, backup_dir: Path | None = None, **options: A
         "release_commit": None,
         "accepted_revision": None,
         "backup_dir": backup_dir,
+        # The limit of earlier releases; the cases of the interval-derived
+        # limit pass None.
+        "max_backup_age_hours": 26,
         "now": lambda: _NOW,
     }
     values.update(options)
@@ -120,7 +123,7 @@ def _document(report: Any) -> dict[str, Any]:
 def _published(
     backup_dir: Path,
     completed: datetime.datetime,
-    kind: str = "daily",
+    kind: str = "scheduled",
     label: str | None = None,
 ) -> str:
     """A published backup whose manifest says it completed at ``completed``."""
@@ -159,7 +162,7 @@ def test_status_ok(
 ) -> None:
     """SC-1 (+ SC-13, SC-16)."""
     now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
-    name = _published(tmp_path, now - datetime.timedelta(hours=3))
+    name = _published(tmp_path, now - datetime.timedelta(hours=2))
     code, out, err = _run_cli(capsys, "--backup-dir", str(tmp_path))
     assert code == 0, out + err
     assert '\n  "exit_code": 0,\n' in out
@@ -194,13 +197,14 @@ def test_status_ok(
     }
     backup = document["backup"]
     assert backup["status"] == "ok" and backup["directory"] == str(tmp_path)
-    assert backup["max_age_hours"] == 26 and backup["candidates"] == 1
-    assert backup["latest"]["name"] == name and backup["latest"]["kind"] == "daily"
-    assert backup["latest"]["age_hours"] == 3.0
+    # The limit follows the interval of Administration → Backups (1 h + 2 h).
+    assert backup["max_age_hours"] == 3 and backup["candidates"] == 1
+    assert backup["latest"]["name"] == name and backup["latest"]["kind"] == "scheduled"
+    assert backup["latest"]["age_hours"] == 2.0
     assert backup["latest"]["release_tag"] == backup_harness.RELEASE
     assert backup["latest"]["alembic_revision"] == _HEAD
     assert backup["latest"]["dump_bytes"] == len(backup_harness.DUMP)
-    assert backup["latest_daily"]["name"] == name
+    assert backup["latest_scheduled"]["name"] == name
     assert document["archival"] == {
         "status": "not_applicable",
         "reason": "Archival proposals arrive with P16-S10.",
@@ -305,19 +309,63 @@ def test_corrupt_newest_manifest(engine: Engine, tmp_path: Path) -> None:
 
 
 def test_pre_release_backup_is_the_newest(engine: Engine, tmp_path: Path) -> None:
-    """SC-7."""
-    daily = _published(tmp_path, _NOW - datetime.timedelta(hours=10))
+    """SC-7; a daily backup of an earlier release counts as a scheduled one."""
+    daily = _published(tmp_path, _NOW - datetime.timedelta(hours=10), "daily")
     pre_release = _published(
         tmp_path, _NOW - datetime.timedelta(hours=2), "pre-release", "v1.0.0-rc.2"
     )
     backup = _document(_collect(engine, tmp_path))["backup"]
     assert backup["latest"]["name"] == pre_release
     assert backup["latest"]["kind"] == "pre-release"
-    assert backup["latest_daily"] == {
+    assert backup["latest_scheduled"] == {
         "name": daily,
         "completed_at": (_NOW - datetime.timedelta(hours=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "age_hours": 10.0,
     }
+
+
+def _set_backup_interval(url: URL, hours: int) -> None:
+    engine = owner_engine(url, poolclass=NullPool)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text("UPDATE application_policy SET backup_interval_hours = :hours"),
+                {"hours": hours},
+            )
+    finally:
+        engine.dispose()
+
+
+def test_the_age_limit_follows_the_backup_interval(
+    engine: Engine, database_url: URL, tmp_path: Path
+) -> None:
+    """Without the option the limit is the interval of Administration → Backups + 2 h."""
+    name = _published(tmp_path, _NOW - datetime.timedelta(hours=4))
+    document = _document(_collect(engine, tmp_path, max_backup_age_hours=None))
+    assert document["backup"]["max_age_hours"] == 3
+    assert document["findings"] == [
+        {
+            "code": "backup_stale",
+            "message": f"The newest backup {name} completed 4.0 hours ago; the limit is 3 hours.",
+        }
+    ]
+    _set_backup_interval(database_url, 24)
+    try:
+        document = _document(_collect(engine, tmp_path, max_backup_age_hours=None))
+    finally:
+        _set_backup_interval(database_url, 1)
+    assert document["backup"]["max_age_hours"] == 26
+    assert document["findings"] == []
+    # The option wins over the interval.
+    document = _document(_collect(engine, tmp_path, max_backup_age_hours=5))
+    assert (document["backup"]["max_age_hours"], document["findings"]) == (5, [])
+
+
+def test_without_the_database_the_limit_assumes_an_hourly_interval(tmp_path: Path) -> None:
+    _published(tmp_path, _NOW - datetime.timedelta(hours=1))
+    report = _collect(None, tmp_path, max_backup_age_hours=None)
+    assert report.exit_code == 2
+    assert _document(report)["backup"]["max_age_hours"] == 3
 
 
 def test_completion_time_in_the_future(engine: Engine, tmp_path: Path) -> None:

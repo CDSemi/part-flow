@@ -16,6 +16,7 @@ test('the Policies sections follow the GUI_DESIGN §9 order', () => {
     'Machine assignment',
     'Correction permissions',
     'History archival & purge',
+    'Backups',
     'Department display settings',
     'Settings',
   ]);

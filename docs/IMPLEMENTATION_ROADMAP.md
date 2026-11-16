@@ -50,11 +50,12 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 13 — Full Administration and Production Identity Configuration | Closed (2026-10-07) | Workers, Worker identification and sessions, master-data management, policies, Users and roles as configuration. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, backups set in Administration, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration since 2026-11-16; the host checks after go-live, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
 | Phase 17 — Owner Decisions After Go-Live | In progress | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
-**Database schema.** The current Alembic migration head is `0034_phase17_unique_names`
-(`backend/alembic/versions/20261114_0034_phase17_unique_names.py`). Phases 15 and 16 added no migration; Phase 17 added
+**Database schema.** The current Alembic migration head is `0035_phase16_backup_policy`
+(`backend/alembic/versions/20261116_0035_phase16_backup_policy.py`). Phase 15 added no migration; Phase 16 added
+`0035_phase16_backup_policy` (the backup policy of Administration → Backups); Phase 17 added
 `0033_phase17_super_user_role` (the Super User role) and `0034_phase17_unique_names` (unique Area and Planned Route
 names).
 
@@ -1132,7 +1133,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - platform-upgrade identity checks: canonical PN and Worker badge identity follow the backend Python's Unicode Character Database (UCD), pinned to `15.0.0`, and the Asset Tag prefix check refuses Python's `\s` whitespace set, a strict superset of PostgreSQL's libc `[[:space:]]`; before any Python upgrade that changes the UCD, or a glibc change, a read-only check lists every stored PN, badge and Asset Tag prefix whose canonical form or CHECK outcome would change, and the owner decides on re-canonicalization before the upgrade
 - PN entry canonical form: the Work Orders typed-PN and demand-label paths submit the trimmed raw input and display the server's canonical form, so the browser's Unicode tables never decide a stored PN (today they can diverge from the server only on about 27 Unicode-version-sensitive code points)
 - AssignedRoute snapshot copy lock order — delivered: a partial-quantity transfer locks its target Area in one ascending pass with the Areas of the snapshot its split copies (`route_templates.lock_assignment_areas`, as for release and receipt), and every snapshot copy of a split child or a merge result (`lineage.copy_assigned_route`) locks its Areas, then its Operations, `FOR KEY SHARE` in ascending id order before its INSERT (`route_templates.lock_snapshot_references`); a crossing release or a second crossing partial transfer therefore waits instead of deadlocking, which the crossing-route concurrency tests in `backend/tests/test_route_template_management_api.py` prove
-- backups set in Administration (owner decision of 2026-11-13): the backup interval and the numbers of hourly, daily and weekly backups kept are edited in Administration, by default one backup every hour with 48 hourly, 30 daily and 52 weekly backups kept (a recovery point objective of one hour); the host task runs every hour and takes and rotates backups by those values, and the backup-age threshold of `check.sh` follows the interval
+- backups set in Administration (owner decision of 2026-11-13) — delivered: Administration → Backups edits the backup interval and the numbers of hourly, daily and weekly backups kept, by default one backup every hour with 48 hourly, 30 daily and 52 weekly backups kept (a recovery point objective of one hour; migration `0035_phase16_backup_policy`); the host task runs `backup.sh --kind scheduled` every hour, which reads the policy from the database (`app.cli backup-policy`), takes a backup only when one is due (`backup-due`) and rotates the scheduled backups by those values (`backup-rotate --keep-hourly`); `--kind daily` and its retention options are refused with the command to use instead, and the backup-age threshold of `check.sh` is the interval plus 2 hours unless `--max-backup-age-hours` is given
 - a `web` access log without the successful automatic refreshes of the Production Board feed (owner decision of 2026-11-13) — delivered: the `web` access log skips a successful `GET /api/production-board` or `GET /api/policies/due-soon` (DEPLOYMENT §3.1), so a board refreshing every 5 seconds no longer shortens the log; a failed refresh is still logged
 - a minimal `pf` (owner decision of 2026-11-13): one small command on top of `deploy/production` with `install`, `update`, `backup`, `restore` and `status` for the production stack, where `update` runs `release.sh` (so every update keeps the candidate's check (j)); it replaces the staging-only Deployment Admin (`deploy/synology/`, `compose.nas.yaml` and `deployment/SYNOLOGY_ADMIN.md`), which is removed, and the separate deployment-kit project is paused
 - **administrative Movement-history archival/purge maintenance** (PROJECT_PROFILE §28): configurable retention period, select-by-cutoff → lossless archive export → verify → purge exactly the verified archived rows through a separate privileged maintenance path; keep reversal/reference chains and atomic-command groups whole so no retained row references purged history; include policy / size-threshold / manual triggers, scope preview, mandatory reason, and full audit; normal runtime remains append-only; no full retention/archival engine is built before this phase; the retention period is already stored by Phase 13 (`application_policy.retention_period_months`, whole months or none), and the data-size threshold's measure and unit are defined here together with its trigger
@@ -1228,8 +1229,9 @@ The full description is in DEPLOYMENT §3.1. In short:
 
 - `deploy/production/backup.sh` publishes each backup as a directory under `PARTFLOW_BACKUP_DIR` (dump, table of
   contents, `manifest.json`, `SHA256SUMS`) by one atomic rename. `python -m app.cli backup-manifest`, `backup-verify`
-  and `backup-rotate` run in the network-less `backup-tools` service. Rotation keeps 14 daily and 8 weekly verified
-  backups until the owner sets the real values; pre-release, manual and archive backups are never rotated.
+  and `backup-rotate` run in the network-less `backup-tools` service. Rotation keeps the newest verified scheduled
+  backup of each of the hours, days and weeks set in Administration → Backups (initially 48, 30 and 52); pre-release,
+  manual and archive backups are never rotated.
 - `migrate` refuses a pre-release backup that is stale, of another revision or database, tampered with, or not proven
   to hold every write.
 - `deploy/production/restore-test.sh` restores a backup into an isolated Compose project, provisions throwaway roles,
@@ -1433,7 +1435,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 17 item 7 delivered: Scan behavior and Settings → Other settings show their candidate settings as disabled previews. |
+| 2026-11-16 | uncommitted | Phase 16: backups set in Administration delivered; migration `0035_phase16_backup_policy` becomes the schema head. |
+| 2026-11-16 | `0e983ec` | Phase 17 item 7 delivered: Scan behavior and Settings → Other settings show their candidate settings as disabled previews. |
 | 2026-11-16 | `a04179f` | Phase 17 item 6 delivered: Add to Hot list in the New Work Order dialog. |
 | 2026-11-15 | `a3a7e87` | Phase 17 item 5 delivered: a Stockroom station allocation shows the Worker the station identified in the allocation dialog and in PN Tracking. |
 | 2026-11-14 | `2a24c2a` | Phase 17 item 4 delivered: migration `0034_phase17_unique_names` makes Area names unique within a Department and active Planned Route names unique, and `revision` reports stored duplicates as `blocked_by_data`. |

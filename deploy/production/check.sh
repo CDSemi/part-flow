@@ -46,7 +46,7 @@ Run from the repository root of the running release's checkout, as the account t
   --cacert FILE              CA certificate for curl (a private CA)
   --resolve-to ADDRESS       connect to this IPv4 address for HOST (the host cannot resolve its own name)
   --archive-dir DIR          measure this directory as disk_archive (P16-S8); SKIP without it
-  --max-backup-age-hours N   1-720, default 26
+  --max-backup-age-hours N   1-720, default: the interval of Administration → Backups plus 2
   --min-free-percent N       0-100, default 15 (100 fails every measured disk: the notification test)
   --min-cert-days N          1-365, default 21
   --renotify-hours N         0-168, default 6; an unchanged failing set is notified again after N hours (0 = always)
@@ -125,7 +125,7 @@ STATE_DIR_OPTION=
 CACERT=
 RESOLVE_TO=
 ARCHIVE_DIR=
-MAX_AGE=26
+MAX_AGE=
 MIN_FREE=15
 MIN_CERT_DAYS=21
 RENOTIFY_HOURS=6
@@ -690,7 +690,10 @@ check_status() {
     fi
     before=$(one_off_status) || before=
     src=0
-    pf "$STATUS_SECONDS" --profile ops run --rm --no-deps -T --user "$USER_IDS" status --max-backup-age-hours "$MAX_AGE" \
+    # Without --max-backup-age-hours, status takes the limit from the interval of Administration → Backups.
+    set -- status
+    [ -z "$MAX_AGE" ] || set -- status --max-backup-age-hours "$MAX_AGE"
+    pf "$STATUS_SECONDS" --profile ops run --rm --no-deps -T --user "$USER_IDS" "$@" \
         >"$WORK/status.json" 2>"$WORK/status.err" || src=$?
     # This run evaluates its own output; the state copies (for the operator) are replaced whole, never mixed.
     for name in status.json status.err; do

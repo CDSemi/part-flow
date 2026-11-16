@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `a04179f` cộng các thay đổi chưa commit ngày 2026-11-16.
+> Đồng bộ với bản tiếng Anh tại commit `0e983ec` cộng các thay đổi chưa commit ngày 2026-11-16.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2588,7 +2588,7 @@ sau:
 | **Organization**     | Departments, Areas, Operations, Workers |
 | **Production setup** | Scan Stations, Barcode configuration, Scan behavior |
 | **Access**           | Users, Roles & permissions |
-| **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Department display settings, Settings |
+| **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Backups, Department display settings, Settings |
 
 Mỗi section là một mẫu bảng-cộng-editor chuẩn. Bảng Areas là ví dụ tham chiếu: Area (màu và tên), Operations, Machine
 assignment (Direct processing — no Machines / Queue → assign (one-shot); mode suy ra từ việc Area có Machine nào hay
@@ -2623,6 +2623,7 @@ không phải xác nhận cho qua.
   allocation từ Management và việc đảo ngược allocation, còn Undo recent eligible scans áp dụng tại các Scan Station qua
   role được đánh dấu Applied at Scan Stations; các correction permission khác chưa được kiểm tra.
 - **History archival & purge** (Admin-only) được mô tả dưới heading riêng của nó bên dưới.
+- **Backups** (Configure system settings) được mô tả dưới heading riêng của nó bên dưới.
 - **Department display settings** được cấu hình **theo Department, không bao giờ toàn cục**: một bảng các Department
   với một editor cho thời gian rotation của Production Board (số giây cho mỗi dòng hiển thị 1–60, thời gian dừng tối
   thiểu mỗi trang 1–300 s; mặc định 3 và 6).
@@ -2677,9 +2678,9 @@ chạy với các trạng thái loading, error và retry tường minh; các l�
 ID mode: Disabled, Fixed Worker kèm Fixed Worker của nó, hoặc Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, Department display settings, các panel Due
-Soon warning và User sign-in của section Settings, retention period của History archival & purge và statement Machine
-assignment cũng là cấu hình được lưu. Users và Roles & permissions nêu rằng người dùng đăng nhập bằng login name và mật khẩu, và
-những permission nào đã được kiểm tra cho đến nay.
+Soon warning và User sign-in của section Settings, retention period của History archival & purge, chính sách Backups và
+statement Machine assignment cũng là cấu hình được lưu. Users và Roles & permissions nêu rằng người dùng đăng nhập bằng
+login name và mật khẩu, và những permission nào đã được kiểm tra cho đến nay.
 
 Mọi thứ khác tự trình bày một cách trung thực: không gì chưa khả dụng được làm cho trông như đang hoạt động.
 
@@ -2717,8 +2718,8 @@ quyền.
   `Choose a new password` (công việc đang mở của cùng người dùng được giữ lại).
 - **Xem và thay đổi.** Mọi người dùng đã đăng nhập đều được xem các section. Các thay đổi của mỗi section cần permission riêng
   của nó (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, và Roles & permissions / Users đều nêu permission của mình). Không có nó thì section là
-  view-only: các control của nó bị ẩn và một dòng `View only` nêu permission. Server kiểm tra các permission này.
+  permissions, Settings, Backups, và Roles & permissions / Users đều nêu permission của mình). Không có nó thì section
+  là view-only: các control của nó bị ẩn và một dòng `View only` nêu permission. Server kiểm tra các permission này.
 - Badge của Worker chỉ được hiển thị cho người dùng được quản lý Workers.
 - **Bảo vệ Correction permissions.** Việc thay đổi các correction permission, permission quản lý chúng, hoặc người dùng có
   role giữ chúng cần permission quản lý correction permission. Các correction permission trong Policies → Correction
@@ -2802,6 +2803,24 @@ Purge).
 - **Chưa khả dụng.** Các lần chạy archival và purge (archive export, verification, purge, preview phạm vi và tác động,
   reason), ngưỡng dung lượng dữ liệu và các yêu cầu thủ công chưa khả dụng (IMPLEMENTATION_ROADMAP). Cho đến khi chúng
   khả dụng, section nêu rằng chúng chưa khả dụng và toàn bộ lịch sử Movement vẫn nằm trong database.
+
+### Backups
+
+Backups đặt chính sách cho tác vụ backup của server, chạy mỗi giờ (OPERATIONS_RUNBOOK §3). Việc thay đổi cần Configure
+system settings.
+
+- Một select **Scheduled backup** gồm `Every hour` (giá trị ban đầu), `Every 2 hours`, `Every 3 hours`, `Every 4 hours`,
+  `Every 6 hours`, `Every 8 hours`, `Every 12 hours` và `Every 24 hours`.
+- **Hourly backups kept** (0–720, ban đầu 48), **Daily backups kept** (1–3650, ban đầu 30) và **Weekly backups kept**
+  (0–520, ban đầu 52) là các số nguyên, mỗi ô có lỗi inline riêng. Việc rotation giữ backup scheduled mới nhất của mỗi
+  giờ, ngày và tuần trong chừng ấy giờ, ngày và tuần (UTC).
+- Một dòng trung tính nhắc lại retention và giới hạn trên của nó, ví dụ `Keeps one scheduled backup per hour for the
+  last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups.`
+- Văn bản trợ giúp nêu rằng tác vụ tạo một backup khi khoảng thời gian đã trôi qua kể từ backup scheduled mới nhất,
+  rằng các backup tạo bằng tay hoặc trước khi cập nhật không bao giờ bị xóa, và rằng một thay đổi có hiệu lực từ lần
+  chạy kế tiếp của tác vụ. Việc lưu là một lần thay thế toàn bộ có audit, không hỏi xác nhận và không tạo hay xóa
+  backup nào.
+- Không có permission thì bốn giá trị hiển thị dưới dạng văn bản.
 
 ---
 
@@ -3961,7 +3980,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-16 | uncommitted | §9: Scan behavior và Other settings hiển thị các setting ứng viên thành bản xem trước bị vô hiệu hóa, gắn nhãn `Not available yet`. |
+| 2026-11-16 | uncommitted | §9: Administration → Backups đặt khoảng thời gian backup scheduled và số backup hourly, daily và weekly được giữ. |
+| 2026-11-16 | 0e983ec | §9: Scan behavior và Other settings hiển thị các setting ứng viên thành bản xem trước bị vô hiệu hóa, gắn nhãn `Not available yet`. |
 | 2026-11-16 | a04179f | §11.3: Add to Hot list trong phần đầu của New Work Order. |
 | 2026-11-15 | a3a7e87 | §7.2 mục 7 và §11.6: một entry phân bổ của trạm Stockroom nêu tên Worker mà trạm đó đã xác định. |
 | 2026-11-14 | 2a24c2a | §13.2: một Duplicate mà `{name} (variant)` của nó đã thuộc về một route đang dùng sẽ mở `New Planned Route` kèm lời từ chối. |

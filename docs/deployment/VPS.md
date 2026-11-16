@@ -222,14 +222,15 @@ absolute path, because systemd refuses a relative one:
 
 | Service | `ExecStart=` | Timer |
 | --- | --- | --- |
-| `partflow-backup.service` | `/srv/partflow/current/deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env` | `partflow-backup.timer`: `OnCalendar=*-*-* 02:00:00`, `Persistent=true` |
+| `partflow-backup.service` | `/srv/partflow/current/deploy/production/backup.sh --kind scheduled --operator scheduler --env-file /srv/partflow/env/production.env` | `partflow-backup.timer`: `OnCalendar=hourly`, `Persistent=true` |
 | `partflow-check.service` | `/srv/partflow/current/deploy/production/check.sh --url https://<host> --env-file /srv/partflow/env/production.env` | `partflow-check.timer`: `OnCalendar=*:0/15` |
 | `partflow-reconcile.service` | `/srv/partflow/current/deploy/production/scheduled-reconcile.sh --env-file /srv/partflow/env/production.env` | `partflow-reconcile.timer`: `OnCalendar=*-*-* 04:00:00`, `Persistent=true` |
 
-14 and 8 are example retention values; both options are required. Check every unit with `systemd-analyze verify`
-before enabling the timers with `systemctl enable --now <timer>`. Any non-zero exit, including a daily backup that
-fails verification, fails its unit and sends the alert. Keep the backup time away from release times, because a
-release holds the backup lock.
+The backup timer runs the task every hour; **Administration → Backups** in PartFlow sets how often it takes a backup
+and how many it keeps (runbook §3). Check every unit with `systemd-analyze verify` before enabling the timers with
+`systemctl enable --now <timer>`. Any non-zero exit, including a scheduled backup that fails verification, fails its
+unit and sends the alert. A backup that starts during a release is refused, because the release holds the backup
+lock; the next hour's backup runs normally.
 
 With cron instead of systemd, set `MAILTO=` and use `--quiet`, because cron mails whenever a job prints something:
 
@@ -240,10 +241,11 @@ With cron instead of systemd, set `MAILTO=` and use `--quiet`, because cron mail
 
 **Encrypted copy outside the VPS (restic).** Set `RESTIC_REPOSITORY` to the object storage location and
 `RESTIC_PASSWORD_FILE` to a key file of mode 0400, and keep a copy of that key outside the VPS: without it, the copies
-cannot be read. After the backup unit has run:
+cannot be read. Once a day, from a unit and timer of their own (for example at 03:30, between two backups):
 
 1. `restic backup --tag database /srv/partflow/backups/database`
-2. `restic forget --tag database --keep-daily 14 --keep-weekly 8 --prune`, with the same retention as the backups
+2. `restic forget --tag database --keep-daily 30 --keep-weekly 52 --prune`, with the retention you choose for the
+   off-host copies
 3. `restic check`, weekly
 
 A failure of any of these fails its unit and sends the alert. When an archive folder is used later, copy it to its own
@@ -253,7 +255,8 @@ restic repository, or under a restic tag that `forget` never targets: archives a
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Rewritten with complete installation commands for the VPS folders, one checkout per release with the `current` link for the schedules, the systemd units in one table, and the move from the NAS pointing to the runbook. |
+| 2026-11-16 | uncommitted | §8: the backup timer runs every hour with `--kind scheduled`; Administration → Backups sets the interval and the retention; restic runs once a day. |
+| 2026-11-10 | `e0e5056` | Rewritten with complete installation commands for the VPS folders, one checkout per release with the `current` link for the schedules, the systemd units in one table, and the move from the NAS pointing to the runbook. |
 | 2026-11-09 | `b405c6e` | Rewritten as current content for new readers; pilot and release gates removed by owner decision. |
 | 2026-10-09 | `03bd90c` | Added the monitoring units, the alert notifier and the cron alternative. |
 | 2026-10-08 | `a330383` | Added production backup automation, the schedule units and the off-VPS restic copy. |

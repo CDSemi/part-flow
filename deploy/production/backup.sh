@@ -8,13 +8,18 @@
 # <PARTFLOW_BACKUP_DIR>/.partial/<NAME>/, lists it and extracts its alembic_version rows (both inside `db`, TZ=UTC), then
 # the `backup-tools` one-shot (no network, no database) writes manifest.json and SHA256SUMS and publishes the backup
 # directory <PARTFLOW_BACKUP_DIR>/<NAME>/ with one atomic rename (backup-manifest), verifies it (backup-verify) and, for
-# a daily backup, applies the retention (backup-rotate). Encryption and the off-host copy belong to the platform backup
-# tool (SYNOLOGY_NAS §11, VPS §8).
+# a scheduled backup, applies the retention (backup-rotate). Encryption and the off-host copy belong to the platform
+# backup tool (SYNOLOGY_NAS §11, VPS §8).
 #
-# stdout: exactly one line on success, `BACKUP <NAME> <absolute path>`. stderr: progress, every tool JSON document,
-# errors. Exit status: 0 completed; 1 refused before writing (backup_running, backup_lock_stale, insufficient_space,
-# name_exists); 2 could not run; 3 failed (no backup published, or the published backup failed verification);
-# 4 completed, but the rotation failed or found a daily backup that fails verification.
+# A scheduled backup (`--kind scheduled`, the host task that runs every hour) first reads the backup policy of
+# Administration → Backups from the database (`app.cli backup-policy`, as the application role) and asks backup-tools
+# whether one is due (`backup-due`): when none is due it writes nothing and prints `NOT_DUE <newest scheduled backup>`.
+#
+# stdout: exactly one line on success, `BACKUP <NAME> <absolute path>`, or `NOT_DUE <NAME>` for a scheduled run with no
+# backup due. stderr: progress, every tool JSON document, errors. Exit status: 0 completed (or no scheduled backup was
+# due); 1 refused before writing (backup_running, backup_lock_stale, insufficient_space, name_exists); 2 could not run
+# (also: the backup policy could not be read); 3 failed (no backup published, or the published backup failed
+# verification); 4 completed, but the rotation failed or found a scheduled backup that fails verification.
 # The backup lock <PARTFLOW_BACKUP_DIR>/.backup.lock is never broken automatically (OPERATIONS_RUNBOOK §3).
 set -eu
 
@@ -27,24 +32,27 @@ unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_
 
 usage() {
     cat <<'EOF'
-Usage: deploy/production/backup.sh --kind daily|manual|pre-release --operator NAME
+Usage: deploy/production/backup.sh --kind scheduled|manual|pre-release --operator NAME
            [--reason TEXT] [--label TAG] [--tools-release TAG] [--env-file .env.production]
-           [--environment NAME] [--keep-daily N --keep-weekly N | --no-rotate] [--reserve-mib N]
+           [--environment NAME] [--no-rotate] [--reserve-mib N]
            [--lock-held-by-release RECORD_DIR] [--rehearsal --project NAME]
 
 Run from the repository root of a release checkout. Writes one backup directory <PARTFLOW_BACKUP_DIR>/<NAME>/
 (partflow.dump, partflow.dump.list, manifest.json, SHA256SUMS); NAME = <UTC stamp>-<kind>[-<label>].
-  --kind daily|manual|pre-release  daily needs --keep-daily N --keep-weekly N (the owner's retention) or --no-rotate
-  --reason TEXT                    required for manual (default: scheduled daily backup / pre-release backup for TAG)
+  --kind scheduled|manual|pre-release
+                                   scheduled: the host task that runs every hour; Administration → Backups sets how
+                                   often a backup is due and how many scheduled backups are kept
+  --no-rotate                      scheduled only: keep every scheduled backup this run
+  --reason TEXT                    required for manual (default: scheduled backup / pre-release backup for TAG)
   --label TAG                      the target release tag; required for pre-release, refused otherwise
   --tools-release TAG              the image that writes and verifies the manifest (default: PARTFLOW_RELEASE)
   --reserve-mib N                  free space kept beyond 2 x the newest dump (default 1024)
   --lock-held-by-release DIR       release.sh only: it holds the backup lock for its record directory DIR
   --rehearsal --project NAME       a throwaway Compose project (never partflow-production)
 Text values: 1-500 characters, no control characters, no " or \.
-Exit: 0 completed, 1 refused (nothing written), 2 could not run, 3 failed (do not use a backup it names),
-      4 completed but the rotation failed or found a daily backup that fails verification.
-stdout on success: BACKUP <NAME> <absolute path>
+Exit: 0 completed (or no scheduled backup was due), 1 refused (nothing written), 2 could not run, 3 failed (do not use
+      a backup it names), 4 completed but the rotation failed or found a scheduled backup that fails verification.
+stdout on success: BACKUP <NAME> <absolute path>, or NOT_DUE <NAME> when no scheduled backup was due
 EOF
 }
 
@@ -87,8 +95,10 @@ LABEL=
 TOOLS_RELEASE=
 ENV_FILE=.env.production
 ENVIRONMENT=
+KEEP_HOURLY=
 KEEP_DAILY=
 KEEP_WEEKLY=
+INTERVAL_HOURS=
 NO_ROTATE=
 RESERVE_MIB=1024
 HELD_BY=
@@ -108,8 +118,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-rotate) NO_ROTATE=1; shift; continue ;;
         --rehearsal) REHEARSAL=1; shift; continue ;;
-        --kind | --operator | --reason | --label | --tools-release | --env-file | --environment | --keep-daily | \
-            --keep-weekly | --reserve-mib | --lock-held-by-release | --project)
+        --keep-daily | --keep-weekly)
+            usage_error "$option was replaced by Administration → Backups, which sets how many scheduled backups are kept (OPERATIONS_RUNBOOK §3)." ;;
+        --kind | --operator | --reason | --label | --tools-release | --env-file | --environment | --reserve-mib | \
+            --lock-held-by-release | --project)
             [ "$#" -ge 2 ] || usage_error "$option needs a value."
             value=$2
             shift 2
@@ -124,8 +136,6 @@ while [ "$#" -gt 0 ]; do
         --tools-release) TOOLS_RELEASE=$value ;;
         --env-file) ENV_FILE=$value ;;
         --environment) ENVIRONMENT=$value ;;
-        --keep-daily) check_count "$option" "$value" 1 3650; KEEP_DAILY=$value ;;
-        --keep-weekly) check_count "$option" "$value" 0 520; KEEP_WEEKLY=$value ;;
         --reserve-mib) check_count "$option" "$value" 0 1048576; RESERVE_MIB=$value ;;
         --lock-held-by-release) check_text "$option" "$value"; HELD_BY=$value ;;
         --project) PROJECT=$value ;;
@@ -133,9 +143,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$KIND" in
-    daily | manual | pre-release) ;;
+    scheduled | manual | pre-release) ;;
+    daily)
+        usage_error "--kind daily was replaced by --kind scheduled: run deploy/production/backup.sh --kind scheduled --operator scheduler every hour; Administration → Backups sets how often a backup is due and how many are kept (OPERATIONS_RUNBOOK §3)." ;;
     '') usage_error "--kind is required." ;;
-    *) usage_error "--kind must be daily, manual or pre-release." ;;
+    *) usage_error "--kind must be scheduled, manual or pre-release." ;;
 esac
 [ -n "$OPERATOR" ] || usage_error "--operator is required."
 if [ -n "$LABEL" ]; then
@@ -147,15 +159,9 @@ if [ -n "$TOOLS_RELEASE" ]; then
         || usage_error "--tools-release must be a release tag of at most 64 letters, digits, '.', '_' or '-'."
 fi
 case "$KIND" in
-    daily)
+    scheduled)
         [ -z "$LABEL" ] || usage_error "--label is only for --kind pre-release."
-        if [ -n "$NO_ROTATE" ]; then
-            [ -z "$KEEP_DAILY$KEEP_WEEKLY" ] || usage_error "--no-rotate excludes --keep-daily and --keep-weekly."
-        else
-            [ -n "$KEEP_DAILY" ] && [ -n "$KEEP_WEEKLY" ] \
-                || usage_error "--kind daily needs --keep-daily N --keep-weekly N (the owner's retention) or --no-rotate."
-        fi
-        [ -n "$REASON" ] || REASON="scheduled daily backup"
+        [ -n "$REASON" ] || REASON="scheduled backup"
         ;;
     manual)
         [ -z "$LABEL" ] || usage_error "--label is only for --kind pre-release."
@@ -166,8 +172,8 @@ case "$KIND" in
         [ -n "$REASON" ] || REASON="pre-release backup for $LABEL"
         ;;
 esac
-if [ "$KIND" != daily ] && [ -n "$KEEP_DAILY$KEEP_WEEKLY$NO_ROTATE" ]; then
-    usage_error "--keep-daily, --keep-weekly and --no-rotate are only for --kind daily."
+if [ "$KIND" != scheduled ] && [ -n "$NO_ROTATE" ]; then
+    usage_error "--no-rotate is only for --kind scheduled."
 fi
 if [ -n "$REHEARSAL" ]; then
     [ -n "$PROJECT" ] || usage_error "--rehearsal needs --project NAME (a throwaway Compose project)."
@@ -229,6 +235,10 @@ tools() {
 # json_field FILE KEY: a top-level string value of an indented app.cli report (empty for null or absent).
 json_field() {
     sed -n 's/^  "'"$2"'": "\([^"]*\)",\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# json_number FILE KEY: a top-level whole-number value of an indented app.cli report (empty for null or absent).
+json_number() {
+    sed -n 's/^  "'"$2"'": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
 }
 # pg_dump_sessions: the number of pg_dump sessions on the database server (empty when it cannot be read).
 pg_dump_sessions() {
@@ -358,6 +368,43 @@ WORK=$(mktemp -d)
 step_ok
 
 # ---------------------------------------------------------------------------
+# 0b scheduled only: the backup policy of Administration → Backups, and whether a backup is due
+# ---------------------------------------------------------------------------
+
+if [ "$KIND" = scheduled ]; then
+    step_begin policy
+    rc=0
+    pf run --rm --no-deps -T backend python -m app.cli backup-policy >"$WORK/policy.json" || rc=$?
+    cat "$WORK/policy.json" >&2
+    INTERVAL_HOURS=$(json_number "$WORK/policy.json" interval_hours)
+    KEEP_HOURLY=$(json_number "$WORK/policy.json" keep_hourly)
+    KEEP_DAILY=$(json_number "$WORK/policy.json" keep_daily)
+    KEEP_WEEKLY=$(json_number "$WORK/policy.json" keep_weekly)
+    if [ "$rc" -ne 0 ] || [ -z "$INTERVAL_HOURS" ] || [ -z "$KEEP_HOURLY" ] || [ -z "$KEEP_DAILY" ] \
+        || [ -z "$KEEP_WEEKLY" ]; then
+        could_not_run "the backup policy of Administration → Backups could not be read from the database (backup-policy exit $rc; see above)."
+    fi
+    step_ok
+
+    step_begin due
+    rc=0
+    tools backup-due --interval-hours "$INTERVAL_HOURS" >"$WORK/due.json" || rc=$?
+    cat "$WORK/due.json" >&2
+    case "$rc" in
+        0) step_ok ;;
+        1)
+            NEWEST=$(sed -n 's/^    "name": "\([^"]*\)",\{0,1\}$/\1/p' "$WORK/due.json" | head -n 1)
+            [ -n "$NEWEST" ] || NEWEST=unknown
+            echo "backup: no scheduled backup is due: the newest, $NEWEST, is younger than the interval of Administration → Backups ($INTERVAL_HOURS h). Nothing was written." >&2
+            STEP=done
+            echo "NOT_DUE $NEWEST"
+            exit 0
+            ;;
+        *) could_not_run "backup-due could not decide whether a scheduled backup is due (exit $rc; see above)." ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
 # 1 identify the running release (best effort, never fatal)
 # ---------------------------------------------------------------------------
 
@@ -389,7 +436,7 @@ step_ok
 
 step_begin space
 newest=$(ls -1 "$DIR" 2>/dev/null \
-    | grep -E '^[0-9]{8}T[0-9]{6}Z-(daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$' \
+    | grep -E '^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$' \
     | while read -r entry; do [ -f "$DIR/$entry/partflow.dump" ] && echo "$entry"; done \
     | sort | tail -n 1) || newest=
 if [ -n "$newest" ]; then
@@ -476,14 +523,15 @@ fi
 step_ok
 
 STATUS=0
-if [ "$KIND" = daily ] && [ -z "$NO_ROTATE" ]; then
+if [ "$KIND" = scheduled ] && [ -z "$NO_ROTATE" ]; then
     step_begin rotate
     rc=0
-    tools backup-rotate --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" >&2 || rc=$?
+    tools backup-rotate --keep-hourly "$KEEP_HOURLY" --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" >&2 \
+        || rc=$?
     case "$rc" in
         0) step_ok ;;
         1)
-            echo "backup: rotation found daily backups that fail verification (the names are in the backup-rotate report above); they were kept for review (OPERATIONS_RUNBOOK §9). $NAME itself is complete and verified." >&2
+            echo "backup: rotation found scheduled backups that fail verification (the names are in the backup-rotate report above); they were kept for review (OPERATIONS_RUNBOOK §9). $NAME itself is complete and verified." >&2
             STATUS=4
             ;;
         *)

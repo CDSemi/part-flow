@@ -1,11 +1,11 @@
 # Cài đặt PartFlow trên Synology NAS
 
-> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `77a2dfb` cộng các thay đổi chưa
-> commit ngày 2026-11-12. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi
+> chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này cài PartFlow production trên Synology NAS của công ty, từng bước, từ một NAS trống đến khi mọi người làm
-việc trong PartFlow qua HTTPS. Sau đó hướng dẫn thiết lập bản sao lưu hằng ngày và việc giám sát, rồi chỉ cách cài một
+việc trong PartFlow qua HTTPS. Sau đó hướng dẫn thiết lập bản sao lưu mỗi giờ và việc giám sát, rồi chỉ cách cài một
 bản phát hành (release) mới. Hãy làm theo đúng thứ tự các mục và không bỏ qua bước nào: mỗi bước cho biết bạn phải làm
 gì, bạn sẽ thấy gì, và phải làm gì khi bạn thấy điều khác.
 
@@ -21,8 +21,8 @@ hành hằng ngày sau khi cài nằm trong [`OPERATIONS_RUNBOOK.vi.md`](./OPERA
 - PartFlow chạy trên NAS trong Compose project `partflow-production`, truy cập được tại `https://<HOSTNAME>` từ mạng
   công ty và, nếu bạn chọn, từ Internet qua Cloudflare;
 - Administrator đầu tiên đã được tạo và các thiết bị Scan Station đã được đăng ký (enroll);
-- sau §11, có một bản sao lưu hằng ngày đã được xác minh cùng một bản sao được mã hóa nằm ngoài NAS, và có email cảnh
-  báo khi một kiểm tra thất bại.
+- sau §11, có bản sao lưu đã được xác minh mỗi giờ cùng một bản sao được mã hóa nằm ngoài NAS, và có email cảnh báo
+  khi một kiểm tra thất bại.
 
 ### Bạn cần chuẩn bị
 
@@ -415,7 +415,7 @@ PartFlow giờ đã chạy production. Hãy đưa mọi người địa chỉ `h
 
 ## 11. Sau khi đưa vào sử dụng: sao lưu và giám sát
 
-Các tác vụ này được khuyến nghị và không bao giờ chặn việc sử dụng. Cho đến khi bản sao lưu hằng ngày chạy, các bản sao
+Các tác vụ này được khuyến nghị và không bao giờ chặn việc sử dụng. Cho đến khi tác vụ sao lưu chạy, các bản sao
 lưu duy nhất là những bản mà `release.sh` tạo trước mỗi bản phát hành. Hãy làm theo thứ tự này.
 
 ### 11.1 Thông báo qua email
@@ -424,31 +424,36 @@ DSM gửi email khi một tác vụ theo lịch thất bại; đây là kênh c�
 Email**, chọn **Enable email notifications**, nhập cài đặt máy chủ thư (SMTP) và người nhận, rồi bấm **Send a test
 email**. Chỉ tiếp tục khi email thử đã đến.
 
-### 11.2 Tác vụ sao lưu hằng ngày
+### 11.2 Tác vụ sao lưu
 
 1. Mở **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**.
 2. **General:** Task `PartFlow backup`, User `root`, chọn **Enabled**.
-3. **Schedule:** **Run on the following days: Daily**, giờ chạy đầu tiên `02:00`, một lần mỗi ngày.
+3. **Schedule:** **Run on the following days: Daily**, giờ chạy đầu tiên `00:00`, **Frequency** mỗi giờ, giờ chạy
+   cuối cùng `23:00`.
 4. **Task Settings:** chọn **Send run details by email**, nhập địa chỉ của bạn, và chọn **Send run details only when
    the script terminates abnormally**. Trong **Run command** nhập:
 
    ```sh
-   cd /volume1/docker/partflow/repo && deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8
+   cd /volume1/docker/partflow/repo && deploy/production/backup.sh --kind scheduled --operator scheduler
    ```
 
 5. Bấm **OK**. Chọn tác vụ và bấm **Run** để thử. Sau khoảng một phút, thư mục sao lưu có thêm một thư mục con có tên
-   kết thúc bằng `-daily`:
+   kết thúc bằng `-scheduled`:
 
    ```sh
    ls /volume1/docker/partflow/backups
    ```
 
-`--keep-daily 14 --keep-weekly 8` giữ 14 bản sao lưu hằng ngày mới nhất cộng một bản mỗi tuần trong 8 tuần; hãy chọn
-con số của riêng bạn. Với bản sao lưu hằng ngày, tối đa mất một ngày công việc. Hãy để 02:00 cách xa các thời điểm bạn
-cài bản phát hành: một bản sao lưu đang chạy sẽ làm bản phát hành dừng trước khi thay đổi bất cứ điều gì (hãy chạy lại
-bản phát hành khi bản sao lưu đã xong), và một bản sao lưu bắt đầu trong lúc đang phát hành bị từ chối (bạn nhận email
-báo thất bại của nó; bản sao lưu của ngày hôm sau chạy bình thường, hoặc hãy tạo một bản thủ công, runbook §3). Các bản
-sao lưu được giải thích trong runbook §3.
+Tác vụ chạy mỗi giờ, và **Administration → Backups** trong PartFlow quyết định tần suất nó tạo một bản sao lưu (ban đầu
+mỗi giờ) và số bản nó giữ (ban đầu 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần). Một lần chạy không có bản sao
+lưu nào đến hạn kết thúc mà không ghi gì. Với một bản sao lưu mỗi giờ, tối đa mất một giờ công việc. Hãy bắt đầu các bản
+phát hành sau giờ tròn vài phút: một bản sao lưu đang chạy sẽ làm bản phát hành dừng trước khi thay đổi bất cứ điều gì
+(hãy chạy lại bản phát hành khi bản sao lưu đã xong), và một bản sao lưu bắt đầu trong lúc đang phát hành bị từ chối
+(bạn nhận email báo thất bại của nó; bản sao lưu của giờ tiếp theo chạy bình thường). Các bản sao lưu được giải thích
+trong runbook §3.
+
+Một tác vụ của bản phát hành trước với `--kind daily` nay thất bại kèm thông báo nêu tên lệnh này: hãy đổi lịch và lệnh
+của nó như trên.
 
 ### 11.3 Bản sao mã hóa ngoài NAS
 
@@ -458,8 +463,9 @@ Một bản sao lưu chỉ nằm trên NAS sẽ mất cùng NAS. Hãy sao chép 
 2. Chọn đích nằm ngoài NAS này: một NAS khác, Synology C2 Storage hoặc một dịch vụ tương thích S3.
 3. Ở phần nguồn, chọn thư mục `docker/partflow/backups`.
 4. Bật **client-side encryption**. Giữ mật khẩu và tệp khóa ngoài NAS: không có chúng thì không đọc được các bản sao.
-5. Lên lịch hằng ngày lúc `03:00`, sau bản sao lưu. Đặt việc xoay vòng phiên bản (version rotation) theo quyết định của
-   bạn, bật kiểm tra tính toàn vẹn hằng tuần, và bật thông báo email khi thất bại.
+5. Lên lịch hằng ngày lúc `03:30`, giữa hai bản sao lưu. Đặt việc xoay vòng phiên bản (version rotation) theo quyết
+   định của bạn, bật kiểm tra tính toàn vẹn hằng tuần, và bật thông báo email khi thất bại. Sau khi mất NAS, mọi thứ kể
+   từ lần sao chép cuối cùng đều mất: hãy lên lịch thường xuyên hơn nếu một ngày là quá nhiều.
 
 Snapshot của volume NAS chỉ là lớp bảo vệ thứ hai: chúng không bao giờ thay thế các bản sao lưu này và bản sao của chúng
 nằm ngoài NAS.
@@ -467,7 +473,7 @@ nằm ngoài NAS.
 ### 11.4 Diễn tập khôi phục (restore drill)
 
 Một lần sau khi đưa vào sử dụng (go-live), rồi mỗi quý, hãy chứng minh rằng một bản sao lưu khôi phục được và đo xem mất
-bao lâu. Dùng tên của bản sao lưu hằng ngày mới nhất (tên thư mục từ §11.2):
+bao lâu. Dùng tên của bản sao lưu theo lịch mới nhất (tên thư mục từ §11.2):
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -485,7 +491,7 @@ Tạo thêm hai tác vụ như ở §11.2 (User `root`, chỉ gửi email khi sc
 | Task | Schedule | Run command |
 | --- | --- | --- |
 | `PartFlow check` | Hằng ngày, lần chạy đầu `00:00`, lặp lại mỗi 15 phút, lần chạy cuối `23:45` | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/check.sh --url https://<HOSTNAME> --quiet` |
-| `PartFlow reconcile` | Hằng ngày lúc `04:00`, sau bản sao lưu | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/scheduled-reconcile.sh` |
+| `PartFlow reconcile` | Hằng ngày lúc `04:00` | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/scheduled-reconcile.sh` |
 
 `HOME=/root` cho các script biết nơi lưu trạng thái của chúng, phòng khi Task Scheduler không đặt biến này. Hãy điều
 chỉnh lệnh check theo phương án HTTPS của bạn:
@@ -543,7 +549,7 @@ quy tắc của profile đang dùng:
 
 Mọi bản phát hành sau này được cài bằng `deploy/production/release.sh`. Script tạo một bản sao lưu đã xác minh, build các
 image mới mà không động đến các image đang chạy, migrate database, chuyển PartFlow sang bản phát hành mới và kiểm tra nó.
-Hãy chọn thời điểm không có việc nhập Work Order nào đang chạy và bản sao lưu hằng ngày (02:00) cũng không chạy.
+Hãy chọn thời điểm không có việc nhập Work Order nào đang chạy, sau giờ tròn vài phút, khi bản sao lưu mỗi giờ đã xong.
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -594,7 +600,8 @@ ghi kích thước database mỗi ngày một lần.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | §12: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau một phút, và mọi trang khác khi rảnh 1 phút thay vì 2 phút. |
+| 2026-11-16 | uncommitted | §1, §11.2: tác vụ sao lưu chạy mỗi giờ với `--kind scheduled`, và Administration → Backups đặt khoảng thời gian và số bản sao lưu được giữ; §11.3, §11.5, §12: các giờ quanh bản sao lưu mỗi giờ. |
+| 2026-11-12 | `de4d99f` | §12: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau một phút, và mọi trang khác khi rảnh 1 phút thay vì 2 phút. |
 | 2026-11-12 | `77a2dfb` | §12: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau khoảng một phút, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu). |
 | 2026-11-10 | `e0e5056` | Viết lại thành một quy trình cài đặt tuyến tính từ NAS trống đến khi mọi người làm việc trong PartFlow, với mọi đường dẫn DSM và mọi lệnh theo thứ tự; bước HTTPS đưa ra phương án mạng LAN hoặc hướng dẫn Cloudflare; thêm kiểm tra kernel không hỗ trợ giới hạn bộ xử lý và kiểm tra firewall đối với các mạng của container; phần NAS staging tùy chọn và quy trình chuyển máy được loại bỏ (việc chuyển máy nay nằm trong runbook §6). |
 | 2026-11-09 | `398c617` | Khôi phục các mục nhỏ mà bản viết lại đã bỏ sót: kiểm tra tình trạng trong smoke test của staging, bản sao ngoài NAS và kiểm thử khôi phục của các dump staging, đối soát staging, tên đầy đủ của reconcile check (h) và lệnh `revision` đầy đủ; bước 1 nay bao gồm cả NAS chưa từng cài staging. |

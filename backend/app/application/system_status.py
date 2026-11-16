@@ -39,7 +39,13 @@ from app.application.readiness import evaluate
 from app.infrastructure import backup_files, schema_revision
 
 REPORT_VERSION: Final = 1
-DEFAULT_MAX_BACKUP_AGE_HOURS: Final = 26
+#: Without ``--max-backup-age-hours`` the age limit of the newest backup is the
+#: interval of Administration → Backups plus this margin: one missed hourly run
+#: is no finding yet, a second one is, and a daily interval keeps the 26 hours
+#: of earlier releases.
+BACKUP_AGE_MARGIN_HOURS: Final = 2
+#: The interval assumed while the database cannot be read (the owner's default).
+DEFAULT_BACKUP_INTERVAL_HOURS: Final = 1
 DEFAULT_STATEMENT_TIMEOUT_SECONDS: Final = 20
 LOCK_TIMEOUT_SECONDS: Final = 5
 CONNECT_TIMEOUT_SECONDS: Final = 10
@@ -48,6 +54,13 @@ ARCHIVAL_REASON: Final = "Archival proposals arrive with P16-S10."
 #: A completion time further ahead than this is a clock problem, not a fresh backup.
 FUTURE_TOLERANCE: Final = datetime.timedelta(minutes=5)
 
+#: The scheduled backup interval of Administration → Backups, read through
+#: ``to_jsonb`` so a database at a revision without the column answers NULL
+#: instead of failing the run (ACCESS SHARE on application_policy).
+BACKUP_INTERVAL_SQL: Final = (
+    "SELECT (to_jsonb(p) ->> 'backup_interval_hours')::integer FROM application_policy AS p"
+    " WHERE p.id = 1"
+)
 #: The exact Movement count and size: the last statement (ACCESS SHARE on part_movements).
 MOVEMENTS_SQL: Final = (
     "SELECT count(*), pg_total_relation_size('part_movements') FROM part_movements"
@@ -112,7 +125,10 @@ class StatusReport:
     release_tag: str | None
     release_commit: str | None
     statement_timeout_seconds: int
+    #: The age limit of the newest backup: the option, else the interval + margin.
     max_backup_age_hours: int
+    #: The interval of Administration → Backups; None while it cannot be read.
+    backup_interval_hours: int | None = None
     finished_at: datetime.datetime | None = None
     database: dict[str, Any] = field(default_factory=dict)
     movements: dict[str, Any] = field(default_factory=dict)
@@ -273,7 +289,9 @@ def _read_database(
             "longest_wait_seconds": round(float(locks.longest), 1),
         }
         _schema_section(connection, report, accepted_revision, scripts)
-        # Last: the only statement that locks a production table (ACCESS SHARE).
+        # Last: the only statements that lock production tables (ACCESS SHARE).
+        interval = connection.execute(text(BACKUP_INTERVAL_SQL)).scalar_one_or_none()
+        report.backup_interval_hours = interval if isinstance(interval, int) else None
         report.movements = {"status": "error", "rows": None, "total_bytes": None}
         movements = connection.execute(text(MOVEMENTS_SQL)).one()
         report.movements = {
@@ -380,7 +398,7 @@ def backup_section(
         "directory": None,
         "max_age_hours": max_age_hours,
         "latest": None,
-        "latest_daily": None,
+        "latest_scheduled": None,
         "candidates": 0,
         "lock": {"present": False, "by": None, "started_at": None, "name": None},
     }
@@ -405,7 +423,7 @@ def backup_section(
     section["candidates"] = len(candidates)
     candidates.sort(key=lambda parsed: (parsed.stamp, parsed.name), reverse=True)
     latest: _Published | None = None
-    latest_daily: _Published | None = None
+    latest_scheduled: _Published | None = None
     for candidate in candidates:
         published = _read_manifest(backup_dir, candidate)
         if published is None:
@@ -415,8 +433,8 @@ def backup_section(
             continue
         if latest is None:
             latest = published
-        if candidate.kind == "daily":
-            latest_daily = published
+        if candidate.kind in backups.ROTATED_KINDS:
+            latest_scheduled = published
             break
     if latest is None:
         message = FINDING_MESSAGES["backup_missing"].format(dir=directory)
@@ -444,11 +462,11 @@ def backup_section(
                 name=latest.name.name, age_hours=age, max=max_age_hours
             )
             findings.append(Finding("backup_stale", message))
-    if latest_daily is not None:
-        section["latest_daily"] = {
-            "name": latest_daily.name.name,
-            "completed_at": _utc_text(latest_daily.completed_at),
-            "age_hours": _age_hours(latest_daily.completed_at, now),
+    if latest_scheduled is not None:
+        section["latest_scheduled"] = {
+            "name": latest_scheduled.name.name,
+            "completed_at": _utc_text(latest_scheduled.completed_at),
+            "age_hours": _age_hours(latest_scheduled.completed_at, now),
         }
     section["status"] = "finding" if findings else "ok"
     return section, findings
@@ -466,7 +484,7 @@ def collect_status(
     release_commit: str | None,
     accepted_revision: str | None,
     backup_dir: Path | None,
-    max_backup_age_hours: int = DEFAULT_MAX_BACKUP_AGE_HOURS,
+    max_backup_age_hours: int | None = None,
     statement_timeout_seconds: int = DEFAULT_STATEMENT_TIMEOUT_SECONDS,
     now: Callable[[], datetime.datetime] | None = None,
 ) -> StatusReport:
@@ -477,7 +495,7 @@ def collect_status(
         release_tag=release_tag,
         release_commit=release_commit,
         statement_timeout_seconds=statement_timeout_seconds,
-        max_backup_age_hours=max_backup_age_hours,
+        max_backup_age_hours=max_backup_age_hours or 0,
     )
     report.database = _database_section("error")
     report.movements = _not_run_movements()
@@ -486,11 +504,15 @@ def collect_status(
         report.error = RunError("configuration_invalid", ERROR_MESSAGES["configuration_invalid"])
     else:
         _database_part(engine, report, accepted_revision)
+    if max_backup_age_hours is None:
+        interval = report.backup_interval_hours or DEFAULT_BACKUP_INTERVAL_HOURS
+        report.max_backup_age_hours = interval + BACKUP_AGE_MARGIN_HOURS
+    limit = report.max_backup_age_hours
     try:
-        report.backup, backup_findings = backup_section(backup_dir, max_backup_age_hours, clock())
+        report.backup, backup_findings = backup_section(backup_dir, limit, clock())
     except Exception as exc:
         # An unexpected failure still yields a complete report (exit 2).
-        report.backup, backup_findings = backup_section(None, max_backup_age_hours, clock())
+        report.backup, backup_findings = backup_section(None, limit, clock())
         if report.error is None:
             report.error = RunError("internal_error", ERROR_MESSAGES["internal_error"], exc)
     report.findings.extend(backup_findings)

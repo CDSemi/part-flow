@@ -65,22 +65,33 @@ Commands:
 - ``backup-verify NAME [--backup-dir DIR] [--expect-database NAME]`` (Phase
   16 slice 5, read-only): verify one backup directory. 0 verified, 1
   invalid, 2 could not read it.
-- ``backup-rotate --keep-daily N --keep-weekly N [--backup-dir DIR]
-  [--dry-run]`` (Phase 16 slice 5): keep the newest verified daily backups
-  and the newest of each recent ISO week, delete the other verified daily
-  backups; never touches other kinds or invalid backups. 0 rotated, 1
-  rotated but some daily backups failed verification, 2 failed.
+- ``backup-rotate [--keep-hourly N] --keep-daily N --keep-weekly N
+  [--backup-dir DIR] [--dry-run]`` (Phase 16 slice 5; hourly since the
+  backups of Administration → Backups): of the verified scheduled backups
+  (and the daily backups of earlier releases), keep the newest of each of
+  the newest N hours, days and ISO weeks and delete the others; never
+  touches other kinds or invalid backups. 0 rotated, 1 rotated but some
+  scheduled backups failed verification, 2 failed.
+- ``backup-due --interval-hours N [--backup-dir DIR]`` (Phase 16,
+  read-only): whether the host's hourly task takes a scheduled backup now.
+  Reads no database. 0 due, 1 not due, 2 could not read the directory.
+- ``backup-policy`` (Phase 16, read-only): the backup policy of
+  Administration → Backups — the interval of the scheduled backups and the
+  hourly, daily and weekly backups kept — as one JSON document
+  (``deploy/production/backup.sh``). 0 read, 2 could not read it.
 - ``status [--backup-dir DIR] [--max-backup-age-hours N] [--statement-timeout
   SECONDS]`` (Phase 16 slice 6, read-only): the database size, connections
   and lock waits, the Movement count, the schema readiness and the age of
   the newest published backup as one JSON document
-  (``deploy/production/check.sh``). 0 ok, 1 a finding, 2 could not run.
+  (``deploy/production/check.sh``); without ``--max-backup-age-hours`` the
+  age limit is the interval of Administration → Backups plus two hours.
+  0 ok, 1 a finding, 2 could not run.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
 ``provision-roles``, ``apply-grants``, ``backup-manifest``, ``backup-verify``,
-``backup-rotate``, ``status``: their JSON document); refusals and errors go
-to stderr.
+``backup-rotate``, ``backup-due``, ``backup-policy``, ``status``: their JSON
+document); refusals and errors go to stderr.
 """
 
 import argparse
@@ -106,6 +117,7 @@ from app.application import (
     backups,
     database_roles,
     migration,
+    policies,
     reconciliation,
     system_status,
 )
@@ -685,7 +697,8 @@ def _backup_name(value: str) -> backups.BackupName:
     parsed = backups.parse_name(value)
     if parsed is None:
         raise argparse.ArgumentTypeError(
-            "must be <YYYYMMDDTHHMMSSZ>-daily, -manual or -pre-release-<release tag>,"
+            "must be <YYYYMMDDTHHMMSSZ>-scheduled, -daily, -manual or"
+            " -pre-release-<release tag>,"
             f" got {value!r}"
         )
     return parsed
@@ -829,9 +842,9 @@ def _run_backup_verify(args: argparse.Namespace) -> int:
 
 
 _BACKUP_ROTATE_HELP = (
-    "Keep the newest verified daily backups and the newest verified daily backup of each of"
-    " the newest ISO weeks; delete the other verified daily backups. Never touches pre-release,"
-    " manual or invalid backups."
+    "Of the verified scheduled backups (and the daily backups of earlier releases), keep the"
+    " newest of each of the newest N hours, days and ISO weeks (UTC); delete the others. Never"
+    " touches pre-release, manual or invalid backups."
 )
 
 
@@ -840,18 +853,25 @@ def _add_backup_rotate_parser(subparsers: Any) -> None:
         "backup-rotate", help=_BACKUP_ROTATE_HELP, description=_BACKUP_ROTATE_HELP
     )
     parser.add_argument(
+        "--keep-hourly",
+        type=_bounded_int(0, 720),
+        default=0,
+        metavar="N",
+        help="The newest backup of each of the newest N hours is kept (0-720, default 0).",
+    )
+    parser.add_argument(
         "--keep-daily",
         type=_bounded_int(1, 3650),
         required=True,
         metavar="N",
-        help="The newest N verified daily backups are kept (1-3650).",
+        help="The newest backup of each of the newest N days is kept (1-3650).",
     )
     parser.add_argument(
         "--keep-weekly",
         type=_bounded_int(0, 520),
         required=True,
         metavar="N",
-        help="The newest daily backup of each of the newest N ISO weeks is kept (0-520).",
+        help="The newest backup of each of the newest N ISO weeks is kept (0-520).",
     )
     _backup_dir_argument(parser)
     parser.add_argument(
@@ -863,6 +883,7 @@ def _add_backup_rotate_parser(subparsers: Any) -> None:
 def _run_backup_rotate(args: argparse.Namespace) -> int:
     report = backups.rotate_backups(
         args.backup_dir,
+        keep_hourly=args.keep_hourly,
         keep_daily=args.keep_daily,
         keep_weekly=args.keep_weekly,
         dry_run=args.dry_run,
@@ -871,6 +892,105 @@ def _run_backup_rotate(args: argparse.Namespace) -> int:
     _print_backup_traceback(report.error)
     print(backups.rotate_summary(report), file=sys.stderr)
     return report.exit_code
+
+
+_BACKUP_DUE_HELP = (
+    "Report whether a scheduled backup is due: none was published yet, or the newest started"
+    " at least the interval ago (less ten minutes). Never changes anything; reads no database."
+)
+
+
+def _add_backup_due_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "backup-due", help=_BACKUP_DUE_HELP, description=_BACKUP_DUE_HELP
+    )
+    parser.add_argument(
+        "--interval-hours",
+        type=int,
+        choices=policies.BACKUP_INTERVALS,
+        required=True,
+        metavar="N",
+        help="The interval of Administration → Backups: 1, 2, 3, 4, 6, 8, 12 or 24 hours.",
+    )
+    _backup_dir_argument(parser)
+    parser.set_defaults(handler=_run_backup_due)
+
+
+def _run_backup_due(args: argparse.Namespace) -> int:
+    report = backups.check_due(args.backup_dir, interval_hours=args.interval_hours)
+    _print_document(backups.due_document(report))
+    _print_backup_traceback(report.error)
+    print(backups.due_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
+_BACKUP_POLICY_HELP = (
+    "Print the backup policy of Administration → Backups — the interval of the scheduled"
+    " backups and the hourly, daily and weekly backups kept — as a JSON report. Never changes"
+    " data."
+)
+_BACKUP_POLICY_UNREACHABLE = (
+    "The backup policy could not be read: PartFlow could not reach its database."
+)
+_BACKUP_POLICY_REFUSED = (
+    "The backup policy could not be read (database error). Check that the database is at this"
+    " release's revision (python -m app.cli revision)."
+)
+
+
+def _add_backup_policy_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "backup-policy", help=_BACKUP_POLICY_HELP, description=_BACKUP_POLICY_HELP
+    )
+    parser.set_defaults(handler=_run_backup_policy)
+
+
+def _backup_policy_document(
+    policy: policies.BackupPolicy | None, error: tuple[str, str] | None
+) -> dict[str, object]:
+    return {
+        "report_version": 1,
+        "command": "backup-policy",
+        "result": "failed" if policy is None else "read",
+        "exit_code": 2 if policy is None else 0,
+        "interval_hours": None if policy is None else policy.interval_hours,
+        "keep_hourly": None if policy is None else policy.keep_hourly,
+        "keep_daily": None if policy is None else policy.keep_daily,
+        "keep_weekly": None if policy is None else policy.keep_weekly,
+        "error": None if error is None else {"code": error[0], "message": error[1]},
+    }
+
+
+def _read_backup_policy() -> tuple[policies.BackupPolicy | None, tuple[str, str] | None]:
+    try:
+        engine = _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        return None, ("configuration_invalid", _CONFIGURATION_INVALID)
+    try:
+        with Session(engine) as session:
+            return policies.read_backup_policy(session), None
+    except (OperationalError, InterfaceError):
+        return None, ("database_unavailable", _BACKUP_POLICY_UNREACHABLE)
+    except SQLAlchemyError:
+        return None, ("database_error", _BACKUP_POLICY_REFUSED)
+    finally:
+        engine.dispose()
+
+
+def _run_backup_policy(args: argparse.Namespace) -> int:
+    policy, error = _read_backup_policy()
+    _print_document(_backup_policy_document(policy, error))
+    if policy is None:
+        message = error[1] if error is not None else "The backup policy could not be read."
+        print(f"backup-policy: {message}", file=sys.stderr)
+        return 2
+    every = "hour" if policy.interval_hours == 1 else f"{policy.interval_hours} hours"
+    print(
+        f"backup-policy: a scheduled backup every {every}; keep {policy.keep_hourly} hourly,"
+        f" {policy.keep_daily} daily and {policy.keep_weekly} weekly",
+        file=sys.stderr,
+    )
+    return 0
 
 
 _STATUS_HELP = (
@@ -891,9 +1011,12 @@ def _add_status_parser(subparsers: Any) -> None:
     parser.add_argument(
         "--max-backup-age-hours",
         type=_bounded_int(1, 720),
-        default=system_status.DEFAULT_MAX_BACKUP_AGE_HOURS,
+        default=None,
         metavar="N",
-        help="A newest backup older than N hours is a finding (1-720, default %(default)s).",
+        help=(
+            "A newest backup older than N hours is a finding (1-720; default: the interval of"
+            " Administration → Backups plus 2 hours)."
+        ),
     )
     parser.add_argument(
         "--statement-timeout",
@@ -965,6 +1088,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_backup_manifest_parser(subparsers)
     _add_backup_verify_parser(subparsers)
     _add_backup_rotate_parser(subparsers)
+    _add_backup_due_parser(subparsers)
+    _add_backup_policy_parser(subparsers)
     _add_status_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)

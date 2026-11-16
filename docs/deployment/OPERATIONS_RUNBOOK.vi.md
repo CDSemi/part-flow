@@ -1,7 +1,7 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `4a99914` cộng các thay đổi chưa
-> commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi
+> chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Runbook này gồm các thủ tục vận hành PartFlow production sau khi đã cài đặt: kiểm tra tình trạng, sao lưu và thử
@@ -15,7 +15,7 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Tôi muốn … | Mục |
 | --- | --- |
 | Kiểm tra PartFlow có khỏe không, hoặc tìm nguyên nhân của một lỗi | §2 |
-| Sao lưu thủ công, kiểm tra một bản sao lưu, hoặc hiểu thư mục sao lưu | §3 |
+| Sao lưu thủ công, kiểm tra một bản sao lưu, hiểu thư mục sao lưu hoặc tác vụ sao lưu mỗi giờ | §3 |
 | Chứng minh rằng một bản sao lưu khôi phục được | §4 |
 | Cài một bản phát hành mới | §5 |
 | Hoàn tác một bản phát hành | §6 |
@@ -121,7 +121,7 @@ Nó in một dòng cho mỗi kiểm tra, `PASS|FAIL|SKIP <id> <reason>`, theo th
 | `disk_archive` | thư mục lưu trữ (archive) còn trống dưới 15 %; `SKIP` khi chưa chỉ định thư mục lưu trữ (`--archive-dir`) |
 | `database` | báo cáo `status` không chạy được, không trả lời trong 120 s, hoặc báo lỗi database |
 | `schema` | `status` báo schema chưa sẵn sàng |
-| `backup_age` | không tìm thấy bản sao lưu đã công bố, không đọc được thư mục sao lưu, hoặc bản sao lưu mới nhất thuộc bất kỳ loại nào hoàn tất cách đây hơn 26 giờ (`--max-backup-age-hours`) |
+| `backup_age` | không tìm thấy bản sao lưu đã công bố, không đọc được thư mục sao lưu, hoặc bản sao lưu mới nhất thuộc bất kỳ loại nào hoàn tất cách đây lâu hơn khoảng thời gian sao lưu theo lịch của Administration → Backups cộng 2 giờ (ban đầu là 3 giờ; `--max-backup-age-hours` đặt giới hạn khác) |
 | `archival_proposal` | luôn `SKIP`: việc lưu trữ lịch sử Movement chưa được triển khai |
 
 - Bốn dòng cuối đến từ một lần chạy `status` chỉ đọc. Khi một bản phát hành đang giữ khóa của nó, hoặc `release.sh`
@@ -204,12 +204,13 @@ gốc của một thư mục mã nguồn bản phát hành: của bản phát h�
 phát hành mới khi `release.sh` gọi nó. Một bản sao lưu là một thư mục `<backup-dir>/<NAME>/`:
 
 ```text
-NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-daily
+NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-scheduled
                                          and 20261008T140000Z-pre-release-v1.0.0-rc.2
 ```
 
-- `kind` là `daily` (sao lưu theo lịch), `manual` (làm bằng tay, kèm lý do) hoặc `pre-release` (do `release.sh` tạo,
-  với tag phát hành đích làm `label`).
+- `kind` là `scheduled` (tác vụ sao lưu chạy mỗi giờ), `manual` (làm bằng tay, kèm lý do) hoặc `pre-release` (do
+  `release.sh` tạo, với tag phát hành đích làm `label`). `daily` là loại sao lưu theo lịch của các bản phát hành trước:
+  các bản sao lưu đó vẫn được kiểm tra, khôi phục và xoay vòng như bản sao lưu theo lịch.
 - Thư mục chứa đúng bốn tệp: `partflow.dump` (database, được dump bên trong `db` bằng
   `pg_dump --format=custom --no-owner --no-privileges`), `partflow.dump.list` (mục lục của nó), `manifest.json` (khi
   nào, ở đâu và từ bản phát hành nào và revision database nào bản sao lưu được tạo, phiên bản PostgreSQL, các
@@ -233,19 +234,20 @@ deploy/production/backup.sh --kind manual --operator "<your name>" --reason "<wh
 ```
 
 Khi thành công, đầu ra chuẩn (standard output) đúng một dòng, `BACKUP <NAME> <absolute path>`; các dòng tiến trình như
-`backup: dump ok (1234 ms)` đi ra lỗi chuẩn (standard error). Bản sao lưu hằng ngày theo lịch là
-`deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8`
-([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.2). `release.sh` tự tạo bản sao lưu trước phát hành; dạng thủ công
+`backup: dump ok (1234 ms)` đi ra lỗi chuẩn (standard error). Tác vụ sao lưu chạy
+`deploy/production/backup.sh --kind scheduled --operator scheduler` mỗi giờ
+([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.2); mục Sao lưu theo lịch (Scheduled backups), bên dưới, giải thích
+nó. `release.sh` tự tạo bản sao lưu trước phát hành; dạng thủ công
 của nó, cho một lần phát hành bằng tay, là
 `deploy/production/backup.sh --kind pre-release --label <target tag> --tools-release <target tag> --operator "<your name>"`.
 
 | Tùy chọn | Ý nghĩa |
 | --- | --- |
-| `--kind daily\|manual\|pre-release`, `--operator NAME` | Bắt buộc. |
+| `--kind scheduled\|manual\|pre-release`, `--operator NAME` | Bắt buộc. `--kind daily`, `--keep-daily` và `--keep-weekly` của các bản phát hành trước bị từ chối kèm lệnh cần dùng thay thế. |
 | `--reason TEXT` | Bắt buộc với `manual`. |
 | `--label TAG` | Tag phát hành đích: bắt buộc với `pre-release`, bị từ chối với loại khác. |
 | `--tools-release TAG` | Bản phát hành có image `backup-tools` ghi và kiểm tra manifest (mặc định: `PARTFLOW_RELEASE`). |
-| `--keep-daily N --keep-weekly N`, hoặc `--no-rotate` | Chỉ với `daily`, và bắt buộc một trong hai: chính sách giữ lại (bên dưới). Không có giá trị mặc định. |
+| `--no-rotate` | Chỉ với `scheduled`: giữ mọi bản sao lưu theo lịch trong lần chạy này. |
 | `--reserve-mib N` | Dung lượng trống giữ lại ngoài hai lần dump mới nhất (mặc định 1024). |
 
 Giá trị văn bản dài 1 đến 500 ký tự, không có ký tự điều khiển, `"` hoặc `\`. Trước khi ghi, `backup.sh` yêu cầu dung
@@ -253,11 +255,11 @@ lượng trống bằng hai lần dump mới nhất (hoặc kích thước datab
 
 | Mã thoát | Ý nghĩa | Cần làm gì |
 | --- | --- | --- |
-| 0 | Hoàn tất và đã kiểm tra. | Không cần làm gì. |
+| 0 | Hoàn tất và đã kiểm tra, hoặc (`scheduled`) chưa có bản sao lưu nào đến hạn: khi đó đầu ra chuẩn là `NOT_DUE <NAME>`, bản sao lưu theo lịch mới nhất. | Không cần làm gì. |
 | 1 | Bị từ chối trước khi ghi: `backup_running`, `backup_lock_stale`, `insufficient_space` hoặc `name_exists`. | Đọc lý do; chưa có gì được ghi. |
-| 2 | Không chạy được: tùy chọn, công cụ, cấu hình, `db` không chạy, hoặc không tạo được khóa sao lưu. | Sửa nguyên nhân và chạy lại. |
+| 2 | Không chạy được: tùy chọn, công cụ, cấu hình, `db` không chạy, không tạo được khóa sao lưu, hoặc (`scheduled`) không đọc được chính sách sao lưu từ database. | Sửa nguyên nhân và chạy lại. |
 | 3 | Thất bại: không có bản sao lưu nào được công bố, hoặc bản được công bố không qua kiểm tra. | Không bao giờ dùng bản sao lưu mà thông báo nêu tên; xóa nó sau khi xem xét. |
-| 4 | Bản sao lưu đã hoàn tất và được kiểm tra, nhưng việc xoay vòng (rotation) thất bại hoặc phát hiện một bản sao lưu hằng ngày không qua kiểm tra. | Đọc báo cáo xoay vòng trên lỗi chuẩn (Retention, bên dưới). |
+| 4 | Bản sao lưu đã hoàn tất và được kiểm tra, nhưng việc xoay vòng (rotation) thất bại hoặc phát hiện một bản sao lưu theo lịch không qua kiểm tra. | Đọc báo cáo xoay vòng trên lỗi chuẩn (Retention, bên dưới). |
 
 ### Kiểm tra một bản sao lưu (Verifying a backup)
 
@@ -273,23 +275,48 @@ $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-ver
 (không kiểm tra được). Đặt `PARTFLOW_RELEASE=<tag>` trước lệnh đầu để dùng image `backup-tools` của bản phát hành
 khác.
 
+### Sao lưu theo lịch (Scheduled backups)
+
+Tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.2,
+[`VPS.vi.md`](./VPS.vi.md) §8). **Administration → Backups** trong PartFlow đặt tần suất tạo bản sao lưu và số bản sao
+lưu theo lịch được giữ; một thay đổi có hiệu lực từ lần chạy kế tiếp của tác vụ. Mỗi lần chạy:
+
+1. lấy khóa sao lưu, rồi đọc chính sách sao lưu từ database (`python -m app.cli backup-policy` trong một container
+   `backend` dùng một lần, với role ứng dụng); khi không đọc được chính sách, nó thoát với 2;
+2. hỏi `backup-due` xem có bản sao lưu nào đến hạn không: khi bản sao lưu theo lịch mới nhất bắt đầu cách đây chưa tới
+   khoảng thời gian đã đặt (trừ mười phút, để một tác vụ mỗi giờ không bao giờ bỏ qua một giờ), nó không ghi gì, in
+   `NOT_DUE <NAME>` và thoát với 0;
+3. nếu không thì tạo và kiểm tra bản sao lưu, rồi áp dụng chính sách giữ lại (bên dưới).
+
+| Administration → Backups | Giá trị ban đầu | Cho phép |
+| --- | --- | --- |
+| Scheduled backup | Every hour | mỗi 1, 2, 3, 4, 6, 8, 12 hoặc 24 giờ |
+| Hourly backups kept | 48 | 0 đến 720 |
+| Daily backups kept | 30 | 1 đến 3650 |
+| Weekly backups kept | 52 | 0 đến 520 |
+
+Việc thay đổi các giá trị này cần permission Configure system settings, và mọi thay đổi đều được audit.
+
 ### Giữ lại, bản sao ngoài máy chủ và cảnh báo (Retention, the off-host copy and alerts)
 
-Một bản sao lưu `daily` kết thúc bằng việc xoay vòng các bản sao lưu hằng ngày. Để xem trước mà không xóa gì:
+Một bản sao lưu theo lịch kết thúc bằng việc xoay vòng các bản sao lưu theo lịch, với các giá trị của Administration →
+Backups. Để xem trước mà không xóa gì (ở đây với các giá trị ban đầu):
 
 ```sh
-$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-daily 14 --keep-weekly 8 --dry-run
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-hourly 48 --keep-daily 30 --keep-weekly 52 --dry-run
 ```
 
-- Nó giữ `--keep-daily` bản sao lưu hằng ngày đã kiểm tra mới nhất, cộng bản sao lưu hằng ngày mới nhất của mỗi tuần
-  trong `--keep-weekly` tuần lịch mới nhất (tuần ISO theo UTC; các tuần chồng lên cửa sổ hằng ngày).
-- Nó kiểm tra mọi ứng viên trước. Một bản sao lưu hằng ngày không qua kiểm tra không được tính và **không bao giờ bị
+- Nó giữ bản sao lưu theo lịch đã kiểm tra mới nhất của mỗi giờ trong `--keep-hourly` giờ, mỗi ngày trong
+  `--keep-daily` ngày và mỗi tuần lịch trong `--keep-weekly` tuần lịch mới nhất có một bản (giờ, ngày và tuần ISO theo
+  UTC; các khoảng chồng lên nhau), nên bản sao lưu theo lịch mới nhất luôn được giữ. Các bản sao lưu hằng ngày của các
+  bản phát hành trước được tính là bản sao lưu theo lịch.
+- Nó kiểm tra mọi ứng viên trước. Một bản sao lưu theo lịch không qua kiểm tra không được tính và **không bao giờ bị
   xóa**: `backup.sh` thoát với 4 và bạn xem xét nó (§9).
 - **Bản sao lưu pre-release và manual không bao giờ bị xoay vòng**: bạn xóa chúng sau khi xem xét (§9). Không công cụ
   nào từng xoay vòng hay xóa một thư mục lưu trữ.
 - Phần còn sót trong `.partial/` cũ hơn 24 giờ bị xóa.
-- 14 và 8 chỉ là ví dụ; chủ sở hữu chọn giá trị thực trong lệnh theo lịch. Chúng là tùy chọn bắt buộc, không bao giờ
-  là giá trị mặc định dựng sẵn.
+- Với các giá trị ban đầu, thư mục sao lưu chứa tối đa 130 bản sao lưu theo lịch (48 + 30 + 52, ít hơn khi các khoảng
+  chồng lên nhau). Hãy dự trù dung lượng cho chừng ấy bản dump, cộng các bản sao lưu pre-release và manual.
 
 Công cụ sao lưu của nền tảng mã hóa thư mục sao lưu và sao chép nó ra ngoài máy chủ, không bao giờ là bản sao tự
 làm: Hyper Backup với mã hóa phía máy khách trên NAS ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.3), restic
@@ -297,10 +324,11 @@ lên object storage trên VPS ([`VPS.vi.md`](./VPS.vi.md) §8).
 
 Cảnh báo, sau khi các lịch đã được thiết lập: sao lưu theo lịch thất bại (mã thoát khác 0) sẽ kích hoạt thông báo lỗi
 của trình lập lịch; sao chép ngoài máy chủ thất bại sẽ kích hoạt thông báo riêng của công cụ sao lưu; và kiểm tra
-`backup_age` của `check.sh` thất bại khi bản sao lưu mới nhất cũ hơn 26 giờ (§2). Với sao lưu hằng ngày, tối đa 24
-giờ công việc có thể bị mất (mục tiêu điểm khôi phục, recovery point objective, RPO). Cho đến khi sao lưu hằng ngày
-được lên lịch, các bản sao lưu duy nhất là những bản `release.sh` tạo trước mỗi lần phát hành và mọi bản sao lưu thủ
-công.
+`backup_age` của `check.sh` thất bại khi bản sao lưu mới nhất cũ hơn khoảng thời gian của Administration → Backups
+cộng 2 giờ (§2). Với một bản sao lưu mỗi giờ, tối đa một giờ công việc có thể bị mất (mục tiêu điểm khôi phục, recovery
+point objective, RPO); sau khi mất máy chủ, là mọi thứ kể từ lần sao chép ngoài máy chủ cuối cùng. Cho đến khi tác
+vụ sao lưu được lên lịch, các bản sao lưu duy nhất là những bản `release.sh` tạo trước mỗi lần phát hành và mọi bản sao
+lưu thủ công.
 
 ### Khóa sao lưu và khóa phát hành (Backup lock and release lock)
 
@@ -308,10 +336,11 @@ Các bản sao lưu không bao giờ chạy cùng lúc. Thư mục `<backup-dir>
 `host`, `pid`, `started_at`, `by` (`backup.sh` hoặc `release.sh`) và `name` của bản sao lưu hoặc `release`. Lần chạy
 thứ hai bị từ chối, không bao giờ xếp hàng: `backup_running` nghĩa là một bản sao lưu, hoặc một lần phát hành đang
 giữ khóa, đang diễn ra, nên hãy chờ. `release.sh` giữ khóa từ lúc tạm dừng ghi (hoặc từ bản sao lưu của nó) cho đến
-khi `backend` mới chạy. **Hãy để sao lưu hằng ngày tránh xa giờ phát hành:** một bản sao lưu đang chạy sẽ chặn lần
-phát hành trước khi tạm dừng ghi mà chưa thay đổi gì, và một bản sao lưu hằng ngày bắt đầu trong lúc phát hành sẽ bị
-từ chối. Một khóa hoàn toàn không tạo được (thư mục sao lưu đầy, chỉ đọc hoặc hết inode) được báo là không chạy được
-(mã thoát 2), không bao giờ là `backup_running`.
+khi `backend` mới chạy. **Hãy bắt đầu một lần phát hành ngay sau một bản sao lưu theo lịch:** một bản sao lưu đang
+chạy sẽ chặn lần phát hành trước khi tạm dừng ghi mà chưa thay đổi gì (hãy bắt đầu lại khi bản sao lưu đã xong), và một
+bản sao lưu theo lịch bắt đầu trong lúc phát hành sẽ bị từ chối (mã thoát 1, kèm email báo lỗi của nó; lần phát hành tự
+tạo bản sao lưu của mình, và lần chạy kế tiếp sao lưu như bình thường). Một khóa hoàn toàn không tạo được (thư mục sao
+lưu đầy, chỉ đọc hoặc hết inode) được báo là không chạy được (mã thoát 2), không bao giờ là `backup_running`.
 
 `backup_lock_stale` nghĩa là khóa do một lần chạy không còn tồn tại để lại: nó bị kill, hết bộ nhớ, hoặc mất điện.
 **Nó không bao giờ tự động bị xóa.** Xóa nó bằng tay sau các kiểm tra này:
@@ -432,8 +461,8 @@ phải làm gì khi `release.sh` dừng.
   chờ, để không gì được ghi giữa bản sao lưu và migration; nếu không thì ngay trước khi chuyển.
 - Xác nhận các image của bản phát hành đang chạy vẫn còn trên máy chủ: quay lui theo đường 1 cần chúng (§6), và
   `release.sh` từ chối khởi động nếu thiếu chúng.
-- Chọn thời điểm không có lần nhập Work Order nào đang chạy và không có sao lưu nào đang chạy (sao lưu hằng ngày lúc
-  02:00 trên NAS).
+- Chọn thời điểm không có lần nhập Work Order nào đang chạy, và bắt đầu ngay sau khi một bản sao lưu theo lịch đã xong
+  (tác vụ sao lưu bắt đầu vào mỗi giờ tròn trên NAS).
 - Báo cho người dùng khi nào thay đổi bắt đầu và khi nào bạn sẽ quyết định quay lui, và yêu cầu các trạm hoàn tất các
   hộp thoại đang mở.
 - `release.sh` chạy đối soát trên bản phát hành đang chạy trước khi thay đổi bất cứ thứ gì, và xử lý các phát hiện của
@@ -909,8 +938,8 @@ trigger có thể hiện một phát hiện rồi biến mất: hãy chạy lạ
 
 ### Đối soát theo lịch (Scheduled reconciliation)
 
-`deploy/production/scheduled-reconcile.sh` là dạng chạy hằng ngày, khuyến nghị lúc 04:00, sau sao lưu hằng ngày, từ
-thư mục mã nguồn của bản phát hành đang chạy, bằng tài khoản vận hành ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md)
+`deploy/production/scheduled-reconcile.sh` là dạng chạy hằng ngày, khuyến nghị lúc 04:00, từ thư mục mã nguồn
+của bản phát hành đang chạy, bằng tài khoản vận hành ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md)
 §11.5).
 
 - Nó chạy đối soát đầy đủ và ghi báo cáo vào `~/partflow-monitoring/reconcile/<UTC timestamp>-reconcile.json`
@@ -940,7 +969,7 @@ chúng vào ticket hay email. Không công cụ nào xóa chúng; hãy xóa bằ
 | Trình duyệt hiển thị cảnh báo chứng chỉ | Thiết bị không tin chứng chỉ gốc, chứng chỉ đã hết hạn, hoặc địa chỉ khác với tên trong chứng chỉ ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §9.1). |
 | `check.sh`: `FAIL https ... (curl 60)` | NAS không tin chứng chỉ: thêm `--cacert <root certificate>` (phương án A). Phía sau Cloudflare, bỏ `--resolve-to`. |
 | `check.sh`: `FAIL https host name ... not resolved (curl 6)` | Máy chủ không phân giải được tên PartFlow của chính nó: thêm `--resolve-to 127.0.0.1` (phương án A), hoặc sửa DNS. |
-| `check.sh`: `FAIL backup_age` | Sao lưu hằng ngày không chạy hoặc thất bại: kiểm tra tác vụ và email của nó, rồi chạy sao lưu thủ công (§3). |
+| `check.sh`: `FAIL backup_age` | Sao lưu theo lịch không chạy hoặc thất bại: kiểm tra tác vụ và email của nó, rồi chạy sao lưu thủ công (§3). |
 | `check.sh`: `FAIL disk_...` | Áp lực về database hoặc dung lượng lưu trữ, bên dưới. |
 | `check.sh` hoặc `release.sh`: một khóa cũ hơn 4 giờ, một bản phát hành khác đang giữ khóa, hoặc `backup_lock_stale` | Một lần chạy bị kill để lại khóa của nó: §3, Khóa sao lưu và khóa phát hành. |
 | `backup_running` | Một bản sao lưu, hoặc một lần phát hành đang giữ khóa sao lưu, đang chạy: chờ rồi chạy lại. |
@@ -1093,16 +1122,16 @@ phục chấp nhận được; các giá trị ở đây là ví dụ làm việ
 | Khi nào | Tác vụ |
 | --- | --- |
 | Mỗi 15 phút (tự động) | `check.sh`: tình trạng, các lần khởi động lại, đĩa, chứng chỉ, tuổi bản sao lưu và lỗi backend (§2). Một thất bại không đổi được nhắc lại mỗi 6 giờ. |
-| Hằng ngày | Sao lưu theo lịch lúc 02:00 và đối soát theo lịch lúc 04:00 tự chạy. Đọc mọi email báo lỗi, kể cả của bản sao ngoài máy chủ; mã thoát 4 của một bản sao lưu bao gồm cả trường hợp một bản sao lưu hằng ngày không qua kiểm tra. |
+| Hằng ngày | Sao lưu theo lịch (mỗi giờ) và đối soát theo lịch lúc 04:00 tự chạy. Đọc mọi email báo lỗi, kể cả của bản sao ngoài máy chủ; mã thoát 4 của một bản sao lưu bao gồm cả trường hợp một bản sao lưu theo lịch không qua kiểm tra. |
 | Hằng tuần | Xem xét mức tăng của database (`~/partflow-monitoring/growth.tsv`) và `docker stats --no-stream`. Xem xét các lần đăng nhập thất bại và quyền bị từ chối: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` và `refusal.code` phân biệt đăng nhập bị từ chối hoặc bị khóa, từ chối quyền, `station_device_required`, `station_device_mismatch` và `csrf_rejected`). Kiểm tra các bản cập nhật bảo mật đang chờ của máy chủ. |
-| Hằng tháng | Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu hằng ngày mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
+| Hằng tháng | Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
 | Hằng quý, và sau một thay đổi schema lớn | Diễn tập khôi phục (§4); so sánh các thời gian `restore_to_ready` và `total` của nó với thời gian nhà máy có thể làm việc mà không có PartFlow. |
 | Trước khi đổi image PostgreSQL hoặc glibc của máy chủ | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Trước mỗi lần phát hành | Xem xét các migration, quyết định quay lui và các kiểm tra (§5); `release.sh` tạo bản sao lưu. |
 
 **Xóa các bản sao lưu và báo cáo cũ.** Không công cụ nào xóa bản sao lưu pre-release, bản sao lưu manual, bản sao lưu
-hằng ngày không qua kiểm tra, hay báo cáo đối soát. Sau khi xem xét, xóa từng cái theo tên; không bao giờ xóa bản sao
-lưu hằng ngày đã kiểm tra mới nhất hoặc bất cứ thứ gì trong thư mục lưu trữ:
+theo lịch không qua kiểm tra, hay báo cáo đối soát. Sau khi xem xét, xóa từng cái theo tên; không bao giờ xóa bản sao
+lưu theo lịch đã kiểm tra mới nhất hoặc bất cứ thứ gì trong thư mục lưu trữ:
 
 ```sh
 rm -r "<backup-dir>/<NAME>"
@@ -1151,7 +1180,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | §5: lần phát hành dừng trước khi tạm dừng ghi khi `revision` của image mới báo `blocked_by_data`. |
+| 2026-11-16 | uncommitted | §2, §3, §5, §8, §9: tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ; Administration → Backups đặt khoảng thời gian và số bản sao lưu hourly, daily và weekly được giữ; giới hạn `backup_age` đi theo khoảng thời gian đó. |
+| 2026-11-14 | `2a24c2a` | §5: lần phát hành dừng trước khi tạm dừng ghi khi `revision` của image mới báo `blocked_by_data`. |
 | 2026-11-13 | `4a99914` | §2: các lần Production Board tự làm mới thành công không còn nằm trong log `web`. |
 | 2026-11-12 | `de4d99f` | §5 Observe: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 giây, và mọi trang khác khi rảnh 1 phút thay vì 2 phút; §2: mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày thay vì 3 MB. |
 | 2026-11-12 | `77a2dfb` | §5 Observe: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau 60 giây, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu), nên không ai phải đi tới từng máy. |

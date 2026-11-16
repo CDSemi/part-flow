@@ -864,7 +864,7 @@ def test_rotation_keeps_the_newest_dailies_and_one_per_week(
     assert document["deleted"] == sorted(names[:5])
     assert (document["skipped"], document["invalid"], document["error"]) == ([], [], None)
     assert _root(tmp_path) == expected
-    assert err.strip() == "backup-rotate: kept 15 daily backups, deleted 5"
+    assert err.strip() == "backup-rotate: kept 15 scheduled backups, deleted 5"
     # Converges: a rerun deletes nothing.
     code, document, _ = _rotate(capsys, tmp_path, 14, 8)
     assert (code, document["deleted"]) == (0, [])
@@ -1062,8 +1062,8 @@ def test_invalid_dailies_are_kept_and_not_counted(
     assert corrupted not in document["deleted"] and edited not in document["deleted"]
     assert (tmp_path / corrupted).exists() and (tmp_path / edited).exists()
     assert document["error"]["message"] == (
-        f"Daily backups {corrupted}, {edited} failed verification; they were not counted or"
-        " deleted. Review and remove them by hand (OPERATIONS_RUNBOOK §9)."
+        f"Scheduled backups {corrupted}, {edited} failed verification; they were not counted"
+        " or deleted. Review and remove them by hand (OPERATIONS_RUNBOOK §9)."
     )
     assert err.strip().endswith(", 2 failed verification and were kept for review")
     for name in document["kept"]:
@@ -1096,6 +1096,229 @@ def test_unreadable_dailies_are_kept_and_not_counted(
     assert document["kept"] == [names[3]]
     assert document["deleted"] == [names[1], names[2]]
     assert _root(tmp_path) == [oldest, names[3], newest]
+
+
+def _hourlies(backup_dir: Path, first: datetime.datetime, hours: int) -> list[str]:
+    names = []
+    for offset in range(hours):
+        name = name_of(first + datetime.timedelta(hours=offset), "scheduled")
+        publish(backup_dir, name)
+        names.append(name)
+    return names
+
+
+def test_scheduled_backups_keep_one_per_hour_day_and_week(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Administration → Backups: 72 hourly backups from 2026-09-01 00:00 (a Tuesday)."""
+    names = _hourlies(tmp_path, utc(2026, 9, 1, 0), 72)
+    code, document, err = _rotate(capsys, tmp_path, 30, 52, "--keep-hourly", "48")
+    assert code == 0, err
+    assert (document["keep_hourly"], document["keep_daily"], document["keep_weekly"]) == (
+        48,
+        30,
+        52,
+    )
+    # The newest 48 hours, plus 09-01 23:00 as the newest backup of that day.
+    expected = sorted([*names[-48:], name_of(utc(2026, 9, 1, 23), "scheduled")])
+    assert document["kept"] == expected
+    assert document["deleted"] == sorted(names[:23])
+    assert _root(tmp_path) == expected
+    assert err.strip() == "backup-rotate: kept 49 scheduled backups, deleted 23"
+
+
+def test_several_backups_in_one_hour_keep_only_the_newest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    early = name_of(utc(2026, 9, 1, 10, 5), "scheduled")
+    late = name_of(utc(2026, 9, 1, 10, 50), "scheduled")
+    previous = name_of(utc(2026, 9, 1, 9, 5), "scheduled")
+    for name in (previous, early, late):
+        publish(tmp_path, name)
+    code, document, _ = _rotate(capsys, tmp_path, 1, 0, "--keep-hourly", "2")
+    assert code == 0
+    assert document["kept"] == sorted([previous, late])
+    assert document["deleted"] == [early]
+
+
+def test_daily_backups_of_earlier_releases_rotate_with_the_scheduled_ones(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dailies = _dailies(tmp_path, utc(2026, 8, 1), 10)  # 08-01 .. 08-10 at 02:00
+    scheduled = _hourlies(tmp_path, utc(2026, 8, 11, 0), 3)
+    code, document, _ = _rotate(capsys, tmp_path, 3, 0, "--keep-hourly", "2")
+    assert code == 0
+    # Hours: the two newest scheduled; days: 08-11 (scheduled), 08-10 and 08-09 (daily).
+    assert document["kept"] == sorted([*scheduled[1:], dailies[-1], dailies[-2]])
+    assert document["deleted"] == sorted([*dailies[:-2], scheduled[0]])
+
+
+def test_without_keep_hourly_no_hour_is_kept_on_its_own(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    names = _hourlies(tmp_path, utc(2026, 9, 1, 0), 3)
+    code, document, _ = _rotate(capsys, tmp_path, 1, 0)
+    assert code == 0
+    assert document["keep_hourly"] == 0
+    assert document["kept"] == [names[-1]]
+
+
+@pytest.mark.parametrize("hourly", ["-1", "721", "x"])
+def test_keep_hourly_is_bounded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], hourly: str
+) -> None:
+    with pytest.raises(SystemExit) as usage:
+        cli.main(
+            [
+                "backup-rotate",
+                "--keep-hourly",
+                hourly,
+                "--keep-daily",
+                "1",
+                "--keep-weekly",
+                "0",
+                "--backup-dir",
+                str(tmp_path),
+            ]
+        )
+    assert usage.value.code == 2
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# backup-due (Administration → Backups)
+# ---------------------------------------------------------------------------
+
+_DUE_NOW = utc(2026, 10, 8, 12, 0)
+
+
+def test_with_no_scheduled_backup_one_is_due(tmp_path: Path) -> None:
+    publish(tmp_path, name_of(_DUE_NOW - datetime.timedelta(minutes=5), "manual"))
+    publish(
+        tmp_path,
+        name_of(_DUE_NOW - datetime.timedelta(minutes=6), "pre-release", "v1.0.0-rc.2"),
+    )
+    report = backups.check_due(tmp_path, interval_hours=1, now=_DUE_NOW)
+    assert (report.result, report.exit_code, report.newest) == ("due", 0, None)
+    assert backups.due_summary(report) == "backup-due: due (no scheduled backup was published yet)"
+
+
+@pytest.mark.parametrize(
+    ("interval", "minutes", "due"),
+    [
+        (1, 30, False),
+        (1, 49, False),
+        (1, 50, True),
+        (1, 59, True),
+        (1, 600, True),
+        (6, 349, False),
+        (6, 350, True),
+        (24, 1429, False),
+        (24, 1430, True),
+    ],
+)
+def test_a_backup_is_due_ten_minutes_before_its_interval_has_passed(
+    tmp_path: Path, interval: int, minutes: int, due: bool
+) -> None:
+    name = name_of(_DUE_NOW - datetime.timedelta(minutes=minutes), "scheduled")
+    publish(tmp_path, name)
+    report = backups.check_due(tmp_path, interval_hours=interval, now=_DUE_NOW)
+    assert report.due is due
+    assert report.exit_code == (0 if due else 1)
+    assert report.newest is not None and report.newest.name == name
+    assert report.age_minutes == minutes
+
+
+def test_a_daily_backup_of_an_earlier_release_counts(tmp_path: Path) -> None:
+    daily = name_of(_DUE_NOW - datetime.timedelta(minutes=20))
+    publish(tmp_path, daily)
+    report = backups.check_due(tmp_path, interval_hours=1, now=_DUE_NOW)
+    assert (report.result, report.newest) == ("not_due", backups.parse_name(daily))
+
+
+def test_a_backup_whose_manifest_does_not_name_it_is_not_counted(tmp_path: Path) -> None:
+    older = name_of(_DUE_NOW - datetime.timedelta(hours=3), "scheduled")
+    publish(tmp_path, older)
+    disagreeing = name_of(_DUE_NOW - datetime.timedelta(minutes=10), "scheduled")
+    reseal(publish(tmp_path, disagreeing), _set("kind", "manual"))
+    unreadable = name_of(_DUE_NOW - datetime.timedelta(minutes=5), "scheduled")
+    (publish(tmp_path, unreadable) / "manifest.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / ".partial" / name_of(_DUE_NOW, "scheduled")).mkdir(parents=True)
+    report = backups.check_due(tmp_path, interval_hours=1, now=_DUE_NOW)
+    assert report.due is True
+    assert report.newest is not None and report.newest.name == older
+
+
+def test_a_backup_named_in_the_future_makes_one_due(tmp_path: Path) -> None:
+    ahead = tmp_path / "ahead"
+    ahead.mkdir()
+    publish(ahead, name_of(_DUE_NOW + datetime.timedelta(minutes=30), "scheduled"))
+    assert backups.check_due(ahead, interval_hours=24, now=_DUE_NOW).due is True
+    skew = tmp_path / "skew"
+    skew.mkdir()
+    publish(skew, name_of(_DUE_NOW + datetime.timedelta(minutes=1), "scheduled"))
+    assert backups.check_due(skew, interval_hours=24, now=_DUE_NOW).due is False
+
+
+def test_backup_due_cli_document(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    started = datetime.datetime.now(datetime.UTC).replace(microsecond=0) - datetime.timedelta(
+        minutes=20
+    )
+    name = name_of(started, "scheduled")
+    publish(tmp_path, name)
+    code, document, err = _run(
+        capsys, "backup-due", "--interval-hours", "1", "--backup-dir", str(tmp_path)
+    )
+    assert code == 1
+    assert list(document) == [
+        "report_version",
+        "command",
+        "result",
+        "exit_code",
+        "interval_hours",
+        "newest",
+        "error",
+    ]
+    assert (document["command"], document["result"], document["interval_hours"]) == (
+        "backup-due",
+        "not_due",
+        1,
+    )
+    assert document["newest"]["name"] == name
+    assert document["newest"]["started_at"] == started.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert document["newest"]["age_minutes"] in (20, 21)
+    assert document["error"] is None
+    assert err.startswith(f"backup-due: not due (the newest scheduled backup, {name}, started")
+    assert err.rstrip().endswith("minutes ago; one is due every hour)")
+
+
+def test_backup_due_cannot_read_a_missing_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing"
+    code, document, err = _run(
+        capsys, "backup-due", "--interval-hours", "2", "--backup-dir", str(missing)
+    )
+    assert (code, document["result"], document["newest"]) == (2, "failed", None)
+    assert document["error"]["code"] == "io_error"
+    assert err.startswith(f"backup-due: The backup directory {missing} could not be read (")
+
+
+@pytest.mark.parametrize("interval", ["0", "5", "48", "x"])
+def test_backup_due_admits_only_the_allowed_intervals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], interval: str
+) -> None:
+    with pytest.raises(SystemExit) as usage:
+        cli.main(["backup-due", "--interval-hours", interval, "--backup-dir", str(tmp_path)])
+    assert usage.value.code == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_a_scheduled_backup_name_parses() -> None:
+    parsed = backups.parse_name("20261008T020000Z-scheduled")
+    assert parsed is not None
+    assert (parsed.kind, parsed.label) == ("scheduled", None)
+    assert backups.parse_name("20261008T020000Z-scheduled-v1") is None
 
 
 # ---------------------------------------------------------------------------

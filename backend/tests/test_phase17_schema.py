@@ -6,9 +6,9 @@ verifies what `0033_phase17_super_user_role` (IMPLEMENTATION_ROADMAP
 Phase 17 item 3; PROJECT_PROFILE §20) and `0034_phase17_unique_names`
 (item 4; PROJECT_PROFILE §8.4, §8.8) do:
 
-- exact head boundary: `0034_phase17_unique_names` is the single head
-  (the earlier cases run against their own revision), and the models
-  match the schema migrated to it;
+- the earlier cases run against their own revision; the head boundary
+  and the models parity moved to `tests/test_phase16_backup_policy_schema.py`
+  with `0035_phase16_backup_policy`;
 - 0033: the migration's permission literal is exactly the 0028
   vocabulary;
 - a fresh install seeds `Super User` with every key of
@@ -40,7 +40,6 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError
@@ -48,7 +47,7 @@ from sqlalchemy.exc import IntegrityError
 from alembic import command
 from app.application import migration
 from app.domain.enums import Permission
-from app.infrastructure import models, schema_revision
+from app.infrastructure import schema_revision
 
 # Schema and seed assertions: owner connections in the application-role
 # test mode (Phase 16 slice 4).
@@ -58,7 +57,8 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0032_phase14_route_adjusted"
 _SUPER_USER_REVISION = "0033_phase17_super_user_role"
 _UNIQUE_NAMES_REVISION = "0034_phase17_unique_names"
-_HEAD_REVISION = _UNIQUE_NAMES_REVISION
+# The fresh-install cases run at the code head, whatever later revision it is.
+_HEAD_REVISION = schema_revision.code_head()
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261114_0033_phase17_super_user_role.py"
 _UNIQUE_NAMES_MIGRATION_FILE = _VERSIONS_DIR / "20261114_0034_phase17_unique_names.py"
@@ -214,21 +214,6 @@ def super_user_database(admin_engine: Engine, super_user_template: str) -> Itera
 # ---------------------------------------------------------------------------
 # Head and literals
 # ---------------------------------------------------------------------------
-
-
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-
-
-def test_models_metadata_matches_the_migrated_schema(head_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
 
 
 def test_the_permission_literal_is_the_0028_vocabulary() -> None:
@@ -476,7 +461,9 @@ def test_revision_reports_the_duplicates_and_migrate_refuses(super_user_database
             engine, release=None, commit=None, accepted_revision=None
         )
         assert (report.state, report.exit_code) == ("blocked_by_data", 1)
-        assert report.pending_revisions == [_UNIQUE_NAMES_REVISION]
+        # 0034 first; any later revision up to the code head follows it.
+        assert report.pending_revisions[0] == _UNIQUE_NAMES_REVISION
+        assert report.pending_revisions[-1] == _HEAD_REVISION
         assert report.blocking_data == expected
         assert migration.revision_document(report)["blocking_data"] == expected
         assert migration.revision_summary(report).endswith(

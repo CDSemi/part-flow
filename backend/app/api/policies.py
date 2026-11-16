@@ -54,14 +54,24 @@ handlers in ``app.api.errors`` translate typed failures.
   (strict integers and booleans; an empty body, a ``null`` or an extra
   field is 422); requires ``CONFIGURE_SYSTEM_SETTINGS``; the audit row
   names the signed-in administrator.
+- ``GET /policies/backups`` — Administration → Backups (Phase 16, owner
+  decision of 2026-11-13): the interval of the scheduled backups in whole
+  hours and the hourly, daily and weekly backups their rotation keeps.
+  Requires a signed-in User.
+- ``PUT /policies/backups`` — a full replace like Due Soon: all four
+  fields are required strict integers (a missing field, a string, float,
+  bool, ``null`` or an extra field is 422); the allowed intervals and the
+  ranges are the Application's 422; requires ``CONFIGURE_SYSTEM_SETTINGS``;
+  answers with the stored policy, also when nothing changed. Saving takes
+  or removes no backup: the host's hourly backup task reads it.
 
 Access (Phase 14 slice 2): every read needs a signed-in User except
 ``GET /policies/due-soon``, which stays public (the Production Board and
 the Scan Station read it without signing in). Each write needs its
 section's permission — Worker sessions
 ``MANAGE_WORKER_SESSION_POLICIES``, Correction permissions
-``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention and user
-sign-in ``CONFIGURE_SYSTEM_SETTINGS`` — and its audit row names the
+``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention, user sign-in
+and backups ``CONFIGURE_SYSTEM_SETTINGS`` — and its audit row names the
 signed-in User (``actor_user_id``).
 """
 
@@ -185,6 +195,34 @@ class RetentionPolicyPutRequest(BaseModel):
 def _retention_response(policy: ApplicationPolicy) -> RetentionPolicyResponse:
     return RetentionPolicyResponse(
         retention_period_months=policy.retention_period_months, updated_at=policy.updated_at
+    )
+
+
+class BackupPolicyResponse(BaseModel):
+    backup_interval_hours: int
+    backup_keep_hourly: int
+    backup_keep_daily: int
+    backup_keep_weekly: int
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class BackupPolicyPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backup_interval_hours: StrictInt
+    backup_keep_hourly: StrictInt
+    backup_keep_daily: StrictInt
+    backup_keep_weekly: StrictInt
+
+
+def _backup_response(policy: ApplicationPolicy) -> BackupPolicyResponse:
+    return BackupPolicyResponse(
+        backup_interval_hours=policy.backup_interval_hours,
+        backup_keep_hourly=policy.backup_keep_hourly,
+        backup_keep_daily=policy.backup_keep_daily,
+        backup_keep_weekly=policy.backup_keep_weekly,
+        updated_at=policy.updated_at,
     )
 
 
@@ -315,3 +353,23 @@ def put_sign_in_policy(
         session, actor_user_id=principal.user_id, **body.model_dump(exclude_unset=True)
     )
     return _sign_in_response(policy)
+
+
+@router.get("/policies/backups")
+def get_backup_policy(principal: SignedInDep, session: SessionDep) -> BackupPolicyResponse:
+    return _backup_response(policies.get_policy(session))
+
+
+@router.put("/policies/backups")
+def put_backup_policy(
+    principal: SystemSettingsManagerDep, body: BackupPolicyPutRequest, session: SessionDep
+) -> BackupPolicyResponse:
+    policy = policies.update_backup_policy(
+        session,
+        interval_hours=body.backup_interval_hours,
+        keep_hourly=body.backup_keep_hourly,
+        keep_daily=body.backup_keep_daily,
+        keep_weekly=body.backup_keep_weekly,
+        actor_user_id=principal.user_id,
+    )
+    return _backup_response(policy)

@@ -260,7 +260,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0034_phase17_unique_names`):
+current head, `0035_phase16_backup_policy`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -537,8 +537,10 @@ The pytest suite holds three kinds of tests:
   constraints, the widened audit vocabulary, the refusing downgrades and the
   parity between the models and the migrations. `tests/test_phase17_schema.py`
   covers `0033_phase17_super_user_role`, which seeds the Super User role, and
-  the single head `0034_phase17_unique_names`, which makes Area and Planned
-  Route names unique.
+  `0034_phase17_unique_names`, which makes Area and Planned Route names
+  unique; `tests/test_phase16_backup_policy_schema.py` covers the single head
+  `0035_phase16_backup_policy`, the backup policy of Administration → Backups,
+  and the parity between the models and the migrations.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -765,7 +767,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | The migration head is `0034_phase17_unique_names`. |
+| 2026-11-16 | uncommitted | The migration head is `0035_phase16_backup_policy`, covered by `tests/test_phase16_backup_policy_schema.py`. |
+| 2026-11-14 | `2a24c2a` | The migration head is `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | The migration head is `0033_phase17_super_user_role`, covered by `tests/test_phase17_schema.py`. |
 | 2026-11-10 | `e0e5056` | Production links point to the rewritten deployment guides, with `docs/DEPLOYMENT.md` §1 as the starting point. |
 | 2026-11-09 | `398c617` | Rewritten as a newcomer introduction plus the developer guide; the phase-by-phase status narrative was removed, the production section shortened to an orientation, and stale commands and statements were corrected. |

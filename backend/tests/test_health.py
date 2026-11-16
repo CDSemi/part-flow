@@ -29,7 +29,7 @@ from app.main import create_app
 from tests.conftest import owner_engine
 
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0033_phase17_super_user_role"
+_PREVIOUS = "0034_phase17_unique_names"
 _UNKNOWN = "9999_unknown_to_this_image"
 _OTHER_UNKNOWN = "9998_unknown_to_this_image"
 _NOT_READY_DETAIL = (

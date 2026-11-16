@@ -380,7 +380,8 @@ def test_the_cli_reads_no_model() -> None:
         elif isinstance(node, ast.Attribute):
             assert node.attr not in {"User", "Role", "RolePermission", "Permission"}
             assert node.attr not in {"UserCredential", "UserSession"}
-    # `errors` is the shared refusal vocabulary the CLI renders.
+    # `errors` is the shared refusal vocabulary the CLI renders; `policies`
+    # serves `backup-policy`, the host task's read of Administration → Backups.
     assert "authentication" in application
     assert application <= {
         "authentication",
@@ -389,6 +390,7 @@ def test_the_cli_reads_no_model() -> None:
         "migration",
         "database_roles",
         "backups",
+        "policies",
         "system_status",
     }
 

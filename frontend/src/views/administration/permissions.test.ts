@@ -184,6 +184,7 @@ test('each Administration section names the permission its changes need', () => 
     'machine-assignment': null,
     'correction-permissions': 'MANAGE_CORRECTION_PERMISSIONS',
     'data-retention': 'CONFIGURE_SYSTEM_SETTINGS',
+    backups: 'CONFIGURE_SYSTEM_SETTINGS',
     'department-display': 'MANAGE_DEPARTMENTS',
     settings: 'CONFIGURE_SYSTEM_SETTINGS',
   });
@@ -270,6 +271,7 @@ test('only the session UI, the sign-in gate, the Administration sections, the Ma
     'app/session-context.ts',
     'app/session-provider.tsx',
     'views/administration/AreasSection.tsx',
+    'views/administration/BackupsSection.tsx',
     'views/administration/BarcodeConfigurationSection.tsx',
     'views/administration/CorrectionPermissionsSection.tsx',
     'views/administration/DepartmentDisplaySection.tsx',

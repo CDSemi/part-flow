@@ -18,7 +18,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
+NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 PROJECT_PATTERN='^partflow-restore-[a-z0-9][a-z0-9-]{0,40}$'
 DRILL_DATABASE=partflow_restore_test
@@ -130,7 +130,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$BACKUP" ] || usage_error "--backup NAME is required."
 printf '%s' "$BACKUP" | grep -Eq "$NAME_PATTERN" \
-    || usage_error "--backup must name a backup directory created by backup.sh (for example 20261008T020000Z-daily)."
+    || usage_error "--backup must name a backup directory created by backup.sh (for example 20261008T020000Z-scheduled)."
 [ -n "$OPERATOR" ] || usage_error "--operator is required."
 for pair in "--release:$RELEASE" "--tools-release:$TOOLS_RELEASE"; do
     value=${pair#*:}

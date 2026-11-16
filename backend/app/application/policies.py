@@ -35,7 +35,13 @@ the failed sign-ins before a lock (3-100, default 10), the lock duration
 (1-1440 minutes, default 15) and whether an administrator-set password
 must be replaced at the next sign-in (default on). Every request reads
 it, so a change applies to open sign-ins at their next request; its audit
-row names the signed-in administrator (``actor_user_id``).
+row names the signed-in administrator (``actor_user_id``). Phase 16 adds
+Administration → Backups (owner decision of 2026-11-13; ``entity_id``
+``backups``, a full replace like Due Soon): the interval of the scheduled
+backups (1, 2, 3, 4, 6, 8, 12 or 24 hours, default 1) and the hourly
+(0-720, default 48), daily (1-3650, default 30) and weekly (0-520, default
+52) backups their rotation keeps. Only the host's hourly backup task
+(``app.cli backup-policy``) and ``status`` read it, from their next run.
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -55,7 +61,7 @@ dialogs or Movements and never rewrites history: it applies from each
 session's next refresh or sign-in, and from each command's own read.
 """
 
-from typing import Any, Final, TypeGuard
+from typing import Any, Final, NamedTuple, TypeGuard
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -65,6 +71,13 @@ from app.application.common import UNSET, UnsetType, commit
 from app.application.errors import InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType
 from app.infrastructure.models import (
+    BACKUP_INTERVAL_HOURS,
+    BACKUP_KEEP_DAILY_MAX,
+    BACKUP_KEEP_DAILY_MIN,
+    BACKUP_KEEP_HOURLY_MAX,
+    BACKUP_KEEP_HOURLY_MIN,
+    BACKUP_KEEP_WEEKLY_MAX,
+    BACKUP_KEEP_WEEKLY_MIN,
     DUE_SOON_DAYS_MAX,
     DUE_SOON_DAYS_MIN,
     DUE_SOON_PERCENT_MAX,
@@ -96,6 +109,12 @@ DATA_RETENTION_SECTION: Final = "data-retention"
 # The audit entity_id and API path segment of Administration → Settings →
 # User sign-in (Phase 14 slice 1; CD3).
 SIGN_IN_SECTION: Final = "sign-in"
+# The audit entity_id and API path segment of Administration → Backups
+# (Phase 16; CD3: the sidebar section id).
+BACKUPS_SECTION: Final = "backups"
+# The scheduled backup intervals Administration → Backups admits: the
+# whole hours that divide the day (the backup-due command's choices too).
+BACKUP_INTERVALS: Final = BACKUP_INTERVAL_HOURS
 # Lock-first mode of a policy write: the FOR NO KEY UPDATE its own UPDATE takes.
 _EDIT_LOCK: Final = {"key_share": True}
 
@@ -436,6 +455,92 @@ def update_sign_in_policy(
         entity_id=SIGN_IN_SECTION,
         before_data=before,
         after_data=_sign_in_snapshot(policy),
+        actor_user_id=actor_user_id,
+    )
+    commit(session, {})
+    return policy
+
+
+class BackupPolicy(NamedTuple):
+    """The backup policy of Administration → Backups, as stored."""
+
+    interval_hours: int
+    keep_hourly: int
+    keep_daily: int
+    keep_weekly: int
+
+
+def backup_policy(policy: ApplicationPolicy) -> BackupPolicy:
+    return BackupPolicy(
+        interval_hours=policy.backup_interval_hours,
+        keep_hourly=policy.backup_keep_hourly,
+        keep_daily=policy.backup_keep_daily,
+        keep_weekly=policy.backup_keep_weekly,
+    )
+
+
+def read_backup_policy(session: Session) -> BackupPolicy:
+    """The stored backup policy (unlocked; the host task's read)."""
+    return backup_policy(get_policy(session))
+
+
+def _backup_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {
+        "backup_interval_hours": policy.backup_interval_hours,
+        "backup_keep_hourly": policy.backup_keep_hourly,
+        "backup_keep_daily": policy.backup_keep_daily,
+        "backup_keep_weekly": policy.backup_keep_weekly,
+    }
+
+
+def update_backup_policy(
+    session: Session,
+    *,
+    interval_hours: object,
+    keep_hourly: object,
+    keep_daily: object,
+    keep_weekly: object,
+    actor_user_id: int | None,
+) -> ApplicationPolicy:
+    """Replace the backup policy (all four fields); a no-op writes and audits nothing.
+
+    Saving it takes, removes or schedules no backup: the host's hourly
+    backup task reads it at its next run.
+    """
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    if not (_is_whole_in(interval_hours, 1, 24) and interval_hours in BACKUP_INTERVALS):
+        raise InvalidInputError("Back up every 1, 2, 3, 4, 6, 8, 12 or 24 hours.")
+    if not _is_whole_in(keep_hourly, BACKUP_KEEP_HOURLY_MIN, BACKUP_KEEP_HOURLY_MAX):
+        raise InvalidInputError("Hourly backups kept must be a whole number from 0 to 720.")
+    if not _is_whole_in(keep_daily, BACKUP_KEEP_DAILY_MIN, BACKUP_KEEP_DAILY_MAX):
+        raise InvalidInputError("Daily backups kept must be a whole number from 1 to 3650.")
+    if not _is_whole_in(keep_weekly, BACKUP_KEEP_WEEKLY_MIN, BACKUP_KEEP_WEEKLY_MAX):
+        raise InvalidInputError("Weekly backups kept must be a whole number from 0 to 520.")
+    before = _backup_snapshot(policy)
+    after = {
+        "backup_interval_hours": interval_hours,
+        "backup_keep_hourly": keep_hourly,
+        "backup_keep_daily": keep_daily,
+        "backup_keep_weekly": keep_weekly,
+    }
+    if after == before:
+        return policy
+    policy.backup_interval_hours = interval_hours
+    policy.backup_keep_hourly = keep_hourly
+    policy.backup_keep_daily = keep_daily
+    policy.backup_keep_weekly = keep_weekly
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=BACKUPS_SECTION,
+        before_data=before,
+        after_data=_backup_snapshot(policy),
         actor_user_id=actor_user_id,
     )
     commit(session, {})

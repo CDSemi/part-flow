@@ -67,7 +67,7 @@ _DATABASE = "partflow_test_database_roles"
 _FRESH_DATABASE = "partflow_test_database_roles_fresh"
 _OWNED_DATABASE = "partflow_test_database_roles_owned"
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0033_phase17_super_user_role"
+_PREVIOUS = "0034_phase17_unique_names"
 _NOT_SUPERUSER = (
     "The database-role tests need a superuser test database role (the Compose and CI"
     " partflow_user is one)."

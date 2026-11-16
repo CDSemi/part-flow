@@ -7,6 +7,7 @@ import { SignInGate } from '../../app/SignInGate';
 import { getViewStatePreview } from '../../app/view-state';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { AreasSection } from './AreasSection';
+import { BackupsSection } from './BackupsSection';
 import { BarcodeConfigurationSection } from './BarcodeConfigurationSection';
 import { CorrectionPermissionsSection } from './CorrectionPermissionsSection';
 import { DepartmentDisplaySection } from './DepartmentDisplaySection';
@@ -40,8 +41,10 @@ import type { AdminSection } from './sections';
 // settings are disabled previews marked Not available yet) and History
 // archival & purge (the real retention period; archival and purge runs
 // say they are not available yet). Machine assignment is a read-only
-// statement of the two Area modes. Scan behavior shows its candidate
-// settings as disabled previews marked Not available yet (Phase 17).
+// statement of the two Area modes. Backups (Phase 16) reads and writes
+// the real interval and retention of the scheduled backups. Scan
+// behavior shows its candidate settings as disabled previews marked Not
+// available yet (Phase 17).
 //
 // Access (Phase 14 slice 2): every section needs a signed-in user, and
 // no Administration request is sent before — the shared sign-in gate
@@ -170,6 +173,8 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <ScanBehaviorSection />;
     case 'data-retention':
       return <HistoryArchivalSection />;
+    case 'backups':
+      return <BackupsSection />;
     default:
       return <PlaceholderSection section={section} entryAction />;
   }

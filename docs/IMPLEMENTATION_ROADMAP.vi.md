@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `a04179f` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `0e983ec` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -49,13 +49,13 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 13 — Full Administration and Production Identity Configuration | Đã đóng (2026-10-07) | Worker, nhận diện Worker và phiên, quản lý master data, chính sách, User và role dưới dạng cấu hình. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, backup cấu hình trong Administration, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0034_phase17_unique_names`
-(`backend/alembic/versions/20261114_0034_phase17_unique_names.py`). Phase 15 và 16 không thêm migration nào; Phase 17
-thêm `0033_phase17_super_user_role` (role Super User) và `0034_phase17_unique_names` (tên Area và Planned Route duy
-nhất).
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0035_phase16_backup_policy`
+(`backend/alembic/versions/20261116_0035_phase16_backup_policy.py`). Phase 15 không thêm migration nào; Phase 16 thêm
+`0035_phase16_backup_policy` (chính sách backup của Administration → Backups); Phase 17 thêm
+`0033_phase17_super_user_role` (role Super User) và `0034_phase17_unique_names` (tên Area và Planned Route duy nhất).
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
 NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
@@ -1120,7 +1120,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - kiểm tra định danh khi nâng cấp nền tảng: định danh PN chuẩn và badge Worker theo Cơ sở dữ liệu ký tự Unicode (UCD) của Python ở backend, được ghim ở `15.0.0`, và kiểm tra tiền tố Asset Tag từ chối tập khoảng trắng `\s` của Python, một tập cha thực sự của `[[:space:]]` trong libc của PostgreSQL; trước mọi lần nâng cấp Python làm đổi UCD, hoặc một thay đổi glibc, một kiểm tra chỉ đọc liệt kê mọi PN, badge và tiền tố Asset Tag đã lưu mà dạng chuẩn hay kết quả CHECK của nó sẽ thay đổi, và chủ sở hữu quyết định việc chuẩn hóa lại trước khi nâng cấp
 - dạng chuẩn khi nhập PN: các đường nhập PN bằng tay và nhãn demand của Work Orders gửi đầu vào thô đã cắt khoảng trắng và hiển thị dạng chuẩn của server, để bảng Unicode của trình duyệt không bao giờ quyết định một PN được lưu (hiện nay chúng chỉ có thể khác server ở khoảng 27 code point nhạy với phiên bản Unicode)
 - thứ tự khóa khi sao chép snapshot AssignedRoute — đã có: một lần chuyển số lượng một phần khóa Area đích của nó trong một lượt tăng dần cùng với các Area của snapshot mà lần tách của nó sao chép (`route_templates.lock_assignment_areas`, như với release và receipt), và mọi bản sao snapshot của một flow con hay của một kết quả gộp (`lineage.copy_assigned_route`) khóa các Area của nó, rồi các Operation của nó, `FOR KEY SHARE` theo thứ tự id tăng dần trước lệnh INSERT của nó (`route_templates.lock_snapshot_references`); vì vậy một lần release cắt chéo hoặc một lần chuyển một phần cắt chéo thứ hai sẽ chờ thay vì deadlock, điều mà các test đồng thời với route cắt chéo trong `backend/tests/test_route_template_management_api.py` chứng minh
-- backup cấu hình trong Administration (quyết định của chủ sở hữu ngày 2026-11-13): khoảng cách giữa các lần backup và số bản backup theo giờ, theo ngày và theo tuần được giữ lại được sửa trong Administration, mặc định mỗi giờ một bản với 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần được giữ (mục tiêu điểm khôi phục một giờ); tác vụ trên máy chủ chạy mỗi giờ, lấy và xoay vòng backup theo các giá trị đó, và ngưỡng tuổi backup của `check.sh` đi theo khoảng cách đó
+- backup cấu hình trong Administration (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: Administration → Backups sửa khoảng cách giữa các lần backup và số bản backup theo giờ, theo ngày và theo tuần được giữ lại, mặc định mỗi giờ một bản với 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần được giữ (mục tiêu điểm khôi phục một giờ; migration `0035_phase16_backup_policy`); tác vụ trên máy chủ chạy `backup.sh --kind scheduled` mỗi giờ, đọc chính sách từ database (`app.cli backup-policy`), chỉ lấy backup khi đến hạn (`backup-due`) và xoay vòng các backup scheduled theo các giá trị đó (`backup-rotate --keep-hourly`); `--kind daily` và các option retention của nó bị từ chối kèm lệnh cần dùng thay thế, và ngưỡng tuổi backup của `check.sh` là khoảng cách đó cộng 2 giờ trừ khi có `--max-backup-age-hours`
 - log truy cập `web` không ghi các lần Production Board tự làm mới thành công (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: log truy cập `web` bỏ qua một lượt `GET /api/production-board` hay `GET /api/policies/due-soon` thành công (DEPLOYMENT §3.1), để một board làm mới mỗi 5 giây không còn làm log ngắn lại; một lần làm mới thất bại vẫn được ghi
 - một `pf` tối giản (quyết định của chủ sở hữu ngày 2026-11-13): một lệnh nhỏ dựa trên `deploy/production` với `install`, `update`, `backup`, `restore` và `status` cho production stack, trong đó `update` chạy `release.sh` (nên mọi lần cập nhật vẫn có kiểm tra (j) trên bản ứng viên); nó thay cho Deployment Admin chỉ dành cho staging (`deploy/synology/`, `compose.nas.yaml` và `deployment/SYNOLOGY_ADMIN.md`), vốn bị gỡ bỏ, và dự án bộ công cụ triển khai riêng được tạm dừng
 - **bảo trì archival/purge lịch sử Movement có tính quản trị** (PROJECT_PROFILE §28): thời hạn lưu giữ cấu hình được, chọn theo mốc cắt → xuất archive không mất mát → kiểm tra → purge đúng các dòng đã được archive và kiểm tra qua một đường bảo trì đặc quyền riêng; giữ nguyên vẹn các chuỗi đảo ngược/tham chiếu và các nhóm lệnh nguyên tử để không dòng nào được giữ lại tham chiếu tới lịch sử đã purge; gồm các cơ chế kích hoạt theo chính sách / ngưỡng kích thước / thủ công, xem trước phạm vi, lý do bắt buộc và audit đầy đủ; runtime thông thường vẫn chỉ-ghi-thêm; không xây một engine lưu giữ/archival đầy đủ trước phase này; thời hạn lưu giữ đã được Phase 13 lưu (`application_policy.retention_period_months`, số tháng nguyên hoặc không có), và thước đo cùng đơn vị của ngưỡng kích thước dữ liệu được định nghĩa ở đây cùng với cơ chế kích hoạt của nó
@@ -1216,9 +1216,9 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
 
 - `deploy/production/backup.sh` công bố mỗi bản backup thành một thư mục dưới `PARTFLOW_BACKUP_DIR` (dump, mục lục,
   `manifest.json`, `SHA256SUMS`) bằng một lần đổi tên nguyên tử. `python -m app.cli backup-manifest`, `backup-verify` và
-  `backup-rotate` chạy trong service `backup-tools` không có mạng. Việc xoay vòng giữ 14 bản hằng ngày và 8 bản hằng tuần
-  đã kiểm tra cho tới khi chủ sở hữu đặt giá trị thật; các bản trước-release, thủ công và archive không bao giờ bị xoay
-  vòng.
+  `backup-rotate` chạy trong service `backup-tools` không có mạng. Việc xoay vòng giữ bản backup scheduled đã kiểm tra
+  mới nhất của mỗi giờ, ngày và tuần được đặt trong Administration → Backups (ban đầu 48, 30 và 52); các bản
+  trước-release, thủ công và archive không bao giờ bị xoay vòng.
 - `migrate` từ chối một backup trước-release đã cũ, của revision hay database khác, bị can thiệp, hoặc chưa chứng minh
   được là chứa mọi thao tác ghi.
 - `deploy/production/restore-test.sh` restore một bản backup vào một Compose project cô lập, cấp các role tạm, áp grant,
@@ -1422,7 +1422,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 17 mục 7 đã có: Scan behavior và Settings → Other settings hiển thị các thiết lập ứng viên thành bản xem trước bị vô hiệu hóa. |
+| 2026-11-16 | uncommitted | Phase 16: backup cấu hình trong Administration đã có; migration `0035_phase16_backup_policy` trở thành head của lược đồ. |
+| 2026-11-16 | `0e983ec` | Phase 17 mục 7 đã có: Scan behavior và Settings → Other settings hiển thị các thiết lập ứng viên thành bản xem trước bị vô hiệu hóa. |
 | 2026-11-16 | `a04179f` | Phase 17 mục 6 đã có: Add to Hot list trong dialog New Work Order. |
 | 2026-11-15 | `a3a7e87` | Phase 17 mục 5 đã có: một lần phân bổ của trạm Stockroom hiển thị Worker mà trạm đã xác định, trong hộp thoại phân bổ và trong PN Tracking. |
 | 2026-11-14 | `2a24c2a` | Phase 17 mục 4 đã có: migration `0034_phase17_unique_names` làm tên Area duy nhất trong một Department và tên Planned Route đang dùng duy nhất, và `revision` báo các tên trùng đã lưu với trạng thái `blocked_by_data`. |

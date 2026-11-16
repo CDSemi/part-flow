@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0034_phase17_unique_names`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0035_phase16_backup_policy`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -716,7 +716,8 @@ Các ràng buộc được liệt kê ở §17.
 
 - Các lần ghi policy toàn cục được audit với `entity_type` `ApplicationPolicy`. `entity_id` là mục Administration:
   `worker-sessions` (timeout của Worker session), `correction-permissions` (policy lý do Undo), `due-soon` (panel cảnh báo
-  Due Soon trong Settings), `data-retention` (History archival & purge) và `sign-in` (panel Settings → User sign-in).
+  Due Soon trong Settings), `data-retention` (History archival & purge), `sign-in` (panel Settings → User sign-in) và
+  `backups` (Backups).
 - Mỗi lần `PUT` có hiệu lực trên một trong các mục này append đúng một dòng `UPDATED` trong cùng transaction; một `PUT`
   không thay đổi gì thì không append gì. Các snapshot là:
 
@@ -727,8 +728,9 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/due-soon` | `{due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days}` |
   | `PUT /api/policies/data-retention` (đặt hoặc xóa khoảng thời gian) | `{retention_period_months}` |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
+  | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
 
-  Dòng `sign-in` mang `actor_user_id` là User đã đăng nhập.
+  Các dòng `sign-in` và `backups` mang `actor_user_id` là User đã đăng nhập.
 - Các lần ghi mật khẩu append dòng `UPDATED` cho entity type `User` với snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` dạng text ISO-8601; không bao giờ là hash, salt, token hay mật khẩu) và
   khóa metadata `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` hoặc `RECOVERY_CLI`; lệnh khôi phục còn ghi
@@ -1093,6 +1095,12 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   (`0027_phase13_retention_period`): khoảng thời gian retention của lịch sử Movement tính bằng tháng nguyên, NULL nghĩa là
   không có khoảng retention. Đây là cột policy duy nhất không có server default, vì PROJECT_PROFILE §28 cấm một con số
   retention cố định trong code. Nó được lưu cho việc bảo trì lưu trữ (archival) và không đường sản xuất nào đọc nó.
+- `backup_interval_hours` (mặc định 1, `ck_application_policy_backup_interval_hours_allowed`: 1, 2, 3, 4, 6, 8, 12 hoặc
+  24), `backup_keep_hourly` (mặc định 48, `ck_application_policy_backup_keep_hourly_range`, 0–720), `backup_keep_daily`
+  (mặc định 30, `ck_application_policy_backup_keep_daily_range`, 1–3650) và `backup_keep_weekly` (mặc định 52,
+  `ck_application_policy_backup_keep_weekly_range`, 0–520) (`0035_phase16_backup_policy`): `integer NOT NULL`, chính
+  sách backup của Administration → Backups. Chỉ tác vụ backup của máy chủ (`app.cli backup-policy`) và `status` đọc nó;
+  không đường sản xuất nào đọc. Downgrade từ chối khi section này đã từng được ghi.
 - Các cột đăng nhập và role của Scan Station được liệt kê ở "Đăng nhập" và "Thiết bị Scan Station" bên dưới.
 - Các policy về sau được thêm dưới dạng cột có kiểu, có server default khi tồn tại giá trị mặc định canonical. Không có
   kho key/value.
@@ -1242,7 +1250,7 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0034_phase17_unique_names`) |
+| Class | `partflow_app` privileges | Tables (29 at head `0035_phase16_backup_policy`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
@@ -1387,7 +1395,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-14 | uncommitted | Migration head `0034_phase17_unique_names`. |
+| 2026-11-16 | uncommitted | Migration head `0035_phase16_backup_policy`: bốn cột chính sách backup của `application_policy` và section audit `backups`. |
+| 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; việc bổ sung cho một role Super User đã có thêm một dòng audit `UPDATED`. |
 | 2026-11-13 | `6c0fa6c` | §18 và §20: việc trả số lượng đã nhập kho và đồng bộ quét offline đã được chốt bởi các quyết định của chủ sở hữu ngày 2026-11-13. |
 | 2026-11-09 | `398c617` | Viết lại thành nội dung hiện tại cho người đọc mới; phần mô tả schema nay khớp với migration head `0032_phase14_route_adjusted` và code release; không thay đổi rule nào. |

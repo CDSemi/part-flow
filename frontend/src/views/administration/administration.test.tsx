@@ -22,9 +22,9 @@ import { AdministrationView } from './AdministrationView';
 // Administration (GUI_DESIGN §9): the minimum environment setup
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
 // configuration — Workers, Users, Roles & permissions, Worker sessions,
-// Correction permissions, Department display settings, Settings and
-// History archival & purge read and write the real /api surface (faked
-// in-memory here with the same routes and semantics). Machine
+// Correction permissions, Department display settings, Settings,
+// History archival & purge and Backups read and write the real /api
+// surface (faked in-memory here with the same routes and semantics). Machine
 // assignment is a read-only statement; Scan behavior, and the other
 // general settings of Settings, show their candidate settings as
 // disabled previews marked Not available yet.
@@ -153,6 +153,8 @@ interface FakeState {
   /** `application_policy` Movement-history retention period (months;
    * null = no retention period). */
   retentionMonths: number | null;
+  /** `application_policy` backup policy (Phase 16). */
+  backup: { interval: number; hourly: number; daily: number; weekly: number };
   /** Scan Station devices (Phase 14 slice 4), every state. */
   devices: DeviceRow[];
   /** What issuing an enrollment code needs (the server's answer). */
@@ -314,6 +316,7 @@ function seedState(): FakeState {
     undoReasonRequired: false,
     dueSoon: { min: 2, percent: 15, max: 7 },
     retentionMonths: null,
+    backup: { interval: 1, hourly: 48, daily: 30, weekly: 52 },
     devices: [],
     enrollmentPermissions: [
       'MANAGE_CORRECTION_PERMISSIONS',
@@ -342,6 +345,8 @@ let correctionFailure: { status: number; detail: string } | null;
 let dueSoonFailure: { status: number; detail: string } | null;
 /** A refusal of every `/api/policies/data-retention` call, if set. */
 let retentionFailure: { status: number; detail: string } | null;
+/** A refusal of every `/api/policies/backups` call, if set. */
+let backupFailure: { status: number; detail: string } | null;
 let roleFailures: Partial<Record<RoleRoute, FakeFailure>>;
 let userFailures: Partial<Record<UserRoute, FakeFailure>>;
 /** While set, a role PATCH stays pending until it resolves. */
@@ -384,6 +389,11 @@ const E_D4 =
 const E_T1 =
   'The retention period must be a whole number of months from 12 to 1200, or no retention period.';
 const E_T2 = 'Enter a whole number of months from 12 to 1200.';
+// The server's backup policy refusals (app/application/policies.py).
+const E_BK_INTERVAL = 'Back up every 1, 2, 3, 4, 6, 8, 12 or 24 hours.';
+const E_BK_HOURLY = 'Hourly backups kept must be a whole number from 0 to 720.';
+const E_BK_DAILY = 'Daily backups kept must be a whole number from 1 to 3650.';
+const E_BK_WEEKLY = 'Weekly backups kept must be a whole number from 0 to 520.';
 
 const wholeIn = (value: unknown, min: number, max: number) =>
   typeof value === 'number' &&
@@ -668,6 +678,48 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     }
     return json({
       retention_period_months: state.retentionMonths,
+      updated_at: T0,
+    });
+  }
+  if (url === '/api/policies/backups') {
+    if (backupFailure) {
+      return json({ detail: backupFailure.detail }, backupFailure.status);
+    }
+    if (method === 'PUT') {
+      // A full replace: exactly the four strict-integer fields.
+      const keys = [
+        'backup_interval_hours',
+        'backup_keep_hourly',
+        'backup_keep_daily',
+        'backup_keep_weekly',
+      ];
+      if (
+        Object.keys(body).length !== keys.length ||
+        !keys.every(
+          (key) =>
+            typeof body[key] === 'number' &&
+            Number.isInteger(body[key] as number),
+        )
+      ) {
+        return json({ detail: 'Invalid request.' }, 422);
+      }
+      const interval = body.backup_interval_hours as number;
+      const hourly = body.backup_keep_hourly as number;
+      const daily = body.backup_keep_daily as number;
+      const weekly = body.backup_keep_weekly as number;
+      if (![1, 2, 3, 4, 6, 8, 12, 24].includes(interval)) {
+        return json({ detail: E_BK_INTERVAL }, 422);
+      }
+      if (!wholeIn(hourly, 0, 720)) return json({ detail: E_BK_HOURLY }, 422);
+      if (!wholeIn(daily, 1, 3650)) return json({ detail: E_BK_DAILY }, 422);
+      if (!wholeIn(weekly, 0, 520)) return json({ detail: E_BK_WEEKLY }, 422);
+      state.backup = { interval, hourly, daily, weekly };
+    }
+    return json({
+      backup_interval_hours: state.backup.interval,
+      backup_keep_hourly: state.backup.hourly,
+      backup_keep_daily: state.backup.daily,
+      backup_keep_weekly: state.backup.weekly,
       updated_at: T0,
     });
   }
@@ -1176,6 +1228,7 @@ beforeEach(() => {
   correctionFailure = null;
   dueSoonFailure = null;
   retentionFailure = null;
+  backupFailure = null;
   roleFailures = {};
   userFailures = {};
   roleHold = null;
@@ -4243,6 +4296,206 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
   expect(await screen.findByRole('radio', { name: NO_PERIOD })).toBeChecked();
 });
 
+/* ============ Backups (Phase 16 — scheduled backup policy) ============ */
+
+const BACKUP_PATH = '/api/policies/backups';
+const BACKUP_HELP =
+  "The backup task on the server runs every hour. It takes a backup when the interval below has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set below (counted in UTC) and removes the other scheduled backups. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
+const BACKUP_UNKNOWN_OUTCOME =
+  'The server did not answer — this change may or may not have been saved. Check the backup settings before trying again; saving the same values again is safe.';
+
+async function openBackups(status: 'connected' | 'unavailable' = 'connected') {
+  renderAdmin(status);
+  openSection('Backups');
+  return (await screen.findByLabelText(
+    'Scheduled backup',
+  )) as HTMLSelectElement;
+}
+
+function keptField(label: string): HTMLInputElement {
+  return screen.getByLabelText(label) as HTMLInputElement;
+}
+
+test('FA-B1: Backups loads the owner defaults and explains the hourly task', async () => {
+  const interval = await openBackups();
+  expect(interval).toHaveValue('1');
+  expect(
+    Array.from(interval.options, (option) => [option.value, option.text]),
+  ).toEqual([
+    ['1', 'Every hour'],
+    ['2', 'Every 2 hours'],
+    ['3', 'Every 3 hours'],
+    ['4', 'Every 4 hours'],
+    ['6', 'Every 6 hours'],
+    ['8', 'Every 8 hours'],
+    ['12', 'Every 12 hours'],
+    ['24', 'Every 24 hours'],
+  ]);
+  expect(keptField('Hourly backups kept')).toHaveValue(48);
+  expect(keptField('Daily backups kept')).toHaveValue(30);
+  expect(keptField('Weekly backups kept')).toHaveValue(52);
+  expect(
+    screen.getByRole('heading', { name: 'Scheduled backups' }),
+  ).toBeInTheDocument();
+  expect(document.body.textContent).toContain(BACKUP_HELP);
+  expect(document.body.textContent).toContain(
+    'Keeps one scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups.',
+  );
+  expect(document.body.textContent).toContain(
+    'How often the server takes a scheduled backup, and how many hourly, daily and weekly backups it keeps',
+  );
+  expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
+  expect(screen.queryByRole('note')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+});
+
+test('FA-B2: a change PUTs all four fields and re-reads', async () => {
+  const interval = await openBackups();
+  fireEvent.change(interval, { target: { value: '6' } });
+  fireEvent.change(keptField('Hourly backups kept'), {
+    target: { value: '0' },
+  });
+  fireEvent.change(keptField('Daily backups kept'), {
+    target: { value: '14' },
+  });
+  fireEvent.change(keptField('Weekly backups kept'), {
+    target: { value: '1' },
+  });
+  expect(document.body.textContent).toContain(
+    'Keeps one scheduled backup per day for the last 14 days and per week for the last week — at most 15 scheduled backups.',
+  );
+  const save = screen.getByRole('button', { name: 'Save' });
+  expect(save).toBeEnabled();
+  fireEvent.click(save);
+
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    '✓ Backup settings saved.',
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: BACKUP_PATH,
+      body: {
+        backup_interval_hours: 6,
+        backup_keep_hourly: 0,
+        backup_keep_daily: 14,
+        backup_keep_weekly: 1,
+      },
+    },
+  ]);
+  expect(state.backup).toEqual({
+    interval: 6,
+    hourly: 0,
+    daily: 14,
+    weekly: 1,
+  });
+  await waitFor(() => expect(save).toBeDisabled());
+  // Editing again clears the saved note.
+  fireEvent.change(keptField('Daily backups kept'), {
+    target: { value: '15' },
+  });
+  expect(screen.queryByRole('status')).toBeNull();
+});
+
+test('FA-B3: an entry outside its range cannot be saved; a server refusal stays in place', async () => {
+  await openBackups();
+  const save = screen.getByRole('button', { name: 'Save' });
+  for (const [label, value, error] of [
+    ['Hourly backups kept', '721', 'Enter a whole number from 0 to 720.'],
+    ['Daily backups kept', '0', 'Enter a whole number from 1 to 3650.'],
+    ['Weekly backups kept', '1.5', 'Enter a whole number from 0 to 520.'],
+    ['Daily backups kept', '', 'Enter a whole number from 1 to 3650.'],
+  ] as const) {
+    const field = keptField(label);
+    const before = field.value;
+    fireEvent.change(field, { target: { value } });
+    expect(screen.getByRole('alert')).toHaveTextContent(error);
+    expect(save).toBeDisabled();
+    expect(document.body.textContent).not.toContain(
+      'Keeps one scheduled backup',
+    );
+    fireEvent.change(field, { target: { value: before } });
+    expect(screen.queryByRole('alert')).toBeNull();
+  }
+
+  backupFailure = { status: 409, detail: 'The policy changed meanwhile.' };
+  fireEvent.change(keptField('Weekly backups kept'), {
+    target: { value: '8' },
+  });
+  fireEvent.click(save);
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'The policy changed meanwhile.',
+  );
+  expect(keptField('Weekly backups kept')).toHaveValue(8);
+  expect(state.backup.weekly).toBe(52);
+});
+
+test('FA-B4: an unanswered save is an unknown outcome and re-reads the stored policy', async () => {
+  await openBackups();
+  fireEvent.change(keptField('Hourly backups kept'), {
+    target: { value: '24' },
+  });
+  vi.mocked(fetch).mockImplementationOnce(async (input, init) => {
+    await handle(String(input), init);
+    throw new TypeError('Failed to fetch');
+  });
+  const save = screen.getByRole('button', { name: 'Save' });
+  fireEvent.click(save);
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    BACKUP_UNKNOWN_OUTCOME,
+  );
+  expect(state.backup.hourly).toBe(24);
+  await waitFor(() => expect(save).toBeDisabled());
+  expect(keptField('Hourly backups kept')).toHaveValue(24);
+});
+
+test('FA-B5: offline the stored policy stays visible and cannot be saved', async () => {
+  state.backup = { interval: 12, hourly: 0, daily: 7, weekly: 4 };
+  const interval = await openBackups('unavailable');
+  expect(interval).toHaveValue('12');
+  fireEvent.change(keptField('Daily backups kept'), {
+    target: { value: '9' },
+  });
+  const save = screen.getByRole('button', { name: 'Save' });
+  expect(save).toBeDisabled();
+  fireEvent.click(save);
+  expect(writes).toEqual([]);
+});
+
+test('FA-B6: without the permission the policy reads as text; a failed load offers Retry', async () => {
+  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  state.backup = { interval: 1, hourly: 48, daily: 30, weekly: 52 };
+  renderAdmin();
+  openSection('Backups');
+  await waitFor(() =>
+    expect(readOnlyRows()).toEqual({
+      'Scheduled backup': 'Every hour',
+      'Hourly backups kept': '48',
+      'Daily backups kept': '30',
+      'Weekly backups kept': '52',
+    }),
+  );
+  expect(
+    screen.getByText(
+      'View only — changing this needs the Configure system settings permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+  cleanup();
+
+  session = sessionValue();
+  backupFailure = { status: 500, detail: 'Database unavailable.' };
+  renderAdmin();
+  openSection('Backups');
+  expect(
+    await screen.findByText('Backup settings could not be loaded.'),
+  ).toBeInTheDocument();
+  backupFailure = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByLabelText('Scheduled backup')).toHaveValue('1');
+});
+
 /* ============ Users (Phase 13 — application accounts) ============ */
 
 const USERS_NOTE =
@@ -5837,6 +6090,7 @@ test('FA-3: without its permission every section is view-only — values as text
     ['Worker sessions', 'Manage Worker session policies'],
     ['Correction permissions', 'Manage correction permissions'],
     ['History archival & purge', 'Configure system settings'],
+    ['Backups', 'Configure system settings'],
     ['Department display settings', 'Manage Departments'],
     ['Settings', 'Configure system settings'],
   ];

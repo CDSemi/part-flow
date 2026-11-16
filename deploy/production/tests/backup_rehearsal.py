@@ -321,9 +321,8 @@ class BackupRehearsal(Rehearsal):
         return self.run(["sh", Path(script).as_posix(), *arguments], timeout=timeout, check_rc=False, record_output=True,
                         env_extra=env_extra)
 
-    def backup(self, *arguments, kind="daily"):
-        extra = ["--keep-daily", "14", "--keep-weekly", "8"] if kind == "daily" else []
-        result = self.script(BACKUP_SH, "--kind", kind, "--operator", "s5 rehearsal", *extra, "--env-file",
+    def backup(self, *arguments, kind="scheduled"):
+        result = self.script(BACKUP_SH, "--kind", kind, "--operator", "s5 rehearsal", "--env-file",
                              self.env_file.as_posix(), "--rehearsal", "--project", self.project, *arguments)
         match = re.fullmatch(r"BACKUP (\S+) (\S+)\n", result.stdout)
         self.save_log(f"backup-{kind}-{len(self.evidence['commands'])}.log", result.stdout + result.stderr)
@@ -415,7 +414,7 @@ class BackupRehearsal(Rehearsal):
             result, name = self.backup()
             observed["backup"] = {"rc": result.returncode, "name": name, "seconds": round(time.monotonic() - started, 2),
                                   "progress": [line for line in result.stderr.splitlines() if re.match(r"backup: \w+ ok", line)]}
-            check(result.returncode == 0 and name, f"backup.sh daily exit {result.returncode}: {result.stderr[-800:]}")
+            check(result.returncode == 0 and name, f"backup.sh scheduled exit {result.returncode}: {result.stderr[-800:]}")
             self.daily = name
             sums = self.run(["sh", "-c", f'cd "{posix_host_path(self.backup_dir / name)}" && sha256sum -c SHA256SUMS'])
             observed["sha256sum"] = sums.stdout.strip().splitlines()

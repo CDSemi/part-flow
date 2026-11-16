@@ -1,6 +1,6 @@
 // Application policies API (Administration → Worker sessions,
 // Correction permissions, Settings and History archival & purge,
-// Phase 13).
+// Phase 13; Backups, Phase 16).
 //
 // The global policy singleton the server seeds and audits. It holds the
 // default sliding inactivity timeout of scanned Worker Sessions in whole
@@ -22,8 +22,10 @@
 // policy (how long a user's sign-in lasts, when failed sign-ins lock an
 // account, whether an administrator-set password must be replaced) —
 // readable by any signed-in user, written as a partial merge by users
-// whose role may configure system settings. The server validates and
-// stays authoritative;
+// whose role may configure system settings. Backups holds how often the
+// server's hourly backup task takes a scheduled backup and how many its
+// rotation keeps — replaced as a whole, read by that task at its next
+// run. The server validates and stays authoritative;
 // this module only maps the wire shape, and refuses a Due Soon answer
 // outside the server's ranges rather than letting it degrade the
 // countdowns silently.
@@ -240,6 +242,59 @@ export async function updateRetentionPolicy(
     body: { retention_period_months: retentionPeriodMonths },
   });
   return toRetentionPolicy(wire);
+}
+
+export interface BackupPolicy {
+  /** A scheduled backup is due this many whole hours after the newest
+   * one (1, 2, 3, 4, 6, 8, 12 or 24). */
+  intervalHours: number;
+  /** The newest scheduled backup of each of the last N hours, days and
+   * weeks (UTC) is kept. */
+  keepHourly: number;
+  keepDaily: number;
+  keepWeekly: number;
+}
+
+interface BackupPolicyWire {
+  backup_interval_hours: number;
+  backup_keep_hourly: number;
+  backup_keep_daily: number;
+  backup_keep_weekly: number;
+  updated_at: string;
+}
+
+const BACKUP_POLICY_PATH = '/api/policies/backups';
+
+function toBackupPolicy(wire: BackupPolicyWire): BackupPolicy {
+  return {
+    intervalHours: wire.backup_interval_hours,
+    keepHourly: wire.backup_keep_hourly,
+    keepDaily: wire.backup_keep_daily,
+    keepWeekly: wire.backup_keep_weekly,
+  };
+}
+
+/** The backup policy (Administration → Backups). */
+export async function getBackupPolicy(): Promise<BackupPolicy> {
+  const wire = await apiRequest<BackupPolicyWire>(BACKUP_POLICY_PATH);
+  return toBackupPolicy(wire);
+}
+
+/** Replace the backup policy (all four fields); an unchanged policy is a
+ * server no-op. */
+export async function updateBackupPolicy(
+  policy: BackupPolicy,
+): Promise<BackupPolicy> {
+  const wire = await apiRequest<BackupPolicyWire>(BACKUP_POLICY_PATH, {
+    method: 'PUT',
+    body: {
+      backup_interval_hours: policy.intervalHours,
+      backup_keep_hourly: policy.keepHourly,
+      backup_keep_daily: policy.keepDaily,
+      backup_keep_weekly: policy.keepWeekly,
+    },
+  });
+  return toBackupPolicy(wire);
 }
 
 export interface SignInPolicy {

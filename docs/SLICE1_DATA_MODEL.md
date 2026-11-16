@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0034_phase17_unique_names`. The slice's own tables
+The schema described here is the current schema at migration head `0035_phase16_backup_policy`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -723,8 +723,8 @@ The constraints are listed in §17.
 
 - Global policy writes are audited with `entity_type` `ApplicationPolicy`. `entity_id` is the Administration section:
   `worker-sessions` (the Worker session timeout), `correction-permissions` (the Undo reason policy), `due-soon` (the Due
-  Soon warning panel of Settings), `data-retention` (History archival & purge) and `sign-in` (the Settings → User
-  sign-in panel).
+  Soon warning panel of Settings), `data-retention` (History archival & purge), `sign-in` (the Settings → User
+  sign-in panel) and `backups` (Backups).
 - Every effective `PUT` on one of these sections appends exactly one `UPDATED` row in the same transaction; a `PUT`
   that changes nothing appends nothing. The snapshots are:
 
@@ -735,8 +735,9 @@ The constraints are listed in §17.
   | `PUT /api/policies/due-soon` | `{due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days}` |
   | `PUT /api/policies/data-retention` (setting or clearing the period) | `{retention_period_months}` |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
+  | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
 
-  The `sign-in` row carries `actor_user_id` set to the signed-in User.
+  The `sign-in` and `backups` rows carry `actor_user_id` set to the signed-in User.
 - Password writes append `UPDATED` rows for entity type `User` with the snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` as ISO-8601 text; never a hash, salt, token or password) and the
   metadata key `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` or `RECOVERY_CLI`; the recovery command
@@ -1100,6 +1101,12 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   (`0027_phase13_retention_period`): the Movement-history retention period in whole months, NULL meaning no retention
   period. It is the one policy column with no server default, because PROJECT_PROFILE §28 forbids a hard-coded
   retention number. It is stored for the archival maintenance and read by no production path.
+- `backup_interval_hours` (default 1, `ck_application_policy_backup_interval_hours_allowed`: 1, 2, 3, 4, 6, 8, 12 or
+  24), `backup_keep_hourly` (default 48, `ck_application_policy_backup_keep_hourly_range`, 0–720), `backup_keep_daily`
+  (default 30, `ck_application_policy_backup_keep_daily_range`, 1–3650) and `backup_keep_weekly` (default 52,
+  `ck_application_policy_backup_keep_weekly_range`, 0–520) (`0035_phase16_backup_policy`): `integer NOT NULL`, the
+  backup policy of Administration → Backups. Only the host's backup task (`app.cli backup-policy`) and `status` read
+  it; no production path does. The downgrade refuses once the section was written.
 - The sign-in and Scan Station role columns are listed under "Sign-in" and "Scan Station devices" below.
 - Later policies are added as typed columns, with a server default where a canonical default exists. There is no
   key/value store.
@@ -1249,7 +1256,7 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0034_phase17_unique_names`) |
+| Class | `partflow_app` privileges | Tables (29 at head `0035_phase16_backup_policy`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
@@ -1394,7 +1401,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-14 | uncommitted | Migration head `0034_phase17_unique_names`. |
+| 2026-11-16 | uncommitted | Migration head `0035_phase16_backup_policy`: the four backup policy columns of `application_policy` and the `backups` audit section. |
+| 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; completing an existing Super User role appends one `UPDATED` audit row. |
 | 2026-11-13 | `6c0fa6c` | §18 and §20: the return of stocked quantity and offline scan synchronization are settled by the owner decisions of 2026-11-13. |
 | 2026-11-09 | `398c617` | Rewritten as current content for new readers; the schema description now matches migration head `0032_phase14_route_adjusted` and the release code; no rule changed. |

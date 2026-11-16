@@ -45,7 +45,7 @@ IMAGE_WEB = "sha256:" + "c" * 64
 IMAGE_DB = "sha256:" + "d" * 64
 REVISION = "0032_phase14_route_adjusted"
 COMPOSE_PREFIX = "compose -f compose.production.yaml --env-file .env.production "
-NAME_RE = r"[0-9]{8}T[0-9]{6}Z-(daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?"
+NAME_RE = r"[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?"
 DB_SIZE = r"exec -T db sh -c psql .*pg_database_size"
 PG_STAT = r"exec -T db sh -c psql .*pg_stat_activity"
 PG_DUMP = r"exec -T -e TZ=UTC db sh -c pg_dump "
@@ -81,6 +81,20 @@ shutil.rmtree(src)
 def report(command, result, exit_code, **fields):
     return json.dumps({"report_version": 1, "command": command, "result": result, "exit_code": exit_code, **fields},
                       indent=2, ensure_ascii=True) + "\n"
+
+
+def policy_report(interval=1, hourly=48, daily=30, weekly=52):
+    """The backup policy of Administration → Backups as `app.cli backup-policy` prints it."""
+    return report("backup-policy", "read", 0, interval_hours=interval, keep_hourly=hourly, keep_daily=daily,
+                  keep_weekly=weekly, error=None)
+
+
+def due_report(due=True, newest=None, interval=1):
+    document = None
+    if newest is not None:
+        document = {"name": newest, "started_at": "2026-10-08T01:30:00Z", "age_minutes": 30}
+    return report("backup-due", "due" if due else "not_due", 0 if due else 1, interval_hours=interval,
+                  newest=document, error=None)
 
 
 def df_answer(available_kib):
@@ -276,6 +290,8 @@ class Backup(ScriptHarness):
             rule(r"^image inspect --format \{\{index \.Config\.Labels \"org\.opencontainers\.image\.revision\"\}\} partflow/backend:",
                  out(COMMIT + "\n")),
             rule(r"^inspect --format \{\{\.Image\}\} cid-db$", out(IMAGE_DB + "\n")),
+            rule(r"run --rm --no-deps -T backend python -m app\.cli backup-policy$", out(policy_report())),
+            rule(TOOL_RUN + "backup-due ", out(due_report())),
             rule(r"run --rm --no-deps -T backend python -m app\.cli revision$",
                  out(json.dumps({"report_version": 1, "command": "revision", "state": "current", "exit_code": 0,
                                  "expected_revision": REVISION, "database_revision": REVISION}, indent=2) + "\n")),
@@ -290,11 +306,8 @@ class Backup(ScriptHarness):
             rule(TOOL_RUN + "backup-rotate ", out(report("backup-rotate", "rotated", 0))),
         ]
 
-    def backup(self, *arguments, kind="daily", keep=("--keep-daily", "14", "--keep-weekly", "8")):
-        base = ["--kind", kind, "--operator", "scheduler"]
-        if kind == "daily" and keep:
-            base += list(keep)
-        return self.run_script(BACKUP_SH, *base, *arguments)
+    def backup(self, *arguments, kind="scheduled"):
+        return self.run_script(BACKUP_SH, "--kind", kind, "--operator", "scheduler", *arguments)
 
     def name(self):
         match = re.fullmatch(r"BACKUP (" + NAME_RE + r") (\S+)\n", self.result.stdout)
@@ -315,16 +328,18 @@ class Backup(ScriptHarness):
         return text
 
     # BS-1
-    def test_bs1_daily_all_green(self):
+    def test_bs1_scheduled_all_green(self):
         self.backup()
         self.assertExit(0)
         name, path = self.name()
-        self.assertRegex(name, r"-daily$")
+        self.assertRegex(name, r"-scheduled$")
         self.assertEqual(path, f"{sh_path(self.backup_dir)}/{name}")
         expected = [
             "config --quiet",
             "ps --status running -q db",
             f"image inspect --format {{{{.Id}}}} partflow/backend:{RELEASE}",
+            "run --rm --no-deps -T backend python -m app.cli backup-policy",
+            "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-due --interval-hours 1",
             f'image inspect --format {{{{index .Config.Labels "org.opencontainers.image.revision"}}}} partflow/backend:{RELEASE}',
             f"image inspect --format {{{{.Id}}}} partflow/backend:{RELEASE}",
             f"image inspect --format {{{{.Id}}}} partflow/web:{RELEASE}",
@@ -336,17 +351,20 @@ class Backup(ScriptHarness):
             "exec -T -e TZ=UTC db pg_restore --list",
             "exec -T -e TZ=UTC db pg_restore --data-only --table=alembic_version --file=-",
             "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-manifest --name " + name
-            + " --operator scheduler --reason scheduled daily backup --release-tag " + RELEASE + " --release-commit "
+            + " --operator scheduler --reason scheduled backup --release-tag " + RELEASE + " --release-commit "
             + COMMIT + " --expected-revision " + REVISION + " --environment production --host bs-host --image-backend "
             + IMAGE_BACKEND + " --image-web " + IMAGE_WEB + " --image-db " + IMAGE_DB,
             "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-verify " + name,
-            "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-rotate --keep-daily 14 --keep-weekly 8",
+            "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-rotate --keep-hourly 48"
+            " --keep-daily 30 --keep-weekly 52",
         ]
         self.assertEqual(self.docker(), expected)
         for entry in self.docker_entries(r"backup-tools "):
             self.assertEqual(entry["env"].get("PARTFLOW_RELEASE"), RELEASE)
         for entry in self.docker_entries(r"exec |run --rm --no-deps -T backend|config"):
             self.assertNotIn("PARTFLOW_RELEASE", entry["env"])
+        self.assertIn('"command": "backup-policy"', self.result.stderr)
+        self.assertIn('"command": "backup-due"', self.result.stderr)
         owner = self.docker_entries(r"backup-manifest ")[0]["watch"][str(self.lock / "owner")]
         self.assertIn("by=backup.sh", owner.splitlines())
         self.assertIn(f"name={name}", owner.splitlines())
@@ -364,20 +382,86 @@ class Backup(ScriptHarness):
         self.assertExit(0)
         self.assertEqual(len(self.docker_entries(DB_SIZE)), 1)
 
-    # BS-1b
+    # BS-1b: the retention comes from Administration → Backups, never from the command line.
     def test_bs1b_retention_options(self):
-        for arguments in ((), ("--kind", "manual", "--reason", "x", "--keep-daily", "3"),
-                          ("--kind", "daily", "--keep-daily", "14"), ("--kind", "daily", "--no-rotate", "--keep-weekly", "2"),
-                          ("--kind", "daily", "--keep-daily", "0", "--keep-weekly", "8")):
+        for arguments, message in (
+            (("--kind", "daily"), "--kind daily was replaced by --kind scheduled: run deploy/production/backup.sh"
+                                  " --kind scheduled --operator scheduler every hour"),
+            (("--kind", "daily", "--keep-daily", "14", "--keep-weekly", "8"), "was replaced"),
+            (("--kind", "scheduled", "--keep-daily", "14"),
+             "--keep-daily was replaced by Administration → Backups"),
+            (("--kind", "scheduled", "--keep-weekly", "2"),
+             "--keep-weekly was replaced by Administration → Backups"),
+            (("--kind", "manual", "--reason", "x", "--no-rotate"), "--no-rotate is only for --kind scheduled."),
+        ):
             with self.subTest(arguments=arguments):
-                self.run_script(BACKUP_SH, "--operator", "x", *(arguments or ("--kind", "daily")))
+                self.run_script(BACKUP_SH, "--operator", "x", *arguments)
                 self.assertExit(2)
+                self.assertIn(message, self.result.stderr)
                 self.assertEqual(self.calls(), [])
                 self.assertEqual(list(self.backup_dir.iterdir()), [])
         with self.subTest(case="--no-rotate"):
-            self.run_script(BACKUP_SH, "--kind", "daily", "--operator", "x", "--no-rotate")
+            self.run_script(BACKUP_SH, "--kind", "scheduled", "--operator", "x", "--no-rotate")
             self.assertExit(0)
             self.assertNoDocker(r"backup-rotate")
+
+    # BS-19: the policy of Administration → Backups decides the interval and the retention.
+    def test_bs19_the_policy_reaches_the_due_check_and_the_rotation(self):
+        self.prepend("docker", rule(r"app\.cli backup-policy$", out(policy_report(6, 24, 14, 8))))
+        self.backup()
+        self.assertExit(0)
+        self.assertEqual(len(self.docker_entries(r"backup-due --interval-hours 6$")), 1)
+        self.assertEqual(len(self.docker_entries(r"backup-rotate --keep-hourly 24 --keep-daily 14 --keep-weekly 8$")), 1)
+        due = self.docker_entries(r"backup-due ")[0]
+        self.assertEqual(due["env"].get("PARTFLOW_RELEASE"), RELEASE)
+
+    # BS-20: no scheduled backup is due — nothing is written and the lock is released.
+    def test_bs20_no_backup_due(self):
+        newest = "20261008T013000Z-scheduled"
+        self.prepend("docker", rule(TOOL_RUN + "backup-due ", out(due_report(False, newest), rc=1)))
+        self.backup()
+        self.assertExit(0)
+        self.assertEqual(self.result.stdout, f"NOT_DUE {newest}\n")
+        self.assertIn(f"backup: no scheduled backup is due: the newest, {newest}, is younger than the interval of"
+                      " Administration → Backups (1 h). Nothing was written.", self.result.stderr)
+        self.assertNoDocker(r"app\.cli revision", DB_SIZE, r"pg_dump", r"backup-manifest", r"backup-rotate")
+        self.assertEqual(self.published(), [])
+        self.assertEqual(self.partial_entries(), [])
+        self.assertFalse(self.lock.exists())
+
+    # BS-21: the policy cannot be read (database down, an older schema): the run could not run.
+    def test_bs21_policy_unreadable(self):
+        failed = report("backup-policy", "failed", 2, interval_hours=None, keep_hourly=None, keep_daily=None,
+                        keep_weekly=None, error={"code": "database_unavailable", "message": "x"})
+        for answer in (out(failed, rc=2), out("", rc=1, stderr="no such command\n"), out(policy_report(), rc=2)):
+            with self.subTest(answer=answer):
+                self.reset()
+                self.prepend("docker", rule(r"app\.cli backup-policy$", answer))
+                self.backup()
+                self.assertExit(2)
+                self.assertIn("the backup policy of Administration → Backups could not be read from the database",
+                              self.result.stderr)
+                self.assertNoDocker(r"backup-due", r"pg_dump", r"backup-manifest")
+                self.assertEqual(self.result.stdout, "")
+                self.assertFalse(self.lock.exists())
+
+    # BS-22: backup-due cannot read the backup directory.
+    def test_bs22_due_check_fails(self):
+        failed = report("backup-due", "failed", 2, interval_hours=1, newest=None,
+                        error={"code": "io_error", "message": "x"})
+        self.prepend("docker", rule(TOOL_RUN + "backup-due ", out(failed, rc=2)))
+        self.backup()
+        self.assertExit(2)
+        self.assertIn("backup-due could not decide whether a scheduled backup is due (exit 2; see above)",
+                      self.result.stderr)
+        self.assertNoDocker(r"pg_dump", r"backup-manifest")
+        self.assertFalse(self.lock.exists())
+
+    # BS-23: manual and pre-release backups read no policy and are never rotated.
+    def test_bs23_other_kinds_read_no_policy(self):
+        self.backup("--reason", "before the NAS move", kind="manual")
+        self.assertExit(0)
+        self.assertNoDocker(r"backup-policy", r"backup-due", r"backup-rotate")
 
     # BS-2
     def test_bs2_lock_held_on_another_host(self):
@@ -425,7 +509,7 @@ class Backup(ScriptHarness):
                 self.assertIn("No backup was published.", self.result.stderr)
                 self.assertEqual(self.partial_entries(), [])
                 self.assertEqual(self.published(), [])
-                self.assertNoDocker(r"backup-tools", PG_LIST)
+                self.assertNoDocker(r"backup-tools backup-(manifest|verify|rotate)", PG_LIST)
                 self.assertFalse(self.lock.exists())
 
     # BS-5
@@ -460,8 +544,8 @@ class Backup(ScriptHarness):
                       " ".join(manifest["argv"]))
         self.assertEqual(manifest["env"].get("PARTFLOW_RELEASE"), TOOLS)
         self.assertNoDocker(r"backup-rotate")
-        for arguments, kind in ((("--label", TOOLS), "manual"), ((), "manual"), (("--label", TOOLS), "daily"),
-                                ((), "pre-release"), (("--label", "bad tag"), "pre-release")):
+        for arguments, kind in ((("--label", TOOLS), "manual"), ((), "manual"), (("--label", TOOLS), "scheduled"),
+                                ((), "daily"), ((), "pre-release"), (("--label", "bad tag"), "pre-release")):
             with self.subTest(kind=kind, arguments=arguments):
                 self.reset()
                 extra = ("--reason", "x") if kind == "manual" and arguments else ()
@@ -535,7 +619,7 @@ class Backup(ScriptHarness):
         self.assertEqual(self.partial_entries(), [])
         self.assertEqual(self.published(), [])
         self.assertFalse(self.lock.exists())
-        self.assertNoDocker(r"backup-tools")
+        self.assertNoDocker(r"backup-tools backup-(manifest|verify|rotate)")
 
     # BS-13
     def test_bs13_stale_lock(self):

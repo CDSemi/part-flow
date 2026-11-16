@@ -379,6 +379,26 @@ POLICY_RETENTION_PERIOD_SQL = (
     "retention_period_months IS NULL OR retention_period_months BETWEEN 12 AND 1200"
 )
 
+# Backups (Phase 16, owner decision of 2026-11-13; Administration →
+# Backups): how often the host's hourly task takes a scheduled backup — a
+# whole number of hours that divides the day — and how many scheduled
+# backups its rotation keeps: the newest backup of each of the newest N
+# hours, days and ISO weeks (UTC) that hold one. Defaults: every hour,
+# 48 hourly, 30 daily and 52 weekly. At least one daily backup is always
+# kept, so the newest scheduled backup is never removed. Repeated
+# verbatim by migration `0035_phase16_backup_policy`.
+BACKUP_INTERVAL_HOURS = (1, 2, 3, 4, 6, 8, 12, 24)
+BACKUP_KEEP_HOURLY_MIN = 0
+BACKUP_KEEP_HOURLY_MAX = 720
+BACKUP_KEEP_DAILY_MIN = 1
+BACKUP_KEEP_DAILY_MAX = 3650
+BACKUP_KEEP_WEEKLY_MIN = 0
+BACKUP_KEEP_WEEKLY_MAX = 520
+POLICY_BACKUP_INTERVAL_SQL = "backup_interval_hours IN (1, 2, 3, 4, 6, 8, 12, 24)"
+POLICY_BACKUP_KEEP_HOURLY_SQL = "backup_keep_hourly BETWEEN 0 AND 720"
+POLICY_BACKUP_KEEP_DAILY_SQL = "backup_keep_daily BETWEEN 1 AND 3650"
+POLICY_BACKUP_KEEP_WEEKLY_SQL = "backup_keep_weekly BETWEEN 0 AND 520"
+
 # Users, roles and permissions (Phase 13 slice 12; PROJECT_PROFILE §7,
 # §20; owner decisions OD-8, OD-19): the closed permission vocabulary,
 # one key per §20 capability; the canonical login name (trimmed,
@@ -1160,6 +1180,12 @@ class ApplicationPolicy(Base):
     permissions every enrolled Scan Station device has (owner decision
     OD-S4-1) — set once by migration to the seeded Operator role; no API
     writes it; changed only by editing that role's grants.
+
+    Phase 16 adds the backup policy of Administration → Backups (owner
+    decision of 2026-11-13): the interval of the scheduled backups and
+    the numbers of hourly, daily and weekly backups their rotation keeps.
+    Read by the host's hourly backup task (`app.cli backup-policy`) and by
+    `status` for the backup-age limit; never by a production command.
     """
 
     __tablename__ = "application_policy"
@@ -1209,6 +1235,20 @@ class ApplicationPolicy(Base):
     )
     require_password_change: Mapped[bool] = mapped_column(
         nullable=False, server_default=text("true")
+    )
+    # Backups (Phase 16): the scheduled backup interval in whole hours and
+    # the hourly, daily and weekly backups the rotation keeps.
+    backup_interval_hours: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    backup_keep_hourly: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("48")
+    )
+    backup_keep_daily: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("30")
+    )
+    backup_keep_weekly: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("52")
     )
     # The role applied at Scan Stations (Phase 14 slice 4): its station
     # keys authorize each station command. Set once by migration.
@@ -1261,6 +1301,22 @@ class ApplicationPolicy(Base):
         CheckConstraint(
             POLICY_RETENTION_PERIOD_SQL,
             name=conv("ck_application_policy_retention_period_range"),
+        ),
+        CheckConstraint(
+            POLICY_BACKUP_INTERVAL_SQL,
+            name=conv("ck_application_policy_backup_interval_hours_allowed"),
+        ),
+        CheckConstraint(
+            POLICY_BACKUP_KEEP_HOURLY_SQL,
+            name=conv("ck_application_policy_backup_keep_hourly_range"),
+        ),
+        CheckConstraint(
+            POLICY_BACKUP_KEEP_DAILY_SQL,
+            name=conv("ck_application_policy_backup_keep_daily_range"),
+        ),
+        CheckConstraint(
+            POLICY_BACKUP_KEEP_WEEKLY_SQL,
+            name=conv("ck_application_policy_backup_keep_weekly_range"),
         ),
     )
 

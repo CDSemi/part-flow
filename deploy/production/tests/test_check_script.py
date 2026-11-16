@@ -37,7 +37,8 @@ PROJECT_LABEL = "label=com.docker.compose.project=partflow-production"
 SERVICES = ("db", "backend", "web")
 CHECK_IDS = ("https", "certificate", "containers", "restarts", "errors", "disk_data", "disk_backup", "disk_docker",
              "disk_archive", "database", "schema", "backup_age", "archival_proposal")
-STATUS_RUN = r"--profile ops run --rm --no-deps -T --user 1000:1000 status --max-backup-age-hours (\d+)$"
+# Without --max-backup-age-hours, status takes the limit from the interval of Administration → Backups.
+STATUS_RUN = r"--profile ops run --rm --no-deps -T --user 1000:1000 status(?: --max-backup-age-hours (\d+))?$"
 LOGS = r"logs --no-log-prefix --since (\S+) --until (\S+) backend$"
 # Git Bash converts an absolute POSIX argument for a native (Windows) fake: "/var/..." may arrive as "C:/.../var/...".
 EXEC_DF = r"exec -T db df -Pk .*/var/lib/postgresql/data$"
@@ -198,7 +199,7 @@ class Check(CheckHarness):
             r"^docker ps .*service=web ", r"^docker inspect .* cid-web$", r"^docker logs --no-log-prefix --since ",
             r"^docker exec -T db df -Pk .*/var/lib/postgresql/data$", r"^df -Pk .*backups$", r"^docker info ",
             r"^df -Pk .*/var/lib/docker$", r"^docker ps .*service=status --filter label=com\.docker\.compose\.oneoff=True$",
-            r"^docker --profile ops run --rm --no-deps -T --user 1000:1000 status --max-backup-age-hours 26$",
+            r"^docker --profile ops run --rm --no-deps -T --user 1000:1000 status$",
         ]
         self.assertEqual(len(order), len(patterns), order)
         for text, pattern in zip(order, patterns):
@@ -211,7 +212,7 @@ class Check(CheckHarness):
                 matches = [seconds for text, seconds in bounded.items() if text.endswith(" ".join(entry["argv"]))
                            and text.split(" ")[0] == entry["tool"]]
                 self.assertTrue(matches, f"not bounded by timeout: {command}")
-                expected = "120" if " status --max-backup-age-hours" in command else ("15" if entry["tool"] == "openssl" else "30")
+                expected = "120" if re.search(STATUS_RUN, command) else ("15" if entry["tool"] == "openssl" else "30")
                 self.assertEqual(matches[0], expected, command)
         self.assertIn(["5", "true"], self.timeout_calls())
         self.assertTrue((self.monitoring / "status.json").exists())
@@ -425,7 +426,7 @@ class Check(CheckHarness):
         self.check()
         self.assertExit(1)
         self.assertEqual(self.line("backup_age"), f"FAIL backup_age {stale}")
-        self.assertEqual(re.search(STATUS_RUN, self.status_runs()[0]).group(1), "26")
+        self.assertIsNone(re.search(STATUS_RUN, self.status_runs()[0]).group(1))
         self.reset()
         self.check("--max-backup-age-hours", "48", "--only", "backup_age")
         self.assertEqual(re.search(STATUS_RUN, self.status_runs()[0]).group(1), "48")
@@ -553,16 +554,16 @@ class Check(CheckHarness):
         if calls.exists():
             calls.unlink()
 
-    # CK-18
-    def test_ck18_default_backup_age_matches_the_application(self):
+    # CK-18: no default limit in the script; status derives it from the interval of Administration → Backups.
+    def test_ck18_default_backup_age_follows_the_backup_interval(self):
         source = SYSTEM_STATUS.read_text(encoding="utf-8")
-        match = re.search(r"^DEFAULT_MAX_BACKUP_AGE_HOURS\b[^=\n]*=\s*(\d+)\s*$", source, re.M)
-        self.assertIsNotNone(match, f"no DEFAULT_MAX_BACKUP_AGE_HOURS literal in {SYSTEM_STATUS}")
+        margin = re.search(r"^BACKUP_AGE_MARGIN_HOURS\b[^=\n]*=\s*(\d+)\s*$", source, re.M)
+        interval = re.search(r"^DEFAULT_BACKUP_INTERVAL_HOURS\b[^=\n]*=\s*(\d+)\s*$", source, re.M)
+        self.assertIsNotNone(margin, f"no BACKUP_AGE_MARGIN_HOURS literal in {SYSTEM_STATUS}")
+        self.assertIsNotNone(interval, f"no DEFAULT_BACKUP_INTERVAL_HOURS literal in {SYSTEM_STATUS}")
+        self.assertEqual((margin.group(1), interval.group(1)), ("2", "1"))
         script = CHECK_SH.read_text(encoding="utf-8")
-        default = re.search(r"^MAX_AGE=(\d+)$", script, re.M)
-        self.assertIsNotNone(default)
-        self.assertEqual(default.group(1), match.group(1))
-        self.assertEqual(match.group(1), "26")
+        self.assertIsNotNone(re.search(r"^MAX_AGE=$", script, re.M))
 
     # CK-19
     def test_ck19_state_files(self):
@@ -611,7 +612,7 @@ class Check(CheckHarness):
         self.assertEqual(self.line("errors"), "FAIL errors no answer within 30 s")
         self.assertEqual((self.monitoring / "errors-since").read_bytes(), cursor)
         self.reset()
-        self.prepend("timeout", rule(r"^120 docker compose .* status ", out(rc=124)))
+        self.prepend("timeout", rule(r"^120 docker compose .* status( |$)", out(rc=124)))
         # Before the run another (overlapping) run's status container exists; after it, this run's leftover too.
         self.prepend("docker", rule(r"^ps -a -q --filter " + PROJECT_LABEL + r" --filter label=com\.docker\.compose\.service=status"
                                     r" --filter label=com\.docker\.compose\.oneoff=True$",

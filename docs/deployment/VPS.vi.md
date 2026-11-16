@@ -1,7 +1,7 @@
 # Triển khai PartFlow trên VPS Linux
 
-> **Bản gốc:** [`VPS.md`](./VPS.md). Đồng bộ với bản tiếng Anh tại commit `8a7e2b5` cộng các thay đổi chưa
-> commit ngày 2026-11-10. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`VPS.md`](./VPS.md). Đồng bộ với bản tiếng Anh tại commit `e0e5056` cộng các thay đổi chưa
+> commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này cài PartFlow trên một máy chủ ảo riêng (virtual private server, VPS) chạy Linux, là máy chủ production
@@ -231,14 +231,15 @@ dẫn tuyệt đối, vì systemd từ chối đường dẫn tương đối:
 
 | Service | `ExecStart=` | Timer |
 | --- | --- | --- |
-| `partflow-backup.service` | `/srv/partflow/current/deploy/production/backup.sh --kind daily --keep-daily 14 --keep-weekly 8 --operator scheduler --env-file /srv/partflow/env/production.env` | `partflow-backup.timer`: `OnCalendar=*-*-* 02:00:00`, `Persistent=true` |
+| `partflow-backup.service` | `/srv/partflow/current/deploy/production/backup.sh --kind scheduled --operator scheduler --env-file /srv/partflow/env/production.env` | `partflow-backup.timer`: `OnCalendar=hourly`, `Persistent=true` |
 | `partflow-check.service` | `/srv/partflow/current/deploy/production/check.sh --url https://<host> --env-file /srv/partflow/env/production.env` | `partflow-check.timer`: `OnCalendar=*:0/15` |
 | `partflow-reconcile.service` | `/srv/partflow/current/deploy/production/scheduled-reconcile.sh --env-file /srv/partflow/env/production.env` | `partflow-reconcile.timer`: `OnCalendar=*-*-* 04:00:00`, `Persistent=true` |
 
-14 và 8 là các giá trị lưu giữ làm ví dụ; cả hai tùy chọn đều bắt buộc. Hãy kiểm tra từng unit bằng
-`systemd-analyze verify` trước khi bật các timer bằng `systemctl enable --now <timer>`. Mọi mã thoát khác 0, kể cả một
-bản sao lưu hằng ngày không qua được bước xác minh, đều làm unit của nó thất bại và gửi cảnh báo. Hãy đặt giờ sao lưu
-cách xa giờ phát hành, vì một lần phát hành giữ khóa sao lưu.
+Timer sao lưu chạy tác vụ mỗi giờ; **Administration → Backups** trong PartFlow đặt tần suất nó tạo một bản sao lưu và số
+bản nó giữ (runbook §3). Hãy kiểm tra từng unit bằng `systemd-analyze verify` trước khi bật các timer bằng
+`systemctl enable --now <timer>`. Mọi mã thoát khác 0, kể cả một bản sao lưu theo lịch không qua được bước xác minh,
+đều làm unit của nó thất bại và gửi cảnh báo. Một bản sao lưu bắt đầu trong lúc đang phát hành bị từ chối, vì lần phát
+hành giữ khóa sao lưu; bản sao lưu của giờ tiếp theo chạy bình thường.
 
 Nếu dùng cron thay cho systemd, hãy đặt `MAILTO=` và dùng `--quiet`, vì cron gửi thư mỗi khi một tác vụ in ra gì đó:
 
@@ -249,11 +250,12 @@ Nếu dùng cron thay cho systemd, hãy đặt `MAILTO=` và dùng `--quiet`, v�
 
 **Bản sao mã hóa nằm ngoài VPS (restic).** Đặt `RESTIC_REPOSITORY` thành vị trí lưu trữ đối tượng (object storage) và
 `RESTIC_PASSWORD_FILE` thành một tệp khóa có quyền 0400, và giữ một bản sao của khóa đó bên ngoài VPS: không có nó thì
-không đọc được các bản sao. Sau khi unit sao lưu đã chạy:
+không đọc được các bản sao. Mỗi ngày một lần, từ một unit và timer riêng của chúng (ví dụ lúc 03:30, giữa hai bản sao
+lưu):
 
 1. `restic backup --tag database /srv/partflow/backups/database`
-2. `restic forget --tag database --keep-daily 14 --keep-weekly 8 --prune`, với cùng chính sách lưu giữ như các bản sao
-   lưu
+2. `restic forget --tag database --keep-daily 30 --keep-weekly 52 --prune`, với chính sách lưu giữ bạn chọn cho các
+   bản sao ngoài máy chủ
 3. `restic check`, hằng tuần
 
 Thất bại của bất kỳ lệnh nào trong số này làm unit của nó thất bại và gửi cảnh báo. Khi sau này dùng một thư mục lưu
@@ -264,7 +266,8 @@ bản lưu trữ không bao giờ bị xoay vòng hay xóa.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-10 | uncommitted | Viết lại với đầy đủ lệnh cài đặt cho các thư mục của VPS, một thư mục mã nguồn cho mỗi bản phát hành cùng liên kết `current` cho các tác vụ theo lịch, các systemd unit gom trong một bảng, và việc chuyển từ NAS trỏ sang runbook. |
+| 2026-11-16 | uncommitted | §8: timer sao lưu chạy mỗi giờ với `--kind scheduled`; Administration → Backups đặt khoảng thời gian và chính sách lưu giữ; restic chạy mỗi ngày một lần. |
+| 2026-11-10 | `e0e5056` | Viết lại với đầy đủ lệnh cài đặt cho các thư mục của VPS, một thư mục mã nguồn cho mỗi bản phát hành cùng liên kết `current` cho các tác vụ theo lịch, các systemd unit gom trong một bảng, và việc chuyển từ NAS trỏ sang runbook. |
 | 2026-11-09 | `b405c6e` | Viết lại thành nội dung hiện hành cho người đọc mới; bỏ pilot và các cổng phát hành theo quyết định của chủ sở hữu. |
 | 2026-10-09 | `03bd90c` | Thêm các unit giám sát, trình gửi cảnh báo và phương án thay thế bằng cron. |
 | 2026-10-08 | `a330383` | Thêm tự động hóa sao lưu production, các unit theo lịch và bản sao restic nằm ngoài VPS. |

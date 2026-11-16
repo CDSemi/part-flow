@@ -3,7 +3,7 @@
 > **Language:** English is the source of truth. [Tiếng Việt](./SYNOLOGY_NAS.vi.md).
 
 This guide installs PartFlow production on the company Synology NAS, step by step, from an empty NAS to people working
-in PartFlow over HTTPS. It then sets up the daily backup and the monitoring, and shows how a new release is
+in PartFlow over HTTPS. It then sets up the hourly backup and the monitoring, and shows how a new release is
 installed. Follow the sections in order and do not skip a step: each step says what to do, what you should see, and
 what to do when you see something else.
 
@@ -19,7 +19,7 @@ installation is in [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md).
 - PartFlow running on the NAS in the Compose project `partflow-production`, reachable at `https://<HOSTNAME>` from the
   company network, and, if you choose it, from the Internet through Cloudflare;
 - the first Administrator created and the Scan Station devices enrolled;
-- after §11, a daily verified backup with an encrypted copy outside the NAS, and email alerts when a check fails.
+- after §11, a verified backup every hour with an encrypted copy outside the NAS, and email alerts when a check fails.
 
 ### What you need
 
@@ -414,7 +414,7 @@ PartFlow is now in production. Give people the address `https://<HOSTNAME>`.
 
 ## 11. After go-live: backups and monitoring
 
-These tasks are recommended and never block use. Until the daily backup runs, the only backups are the ones that
+These tasks are recommended and never block use. Until the backup task runs, the only backups are the ones that
 `release.sh` takes before each release. Do them in this order.
 
 ### 11.1 Email notifications
@@ -423,30 +423,35 @@ DSM sends an email when a scheduled task fails; this is the only alert channel. 
 Email**, select **Enable email notifications**, enter the mail server (SMTP) settings and the recipient, and click
 **Send a test email**. Continue only when the test email arrives.
 
-### 11.2 Daily backup task
+### 11.2 Backup task
 
 1. Open **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**.
 2. **General:** Task `PartFlow backup`, User `root`, **Enabled** selected.
-3. **Schedule:** **Run on the following days: Daily**, first run time `02:00`, once a day.
+3. **Schedule:** **Run on the following days: Daily**, first run time `00:00`, **Frequency** every hour, last run
+   time `23:00`.
 4. **Task Settings:** select **Send run details by email**, enter your address, and select **Send run details only
    when the script terminates abnormally**. In **Run command** enter:
 
    ```sh
-   cd /volume1/docker/partflow/repo && deploy/production/backup.sh --kind daily --operator scheduler --keep-daily 14 --keep-weekly 8
+   cd /volume1/docker/partflow/repo && deploy/production/backup.sh --kind scheduled --operator scheduler
    ```
 
 5. Click **OK**. Select the task and click **Run** to test it. After about a minute, the backup folder has a new
-   sub-folder whose name ends with `-daily`:
+   sub-folder whose name ends with `-scheduled`:
 
    ```sh
    ls /volume1/docker/partflow/backups
    ```
 
-`--keep-daily 14 --keep-weekly 8` keeps the 14 newest daily backups plus one per week for 8 weeks; choose your own
-numbers. With a daily backup, at most one day of work can be lost. Keep 02:00 away from the times you install
-releases: a running backup stops a release before it changes anything (start the release again once the backup has
-finished), and a backup that starts during a release is refused (you receive its failure email; the next day's backup
-runs normally, or take a manual one, runbook §3). Backups are explained in the runbook §3.
+The task runs every hour, and **Administration → Backups** in PartFlow decides how often it takes a backup (initially
+every hour) and how many it keeps (initially 48 hourly, 30 daily and 52 weekly backups). A run with no backup due ends
+without writing anything. With a backup every hour, at most one hour of work can be lost. Start releases a few minutes
+after the full hour: a running backup stops a release before it changes anything (start the release again once the
+backup has finished), and a backup that starts during a release is refused (you receive its failure email; the next
+hour's backup runs normally). Backups are explained in the runbook §3.
+
+A task of an earlier release with `--kind daily` now fails with a message that names this command: change its
+schedule and command as above.
 
 ### 11.3 Encrypted copy outside the NAS
 
@@ -457,15 +462,16 @@ A backup that stays on the NAS is lost with the NAS. Copy the backup folder else
 3. As the source, select the folder `docker/partflow/backups`.
 4. Enable **client-side encryption**. Keep the password and the key file outside the NAS: without them, the copies
    cannot be read.
-5. Schedule it daily at `03:00`, after the backup. Set the version rotation as you decide, enable the weekly integrity
-   check, and enable the email notification for failures.
+5. Schedule it daily at `03:30`, between two backups. Set the version rotation as you decide, enable the weekly
+   integrity check, and enable the email notification for failures. After the loss of the NAS, everything since the
+   last copy is lost: schedule it more often if a day is too much.
 
 Snapshots of the NAS volume are only a second layer: they never replace these backups and their copy outside the NAS.
 
 ### 11.4 Restore drill
 
 Once after go-live, and then every quarter, prove that a backup can be restored and measure how long it takes. Use the
-name of the newest daily backup (the folder name from §11.2):
+name of the newest scheduled backup (the folder name from §11.2):
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -482,7 +488,7 @@ Create two more tasks as in §11.2 (User `root`, email only when the script term
 | Task | Schedule | Run command |
 | --- | --- | --- |
 | `PartFlow check` | Daily, first run `00:00`, repeat every 15 minutes, last run `23:45` | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/check.sh --url https://<HOSTNAME> --quiet` |
-| `PartFlow reconcile` | Daily at `04:00`, after the backup | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/scheduled-reconcile.sh` |
+| `PartFlow reconcile` | Daily at `04:00` | `cd /volume1/docker/partflow/repo && HOME=/root deploy/production/scheduled-reconcile.sh` |
 
 `HOME=/root` tells the scripts where to keep their state, in case Task Scheduler does not set it. Adjust the check
 command to your HTTPS option:
@@ -541,7 +547,7 @@ and edit the rules of the active profile:
 
 Every later release is installed with `deploy/production/release.sh`. It takes a verified backup, builds the new
 images without touching the running ones, migrates the database, switches PartFlow to the new release and checks it.
-Choose a time when no Work Order import runs and the daily backup (02:00) does not.
+Choose a time when no Work Order import runs, a few minutes after the full hour, once the hourly backup has finished.
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -590,7 +596,8 @@ storage (images and container logs). `/root/partflow-monitoring/growth.tsv` reco
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-12 | uncommitted | §12: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after a minute, and every other page once idle for 1 minute instead of 2. |
+| 2026-11-16 | uncommitted | §1, §11.2: the backup task runs every hour with `--kind scheduled`, and Administration → Backups sets the interval and how many backups are kept; §11.3, §11.5, §12: times around the hourly backup. |
+| 2026-11-12 | `de4d99f` | §12: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after a minute, and every other page once idle for 1 minute instead of 2. |
 | 2026-11-12 | `77a2dfb` | §12: pages open during a release now reload themselves (a Scan Station or Production Board after about a minute, every other page once idle for 2 minutes with nothing unsaved). |
 | 2026-11-10 | `e0e5056` | Rewritten as one linear installation from an empty NAS to people working in PartFlow, with every DSM path and command in order; the HTTPS step offers the LAN option or the Cloudflare guide; added the check for kernels without processor quota support and the firewall check of the container networks; the optional NAS staging and the move procedure were removed (the move is now in the runbook §6). |
 | 2026-11-09 | `398c617` | Restored small items the rewrite had dropped: the health check in the staging smoke test, the off-NAS copy and restore test of staging dumps, the staging reconciliation, the full name of reconcile check (h) and the full `revision` command; step 1 now covers a NAS where staging was never installed. |

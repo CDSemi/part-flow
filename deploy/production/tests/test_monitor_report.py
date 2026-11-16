@@ -43,7 +43,7 @@ def status_doc(exit_code=0, findings=(), error=None, backup="ok", locks=None, da
                    "readiness": "current" if reachable else None, "expected_revision": HEAD,
                    "database_revision": HEAD if reachable else None, "accepted_revision": None},
         "backup": {"status": "not_applicable", "directory": None, "max_age_hours": 26, "latest": None,
-                   "latest_daily": None, "candidates": 0,
+                   "latest_scheduled": None, "candidates": 0,
                    "lock": {"present": False, "by": None, "started_at": None, "name": None}},
         "archival": {"status": "not_applicable", "reason": ARCHIVAL_REASON, "awaiting_approval": None},
         "findings": [{"code": code, "message": message} for code, message in findings],
@@ -53,9 +53,10 @@ def status_doc(exit_code=0, findings=(), error=None, backup="ok", locks=None, da
         document["backup"].update({
             "status": "finding" if any(c.startswith("backup_") for c, _ in findings) else "ok",
             "directory": "/backups", "candidates": 1,
-            "latest": {"name": "20261008T020000Z-daily", "kind": "daily", "completed_at": "2026-10-08T02:00:30Z",
+            "latest": {"name": "20261008T020000Z-scheduled", "kind": "scheduled", "completed_at": "2026-10-08T02:00:30Z",
                        "age_hours": 3.4, "release_tag": "v1.0.0-rc.1", "alembic_revision": HEAD, "dump_bytes": 1024},
-            "latest_daily": {"name": "20261008T020000Z-daily", "completed_at": "2026-10-08T02:00:30Z", "age_hours": 3.4},
+            "latest_scheduled": {"name": "20261008T020000Z-scheduled", "completed_at": "2026-10-08T02:00:30Z",
+                                 "age_hours": 3.4},
         })
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
 
@@ -111,7 +112,7 @@ class Status(Helper):
             "PASS database partflow as partflow_app: 50.0 MiB, 4 connections, 0 lock waits (longest 0.0 s),"
             " 1234 Movements (1.0 MiB)",
             f"PASS schema current at {HEAD}",
-            "PASS backup_age 20261008T020000Z-daily completed 3.4 h ago (limit 26 h)",
+            "PASS backup_age 20261008T020000Z-scheduled completed 3.4 h ago (limit 26 h)",
             f"SKIP archival_proposal {ARCHIVAL_REASON}",
         ])
 
@@ -136,7 +137,7 @@ class Status(Helper):
         self.assertEqual(rc, 1)
         self.assertEqual(lines[0], "FAIL database The PartFlow database could not be reached.")
         self.assertEqual(lines[1], "SKIP schema not evaluated (database_unavailable)")
-        self.assertEqual(lines[2], "PASS backup_age 20261008T020000Z-daily completed 3.4 h ago (limit 26 h)")
+        self.assertEqual(lines[2], "PASS backup_age 20261008T020000Z-scheduled completed 3.4 h ago (limit 26 h)")
         self.assertEqual(lines[3], f"SKIP archival_proposal {ARCHIVAL_REASON}")
 
     # MR-4

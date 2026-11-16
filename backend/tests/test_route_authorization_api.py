@@ -675,6 +675,27 @@ _WRITES: list[_Write] = [
         "application_policy",
     ),
     _Write(
+        "backup-policy",
+        "PUT",
+        "/api/policies/backups",
+        _key(CSS),
+        _key(CSS),
+        lambda c: (
+            "/api/policies/backups",
+            {
+                "json": {
+                    "backup_interval_hours": 1,
+                    "backup_keep_hourly": _changed_policy_value(
+                        c, "/api/policies/backups", "backup_keep_hourly", 0, 700
+                    ),
+                    "backup_keep_daily": 30,
+                    "backup_keep_weekly": 52,
+                }
+            },
+        ),
+        "application_policy",
+    ),
+    _Write(
         "sign-in-policy",
         "PUT",
         "/api/policies/sign-in",

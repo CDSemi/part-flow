@@ -29,7 +29,7 @@ HEALTH_INTERVAL=2
 # The release in the shell would override the env file for every command: the script sets it per command only.
 unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR COMPOSE_PROJECT_NAME COMPOSE_FILE \
     COMPOSE_PROFILES
-BACKUP_NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
+BACKUP_NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
 
 usage() {
     cat <<'EOF'
