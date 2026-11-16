@@ -24,7 +24,7 @@ release_rehearsal.py / stack_smoke.py run (recorded by the caller).
 Isolation: only the project `partflow-s5-rehearsal` (edge 172.30.255.0/24; every documented block addresses it through
 COMPOSE_PROJECT_NAME and first asserts that `$PF ps -q db` is that project's db) and the drill projects
 partflow-restore-s5-* it creates; it refuses any of them that already has containers or volumes, never touches the
-development stack `partflow`, a `pfa34*`/`dind*` container or the OPS lane. In `finally` it runs `down -v
+development stack `partflow` or a `pfa34*`/`dind*` container. In `finally` it runs `down -v
 --remove-orphans` for its projects, removes its image tags (A, B, F) and a --db-image it pulled itself.
 
 Host adaptations (Docker Desktop):

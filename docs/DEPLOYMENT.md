@@ -63,9 +63,7 @@ the installation.
 
 `deploy/production/pf` is the short command for the production stack: `install`, `update`, `backup`, `restore` and
 `status`, each running the documented procedure
-([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any command). The older
-Deployment Admin tool (`pf.sh`) and its guide [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) manage
-separate staging instances; they are not part of the production installation, and no step above needs them.
+([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any command).
 
 ### 1.3 What is supported
 
@@ -552,8 +550,7 @@ PartFlow environments never share a database, secrets, a host name or a backup f
 - **Development** runs on a workstation with `compose.yaml` and developer data only. It is also where a new release is
   tried before production (root [`README.md`](../README.md)).
 - **Staging** is optional and holds only synthetic or sanitized data. It never runs on the Docker daemon of the
-  production host. The Deployment Admin tool `pf` can manage a staging instance on another host
-  ([`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)).
+  production host.
 - **Production** runs on the production host with `compose.production.yaml` and the factory's real data. It has its
   own Compose project, database volume, secrets folder, host name and backup folder.
 
@@ -732,7 +729,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §1.2: the short command `deploy/production/pf` for the production stack. |
+| 2026-11-16 | uncommitted | §1.2, §6: the Deployment Admin tool and its guide are removed. |
+| 2026-11-16 | `5708664` | §1.2: the short command `deploy/production/pf` for the production stack. |
 | 2026-11-13 | `4a99914` | §3.1 Logs: the successful automatic refreshes of the Production Board feed are not logged. |
 | 2026-11-12 | `de4d99f` | §3.1 Logs: an open Production Board adds `web` records every 5 s instead of 15 s. |
 | 2026-11-12 | `878822f` | `smoke.sh` waits for a starting `web` and backend before its checks. |

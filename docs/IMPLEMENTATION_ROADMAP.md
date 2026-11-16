@@ -50,7 +50,7 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 13 — Full Administration and Production Identity Configuration | Closed (2026-10-07) | Workers, Worker identification and sessions, master-data management, policies, Users and roles as configuration. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration since 2026-11-16; the host checks after go-live, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration and the minimal `pf` since 2026-11-16; the host checks after go-live, the open follow-ups and Movement-history archival remain. |
 | Phase 17 — Owner Decisions After Go-Live | In progress | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
 **Database schema.** The current Alembic migration head is `0035_phase16_backup_policy`
@@ -1135,7 +1135,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - AssignedRoute snapshot copy lock order — delivered: a partial-quantity transfer locks its target Area in one ascending pass with the Areas of the snapshot its split copies (`route_templates.lock_assignment_areas`, as for release and receipt), and every snapshot copy of a split child or a merge result (`lineage.copy_assigned_route`) locks its Areas, then its Operations, `FOR KEY SHARE` in ascending id order before its INSERT (`route_templates.lock_snapshot_references`); a crossing release or a second crossing partial transfer therefore waits instead of deadlocking, which the crossing-route concurrency tests in `backend/tests/test_route_template_management_api.py` prove
 - backups set in Administration (owner decision of 2026-11-13) — delivered: Administration → Backups edits the backup interval and the numbers of hourly, daily and weekly backups kept, by default one backup every hour with 48 hourly, 30 daily and 52 weekly backups kept (a recovery point objective of one hour; migration `0035_phase16_backup_policy`); the host task runs `backup.sh --kind scheduled` every hour, which reads the policy from the database (`app.cli backup-policy`), takes a backup only when one is due (`backup-due`) and rotates the scheduled backups by those values (`backup-rotate --keep-hourly`); `--kind daily` and its retention options are refused with the command to use instead, and the backup-age threshold of `check.sh` is the interval plus 2 hours unless `--max-backup-age-hours` is given
 - a `web` access log without the successful automatic refreshes of the Production Board feed (owner decision of 2026-11-13) — delivered: the `web` access log skips a successful `GET /api/production-board` or `GET /api/policies/due-soon` (DEPLOYMENT §3.1), so a board refreshing every 5 seconds no longer shortens the log; a failed refresh is still logged
-- a minimal `pf` (owner decision of 2026-11-13): one small command on top of `deploy/production` with `install`, `update`, `backup`, `restore` and `status` for the production stack, where `update` runs `release.sh` (so every update keeps the candidate's check (j)); it replaces the staging-only Deployment Admin (`deploy/synology/`, `compose.nas.yaml` and `deployment/SYNOLOGY_ADMIN.md`), which is removed, and the separate deployment-kit project is paused — the command is delivered as `deploy/production/pf` (`install`: SYNOLOGY_NAS §7 and §8 on an empty database; `update TAG`: fetch, checkout and `release.sh`; `backup`: a manual backup; `restore NAME --approved-by OWNER`: the new-instance restore of OPERATIONS_RUNBOOK §6; `status`: the containers, `/api/health` and the `status` summary, or `check.sh` with `--url`); the removal of the Deployment Admin follows
+- a minimal `pf` (owner decision of 2026-11-13) — delivered: `deploy/production/pf` runs each documented procedure of the production stack in one command: `install` (SYNOLOGY_NAS §7 and §8 on an empty database), `update TAG` (fetch, checkout and `release.sh`, so every update keeps the candidate's check (j)), `backup` (a manual backup), `restore NAME --approved-by OWNER` (the new-instance restore of OPERATIONS_RUNBOOK §6) and `status` (the containers, `/api/health` and the `status` summary, or `check.sh` with `--url`); the staging-only Deployment Admin it replaces (`deploy/synology/`, `compose.nas.yaml`, `pf.sh` and `deployment/SYNOLOGY_ADMIN.md`) is removed, and the separate deployment-kit project is paused
 - **administrative Movement-history archival/purge maintenance** (PROJECT_PROFILE §28): configurable retention period, select-by-cutoff → lossless archive export → verify → purge exactly the verified archived rows through a separate privileged maintenance path; keep reversal/reference chains and atomic-command groups whole so no retained row references purged history; include policy / size-threshold / manual triggers, scope preview, mandatory reason, and full audit; normal runtime remains append-only; no full retention/archival engine is built before this phase; the retention period is already stored by Phase 13 (`application_policy.retention_period_months`, whole months or none), and the data-size threshold's measure and unit are defined here together with its trigger
 
 PartNumber master hard deletion is **not** a Phase 16 maintenance operation. It belongs to Phase 13 Management → Part
@@ -1329,9 +1329,8 @@ history.
 - A database superuser (the owner role) who disables a trigger or sets `session_replication_role = replica` in its own
   session can change history and restore the guard; check (h) sees only the persistent state and cannot detect such a
   past change (accepted; a hash chain over Movement rows was not chosen because it adds a write cost to every
-  production command). Objects the owner creates are outside (h) unless they replace a guard. The development, test and
-  Deployment Admin staging databases keep one owner role, where the trigger alone binds every path that does not
-  disable it.
+  production command). Objects the owner creates are outside (h) unless they replace a guard. The development and test
+  databases keep one owner role, where the trigger alone binds every path that does not disable it.
 - An authenticated read-back of individual screens after a restore is not automated; reconcile replays Movement history
   against every projection, and the owner may check by hand (`restore-test.sh --keep`).
 - Writes made outside the application are outside the backup freshness guarantee.
@@ -1343,9 +1342,6 @@ history.
 - PN entry canonical form (scope bullet above) — not implemented.
 - Platform-upgrade identity checks: the Python side is implemented by check (j); before any Python or glibc upgrade the
   owner reviews the check's list and decides on re-canonicalization.
-- Deployment Admin (the staging-only `pf`, [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)): its
-  development stopped on 2026-10-14 and the minimal `pf` (scope bullet above) replaces it; until then it stays in its
-  last state and its open steps are not built.
 - Movement-history archival and purge — planned above.
 
 ## Phase 17 — Owner Decisions After Go-Live
@@ -1435,7 +1431,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 16: the minimal `pf` delivered as `deploy/production/pf`. |
+| 2026-11-16 | uncommitted | Phase 16: the Deployment Admin removed, which completes the minimal `pf`; its open follow-up closed. |
+| 2026-11-16 | `5708664` | Phase 16: the minimal `pf` delivered as `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | Phase 16: backups set in Administration delivered; migration `0035_phase16_backup_policy` becomes the schema head. |
 | 2026-11-16 | `0e983ec` | Phase 17 item 7 delivered: Scan behavior and Settings → Other settings show their candidate settings as disabled previews. |
 | 2026-11-16 | `a04179f` | Phase 17 item 6 delivered: Add to Hot list in the New Work Order dialog. |

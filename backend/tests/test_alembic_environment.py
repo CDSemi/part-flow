@@ -3,14 +3,14 @@
 ``env.py`` reads DATABASE_URL from the application settings when the
 caller has not pre-set ``sqlalchemy.url``. Alembic's Config is a
 ConfigParser with interpolation, so a URL whose user or password is
-percent-encoded (the Deployment Admin encodes it, e.g. ``%40`` for
-``@``) must still migrate: online and offline both read the value back
-unescaped, and the engine authenticates with the decoded credentials.
+percent-encoded (e.g. ``%40`` for ``@``) must still migrate: online and
+offline both read the value back unescaped, and the engine
+authenticates with the decoded credentials.
 
 The online run goes through ``alembic upgrade head`` in a subprocess
-with only DATABASE_URL set — the default ``env.py`` path of development,
-tests and the OPS-lane staging — against a dedicated temporary database
-that is dropped afterwards. AE-1 (Phase 16 slice 2) runs the same step
+with only DATABASE_URL set — the default ``env.py`` path of development
+and tests — against a dedicated temporary database that is dropped
+afterwards. AE-1 (Phase 16 slice 2) runs the same step
 with the file-based configuration (``DATABASE_HOST`` …
 ``DATABASE_PASSWORD_FILE``) as a temporary role whose password needs
 percent-encoding. AE-2/AE-3 (Phase 16 slice 3) cover the external

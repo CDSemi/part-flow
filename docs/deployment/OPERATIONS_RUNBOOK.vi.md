@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `5708664` cộng các thay đổi
 > chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -877,8 +877,7 @@ python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code
 
 Lệnh cuối in `clean 0`, `mismatch 1` hoặc `error 2`, hoặc "could not run" khi báo cáo không đầy đủ.
 Để kiểm thử một image mới trước khi phát hành: `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`.
-Dạng dùng khi phát triển nằm trong [`README.vi.md`](../../README.vi.md) ở thư mục gốc; với một bản staging của công cụ
-Deployment Admin `pf`, xem [`SYNOLOGY_ADMIN.vi.md`](./SYNOLOGY_ADMIN.vi.md) §14.
+Dạng dùng khi phát triển nằm trong [`README.vi.md`](../../README.vi.md) ở thư mục gốc.
 
 ### Tùy chọn, mã thoát và quy tắc báo cáo (Options, exit codes and the report rule)
 
@@ -1193,7 +1192,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Trước khi chạy bất kỳ lệnh nào: lệnh ngắn `deploy/production/pf`. |
+| 2026-11-16 | uncommitted | §7: dạng reconcile cho một instance staging của Deployment Admin được bỏ cùng với công cụ đó. |
+| 2026-11-16 | `5708664` | Trước khi chạy bất kỳ lệnh nào: lệnh ngắn `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | §2, §3, §5, §8, §9: tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ; Administration → Backups đặt khoảng thời gian và số bản sao lưu hourly, daily và weekly được giữ; giới hạn `backup_age` đi theo khoảng thời gian đó. |
 | 2026-11-14 | `2a24c2a` | §5: lần phát hành dừng trước khi tạm dừng ghi khi `revision` của image mới báo `blocked_by_data`. |
 | 2026-11-13 | `4a99914` | §2: các lần Production Board tự làm mới thành công không còn nằm trong log `web`. |

@@ -872,8 +872,7 @@ class Dockerfiles(unittest.TestCase):
 
 class ReleaseArtifacts(unittest.TestCase):
     """Container health checks probe liveness only, so a schema mismatch (readiness 503) never makes a container
-    unhealthy or keeps a dependant from starting (CD2). compose.nas.yaml (OPS lane) is the recorded hand-off of
-    P16-S3 SPEC section 8.5 and is deliberately not asserted here."""
+    unhealthy or keeps a dependant from starting (CD2)."""
 
     def health_tests(self, path):
         if not docker_compose_available():

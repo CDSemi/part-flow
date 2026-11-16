@@ -862,8 +862,7 @@ python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code
 
 The last command prints `clean 0`, `mismatch 1` or `error 2`, or "could not run" when the report is not complete.
 To test a new image before a release: `PARTFLOW_RELEASE=<new> $PF run --rm --no-deps -T backend python -m app.cli reconcile --check j`.
-The development form is in the root [`README.md`](../../README.md); for a staging instance of the Deployment Admin tool
-`pf`, see [`SYNOLOGY_ADMIN.md`](./SYNOLOGY_ADMIN.md) §14.
+The development form is in the root [`README.md`](../../README.md).
 
 ### Options, exit codes and the report rule
 
@@ -1175,7 +1174,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Before you run any command: the short command `deploy/production/pf`. |
+| 2026-11-16 | uncommitted | §7: the reconcile form for a Deployment Admin staging instance is removed with that tool. |
+| 2026-11-16 | `5708664` | Before you run any command: the short command `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | §2, §3, §5, §8, §9: the backup task runs `backup.sh --kind scheduled` every hour; Administration → Backups sets the interval and the hourly, daily and weekly backups kept; the `backup_age` limit follows the interval. |
 | 2026-11-14 | `2a24c2a` | §5: the release stops before the write freeze when the new image's `revision` reports `blocked_by_data`. |
 | 2026-11-13 | `4a99914` | §2: the successful automatic refreshes of the Production Board are no longer in the `web` log. |

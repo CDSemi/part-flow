@@ -35,10 +35,6 @@ when PartFlow runs.
 | [`deployment/VPS.md`](./deployment/VPS.md) | Installing the same production stack on a Linux virtual private server (VPS), the alternative production host. | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) |
 | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) | Why shared web hosting is only conditionally possible and what a provider must confirm first, including the Hawk Host finding. | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) |
 
-Not needed for production: [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)
-([Vietnamese](./deployment/SYNOLOGY_ADMIN.vi.md)) is the short guide to the Deployment Admin tool (`pf`), which manages
-staging instances on a host other than the production one; its development stopped on 2026-10-14.
-
 ## Translation policy
 
 [`TRANSLATION_POLICY.md`](./TRANSLATION_POLICY.md) defines how Vietnamese
@@ -51,7 +47,8 @@ are also intentionally excluded.
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-11 | uncommitted | The Deployment Admin entry describes the rewritten short guide and no longer mentions the dropped reusable-controller design. |
+| 2026-11-16 | uncommitted | The Deployment Admin entry removed with the tool and its guide. |
+| 2026-11-11 | `ce90520` | The Deployment Admin entry describes the rewritten short guide and no longer mentions the dropped reusable-controller design. |
 | 2026-11-10 | `e0e5056` | Deployment documents listed in reading order with the Cloudflare guide; the Deployment Admin guide marked as not needed for production; the superseded staging kit removed. |
 | 2026-11-09 | `398c617` | Rewritten for new readers: an introduction, a current one-sentence description of each document, and this change table. |
 | 2026-10-14 | `2c360cb` | Deployment Admin entry mentions its planned reusable-controller design goal. |

@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `5708664` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -49,7 +49,7 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 13 — Full Administration and Production Identity Configuration | Đã đóng (2026-10-07) | Worker, nhận diện Worker và phiên, quản lý master data, chính sách, User và role dưới dạng cấu hình. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
 **Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0035_phase16_backup_policy`
@@ -1122,7 +1122,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - thứ tự khóa khi sao chép snapshot AssignedRoute — đã có: một lần chuyển số lượng một phần khóa Area đích của nó trong một lượt tăng dần cùng với các Area của snapshot mà lần tách của nó sao chép (`route_templates.lock_assignment_areas`, như với release và receipt), và mọi bản sao snapshot của một flow con hay của một kết quả gộp (`lineage.copy_assigned_route`) khóa các Area của nó, rồi các Operation của nó, `FOR KEY SHARE` theo thứ tự id tăng dần trước lệnh INSERT của nó (`route_templates.lock_snapshot_references`); vì vậy một lần release cắt chéo hoặc một lần chuyển một phần cắt chéo thứ hai sẽ chờ thay vì deadlock, điều mà các test đồng thời với route cắt chéo trong `backend/tests/test_route_template_management_api.py` chứng minh
 - backup cấu hình trong Administration (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: Administration → Backups sửa khoảng cách giữa các lần backup và số bản backup theo giờ, theo ngày và theo tuần được giữ lại, mặc định mỗi giờ một bản với 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần được giữ (mục tiêu điểm khôi phục một giờ; migration `0035_phase16_backup_policy`); tác vụ trên máy chủ chạy `backup.sh --kind scheduled` mỗi giờ, đọc chính sách từ database (`app.cli backup-policy`), chỉ lấy backup khi đến hạn (`backup-due`) và xoay vòng các backup scheduled theo các giá trị đó (`backup-rotate --keep-hourly`); `--kind daily` và các option retention của nó bị từ chối kèm lệnh cần dùng thay thế, và ngưỡng tuổi backup của `check.sh` là khoảng cách đó cộng 2 giờ trừ khi có `--max-backup-age-hours`
 - log truy cập `web` không ghi các lần Production Board tự làm mới thành công (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: log truy cập `web` bỏ qua một lượt `GET /api/production-board` hay `GET /api/policies/due-soon` thành công (DEPLOYMENT §3.1), để một board làm mới mỗi 5 giây không còn làm log ngắn lại; một lần làm mới thất bại vẫn được ghi
-- một `pf` tối giản (quyết định của chủ sở hữu ngày 2026-11-13): một lệnh nhỏ dựa trên `deploy/production` với `install`, `update`, `backup`, `restore` và `status` cho production stack, trong đó `update` chạy `release.sh` (nên mọi lần cập nhật vẫn có kiểm tra (j) trên bản ứng viên); nó thay cho Deployment Admin chỉ dành cho staging (`deploy/synology/`, `compose.nas.yaml` và `deployment/SYNOLOGY_ADMIN.md`), vốn bị gỡ bỏ, và dự án bộ công cụ triển khai riêng được tạm dừng — lệnh đã có là `deploy/production/pf` (`install`: SYNOLOGY_NAS §7 và §8 trên một database trống; `update TAG`: fetch, checkout và `release.sh`; `backup`: một bản sao lưu thủ công; `restore NAME --approved-by OWNER`: khôi phục vào instance mới theo OPERATIONS_RUNBOOK §6; `status`: các container, `/api/health` và tóm tắt của `status`, hoặc `check.sh` với `--url`); việc gỡ bỏ Deployment Admin sẽ làm sau
+- một `pf` tối giản (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: `deploy/production/pf` chạy mỗi quy trình đã mô tả của production stack bằng một lệnh: `install` (SYNOLOGY_NAS §7 và §8 trên một database trống), `update TAG` (fetch, checkout và `release.sh`, nên mọi lần cập nhật vẫn có kiểm tra (j) trên bản ứng viên), `backup` (một bản sao lưu thủ công), `restore NAME --approved-by OWNER` (khôi phục vào instance mới theo OPERATIONS_RUNBOOK §6) và `status` (các container, `/api/health` và tóm tắt của `status`, hoặc `check.sh` với `--url`); Deployment Admin chỉ dành cho staging mà nó thay thế (`deploy/synology/`, `compose.nas.yaml`, `pf.sh` và `deployment/SYNOLOGY_ADMIN.md`) đã được gỡ bỏ, và dự án bộ công cụ triển khai riêng được tạm dừng
 - **bảo trì archival/purge lịch sử Movement có tính quản trị** (PROJECT_PROFILE §28): thời hạn lưu giữ cấu hình được, chọn theo mốc cắt → xuất archive không mất mát → kiểm tra → purge đúng các dòng đã được archive và kiểm tra qua một đường bảo trì đặc quyền riêng; giữ nguyên vẹn các chuỗi đảo ngược/tham chiếu và các nhóm lệnh nguyên tử để không dòng nào được giữ lại tham chiếu tới lịch sử đã purge; gồm các cơ chế kích hoạt theo chính sách / ngưỡng kích thước / thủ công, xem trước phạm vi, lý do bắt buộc và audit đầy đủ; runtime thông thường vẫn chỉ-ghi-thêm; không xây một engine lưu giữ/archival đầy đủ trước phase này; thời hạn lưu giữ đã được Phase 13 lưu (`application_policy.retention_period_months`, số tháng nguyên hoặc không có), và thước đo cùng đơn vị của ngưỡng kích thước dữ liệu được định nghĩa ở đây cùng với cơ chế kích hoạt của nó
 
 Xóa cứng PartNumber master **không** phải là một thao tác bảo trì của Phase 16. Nó thuộc Management → Part Numbers của
@@ -1317,8 +1317,7 @@ Chủ sở hữu duyệt bản thiết kế của ba bước này trước khi b
   chính nó có thể thay đổi lịch sử rồi khôi phục chốt chặn; kiểm tra (h) chỉ thấy trạng thái lưu bền và không phát hiện
   được thay đổi đã qua như vậy (được chấp nhận; một chuỗi hash trên các dòng Movement không được chọn vì nó thêm chi phí
   ghi cho mọi lệnh sản xuất). Các đối tượng do owner tạo nằm ngoài (h) trừ khi chúng thay thế một chốt chặn. Database
-  phát triển, test và staging của Deployment Admin giữ một owner role duy nhất, nơi chỉ riêng trigger ràng buộc mọi
-  đường ghi không tắt nó.
+  phát triển và test giữ một owner role duy nhất, nơi chỉ riêng trigger ràng buộc mọi đường ghi không tắt nó.
 - Việc đọc lại có xác thực từng màn hình sau một lần restore chưa được tự động hóa; reconcile phát lại lịch sử Movement
   đối chiếu với mọi projection, và chủ sở hữu có thể kiểm tra bằng tay (`restore-test.sh --keep`).
 - Các thao tác ghi thực hiện bên ngoài ứng dụng nằm ngoài cam kết độ mới của backup.
@@ -1331,9 +1330,6 @@ Chủ sở hữu duyệt bản thiết kế của ba bước này trước khi b
 - Dạng chuẩn khi nhập PN (gạch đầu dòng phạm vi ở trên) — chưa triển khai.
 - Kiểm tra định danh khi nâng cấp nền tảng: phía Python đã được kiểm tra (j) triển khai; trước mọi lần nâng cấp Python
   hay glibc, chủ sở hữu xem danh sách của kiểm tra đó và quyết định việc chuẩn hóa lại.
-- Deployment Admin (`pf` chỉ dành cho staging, [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md)): việc
-  phát triển nó đã dừng ngày 2026-10-14 và `pf` tối giản (gạch đầu dòng phạm vi ở trên) thay thế nó; cho tới lúc đó nó
-  giữ nguyên trạng thái cuối và các bước còn mở của nó không được làm.
 - Archival và purge lịch sử Movement — đã lên kế hoạch ở trên.
 
 ## Phase 17 — Owner Decisions After Go-Live
@@ -1422,7 +1418,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 16: `pf` tối giản đã có dưới dạng `deploy/production/pf`. |
+| 2026-11-16 | uncommitted | Phase 16: Deployment Admin được gỡ bỏ, hoàn tất `pf` tối giản; việc còn mở của nó được đóng. |
+| 2026-11-16 | `5708664` | Phase 16: `pf` tối giản đã có dưới dạng `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | Phase 16: backup cấu hình trong Administration đã có; migration `0035_phase16_backup_policy` trở thành head của lược đồ. |
 | 2026-11-16 | `0e983ec` | Phase 17 mục 7 đã có: Scan behavior và Settings → Other settings hiển thị các thiết lập ứng viên thành bản xem trước bị vô hiệu hóa. |
 | 2026-11-16 | `a04179f` | Phase 17 mục 6 đã có: Add to Hot list trong dialog New Work Order. |

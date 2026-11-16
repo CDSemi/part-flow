@@ -14,7 +14,7 @@ Isolation: only the project `partflow-s3-rehearsal` (or --project) is created: i
 172.30.252.0/24), volume, a free loopback port, a generated env file, a temporary secrets directory and records
 directory. The run refuses the projects `partflow`, `partflow-production` and `partflow-staging` and any project that
 already has containers or volumes, strips host PARTFLOW_*/POSTGRES_*/COMPOSE_* variables, and never touches the
-development stack or the OPS lane. In `finally` it runs `down -v --remove-orphans` for that project only and removes
+development stack. In `finally` it runs `down -v --remove-orphans` for that project only and removes
 the rehearsal image tags partflow/{backend,web}:s3-rh-{a,b,c,d} (unless --keep, which prints the teardown commands).
 
 Evidence JSON: per case pass / fail / manual with the observed answers (never a password, token or cookie value),

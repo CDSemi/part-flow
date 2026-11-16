@@ -21,7 +21,7 @@ it) and OR-3 run last.
 Isolation: only the project `partflow-s6-rehearsal` (edge 172.30.249.0/24, a free loopback port, its own volume with
 the size-limited tmpfs override below, generated env file, secrets, backup, records and state directories) and the
 OR-7 container `pf-s6-or7-*` it starts itself. It refuses a project that already has containers or volumes, never
-touches the development stack `partflow`, other projects or containers it did not start, or the OPS lane. In `finally`
+touches the development stack `partflow` or other projects or containers it did not start. In `finally`
 it runs `down -v --remove-orphans` for its project, removes the OR-7 container and its image tags (A, F). It never
 calls `sync`.
 

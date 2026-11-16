@@ -2,10 +2,10 @@
 
 Two online paths:
 
-- Default (``alembic upgrade head`` in development, tests and the OPS-lane
-  staging): uses the same database configuration as the backend
-  application so migrations always target the database the API runs
-  against, on a connection and transaction of its own. A caller may
+- Default (``alembic upgrade head`` in development and tests): uses the
+  same database configuration as the backend application so migrations
+  always target the database the API runs against, on a connection and
+  transaction of its own. A caller may
   pre-set `sqlalchemy.url` on the Alembic config (the test suite does, to
   migrate an isolated temporary database); only then is the application
   setting not consulted.

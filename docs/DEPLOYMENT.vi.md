@@ -1,6 +1,6 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `4a99914` cộng các thay đổi chưa
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `5708664` cộng các thay đổi chưa
 > commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -65,9 +65,7 @@ Các script trong `deploy/production/` làm giúp bạn những việc rủi ro:
 
 `deploy/production/pf` là lệnh ngắn cho production stack: `install`, `update`, `backup`, `restore` và `status`, mỗi lệnh
 chạy quy trình đã mô tả ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md), Trước khi chạy
-bất kỳ lệnh nào). Công cụ Deployment Admin cũ (`pf.sh`) và hướng dẫn của nó
-[`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md) quản lý các instance staging riêng biệt; chúng
-không thuộc bản cài đặt production, và không bước nào ở trên cần đến chúng.
+bất kỳ lệnh nào).
 
 ### 1.3 Những gì được hỗ trợ
 
@@ -557,8 +555,7 @@ Các môi trường của PartFlow không bao giờ dùng chung database, bí m�
 - **Development** chạy trên một máy trạm với `compose.yaml` và chỉ dữ liệu của lập trình viên. Đây cũng là nơi một bản
   phát hành mới được thử trước production ([`README.vi.md`](../README.vi.md) ở thư mục gốc).
 - **Staging** là tùy chọn và chỉ chứa dữ liệu tổng hợp hoặc đã được làm sạch. Nó không bao giờ chạy trên Docker daemon
-  của máy chủ production. Công cụ Deployment Admin `pf` có thể quản lý một instance staging trên máy chủ khác
-  ([`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)).
+  của máy chủ production.
 - **Production** chạy trên máy chủ production với `compose.production.yaml` và dữ liệu thật của nhà máy. Nó có Compose
   project, volume database, thư mục bí mật, tên miền truy cập và thư mục sao lưu riêng.
 
@@ -741,7 +738,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §1.2: lệnh ngắn `deploy/production/pf` cho production stack. |
+| 2026-11-16 | uncommitted | §1.2, §6: công cụ Deployment Admin và hướng dẫn của nó được gỡ bỏ. |
+| 2026-11-16 | `5708664` | §1.2: lệnh ngắn `deploy/production/pf` cho production stack. |
 | 2026-11-13 | `4a99914` | §3.1 Log: các lần Production Board tự làm mới thành công không được ghi log. |
 | 2026-11-12 | `de4d99f` | §3.1 Log: mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s thay vì 15 s. |
 | 2026-11-12 | `878822f` | `smoke.sh` chờ `web` và backend khởi động xong trước khi kiểm tra. |

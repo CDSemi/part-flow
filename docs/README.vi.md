@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `398c617` cộng các thay đổi chưa commit ngày 2026-11-10. Mỗi tài liệu đang dùng có một bản dịch tiếng Việt nằm
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `ce90520` cộng các thay đổi chưa commit ngày 2026-11-16. Mỗi tài liệu đang dùng có một bản dịch tiếng Việt nằm
 > cạnh với hậu tố `.vi.md`.
 
 Mục lục này liệt kê mọi tài liệu PartFlow đang dùng và mục đích của từng tài liệu.
@@ -37,10 +37,6 @@ runbook khi PartFlow đã chạy.
 | [`deployment/VPS.vi.md`](./deployment/VPS.vi.md) | Cài cùng production stack đó trên một máy chủ riêng ảo (virtual private server, VPS) Linux, máy chủ production thay thế. | [`deployment/VPS.md`](./deployment/VPS.md) |
 | [`deployment/SHARED_HOSTING.vi.md`](./deployment/SHARED_HOSTING.vi.md) | Vì sao shared web hosting chỉ khả thi có điều kiện và nhà cung cấp phải xác nhận những gì trước, gồm cả kết quả đánh giá Hawk Host. | [`deployment/SHARED_HOSTING.md`](./deployment/SHARED_HOSTING.md) |
 
-Không cần cho production: [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)
-([bản tiếng Anh](./deployment/SYNOLOGY_ADMIN.md)) là hướng dẫn ngắn về công cụ Deployment Admin (`pf`), dùng để quản lý
-các instance staging trên một máy chủ khác máy chủ production; việc phát triển công cụ này đã dừng ngày 2026-10-14.
-
 ## Chính sách bản dịch
 
 [`TRANSLATION_POLICY.vi.md`](./TRANSLATION_POLICY.vi.md) quy định cách tạo, kiểm
@@ -53,7 +49,8 @@ nằm trong phạm vi dịch.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-11 | uncommitted | Mục Deployment Admin mô tả hướng dẫn ngắn đã viết lại và không còn nhắc đến thiết kế controller dùng lại được đã bị bỏ. |
+| 2026-11-16 | uncommitted | Mục Deployment Admin được bỏ cùng với công cụ và hướng dẫn của nó. |
+| 2026-11-11 | `ce90520` | Mục Deployment Admin mô tả hướng dẫn ngắn đã viết lại và không còn nhắc đến thiết kế controller dùng lại được đã bị bỏ. |
 | 2026-11-10 | `e0e5056` | Các tài liệu triển khai được liệt kê theo thứ tự đọc, có thêm hướng dẫn Cloudflare; hướng dẫn Deployment Admin được ghi rõ là không cần cho production; bộ công cụ staging đã bị thay thế được xóa. |
 | 2026-11-09 | `398c617` | Viết lại cho người mới đọc: phần giới thiệu, mô tả hiện tại một câu cho mỗi tài liệu, và bảng thay đổi này. |
 | 2026-10-14 | `2c360cb` | Mục Deployment Admin nêu mục tiêu thiết kế dự kiến là một controller dùng lại được. |
