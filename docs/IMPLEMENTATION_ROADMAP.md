@@ -1367,8 +1367,10 @@ order, and a delivered item says so:
    The migration refuses while a duplicate is stored. `revision`, run with the new image before the write freeze
    (`release.sh` step 4), reports the duplicates as `blocked_by_data` and lists them in `blocking_data`, and `migrate`
    refuses with the same list, so the owner renames them in PartFlow first.
-5. **The allocating Worker.** An allocation recorded at a Scan Station shows the Worker whose badge recorded it, in the
-   Work Order details and in PN Tracking, as a Management allocation shows its user.
+5. **The allocating Worker — delivered.** An allocation recorded at a Stockroom Scan Station shows the Worker the
+   station identified, by current name, in the Work Order details (the allocation dialog) and in PN Tracking's
+   allocation history, as a Management allocation shows its user. The audit trail lists only Management allocations,
+   so it is unchanged.
 6. **Add to Hot list at intake.** The New Work Order dialog can put its demand lines on the Hot list. They join at the
    bottom through the Hot-list command (no typed rank), for users who may set demand priority.
 7. **Settings previews.** Scan behavior and General settings show their candidate settings as disabled controls, each
@@ -1427,7 +1429,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | Phase 17 item 4 delivered: migration `0034_phase17_unique_names` makes Area names unique within a Department and active Planned Route names unique, and `revision` reports stored duplicates as `blocked_by_data`. |
+| 2026-11-15 | uncommitted | Phase 17 item 5 delivered: a Stockroom station allocation shows the Worker the station identified in the allocation dialog and in PN Tracking. |
+| 2026-11-14 | `2a24c2a` | Phase 17 item 4 delivered: migration `0034_phase17_unique_names` makes Area names unique within a Department and active Planned Route names unique, and `revision` reports stored duplicates as `blocked_by_data`. |
 | 2026-11-14 | `15a2120` | Phase 17 item 3 delivered: migration `0033_phase17_super_user_role` seeds the Super User role with every permission key and becomes the schema head. |
 | 2026-11-14 | `277a512` | Phase 17 item 2 delivered: manual Work Order entry refuses a Work Order Number, Part Number or Job Number longer than 200 characters; Phase 17 is in progress. |
 | 2026-11-13 | `c0f0b0c` | Phase 17 item 1 delivered: reserved permission keys show `(reserved)` and cannot be chosen. |

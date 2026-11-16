@@ -77,7 +77,12 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 from app.api.authorization import RequireAnyPermission, RequirePermission, StationDeviceDep
 from app.api.dependencies import SessionDep
 from app.api.request_log import bind_command, bind_result
-from app.api.user_refs import UserRefResponse, user_ref_response
+from app.api.user_refs import (
+    UserRefResponse,
+    WorkerRefResponse,
+    user_ref_response,
+    worker_ref_response,
+)
 from app.application import allocations, station_devices
 from app.application.authentication import Principal
 from app.domain.enums import Permission
@@ -390,6 +395,9 @@ class ContextAllocationResponse(BaseModel):
     station_id: str | None
     allocated_at: datetime.datetime
     actor_user: UserRefResponse | None
+    # The Worker a Stockroom station identified (Phase 17); null for a
+    # Management row and when the station's Area identifies no Worker.
+    worker: WorkerRefResponse | None
 
 
 class ContextLineResponse(BaseModel):
@@ -444,6 +452,7 @@ def _context_line(line: allocations.ContextLine) -> ContextLineResponse:
                 station_id=entry.allocation.station_id,
                 allocated_at=entry.allocation.allocated_at,
                 actor_user=user_ref_response(entry.actor_user),
+                worker=worker_ref_response(entry.worker),
             )
             for entry in line.active_allocations
         ],

@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14.
+> Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-15.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2347,7 +2347,8 @@ trap**, được xếp lớp bên dưới thanh điều hướng và các dialog
    (introduced = active + stocked + scrapped; scrap không bao giờ làm giảm quantity được yêu cầu).
 7. **Stocked & Allocation history.** Quantity stocked và các mục Work Order Allocation, kèm ghi chú thứ tự của
    PROJECT_PROFILE §18, và một trạng thái rỗng khi không có gì stocked. Một mục của Management nêu tên người dùng đã ghi
-   nhận nó; một hiệu chỉnh vượt demand được đánh dấu `beyond demand`.
+   nhận nó, và một mục của trạm Stockroom nêu tên Worker mà trạm đó đã xác định (`Worker <tên>`; không có gì khi Area
+   của trạm không xác định Worker nào); một hiệu chỉnh vượt demand được đánh dấu `beyond demand`.
 8. **Corrections.** Các hành động chỉ dành cho người dùng có thẩm quyền, dưới dạng các nút tường minh: Quantity
    adjustment, Edit assigned Route, Adjust WO Allocation, Change priority, View audit trail.
    - Mọi hiệu chỉnh (một allocation vượt demand, một lần đảo ngược) bắt buộc có lý do và tạo ra lịch sử mới. Một
@@ -3236,7 +3237,9 @@ dạng bị vô hiệu hóa hay trơ.
   khiến một Work Order đã hoàn tất trở lại chưa hoàn tất: Work Order mở lại và ngày hoàn tất của nó bị xóa, và một lần
   hoàn tất về sau ghi một ngày hoàn tất mới. Một correction hoặc đảo ngược để Work Order vẫn hoàn tất không bao giờ dịch
   chuyển ngày hoàn tất của nó.
-- **Người thực hiện.** Mỗi entry hiển thị người dùng đã ghi nhận nó, kèm avatar và tên.
+- **Người thực hiện.** Mỗi entry của Management hiển thị người dùng đã ghi nhận nó, kèm avatar và tên. Một entry của
+  trạm Stockroom hiển thị Worker mà trạm đó đã xác định (`Worker <tên>`), hoặc không có gì khi Area của trạm không
+  xác định Worker nào.
 - **Kết quả không xác định và đăng nhập.** Một ý định giữ một định danh request qua mọi lần gửi lại. Các ô nhập và điều
   hướng step bị khóa trong khi một lần gửi đang chạy, và vẫn bị khóa khi server không trả lời, nên lần submit kế tiếp chỉ
   có thể lặp lại cùng ý định đó. Một lời từ chối tường minh cho lần gửi lại đó chứng minh rằng không gì được ghi nhận và
@@ -3939,7 +3942,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-14 | uncommitted | §13.2: một Duplicate mà `{name} (variant)` của nó đã thuộc về một route đang dùng sẽ mở `New Planned Route` kèm lời từ chối. |
+| 2026-11-15 | uncommitted | §7.2 mục 7 và §11.6: một entry phân bổ của trạm Stockroom nêu tên Worker mà trạm đó đã xác định. |
+| 2026-11-14 | 2a24c2a | §13.2: một Duplicate mà `{name} (variant)` của nó đã thuộc về một route đang dùng sẽ mở `New Planned Route` kèm lời từ chối. |
 | 2026-11-14 | 15a2120 | §9: các role ban đầu có thêm Super User. |
 | 2026-11-14 | 277a512 | §11.2: một WO Number, PN của một line chưa lưu và một Job Number mới dài hơn 200 ký tự là lỗi field, và Add Part không đề xuất tạo một PN mới như vậy. |
 | 2026-11-13 | c0f0b0c | §9: các permission để dành hiển thị `(reserved)` và không chọn được. |

@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-15. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1357,8 +1357,10 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    Migration từ chối khi còn tên trùng đã lưu. Lệnh `revision`, chạy bằng image mới trước khi tạm dừng ghi
    (`release.sh` bước 4), báo các tên trùng với trạng thái `blocked_by_data` và liệt kê chúng trong `blocking_data`,
    còn `migrate` từ chối với cùng danh sách, nên chủ sở hữu đổi tên chúng trong PartFlow trước.
-5. **Worker đã phân bổ.** Một lần phân bổ ghi tại Scan Station hiển thị Worker có badge đã ghi nó, trong chi tiết Work
-   Order và trong PN Tracking, như một lần phân bổ của Management hiển thị user của nó.
+5. **Worker đã phân bổ — đã có.** Một lần phân bổ ghi tại Scan Station của Stockroom hiển thị Worker mà trạm đã xác
+   định, theo tên hiện tại, trong chi tiết Work Order (hộp thoại phân bổ) và trong lịch sử phân bổ của PN Tracking, như
+   một lần phân bổ của Management hiển thị user của nó. Nhật ký audit chỉ liệt kê các lần phân bổ của Management, nên
+   không đổi.
 6. **Add to Hot list khi tạo Work Order.** Dialog New Work Order có thể đưa các dòng demand của nó vào Hot list. Chúng
    vào cuối danh sách qua lệnh của Hot list (không gõ hạng), cho user có quyền đặt priority của demand.
 7. **Bản xem trước các thiết lập.** Scan behavior và General settings hiển thị các thiết lập ứng viên thành control bị
@@ -1417,7 +1419,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | Phase 17 mục 4 đã có: migration `0034_phase17_unique_names` làm tên Area duy nhất trong một Department và tên Planned Route đang dùng duy nhất, và `revision` báo các tên trùng đã lưu với trạng thái `blocked_by_data`. |
+| 2026-11-15 | uncommitted | Phase 17 mục 5 đã có: một lần phân bổ của trạm Stockroom hiển thị Worker mà trạm đã xác định, trong hộp thoại phân bổ và trong PN Tracking. |
+| 2026-11-14 | `2a24c2a` | Phase 17 mục 4 đã có: migration `0034_phase17_unique_names` làm tên Area duy nhất trong một Department và tên Planned Route đang dùng duy nhất, và `revision` báo các tên trùng đã lưu với trạng thái `blocked_by_data`. |
 | 2026-11-14 | `15a2120` | Phase 17 mục 3 đã có: migration `0033_phase17_super_user_role` seed role Super User với mọi permission key và trở thành head lược đồ. |
 | 2026-11-14 | `277a512` | Phase 17 mục 2 đã có: nhập Work Order bằng tay từ chối Work Order Number, Part Number hoặc Job Number dài hơn 200 ký tự; Phase 17 đang làm. |
 | 2026-11-13 | `c0f0b0c` | Phase 17 mục 1 đã có: các permission key để dành hiển thị `(reserved)` và không chọn được. |

@@ -455,7 +455,11 @@ test('FC-5: a reverse start with one active allocation opens the Reverse step wi
 
 test('FC-5: a reversal that keeps the Work Order complete names no reopen; two allocations open the Overview of the line', async () => {
   const overAllocated = completedContext([
-    { ...STOCKROOM_ROW, quantity: 10 },
+    {
+      ...STOCKROOM_ROW,
+      quantity: 10,
+      worker: { id: 5, name: 'Wanda Worker' },
+    },
     CORRECTION_ROW,
   ]);
   overAllocated.lines[0] = {
@@ -483,6 +487,17 @@ test('FC-5: a reversal that keeps the Work Order complete names no reopen; two a
   expect(entry).toHaveTextContent('Mia Manager');
   expect(entry).toHaveTextContent('· reason: customer accepted overage');
   expect(entry.querySelector('.worker-avatar')).not.toBeNull();
+  expect(entry).not.toHaveTextContent('Wanda Worker');
+  // The station entry names the Worker its Stockroom station identified
+  // (Phase 17), as the correction names its User.
+  const station = screen
+    .getByRole('button', {
+      name: 'Reverse allocation of 10 pcs to Work Order 007201',
+    })
+    .closest('li') as HTMLElement;
+  expect(station).toHaveTextContent('10 pcs · Stockroom ·');
+  expect(station).toHaveTextContent('· Worker Wanda Worker');
+  expect(station).not.toHaveTextContent('Mia Manager');
 
   fireEvent.click(reverseCorrection);
   await screen.findByLabelText('Reason (required)');

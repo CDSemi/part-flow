@@ -63,6 +63,7 @@ from app.infrastructure.models import (
     ScanStation,
     Worker,
     WorkerSession,
+    WorkOrderAllocation,
 )
 
 # The resolver's lock on the Fixed Worker row: FOR KEY SHARE. It
@@ -445,6 +446,38 @@ def _badge_identity(
         timeout_override=locked.worker_session_timeout_minutes,
     )
     return StationIdentity(worker_id=worker.id, scan_session_id=session_id)
+
+
+class WorkerRef(NamedTuple):
+    """The display reference of a recorded Worker: the id and the current name."""
+
+    id: int
+    name: str
+
+
+def allocating_workers(
+    session: Session, rows: Iterable[WorkOrderAllocation]
+) -> dict[int, WorkerRef]:
+    """The Worker each station allocation row recorded, by allocation id.
+
+    Display only (Phase 17): the allocation context and Tracking's
+    allocation history name the Worker, by current name, as they name
+    the User of a Management row. A row without a Worker is left out.
+    """
+    recorded = {
+        row.id: row.allocated_by_worker_id for row in rows if row.allocated_by_worker_id is not None
+    }
+    if not recorded:
+        return {}
+    workers = {
+        worker.id: WorkerRef(worker.id, worker.name)
+        for worker in session.scalars(select(Worker).where(Worker.id.in_(set(recorded.values()))))
+    }
+    return {
+        allocation_id: workers[worker_id]
+        for allocation_id, worker_id in recorded.items()
+        if worker_id in workers
+    }
 
 
 def stamp_movements(rows: Iterable[PartMovement], identity: StationIdentity) -> None:

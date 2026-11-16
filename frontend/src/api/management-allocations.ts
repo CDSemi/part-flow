@@ -33,6 +33,13 @@ export interface AllocationUserRef {
   avatarUpdatedAt: string | null;
 }
 
+/** The Worker a Stockroom station identified for an allocation row
+ * (Phase 17), by current name. */
+export interface AllocationWorkerRef {
+  id: number;
+  name: string;
+}
+
 /** One active allocation row of a demand line (not reversed, not a
  * reversal). */
 export interface ContextAllocation {
@@ -47,6 +54,9 @@ export interface ContextAllocation {
   allocatedAt: string;
   /** null for a station row and for a row recorded before sign-in. */
   actorUser: AllocationUserRef | null;
+  /** The Worker of a station row; null for a Management row and when
+   * the station's Area identifies no Worker. */
+  worker: AllocationWorkerRef | null;
 }
 
 /** One demand line with its derived allocation figures. */
@@ -110,6 +120,7 @@ interface ContextAllocationWire {
   station_id: string | null;
   allocated_at: string;
   actor_user: unknown;
+  worker: unknown;
 }
 
 interface ContextLineWire {
@@ -177,6 +188,23 @@ function malformedActor(): Error {
   return new Error('The server answered a malformed allocation actor.');
 }
 
+/**
+ * The `worker` reference of an allocation row: null (or absent) when no
+ * Worker recorded it; a malformed reference throws instead of rendering
+ * a wrong name.
+ */
+export function toAllocationWorkerRef(
+  wire: unknown,
+): AllocationWorkerRef | null {
+  if (wire === undefined || wire === null) return null;
+  if (typeof wire !== 'object' || Array.isArray(wire)) throw malformedActor();
+  const { id, name } = wire as Record<string, unknown>;
+  if (typeof id !== 'number' || typeof name !== 'string') {
+    throw malformedActor();
+  }
+  return { id, name };
+}
+
 function toContextAllocation(wire: ContextAllocationWire): ContextAllocation {
   return {
     allocationId: wire.allocation_id,
@@ -188,6 +216,7 @@ function toContextAllocation(wire: ContextAllocationWire): ContextAllocation {
     stationId: wire.station_id,
     allocatedAt: wire.allocated_at,
     actorUser: toAllocationUserRef(wire.actor_user),
+    worker: toAllocationWorkerRef(wire.worker),
   };
 }
 

@@ -18,6 +18,7 @@ import type {
   AllocationContext,
   AllocationScope,
   AllocationUserRef,
+  AllocationWorkerRef,
   ContextAllocation,
   ContextLine,
   ManagementAllocationResult,
@@ -104,6 +105,11 @@ function Actor({ actor }: { actor: AllocationUserRef }) {
       {actor.displayName}
     </span>
   );
+}
+
+/** The Worker a Stockroom station identified for a station row. */
+function WorkerActor({ worker }: { worker: AllocationWorkerRef }) {
+  return <span className="aad-actor">Worker {worker.name}</span>;
 }
 
 /**
@@ -546,6 +552,11 @@ export function AllocationAdjustmentDialog({
                               {' · '}
                               <Actor actor={a.actorUser} />
                             </>
+                          ) : a.worker ? (
+                            <>
+                              {' · '}
+                              <WorkerActor worker={a.worker} />
+                            </>
                           ) : null}
                           {a.allocationReason
                             ? ` · reason: ${a.allocationReason}`
@@ -763,6 +774,11 @@ export function AllocationAdjustmentDialog({
             <>
               {' · '}
               <Actor actor={row.actorUser} />
+            </>
+          ) : row.worker ? (
+            <>
+              {' · '}
+              <WorkerActor worker={row.worker} />
             </>
           ) : null}
         </p>

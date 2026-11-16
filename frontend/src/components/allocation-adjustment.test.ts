@@ -54,6 +54,7 @@ function allocation(quantity: number): ContextAllocation {
     stationId: 'STOCK-1',
     allocatedAt: '2026-08-02T08:00:00Z',
     actorUser: null,
+    worker: null,
   };
 }
 

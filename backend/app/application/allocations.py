@@ -1449,10 +1449,13 @@ def allocate_beyond_demand(
 
 
 class ContextAllocation(NamedTuple):
-    """One active allocation row of a line, with who recorded it."""
+    """One active allocation row of a line, with who recorded it: the
+    signed-in User of a Management row, or the Worker a Stockroom station
+    identified (Phase 17; None when the station's Area identifies none)."""
 
     allocation: WorkOrderAllocation
     actor_user: user_access.UserRef | None
+    worker: station_identity.WorkerRef | None
 
 
 class ContextLine(NamedTuple):
@@ -1532,11 +1535,14 @@ def management_allocation_context(
     actors = user_access.user_refs(
         session, [row.actor_user_id for row in rows if row.actor_user_id is not None]
     )
+    workers = station_identity.allocating_workers(session, rows)
     by_demand: dict[int, list[ContextAllocation]] = {}
     for row in rows:
         by_demand.setdefault(row.work_order_demand_id, []).append(
             ContextAllocation(
-                row, actors.get(row.actor_user_id) if row.actor_user_id is not None else None
+                row,
+                actors.get(row.actor_user_id) if row.actor_user_id is not None else None,
+                workers.get(row.id),
             )
         )
     return AllocationContext(

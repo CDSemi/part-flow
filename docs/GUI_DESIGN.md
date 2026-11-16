@@ -2322,8 +2322,9 @@ trap**, layered below navigation and application dialogs.
 6. **Scrap history.** The PN's `SCRAPPED` events and cumulative scrapped quantity, with the reconciliation note
    (introduced = active + stocked + scrapped; scrap never reduces the requested quantity).
 7. **Stocked & Allocation history.** Stocked quantity and Work Order Allocation entries, with the PROJECT_PROFILE §18
-   ordering note, and an empty state when nothing is stocked. A Management entry names the user who recorded it; a
-   beyond-demand correction is marked `beyond demand`.
+   ordering note, and an empty state when nothing is stocked. A Management entry names the user who recorded it, and
+   a Stockroom station entry names the Worker its station identified (`Worker <name>`; nothing when the station's Area
+   identifies no Worker); a beyond-demand correction is marked `beyond demand`.
 8. **Corrections.** Actions for authorized users only, as explicit buttons: Quantity adjustment, Edit assigned Route,
    Adjust WO Allocation, Change priority, View audit trail.
    - Every correction (an allocation beyond demand, a reversal) requires a reason and produces new history. A routine
@@ -3209,7 +3210,8 @@ disabled or inert.
   make a completed Work Order incomplete again: the Work Order reopens and its done date is cleared, and a later
   completion records a new done date. A correction or reversal that leaves the Work Order complete never moves its done
   date.
-- **Actor.** Each entry shows the user who recorded it, with an avatar and name.
+- **Actor.** Each Management entry shows the user who recorded it, with an avatar and name. A Stockroom station entry
+  shows the Worker its station identified (`Worker <name>`), or nothing when the station's Area identifies no Worker.
 - **Unknown outcome and sign-in.** One intent keeps one request identity through every resubmit. The inputs and the
   step navigation lock while a submission is in flight, and stay locked when the server did not answer, so the next
   submit can only repeat the same intent. An explicit refusal of that resubmit proves that nothing was recorded and
@@ -3898,7 +3900,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-14 | uncommitted | §13.2: a Duplicate whose `{name} (variant)` an active route already holds opens `New Planned Route` with the refusal. |
+| 2026-11-15 | uncommitted | §7.2 item 7 and §11.6: a Stockroom station allocation entry names the Worker its station identified. |
+| 2026-11-14 | 2a24c2a | §13.2: a Duplicate whose `{name} (variant)` an active route already holds opens `New Planned Route` with the refusal. |
 | 2026-11-14 | 15a2120 | §9: the initial roles include Super User. |
 | 2026-11-14 | 277a512 | §11.2: a WO Number, the PN of an unsaved line and a new Job Number longer than 200 characters are field errors, and Add Part offers no such new PN. |
 | 2026-11-13 | c0f0b0c | §9: reserved permissions show `(reserved)` and cannot be chosen. |

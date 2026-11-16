@@ -10,6 +10,7 @@ import {
   getAllocationContext,
   reverseAllocation,
   toAllocationUserRef,
+  toAllocationWorkerRef,
 } from './management-allocations';
 import { loadTrackingAllocations } from './tracking';
 
@@ -99,6 +100,7 @@ test('FC-1: the context read asks for a PN or one demand line and converts every
               station_id: 'STOCK-1',
               allocated_at: '2026-08-02T08:00:00Z',
               actor_user: null,
+              worker: { id: 5, name: 'Wanda Worker' },
             },
             {
               allocation_id: 32,
@@ -110,6 +112,7 @@ test('FC-1: the context read asks for a PN or one demand line and converts every
               station_id: null,
               allocated_at: '2026-08-03T08:00:00Z',
               actor_user: MIA,
+              worker: null,
             },
           ],
         },
@@ -150,6 +153,7 @@ test('FC-1: the context read asks for a PN or one demand line and converts every
             stationId: 'STOCK-1',
             allocatedAt: '2026-08-02T08:00:00Z',
             actorUser: null,
+            worker: { id: 5, name: 'Wanda Worker' },
           },
           {
             allocationId: 32,
@@ -165,6 +169,7 @@ test('FC-1: the context read asks for a PN or one demand line and converts every
               displayName: 'Mia Manager',
               avatarUpdatedAt: null,
             },
+            worker: null,
           },
         ],
       },
@@ -308,6 +313,19 @@ test('FC-1: the actor reference is null, a User, or refused when malformed', () 
   ).toThrow();
 });
 
+test('Phase 17: the Worker reference is null, a Worker, or refused when malformed', () => {
+  expect(toAllocationWorkerRef(null)).toBeNull();
+  expect(toAllocationWorkerRef(undefined)).toBeNull();
+  expect(toAllocationWorkerRef({ id: 5, name: 'Wanda Worker' })).toEqual({
+    id: 5,
+    name: 'Wanda Worker',
+  });
+  expect(() => toAllocationWorkerRef('Wanda')).toThrow();
+  expect(() => toAllocationWorkerRef([5])).toThrow();
+  expect(() => toAllocationWorkerRef({ id: '5', name: 'Wanda' })).toThrow();
+  expect(() => toAllocationWorkerRef({ id: 5 })).toThrow();
+});
+
 test('FC-1: the Tracking allocation history carries the beyond-demand flag and the actor', async () => {
   answer = {
     status: 200,
@@ -332,8 +350,28 @@ test('FC-1: the Tracking allocation history carries the beyond-demand flag and t
           exceeds_demand: true,
           actor_user: MIA,
         },
+        {
+          id: 31,
+          quantity: 10,
+          work_order: {
+            work_order_id: 1,
+            work_order_number: '007201',
+            work_order_demand_id: 7,
+            request_type: 'NEW',
+          },
+          source: 'STOCKROOM',
+          is_manual_override: false,
+          allocation_reason: null,
+          reverses_allocation_id: null,
+          reversed_by_allocation_id: null,
+          station_id: 'STOCK-1',
+          allocated_at: '2026-08-02T08:00:00Z',
+          exceeds_demand: false,
+          actor_user: null,
+          worker: { id: 5, name: 'Wanda Worker' },
+        },
       ],
-      total: 1,
+      total: 2,
       has_more: false,
       next_before_allocation_id: null,
     },
@@ -345,6 +383,10 @@ test('FC-1: the Tracking allocation history carries the beyond-demand flag and t
     displayName: 'Mia Manager',
     avatarUpdatedAt: null,
   });
+  // A row without the key reads as recorded by no Worker.
+  expect(page.allocations[0].worker).toBeNull();
+  expect(page.allocations[1].actorUser).toBeNull();
+  expect(page.allocations[1].worker).toEqual({ id: 5, name: 'Wanda Worker' });
 });
 
 test('FC-10: Management allocation never sends a Scan Station device header', async () => {

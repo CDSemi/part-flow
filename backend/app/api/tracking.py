@@ -52,7 +52,12 @@ from pydantic import BaseModel
 
 from app.api.authorization import TRACKING_READ, RequireAnyPermission
 from app.api.dependencies import SessionDep
-from app.api.user_refs import UserRefResponse, user_ref_response
+from app.api.user_refs import (
+    UserRefResponse,
+    WorkerRefResponse,
+    user_ref_response,
+    worker_ref_response,
+)
 from app.application import audit_trail, tracking
 from app.application.allocations import DemandContext
 from app.application.authentication import Principal
@@ -412,6 +417,10 @@ class AllocationResponse(BaseModel):
     # The signed-in User of a Management row; null for station rows and
     # rows recorded before sign-in existed.
     actor_user: UserRefResponse | None
+    # The Worker a Stockroom station identified for a station row
+    # (Phase 17); null for Management rows and when the station's Area
+    # identifies no Worker.
+    worker: WorkerRefResponse | None
 
 
 class MovementRouteStepRef(BaseModel):
@@ -647,6 +656,7 @@ def _allocation(entry: tracking.AllocationEntry) -> AllocationResponse:
         station_id=row.station_id,
         allocated_at=row.allocated_at,
         actor_user=user_ref_response(entry.actor_user),
+        worker=worker_ref_response(entry.worker),
     )
 
 

@@ -29,8 +29,14 @@
 // Production-safe: no mock data, no framework imports.
 
 import { apiRequest } from './client';
-import { toAllocationUserRef } from './management-allocations';
-import type { AllocationUserRef } from './management-allocations';
+import {
+  toAllocationUserRef,
+  toAllocationWorkerRef,
+} from './management-allocations';
+import type {
+  AllocationUserRef,
+  AllocationWorkerRef,
+} from './management-allocations';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -285,6 +291,9 @@ export interface TrackingAllocation {
   /** The User who recorded a Management row; null for a station row
    * and for a row recorded before sign-in. */
   actorUser: AllocationUserRef | null;
+  /** The Worker of a station row (Phase 17); null for a Management row
+   * and when the station's Area identifies no Worker. */
+  worker: AllocationWorkerRef | null;
 }
 
 export interface TrackingMovement {
@@ -553,6 +562,7 @@ interface AllocationWire {
   allocated_at: string;
   exceeds_demand: boolean;
   actor_user: unknown;
+  worker: unknown;
 }
 
 interface FlowPageWire {
@@ -831,6 +841,7 @@ function toAllocation(wire: AllocationWire): TrackingAllocation {
     allocatedAt: wire.allocated_at,
     exceedsDemand: wire.exceeds_demand,
     actorUser: toAllocationUserRef(wire.actor_user),
+    worker: toAllocationWorkerRef(wire.worker),
   };
 }
 

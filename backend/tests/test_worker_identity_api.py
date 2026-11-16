@@ -760,6 +760,50 @@ def test_management_rows_stay_without_identity_in_a_fixed_area(
         assert reversed_["rows"][0]["station_id"] is None
 
 
+def test_a_station_allocation_shows_its_worker_as_management_shows_its_user(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Phase 17: the allocation context (Work Order Details) and Tracking's
+    allocation history name the Worker a Stockroom station identified, by
+    current name, where a Management row names its User. A station whose
+    Area identifies no Worker names nobody."""
+    material, stockroom = _Cell(client, machine_count=1), _Cell(client, is_terminal=True)
+    pn, demand_id = _stocked(client, material, stockroom)
+    worker = _worker(client)
+    _set_mode(client, stockroom.area_id, "FIXED", int(worker["id"]))
+    with_worker = _ok(_allocate(client, pn, demand_id, 2, stockroom.station_id), 201)
+    _set_mode(client, stockroom.area_id, "DISABLED")
+    without_worker = _ok(_allocate(client, pn, demand_id, 1, stockroom.station_id), 201)
+    management = _ok(_allocate(client, pn, demand_id, 1, None), 201)
+    renamed = _unique("Renamed worker")
+    _ok(admin_of(client).patch(f"/api/workers/{worker['id']}", json={"name": renamed}))
+
+    station_id = int(with_worker["rows"][0]["allocation_id"])
+    unnamed_id = int(without_worker["rows"][0]["allocation_id"])
+    management_id = int(management["rows"][0]["allocation_id"])
+    user_id = admin_of(client).user_id
+    expected = {
+        station_id: ({"id": int(worker["id"]), "name": renamed}, None),
+        unnamed_id: (None, None),
+        management_id: (None, user_id),
+    }
+
+    def shown(row: dict[str, Any]) -> tuple[Any, int | None]:
+        actor = row["actor_user"]
+        return row["worker"], actor["id"] if actor is not None else None
+
+    context = _ok(
+        admin_of(client).get(
+            "/api/allocations/management/context", params={"work_order_demand_id": demand_id}
+        )
+    )
+    rows = context["lines"][0]["active_allocations"]
+    assert {row["allocation_id"]: shown(row) for row in rows} == expected
+
+    history = _ok(admin_of(client).get("/api/tracking/allocations", params={"part_number": pn}))
+    assert {row["id"]: shown(row) for row in history["allocations"]} == expected
+
+
 def _role_map(roles: dict[int, str]) -> Callable[[int | None], str | None]:
     return lambda value: None if value is None else roles[value]
 

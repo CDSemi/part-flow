@@ -82,7 +82,7 @@ from typing import Any, Final, Literal, NamedTuple
 from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.orm import Session, aliased
 
-from app.application import route_adjustments, user_access
+from app.application import route_adjustments, station_identity, user_access
 from app.application.allocations import (
     DemandContext,
     active_allocated_quantities,
@@ -306,6 +306,10 @@ class AllocationEntry(NamedTuple):
     # The signed-in User who recorded a Management row (Phase 14); None
     # for station rows and rows recorded before sign-in existed.
     actor_user: user_access.UserRef | None
+    # The Worker a Stockroom station identified for a station row
+    # (Phase 17), by current name; None for Management rows and for a
+    # station whose Area identifies no Worker.
+    worker: station_identity.WorkerRef | None
 
 
 class AllocationPage(NamedTuple):
@@ -1261,10 +1265,12 @@ def allocation_history(
             )
         ):
             reversed_by[int(original_id)] = int(reversal_id)
-    # One display-reference read over the page's recorded Users.
+    # One display-reference read over the page's recorded Users, and one
+    # over its station Workers.
     actors = user_access.user_refs(
         session, [row.actor_user_id for row in rows if row.actor_user_id is not None]
     )
+    workers = station_identity.allocating_workers(session, rows)
     return AllocationPage(
         entries=[
             AllocationEntry(
@@ -1275,6 +1281,7 @@ def allocation_history(
                 actor_user=(
                     actors.get(row.actor_user_id) if row.actor_user_id is not None else None
                 ),
+                worker=workers.get(row.id),
             )
             for row in rows
         ],

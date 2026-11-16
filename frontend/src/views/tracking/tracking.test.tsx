@@ -2265,6 +2265,7 @@ function overAllocatedDetail(lines = 2) {
           allocated_at: '2030-07-23T08:00:00Z',
           exceeds_demand: false,
           actor_user: null,
+          worker: { id: 5, name: 'Wanda Worker' },
         },
       ],
       total: 2,
@@ -2546,6 +2547,12 @@ test('FC-9: the demand counts each line only up to its demand and names the exce
   );
   expect(entries[1].textContent).not.toContain('beyond demand');
   expect(entries[1].textContent).toContain('· STOCK-ST-1');
+  // The station row names the Worker its Stockroom station identified
+  // (Phase 17), as the Management row names its User.
+  expect(entries[1].textContent).toContain(
+    '· STOCK-ST-1 · Worker Wanda Worker',
+  );
+  expect(entries[0].textContent).not.toContain('Worker');
 });
 
 test('FC-9: a single line allocated beyond its demand reads fully covered plus its excess', async () => {

@@ -1274,7 +1274,11 @@ function TrackingDetailContent({
                       : ''}
                     {a.stationId ? ` · ${a.stationId}` : ''}
                     {a.exceedsDemand ? ' · beyond demand' : ''}
-                    {a.actorUser ? ` · ${a.actorUser.displayName}` : ''}
+                    {a.actorUser
+                      ? ` · ${a.actorUser.displayName}`
+                      : a.worker
+                        ? ` · Worker ${a.worker.name}`
+                        : ''}
                   </span>
                 </li>
               ))}
