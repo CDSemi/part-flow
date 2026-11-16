@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi
 > chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -25,6 +25,7 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Biết việc cần làm hằng ngày, hằng tuần, hằng tháng; đổi mật khẩu; xóa bản sao lưu cũ | §9 |
 | Lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập của một user, hoặc thu hồi quyền truy cập của một user | §8 (Đăng nhập và tài khoản người dùng) |
 | Tìm xem một bản phát hành trước đây đã làm gì | §1 |
+| Dùng lệnh ngắn `pf` để cài đặt, cập nhật, sao lưu, khôi phục hoặc xem trạng thái | Trước khi chạy bất kỳ lệnh nào |
 
 ## Trước khi chạy bất kỳ lệnh nào
 
@@ -44,6 +45,18 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 3. Dùng thư mục mã nguồn của bản phát hành **đang chạy** cho công việc hằng ngày. Khi phát hành, dùng thư mục mã nguồn
    của bản phát hành **mới**. Trong bản cài trên NAS, cả hai là cùng một thư mục `repo/`; lệnh `git checkout <tag>`
    chuyển giữa chúng.
+
+**Lệnh ngắn `pf`.** `deploy/production/pf` chạy mỗi quy trình đã mô tả bằng một lệnh, theo đúng thứ tự, và dừng ở
+bước đầu tiên thất bại; nó không thêm quy trình nào của riêng nó. `deploy/production/pf --help` in ra các tùy chọn của
+nó.
+
+| Lệnh | Những gì nó chạy |
+| --- | --- |
+| `pf install` | Lần cài đặt đầu tiên của bản phát hành đã checkout trên một database trống: [`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §7 và §8. |
+| `pf update <tag>` | `git fetch --tags`, `git checkout <tag>`, rồi `release.sh` (§5); người phê duyệt mặc định là người vận hành. |
+| `pf backup [--reason TEXT]` | Một bản sao lưu thủ công (§3). |
+| `pf restore <NAME> --approved-by <owner>` | Khôi phục vào instance mới (new-instance restore) của §6 vào một database trống, với sự phê duyệt của chủ sở hữu được ghi vào `restore.json` trước khi `backend` khởi động. |
+| `pf status [--url https://<partflow-host>]` | Các container, `/api/health` và tóm tắt của `status` (§2); với `--url`, `check.sh --no-state`. |
 
 Quy ước: tác vụ chạy một lần (one-shot job) đọc hoặc ghi thư mục sao lưu chạy với `--user "$(id -u):$(id -g)"`, vì
 thư mục đó có mode 0700. `<partflow-host>` là tên miền truy cập (host name) mà mọi người gõ trên trình duyệt,
@@ -1180,7 +1193,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §2, §3, §5, §8, §9: tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ; Administration → Backups đặt khoảng thời gian và số bản sao lưu hourly, daily và weekly được giữ; giới hạn `backup_age` đi theo khoảng thời gian đó. |
+| 2026-11-16 | uncommitted | Trước khi chạy bất kỳ lệnh nào: lệnh ngắn `deploy/production/pf`. |
+| 2026-11-16 | `c1f042b` | §2, §3, §5, §8, §9: tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ; Administration → Backups đặt khoảng thời gian và số bản sao lưu hourly, daily và weekly được giữ; giới hạn `backup_age` đi theo khoảng thời gian đó. |
 | 2026-11-14 | `2a24c2a` | §5: lần phát hành dừng trước khi tạm dừng ghi khi `revision` của image mới báo `blocked_by_data`. |
 | 2026-11-13 | `4a99914` | §2: các lần Production Board tự làm mới thành công không còn nằm trong log `web`. |
 | 2026-11-12 | `de4d99f` | §5 Observe: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 giây, và mọi trang khác khi rảnh 1 phút thay vì 2 phút; §2: mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày thay vì 3 MB. |

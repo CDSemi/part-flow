@@ -1,0 +1,419 @@
+#!/bin/sh
+# PartFlow `pf`: one small command for the production stack (owner decision of 2026-11-13; IMPLEMENTATION_ROADMAP
+# Phase 16, minimal `pf`). Run it from the repository root of a release checkout, as the operating account. It adds no
+# procedure of its own: each command runs the steps the guides document, in their order, and stops at the first one
+# that fails.
+#   install  the first installation of the checked-out release on a host whose database is empty (SYNOLOGY_NAS §7, §8)
+#   update   deploy/production/release.sh for a new release tag (OPERATIONS_RUNBOOK §5)
+#   backup   a manual deploy/production/backup.sh (OPERATIONS_RUNBOOK §3)
+#   restore  the new-instance restore of a backup into an empty database (OPERATIONS_RUNBOOK §6)
+#   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
+# `deploy/production/pf --help` prints the usage. Exit status: 0 done, 1 refused or a check failed (nothing was
+# changed by the refusal), 2 could not run; update and backup end with the exit status of release.sh and backup.sh.
+set -eu
+
+RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+BACKUP_NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
+# The values in the shell would override the env file for every Compose command: the script sets them per command only.
+unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR PARTFLOW_BACKEND_WORKERS \
+    COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+
+usage() {
+    cat <<'EOF'
+Usage: deploy/production/pf <command> [options]
+
+Run from the repository root of the release checkout, as the operating account (root on the NAS).
+Commands:
+  install                   first installation of the checked-out release on a host whose database is empty: build
+                            the images, start db, create the database roles and the schema, start backend (one
+                            worker) and web, and check /api/health (SYNOLOGY_NAS §7 and §8)
+  update TAG [--approver NAME]
+                            install release TAG: fetch the tags, check TAG out and run release.sh
+                            (OPERATIONS_RUNBOOK §5; the approver defaults to the operator)
+  backup [--reason TEXT]    take a manual backup now (backup.sh --kind manual; OPERATIONS_RUNBOOK §3)
+  restore NAME --approved-by NAME [--reason TEXT]
+                            restore the backup NAME into this host's empty database, then start PartFlow on it
+                            (OPERATIONS_RUNBOOK §6, New-instance restore); the checkout must be at the backup's release
+  status [--url URL]        the containers, /api/health and the status report; with --url the full check.sh
+Options of every command:
+  --env-file FILE           default .env.production
+  --operator NAME           recorded as the operator (default: the login name)
+Text values: 1-500 characters, no control characters, no " or \.
+Exit: 0 done, 1 refused or a check failed, 2 could not run; update and backup end with the exit status of release.sh
+      and backup.sh.
+EOF
+}
+
+usage_error() {
+    echo "pf: $1 Nothing was changed." >&2
+    usage >&2
+    exit 2
+}
+
+could_not_run() {
+    echo "pf: $1" >&2
+    exit 2
+}
+
+refuse() {
+    echo "pf: refused — $1" >&2
+    exit 1
+}
+
+check_text() {
+    case "$2" in
+        *[![:space:]]*) ;;
+        *) usage_error "$1 must not be empty." ;;
+    esac
+    [ "${#2}" -le 500 ] || usage_error "$1 must be at most 500 characters."
+    case "$2" in
+        *\"* | *\\*) usage_error "$1 must not contain \" or \\." ;;
+    esac
+    [ "$(printf '%s' "$2" | tr -d '[:cntrl:]')" = "$2" ] || usage_error "$1 must not contain control characters."
+}
+
+utc() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+step() {
+    echo "pf: $1" >&2
+}
+
+# ---------------------------------------------------------------------------
+# Arguments (refused before any action)
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    install | update | backup | restore | status) COMMAND=$1; shift ;;
+    '') usage_error "a command is required." ;;
+    *) usage_error "unknown command $1." ;;
+esac
+
+ENV_FILE=.env.production
+OPERATOR=
+APPROVER=
+APPROVED_BY=
+REASON=
+URL=
+TARGET=
+SEEN=' '
+while [ "$#" -gt 0 ]; do
+    option=$1
+    case "$option" in
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --*)
+            case "$SEEN" in
+                *" $option "*) usage_error "$option is given twice." ;;
+            esac
+            SEEN="$SEEN$option "
+            [ "$#" -ge 2 ] || usage_error "$option needs a value."
+            value=$2
+            shift 2
+            ;;
+        *)
+            [ -z "$TARGET" ] || usage_error "unexpected argument $option."
+            TARGET=$option
+            shift
+            continue
+            ;;
+    esac
+    case "$COMMAND:$option" in
+        *:--env-file) ENV_FILE=$value ;;
+        *:--operator) check_text "$option" "$value"; OPERATOR=$value ;;
+        update:--approver) check_text "$option" "$value"; APPROVER=$value ;;
+        backup:--reason | restore:--reason) check_text "$option" "$value"; REASON=$value ;;
+        restore:--approved-by) check_text "$option" "$value"; APPROVED_BY=$value ;;
+        status:--url) URL=$value ;;
+        *) usage_error "$option is not an option of pf $COMMAND." ;;
+    esac
+done
+
+case "$COMMAND" in
+    update)
+        [ -n "$TARGET" ] || usage_error "pf update needs the release TAG."
+        printf '%s' "$TARGET" | grep -Eq "$RELEASE_PATTERN" \
+            || usage_error "TAG must be a release tag of at most 64 letters, digits, '.', '_' or '-'."
+        ;;
+    restore)
+        [ -n "$TARGET" ] || usage_error "pf restore needs the backup NAME."
+        printf '%s' "$TARGET" | grep -Eq "$BACKUP_NAME_PATTERN" \
+            || usage_error "NAME must name a backup folder created by backup.sh (for example 20261008T020000Z-scheduled)."
+        [ -n "$APPROVED_BY" ] \
+            || usage_error "pf restore needs --approved-by NAME: the owner who approved restoring this backup into production."
+        ;;
+    *) [ -z "$TARGET" ] || usage_error "pf $COMMAND takes no argument $TARGET." ;;
+esac
+if [ -n "$URL" ]; then
+    printf '%s' "$URL" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$' \
+        || usage_error "--url must be https://HOST[:PORT] as users reach PartFlow."
+fi
+if [ -z "$OPERATOR" ]; then
+    OPERATOR=$(id -un 2>/dev/null) || OPERATOR=
+    [ -n "$OPERATOR" ] || OPERATOR=operator
+    check_text "the login name" "$OPERATOR"
+fi
+[ -n "$APPROVER" ] || APPROVER=$OPERATOR
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+[ -f compose.production.yaml ] \
+    || could_not_run "Run it from the repository root of a release checkout (compose.production.yaml not found)."
+[ -f "$ENV_FILE" ] || could_not_run "The env file $ENV_FILE does not exist (SYNOLOGY_NAS §5)."
+env_value() {
+    sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1
+}
+RELEASE=$(env_value PARTFLOW_RELEASE)
+BACKUP_DIR=$(env_value PARTFLOW_BACKUP_DIR)
+PORT=$(env_value PARTFLOW_HTTP_PORT)
+[ -n "$PORT" ] || PORT=18080
+printf '%s' "$RELEASE" | grep -Eq "$RELEASE_PATTERN" \
+    || could_not_run "PARTFLOW_RELEASE in $ENV_FILE must name a release tag (unquoted)."
+printf '%s' "$PORT" | grep -Eq '^[0-9]{1,5}$' || could_not_run "PARTFLOW_HTTP_PORT in $ENV_FILE must be a port number."
+command -v docker >/dev/null 2>&1 || could_not_run "docker is not installed."
+
+pf_compose() {
+    docker compose -f compose.production.yaml --env-file "$ENV_FILE" "$@"
+}
+
+# json_field FILE KEY: a top-level string value of an indented app.cli report (empty for null or absent).
+json_field() {
+    sed -n 's/^  "'"$2"'": "\([^"]*\)",\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+
+# checkout_at_release: the checked-out commit is the one of the tag PARTFLOW_RELEASE names.
+checkout_at_release() {
+    tagged=$(git rev-parse -q --verify "refs/tags/$RELEASE^{commit}" 2>/dev/null) || tagged=
+    [ -n "$tagged" ] && [ "$(git rev-parse HEAD 2>/dev/null)" = "$tagged" ]
+}
+
+# wait_healthy SERVICE SECONDS: wait until the running container of SERVICE reports healthy.
+wait_healthy() {
+    waited=0
+    while :; do
+        cid=$(pf_compose ps -q "$1" 2>/dev/null | head -n 1) || cid=
+        if [ -n "$cid" ]; then
+            state=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null) || state=
+            [ "$state" != healthy ] || return 0
+        fi
+        [ "$waited" -lt "$2" ] || return 1
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
+# wait_ready TAG SECONDS: wait until /api/health reports release TAG with the schema current.
+wait_ready() {
+    waited=0
+    while :; do
+        body=$(curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || body=
+        case $body in *"\"release\":\"$1\""*) case $body in *'"schema":"current"'*) return 0 ;; esac ;; esac
+        [ "$waited" -lt "$2" ] || return 1
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
+# public_relations: the number of relations in schema public of the production database (empty when unreadable).
+public_relations() {
+    pf_compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"'"' \
+        2>/dev/null | tr -d '\r' | head -n 1
+}
+
+start_db() {
+    step "starting db"
+    pf_compose up -d db >&2 || could_not_run "db could not be started (see above)."
+    wait_healthy db 120 || could_not_run "db did not become healthy within 120 s: check \`docker compose ps\` and its log."
+}
+
+# ---------------------------------------------------------------------------
+# pf install (SYNOLOGY_NAS §7 and §8)
+# ---------------------------------------------------------------------------
+
+cmd_install() {
+    command -v git >/dev/null 2>&1 || could_not_run "git is not installed."
+    checkout_at_release \
+        || refuse "the checkout is not at the tag $RELEASE that PARTFLOW_RELEASE names: run \`git checkout $RELEASE\` first."
+    step "building the images of $RELEASE (10 to 30 minutes; after a network error, run pf install again)"
+    env PARTFLOW_COMMIT="$(git rev-parse HEAD)" docker compose -f compose.production.yaml \
+        -f compose.production.build.yaml --env-file "$ENV_FILE" build >&2 \
+        || could_not_run "the image build failed (see above); run pf install again."
+    start_db
+    count=$(public_relations)
+    case "$count" in
+        0) ;;
+        '') could_not_run "the database could not be read." ;;
+        *) refuse "the database already holds PartFlow tables: PartFlow is installed here (use pf update TAG), or restore into a new database volume with pf restore." ;;
+    esac
+    step "creating the database roles"
+    pf_compose --profile ops run --rm -T db-roles || could_not_run "db-roles failed (see its report above)."
+    step "creating the database schema"
+    pf_compose --profile ops run --rm -T migrate --no-backup-reason "first install: empty database" \
+        || could_not_run "migrate failed (see its report above)."
+    step "starting backend (one worker, for the setup of the first Administrator) and web"
+    env PARTFLOW_BACKEND_WORKERS=1 docker compose -f compose.production.yaml --env-file "$ENV_FILE" \
+        up -d backend web >&2 || could_not_run "backend and web could not be started (see above)."
+    wait_ready "$RELEASE" 180 \
+        || could_not_run "/api/health does not report release $RELEASE with the schema current after 180 s: read \`docker compose logs --tail=100 backend web\`."
+    echo "pf: PartFlow $RELEASE is installed and answers on http://127.0.0.1:$PORT. Next: HTTPS (SYNOLOGY_NAS §9), the first Administrator (§10), the backup task and the monitoring (§11)."
+}
+
+# ---------------------------------------------------------------------------
+# pf update TAG (OPERATIONS_RUNBOOK §5)
+# ---------------------------------------------------------------------------
+
+cmd_update() {
+    command -v git >/dev/null 2>&1 || could_not_run "git is not installed."
+    [ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \
+        || refuse "the checkout has local changes: release.sh builds only a clean tag. Review them with \`git status\`."
+    step "fetching the release tags"
+    git fetch --tags >&2 || could_not_run "git fetch --tags failed (see above)."
+    git rev-parse -q --verify "refs/tags/$TARGET^{commit}" >/dev/null 2>&1 \
+        || refuse "there is no release tag $TARGET."
+    step "checking out $TARGET"
+    git checkout -q "$TARGET" || could_not_run "git checkout $TARGET failed (see above)."
+    # The new release's release.sh replaces this process: nothing of the old checkout's pf runs after the checkout.
+    exec sh deploy/production/release.sh --release "$TARGET" --operator "$OPERATOR" --approver "$APPROVER" \
+        --env-file "$ENV_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# pf backup (OPERATIONS_RUNBOOK §3)
+# ---------------------------------------------------------------------------
+
+cmd_backup() {
+    [ -n "$REASON" ] || REASON="manual backup (pf backup)"
+    exec sh deploy/production/backup.sh --kind manual --operator "$OPERATOR" --reason "$REASON" --env-file "$ENV_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# pf restore NAME (OPERATIONS_RUNBOOK §6, New-instance restore)
+# ---------------------------------------------------------------------------
+
+cmd_restore() {
+    command -v git >/dev/null 2>&1 || could_not_run "git is not installed."
+    for tool in sha256sum df awk; do
+        command -v "$tool" >/dev/null 2>&1 || could_not_run "$tool is not installed."
+    done
+    case "$BACKUP_DIR" in
+        /*) ;;
+        *) could_not_run "PARTFLOW_BACKUP_DIR in $ENV_FILE must be an absolute path, written unquoted." ;;
+    esac
+    BPATH=${BACKUP_DIR%/}/$TARGET
+    [ -d "$BPATH" ] || refuse "there is no backup folder $BPATH: copy the backup into the backup folder first."
+    checkout_at_release \
+        || refuse "the checkout is not at the tag $RELEASE that PARTFLOW_RELEASE names: run \`git checkout $RELEASE\` first."
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+
+    step "checking the backup files"
+    (cd "$BPATH" && sha256sum -c SHA256SUMS >&2) || refuse "the files of $TARGET do not match SHA256SUMS: do not use this backup."
+    rc=0
+    pf_compose --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-verify "$TARGET" \
+        >"$WORK/verify.json" || rc=$?
+    cat "$WORK/verify.json" >&2
+    [ "$rc" -eq 0 ] || refuse "$TARGET failed verification (backup-verify exit $rc): do not use this backup."
+    tag=$(json_field "$WORK/verify.json" release_tag)
+    [ "$tag" = "$RELEASE" ] \
+        || refuse "$TARGET is a backup of release ${tag:-unknown}: check that release out and set PARTFLOW_RELEASE=${tag:-<tag>} in $ENV_FILE first (its images must be built: SYNOLOGY_NAS §7 step 1)."
+
+    start_db
+    count=$(public_relations)
+    case "$count" in
+        0) ;;
+        '') could_not_run "the database could not be read." ;;
+        *) refuse "the database is not empty: a restore goes only into a new, empty database volume (OPERATIONS_RUNBOOK §6). Nothing was restored." ;;
+    esac
+    dump_kib=$(( ($(wc -c <"$BPATH/partflow.dump" | tr -d ' ') + 1023) / 1024 ))
+    free_kib=$(pf_compose exec -T db df -Pk /var/lib/postgresql/data 2>/dev/null | awk 'NR == 2 {print $4}' | tr -d '\r') \
+        || free_kib=
+    printf '%s' "$free_kib" | grep -Eq '^[0-9]+$' || could_not_run "the free space of the database volume could not be read."
+    [ "$free_kib" -ge $((2 * dump_kib + 1048576)) ] \
+        || refuse "$((free_kib / 1024)) MiB free on the database volume, $(((2 * dump_kib + 1048576) / 1024)) MiB needed. Nothing was restored."
+
+    step "restoring $TARGET in one transaction"
+    pf_compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --single-transaction --exit-on-error --no-owner --no-privileges' \
+        <"$BPATH/partflow.dump" >&2 \
+        || refuse "pg_restore failed and rolled back: the database is empty again (see above)."
+    step "creating the database roles and applying the grants"
+    pf_compose --profile ops run --rm -T db-roles >&2 || could_not_run "db-roles failed (see above)."
+    pf_compose --profile ops run --rm -T db-roles apply-grants >&2 || could_not_run "apply-grants failed (see above)."
+
+    REC=${HOME:-/root}/partflow-deployments/$(date -u +%Y%m%dT%H%M%SZ)-restore-$TARGET
+    mkdir -p "$REC" || could_not_run "the record folder $REC cannot be created."
+    step "checking the restored database (revision and reconcile; reports in $REC)"
+    rc=0
+    pf_compose run --rm --no-deps -T backend python -m app.cli revision >"$REC/revision.json" || rc=$?
+    [ "$rc" -eq 0 ] || refuse "revision exit $rc: the restored database is not at the revision of $RELEASE ($REC/revision.json). PartFlow was not started."
+    rc=0
+    pf_compose run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 >"$REC/reconcile.json" \
+        || rc=$?
+    [ "$rc" -eq 0 ] || refuse "reconcile exit $rc: review $REC/reconcile.json with OPERATIONS_RUNBOOK §7 before PartFlow serves this database. PartFlow was not started."
+
+    [ -n "$REASON" ] || REASON="new-instance restore of $TARGET"
+    cat >"$REC/restore.json" <<EOF
+{
+  "host": "$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._-')",
+  "release": "$RELEASE",
+  "backup": "$TARGET",
+  "operator": "$OPERATOR",
+  "approved_by": "$APPROVED_BY",
+  "approved_at": "$(utc)",
+  "reason": "$REASON",
+  "revision": "current",
+  "reconcile": "clean"
+}
+EOF
+    step "starting backend and web on the restored database"
+    pf_compose up -d backend web >&2 || could_not_run "backend and web could not be started (see above)."
+    wait_ready "$RELEASE" 180 \
+        || could_not_run "/api/health does not report release $RELEASE with the schema current after 180 s: read \`docker compose logs --tail=100 backend web\`."
+    sh deploy/production/smoke.sh --release "$RELEASE" --env-file "$ENV_FILE" \
+        || refuse "the smoke checks failed after the restore (see above)."
+    echo "pf: $TARGET is restored and PartFlow $RELEASE runs on it. Writes made after its dump started are not in it. Next: HTTPS for this host (SYNOLOGY_NAS §9); the Administrators come with the backup."
+}
+
+# ---------------------------------------------------------------------------
+# pf status (OPERATIONS_RUNBOOK §2)
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+    if [ -n "$URL" ]; then
+        exec sh deploy/production/check.sh --url "$URL" --env-file "$ENV_FILE" --no-state
+    fi
+    status=0
+    pf_compose ps || status=1
+    body=$(curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || body=
+    if [ -n "$body" ]; then
+        echo "health: $body"
+    else
+        echo "health: no answer on http://127.0.0.1:$PORT/api/health"
+        status=1
+    fi
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    rc=0
+    pf_compose --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" status >"$WORK/status.json" \
+        2>"$WORK/status.err" || rc=$?
+    summary=$(tail -n 1 "$WORK/status.err" 2>/dev/null) || summary=
+    echo "${summary:-status: no report (exit $rc)}"
+    [ "$rc" -eq 0 ] || status=1
+    exit "$status"
+}
+
+case "$COMMAND" in
+    install) cmd_install ;;
+    update) cmd_update ;;
+    backup) cmd_backup ;;
+    restore) cmd_restore ;;
+    status) cmd_status ;;
+esac

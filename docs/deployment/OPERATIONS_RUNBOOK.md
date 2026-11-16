@@ -23,6 +23,7 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | Know what to do daily, weekly and monthly; change a password; remove old backups | §9 |
 | Reset a forgotten password or login name, rename a user, or remove a user's access | §8 (Sign-in and user accounts) |
 | Find what a past release did | §1 |
+| Use the short `pf` command for an installation, an update, a backup, a restore or the status | Before you run any command |
 
 ## Before you run any command
 
@@ -40,6 +41,18 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
    ([`VPS.md`](./VPS.md) §3 and §6): wherever this runbook names `.env.production`, use the VPS file instead.
 3. Use the checkout of the **running** release for daily work. During a release, use the checkout of the **new**
    release. In the NAS installation both are the same folder `repo/`; `git checkout <tag>` switches it.
+
+**The short command `pf`.** `deploy/production/pf` runs the documented procedures in one command each, in their
+order, and stops at the first step that fails; it adds no procedure of its own. `deploy/production/pf --help` prints
+its options.
+
+| Command | What it runs |
+| --- | --- |
+| `pf install` | The first installation of the checked-out release on an empty database: [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §7 and §8. |
+| `pf update <tag>` | `git fetch --tags`, `git checkout <tag>`, then `release.sh` (§5); the approver defaults to the operator. |
+| `pf backup [--reason TEXT]` | A manual backup (§3). |
+| `pf restore <NAME> --approved-by <owner>` | The new-instance restore of §6 into an empty database, with the owner's approval recorded in `restore.json` before `backend` starts. |
+| `pf status [--url https://<partflow-host>]` | The containers, `/api/health` and the `status` summary (§2); with `--url`, `check.sh --no-state`. |
 
 Conventions: a one-shot job that reads or writes the backup folder runs with `--user "$(id -u):$(id -g)"`, because
 that folder has mode 0700. `<partflow-host>` is the host name people type in the browser, `<backup-dir>` is the value
@@ -1162,7 +1175,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §2, §3, §5, §8, §9: the backup task runs `backup.sh --kind scheduled` every hour; Administration → Backups sets the interval and the hourly, daily and weekly backups kept; the `backup_age` limit follows the interval. |
+| 2026-11-16 | uncommitted | Before you run any command: the short command `deploy/production/pf`. |
+| 2026-11-16 | `c1f042b` | §2, §3, §5, §8, §9: the backup task runs `backup.sh --kind scheduled` every hour; Administration → Backups sets the interval and the hourly, daily and weekly backups kept; the `backup_age` limit follows the interval. |
 | 2026-11-14 | `2a24c2a` | §5: the release stops before the write freeze when the new image's `revision` reports `blocked_by_data`. |
 | 2026-11-13 | `4a99914` | §2: the successful automatic refreshes of the Production Board are no longer in the `web` log. |
 | 2026-11-12 | `de4d99f` | §5 Observe: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after 60 s, and every other page once idle for 1 minute instead of 2; §2: an open Production Board adds about 9 MB of `web` log a day instead of 3 MB. |

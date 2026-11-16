@@ -1,7 +1,7 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa
-> commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `4a99914` cộng các thay đổi chưa
+> commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này là điểm khởi đầu để cài đặt và vận hành PartFlow trong môi trường production. Hãy đọc §1 và §2 trước: hai
@@ -63,9 +63,11 @@ Các script trong `deploy/production/` làm giúp bạn những việc rủi ro:
 | Tra cứu một thiết lập, một giới hạn hoặc chức năng của một container | §3.1 của hướng dẫn này |
 | Đặt tên và công bố một bản phát hành (dành cho lập trình viên) | §10 của hướng dẫn này |
 
-Công cụ Deployment Admin `pf` và hướng dẫn của nó [`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md)
-quản lý các instance staging riêng biệt. Chúng không thuộc bản cài đặt production, và không bước nào ở trên cần đến
-chúng.
+`deploy/production/pf` là lệnh ngắn cho production stack: `install`, `update`, `backup`, `restore` và `status`, mỗi lệnh
+chạy quy trình đã mô tả ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md), Trước khi chạy
+bất kỳ lệnh nào). Công cụ Deployment Admin cũ (`pf.sh`) và hướng dẫn của nó
+[`deployment/SYNOLOGY_ADMIN.vi.md`](./deployment/SYNOLOGY_ADMIN.vi.md) quản lý các instance staging riêng biệt; chúng
+không thuộc bản cài đặt production, và không bước nào ở trên cần đến chúng.
 
 ### 1.3 Những gì được hỗ trợ
 
@@ -99,7 +101,7 @@ mạnh nhưng không bao giờ chặn việc sử dụng.
 | Bản phát hành (Release) | Một phiên bản của PartFlow: một git tag như `v1.0.0` (§10.2) và commit mà tag đó trỏ tới. Cả hai image của một bản phát hành được build từ commit đó và mang tag của nó. |
 | Release checkout | Bản git clone với tag phát hành đã được checkout. Mọi lệnh chạy từ thư mục gốc của nó. |
 | Tài khoản vận hành (Operating account) | Tài khoản duy nhất chạy mọi lệnh PartFlow, `release.sh` và mọi tác vụ theo lịch, đồng thời sở hữu thư mục sao lưu. Trên Synology NAS đó là `root`, vì Docker trên DSM cần như vậy. |
-| `PF` | Một biến shell rút gọn lệnh Compose của production stack (bên dưới). Nó không phải công cụ Deployment Admin `pf`. |
+| `PF` | Một biến shell rút gọn lệnh Compose của production stack (bên dưới). Nó không phải lệnh `deploy/production/pf`. |
 | Ops job | Một container chạy một lần (`migrate`, `db-roles`, `backup-tools` hoặc `status`) chỉ chạy khi được khởi động bằng `$PF --profile ops run`. |
 | Tạm dừng ghi (Write freeze) | `backend` được dừng có chủ đích để không thể ghi gì, ví dụ trong lúc migration database. `web` vẫn phục vụ các màn hình, các màn hình này hiển thị OFFLINE và chặn mọi thay đổi. |
 | Thiết lập lần đầu (First-run setup) | Tạo Administrator đầu tiên trong trình duyệt bằng mã thiết lập (setup token) dùng một lần mà `backend` ghi vào log của nó. |
@@ -739,7 +741,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | §3.1 Log: các lần Production Board tự làm mới thành công không được ghi log. |
+| 2026-11-16 | uncommitted | §1.2: lệnh ngắn `deploy/production/pf` cho production stack. |
+| 2026-11-13 | `4a99914` | §3.1 Log: các lần Production Board tự làm mới thành công không được ghi log. |
 | 2026-11-12 | `de4d99f` | §3.1 Log: mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s thay vì 15 s. |
 | 2026-11-12 | `878822f` | `smoke.sh` chờ `web` và backend khởi động xong trước khi kiểm tra. |
 | 2026-11-10 | `e0e5056` | Viết lại thành điểm khởi đầu: bảng tác vụ, một danh sách thuật ngữ và quy tắc an toàn, và §3.1 chỉ để tham chiếu; các bước cài đặt, phát hành và quay lui nay chỉ nằm trong các hướng dẫn theo nền tảng và runbook; truy cập từ Internet được hỗ trợ thông qua Cloudflare. |

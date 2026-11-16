@@ -1,6 +1,6 @@
 # Cài đặt PartFlow trên Synology NAS
 
-> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi
+> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi
 > chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -231,6 +231,9 @@ $PF config --quiet
 ```
 
 ## 7. Build các image và tạo database
+
+`deploy/production/pf install` chạy các bước của mục này và của §8 trong một lệnh, theo thứ tự này, và dừng ở bước đầu
+tiên thất bại; các bước bên dưới cho thấy nó làm gì.
 
 1. Build hai image, `backend` và `web`, từ bản phát hành đã checkout. Việc này mất 10 đến 30 phút. Nếu nó dừng với lỗi
    mạng, hãy chạy lại đúng lệnh đó.
@@ -558,6 +561,8 @@ git checkout <NEW_TAG>
 deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --approver "<your name>"
 ```
 
+`deploy/production/pf update <NEW_TAG>` chạy đúng ba lệnh này.
+
 - Mã thoát 0 nghĩa là bản phát hành mới đang chạy và các kiểm tra tự động của nó đã đạt. Sau đó hãy kiểm tra bằng tay
   với dữ liệu thử: đăng nhập, quét ở một Scan Station, và lưu một thay đổi rồi đọc lại. Các trang đang mở hiển thị
   thông báo cập nhật và tự tải lại: Scan Station hoặc Production Board sau 10 giây đếm ngược trong thông báo, mọi trang
@@ -600,7 +605,8 @@ ghi kích thước database mỗi ngày một lần.
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §1, §11.2: tác vụ sao lưu chạy mỗi giờ với `--kind scheduled`, và Administration → Backups đặt khoảng thời gian và số bản sao lưu được giữ; §11.3, §11.5, §12: các giờ quanh bản sao lưu mỗi giờ. |
+| 2026-11-16 | uncommitted | §7, §12: `deploy/production/pf install` và `pf update` chạy các bước này. |
+| 2026-11-16 | `c1f042b` | §1, §11.2: tác vụ sao lưu chạy mỗi giờ với `--kind scheduled`, và Administration → Backups đặt khoảng thời gian và số bản sao lưu được giữ; §11.3, §11.5, §12: các giờ quanh bản sao lưu mỗi giờ. |
 | 2026-11-12 | `de4d99f` | §12: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau một phút, và mọi trang khác khi rảnh 1 phút thay vì 2 phút. |
 | 2026-11-12 | `77a2dfb` | §12: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau khoảng một phút, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu). |
 | 2026-11-10 | `e0e5056` | Viết lại thành một quy trình cài đặt tuyến tính từ NAS trống đến khi mọi người làm việc trong PartFlow, với mọi đường dẫn DSM và mọi lệnh theo thứ tự; bước HTTPS đưa ra phương án mạng LAN hoặc hướng dẫn Cloudflare; thêm kiểm tra kernel không hỗ trợ giới hạn bộ xử lý và kiểm tra firewall đối với các mạng của container; phần NAS staging tùy chọn và quy trình chuyển máy được loại bỏ (việc chuyển máy nay nằm trong runbook §6). |

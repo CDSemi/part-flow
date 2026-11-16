@@ -61,8 +61,11 @@ the installation.
 | Look up a setting, a limit or what a container does | §3.1 of this guide |
 | Name and publish a release (developers) | §10 of this guide |
 
-The Deployment Admin tool `pf` and its guide [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) manage
-separate staging instances. They are not part of the production installation, and no step above needs them.
+`deploy/production/pf` is the short command for the production stack: `install`, `update`, `backup`, `restore` and
+`status`, each running the documented procedure
+([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any command). The older
+Deployment Admin tool (`pf.sh`) and its guide [`deployment/SYNOLOGY_ADMIN.md`](./deployment/SYNOLOGY_ADMIN.md) manage
+separate staging instances; they are not part of the production installation, and no step above needs them.
 
 ### 1.3 What is supported
 
@@ -95,7 +98,7 @@ required. Backups and monitoring are strongly recommended and never block use.
 | Release | One version of PartFlow: a git tag such as `v1.0.0` (§10.2) and the commit it points to. Both images of a release are built from that commit and carry its tag. |
 | Release checkout | The git clone with the release tag checked out. Every command runs from its root folder. |
 | Operating account | The one account that runs every PartFlow command, `release.sh` and every scheduled task, and that owns the backup folder. On a Synology NAS this is `root`, because Docker on DSM needs it. |
-| `PF` | A shell variable that shortens the Compose command of the production stack (below). It is not the Deployment Admin tool `pf`. |
+| `PF` | A shell variable that shortens the Compose command of the production stack (below). It is not the command `deploy/production/pf`. |
 | Ops job | A one-shot container (`migrate`, `db-roles`, `backup-tools` or `status`) that runs only when started with `$PF --profile ops run`. |
 | Write freeze | `backend` stopped on purpose, so that nothing can be written, for example during a database migration. `web` keeps serving the screens, which show OFFLINE and block every change. |
 | First-run setup | Creating the first Administrator in the browser with a one-time setup token that `backend` writes to its log. |
@@ -729,7 +732,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | §3.1 Logs: the successful automatic refreshes of the Production Board feed are not logged. |
+| 2026-11-16 | uncommitted | §1.2: the short command `deploy/production/pf` for the production stack. |
+| 2026-11-13 | `4a99914` | §3.1 Logs: the successful automatic refreshes of the Production Board feed are not logged. |
 | 2026-11-12 | `de4d99f` | §3.1 Logs: an open Production Board adds `web` records every 5 s instead of 15 s. |
 | 2026-11-12 | `878822f` | `smoke.sh` waits for a starting `web` and backend before its checks. |
 | 2026-11-10 | `e0e5056` | Rewritten as the starting point: a task table, one list of terms and safety rules, and a reference-only §3.1; the installation, release and rollback steps now live only in the platform guides and the runbook; access from the Internet is supported through Cloudflare. |

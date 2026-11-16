@@ -230,6 +230,9 @@ $PF config --quiet
 
 ## 7. Build the images and create the database
 
+`deploy/production/pf install` runs the steps of this section and of §8 in one command, in this order, and stops at
+the first one that fails; the steps below show what it does.
+
 1. Build the two images, `backend` and `web`, from the checked-out release. This takes 10 to 30 minutes. If it stops
    with a network error, run the same command again.
 
@@ -556,6 +559,8 @@ git checkout <NEW_TAG>
 deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --approver "<your name>"
 ```
 
+`deploy/production/pf update <NEW_TAG>` runs the same three commands.
+
 - Exit code 0 means the new release runs and its automatic checks passed. Then check by hand with test data: sign in,
   scan at a Scan Station, and save a change and read it back. Open pages show an update notice and reload themselves:
   a Scan Station or Production Board after a 10-second countdown in the notice, every other page once nobody has used
@@ -596,7 +601,8 @@ storage (images and container logs). `/root/partflow-monitoring/growth.tsv` reco
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §1, §11.2: the backup task runs every hour with `--kind scheduled`, and Administration → Backups sets the interval and how many backups are kept; §11.3, §11.5, §12: times around the hourly backup. |
+| 2026-11-16 | uncommitted | §7, §12: `deploy/production/pf install` and `pf update` run these steps. |
+| 2026-11-16 | `c1f042b` | §1, §11.2: the backup task runs every hour with `--kind scheduled`, and Administration → Backups sets the interval and how many backups are kept; §11.3, §11.5, §12: times around the hourly backup. |
 | 2026-11-12 | `de4d99f` | §12: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after a minute, and every other page once idle for 1 minute instead of 2. |
 | 2026-11-12 | `77a2dfb` | §12: pages open during a release now reload themselves (a Scan Station or Production Board after about a minute, every other page once idle for 2 minutes with nothing unsaved). |
 | 2026-11-10 | `e0e5056` | Rewritten as one linear installation from an empty NAS to people working in PartFlow, with every DSM path and command in order; the HTTPS step offers the LAN option or the Cloudflare guide; added the check for kernels without processor quota support and the firewall check of the container networks; the optional NAS staging and the move procedure were removed (the move is now in the runbook §6). |
