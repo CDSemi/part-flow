@@ -472,6 +472,32 @@ function sessionResponse(): Response {
   );
 }
 
+/** The ranked demand lines in rank order, as the Hot list wire lists them. */
+function hotEntriesWire() {
+  return state.workOrders
+    .flatMap((wo) => wo.demands.map((d) => ({ wo, d })))
+    .filter(({ d }) => d.priority_rank !== null)
+    .sort((a, b) => (a.d.priority_rank ?? 0) - (b.d.priority_rank ?? 0))
+    .map(({ wo, d }) => ({
+      work_order_demand_id: d.id,
+      rank: d.priority_rank,
+      part_number: d.part_number,
+      work_order_id: wo.id,
+      work_order_number: wo.work_order_number,
+      work_order_received_date: wo.received_date,
+      work_order_completed: wo.status === 'COMPLETED',
+      request_type: d.request_type,
+      job_numbers: d.job_numbers,
+      requested_quantity: d.requested_quantity,
+      allocated_quantity: d.allocated_quantity,
+      shortage_quantity: d.requested_quantity - d.allocated_quantity,
+      active: d.requested_quantity > d.allocated_quantity,
+      released_quantity: 0,
+      due_date: d.due_date,
+      part_number_locations: [],
+    }));
+}
+
 async function handle(url: string, init?: RequestInit): Promise<Response> {
   const method = init?.method ?? 'GET';
   if (url === '/api/session') return sessionResponse();
@@ -787,6 +813,52 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     }
     if (state.holdWorkOrderList) await state.holdWorkOrderList;
     return json(listPage(null));
+  }
+  // The Hot list of the Priority view (Phase 17 Add to Hot list): the
+  // ranked demand lines, and ONE single-entry ADD at the bottom.
+  if (url === '/api/hot-list' && method === 'GET') {
+    return json({
+      department: { id: 1, name: 'Plating' },
+      entries: hotEntriesWire(),
+    });
+  }
+  if (url === '/api/hot-list/changes' && method === 'POST') {
+    const current = hotEntriesWire().map((entry) => entry.work_order_demand_id);
+    const expected = body.expected_order as number[];
+    const next = body.new_order as number[];
+    if (JSON.stringify(expected) !== JSON.stringify(current)) {
+      return json(
+        {
+          detail: 'The Hot list was changed meanwhile.',
+          hot_list_changed: true,
+          entries: hotEntriesWire(),
+        },
+        409,
+      );
+    }
+    const demandId = next[next.length - 1];
+    const target = state.workOrders
+      .flatMap((wo) => wo.demands)
+      .find((d) => d.id === demandId)!;
+    target.priority_rank = next.length;
+    return json(
+      {
+        device_event_id: body.device_event_id,
+        action: 'ADD',
+        created: true,
+        changes: [
+          {
+            work_order_demand_id: demandId,
+            part_number: target.part_number,
+            work_order_number: null,
+            previous_rank: null,
+            new_rank: next.length,
+          },
+        ],
+        entries: hotEntriesWire(),
+      },
+      201,
+    );
   }
   if (url === '/api/work-orders' && method === 'POST') {
     if (state.failNextWorkOrderWrite) {
@@ -1210,6 +1282,67 @@ test('a complete save flow (number + due entered) commits ONE POST and reloads f
   expect(
     state.calls.filter((call) => call === 'POST /api/work-orders'),
   ).toHaveLength(1);
+  // Add to Hot list was not ticked: the Hot list was never touched.
+  expect(state.calls.filter((call) => call.includes('/api/hot-list'))).toEqual(
+    [],
+  );
+});
+
+test('Add to Hot list puts the saved lines at the bottom of the Hot list through the Priority command', async () => {
+  // One entry is on the Hot list already.
+  state.workOrders[0].demands[0].priority_rank = 1;
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.change(screen.getByLabelText(/^WO Number/), {
+    target: { value: 'WO-HOT-1' },
+  });
+  fireEvent.change(screen.getByLabelText(/^WO due date/), {
+    target: { value: '2026-12-01' },
+  });
+  scanBarcode('PF:PN:HOT-A');
+  fireEvent.change(await screen.findByLabelText('Quantity for HOT-A'), {
+    target: { value: '4' },
+  });
+  scanBarcode('PF:PN:HOT-B');
+  fireEvent.change(await screen.findByLabelText('Quantity for HOT-B'), {
+    target: { value: '2' },
+  });
+
+  const hot = screen.getByRole('checkbox', { name: 'Add to Hot list' });
+  expect(hot).not.toBeChecked();
+  fireEvent.click(hot);
+  expect(
+    screen.getByText(/the lines join the bottom of the Hot list/),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+
+  expect(
+    await screen.findByText(
+      /WO-HOT-1 saved — business demand only \(2 lines\)\. 🔥 Its 2 lines joined the bottom of the Hot list\./,
+    ),
+  ).toBeInTheDocument();
+  const saved = state.workOrders.find(
+    (w) => w.work_order_number === 'WO-HOT-1',
+  )!;
+  // In line order, below the existing entry.
+  expect(saved.demands.map((d) => [d.part_number, d.priority_rank])).toEqual([
+    ['HOT-A', 2],
+    ['HOT-B', 3],
+  ]);
+  expect(
+    state.calls.filter((call) => call === 'POST /api/hot-list/changes'),
+  ).toHaveLength(2);
+});
+
+test('Add to Hot list is offered only to a user who may set demand priority', async () => {
+  sessionPermissions = PERMISSIONS.filter(
+    (permission) => permission !== 'SET_DEMAND_PRIORITY',
+  );
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  expect(
+    screen.queryByRole('checkbox', { name: 'Add to Hot list' }),
+  ).toBeNull();
 });
 
 test('a failed New Work Order save keeps the whole draft and every entered value', async () => {

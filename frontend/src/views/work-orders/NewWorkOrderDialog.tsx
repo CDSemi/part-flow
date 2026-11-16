@@ -13,6 +13,7 @@ import { PnEditButton } from '../../components/PnEditButton';
 import { todayIso } from '../dates';
 import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
+import { addLinesToHotList, hotListIntakeNotice } from './hot-list-intake';
 import type { AddPartResult } from './AddPartDialog';
 import {
   WORK_ORDER_NUMBER_TOO_LONG,
@@ -61,8 +62,9 @@ export function NewWorkOrderDialog({
   onClose: () => void;
   /** An entered WO Number already exists — open it, never duplicate. */
   onOpenExisting: (existing: WorkOrderSummary) => void;
-  /** The Work Order was committed by the backend. */
-  onSaved: (detail: WorkOrderDetail) => void;
+  /** The Work Order was committed by the backend; `hotListNotice`
+   * says how its lines joined the Hot list (null when not asked). */
+  onSaved: (detail: WorkOrderDetail, hotListNotice: string | null) => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
 }) {
@@ -72,6 +74,11 @@ export function NewWorkOrderDialog({
   // opens.
   const { can } = useSession();
   const [pnReadOnly] = useState(() => !can('MANAGE_PART_NUMBER_MASTER'));
+  // Add to Hot list (Phase 17) is offered to a user who may set demand
+  // priority, the permission its Hot list changes need; fixed when the
+  // dialog opens.
+  const [mayAddToHotList] = useState(() => can('SET_DEMAND_PRIORITY'));
+  const [addToHotList, setAddToHotList] = useState(false);
   const [workOrderNumber, setWorkOrderNumber] = useState('');
   const initialReceived = useRef(todayIso());
   const [received, setReceived] = useState(initialReceived.current);
@@ -108,7 +115,8 @@ export function NewWorkOrderDialog({
     workOrderNumber.trim() !== '' ||
     due !== '' ||
     received !== initialReceived.current ||
-    lines.length > 0;
+    lines.length > 0 ||
+    addToHotList;
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -232,14 +240,14 @@ export function NewWorkOrderDialog({
     // is one all-or-nothing transaction.
     setBusy(true);
     setServerError(null);
+    let detail: WorkOrderDetail;
     try {
-      const detail = await createWorkOrder({
+      detail = await createWorkOrder({
         workOrderNumber: numberIsBlank ? null : workOrderNumber,
         receivedDate: received,
         dueDate: due || null,
         lines: lines.map(draftToNewLine),
       });
-      onSaved(detail);
     } catch (error) {
       // A lost duplicate race commits nothing — resolve the ORIGINAL
       // entered value and open the existing Work Order exactly like
@@ -259,7 +267,18 @@ export function NewWorkOrderDialog({
       setBusy(false);
       setServerError(errorMessage(error));
       showNotice(`✕ ${errorMessage(error)} The entered draft was kept.`);
+      return;
     }
+    // The Work Order is committed. Its lines then join the Hot list
+    // through the Priority command; whatever happens there, the Work
+    // Order stays saved and the notice says how far the lines got.
+    const hotListNotice = addToHotList
+      ? hotListIntakeNotice(
+          await addLinesToHotList(detail.demands.map((demand) => demand.id)),
+          detail.demands.length,
+        )
+      : null;
+    onSaved(detail, hotListNotice);
   }
 
   async function handleSave() {
@@ -380,7 +399,28 @@ export function NewWorkOrderDialog({
                 onChange={(e) => handleDueChange(e.target.value)}
               />
             </div>
+            {mayAddToHotList ? (
+              <div className="nwo-field nwo-hot">
+                <span className="nwo-hot-title">
+                  Priority <span className="field-optional">(optional)</span>
+                </span>
+                <label className="nwo-hot-check">
+                  <input
+                    type="checkbox"
+                    checked={addToHotList}
+                    onChange={(e) => setAddToHotList(e.target.checked)}
+                  />
+                  Add to Hot list
+                </label>
+              </div>
+            ) : null}
           </div>
+          {addToHotList ? (
+            <p className="wo-sub nwo-hot-note">
+              After the save, the lines join the bottom of the Hot list in this
+              order.
+            </p>
+          ) : null}
 
           <div className="nwo-scanrow">
             <input

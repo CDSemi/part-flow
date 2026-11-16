@@ -2063,7 +2063,7 @@ Priority belongs to Work Order Demand.
 The Hot list is managed within the Department:
 
 1. Show Hot Work Order Demand sorted by explicit priority rank.
-2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode. A scanned PN barcode resolves deterministically: no eligible Work Order Demand adds nothing; exactly one is added directly; more than one filters the candidate list to that PN and requires an explicit selection of the specific Work Order Demand — never a first-match guess.
+2. Add Work Order Demand to the Hot list by searching and selecting, by scanning the PN barcode, or, for a new Work Order, by asking for it when the Work Order is created: its demand lines are added at the bottom in line order, one Hot list change each. A scanned PN barcode resolves deterministically: no eligible Work Order Demand adds nothing; exactly one is added directly; more than one filters the candidate list to that PN and requires an explicit selection of the specific Work Order Demand — never a first-match guess.
 3. If a PN has multiple active Work Order Demand records, each Work Order Demand is selected and ranked separately.
 4. Add new Hot entries at the bottom by default; adding at the bottom applies directly.
 5. Allow drag-and-drop reordering.
@@ -2448,7 +2448,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | §8.4 and §8.8: Area names are unique within a Department and active Planned Route names are unique. |
+| 2026-11-16 | uncommitted | §21: a new Work Order can put its demand lines on the Hot list when it is created. |
+| 2026-11-14 | 2a24c2a | §8.4 and §8.8: Area names are unique within a Department and active Planned Route names are unique. |
 | 2026-11-14 | 15a2120 | §20: a fourth initial role, Super User, grants every permission key, and a release that adds a key grants it to every role that holds every other key. |
 | 2026-11-13 | 6c0fa6c | §18 and §32: stocked quantity never returns to active production, offline scan synchronization stays outside the planned scope, and no product decision remains open. |
 | 2026-11-09 | 398c617 | Rewritten as current content for new readers. Two general sentences were narrowed to the specific rules they contradicted (and that the code implements): a reused internal MODIFY Work Order raises its existing line, and raising a released line's quantity is valid only while the Work Order is not completed. |

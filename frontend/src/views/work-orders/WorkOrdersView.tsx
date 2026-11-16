@@ -327,11 +327,11 @@ function ActiveWorkOrdersView() {
             );
             openWorkOrder(existing.id);
           }}
-          onSaved={(saved) => {
+          onSaved={(saved, hotListNotice) => {
             closeNewWorkOrder();
             workOrdersData.reload();
             showNotice(
-              `💾 WO ${woDisplay(saved.workOrderNumber)} saved — business demand only (${saved.demands.length} line${saved.demands.length > 1 ? 's' : ''}).`,
+              `💾 WO ${woDisplay(saved.workOrderNumber)} saved — business demand only (${saved.demands.length} line${saved.demands.length > 1 ? 's' : ''}).${hotListNotice ? ` ${hotListNotice}` : ''}`,
             );
           }}
           onDirtyChange={setNewWorkOrderDirty}

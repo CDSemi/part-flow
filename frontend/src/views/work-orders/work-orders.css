@@ -575,6 +575,34 @@
   width: 220px;
 }
 
+/* Add to Hot list (Phase 17): a checkbox field of the header row. */
+.nwo-hot-title {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.nwo-field .nwo-hot-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nwo-form .nwo-hot-check input {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.nwo-hot-note {
+  margin: -6px 0 10px;
+}
+
 .nwo-scanrow {
   display: flex;
   gap: 10px;

@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-15.
+> Đồng bộ với bản tiếng Anh tại commit `a3a7e87` cộng các thay đổi chưa commit ngày 2026-11-16.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -3060,6 +3060,10 @@ audit chỉ nằm trên các surface audit đã được phê duyệt (§3 rule 
   - Kiểm tra tính duy nhất trải trên **toàn bộ lịch sử, kể cả các Work Order đã hoàn tất**: nhập số của một Work Order đã
     hoàn tất sẽ thông báo việc hoàn tất và mở chi tiết chỉ-đọc của nó (§11.5). Một số đã hoàn tất không bao giờ được âm
     thầm dùng lại chỉ vì Work Order đã rời danh sách đang hoạt động.
+  - **Add to Hot list** (dành cho user có quyền đặt priority của demand; PROJECT_PROFILE §21): khi được chọn, ngay sau
+    khi lưu, các line đã lưu vào cuối Hot list theo thứ tự line, qua chính lệnh thay đổi của Hot list, mỗi line một
+    lệnh. Work Order vẫn được lưu dù việc đó ra sao; thông báo lưu nêu bao nhiêu line đã vào, và line nào còn thiếu thì
+    thêm trong Priority.
 - **Thêm Part thủ công là workflow chính.** Một action nổi bật **＋ Add Part manually** mở **một dialog nhiều bước có khả
   năng truy cập** (không có các modal lồng nhau xếp chồng):
   1. **PN**: search và chọn một PartNumber hiện có, hoặc tạo tường minh một PartNumber mới (kèm preview barcode, §11.2).
@@ -3942,7 +3946,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-15 | uncommitted | §7.2 mục 7 và §11.6: một entry phân bổ của trạm Stockroom nêu tên Worker mà trạm đó đã xác định. |
+| 2026-11-16 | uncommitted | §11.3: Add to Hot list trong phần đầu của New Work Order. |
+| 2026-11-15 | a3a7e87 | §7.2 mục 7 và §11.6: một entry phân bổ của trạm Stockroom nêu tên Worker mà trạm đó đã xác định. |
 | 2026-11-14 | 2a24c2a | §13.2: một Duplicate mà `{name} (variant)` của nó đã thuộc về một route đang dùng sẽ mở `New Planned Route` kèm lời từ chối. |
 | 2026-11-14 | 15a2120 | §9: các role ban đầu có thêm Super User. |
 | 2026-11-14 | 277a512 | §11.2: một WO Number, PN của một line chưa lưu và một Job Number mới dài hơn 200 ký tự là lỗi field, và Add Part không đề xuất tạo một PN mới như vậy. |

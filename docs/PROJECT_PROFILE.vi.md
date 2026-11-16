@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-16.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -2066,7 +2066,7 @@ Priority thuộc về Work Order Demand.
 Hot list được quản lý trong phạm vi Department:
 
 1. Hiển thị các Work Order Demand Hot được sắp xếp theo hạng ưu tiên tường minh.
-2. Thêm Work Order Demand vào Hot list bằng cách tìm kiếm và chọn, hoặc bằng cách quét barcode PN. Một barcode PN được quét sẽ được phân giải một cách tất định: không có Work Order Demand đủ điều kiện nào thì không thêm gì; có đúng một thì thêm trực tiếp; có nhiều hơn một thì lọc danh sách ứng viên theo PN đó và yêu cầu chọn tường minh Work Order Demand cụ thể — không bao giờ đoán theo kết quả khớp đầu tiên.
+2. Thêm Work Order Demand vào Hot list bằng cách tìm kiếm và chọn, bằng cách quét barcode PN, hoặc, với một Work Order mới, bằng cách yêu cầu điều đó khi tạo Work Order: các demand line của nó được thêm vào cuối theo thứ tự line, mỗi line một lần thay đổi Hot list. Một barcode PN được quét sẽ được phân giải một cách tất định: không có Work Order Demand đủ điều kiện nào thì không thêm gì; có đúng một thì thêm trực tiếp; có nhiều hơn một thì lọc danh sách ứng viên theo PN đó và yêu cầu chọn tường minh Work Order Demand cụ thể — không bao giờ đoán theo kết quả khớp đầu tiên.
 3. Nếu một PN có nhiều bản ghi Work Order Demand đang hoạt động, mỗi Work Order Demand được chọn và xếp hạng riêng.
 4. Mặc định thêm các mục Hot mới vào cuối danh sách; việc thêm vào cuối được áp dụng trực tiếp.
 5. Cho phép sắp xếp lại bằng kéo-thả.
@@ -2451,7 +2451,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | §8.4 và §8.8: tên Area là duy nhất trong một Department và tên Planned Route đang dùng là duy nhất. |
+| 2026-11-16 | uncommitted | §21: một Work Order mới có thể đưa các demand line của nó vào Hot list khi được tạo. |
+| 2026-11-14 | 2a24c2a | §8.4 và §8.8: tên Area là duy nhất trong một Department và tên Planned Route đang dùng là duy nhất. |
 | 2026-11-14 | 15a2120 | §20: vai trò ban đầu thứ tư, Super User, cấp mọi permission key, và một bản phát hành thêm một key sẽ cấp key đó cho mọi vai trò đang giữ tất cả các key khác. |
 | 2026-11-13 | 6c0fa6c | §18 và §32: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động, đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch, và không còn quyết định sản phẩm nào để mở. |
 | 2026-11-09 | 398c617 | Viết lại thành nội dung hiện hành cho người mới đọc. Hai câu nói chung được thu hẹp theo đúng các quy tắc cụ thể mà chúng mâu thuẫn (và code đang thực hiện): Work Order MODIFY nội bộ được tái sử dụng thì tăng dòng hiện có, và việc tăng số lượng của một dòng đã phát hành chỉ hợp lệ khi Work Order chưa hoàn tất. |

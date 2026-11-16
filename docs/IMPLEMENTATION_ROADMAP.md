@@ -1371,8 +1371,10 @@ order, and a delivered item says so:
    station identified, by current name, in the Work Order details (the allocation dialog) and in PN Tracking's
    allocation history, as a Management allocation shows its user. The audit trail lists only Management allocations,
    so it is unchanged.
-6. **Add to Hot list at intake.** The New Work Order dialog can put its demand lines on the Hot list. They join at the
-   bottom through the Hot-list command (no typed rank), for users who may set demand priority.
+6. **Add to Hot list at intake — delivered.** The New Work Order dialog can put its demand lines on the Hot list. They
+   join at the bottom through the Hot-list command (no typed rank), for users who may set demand priority: one ADD per
+   line in line order right after the save. The Work Order stays saved whatever happens there, and the saved notice
+   says how many lines joined.
 7. **Settings previews.** Scan behavior and General settings show their candidate settings as disabled controls, each
    marked as not available yet. Scan behavior: success and error sounds, ignoring a repeated scan of the same code
    within a set time, allowing typed entry at Scan Stations, the scanner's ending key and the prefix or suffix to strip,
@@ -1429,7 +1431,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-15 | uncommitted | Phase 17 item 5 delivered: a Stockroom station allocation shows the Worker the station identified in the allocation dialog and in PN Tracking. |
+| 2026-11-16 | uncommitted | Phase 17 item 6 delivered: Add to Hot list in the New Work Order dialog. |
+| 2026-11-15 | `a3a7e87` | Phase 17 item 5 delivered: a Stockroom station allocation shows the Worker the station identified in the allocation dialog and in PN Tracking. |
 | 2026-11-14 | `2a24c2a` | Phase 17 item 4 delivered: migration `0034_phase17_unique_names` makes Area names unique within a Department and active Planned Route names unique, and `revision` reports stored duplicates as `blocked_by_data`. |
 | 2026-11-14 | `15a2120` | Phase 17 item 3 delivered: migration `0033_phase17_super_user_role` seeds the Super User role with every permission key and becomes the schema head. |
 | 2026-11-14 | `277a512` | Phase 17 item 2 delivered: manual Work Order entry refuses a Work Order Number, Part Number or Job Number longer than 200 characters; Phase 17 is in progress. |

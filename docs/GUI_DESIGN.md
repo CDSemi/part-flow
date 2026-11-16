@@ -3035,6 +3035,10 @@ the approved audit surfaces (§3 rule 10).
   - The uniqueness check spans the **whole history, including completed Work Orders**: entering the number of a
     completed Work Order announces the completion and opens its read-only details (§11.5). A completed number is never
     silently reusable just because the Work Order has left the active list.
+  - **Add to Hot list** (offered to a user who may set demand priority; PROJECT_PROFILE §21): when ticked, the saved
+    lines join the bottom of the Hot list in line order right after the save, through the Hot list's own change, one
+    per line. The Work Order stays saved whatever happens there; the saved notice says how many lines joined, and a
+    line left out is added in Priority.
 - **Manual Part addition is the primary workflow.** A prominent **＋ Add Part manually** action opens **one accessible
   multi-step dialog** (no stacked nested modals):
   1. **PN**: search and select an existing PartNumber, or explicitly create a new one (with a barcode preview, §11.2).
@@ -3900,7 +3904,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-15 | uncommitted | §7.2 item 7 and §11.6: a Stockroom station allocation entry names the Worker its station identified. |
+| 2026-11-16 | uncommitted | §11.3: Add to Hot list in the New Work Order header. |
+| 2026-11-15 | a3a7e87 | §7.2 item 7 and §11.6: a Stockroom station allocation entry names the Worker its station identified. |
 | 2026-11-14 | 2a24c2a | §13.2: a Duplicate whose `{name} (variant)` an active route already holds opens `New Planned Route` with the refusal. |
 | 2026-11-14 | 15a2120 | §9: the initial roles include Super User. |
 | 2026-11-14 | 277a512 | §11.2: a WO Number, the PN of an unsaved line and a new Job Number longer than 200 characters are field errors, and Add Part offers no such new PN. |
