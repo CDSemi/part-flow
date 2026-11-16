@@ -138,6 +138,7 @@ export function PolicySwitch({
   on,
   disabled,
   onToggle,
+  note,
 }: {
   label: string;
   description: string;
@@ -145,6 +146,8 @@ export function PolicySwitch({
   on: boolean;
   disabled: boolean;
   onToggle: () => void;
+  /** Shown under the description (a setting preview's tag). */
+  note?: ReactNode;
 }) {
   return (
     <button
@@ -159,6 +162,7 @@ export function PolicySwitch({
       <span className="swtext">
         <span className="swlabel">{label}</span>
         <span className="swdesc">{description}</span>
+        {note}
       </span>
       <span className="track" aria-hidden="true">
         <span className="knob" />

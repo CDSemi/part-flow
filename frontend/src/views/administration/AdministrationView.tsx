@@ -15,6 +15,7 @@ import { HistoryArchivalSection } from './HistoryArchivalSection';
 import { MachineAssignmentSection } from './MachineAssignmentSection';
 import { OperationsSection } from './OperationsSection';
 import { RolesSection } from './RolesSection';
+import { ScanBehaviorSection } from './ScanBehaviorSection';
 import { ScanStationsSection } from './ScanStationsSection';
 import { SettingsSection } from './SettingsSection';
 import { UsersSection } from './UsersSection';
@@ -35,12 +36,12 @@ import type { AdminSection } from './sections';
 // permissions (the real Undo reason policy and the role ×
 // correction-permission table), Department display settings (the
 // per-Department Production Board rotation timing), Settings (the real
-// Due Soon warning policy; the rest of Settings says it is not
-// available yet) and History archival & purge (the real retention
-// period; archival and purge runs say they are not available yet).
-// Machine assignment is a read-only statement of the two Area modes.
-// Scan behavior has no defined content yet and presents itself
-// honestly as not available yet.
+// Due Soon warning and User sign-in policies; the other general
+// settings are disabled previews marked Not available yet) and History
+// archival & purge (the real retention period; archival and purge runs
+// say they are not available yet). Machine assignment is a read-only
+// statement of the two Area modes. Scan behavior shows its candidate
+// settings as disabled previews marked Not available yet (Phase 17).
 //
 // Access (Phase 14 slice 2): every section needs a signed-in user, and
 // no Administration request is sent before — the shared sign-in gate
@@ -165,6 +166,8 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <SettingsSection />;
     case 'machine-assignment':
       return <MachineAssignmentSection />;
+    case 'scan-behavior':
+      return <ScanBehaviorSection />;
     case 'data-retention':
       return <HistoryArchivalSection />;
     default:
@@ -178,9 +181,10 @@ function SectionBody({ section }: { section: AdminSection }) {
  * functional). All Phase 3.5 minimum-environment sections, Workers,
  * Users, Roles & permissions, Worker sessions, Machine assignment
  * (statement), Correction permissions, Department display settings,
- * History archival & purge (retention period) and Settings are real
- * above, so only a `deferred` section (Scan behavior) reaches this: it
- * has no defined settings and promises no phase.
+ * History archival & purge (retention period), Settings and Scan
+ * behavior (disabled previews, Phase 17) are real above, so no section
+ * reaches this today: it stays the honest fallback of a section that
+ * has no defined settings, and it promises no phase.
  */
 function PlaceholderSection({
   section,

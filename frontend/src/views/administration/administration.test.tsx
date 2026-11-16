@@ -25,8 +25,9 @@ import { AdministrationView } from './AdministrationView';
 // Correction permissions, Department display settings, Settings and
 // History archival & purge read and write the real /api surface (faked
 // in-memory here with the same routes and semantics). Machine
-// assignment is a read-only statement; Scan behavior presents itself
-// honestly as not available yet.
+// assignment is a read-only statement; Scan behavior, and the other
+// general settings of Settings, show their candidate settings as
+// disabled previews marked Not available yet.
 
 // Image preparation (sniff, decode, downscale) has its own suite; here
 // it passes the chosen file through, or refuses it when a test says so.
@@ -2945,19 +2946,80 @@ test('the Workers section and its editor show no phase numbers', async () => {
 
 /* ============ Later-phase sections stay honest ============ */
 
-test('FA-S1: Scan behavior is not available yet and promises no phase', async () => {
+/** The label of each setting preview row under `container`, in order. */
+function previewLabels(container: HTMLElement): (string | null)[] {
+  return Array.from(
+    container.querySelectorAll('.admin-previews .swlabel'),
+    (label) => label.textContent,
+  );
+}
+
+/** Every preview row is tagged and none of its controls can be used. */
+function expectDisabledPreviews(container: HTMLElement) {
+  const rows = container.querySelectorAll('.admin-previews > *');
+  expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows) {
+    expect(row.querySelector('.admin-preview-tag')).toHaveTextContent(
+      'Not available yet',
+    );
+    const controls = row.matches('button')
+      ? [row]
+      : Array.from(row.querySelectorAll('input, select, button'));
+    expect(controls.length).toBeGreaterThan(0);
+    for (const control of controls) expect(control).toBeDisabled();
+  }
+}
+
+test('FA-S1: Scan behavior shows its candidate settings as disabled previews of what the Scan Stations do today', async () => {
   renderAdmin();
   await screen.findByRole('button', { name: 'Edit Lathe' });
+  const fetchCalls = vi.mocked(fetch).mock.calls.length;
   openSection('Scan behavior');
 
   const main = document.querySelector('.admin-main') as HTMLElement;
-  expect(main.textContent).toContain(
-    'The Scan behavior configuration is not available yet.',
+  expect(
+    within(main).getByText(
+      'These settings are not available yet. Each control shows what the Scan Stations do today; none of them can be changed here.',
+    ),
+  ).toBeInTheDocument();
+  expect(previewLabels(main)).toEqual([
+    'Success sound',
+    'Error sound',
+    'Ignore a repeated scan',
+    'Typed entry at Scan Stations',
+    'Scanner ending key',
+    'Prefix to strip',
+    'Suffix to strip',
+    'Confirm a single match automatically',
+    'Default quantity',
+  ]);
+  expectDisabledPreviews(main);
+  expect(
+    within(main)
+      .getAllByRole('switch')
+      .map((item) => [
+        item.getAttribute('aria-label'),
+        item.getAttribute('aria-checked'),
+      ]),
+  ).toEqual([
+    ['Success sound', 'false'],
+    ['Error sound', 'false'],
+    ['Typed entry at Scan Stations', 'true'],
+    ['Confirm a single match automatically', 'false'],
+  ]);
+  expect(within(main).getByLabelText('Ignore a repeated scan')).toHaveValue(
+    '0',
   );
-  expect(main.textContent).toContain('Its settings have not been defined.');
-  expect(main.textContent).not.toContain('full Administration');
-  expect(main.textContent).not.toContain('table + editor');
-  expect(screen.getByRole('button', { name: '+ New entry' })).toBeDisabled();
+  expect(within(main).getByLabelText('Scanner ending key')).toHaveValue(
+    'ENTER',
+  );
+  expect(within(main).getByLabelText('Prefix to strip')).toHaveValue('');
+  expect(within(main).getByLabelText('Suffix to strip')).toHaveValue('');
+  expect(within(main).getByLabelText('Default quantity')).toHaveValue('FULL');
+  // Nothing to create, nothing read or stored, no promised phase.
+  expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
+  expect(main.textContent).not.toContain('Its settings have not been defined.');
+  expect(vi.mocked(fetch).mock.calls.length).toBe(fetchCalls);
   expect(document.body.textContent).not.toMatch(/Phase \d/);
 });
 
@@ -3817,7 +3879,9 @@ test('AD-5: the Due Soon warning panel loads, explains, validates and PUTs exact
     screen.getByText('90-day lead → warns 7 days ahead'),
   ).toBeInTheDocument();
   expect(
-    screen.getByText('Other application settings are not available yet.'),
+    screen.getByText(
+      'These settings are not available yet. Each control shows what PartFlow does today; none of them can be changed here.',
+    ),
   ).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
   expect(document.body.textContent).not.toMatch(/Phase \d/);
@@ -3927,6 +3991,39 @@ test('AD-5: offline the Due Soon warning cannot be saved; a failed load offers R
   dueSoonFailure = null;
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   expect(await screen.findByLabelText('Minimum warning days')).toHaveValue(2);
+});
+
+test('Settings shows the other general settings as disabled previews of what PartFlow does today', async () => {
+  await openSettings();
+  const config = document.querySelector('.admin-config') as HTMLElement;
+  expect(previewLabels(config)).toEqual([
+    'Site name',
+    'Logo',
+    'Time zone',
+    'Date format',
+    'Production Board refresh',
+    'Area Board refresh',
+    'Update countdown',
+  ]);
+  expectDisabledPreviews(config);
+  expect(within(config).getByLabelText('Site name')).toHaveValue('PartFlow');
+  expect(
+    within(config).getByRole('button', { name: 'Choose image…' }),
+  ).toBeDisabled();
+  expect(
+    within(config).getByRole('option', { name: 'Set on the server' }),
+  ).toBeInTheDocument();
+  expect(
+    within(config).getByRole('option', { name: 'Jul 24, 2026' }),
+  ).toBeInTheDocument();
+  expect(within(config).getByLabelText('Production Board refresh')).toHaveValue(
+    '5',
+  );
+  expect(within(config).getByLabelText('Area Board refresh')).toHaveValue('15');
+  expect(within(config).getByLabelText('Update countdown')).toHaveValue('10');
+  expect(config.textContent).toContain(
+    'Pages other than the Scan Station and the Production Board also wait until nobody has used them for 60 s.',
+  );
 });
 
 /* ============ History archival & purge (retention period) ============ */
@@ -5762,13 +5859,16 @@ test('FA-3: without its permission every section is view-only — values as text
       'combobox',
     ] as const) {
       // Scan Stations keeps one read-only control per station: the
-      // `Devices…` list every signed-in user may open (slice 4).
+      // `Devices…` list every signed-in user may open (slice 4). The
+      // setting previews of Settings are disabled for every user
+      // (GUI_DESIGN §9) and have their own tests.
       expect(
         within(main)
           .queryAllByRole(role)
           .filter(
             (element) =>
-              !element.getAttribute('aria-label')?.startsWith('Devices of '),
+              !element.getAttribute('aria-label')?.startsWith('Devices of ') &&
+              element.closest('.admin-previews') === null,
           ),
       ).toEqual([]);
     }

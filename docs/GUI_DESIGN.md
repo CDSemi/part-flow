@@ -2610,7 +2610,8 @@ confirmed through.
     by a signed-in user (anyone else sees a prompt to sign in) and editable only by users whose role may configure
     system settings.
 
-  The Settings section states that other application settings are not available yet.
+  Below them, **Other settings** shows the candidate general settings as disabled previews (see *Persisted
+  configuration and sections not available yet*).
 
 ### No Machines, no Route Templates and no PartNumbers sections
 
@@ -2655,17 +2656,29 @@ Settings section's Due Soon warning and User sign-in panels, the History archiva
 Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users sign
 in with a login name and password and which permissions are checked so far.
 
-Everything else presents itself honestly. A section with no defined content states that it is not available yet, with
-its entry action disabled; it is never made to appear functional.
+Everything else presents itself honestly: nothing that is not available yet is made to appear functional.
 
-- **Scan behavior** states that it is not available yet and that its settings have not been defined, with its entry
-  action disabled.
-- The Settings section states that other application settings are not available yet.
+- **Setting previews.** Scan behavior, and **Other settings** in the Settings section, show their candidate settings as
+  disabled controls, each tagged `Not available yet`, under a line stating that these settings are not available yet,
+  that each control shows what PartFlow does today, and that none of them can be changed there. Nothing is read from or
+  saved to the server, neither shows an entry action, and the previews look the same to every signed-in user, with or
+  without the section's permission.
+  - Scan behavior: Success sound and Error sound (Off; PartFlow plays no sound), Ignore a repeated scan (0 s: never),
+    Typed entry at Scan Stations (On), Scanner ending key (Enter), Prefix to strip and Suffix to strip (None), Confirm a
+    single match automatically (Off: a single match still opens its quantity and confirmation steps) and Default
+    quantity (Full available quantity, for a step that moves existing quantity; a received or added quantity always
+    starts empty).
+  - Other settings: Site name (PartFlow, in the top navigation), Logo (Choose image…), Time zone (set on the server when
+    PartFlow is installed), Date format (`Jul 24, 2026`), Production Board refresh (5 s), Area Board refresh (15 s) and
+    Update countdown (10 s; pages other than the Scan Station and the Production Board also wait until nobody has used
+    them for 60 s, §3 rule 13).
 - History archival & purge states that archival and purge runs are not available yet (see below).
+- A section with no defined content at all would state that it is not available yet, with its entry action disabled; no
+  section is in that state today.
 
-Scan behavior and the remaining general settings have no defined content (IMPLEMENTATION_ROADMAP lists them as
-`Deferred`). None of these statements promises a phase. Machines, Planned Routes and Part Numbers stay managed in Management by
-authorized production roles.
+The previewed settings have no canonical definition yet (IMPLEMENTATION_ROADMAP lists working ones as `Deferred`); each
+becomes a working setting only when the owner asks for it. None of these statements promises a phase. Machines, Planned
+Routes and Part Numbers stay managed in Management by authorized production roles.
 
 ### Access to Administration
 
@@ -3904,7 +3917,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-16 | uncommitted | §11.3: Add to Hot list in the New Work Order header. |
+| 2026-11-16 | uncommitted | §9: Scan behavior and Other settings show their candidate settings as disabled previews tagged `Not available yet`. |
+| 2026-11-16 | a04179f | §11.3: Add to Hot list in the New Work Order header. |
 | 2026-11-15 | a3a7e87 | §7.2 item 7 and §11.6: a Stockroom station allocation entry names the Worker its station identified. |
 | 2026-11-14 | 2a24c2a | §13.2: a Duplicate whose `{name} (variant)` an active route already holds opens `New Planned Route` with the refusal. |
 | 2026-11-14 | 15a2120 | §9: the initial roles include Super User. |

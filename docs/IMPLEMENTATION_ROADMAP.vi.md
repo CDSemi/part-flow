@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `a3a7e87` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `a04179f` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1365,11 +1365,12 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    list. Chúng vào cuối danh sách qua lệnh của Hot list (không gõ hạng), cho user có quyền đặt priority của demand: mỗi
    dòng một lệnh ADD, theo thứ tự dòng, ngay sau khi lưu. Work Order vẫn được lưu dù việc đó ra sao, và thông báo lưu
    nêu bao nhiêu dòng đã vào.
-7. **Bản xem trước các thiết lập.** Scan behavior và General settings hiển thị các thiết lập ứng viên thành control bị
-   vô hiệu hóa, mỗi cái ghi là chưa có. Scan behavior: âm báo quét đúng và sai, bỏ qua lần quét lặp lại cùng mã trong
-   một khoảng thời gian, cho phép gõ tay ở Scan Station, phím kết thúc của máy quét và tiền tố hay hậu tố cần bỏ, tự xác
-   nhận khi chỉ đúng một kết quả khớp, và số lượng mặc định. General settings: tên và logo của xưởng, múi giờ và định
-   dạng ngày, nhịp làm mới của các board và thời gian đếm ngược khi có bản cập nhật.
+7. **Bản xem trước các thiết lập — đã có.** Scan behavior và General settings (Settings → Other settings) hiển thị
+   các thiết lập ứng viên thành control bị vô hiệu hóa, mỗi cái ghi là chưa có và cho thấy PartFlow đang làm gì hiện
+   nay. Scan behavior: âm báo quét đúng và sai, bỏ qua lần quét lặp lại cùng mã trong một khoảng thời gian, cho phép gõ
+   tay ở Scan Station, phím kết thúc của máy quét và tiền tố hay hậu tố cần bỏ, tự xác nhận khi chỉ đúng một kết quả
+   khớp, và số lượng mặc định. General settings: tên và logo của xưởng, múi giờ và định dạng ngày, nhịp làm mới của các
+   board và thời gian đếm ngược khi có bản cập nhật. Không gì được lưu, và chưa route nào cần `Manage scan behavior`.
 8. **Đăng nhập đa yếu tố tùy chọn.** Mỗi user có thể thêm mã một lần (TOTP) và passkey (ví dụ lưu trong 1Password), giúp
    đăng nhập tiện hơn; không bao giờ bắt buộc, kể cả với Administrator. User mất chúng thì đăng nhập bằng một mã khôi
    phục dùng một lần hoặc khôi phục qua email, việc này cần một máy chủ gửi mail được đặt trong General settings và một
@@ -1401,8 +1402,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
   chỉ nêu tên các mục); Phase 17 hiển thị các thiết lập ứng viên thành bản xem trước bị vô hiệu hóa, và mỗi thiết lập
   chỉ hoạt động khi chủ sở hữu yêu cầu
 - các lệnh `Quantity adjustment` và hiệu chỉnh lịch sử của Tracking (quyết định của chủ sở hữu ngày 2026-10-06)
-- các permission key chưa route nào cần, cùng chủ sở hữu của chúng: `Manage scan behavior` (cùng mục Scan behavior, khi
-  có một mục như vậy trong Administration); `Resolve exceptional production situations` (cho tới khi PROJECT_PROFILE
+- các permission key chưa route nào cần, cùng chủ sở hữu của chúng: `Manage scan behavior` (cho tới khi Scan behavior
+  có một thiết lập hoạt động thật); `Resolve exceptional production situations` (cho tới khi PROJECT_PROFILE
   định nghĩa một lệnh); `Export and print reports` (cho tới khi có một bề mặt báo cáo được định nghĩa);
   `Perform quantity corrections` và `Perform authorized historical corrections` (cho tới khi có các lệnh điều chỉnh số
   lượng và hiệu chỉnh lịch sử). Administration hiển thị chúng là để dành và không chọn được.
@@ -1421,7 +1422,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 17 mục 6 đã có: Add to Hot list trong dialog New Work Order. |
+| 2026-11-16 | uncommitted | Phase 17 mục 7 đã có: Scan behavior và Settings → Other settings hiển thị các thiết lập ứng viên thành bản xem trước bị vô hiệu hóa. |
+| 2026-11-16 | `a04179f` | Phase 17 mục 6 đã có: Add to Hot list trong dialog New Work Order. |
 | 2026-11-15 | `a3a7e87` | Phase 17 mục 5 đã có: một lần phân bổ của trạm Stockroom hiển thị Worker mà trạm đã xác định, trong hộp thoại phân bổ và trong PN Tracking. |
 | 2026-11-14 | `2a24c2a` | Phase 17 mục 4 đã có: migration `0034_phase17_unique_names` làm tên Area duy nhất trong một Department và tên Planned Route đang dùng duy nhất, và `revision` báo các tên trùng đã lưu với trạng thái `blocked_by_data`. |
 | 2026-11-14 | `15a2120` | Phase 17 mục 3 đã có: migration `0033_phase17_super_user_role` seed role Super User với mọi permission key và trở thành head lược đồ. |

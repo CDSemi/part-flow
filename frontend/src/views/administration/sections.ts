@@ -22,8 +22,9 @@ export interface AdminSection {
    * `minimum` — part of the Minimum Environment Setup prerequisite
    * (Phase 3.5), configured before the real production workflows run;
    * `full` — part of the later full Administration phase (Phase 13);
-   * `deferred` — no content is defined yet (IMPLEMENTATION_ROADMAP
-   * `Deferred`); presented as not available, with no promised phase.
+   * `deferred` — no working setting is defined yet
+   * (IMPLEMENTATION_ROADMAP `Deferred`); presented as not available —
+   * at most as disabled previews (Phase 17) — with no promised phase.
    */
   phase: 'minimum' | 'full' | 'deferred';
   /**

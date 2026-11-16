@@ -1375,11 +1375,13 @@ order, and a delivered item says so:
    join at the bottom through the Hot-list command (no typed rank), for users who may set demand priority: one ADD per
    line in line order right after the save. The Work Order stays saved whatever happens there, and the saved notice
    says how many lines joined.
-7. **Settings previews.** Scan behavior and General settings show their candidate settings as disabled controls, each
-   marked as not available yet. Scan behavior: success and error sounds, ignoring a repeated scan of the same code
-   within a set time, allowing typed entry at Scan Stations, the scanner's ending key and the prefix or suffix to strip,
-   confirming automatically when exactly one result matches, and the default quantity. General settings: the site name
-   and logo, the time zone and date format, the board refresh intervals and the update countdown.
+7. **Settings previews — delivered.** Scan behavior and General settings (Settings → Other settings) show their
+   candidate settings as disabled controls, each marked as not available yet and showing what PartFlow does today. Scan
+   behavior: success and error sounds, ignoring a repeated scan of the same code within a set time, allowing typed entry
+   at Scan Stations, the scanner's ending key and the prefix or suffix to strip, confirming automatically when exactly
+   one result matches, and the default quantity. General settings: the site name and logo, the time zone and date
+   format, the board refresh intervals and the update countdown. Nothing is stored, and no route needs `Manage scan
+   behavior` yet.
 8. **Optional multi-factor sign-in.** Each user may add one-time codes (TOTP) and passkeys (for example kept in
    1Password), which make signing in easier; neither is ever required, Administrators included. A user who loses them
    signs in with a one-time recovery code or recovers by email, which needs an outgoing mail server set in General
@@ -1412,8 +1414,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
   §9 only name the sections); Phase 17 shows the candidate settings as disabled previews, and each becomes a working
   setting only when the owner asks for it
 - the Tracking `Quantity adjustment` and historical-correction commands (owner decision of 2026-10-06)
-- permission keys that no route requires yet, with their owners: `Manage scan behavior` (with the Scan behavior
-  section, once one exists in Administration); `Resolve exceptional production situations` (until PROJECT_PROFILE
+- permission keys that no route requires yet, with their owners: `Manage scan behavior` (until Scan behavior has a
+  working setting); `Resolve exceptional production situations` (until PROJECT_PROFILE
   defines a command); `Export and print reports` (until a report surface is defined); `Perform quantity corrections`
   and `Perform authorized historical corrections` (until the quantity-adjustment and historical-correction commands
   exist). Administration shows them as reserved and not selectable.
@@ -1431,7 +1433,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 17 item 6 delivered: Add to Hot list in the New Work Order dialog. |
+| 2026-11-16 | uncommitted | Phase 17 item 7 delivered: Scan behavior and Settings → Other settings show their candidate settings as disabled previews. |
+| 2026-11-16 | `a04179f` | Phase 17 item 6 delivered: Add to Hot list in the New Work Order dialog. |
 | 2026-11-15 | `a3a7e87` | Phase 17 item 5 delivered: a Stockroom station allocation shows the Worker the station identified in the allocation dialog and in PN Tracking. |
 | 2026-11-14 | `2a24c2a` | Phase 17 item 4 delivered: migration `0034_phase17_unique_names` makes Area names unique within a Department and active Planned Route names unique, and `revision` reports stored duplicates as `blocked_by_data`. |
 | 2026-11-14 | `15a2120` | Phase 17 item 3 delivered: migration `0033_phase17_super_user_role` seeds the Super User role with every permission key and becomes the schema head. |

@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `a3a7e87` cộng các thay đổi chưa commit ngày 2026-11-16.
+> Đồng bộ với bản tiếng Anh tại commit `a04179f` cộng các thay đổi chưa commit ngày 2026-11-16.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2635,7 +2635,8 @@ không phải xác nhận cho qua.
     đọc bởi một người dùng đã đăng nhập (người khác thấy lời nhắc đăng nhập) và chỉ người dùng có role được cấu hình system settings mới
     sửa được.
 
-  Section Settings nêu rằng các application setting khác chưa khả dụng.
+  Bên dưới chúng, **Other settings** hiển thị các general setting ứng viên thành bản xem trước bị vô hiệu hóa (xem
+  *Cấu hình được lưu và các section chưa khả dụng*).
 
 ### Không có section Machines, Route Templates hay PartNumbers
 
@@ -2680,16 +2681,30 @@ Soon warning và User sign-in của section Settings, retention period của His
 assignment cũng là cấu hình được lưu. Users và Roles & permissions nêu rằng người dùng đăng nhập bằng login name và mật khẩu, và
 những permission nào đã được kiểm tra cho đến nay.
 
-Mọi thứ khác tự trình bày một cách trung thực. Một section không có nội dung được định nghĩa thì nêu rằng nó chưa khả
-dụng, với entry action bị vô hiệu hóa; nó không bao giờ được làm cho trông như đang hoạt động.
+Mọi thứ khác tự trình bày một cách trung thực: không gì chưa khả dụng được làm cho trông như đang hoạt động.
 
-- **Scan behavior** nêu rằng nó chưa khả dụng và các setting của nó chưa được định nghĩa, với entry action bị vô hiệu hóa.
-- Section Settings nêu rằng các application setting khác chưa khả dụng.
+- **Bản xem trước setting.** Scan behavior, và **Other settings** trong section Settings, hiển thị các setting ứng viên
+  của chúng thành control bị vô hiệu hóa, mỗi cái gắn nhãn `Not available yet`, bên dưới một dòng nêu rằng các setting
+  này chưa khả dụng, rằng mỗi control cho thấy PartFlow đang làm gì hiện nay, và rằng không cái nào thay đổi được ở đó.
+  Không gì được đọc từ hay lưu vào server, không cái nào có entry action, và các bản xem trước trông như nhau với mọi
+  người dùng đã đăng nhập, dù có hay không có permission của section.
+  - Scan behavior: Success sound và Error sound (Off; PartFlow không phát âm thanh nào), Ignore a repeated scan (0 s:
+    không bao giờ), Typed entry at Scan Stations (On), Scanner ending key (Enter), Prefix to strip và Suffix to strip
+    (None), Confirm a single match automatically (Off: một kết quả khớp duy nhất vẫn mở các bước số lượng và xác nhận
+    của nó) và Default quantity (Full available quantity, cho một bước di chuyển số lượng đã có; số lượng nhận vào hay
+    thêm vào luôn bắt đầu trống).
+  - Other settings: Site name (PartFlow, trên thanh điều hướng trên cùng), Logo (Choose image…), Time zone (đặt trên
+    server khi cài PartFlow), Date format (`Jul 24, 2026`), Production Board refresh (5 s), Area Board refresh (15 s) và
+    Update countdown (10 s; các trang khác ngoài Scan Station và Production Board còn chờ đến khi không ai dùng chúng
+    trong 60 s, §3 rule 13).
 - History archival & purge nêu rằng các lần chạy archival và purge chưa khả dụng (xem bên dưới).
+- Một section hoàn toàn không có nội dung được định nghĩa sẽ nêu rằng nó chưa khả dụng, với entry action bị vô hiệu
+  hóa; hiện không section nào ở trạng thái đó.
 
-Scan behavior và các general setting còn lại không có nội dung được định nghĩa (IMPLEMENTATION_ROADMAP liệt kê chúng là
-`Deferred`). Không statement nào trong số này hứa hẹn một phase. Machines, Planned Routes và Part Numbers vẫn được quản lý
-trong Management bởi các production role được cấp quyền.
+Các setting được xem trước chưa có định nghĩa chuẩn (IMPLEMENTATION_ROADMAP liệt kê các setting hoạt động thật là
+`Deferred`); mỗi cái chỉ trở thành setting hoạt động thật khi owner yêu cầu. Không statement nào trong số này hứa hẹn
+một phase. Machines, Planned Routes và Part Numbers vẫn được quản lý trong Management bởi các production role được cấp
+quyền.
 
 ### Truy cập Administration
 
@@ -3946,7 +3961,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-16 | uncommitted | §11.3: Add to Hot list trong phần đầu của New Work Order. |
+| 2026-11-16 | uncommitted | §9: Scan behavior và Other settings hiển thị các setting ứng viên thành bản xem trước bị vô hiệu hóa, gắn nhãn `Not available yet`. |
+| 2026-11-16 | a04179f | §11.3: Add to Hot list trong phần đầu của New Work Order. |
 | 2026-11-15 | a3a7e87 | §7.2 mục 7 và §11.6: một entry phân bổ của trạm Stockroom nêu tên Worker mà trạm đó đã xác định. |
 | 2026-11-14 | 2a24c2a | §13.2: một Duplicate mà `{name} (variant)` của nó đã thuộc về một route đang dùng sẽ mở `New Planned Route` kèm lời từ chối. |
 | 2026-11-14 | 15a2120 | §9: các role ban đầu có thêm Super User. |

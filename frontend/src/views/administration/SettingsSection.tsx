@@ -23,6 +23,7 @@ import {
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
+import { GeneralSettingsPreviews } from './SettingPreviews';
 import { SignInSettingsPanel } from './SignInSettingsPanel';
 
 // Administration → Settings (Phase 13; GUI_DESIGN §9 Policies and
@@ -33,10 +34,11 @@ import { SignInSettingsPanel } from './SignInSettingsPanel';
 // re-validated by the server. The three fields share a cross-field rule
 // (minimum ≤ maximum), so Save replaces them together. The User sign-in
 // panel (SignInSettingsPanel) follows it and loads its own data. The
-// rest of Settings is not available yet and says so — no control
-// pretends otherwise. Without the Configure system settings permission
-// the whole section reads as text, with one view-only line under its
-// header.
+// other general settings are not available yet: they are disabled
+// previews marked so (Phase 17, SettingPreviews), never a control that
+// pretends to work. Without the Configure system settings permission
+// the stored settings read as text (the previews look the same to
+// every user), with one view-only line under the section header.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'settings')?.subtitle ?? '';
@@ -142,8 +144,10 @@ export function SettingsSection() {
         <SignInSettingsPanel />
         <h2>Other settings</h2>
         <p className="admin-confighelp">
-          Other application settings are not available yet.
+          These settings are not available yet. Each control shows what PartFlow
+          does today; none of them can be changed here.
         </p>
+        <GeneralSettingsPreviews />
       </div>
     </>
   );
