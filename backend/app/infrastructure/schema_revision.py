@@ -3,8 +3,9 @@
 Infrastructure only: where this image's migration scripts are, which
 revision is their single head, which revisions they know, which are
 pending above a database revision, whether a pending revision cannot run
-inside one transaction, the database revision itself, and the Alembic
-upgrade on a caller-owned connection. No readiness rule lives here
+inside one transaction, which stored records block a pending revision,
+the database revision itself, and the Alembic upgrade on a caller-owned
+connection. No readiness rule lives here
 (``app.application.readiness``).
 """
 
@@ -95,6 +96,27 @@ def non_transactional_revisions(revisions: list[str]) -> list[str]:
         script = scripts.get_revision(revision)
         if script is not None and _NON_TRANSACTIONAL.search(read_revision_source(script.path)):
             found.append(revision)
+    return found
+
+
+#: The module function a revision may define (Phase 17):
+#: ``upgrade_blockers(connection) -> list[str]``, read-only, one line per
+#: stored record that blocks the upgrade until someone fixes it in
+#: PartFlow. The revision refuses on its own while it returns a line. It
+#: runs on the database before any pending revision is applied, so it
+#: must answer for every older schema (an empty database included).
+UPGRADE_BLOCKERS_ATTRIBUTE: Final = "upgrade_blockers"
+
+
+def data_blockers(connection: Connection, revisions: list[str]) -> list[str]:
+    """What blocks the given revisions, ``"<revision>: <line>"`` per record (read-only)."""
+    scripts = script_directory()
+    found: list[str] = []
+    for revision in revisions:
+        script = scripts.get_revision(revision)
+        blockers = getattr(script.module, UPGRADE_BLOCKERS_ATTRIBUTE, None) if script else None
+        if blockers is not None:
+            found.extend(f"{revision}: {line}" for line in blockers(connection))
     return found
 
 

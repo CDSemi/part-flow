@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `277a512` cộng các thay đổi chưa commit ngày 2026-11-14.
+> Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -3768,7 +3768,9 @@ Quantity Flow giữ snapshot route riêng của nó từ thời điểm release.
   hủy (chỉ khi chưa từng được dùng), nằm trong dialog. Bắt đầu Duplicate khi có chỉnh sửa chưa lưu đòi hỏi một lựa chọn
   tường minh (`Save, then duplicate` / `Duplicate the saved route` / `Cancel (Esc)`, thông qua `UnsavedChoiceDialog`
   dùng chung). `Duplicate` sao chép template (kể cả một template đã archive, từ bảng của nó) thành một bản nháp mới, chưa
-  từng được dùng, đang hoạt động `{name} (variant)` và mở nó để chỉnh sửa.
+  từng được dùng, đang hoạt động `{name} (variant)` và mở nó để chỉnh sửa. Khi một route đang dùng đã có tên đó
+  (PROJECT_PROFILE §8.8), không có gì được tạo: `New Planned Route` mở ra, điền sẵn bản sao cùng lời từ chối, và bản
+  sao được lưu với một tên khác.
 
 ## 13.3 Archive so với delete
 
@@ -3937,7 +3939,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-14 | uncommitted | §9: các role ban đầu có thêm Super User. |
+| 2026-11-14 | uncommitted | §13.2: một Duplicate mà `{name} (variant)` của nó đã thuộc về một route đang dùng sẽ mở `New Planned Route` kèm lời từ chối. |
+| 2026-11-14 | 15a2120 | §9: các role ban đầu có thêm Super User. |
 | 2026-11-14 | 277a512 | §11.2: một WO Number, PN của một line chưa lưu và một Job Number mới dài hơn 200 ký tự là lỗi field, và Add Part không đề xuất tạo một PN mới như vậy. |
 | 2026-11-13 | c0f0b0c | §9: các permission để dành hiển thị `(reserved)` và không chọn được. |
 | 2026-11-13 | 6c0fa6c | §3: đồng bộ lượt quét offline tham chiếu PROJECT_PROFILE §30 và §32, nơi không còn quyết định nào để mở. |

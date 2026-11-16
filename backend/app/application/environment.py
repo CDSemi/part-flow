@@ -432,7 +432,25 @@ def require_active_area(session: Session, area_id: int, purpose: str) -> Area:
 
 _AREA_CONFLICTS: Final = {
     "uq_areas_barcode_value": "The derived Area barcode is already assigned.",
+    "uq_areas_department_id_name": "The Department already has an Area with this name.",
 }
+
+
+def _reject_duplicate_area_name(
+    session: Session, department_id: int, name: str, exclude_id: int | None = None
+) -> None:
+    """Friendly pre-check (Phase 17): an Area name is unique within its
+    Department, inactive Areas included; `uq_areas_department_id_name`
+    stays the authority."""
+    query = select(Area.id).where(Area.department_id == department_id, Area.name == name).limit(1)
+    if exclude_id is not None:
+        query = query.where(Area.id != exclude_id)
+    if session.scalar(query) is not None:
+        department = session.scalar(select(Department.name).where(Department.id == department_id))
+        raise ConflictError(
+            f"Department '{department}' already has an Area named '{name}'."
+            " Choose another name, or rename the other Area first."
+        )
 
 
 def _session_timeout_override(value: object) -> int | None:
@@ -544,6 +562,7 @@ def create_area(
         raise ConflictError(
             f"Department '{department.name}' is inactive and cannot receive new Areas."
         )
+    _reject_duplicate_area_name(session, department.id, clean_name)
     # A new Area starts Disabled unless the request configures it; a
     # Fixed Worker is locked FOR SHARE after the Department.
     mode, fixed_worker = _worker_identification(
@@ -652,6 +671,8 @@ def update_area(
     if not isinstance(name, UnsetType):
         clean_name = required_text(name, "Area name")
         if clean_name != area.name:
+            # A read before the first assignment of this edit (no autoflush).
+            _reject_duplicate_area_name(session, area.department_id, clean_name, exclude_id=area.id)
             area.name = clean_name
             changed = True
     if not isinstance(description, UnsetType):

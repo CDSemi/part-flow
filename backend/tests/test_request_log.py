@@ -1109,6 +1109,7 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "area_id",
         "clean_station_id",
         "code",
+        "department",
         "department.name",
         "department_id",
         "name",
@@ -1209,6 +1210,7 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
     "route_templates": [
         "area.name",
         "machine.name",
+        "name",
         "number",
         "operation.code",
         "step.area_id",

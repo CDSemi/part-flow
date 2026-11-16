@@ -577,6 +577,9 @@ class Area(Base):
     )
 
     __table_args__ = (
+        # One name per Department, inactive Areas included (Phase 17,
+        # `0034_phase17_unique_names`): an inactive Area can be renamed.
+        UniqueConstraint("department_id", "name", name="uq_areas_department_id_name"),
         # Unique where assigned; PostgreSQL UNIQUE ignores NULLs, so
         # many rows without a barcode stay valid.
         UniqueConstraint("barcode_value", name="uq_areas_barcode_value"),
@@ -1652,6 +1655,18 @@ class RouteTemplate(Base):
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # One name per active Planned Route (Phase 17,
+        # `0034_phase17_unique_names`): an archived route can never be
+        # edited, so it keeps its name without blocking a new route.
+        Index(
+            "uq_route_templates_name_active",
+            "name",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL"),
+        ),
     )
 
 

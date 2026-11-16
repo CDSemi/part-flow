@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `6c0fa6c` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0033_phase17_super_user_role`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0034_phase17_unique_names`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -1242,7 +1242,7 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0033_phase17_super_user_role`) |
+| Class | `partflow_app` privileges | Tables (29 at head `0034_phase17_unique_names`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
@@ -1387,7 +1387,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-14 | uncommitted | Migration head `0033_phase17_super_user_role`; việc bổ sung cho một role Super User đã có thêm một dòng audit `UPDATED`. |
+| 2026-11-14 | uncommitted | Migration head `0034_phase17_unique_names`. |
+| 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; việc bổ sung cho một role Super User đã có thêm một dòng audit `UPDATED`. |
 | 2026-11-13 | `6c0fa6c` | §18 và §20: việc trả số lượng đã nhập kho và đồng bộ quét offline đã được chốt bởi các quyết định của chủ sở hữu ngày 2026-11-13. |
 | 2026-11-09 | `398c617` | Viết lại thành nội dung hiện tại cho người đọc mới; phần mô tả schema nay khớp với migration head `0032_phase14_route_adjusted` và code release; không thay đổi rule nào. |
 | 2026-10-08 | `1116b07` | Database role và grant cho production, với việc thu hồi chỉ-append do `apply-grants` áp dụng. |

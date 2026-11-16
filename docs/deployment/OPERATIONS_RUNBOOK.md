@@ -480,7 +480,9 @@ The other options set the configuration file, the records directory, optional re
 3. The build of the new images. An existing tag is never rebuilt; it is reused only when both images were built from
    this commit as this release.
 4. The identity check (j) and `revision` of the new image against the unchanged database; they must report this
-   release and commit.
+   release and commit. When `revision` reports `blocked_by_data`, the release stops here and changes nothing:
+   `blocking_data` in `candidate-revision.json` lists the stored records the new release cannot accept yet (for example
+   two Areas with one name in a Department). Fix them in PartFlow, then run the release again.
 5. The write freeze, when a migration is pending.
 6. The verified pre-release backup (`backup.sh --kind pre-release`), inside the freeze when a migration is pending.
    The backup lock is held from here until step 9.
@@ -1131,7 +1133,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | §2: the successful automatic refreshes of the Production Board are no longer in the `web` log. |
+| 2026-11-14 | uncommitted | §5: the release stops before the write freeze when the new image's `revision` reports `blocked_by_data`. |
+| 2026-11-13 | `4a99914` | §2: the successful automatic refreshes of the Production Board are no longer in the `web` log. |
 | 2026-11-12 | `de4d99f` | §5 Observe: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after 60 s, and every other page once idle for 1 minute instead of 2; §2: an open Production Board adds about 9 MB of `web` log a day instead of 3 MB. |
 | 2026-11-12 | `77a2dfb` | §5 Observe: pages open during a release now reload themselves (a Scan Station or Production Board after 60 s, every other page once idle for 2 minutes with nothing unsaved), so nobody visits each computer. |
 | 2026-11-12 | `3fb7201` | Added sign-in and user accounts: recovering a forgotten password or login name, renaming a user, removing a user's access, and the recovery when no Administrator is left. |

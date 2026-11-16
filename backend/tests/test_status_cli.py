@@ -37,7 +37,7 @@ from tests.conftest import owner_engine
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_status_cli"
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0032_phase14_route_adjusted"
+_PREVIOUS = "0033_phase17_super_user_role"
 _UNKNOWN = "9999_unknown_to_this_image"
 _NOW = datetime.datetime(2026, 10, 8, 12, 0, tzinfo=datetime.UTC)
 _TOP_KEYS = [

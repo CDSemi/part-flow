@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `6c0fa6c` cộng các thay đổi chưa commit ngày 2026-11-14.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -695,6 +695,7 @@ Quy tắc:
 
 - Định danh và barcode của Area phải luôn ổn định.
 - Tên hiển thị của Area có thể thay đổi.
+- Tên Area là duy nhất trong Department của nó, kể cả các Area đã ngừng dùng; đổi tên một Area đã ngừng dùng sẽ giải phóng tên đó.
 - Một Area có thể chứa không, một hoặc nhiều Machine.
 - Một Area có thể hỗ trợ một hoặc nhiều Operation.
 - Stockroom thường là một Area cuối (terminal).
@@ -824,6 +825,7 @@ Quy tắc vòng đời:
 
 - Một Route Template chưa từng được tham chiếu bởi một Quantity Flow đã phát hành có thể bị xóa hẳn.
 - Một Route Template đã từng được dùng thì được lưu trữ (archive) thay vì bị xóa: nó vẫn hiển thị trong ngữ cảnh lịch sử nhưng không bao giờ được đưa ra để chọn cho các lần gán tuyến mới.
+- Tên Planned Route là duy nhất trong các Planned Route đang dùng. Một route đã lưu trữ giữ tên của nó, và một route mới có thể dùng lại tên đó.
 - **Không có hệ thống quản lý phiên bản template riêng**: các bản chụp Assigned Route hiện có bảo toàn các định nghĩa tuyến trong lịch sử, và lịch sử Movement thực tế, bất biến, vẫn là nguồn có thẩm quyền.
 
 ---
@@ -2449,7 +2451,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | §20: vai trò ban đầu thứ tư, Super User, cấp mọi permission key, và một bản phát hành thêm một key sẽ cấp key đó cho mọi vai trò đang giữ tất cả các key khác. |
+| 2026-11-14 | uncommitted | §8.4 và §8.8: tên Area là duy nhất trong một Department và tên Planned Route đang dùng là duy nhất. |
+| 2026-11-14 | 15a2120 | §20: vai trò ban đầu thứ tư, Super User, cấp mọi permission key, và một bản phát hành thêm một key sẽ cấp key đó cho mọi vai trò đang giữ tất cả các key khác. |
 | 2026-11-13 | 6c0fa6c | §18 và §32: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động, đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch, và không còn quyết định sản phẩm nào để mở. |
 | 2026-11-09 | 398c617 | Viết lại thành nội dung hiện hành cho người mới đọc. Hai câu nói chung được thu hẹp theo đúng các quy tắc cụ thể mà chúng mâu thuẫn (và code đang thực hiện): Work Order MODIFY nội bộ được tái sử dụng thì tăng dòng hiện có, và việc tăng số lượng của một dòng đã phát hành chỉ hợp lệ khi Work Order chưa hoàn tất. |
 | 2026-10-08 | e13574f | Ngày nhận Work Order bị bỏ trống mặc định là ngày theo lịch của site, kể cả với Work Order được import. |

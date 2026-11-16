@@ -53,9 +53,10 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09; the host checks after go-live, backups set in Administration, a minimal `pf`, the open follow-ups and Movement-history archival remain. |
 | Phase 17 — Owner Decisions After Go-Live | In progress | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
-**Database schema.** The current Alembic migration head is `0033_phase17_super_user_role`
-(`backend/alembic/versions/20261114_0033_phase17_super_user_role.py`), which seeds the Super User role and adds no
-schema. Phases 15 and 16 added no migration.
+**Database schema.** The current Alembic migration head is `0034_phase17_unique_names`
+(`backend/alembic/versions/20261114_0034_phase17_unique_names.py`). Phases 15 and 16 added no migration; Phase 17 added
+`0033_phase17_super_user_role` (the Super User role) and `0034_phase17_unique_names` (unique Area and Planned Route
+names).
 
 **Owner decision of 2026-11-09: direct go-live.** PartFlow went into real use on the company Synology NAS on
 2026-11-09, as soon as the production stack was installed. There is no pilot phase and no list of release gates;
@@ -1361,9 +1362,11 @@ order, and a delivered item says so:
    `0033_phase17_super_user_role`). A later migration that adds a key grants it to every role that holds every other
    key, so this role keeps every key under whatever name it has, unless an administrator has narrowed it. An existing
    role named `Super User` in any letter case is completed, not duplicated, and the completion is audited.
-4. **Unique names.** Area names are unique within a Department, and Planned Route names are unique. A read-only check
-   lists existing duplicates so that the owner renames them before installing the release, because the migration
-   refuses while one exists.
+4. **Unique names — delivered.** Area names are unique within a Department, inactive Areas included, and names are
+   unique among the active Planned Routes, an archived route keeping its name (migration `0034_phase17_unique_names`).
+   The migration refuses while a duplicate is stored. `revision`, run with the new image before the write freeze
+   (`release.sh` step 4), reports the duplicates as `blocked_by_data` and lists them in `blocking_data`, and `migrate`
+   refuses with the same list, so the owner renames them in PartFlow first.
 5. **The allocating Worker.** An allocation recorded at a Scan Station shows the Worker whose badge recorded it, in the
    Work Order details and in PN Tracking, as a Management allocation shows its user.
 6. **Add to Hot list at intake.** The New Work Order dialog can put its demand lines on the Hot list. They join at the
@@ -1424,7 +1427,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | Phase 17 item 3 delivered: migration `0033_phase17_super_user_role` seeds the Super User role with every permission key and becomes the schema head. |
+| 2026-11-14 | uncommitted | Phase 17 item 4 delivered: migration `0034_phase17_unique_names` makes Area names unique within a Department and active Planned Route names unique, and `revision` reports stored duplicates as `blocked_by_data`. |
+| 2026-11-14 | `15a2120` | Phase 17 item 3 delivered: migration `0033_phase17_super_user_role` seeds the Super User role with every permission key and becomes the schema head. |
 | 2026-11-14 | `277a512` | Phase 17 item 2 delivered: manual Work Order entry refuses a Work Order Number, Part Number or Job Number longer than 200 characters; Phase 17 is in progress. |
 | 2026-11-13 | `c0f0b0c` | Phase 17 item 1 delivered: reserved permission keys show `(reserved)` and cannot be chosen. |
 | 2026-11-13 | `4a99914` | Phase 16: the `web` access log no longer records the Production Board's successful automatic refreshes. |

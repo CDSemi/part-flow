@@ -692,6 +692,7 @@ Rules:
 
 - Area identity and barcode must remain stable.
 - Area display name may change.
+- An Area name is unique within its Department, inactive Areas included; renaming an inactive Area frees its name.
 - An Area may contain zero, one, or multiple Machines.
 - An Area may support one or multiple Operations.
 - Stockroom is normally a terminal Area.
@@ -821,6 +822,7 @@ Lifecycle rules:
 
 - A Route Template that has never been referenced by a released Quantity Flow may be deleted outright.
 - A Route Template that has ever been used is archived instead of deleted: it stays visible in historical context but is never offered for new route assignments.
+- A Planned Route name is unique among the active Planned Routes. An archived route keeps its name, and a new route may use that name again.
 - There is **no separate template-versioning system**: existing Assigned Route snapshots preserve the historical route definitions, and actual immutable Movement history stays authoritative.
 
 ---
@@ -2446,7 +2448,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | §20: a fourth initial role, Super User, grants every permission key, and a release that adds a key grants it to every role that holds every other key. |
+| 2026-11-14 | uncommitted | §8.4 and §8.8: Area names are unique within a Department and active Planned Route names are unique. |
+| 2026-11-14 | 15a2120 | §20: a fourth initial role, Super User, grants every permission key, and a release that adds a key grants it to every role that holds every other key. |
 | 2026-11-13 | 6c0fa6c | §18 and §32: stocked quantity never returns to active production, offline scan synchronization stays outside the planned scope, and no product decision remains open. |
 | 2026-11-09 | 398c617 | Rewritten as current content for new readers. Two general sentences were narrowed to the specific rules they contradicted (and that the code implements): a reused internal MODIFY Work Order raises its existing line, and raising a released line's quantity is valid only while the Work Order is not completed. |
 | 2026-10-08 | e13574f | An omitted Work Order received date defaults to the site calendar date, also for imported Work Orders. |

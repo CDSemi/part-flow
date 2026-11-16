@@ -20,7 +20,9 @@ upgrade leaves the database untouched):
    not-before proof (an age limit cannot prove that the dump holds every
    write committed before the freeze → ``backup_freshness_unproven``).
 3. When revisions are pending: a pending revision that needs autocommit
-   or ``CONCURRENTLY`` → ``non_transactional_migration``; a session of
+   or ``CONCURRENTLY`` → ``non_transactional_migration``; a stored record
+   that a pending revision cannot accept (its ``upgrade_blockers``
+   returns a line, Phase 17) → ``blocked_by_data``; a session of
    the API (``application_name = 'partflow-api'``) connected to this
    database → ``backend_connected`` (a best-effort guard; the write
    freeze itself is stopping ``backend``).
@@ -36,8 +38,9 @@ upgrade leaves the database untouched):
 
 ``revision_report`` is read-only (one READ ONLY transaction): the
 release identity, the expected and database revisions, the pending and
-non-transactional revisions and what the backend's readiness would answer
-under the configured override.
+non-transactional revisions, the stored records that block a pending
+revision (``blocked_by_data``) and what the backend's readiness would
+answer under the configured override.
 
 Both return complete reports (also on refusal and failure) that the CLI
 prints as one JSON document; ``backend`` never migrates.
@@ -84,6 +87,10 @@ MIGRATE_MESSAGES: Final = {
         "Revision {revision} contains a statement that cannot run inside the migrate"
         " transaction (autocommit_block or CONCURRENTLY). It needs its own documented"
         " procedure. Nothing was changed."
+    ),
+    "blocked_by_data": (
+        "The database holds data this release cannot accept yet: {blockers}. Fix it in"
+        " PartFlow, then run migrate again. Nothing was changed."
     ),
     "backend_connected": (
         "The PartFlow backend is still connected to this database. Stop it first (the write"
@@ -176,7 +183,13 @@ _BACKUP_REFUSALS: Final = frozenset(
 )
 _REFUSALS: Final = (
     frozenset(
-        {"migrate_running", "revision_unknown", "non_transactional_migration", "backend_connected"}
+        {
+            "migrate_running",
+            "revision_unknown",
+            "non_transactional_migration",
+            "blocked_by_data",
+            "backend_connected",
+        }
     )
     | _GRANT_REFUSALS
     | _BACKUP_REFUSALS
@@ -184,7 +197,11 @@ _REFUSALS: Final = (
 
 MigrateResult = Literal["upgraded", "already_current", "refused", "failed", "outcome_unknown"]
 RevisionState = Literal[
-    "current", "upgrade_available", "unknown_revision", "blocked_non_transactional"
+    "current",
+    "upgrade_available",
+    "unknown_revision",
+    "blocked_non_transactional",
+    "blocked_by_data",
 ]
 _Phase = Literal["checks", "upgrade", "grants", "verify"]
 
@@ -290,6 +307,7 @@ class RevisionReport:
     readiness: SchemaState | None = None
     pending_revisions: list[str] = field(default_factory=list)
     non_transactional_revisions: list[str] = field(default_factory=list)
+    blocking_data: list[str] = field(default_factory=list)
     error: RunError | None = None
 
     @property
@@ -370,6 +388,7 @@ def revision_document(report: RevisionReport) -> dict[str, object]:
         "readiness": report.readiness,
         "pending_revisions": list(report.pending_revisions),
         "non_transactional_revisions": list(report.non_transactional_revisions),
+        "blocking_data": list(report.blocking_data),
         "error": _error_document(report.error),
     }
 
@@ -377,10 +396,13 @@ def revision_document(report: RevisionReport) -> dict[str, object]:
 def revision_summary(report: RevisionReport) -> str:
     if report.error is not None:
         return f"revision: {report.error.message}"
-    return (
+    summary = (
         f"revision: {report.state} (database {report.database_revision or 'empty'},"
         f" release head {report.expected_revision}, readiness {report.readiness})"
     )
+    if report.state == "blocked_by_data":
+        summary += "; fix in PartFlow first: " + "; ".join(report.blocking_data)
+    return summary
 
 
 def apply_grants(connection: Connection) -> dict[str, object]:
@@ -590,6 +612,9 @@ def _migrate_in_transaction(
         blocked = schema_revision.non_transactional_revisions(pending)
         if blocked:
             raise _Refused("non_transactional_migration", revision=blocked[0])
+        blockers = schema_revision.data_blockers(connection, pending)
+        if blockers:
+            raise _Refused("blocked_by_data", blockers="; ".join(blockers))
         connected = connection.execute(
             text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
@@ -709,6 +734,10 @@ def revision_report(
             connection.execute(text("SELECT set_config('lock_timeout', '5s', true)"))
             connection.execute(text("SELECT set_config('statement_timeout', '30s', true)"))
             database = schema_revision.read_revision(connection)
+            upgradable = database != expected and (database is None or database in known)
+            pending = schema_revision.pending_revisions(database) if upgradable else []
+            # The records that block a pending revision, read in this READ ONLY transaction.
+            blockers = schema_revision.data_blockers(connection, pending)
     except SQLAlchemyError as exc:
         code = "database_unavailable" if is_connection_failure(exc) else "internal_error"
         report.error = RunError(code, REVISION_MESSAGES[code], exc)
@@ -726,15 +755,15 @@ def revision_report(
     elif database is not None and database not in known:
         report.state = "unknown_revision"
     else:
-        report.pending_revisions = schema_revision.pending_revisions(database)
-        report.non_transactional_revisions = schema_revision.non_transactional_revisions(
-            report.pending_revisions
-        )
-        report.state = (
-            "blocked_non_transactional"
-            if report.non_transactional_revisions
-            else "upgrade_available"
-        )
+        report.pending_revisions = pending
+        report.non_transactional_revisions = schema_revision.non_transactional_revisions(pending)
+        report.blocking_data = blockers
+        if report.non_transactional_revisions:
+            report.state = "blocked_non_transactional"
+        elif blockers:
+            report.state = "blocked_by_data"
+        else:
+            report.state = "upgrade_available"
     return report
 
 

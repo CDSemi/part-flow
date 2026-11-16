@@ -33,7 +33,7 @@ from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0032_phase14_route_adjusted"
+_PREVIOUS = "0033_phase17_super_user_role"
 _ALL = schema_revision.pending_revisions(None)
 
 
@@ -127,6 +127,7 @@ def test_at_head(at_head: URL, run: Callable[..., tuple[int, dict[str, Any], str
         "readiness": "current",
         "pending_revisions": [],
         "non_transactional_revisions": [],
+        "blocking_data": [],
         "error": None,
     }
     # REV-8: the lines the host scripts read with sed/grep.
@@ -143,6 +144,7 @@ def test_one_revision_behind(
     assert document["state"] == "upgrade_available"
     assert document["pending_revisions"] == [_HEAD]
     assert document["non_transactional_revisions"] == []
+    assert document["blocking_data"] == []
     assert document["readiness"] == "mismatch"
 
 

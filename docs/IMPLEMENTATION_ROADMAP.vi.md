@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `277a512` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `15a2120` cộng các thay đổi chưa commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -52,9 +52,10 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09; còn lại các kiểm tra trên máy chủ sau go-live, backup cấu hình trong Administration, một `pf` tối giản, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0033_phase17_super_user_role`
-(`backend/alembic/versions/20261114_0033_phase17_super_user_role.py`), migration seed role Super User và không thêm
-schema. Phase 15 và 16 không thêm migration nào.
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0034_phase17_unique_names`
+(`backend/alembic/versions/20261114_0034_phase17_unique_names.py`). Phase 15 và 16 không thêm migration nào; Phase 17
+thêm `0033_phase17_super_user_role` (role Super User) và `0034_phase17_unique_names` (tên Area và Planned Route duy
+nhất).
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
 NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
@@ -1351,8 +1352,11 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    khác, nên role này giữ mọi key dù được đổi tên thế nào, trừ khi quản trị viên đã thu hẹp nó. Một role đã có tên
    `Super User` (không phân biệt chữ hoa, chữ thường) được bổ sung cho đủ, không bị tạo trùng, và việc bổ sung được
    ghi audit.
-4. **Tên duy nhất.** Tên Area là duy nhất trong một Department, và tên Planned Route là duy nhất. Một kiểm tra chỉ đọc
-   liệt kê các tên trùng hiện có để chủ sở hữu đổi tên trước khi cài release, vì migration từ chối khi còn tên trùng.
+4. **Tên duy nhất — đã có.** Tên Area là duy nhất trong một Department, kể cả Area đã ngừng dùng, và tên là duy nhất
+   trong các Planned Route đang dùng, route đã lưu trữ giữ tên của nó (migration `0034_phase17_unique_names`).
+   Migration từ chối khi còn tên trùng đã lưu. Lệnh `revision`, chạy bằng image mới trước khi tạm dừng ghi
+   (`release.sh` bước 4), báo các tên trùng với trạng thái `blocked_by_data` và liệt kê chúng trong `blocking_data`,
+   còn `migrate` từ chối với cùng danh sách, nên chủ sở hữu đổi tên chúng trong PartFlow trước.
 5. **Worker đã phân bổ.** Một lần phân bổ ghi tại Scan Station hiển thị Worker có badge đã ghi nó, trong chi tiết Work
    Order và trong PN Tracking, như một lần phân bổ của Management hiển thị user của nó.
 6. **Add to Hot list khi tạo Work Order.** Dialog New Work Order có thể đưa các dòng demand của nó vào Hot list. Chúng
@@ -1413,7 +1417,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-14 | uncommitted | Phase 17 mục 3 đã có: migration `0033_phase17_super_user_role` seed role Super User với mọi permission key và trở thành head lược đồ. |
+| 2026-11-14 | uncommitted | Phase 17 mục 4 đã có: migration `0034_phase17_unique_names` làm tên Area duy nhất trong một Department và tên Planned Route đang dùng duy nhất, và `revision` báo các tên trùng đã lưu với trạng thái `blocked_by_data`. |
+| 2026-11-14 | `15a2120` | Phase 17 mục 3 đã có: migration `0033_phase17_super_user_role` seed role Super User với mọi permission key và trở thành head lược đồ. |
 | 2026-11-14 | `277a512` | Phase 17 mục 2 đã có: nhập Work Order bằng tay từ chối Work Order Number, Part Number hoặc Job Number dài hơn 200 ký tự; Phase 17 đang làm. |
 | 2026-11-13 | `c0f0b0c` | Phase 17 mục 1 đã có: các permission key để dành hiển thị `(reserved)` và không chọn được. |
 | 2026-11-13 | `4a99914` | Phase 16: log truy cập `web` không còn ghi các lần Production Board tự làm mới thành công. |

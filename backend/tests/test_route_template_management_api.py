@@ -1281,6 +1281,38 @@ def test_archive_retires_a_used_route_from_new_assignments(
     )
 
 
+def test_an_active_route_name_is_unique_and_archiving_frees_it(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Phase 17: a second active route with a taken name is refused on
+    create and on a rename, writing nothing; once the route is archived its
+    name may be used again, and the archived route keeps it."""
+    cell = _Cell(client)
+    name = _unique("ROUTE")
+    first = _created(client, [_step(cell)], name=name)
+    taken = {
+        "detail": f"An active Planned Route named '{name}' already exists. Choose another name."
+    }
+
+    before = _counts(db_engine)
+    again = _create(client, [_step(cell)], name=f" {name} ")
+    assert (again.status_code, again.json()) == (409, taken)
+    assert _counts(db_engine) == before
+
+    second = _created(client, [_step(cell)])
+    renamed = _put(client, second["id"], {**_write_body(second), "name": name})
+    assert (renamed.status_code, renamed.json()) == (409, taken)
+    assert _record(client, second["id"])["name"] == second["name"]
+
+    _release(client, cell, first["id"])
+    archived = admin_of(client).post(f"/api/route-templates/{first['id']}/archive")
+    assert archived.status_code == 200, archived.text
+    reused = _put(client, second["id"], {**_write_body(second), "name": name})
+    assert reused.status_code == 200, reused.text
+    assert reused.json()["name"] == name
+    assert _record(client, first["id"])["name"] == name
+
+
 def test_delete_removes_only_a_never_used_route(client: TestClient, db_engine: Engine) -> None:
     cell = _Cell(client)
     created = _created(client, [_step(cell), _step(cell, instructions="Again")])
@@ -1447,7 +1479,8 @@ def test_edit_holding_the_template_is_what_the_release_snapshots(
     runner = _Runner(db_engine)
     try:
         runner.start(
-            "put", _replace_call(created["id"], new_steps, "Edited", admin_of(client).user_id)
+            "put",
+            _replace_call(created["id"], new_steps, _unique("Edited"), admin_of(client).user_id),
         )
         assert pause.first_inside.wait(timeout=20)
         runner.start("release", release)
@@ -1479,7 +1512,10 @@ def test_release_holding_the_template_snapshots_the_old_steps(
         runner.start(
             "put",
             _replace_call(
-                created["id"], [_step(cell, instructions="New")], "E", admin_of(client).user_id
+                created["id"],
+                [_step(cell, instructions="New")],
+                _unique("E"),
+                admin_of(client).user_id,
             ),
         )
         _await_lock_waiters(db_engine, 1)
@@ -1622,7 +1658,7 @@ def test_writer_and_release_waiting_on_one_area_never_deadlock(
         )
         # The writer holds the template and waits on the Area.
         runner.start(
-            "put", _replace_call(created["id"], edited, "Edited", admin_of(client).user_id)
+            "put", _replace_call(created["id"], edited, _unique("Edited"), admin_of(client).user_id)
         )
         _await_lock_waiters(db_engine, 1)
         # The release waits on the template, holding no Area lock.
@@ -1664,12 +1700,14 @@ def test_writer_locks_the_machine_before_any_area(
         if write == "create":
             return route_templates.create_route_template(
                 session,
-                name="Locked",
+                name=_unique("Locked"),
                 description=None,
                 steps=_inputs(steps),
                 actor_user_id=admin_of(client).user_id,
             )
-        return _replace_call(existing["id"], steps, "Locked", admin_of(client).user_id)(session)
+        return _replace_call(existing["id"], steps, _unique("Locked"), admin_of(client).user_id)(
+            session
+        )
 
     runner = _Runner(db_engine)
     with db_engine.connect() as holder:
@@ -1707,7 +1745,7 @@ def test_writer_locks_areas_in_ascending_order(client: TestClient, db_engine: En
             "writer",
             lambda s: route_templates.create_route_template(
                 s,
-                name="Ascending",
+                name=_unique("Ascending"),
                 description=None,
                 steps=_inputs(steps),
                 actor_user_id=admin_of(client).user_id,
@@ -1951,7 +1989,7 @@ def test_template_writes_never_take_the_part_number_lock(
         runner.start(
             "replace",
             _replace_call(
-                used["id"], [_step(cell, instructions="x")], "N", admin_of(client).user_id
+                used["id"], [_step(cell, instructions="x")], _unique("N"), admin_of(client).user_id
             ),
         )
         runner.join()
@@ -1998,7 +2036,10 @@ def test_a_failing_audit_row_leaves_nothing_written(
             actor_user_id=admin_of(client).user_id,
         ),
         _replace_call(
-            used["id"], [_step(cell, instructions="Never")], "Never", admin_of(client).user_id
+            used["id"],
+            [_step(cell, instructions="Never")],
+            _unique("Never"),
+            admin_of(client).user_id,
         ),
         lambda s: route_templates.archive_route_template(
             s, used["id"], actor_user_id=admin_of(client).user_id

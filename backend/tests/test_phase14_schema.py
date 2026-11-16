@@ -51,9 +51,10 @@ checks the single head):
   subscript form the application's lookup uses (EXPLAIN), the
   `ix_part_movements_assigned_route_step_id` index, the
   `trg_assigned_route_steps_forbid_update` trigger (UPDATE refused even
-  for zero rows; DELETE of an unreferenced step and INSERT allowed),
-  models↔migration metadata parity at head; up/down/up on a clean head;
-  the downgrade refuses (exact message) while an `AssignedRoute` or
+  for zero rows; DELETE of an unreferenced step and INSERT allowed);
+  up/down/up on a clean 0032 (the models↔migration metadata parity at
+  head is `test_phase17_schema.py`'s); the downgrade refuses (exact
+  message) while an `AssignedRoute` or
   `ROUTE_ADJUSTED` audit row exists.
 """
 
@@ -1438,16 +1439,6 @@ def test_step_reference_index_exists(route_engine: Engine) -> None:
     }
     assert indexes[_STEP_REFERENCE_INDEX]["column_names"] == ["assigned_route_step_id"]
     assert indexes[_STEP_REFERENCE_INDEX]["unique"] is False
-
-
-def test_models_metadata_matches_the_migrated_schema(route_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with route_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
 
 
 def test_a_device_event_id_names_one_adjustment(route_connection: Connection) -> None:

@@ -406,6 +406,30 @@ def _route_name(value: object) -> str:
     return value.strip()
 
 
+_ROUTE_TEMPLATE_CONFLICTS: Final = {
+    "uq_route_templates_name_active": "An active Planned Route with this name already exists.",
+}
+
+
+def _reject_duplicate_route_name(
+    session: Session, name: str, exclude_id: int | None = None
+) -> None:
+    """Friendly pre-check (Phase 17): an active Planned Route name is unique;
+    an archived route keeps its name. `uq_route_templates_name_active`
+    stays the authority."""
+    query = (
+        select(RouteTemplate.id)
+        .where(RouteTemplate.name == name, RouteTemplate.archived_at.is_(None))
+        .limit(1)
+    )
+    if exclude_id is not None:
+        query = query.where(RouteTemplate.id != exclude_id)
+    if session.scalar(query) is not None:
+        raise ConflictError(
+            f"An active Planned Route named '{name}' already exists. Choose another name."
+        )
+
+
 def _route_description(value: object) -> str | None:
     if value is not None and (not isinstance(value, str) or "\x00" in value):
         raise InvalidInputError("The route description must be text.")
@@ -608,7 +632,7 @@ def _commit_record(
     session.expunge(template)
     for step in steps:
         session.expunge(step)
-    commit(session, {})
+    commit(session, _ROUTE_TEMPLATE_CONFLICTS)
     return RouteTemplateRecord(template, steps, ever_used, usage_count)
 
 
@@ -643,11 +667,13 @@ def create_route_template(
     route_description = _route_description(description)
     shaped = shape_route_steps(steps, allow_empty=False)
     lock_step_references(session, shaped)
+    # Judged after the step references, so their refusals keep precedence.
+    _reject_duplicate_route_name(session, route_name)
     template = RouteTemplate(name=route_name, description=route_description)
     session.add(template)
-    flush(session, {})
+    flush(session, _ROUTE_TEMPLATE_CONFLICTS)
     rows = _add_steps(session, template.id, shaped)
-    flush(session, {})
+    flush(session, _ROUTE_TEMPLATE_CONFLICTS)
     audit.append_audit_event(
         session,
         event_type=AuditEventType.CREATED,
@@ -710,6 +736,8 @@ def replace_route_template(
             usage_count=_usage_count(session, template.id),
         )
     lock_step_references(session, shaped)
+    if route_name != template.name:
+        _reject_duplicate_route_name(session, route_name, exclude_id=template.id)
     before = route_template_snapshot(template, current)
     session.execute(delete(RouteStep).where(RouteStep.route_template_id == template.id))
     # UNIQUE (route_template_id, sequence) is not deferrable: the old
@@ -719,7 +747,7 @@ def replace_route_template(
     template.name = route_name
     template.description = route_description
     template.updated_at = func.now()
-    flush(session, {})
+    flush(session, _ROUTE_TEMPLATE_CONFLICTS)
     session.refresh(template)
     audit.append_audit_event(
         session,

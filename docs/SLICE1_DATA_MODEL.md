@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0033_phase17_super_user_role`. The slice's own tables
+The schema described here is the current schema at migration head `0034_phase17_unique_names`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -1249,7 +1249,7 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0033_phase17_super_user_role`) |
+| Class | `partflow_app` privileges | Tables (29 at head `0034_phase17_unique_names`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
@@ -1394,7 +1394,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-14 | uncommitted | Migration head `0033_phase17_super_user_role`; completing an existing Super User role appends one `UPDATED` audit row. |
+| 2026-11-14 | uncommitted | Migration head `0034_phase17_unique_names`. |
+| 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; completing an existing Super User role appends one `UPDATED` audit row. |
 | 2026-11-13 | `6c0fa6c` | §18 and §20: the return of stocked quantity and offline scan synchronization are settled by the owner decisions of 2026-11-13. |
 | 2026-11-09 | `398c617` | Rewritten as current content for new readers; the schema description now matches migration head `0032_phase14_route_adjusted` and the release code; no rule changed. |
 | 2026-10-08 | `1116b07` | Production database roles and grants, with the append-only revocation applied by `apply-grants`. |

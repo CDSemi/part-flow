@@ -3731,7 +3731,8 @@ each keeps its own route snapshot from release time.
   live in the dialog. Starting Duplicate with unsaved edits requires an explicit choice (`Save, then duplicate` /
   `Duplicate the saved route` / `Cancel (Esc)`, through the shared `UnsavedChoiceDialog`). `Duplicate` copies the
   template (including an archived one, from its table) into a new, never-used, active `{name} (variant)` draft and opens
-  it for editing.
+  it for editing. When an active route already holds that name (PROJECT_PROFILE §8.8), nothing is created:
+  `New Planned Route` opens prefilled with the copy and the refusal, and it is saved under another name.
 
 ## 13.3 Archive versus delete
 
@@ -3897,7 +3898,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-14 | uncommitted | §9: the initial roles include Super User. |
+| 2026-11-14 | uncommitted | §13.2: a Duplicate whose `{name} (variant)` an active route already holds opens `New Planned Route` with the refusal. |
+| 2026-11-14 | 15a2120 | §9: the initial roles include Super User. |
 | 2026-11-14 | 277a512 | §11.2: a WO Number, the PN of an unsaved line and a new Job Number longer than 200 characters are field errors, and Add Part offers no such new PN. |
 | 2026-11-13 | c0f0b0c | §9: reserved permissions show `(reserved)` and cannot be chosen. |
 | 2026-11-13 | 6c0fa6c | §3: offline scan synchronization refers to PROJECT_PROFILE §30 and §32, where no decision remains open. |

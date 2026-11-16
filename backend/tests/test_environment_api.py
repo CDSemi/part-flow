@@ -348,6 +348,48 @@ def test_area_deactivation_blocked_while_holding_quantity(
     assert deactivated.json()["is_active"] is False
 
 
+def test_area_name_is_unique_within_its_department(client: TestClient, db_engine: Engine) -> None:
+    """Phase 17: a create retried after a timeout, a second create and a
+    rename onto a taken name are refused with nothing written; an inactive
+    Area keeps its name taken until it is renamed; another Department may
+    use the name."""
+    department = _create_department(client)
+    name = _unique("AREA")
+    first = _create_area(client, department_id=int(department["id"]), name=name)
+    expected = (
+        f"Department '{department['name']}' already has an Area named '{name}'."
+        " Choose another name, or rename the other Area first."
+    )
+
+    before = _area_count(db_engine)
+    retried = admin_of(client).post(
+        "/api/areas", json={"department_id": department["id"], "name": f"  {name}  "}
+    )
+    assert retried.status_code == 409
+    assert retried.json()["detail"] == expected
+    assert _area_count(db_engine) == before
+
+    second = _create_area(client, department_id=int(department["id"]))
+    renamed = admin_of(client).patch(f"/api/areas/{second['id']}", json={"name": name})
+    assert renamed.status_code == 409
+    assert renamed.json()["detail"] == expected
+
+    # Inactive, the first Area still holds the name; renamed, it frees it.
+    deactivated = admin_of(client).patch(f"/api/areas/{first['id']}", json={"is_active": False})
+    assert deactivated.status_code == 200
+    assert (
+        admin_of(client).patch(f"/api/areas/{second['id']}", json={"name": name}).status_code == 409
+    )
+    freed = admin_of(client).patch(f"/api/areas/{first['id']}", json={"name": f"{name} (old)"})
+    assert freed.status_code == 200
+    taken = admin_of(client).patch(f"/api/areas/{second['id']}", json={"name": name})
+    assert taken.status_code == 200
+    assert taken.json()["name"] == name
+
+    # Another Department may use the same name.
+    assert _create_area(client, name=name)["name"] == name
+
+
 # ---------------------------------------------------------------------------
 # Areas — Worker ID mode and Fixed Worker (Phase 13 S3)
 # ---------------------------------------------------------------------------

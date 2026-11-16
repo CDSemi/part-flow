@@ -1,7 +1,7 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `de4d99f` cộng các thay đổi chưa
-> commit ngày 2026-11-13. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `4a99914` cộng các thay đổi chưa
+> commit ngày 2026-11-14. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Runbook này gồm các thủ tục vận hành PartFlow production sau khi đã cài đặt: kiểm tra tình trạng, sao lưu và thử
@@ -492,7 +492,9 @@ Các tùy chọn khác đặt tệp cấu hình, thư mục hồ sơ, các trư�
 3. Build các image mới. Một tag đã tồn tại không bao giờ được build lại; nó chỉ được dùng lại khi cả hai image đều
    được build từ commit này với tư cách bản phát hành này.
 4. Kiểm tra định danh (j) và `revision` của image mới trên database chưa thay đổi; chúng phải báo bản phát hành và
-   commit này.
+   commit này. Khi `revision` báo `blocked_by_data`, lần phát hành dừng ở đây và không thay đổi gì: `blocking_data`
+   trong `candidate-revision.json` liệt kê các bản ghi đã lưu mà bản phát hành mới chưa chấp nhận được (ví dụ hai Area
+   cùng tên trong một Department). Sửa chúng trong PartFlow, rồi chạy lại lần phát hành.
 5. Tạm dừng ghi, khi có migration đang chờ.
 6. Bản sao lưu trước phát hành đã kiểm tra (`backup.sh --kind pre-release`), bên trong thời gian tạm dừng ghi khi có
    migration đang chờ. Khóa sao lưu được giữ từ đây cho đến bước 9.
@@ -1149,7 +1151,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-13 | uncommitted | §2: các lần Production Board tự làm mới thành công không còn nằm trong log `web`. |
+| 2026-11-14 | uncommitted | §5: lần phát hành dừng trước khi tạm dừng ghi khi `revision` của image mới báo `blocked_by_data`. |
+| 2026-11-13 | `4a99914` | §2: các lần Production Board tự làm mới thành công không còn nằm trong log `web`. |
 | 2026-11-12 | `de4d99f` | §5 Observe: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau 60 giây, và mọi trang khác khi rảnh 1 phút thay vì 2 phút; §2: mỗi Production Board đang mở thêm khoảng 9 MB log `web` mỗi ngày thay vì 3 MB. |
 | 2026-11-12 | `77a2dfb` | §5 Observe: các trang đang mở trong lúc phát hành nay tự tải lại (Scan Station hoặc Production Board sau 60 giây, mọi trang khác khi rảnh 2 phút và không còn gì chưa lưu), nên không ai phải đi tới từng máy. |
 | 2026-11-12 | `3fb7201` | Thêm mục đăng nhập và tài khoản người dùng: lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập, thu hồi quyền truy cập của một user, và cách khôi phục khi không còn Administrator nào. |
