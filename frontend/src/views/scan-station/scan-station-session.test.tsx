@@ -1041,6 +1041,7 @@ test('the allocation dialog treats worker_session_required the same way: modal r
     },
     themePreference: null,
     device: { id: 1, label: 'Stockroom PC' },
+    viewer: null,
     stationPermissions: [...STATION_PERMISSIONS],
   };
   const stocked = {

@@ -118,7 +118,8 @@ Management requires a signed-in user (§1.2).
 
 Application Users sign in with a login name and a password. Administration and Management require sign-in. Scan
 Stations and the Production Board never ask for sign-in; a Scan Station is used from an enrolled device instead
-(§4.13).
+(§4.13). A signed-in User who may manage Scan Stations can view a station from a browser that is not enrolled
+(§4.13, viewing a station).
 
 - **Account chip.** The top navigation ends with an account chip. When nobody is signed in it shows `Sign in` (and
   `Set up PartFlow` while PartFlow has no Administrator yet). Otherwise it shows the avatar and name, with a menu
@@ -626,7 +627,9 @@ border, and the theme control aligns its bottom edge with the pill's bottom bord
 determine the Worker Session height.
 
 Both modes require the browser to be an enrolled device of that Scan Station (§4.13). Standard mode on a Manager's or
-Administrator's own computer is enrolled like any other device.
+Administrator's own computer is enrolled like any other device. The one exception is viewing: a signed-in User whose
+role holds the Manage Scan Stations permission may open the standard mode of any station without an enrolled device and
+see what it shows, with every action unavailable (§4.13). Production mode always needs an enrolled device.
 
 **Footer.** Both modes share **one coherent non-interactive footer**: the faint Station ID, a subtle non-interactive
 mode label (**`Standard mode`** or **`Production mode`**), and the concise shortcut hint
@@ -1710,6 +1713,23 @@ Worker badge never authorizes anything.
   (§4.5). A scan that would open only such an action shows a red notification and opens nothing. A refusal of an action
   the role does not grant (on a stale screen) is an ordinary red rejection with nothing recorded. A badge scan refused
   because the badge-scan permission is missing is shown inside the Worker badge modal (§4.12), which stays open.
+- **Viewing a station.** A signed-in User whose role holds the Manage Scan Stations permission (PROJECT_PROFILE §20)
+  opens the standard mode of any station from a browser that is not an enrolled device of it in a viewing state instead
+  of the enrollment panel. The station renders as usual — header, Worker pill, Area totals, `In this Area now` and the
+  Machine cards — read from the server. A persistent notice above the `Scan barcode` card reads `Viewing as <name>.
+  This device is not enrolled for Scan Station <Station ID>; actions need an enrolled device.` with two buttons:
+  `Refresh` (reads the station again; the viewing state is not refreshed automatically) and `Enroll this device`, which
+  opens the enrollment dialog; opened this way the dialog has a `Cancel` button and closes with Escape or a backdrop
+  click without changing anything. While viewing, the scan field and `⌨ Enter PN manually` are disabled (placeholder
+  `Viewing only — scanning needs an enrolled device`), the PN actions, the Machine card and row actions and `⟲ UNDO`
+  are not rendered, the Worker badge sign-in modal never opens (even in a Scanned-session Area without a session), and
+  the theme control never saves the station's theme. If this browser holds a device token that the server refuses as
+  revoked or replaced before the station has loaded, the token is forgotten and the station opens in the viewing state
+  instead of the enrollment panel; a refusal while the station is open on an enrolled device still raises the blocking
+  dialog. Signing in or out takes effect the next time the station is read (`Refresh`, or opening the station again):
+  a User without the permission, or nobody, then gets the enrollment panel or dialog as before. Production mode never opens in the viewing state: it shows
+  the enrollment panel. Once the device is enrolled — from the notice or in another tab — the station behaves exactly
+  as on any enrolled device.
 
 ---
 
@@ -4064,7 +4084,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` on Machines and Part Numbers prints many labels at once from one shared dialog, and both toolbars move the search to its own row when the buttons no longer fit. |
+| 2026-11-17 | uncommitted | §1.2, §4.1 and §4.13: a User who may manage Scan Stations views a station without an enrolled device, with every action unavailable and a way to enroll the device. |
+| 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` on Machines and Part Numbers prints many labels at once from one shared dialog, and both toolbars move the search to its own row when the buttons no longer fit. |
 | 2026-11-17 | 1fc96e1 | §2: passkeys — signing in with a passkey alone, a passkey as the second step, adding and removing passkeys; §9: the setup time covers passkeys, and `Turn off two-step…` deletes them too. |
 | 2026-11-17 | aa6287d | §2: two-step sign-in and the own email address from the account menu, and the second step of the Sign in dialog; §9: Settings → Two-step sign-in, the mail server timeout, and the two-step state and `Turn off two-step…` in Users. |
 | 2026-11-16 | 252f678 | §9: Settings → Outgoing mail server, with a test email, and an optional email address in the Users editor. |

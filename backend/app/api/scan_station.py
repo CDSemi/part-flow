@@ -240,6 +240,15 @@ Stations: each command kind needs its key (403
 the idempotency re-check, so a committed command always replays); the
 context reports the requesting ``device`` and the role's
 ``station_permissions``.
+
+Viewing a station (owner decision 2026-11-17): the context and the Area
+inventory also answer a request WITHOUT a device token from a signed-in
+User whose role holds Manage Scan Stations (``app.api.station_viewing``).
+The context then reports ``device`` null, the ``viewer`` and no
+``station_permissions``; the inventory needs the viewed station in
+``station_id`` (bound to the Area now, else 409
+``station_context_changed``). Every other route here stays device-only
+and refuses a viewer with 401 ``station_device_required``.
 """
 
 import datetime
@@ -265,9 +274,10 @@ from app.api.area_inventory import (
     operation_ref,
     work_order_context,
 )
-from app.api.authorization import StationDeviceDep, StationDeviceForPathDep
+from app.api.authorization import StationDeviceForPathDep
 from app.api.dependencies import SessionDep
 from app.api.request_log import bind_command, bind_result
+from app.api.station_viewing import StationReaderDep, StationReaderForPathDep
 from app.application import (
     direct_processing,
     environment,
@@ -278,6 +288,7 @@ from app.application import (
     scan_station,
     station_access,
     station_devices,
+    station_viewing,
     stockroom,
     transfers,
     undo,
@@ -384,6 +395,14 @@ class StationDeviceRef(BaseModel):
     label: str
 
 
+class StationViewerRef(BaseModel):
+    """The signed-in User a station context was answered to without an
+    enrolled device (Manage Scan Stations; view only)."""
+
+    id: int
+    name: str
+
+
 class StationContextResponse(BaseModel):
     station_id: str
     department: DepartmentRef
@@ -398,19 +417,29 @@ class StationContextResponse(BaseModel):
     # The station's own saved theme (Phase 13 slice 10, GUI_DESIGN §2.1
     # station tier); null = no preference (the Dark default applies).
     theme_preference: ThemePreferenceLiteral | None
-    # The requesting enrolled device (Phase 14 slice 4).
-    device: StationDeviceRef
+    # The requesting enrolled device (Phase 14 slice 4); null exactly when
+    # the context was answered to a viewer.
+    device: StationDeviceRef | None
+    # The signed-in User viewing the station without an enrolled device;
+    # null for an enrolled device.
+    viewer: StationViewerRef | None
     # The role applied at Scan Stations: its grants among the ten Scan
-    # Station keys, sorted — the station hides what it may not do.
+    # Station keys, sorted — the station hides what it may not do. Empty
+    # for a viewer: nothing may be done at the station from this request.
     station_permissions: list[Permission]
 
 
 @router.get("/scan-stations/{station_id}/context")
 def get_station_context(
-    device: StationDeviceForPathDep, station_id: str, session: SessionDep
+    reader: StationReaderForPathDep, station_id: str, session: SessionDep
 ) -> StationContextResponse:
     context = scan_station.station_context(session, station_id)
-    permissions = sorted(station_access.station_permissions(session), key=lambda key: key.value)
+    device, viewer = reader
+    permissions = (
+        []
+        if device is None
+        else sorted(station_access.station_permissions(session), key=lambda key: key.value)
+    )
     return StationContextResponse(
         station_id=context.station.station_id,
         department=DepartmentRef(id=context.department.id, name=context.department.name),
@@ -424,7 +453,14 @@ def get_station_context(
             final_gates=final_gates_response(context.worker_identification.final_gates),
         ),
         theme_preference=_theme_preference(context.station.theme_preference),
-        device=StationDeviceRef(id=device.device_id, label=device.label),
+        device=(
+            None if device is None else StationDeviceRef(id=device.device_id, label=device.label)
+        ),
+        viewer=(
+            None
+            if viewer is None
+            else StationViewerRef(id=viewer.user_id, name=viewer.display_name)
+        ),
         station_permissions=permissions,
     )
 
@@ -1678,9 +1714,15 @@ def undo_production_command(
 
 @router.get("/areas/{area_id}/inventory")
 def get_area_inventory(
-    device: StationDeviceDep, area_id: int, session: SessionDep
+    reader: StationReaderDep, area_id: int, session: SessionDep, station_id: str | None = None
 ) -> AreaInventoryResponse:
     """The station's own Area only: the device's station must be bound to it
-    now (409 ``station_context_changed`` after a rebinding)."""
-    station_devices.require_area_binding(session, device, area_id)
+    now (409 ``station_context_changed`` after a rebinding). A viewer names
+    the viewed station in ``station_id`` (422 without one) and the same rule
+    applies to it; for a device its own station decides and ``station_id``
+    is ignored."""
+    if reader.device is not None:
+        station_devices.require_area_binding(session, reader.device, area_id)
+    else:
+        station_viewing.require_viewed_station_area(session, station_id, area_id)
     return area_inventory_response(scan_station.area_inventory(session, area_id))

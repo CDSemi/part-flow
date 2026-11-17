@@ -815,9 +815,13 @@ def test_a_user_sign_in_neither_widens_nor_narrows_a_station(
     client: TestClient, db_engine: Engine, shop: _Shop
 ) -> None:
     """SD-9 (PLAN CD8): a User holding every key without a device → 401 on
-    every station route; a device with a User holding no key → answered."""
+    every station route but the two reads a viewer may make (the viewing
+    tests cover those: ``test_station_viewing_api``); a device with a User
+    holding no key → answered."""
     admin = admin_of(client)
     for request in _station_requests(shop):
+        if ROUTE_ACCESS[request.key].station_viewer:
+            continue
         response = admin.request(request.method, request.path, **request.kwargs)
         assert response.status_code == 401, (request.key, response.text)
         assert response.json()["station_device_required"] is True

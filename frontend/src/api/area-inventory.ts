@@ -433,12 +433,18 @@ export function toAreaInventory(wire: AreaInventoryWire): AreaInventory {
 export async function getAreaInventory(
   areaId: number,
   stationId: string,
+  { viewing = false }: { viewing?: boolean } = {},
 ): Promise<AreaInventory> {
   // A Scan Station read: the device of `stationId` must belong to the
   // station currently bound to this Area (else 409
-  // `station_context_changed` — the station reloads its context).
+  // `station_context_changed` — the station reloads its context). While
+  // the station is only viewed (its context was answered to a signed-in
+  // viewer, not to an enrolled device), the read names the viewed
+  // station and the server applies the same binding rule to it.
   const wire = await apiRequest<AreaInventoryWire>(
-    `/api/areas/${areaId}/inventory`,
+    viewing
+      ? `/api/areas/${areaId}/inventory?station_id=${encodeURIComponent(stationId)}`
+      : `/api/areas/${areaId}/inventory`,
     { headers: stationDeviceHeaders(stationId) },
   );
   return toAreaInventory(wire);

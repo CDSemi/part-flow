@@ -27,6 +27,7 @@ from app.api.route_access import (
     ROUTE_ACCESS,
     Access,
 )
+from app.api.station_viewing import RequireStationReader
 from app.domain.enums import Permission
 from app.domain.permissions import (
     CORRECTION_PERMISSIONS,
@@ -99,14 +100,21 @@ def test_no_registry_entry_is_stale() -> None:
     assert set(ROUTE_ACCESS) - routes == set()
 
 
-def _station_device_dependencies(route: APIRoute) -> list[RequireStationDevice]:
-    return [call for call in _calls(route) if isinstance(call, RequireStationDevice)]
+def _station_device_dependencies(
+    route: APIRoute,
+) -> list[RequireStationDevice | RequireStationReader]:
+    return [
+        call
+        for call in _calls(route)
+        if isinstance(call, RequireStationDevice | RequireStationReader)
+    ]
 
 
 def test_dependencies_match_the_class() -> None:
     """RA-4 (+ SD-27: exactly the STATION routes require an enrolled
     station device, declared first, bound to the path's station iff the
-    path names one)."""
+    path names one; exactly the ``station_viewer`` ones also answer a
+    viewer — ``RequireStationReader``)."""
     principal_calls = (optional_principal, current_user)
     for key, route in _api_routes().items():
         calls = _calls(route)
@@ -114,11 +122,13 @@ def test_dependencies_match_the_class() -> None:
         any_permissions = _any_permission_dependencies(route)
         devices = _station_device_dependencies(route)
         access = ROUTE_ACCESS[key]
+        assert not access.station_viewer or access.access is Access.STATION, key
         if access.access is Access.STATION:
             assert not permissions and not any_permissions, key
             assert not any(call in principal_calls for call in calls), key
             assert len(devices) == 1, key
             device = devices[0]
+            assert isinstance(device, RequireStationReader) == access.station_viewer, key
             assert device.bind_path_station == ("{station_id}" in route.path), key
             assert route.dependant.dependencies[0].call is device, key
             continue
@@ -240,6 +250,7 @@ def test_management_read_sets_equal_the_spec_literals() -> None:
         ("GET", "/api/work-orders/{work_order_id}"): _WO_VIEW,
         ("GET", "/api/part-numbers"): _WO_VIEW | _PN_VIEW,
         ("GET", "/api/part-numbers/page"): _PN_VIEW,
+        ("GET", "/api/part-numbers/running-work-orders"): _PN_VIEW,
         ("GET", "/api/hot-list"): _PRIORITY_VIEW,
         ("GET", "/api/hot-list/candidates"): _PRIORITY_VIEW,
         ("GET", "/api/tracking"): _TRACKING_VIEW,
@@ -250,7 +261,6 @@ def test_management_read_sets_equal_the_spec_literals() -> None:
         ("GET", "/api/tracking/audit-trail"): _TRACKING_VIEW,
         ("GET", "/api/area-board"): {_VPD},
         ("GET", "/api/machines/{machine_id}"): _MACHINES_VIEW,
-        ("GET", "/api/part-numbers/running-work-orders"): _PN_VIEW,
         ("GET", "/api/machines/{machine_id}/lifecycle-events"): _MACHINES_VIEW,
         ("GET", "/api/route-templates/management"): _ROUTES_VIEW,
         ("GET", "/api/route-templates/{template_id}/usage"): _ROUTES_VIEW,
@@ -284,4 +294,15 @@ def test_station_device_routes_and_bindings() -> None:
     allocation = inspect.getsource(routes[("POST", "/api/allocations")].endpoint)
     assert "station_devices.require_station_binding(device, body.station_id)" in allocation
     inventory = inspect.getsource(routes[("GET", "/api/areas/{area_id}/inventory")].endpoint)
-    assert "station_devices.require_area_binding(session, device, area_id)" in inventory
+    assert "station_devices.require_area_binding(session, reader.device, area_id)" in inventory
+    assert "station_viewing.require_viewed_station_area(session, station_id, area_id)" in inventory
+
+
+def test_exactly_the_station_context_and_inventory_answer_a_viewer() -> None:
+    """Viewing a station (owner decision 2026-11-17): only the two reads the
+    standard-mode station loads accept a viewer; every write stays device-only."""
+    viewable = {key for key, access in ROUTE_ACCESS.items() if access.station_viewer}
+    assert viewable == {
+        ("GET", "/api/scan-stations/{station_id}/context"),
+        ("GET", "/api/areas/{area_id}/inventory"),
+    }

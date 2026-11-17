@@ -1686,3 +1686,32 @@
   flex: 1 1 200px;
   padding: 0 20px;
 }
+
+/* Viewing a station without an enrolled device (GUI_DESIGN §4.13): the
+   persistent notice above the scan panel — the warning guidance beside
+   its two actions, wrapping below it on narrow widths. */
+.ss-viewing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+}
+
+.ss-viewing .ss-guide {
+  flex: 1 1 320px;
+  margin: 0;
+}
+
+.ss-viewing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ss-viewing-actions .bigbtn {
+  padding: 0 20px;
+}

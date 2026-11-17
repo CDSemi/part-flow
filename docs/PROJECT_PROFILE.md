@@ -1471,7 +1471,7 @@ A Scan Station's identity and its binding to one Area are stable application and
 
 ScanSession remains temporary context. Neither Scan Station configuration nor ScanSession is the source of truth for production state — that remains the immutable Part Movement history. Part Movement records the stable station identity (`station_id`) for audit.
 
-A Scan Station is used only from devices an administrator has enrolled for it (§20); enrollment is configuration, never production state, and is never recorded on a Movement.
+A Scan Station is used only from devices an administrator has enrolled for it (§20); enrollment is configuration, never production state, and is never recorded on a Movement. A signed-in User whose role holds the permission to manage Scan Stations may view any Scan Station from a browser that is not enrolled, but can record nothing there (§20).
 
 ---
 
@@ -1749,6 +1749,8 @@ Roles are **named and editable**. Every capability below is a **permission key**
 
 **Scan Station actions.** Scan Station actions are performed by Workers, who hold no role (§7), on a Scan Station device that an administrator has enrolled for that station; a device that is not enrolled, or is enrolled for another station, can perform nothing there. What an enrolled Scan Station may do — including Undo of recent eligible scans (§16) — is decided by the permissions of the one role applied at Scan Stations, initially the Operator role with its initial grants listed below; Worker identity never grants or restricts an action.
 
+**Viewing a Scan Station.** The permission to manage Scan Stations also lets a signed-in User view any Scan Station in the standard mode from a browser that is not an enrolled device of it: the station shows its Area, its Operations, the Area's Worker identification and its current quantity exactly as the station does. Viewing is read-only. Every production action, every scan (including a Worker badge scan) and every change to the station's own settings still needs an enrolled device of that station, because each Movement records the device that made it; the production mode of a station opens only on an enrolled device. A User without this permission, or who must first replace a password an administrator set, is treated like any device that is not enrolled.
+
 Machines, Route Templates (Planned Routes), and PartNumber master metadata are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines, Route Templates, and PartNumber master metadata without being an Administrator. The initial Administrator role holds these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines, Route Templates, or Part Numbers screens (§21).
 
 ## Administrator
@@ -1761,7 +1763,7 @@ The initial Administrator role grants:
 - manage Machines (shared with authorized production roles — managed through Management → Machines, §21),
 - manage Workers,
 - manage users and roles,
-- manage Scan Stations,
+- manage Scan Stations, which includes viewing any Scan Station from a browser that is not enrolled (see "Viewing a Scan Station" above),
 - manage barcode configuration,
 - manage Route Templates (shared with authorized production roles — managed through Management → Planned Routes, §21),
 - manage PartNumber master metadata, including hard deletion (shared with authorized production roles — managed through Management → Part Numbers, §21),
@@ -2457,7 +2459,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Machines and Part Numbers: printing many barcode labels at once; the date added and last-use orders of the Part Number master records. |
+| 2026-11-17 | uncommitted | §15 and §20: a User who may manage Scan Stations can view any Scan Station from a browser that is not enrolled, read-only. |
+| 2026-11-17 | 4cfaf35 | Machines and Part Numbers: printing many barcode labels at once; the date added and last-use orders of the Part Number master records. |
 | 2026-11-17 | 01ce427 | Administrative Archival and Purge: the interim operator command that permanently deletes Work Orders and Part Numbers entered only for testing. |
 | 2026-11-16 | a04179f | §21: a new Work Order can put its demand lines on the Hot list when it is created. |
 | 2026-11-14 | 2a24c2a | §8.4 and §8.8: Area names are unique within a Department and active Planned Route names are unique. |

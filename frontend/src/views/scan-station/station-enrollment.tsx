@@ -45,6 +45,9 @@ function leadOf(reason: EnrollmentReason, stationId: string): string {
  *   underneath) — Escape and backdrop clicks never dismiss it, a code
  *   the server accepts is the only way through. After enrolling, the
  *   operator confirms the same action again: it is recorded once.
+ *   Opened by choice from the viewing notice (a signed-in User viewing
+ *   the station, `onDismiss` given), the dialog blocks nothing: Cancel,
+ *   Escape and the backdrop close it and nothing changes.
  * Enrolling is a write: disabled while disconnected, nothing queued.
  * While the page is outdated (another server release) both forms offer
  * their own `Reload page`; the station never reloads itself while the
@@ -58,6 +61,7 @@ export function StationEnrollment({
   writeNotSent = false,
   writeBlocked,
   onEnrolled,
+  onDismiss,
 }: {
   stationId: string;
   variant: 'panel' | 'dialog';
@@ -72,6 +76,9 @@ export function StationEnrollment({
   /** The device is enrolled and its token stored; `persisted: false` =
    * the browser could not keep it beyond this page. */
   onEnrolled: (result: { persisted: boolean }) => void;
+  /** The dialog was opened by choice (viewing the station): closing it
+   * changes nothing. Absent, the dialog cannot be dismissed. */
+  onDismiss?: () => void;
 }) {
   const { navigate } = useRouter();
   const { status } = useConnectivity();
@@ -168,13 +175,18 @@ export function StationEnrollment({
       ) : null}
       <div className="row">
         {variant === 'panel' ? (
-          // The dialog has no way out: its drafts and an unknown outcome
-          // stay until the same intent is confirmed again after enrolling.
+          // The blocking dialog has no way out: its drafts and an unknown
+          // outcome stay until the same intent is confirmed again after
+          // enrolling.
           <button
             className="bigbtn ghost"
             onClick={() => navigate('/scan-station')}
           >
             Station Selector
+          </button>
+        ) : onDismiss ? (
+          <button className="bigbtn ghost" disabled={busy} onClick={onDismiss}>
+            Cancel
           </button>
         ) : null}
         {outdated ? (
@@ -203,8 +215,11 @@ export function StationEnrollment({
     return (
       <ModalDialog
         label="Enroll this device"
-        // Deliberately not dismissable: the close request is ignored.
-        onClose={() => undefined}
+        // Not dismissable when a refusal raised it: the close request is
+        // ignored. Opened by choice, it closes.
+        onClose={() => {
+          if (onDismiss && !busy) onDismiss();
+        }}
       >
         <h3>Enroll this device</h3>
         {body}

@@ -1418,8 +1418,10 @@ released with its own tag, and a delivered item says so:
    once (GUI_DESIGN §12.6, §14.5): selectable cards grouped by Area, or for Part Numbers by running Work Order or as a
    searchable list ordered by PN, name, date added or last use in a Work Order; Select all and per-group selection;
    and a print that fills the page with the same labels as the single-label dialogs.
-3. **Viewing a Scan Station — planned.** A user who holds Manage Scan Stations opens any Scan Station in its standard
-   mode without an enrolled device, to view it only.
+3. **Viewing a Scan Station — delivered.** A user who holds Manage Scan Stations opens any Scan Station in its standard
+   mode from a browser that is not an enrolled device, to view it only: the station context and the Area inventory
+   answer such a viewer, every write still needs an enrolled device of that station, and the production mode stays
+   enrolled-device only (PROJECT_PROFILE §15, §20; GUI_DESIGN §4.13).
 4. **Administration → Security — planned.** Password rules, Remember me, and every sign-in setting in one section.
 
 ## Deferred
@@ -1465,7 +1467,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 18 item 2 delivered: Print barcodes on Management → Machines and Management → Part Numbers. |
+| 2026-11-17 | uncommitted | Phase 18 item 3 delivered: a user who holds Manage Scan Stations views any Scan Station without an enrolled device. |
+| 2026-11-17 | `4cfaf35` | Phase 18 item 2 delivered: Print barcodes on Management → Machines and Management → Part Numbers. |
 | 2026-11-17 | `01ce427` | Phase 18 opened with the owner's requests of 2026-11-17, item 1 (`pf delete-permanently`) delivered; the owner's review of the archival design recorded. |
 | 2026-11-17 | `1fc96e1` | Phase 17 item 8 delivered with passkeys, which closes Phase 17; migration `0038_phase17_passkeys` becomes the schema head. |
 | 2026-11-17 | `aa6287d` | Phase 17 item 8: two-step sign-in delivered (authenticator app, recovery codes, emailed code, its numbers in Settings, the own email address); migration `0037_phase17_two_step` becomes the schema head. |

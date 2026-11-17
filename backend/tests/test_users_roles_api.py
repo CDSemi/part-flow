@@ -1257,6 +1257,9 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/application/station_access.py",
     "app/api/station_devices.py",
     "app/api/scan_station.py",
+    # 2026-11-17: viewing a Scan Station without an enrolled device needs
+    # Manage Scan Stations.
+    "app/application/station_viewing.py",
     # Phase 14 slice 6: the AssignedRoute adjustment routes.
     "app/api/route_adjustments.py",
     # Phase 15 slice 1: the Work Order import routes.

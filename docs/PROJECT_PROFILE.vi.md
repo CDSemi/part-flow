@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `01ce427` cộng các thay đổi chưa commit ngày 2026-11-17.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `4cfaf35` cộng các thay đổi chưa commit ngày 2026-11-17.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -1474,7 +1474,7 @@ Danh tính của một Scan Station và việc gắn nó với một Area là c�
 
 ScanSession vẫn là ngữ cảnh tạm thời. Cả cấu hình Scan Station lẫn ScanSession đều không phải là nguồn sự thật cho trạng thái sản xuất — nguồn đó vẫn là lịch sử Part Movement bất biến. Part Movement ghi danh tính ổn định của trạm (`station_id`) để phục vụ audit.
 
-Một Scan Station chỉ được dùng từ các thiết bị mà một quản trị viên (administrator) đã đăng ký (enrolled) cho nó (§20); việc đăng ký là cấu hình, không bao giờ là trạng thái sản xuất, và không bao giờ được ghi trên một Movement.
+Một Scan Station chỉ được dùng từ các thiết bị mà một quản trị viên (administrator) đã đăng ký (enrolled) cho nó (§20); việc đăng ký là cấu hình, không bao giờ là trạng thái sản xuất, và không bao giờ được ghi trên một Movement. Một User đã đăng nhập có vai trò giữ quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, nhưng không thể ghi nhận gì ở đó (§20).
 
 ---
 
@@ -1752,6 +1752,8 @@ Các vai trò **có tên và có thể chỉnh sửa**. Mỗi năng lực bên d
 
 **Thao tác tại Scan Station.** Các thao tác tại Scan Station được thực hiện bởi các Worker, những người không giữ vai trò nào (§7), trên một thiết bị Scan Station mà quản trị viên đã đăng ký (enroll) cho trạm đó; một thiết bị chưa đăng ký, hoặc đã đăng ký cho trạm khác, không thể thực hiện gì ở đó. Những gì một Scan Station đã đăng ký được phép làm — bao gồm Undo các lần quét gần đây đủ điều kiện (§16) — được quyết định bởi quyền của một vai trò duy nhất được áp dụng tại các Scan Station, ban đầu là vai trò Operator với các quyền được cấp ban đầu liệt kê bên dưới; danh tính Worker không bao giờ cấp hay hạn chế một thao tác.
 
+**Xem một Scan Station.** Quyền quản lý Scan Station cũng cho phép một User đã đăng nhập xem bất kỳ Scan Station nào ở standard mode từ một trình duyệt không phải là thiết bị đã đăng ký của station đó: station hiển thị Area, các Operation, cách nhận diện Worker của Area và số lượng hiện tại của nó đúng như station hiển thị. Việc xem chỉ để đọc. Mọi thao tác sản xuất, mọi lần quét (kể cả quét badge Worker) và mọi thay đổi đối với thiết lập riêng của station vẫn cần một thiết bị đã đăng ký của station đó, vì mỗi Movement ghi lại thiết bị đã tạo ra nó; production mode của một station chỉ mở trên một thiết bị đã đăng ký. Một User không có quyền này, hoặc phải thay mật khẩu do quản trị viên đặt trước, được đối xử như mọi thiết bị chưa đăng ký.
+
 Machine, Route Template (Planned Routes) và siêu dữ liệu PartNumber master là dữ liệu chủ sản xuất (production master data) — các chức năng quản lý vận hành, không phải quản trị hệ thống. Việc quản lý chúng **dựa trên quyền**: một chuyên viên sản xuất được ủy quyền — ví dụ quản lý sản xuất (Production Manager), kỹ sư quy trình (Process Engineer) hoặc quản lý bảo trì (Maintenance Manager) — có thể quản lý Machine, Route Template và siêu dữ liệu PartNumber master mà không cần là Administrator. Vai trò Administrator ban đầu giữ các năng lực này, nhưng chúng không phải độc quyền của Administrator, và Administration không có màn hình Machines, Route Templates hay Part Numbers trùng lặp (§21).
 
 ## Administrator
@@ -1764,7 +1766,7 @@ Vai trò Administrator ban đầu cấp các quyền:
 - quản lý Machine (dùng chung với các vai trò sản xuất được ủy quyền — được quản lý qua Management → Machines, §21),
 - quản lý Worker,
 - quản lý người dùng và vai trò,
-- quản lý Scan Station,
+- quản lý Scan Station, bao gồm việc xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký (xem "Xem một Scan Station" ở trên),
 - quản lý cấu hình barcode,
 - quản lý Route Template (dùng chung với các vai trò sản xuất được ủy quyền — được quản lý qua Management → Planned Routes, §21),
 - quản lý siêu dữ liệu PartNumber master, bao gồm cả xóa vĩnh viễn (hard delete) (dùng chung với các vai trò sản xuất được ủy quyền — được quản lý qua Management → Part Numbers, §21),
@@ -2460,7 +2462,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Machines và Part Numbers: in nhiều nhãn barcode cùng lúc; thứ tự theo ngày thêm và lần dùng cuối của các bản ghi master Part Number. |
+| 2026-11-17 | uncommitted | §15 và §20: một User có quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, chỉ để đọc. |
+| 2026-11-17 | 4cfaf35 | Machines và Part Numbers: in nhiều nhãn barcode cùng lúc; thứ tự theo ngày thêm và lần dùng cuối của các bản ghi master Part Number. |
 | 2026-11-17 | 01ce427 | Administrative Archival and Purge: lệnh vận hành tạm thời xóa vĩnh viễn các Work Order và Part Number chỉ nhập để thử nghiệm. |
 | 2026-11-16 | a04179f | §21: một Work Order mới có thể đưa các demand line của nó vào Hot list khi được tạo. |
 | 2026-11-14 | 2a24c2a | §8.4 và §8.8: tên Area là duy nhất trong một Department và tên Planned Route đang dùng là duy nhất. |

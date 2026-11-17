@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `4cfaf35` cộng các thay đổi chưa commit ngày 2026-11-17.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -123,7 +123,8 @@ Management yêu cầu một người dùng đã đăng nhập (§1.2).
 
 Các User của ứng dụng đăng nhập bằng tên đăng nhập (login name) và mật khẩu. Administration và Management yêu cầu đăng
 nhập. Scan Station và Production Board không bao giờ yêu cầu đăng nhập; thay vào đó, một Scan Station được sử dụng từ một
-thiết bị đã được đăng ký (enroll) (§4.13).
+thiết bị đã được đăng ký (enroll) (§4.13). Một User đã đăng nhập có quyền quản lý Scan Station có thể xem một station
+từ một trình duyệt chưa enroll (§4.13, xem một station).
 
 - **Account chip.** Thanh điều hướng trên cùng kết thúc bằng một account chip. Khi chưa ai đăng nhập, chip hiển thị
   `Sign in` (và `Set up PartFlow` khi PartFlow chưa có Administrator nào). Ngược lại, chip hiển thị avatar và tên, cùng
@@ -654,7 +655,10 @@ của pill, và control theme căn mép dưới thẳng với viền dưới c�
 định chiều cao của Worker Session.
 
 Cả hai mode đều yêu cầu trình duyệt là một thiết bị đã enroll của Scan Station đó (§4.13). Standard mode trên máy tính
-riêng của Manager hoặc Administrator được enroll như mọi thiết bị khác.
+riêng của Manager hoặc Administrator được enroll như mọi thiết bị khác. Ngoại lệ duy nhất là việc xem: một User đã đăng
+nhập có role giữ permission Manage Scan Stations có thể mở standard mode của bất kỳ station nào mà không cần thiết bị đã
+enroll và xem những gì station hiển thị, với mọi action đều không khả dụng (§4.13). Production mode luôn cần một thiết bị
+đã enroll.
 
 **Footer.** Cả hai mode dùng chung **một footer thống nhất, không tương tác**: Station ID mờ, một nhãn mode tinh tế
 không tương tác (**`Standard mode`** hoặc **`Production mode`**), và gợi ý phím tắt ngắn gọn
@@ -1740,6 +1744,23 @@ Một Scan Station chỉ hoạt động từ một trình duyệt mà administra
   chỉ mở ra một action như vậy sẽ hiển thị một thông báo đỏ và không mở gì. Một từ chối đối với action mà role không
   cấp (trên một màn hình cũ) là một rejection đỏ thông thường mà không ghi gì. Một lần quét badge bị từ chối vì thiếu
   permission quét badge được hiển thị bên trong modal badge Worker (§4.12), modal này vẫn mở.
+- **Xem một station.** Một User đã đăng nhập có role giữ permission Manage Scan Stations (PROJECT_PROFILE §20) mở
+  standard mode của bất kỳ station nào từ một trình duyệt không phải là thiết bị đã enroll của station đó ở trạng thái
+  xem thay vì panel enroll. Station hiển thị như thường lệ — header, Worker pill, các tổng của Area, `In this Area now`
+  và các Machine card — đọc từ server. Một thông báo cố định phía trên card `Scan barcode` ghi `Viewing as <name>. This
+  device is not enrolled for Scan Station <Station ID>; actions need an enrolled device.` với hai nút: `Refresh` (đọc
+  lại station; trạng thái xem không tự động làm mới) và `Enroll this device`, nút này mở dialog enroll; khi được mở theo
+  cách này, dialog có nút `Cancel` và đóng bằng Escape hoặc click ra nền mà không thay đổi gì. Trong khi xem, ô quét và
+  `⌨ Enter PN manually` bị vô hiệu hóa (placeholder `Viewing only — scanning needs an enrolled device`), các PN action,
+  các action trên Machine card và row và `⟲ UNDO` không được hiển thị, modal đăng nhập bằng badge Worker không bao giờ
+  mở (kể cả trong một Area Scanned-session chưa có session), và theme control không bao giờ lưu theme của station. Nếu
+  trình duyệt này giữ một device token mà server từ chối vì đã bị revoke hoặc bị thay thế trước khi station tải xong,
+  token đó bị quên và station mở ở trạng thái xem thay vì panel enroll; một từ chối trong khi station đang mở trên một
+  thiết bị đã enroll vẫn hiện dialog chặn. Đăng nhập hoặc đăng xuất có hiệu lực ở lần đọc station tiếp theo (`Refresh`, hoặc
+  mở lại station): khi đó một User không có permission, hoặc khi không ai đăng nhập, nhận panel hoặc dialog enroll như
+  trước. Production
+  mode không bao giờ mở ở trạng thái xem: nó hiển thị panel enroll. Khi thiết bị đã được enroll — từ thông báo hoặc ở
+  một tab khác — station hoạt động đúng như trên mọi thiết bị đã enroll.
 
 ---
 # 5. Production Board
@@ -4103,7 +4124,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` trên Machines và Part Numbers in nhiều nhãn cùng lúc từ một dialog dùng chung, và cả hai toolbar chuyển ô tìm kiếm xuống hàng riêng khi các nút không còn vừa. |
+| 2026-11-17 | uncommitted | §1.2, §4.1 và §4.13: một User có quyền quản lý Scan Station xem một station mà không cần thiết bị đã enroll, với mọi action không khả dụng và một cách để enroll thiết bị. |
+| 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` trên Machines và Part Numbers in nhiều nhãn cùng lúc từ một dialog dùng chung, và cả hai toolbar chuyển ô tìm kiếm xuống hàng riêng khi các nút không còn vừa. |
 | 2026-11-17 | 1fc96e1 | §2: passkey — đăng nhập chỉ bằng passkey, passkey làm bước thứ hai, thêm và gỡ passkey; §9: thời gian thiết lập bao gồm cả passkey, và `Turn off two-step…` cũng xóa chúng. |
 | 2026-11-17 | aa6287d | §2: xác thực hai bước và địa chỉ email của chính người dùng từ menu tài khoản, và bước thứ hai của dialog Sign in; §9: Settings → Two-step sign-in, timeout của mail server, và trạng thái xác thực hai bước cùng `Turn off two-step…` trong Users. |
 | 2026-11-16 | 252f678 | §9: Settings → Outgoing mail server, kèm test email, và một địa chỉ email tùy chọn trong editor Users. |

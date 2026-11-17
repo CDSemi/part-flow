@@ -12,7 +12,12 @@ route is added here in the same change.
 - ``STATION`` — a Scan Station route: requires an enrolled station
   device (``RequireStationDevice``); never resolves the User principal;
   keys of the role applied at Scan Stations are checked by the
-  Application per command (``app.application.station_access``).
+  Application per command (``app.application.station_access``). A
+  ``station_viewer`` read (the station context and the Area inventory)
+  uses ``RequireStationReader`` instead: the same device rules for a
+  request with a device token, and without one a signed-in User holding
+  Manage Scan Stations — a viewer (``app.api.station_viewing``); only
+  then is the principal resolved.
 - ``SIGNED_IN`` — any signed-in User without a pending forced password
   change (``RequirePermission()``): the Administration reads and the
   Asset Tag format read.
@@ -54,6 +59,8 @@ class RouteAccess:
     password_change_allowed: bool = False
     # A Management read: RequireAnyPermission — any one of these keys opens it.
     any_of: frozenset[Permission] = field(default_factory=frozenset)
+    # A STATION read that also answers a viewer: RequireStationReader.
+    station_viewer: bool = False
 
 
 def _keys(*keys: Permission) -> frozenset[Permission]:
@@ -62,6 +69,7 @@ def _keys(*keys: Permission) -> frozenset[Permission]:
 
 _PUBLIC: Final = RouteAccess(Access.PUBLIC)
 _STATION: Final = RouteAccess(Access.STATION)
+_STATION_VIEWABLE: Final = RouteAccess(Access.STATION, station_viewer=True)
 _SIGNED_IN: Final = RouteAccess(Access.SIGNED_IN)
 
 
@@ -143,14 +151,14 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     # Gated by the one-time enrollment code (Phase 14 slice 4).
     ("POST", "/api/scan-stations/{station_id}/device-activations"): _PUBLIC,
     # --- STATION ------------------------------------------------------------
-    ("GET", "/api/scan-stations/{station_id}/context"): _STATION,
+    ("GET", "/api/scan-stations/{station_id}/context"): _STATION_VIEWABLE,
     **{
         ("POST", f"/api/scan-stations/{{station_id}}/{command}"): _STATION
         for command in _STATION_COMMANDS
     },
     ("GET", "/api/scan-stations/{station_id}/undo-preview/{device_event_id}"): _STATION,
     ("PUT", "/api/scan-stations/{station_id}/theme-preference"): _STATION,
-    ("GET", "/api/areas/{area_id}/inventory"): _STATION,
+    ("GET", "/api/areas/{area_id}/inventory"): _STATION_VIEWABLE,
     ("GET", "/api/allocations/suggestion"): _STATION,
     # The Stockroom station's receiving confirmation (station_id required).
     ("POST", "/api/allocations"): _STATION,

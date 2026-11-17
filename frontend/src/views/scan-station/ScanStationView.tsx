@@ -215,7 +215,11 @@ import type { EnrollmentReason } from './station-enrollment';
  * enrolled for it — without one the enrollment panel (or, mid-session,
  * the blocking enrollment dialog that keeps every draft) asks for the
  * one-time code — and it hides the actions the role applied at Scan
- * Stations does not grant (the server refuses them anyway). Every
+ * Stations does not grant (the server refuses them anyway). A signed-in
+ * User holding Manage Scan Stations may VIEW a station in the standard
+ * mode without an enrolled device: the viewing notice replaces every
+ * action, and enrolling from it turns the browser into the station's
+ * device (owner decision 2026-11-17). Every
  * approved Scan Station workflow is implemented here,
  * including Worker sessions and the badge-confirmation gates; the mock
  * preview of the approved design stays reachable with `?preview=mock`
@@ -571,6 +575,16 @@ function StationView({
   const disconnected = status === 'unavailable';
   const writeBlocked = status !== 'connected';
 
+  // Viewing a station without an enrolled device (owner decision
+  // 2026-11-17, GUI_DESIGN §4.13): a signed-in User whose role holds
+  // Manage Scan Stations may open it in the standard mode and see what it
+  // shows; nothing can be recorded from this browser. The SERVER decides
+  // from the sign-in cookie — the station reads no user module: a context
+  // answered without a device (`device` null) is the viewing state.
+  // Production mode stays enrolled-device only.
+  // The station loaded as an enrolled device of this browser.
+  const enrolledLoaded = useRef(false);
+
   // The scanned Worker Session as the server last answered it (Phase 13,
   // PROJECT_PROFILE §19). Every session-bearing read — this context
   // load, the PN and Machine resolves, the badge scans — takes a
@@ -589,10 +603,34 @@ function StationView({
     // station's own theme save never overrides it (theme-provider
     // rule 1c).
     const themeEpoch = stationThemeEpoch();
-    const loaded = await getStationContext(stationId);
+    const heldToken = readStationDeviceToken(stationId);
+    let loaded: StationContext;
+    try {
+      loaded = await getStationContext(stationId);
+    } catch (error) {
+      // The token this browser held was refused as revoked or replaced
+      // (and forgotten) before the station loaded as an enrolled device:
+      // the standard mode reads once more without a token — the server
+      // answers a signed-in viewer, and refuses anyone else as before
+      // (the enrollment panel then keeps the first refusal's reason).
+      const tryViewing =
+        !productionMode &&
+        heldToken !== null &&
+        readStationDeviceToken(stationId) === null &&
+        stationDeviceRefusal(error) === 'required' &&
+        !enrolledLoaded.current;
+      if (!tryViewing) throw error;
+      loaded = await getStationContext(stationId);
+    }
     applySession(loaded.workerIdentification.session, sent);
     return { ...loaded, themeEpoch };
-  }, [stationId, sessionTicket, applySession, stationThemeEpoch]);
+  }, [
+    stationId,
+    productionMode,
+    sessionTicket,
+    applySession,
+    stationThemeEpoch,
+  ]);
   const context = useApiData(loadContext);
   const { revalidate: revalidateContext, reload: reloadContext } = context;
 
@@ -652,6 +690,27 @@ function StationView({
   }, [loadedContext]);
   const ready =
     loadedContext ?? (deviceBlocked ? lastLoadedContext.current : null);
+  // The viewing state: the server answered the context to a viewer, not to
+  // an enrolled device of this browser. In production mode that answer
+  // never opens the station: the enrollment panel renders instead.
+  const viewing = ready !== null && ready.device === null;
+  const productionViewRefused = productionMode && viewing;
+  useEffect(() => {
+    if (loadedContext !== null) {
+      enrolledLoaded.current = loadedContext.device !== null;
+    }
+  }, [loadedContext]);
+  // A context the server answered to a viewer lifts an earlier device
+  // refusal (a stored token refused before the station loaded): the
+  // station opens in the viewing state, never under the enrollment block.
+  // Before paint, so the block never flashes.
+  const answeredToViewer =
+    !productionMode && loadedContext !== null && loadedContext.device === null;
+  useLayoutEffect(() => {
+    if (!answeredToViewer) return;
+    deviceRefusalPending.current = false;
+    setDeviceRefusal(null);
+  }, [answeredToViewer, loadedContext]);
   // The station every header element and dialog renders: the context as
   // read, with the Scanned session replaced by the LIVE one (unexpired,
   // from the latest applied answer) — the pill and every summary's
@@ -676,17 +735,18 @@ function StationView({
   const scannedMode = ready?.workerIdentification.mode === 'SCANNED';
   // A Scanned-session station without a valid session is blocked: the
   // sign-in modal renders above everything until the server accepts a
-  // badge (GUI_DESIGN §4.12).
-  const sessionBlocked = scannedMode && liveSession === null;
+  // badge (GUI_DESIGN §4.12). A viewer never signs a Worker in.
+  const sessionBlocked = scannedMode && liveSession === null && !viewing;
   // What the role applied at Scan Stations grants (Phase 14 slice 4,
   // OD-S4-1): an action it does not grant is not rendered and never
-  // opens; the server judges every command again.
-  const stationPermissions = ready?.stationPermissions;
+  // opens; the server judges every command again. A viewer is granted
+  // nothing (the server reports no station permissions to it either).
+  const stationPermissions = viewing ? undefined : ready?.stationPermissions;
   const allows = useCallback(
     (action: StationAction) => stationCan(action, stationPermissions ?? []),
     [stationPermissions],
   );
-  const areaId = ready?.area.id ?? null;
+  const areaId = productionViewRefused ? null : (ready?.area.id ?? null);
   // The inventory read answered that the station is no longer bound to
   // this Area (409 `station_context_changed` — an administrator rebound
   // it): not a device refusal, the token stays. Set below.
@@ -694,7 +754,7 @@ function StationView({
   const loadInventory = useCallback(async () => {
     if (areaId === null) return null;
     try {
-      return await getAreaInventory(areaId, stationId);
+      return await getAreaInventory(areaId, stationId, { viewing });
     } catch (error) {
       if (refusalFlag(error, 'station_context_changed')) {
         // The station re-reads its context; the inventory then follows
@@ -704,7 +764,7 @@ function StationView({
       }
       throw error;
     }
-  }, [areaId, stationId]);
+  }, [areaId, stationId, viewing]);
   const inventory = useApiData(loadInventory);
   // The Due Soon warning policy behind the `In this Area now` due tones
   // (GUI_DESIGN §3.12): a SEPARATE read that never joins the inventory,
@@ -755,7 +815,8 @@ function StationView({
       ? { preference: ready.themePreference, epoch: ready.themeEpoch }
       : undefined,
     {
-      writable: !writeBlocked,
+      // A viewer never saves the station's theme (a device-only write).
+      writable: !writeBlocked && !viewing,
       save: (theme) => saveStationThemePreference(stationId, theme),
       onSaveFailed: (theme) => {
         const shown = theme === 'dark' ? 'Dark' : 'Light';
@@ -1305,7 +1366,8 @@ function StationView({
 
   const handleScan = useCallback(() => {
     const input = inputRef.current;
-    if (!input) return;
+    // A viewer has no scan target (the input is disabled): nothing is sent.
+    if (!input || viewing) return;
     if (writeBlocked) {
       blockedNotice();
       return;
@@ -1366,6 +1428,7 @@ function StationView({
         return;
     }
   }, [
+    viewing,
     writeBlocked,
     blockedNotice,
     focusScan,
@@ -1988,10 +2051,14 @@ function StationView({
    * or, when a production dialog is open, to that dialog (the operator
    * confirms the same action again; it is recorded once).
    */
+  // The enrollment dialog a viewer opened by choice from the viewing
+  // notice (it closes without changing anything).
+  const [enrollOpen, setEnrollOpen] = useState(false);
   const completeEnrollment = useCallback(
     ({ persisted }: { persisted: boolean }) => {
       deviceRefusalPending.current = false;
       setDeviceRefusal(null);
+      setEnrollOpen(false);
       setWriteNotSent(false);
       const title = `This device is enrolled for Scan Station ${stationId}.`;
       setNotice(
@@ -2193,6 +2260,18 @@ function StationView({
       />
     );
   }
+  if (productionViewRefused) {
+    // Production mode stays enrolled-device only: a context answered to a
+    // viewer never opens it (GUI_DESIGN §4.13).
+    return (
+      <EnrollmentPanel
+        stationId={stationId}
+        reason={deviceRefusal ?? 'not-enrolled'}
+        writeBlocked={writeBlocked}
+        onEnrolled={completeEnrollment}
+      />
+    );
+  }
   if (context.state.status === 'error' && ready === null) {
     return (
       <UnknownStation
@@ -2265,6 +2344,39 @@ function StationView({
         </header>
 
         <div className="ss-body">
+          {station.viewer !== null ? (
+            // The persistent viewing notice (GUI_DESIGN §4.13): this
+            // browser is not an enrolled device of the station, so every
+            // action is unavailable here; enrolling turns it into one.
+            <div className="ss-viewing" role="status" aria-label="Viewing only">
+              <Guidance tone="warn">
+                Viewing as <b>{station.viewer.name}</b>. This device is not
+                enrolled for Scan Station{' '}
+                <span className="mono">{stationId}</span>; actions need an
+                enrolled device.
+              </Guidance>
+              <div className="ss-viewing-actions">
+                <button
+                  className="bigbtn ghost"
+                  disabled={writeBlocked}
+                  title="Re-read what the station shows now"
+                  onClick={() => {
+                    revalidateContext();
+                    reloadAreaReads();
+                  }}
+                >
+                  Refresh
+                </button>
+                <button
+                  className="bigbtn primary"
+                  disabled={deviceBlocked}
+                  onClick={() => setEnrollOpen(true)}
+                >
+                  Enroll this device
+                </button>
+              </div>
+            </div>
+          ) : null}
           <div className="panel">
             <div className="ph">
               Scan barcode
@@ -2283,20 +2395,26 @@ function StationView({
                   autoComplete="off"
                   inputMode={touchPrimary ? 'none' : undefined}
                   disabled={
-                    writeBlocked || resolving || sessionBlocked || deviceBlocked
+                    viewing ||
+                    writeBlocked ||
+                    resolving ||
+                    sessionBlocked ||
+                    deviceBlocked
                   }
                   placeholder={
-                    disconnected
-                      ? 'Disconnected — scanning disabled'
-                      : status === 'outdated'
-                        ? OUTDATED_SCAN_PLACEHOLDER
-                        : status === 'connecting'
-                          ? 'Connecting…'
-                          : resolving
-                            ? checkingBadge
-                              ? 'Checking barcode…'
-                              : 'Resolving Part Number…'
-                            : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
+                    viewing
+                      ? 'Viewing only — scanning needs an enrolled device'
+                      : disconnected
+                        ? 'Disconnected — scanning disabled'
+                        : status === 'outdated'
+                          ? OUTDATED_SCAN_PLACEHOLDER
+                          : status === 'connecting'
+                            ? 'Connecting…'
+                            : resolving
+                              ? checkingBadge
+                                ? 'Checking barcode…'
+                                : 'Resolving Part Number…'
+                              : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
                   }
                   aria-label="Scan barcode"
                   onKeyDown={(e) => {
@@ -2307,7 +2425,11 @@ function StationView({
                   className="ss-manualbtn"
                   onClick={() => setFlow({ kind: 'manual-pn' })}
                   disabled={
-                    writeBlocked || resolving || sessionBlocked || deviceBlocked
+                    viewing ||
+                    writeBlocked ||
+                    resolving ||
+                    sessionBlocked ||
+                    deviceBlocked
                   }
                 >
                   ⌨ Enter PN manually
@@ -2850,6 +2972,16 @@ function StationView({
             writeNotSent={writeNotSent}
             writeBlocked={writeBlocked}
             onEnrolled={completeEnrollment}
+          />
+        ) : enrollOpen && viewing ? (
+          <StationEnrollment
+            stationId={stationId}
+            variant="dialog"
+            reason="not-enrolled"
+            pendingUnknownOutcome={false}
+            writeBlocked={writeBlocked}
+            onEnrolled={completeEnrollment}
+            onDismiss={() => setEnrollOpen(false)}
           />
         ) : null}
 

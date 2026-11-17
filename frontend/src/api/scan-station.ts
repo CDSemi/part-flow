@@ -137,11 +137,16 @@ export interface StationContext {
   workerIdentification: StationWorkerIdentification;
   /** The station's saved theme (GUI_DESIGN §2.1 station tier); null = no preference. */
   themePreference: 'dark' | 'light' | null;
-  /** The enrolled device this request came from. */
-  device: { id: number; label: string };
+  /** The enrolled device this request came from; null exactly when the
+   * server answered a viewer. */
+  device: { id: number; label: string } | null;
+  /** The signed-in User viewing the station without an enrolled device
+   * (Manage Scan Stations — view only; nothing can be recorded from this
+   * browser); null for an enrolled device. */
+  viewer: { id: number; name: string } | null;
   /** The grants of the role applied at Scan Stations (station keys
    * only): the station hides the actions missing here; the server
-   * judges every command again. */
+   * judges every command again. Empty for a viewer. */
   stationPermissions: StationPermission[];
 }
 
@@ -225,7 +230,8 @@ interface StationContextWire {
     final_gates: { done: FinalGate; queue: FinalGate; undo: FinalGate };
   };
   theme_preference: ThemePreferenceWire | null;
-  device: { id: number; label: string };
+  device: { id: number; label: string } | null;
+  viewer?: { id: number; name: string } | null;
   station_permissions: string[];
 }
 
@@ -255,17 +261,33 @@ export async function getStationContext(
       },
     },
     themePreference: toThemePreference(wire.theme_preference),
-    device: toDeviceRef(wire.device),
+    ...toRequester(wire.device, wire.viewer ?? null),
     stationPermissions: toStationPermissions(wire.station_permissions),
   };
 }
 
-function toDeviceRef(wire: unknown): { id: number; label: string } {
-  const device = wire as { id?: unknown; label?: unknown } | null;
-  if (typeof device?.id !== 'number' || typeof device.label !== 'string') {
+/** Who the context was answered to: exactly one of an enrolled device
+ * and a viewer. */
+function toRequester(
+  deviceWire: unknown,
+  viewerWire: unknown,
+): Pick<StationContext, 'device' | 'viewer'> {
+  if (deviceWire === null) {
+    const viewer = viewerWire as { id?: unknown; name?: unknown } | null;
+    if (typeof viewer?.id !== 'number' || typeof viewer.name !== 'string') {
+      throw new Error('Malformed station viewer in the station context.');
+    }
+    return { device: null, viewer: { id: viewer.id, name: viewer.name } };
+  }
+  const device = deviceWire as { id?: unknown; label?: unknown } | null;
+  if (
+    typeof device?.id !== 'number' ||
+    typeof device.label !== 'string' ||
+    viewerWire !== null
+  ) {
     throw new Error('Malformed station device in the station context.');
   }
-  return { id: device.id, label: device.label };
+  return { device: { id: device.id, label: device.label }, viewer: null };
 }
 
 function toStationPermissions(wire: unknown): StationPermission[] {
