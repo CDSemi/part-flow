@@ -95,6 +95,8 @@ from app.application.errors import (
     PermissionDeniedError,
     RecordedByAnotherUserError,
     RouteDeviationConfirmationRequiredError,
+    SecondStepExpiredError,
+    SecondStepFailedError,
     SetupClosedError,
     SetupTokenInvalidError,
     SignInFailedError,
@@ -329,6 +331,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     _sign_in_refusals: tuple[tuple[type[ApplicationError], int, str], ...] = (
         (PasswordChangeRequiredError, 403, "password_change_required"),
         (SignInFailedError, 401, "sign_in_failed"),
+        # Phase 17: the second step of a two-step sign-in.
+        (SecondStepFailedError, 401, "second_step_failed"),
+        (SecondStepExpiredError, 401, "second_step_expired"),
         (AccountLockedError, 409, "account_locked"),
         (PasswordCheckBusyError, 503, "password_check_busy"),
         (SetupClosedError, 409, "setup_closed"),

@@ -26,7 +26,9 @@ import { AdminField, ServerErrorNote } from './section-widgets';
 // configure system settings edit it, remove it and send a test message.
 // The password is never shown: the server answers only whether one is
 // stored, keeps it when the field is left empty, and drops it with the
-// user name. Saving sends nothing. The server validates every value.
+// user name. The timeout (owner decisions of 2026-11-17) bounds each
+// connect, read or write. Saving sends nothing. The server validates every
+// value.
 
 const SECURITY_LABELS: Record<MailSecurity, string> = {
   STARTTLS: 'STARTTLS',
@@ -44,6 +46,8 @@ const HOST_PATTERN = /^[a-z0-9.:-]+$/;
 const HOST_ERROR =
   'Enter the mail server as a host name or IP address, such as smtp.example.com, without spaces or a port.';
 const PORT_ERROR = 'The port must be a whole number from 1 to 65535.';
+const TIMEOUT_ERROR =
+  'The mail server timeout must be a whole number of seconds from 5 to 120.';
 const SENDER_MISSING =
   'Enter the sender address PartFlow sends its messages from.';
 const CLEAR_SIGN_IN_ERROR =
@@ -53,10 +57,12 @@ const UNKNOWN_OUTCOME =
 const UNKNOWN_SEND =
   'The server did not answer — the test message may or may not have been sent. Check the inbox before trying again.';
 
-function parsePort(text: string): number | null {
+/** The whole number in `text` within [min, max], else null (never
+ * rounded or clamped). */
+function parseWhole(text: string, min: number, max: number): number | null {
   if (text.trim() === '') return null;
   const value = Number(text);
-  return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null;
+  return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
 export function MailServerPanel() {
@@ -122,6 +128,10 @@ function MailServerView({ canEdit }: { canEdit: boolean }) {
               <span className="k">Sender address</span>
               <span className="v">{server.sender}</span>
             </div>
+            <div className="prow">
+              <span className="k">Timeout</span>
+              <span className="v">{`${server.timeoutSeconds} seconds`}</span>
+            </div>
           </>
         )}
       </div>
@@ -184,13 +194,15 @@ function MailServerDialog({
   const [password, setPassword] = useState('');
   const [removePassword, setRemovePassword] = useState(false);
   const [senderText, setSenderText] = useState(saved.sender ?? '');
+  const [timeoutText, setTimeoutText] = useState(String(saved.timeoutSeconds));
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [wrote, setWrote] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
   const host = hostText.trim().toLowerCase();
-  const port = parsePort(portText);
+  const port = parseWhole(portText, 1, 65535);
+  const timeout = parseWhole(timeoutText, 5, 120);
   const user = username.trim();
   const sender = canonicalEmail(senderText);
   const hostInvalid =
@@ -200,6 +212,7 @@ function MailServerDialog({
   const invalid =
     hostInvalid ||
     port === null ||
+    timeout === null ||
     sender === null ||
     senderMissing ||
     clearSignIn;
@@ -210,6 +223,7 @@ function MailServerDialog({
   const changed =
     host !== (saved.host ?? '') ||
     port !== saved.port ||
+    timeout !== saved.timeoutSeconds ||
     security !== saved.security ||
     user !== (saved.username ?? '') ||
     sender !== (saved.sender ?? '') ||
@@ -248,7 +262,7 @@ function MailServerDialog({
 
   const submit = async () => {
     if (busy || writeBlocked) return;
-    if (invalid || port === null || sender === null) {
+    if (invalid || port === null || timeout === null || sender === null) {
       setAttempted(true);
       return;
     }
@@ -262,6 +276,7 @@ function MailServerDialog({
       security,
       username: host === '' || user === '' ? null : user,
       sender: host === '' || sender === '' ? null : sender,
+      timeoutSeconds: timeout,
       ...(passwordChange !== undefined ? { password: passwordChange } : {}),
     });
   };
@@ -274,6 +289,7 @@ function MailServerDialog({
       security: saved.security,
       username: null,
       sender: null,
+      timeoutSeconds: saved.timeoutSeconds,
       password: null,
     });
   };
@@ -330,6 +346,23 @@ function MailServerDialog({
         {port === null && attempted ? (
           <div className="err" role="alert">
             {PORT_ERROR}
+          </div>
+        ) : null}
+        <AdminField label="Timeout (seconds)">
+          <input
+            className="field mono"
+            type="number"
+            min={5}
+            max={120}
+            step={1}
+            value={timeoutText}
+            disabled={busy}
+            onChange={(event) => setTimeoutText(event.target.value)}
+          />
+        </AdminField>
+        {timeout === null && attempted ? (
+          <div className="err" role="alert">
+            {TIMEOUT_ERROR}
           </div>
         ) : null}
         <AdminField

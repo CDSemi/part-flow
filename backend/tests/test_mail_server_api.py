@@ -5,8 +5,8 @@ User who loses their other sign-in methods may receive a one-time code by
 email, sent through the mail server set here.
 
 - ``GET /api/policies/mail-server`` (signed in): host, port, security,
-  user name, whether a password is stored and the sender — never the
-  password;
+  user name, whether a password is stored, the sender and the timeout
+  (owner decisions of 2026-11-17) — never the password;
 - ``PUT`` (Configure system settings): a full replace; the password is
   kept when left out, cleared by ``null``, replaced by a string, and
   dropped with the user name; a refused value writes nothing, a no-op
@@ -56,6 +56,7 @@ _NONE = {
     "mail_security": "STARTTLS",
     "mail_username": None,
     "mail_sender": None,
+    "mail_timeout_seconds": 20,
 }
 _SERVER = {
     "mail_host": " SMTP.Example.com ",
@@ -63,6 +64,7 @@ _SERVER = {
     "mail_security": "STARTTLS",
     "mail_username": " partflow@example.com ",
     "mail_sender": " PartFlow@Example.COM ",
+    "mail_timeout_seconds": 20,
 }
 _STORED = {
     "mail_host": "smtp.example.com",
@@ -70,12 +72,14 @@ _STORED = {
     "mail_security": "STARTTLS",
     "mail_username": "partflow@example.com",
     "mail_sender": "PartFlow@example.com",
+    "mail_timeout_seconds": 20,
 }
 _E_HOST = (
     "Enter the mail server as a host name or IP address, such as smtp.example.com, without"
     " spaces or a port."
 )
 _E_PORT = "The port must be a whole number from 1 to 65535."
+_E_TIMEOUT = "The mail server timeout must be a whole number of seconds from 5 to 120."
 _E_SECURITY = "Choose STARTTLS, SSL/TLS or None as the connection security."
 _E_USERNAME = (
     "The user name must be at most 254 characters, without line breaks or other control characters."
@@ -186,7 +190,7 @@ def _stored(engine: Engine) -> dict[str, Any]:
         row = connection.execute(
             sa.text(
                 "SELECT xmin::text AS row_xmin, mail_host, mail_port, mail_security,"
-                " mail_username, mail_sender,"
+                " mail_username, mail_sender, mail_timeout_seconds,"
                 " (SELECT password FROM mail_server_credentials) AS mail_password"
                 " FROM application_policy"
             )
@@ -269,7 +273,7 @@ def test_the_password_is_replaced_cleared_and_dropped_with_the_user_name(
     assert _stored(db_engine)["mail_password"] is None
 
 
-def test_removing_the_server_keeps_nothing_but_port_and_security(
+def test_removing_the_server_keeps_nothing_but_port_security_and_timeout(
     client: TestClient, db_engine: Engine
 ) -> None:
     _ok(
@@ -287,10 +291,13 @@ def test_removing_the_server_keeps_nothing_but_port_and_security(
                 "mail_security": "TLS",
                 "mail_username": None,
                 "mail_sender": None,
+                "mail_timeout_seconds": 45,
             },
         )
     )
-    assert _values(answered) == _answer({**_NONE, "mail_port": 465, "mail_security": "TLS"}, False)
+    assert _values(answered) == _answer(
+        {**_NONE, "mail_port": 465, "mail_security": "TLS", "mail_timeout_seconds": 45}, False
+    )
     assert _stored(db_engine)["mail_password"] is None
 
 
@@ -324,6 +331,8 @@ def test_every_security_and_an_address_host_are_admitted(client: TestClient) -> 
         pytest.param({"mail_host": "a" * 254}, _E_HOST, id="host-too-long"),
         pytest.param({"mail_port": 0}, _E_PORT, id="port-zero"),
         pytest.param({"mail_port": 65536}, _E_PORT, id="port-too-big"),
+        pytest.param({"mail_timeout_seconds": 4}, _E_TIMEOUT, id="timeout-too-short"),
+        pytest.param({"mail_timeout_seconds": 121}, _E_TIMEOUT, id="timeout-too-long"),
         pytest.param({"mail_security": "SSL"}, _E_SECURITY, id="security-unknown"),
         pytest.param({"mail_security": "starttls"}, _E_SECURITY, id="security-lowercase"),
         pytest.param({"mail_username": "a\nb"}, _E_USERNAME, id="username-newline"),
@@ -358,6 +367,11 @@ def test_refused_values_write_nothing(
         pytest.param({**_SERVER, "mail_port": "587"}, id="port-string"),
         pytest.param({**_SERVER, "mail_port": 587.0}, id="port-float"),
         pytest.param({**_SERVER, "mail_port": True}, id="port-bool"),
+        pytest.param({**_SERVER, "mail_timeout_seconds": "20"}, id="timeout-string"),
+        pytest.param({**_SERVER, "mail_timeout_seconds": None}, id="timeout-null"),
+        pytest.param(
+            {k: v for k, v in _SERVER.items() if k != "mail_timeout_seconds"}, id="timeout-missing"
+        ),
         pytest.param({k: v for k, v in _SERVER.items() if k != "mail_sender"}, id="missing-key"),
         pytest.param({**_SERVER, "mail_password_set": True}, id="extra-key"),
         pytest.param({**_SERVER, "mail_password": "p" * 1025}, id="password-too-long"),
@@ -386,7 +400,7 @@ def test_the_test_message_goes_through_the_stored_server(
     answered = _ok(admin_of(client).post(_TEST_PATH, json={"to": "  Ann@Example.ORG "}))
     assert answered == {"sent_to": "Ann@example.org"}
     [connection] = smtp.connections
-    assert (connection.host, connection.port) == ("smtp.example.com", 587)
+    assert (connection.host, connection.port, connection.timeout) == ("smtp.example.com", 587, 20)
     assert ("login", "partflow@example.com", _PASSWORD) in connection.calls
     [message] = connection.sent
     assert message["To"] == "Ann@example.org"
@@ -396,6 +410,21 @@ def test_the_test_message_goes_through_the_stored_server(
     # Sending writes nothing.
     assert _audit_count(db_engine) == count
     assert _stored(db_engine) == stored
+
+
+def test_the_stored_timeout_reaches_the_connection(
+    client: TestClient, db_engine: Engine, smtp: fake_smtp.Recorder
+) -> None:
+    _ok(
+        admin_of(client).put(
+            _PATH, json={**_SERVER, "mail_timeout_seconds": 90, "mail_password": _PASSWORD}
+        )
+    )
+    before_data, after_data, _, _ = _audits(db_engine)[-1]
+    assert (before_data["mail_timeout_seconds"], after_data["mail_timeout_seconds"]) == (20, 90)
+    _ok(admin_of(client).post(_TEST_PATH, json={"to": "ann@example.org"}))
+    [connection] = smtp.connections
+    assert connection.timeout == 90
 
 
 def test_without_a_server_nothing_is_sent(client: TestClient, smtp: fake_smtp.Recorder) -> None:

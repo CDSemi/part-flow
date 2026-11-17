@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0036_phase17_outgoing_mail`. The slice's own tables
+The schema described here is the current schema at migration head `0037_phase17_two_step`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -724,7 +724,8 @@ The constraints are listed in §17.
 - Global policy writes are audited with `entity_type` `ApplicationPolicy`. `entity_id` is the Administration section:
   `worker-sessions` (the Worker session timeout), `correction-permissions` (the Undo reason policy), `due-soon` (the Due
   Soon warning panel of Settings), `data-retention` (History archival & purge), `sign-in` (the Settings → User
-  sign-in panel), `backups` (Backups) and `mail-server` (the Settings → Outgoing mail server panel).
+  sign-in panel), `backups` (Backups), `mail-server` (the Settings → Outgoing mail server panel) and `two-step` (the
+  Settings → Two-step sign-in panel).
 - Every effective `PUT` on one of these sections appends exactly one `UPDATED` row in the same transaction; a `PUT`
   that changes nothing appends nothing. The snapshots are:
 
@@ -736,15 +737,18 @@ The constraints are listed in §17.
   | `PUT /api/policies/data-retention` (setting or clearing the period) | `{retention_period_months}` |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
-  | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender}`, with the metadata `{mail_password_changed}`; never the password |
+  | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, with the metadata `{mail_password_changed}`; never the password (rows written before `0037_phase17_two_step` have no `mail_timeout_seconds` key) |
+  | `PUT /api/policies/two-step` | `{two_step_window_minutes, two_step_max_codes, two_step_lockout_codes, two_step_email_codes, two_step_email_interval_seconds, two_step_email_code_digits, two_step_recovery_codes, two_step_recovery_code_length, two_step_setup_minutes, two_step_clock_drift_steps}` |
 
-  The `sign-in`, `backups` and `mail-server` rows carry `actor_user_id` set to the signed-in User. A changed mail
-  server password with nothing else changed is an effective change: the snapshots are equal and the metadata says
-  `mail_password_changed: true`.
+  The `sign-in`, `backups`, `mail-server` and `two-step` rows carry `actor_user_id` set to the signed-in User. A
+  changed mail server password with nothing else changed is an effective change: the snapshots are equal and the
+  metadata says `mail_password_changed: true`.
 - Password writes append `UPDATED` rows for entity type `User` with the snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` as ISO-8601 text; never a hash, salt, token or password) and the
   metadata key `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` or `RECOVERY_CLI`; the recovery command
   also records `source: cli`).
+- A user's own email change (`PUT /api/session/email`, the password typed again) appends one `UPDATED` row for entity
+  type `User` with the profile snapshot before and after and the metadata `{"email_change": "BY_USER"}`.
 - The first Administrator created by first-run setup appends the `User` `CREATED` row and the password `UPDATED` row
   with `source: first-run-setup` and `actor_user_id` NULL.
 - Sign-ins, sign-outs, failed attempts, locks and session ends are logged, never audited.
@@ -787,6 +791,48 @@ The constraints are listed in §17.
   `users.updated_at`. Its write locks only the User row (`FOR NO KEY UPDATE`) and does not take the user-administration
   advisory lock, because it changes no grant, role, credential or activity.
 - A no-op or rejected write appends nothing.
+
+### Two-step sign-in
+
+The migration `0037_phase17_two_step` adds the following (IMPLEMENTATION_ROADMAP Phase 17 item 8).
+
+- **`user_totp_factors`**: PK `pk_user_totp_factors` `user_id` (FK `fk_user_totp_factors_user_id_users`: one
+  authenticator app per User at most); `secret bytea NOT NULL` (the 160-bit key of the time-based one-time
+  passwords (TOTP), `ck_user_totp_factors_secret_length`: 20 bytes); `confirmed_at timestamptz` nullable (NULL = a
+  setup waiting for its first code within the policy's setup time from `created_at`; two-step sign-in is on exactly
+  while a confirmed row exists); `last_used_step bigint` nullable (`ck_user_totp_factors_last_used_step_non_negative`:
+  the newest 30-second step accepted, so each code works once); `created_at`. The key is answered once, to set the
+  app up, and never logged or audited.
+- **`user_recovery_codes`**: PK `pk_user_recovery_codes` `id bigint` identity; `user_id` FK
+  `fk_user_recovery_codes_user_id_users`; `code_digest bytea NOT NULL` (the SHA-256 digest of the canonical code,
+  `ck_user_recovery_codes_code_digest_length`: 32 bytes) with `uq_user_recovery_codes_user_id_code_digest`;
+  `used_at timestamptz` nullable (NULL = unused); `created_at`. New codes delete every earlier code of the User;
+  turning two-step sign-in off deletes them all.
+- **`user_sign_in_challenges`**: PK `pk_user_sign_in_challenges` `id bigint` identity; `user_id` FK
+  `fk_user_sign_in_challenges_user_id_users`; `token_digest bytea NOT NULL` (the SHA-256 digest of the opaque token of
+  the `partflow_sign_in` cookie) with `uq_user_sign_in_challenges_token_digest` and
+  `ck_user_sign_in_challenges_token_digest_length`; `failed_attempts integer NOT NULL DEFAULT 0`
+  (`ck_user_sign_in_challenges_failed_attempts_non_negative`); `email_code_digest bytea` and `email_code_sent_at
+  timestamptz` nullable together (`ck_user_sign_in_challenges_email_code_shape`, the digest 32 bytes:
+  `ck_user_sign_in_challenges_email_code_digest_length`); `email_codes_sent integer NOT NULL DEFAULT 0`
+  (`ck_user_sign_in_challenges_email_codes_sent_non_negative`); `created_at`; `ended_at` and `end_reason` nullable
+  together (`ck_user_sign_in_challenges_end_shape`), with `ck_user_sign_in_challenges_end_reason` (`COMPLETED`,
+  `FAILED`, `REPLACED`, `RESET`). A challenge is open for the policy's window from `created_at`, judged with the
+  policy current at each step; expiry is derived, never recorded. `ix_user_sign_in_challenges_user_id_open` indexes a
+  User's open challenges. Rows are never deleted at runtime.
+- The same migration adds `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the two-step
+  policy columns of `application_policy` and `mail_timeout_seconds` (above).
+- All three tables are `ORDINARY` for `partflow_app` and outside `partflow_maintenance`'s reads.
+- Lock order of every sign-in and two-step write: the `partflow:user-administration` advisory lock (administrator and
+  recovery-command resets only), the `users` row, the `user_credentials` row, the `user_sign_in_challenges` row, the
+  `user_totp_factors` row, the `user_recovery_codes` rows, then `user_sessions` and the audit row.
+- Every change of a User's factors appends one `UPDATED` row for entity type `User` with the snapshot `{two_step,
+  recovery_codes}` (whether two-step sign-in is on, and the unused recovery codes) before and after, and the metadata
+  `{"two_step_change": ...}` (`TOTP_ADDED`, `TOTP_REMOVED`, `RECOVERY_CODES_CREATED`, `RESET_BY_ADMINISTRATOR`, or
+  `RESET_BY_CLI` with `source: cli`); a reset also records `sessions_ended` (whether every sign-in of the User ended,
+  `TWO_STEP_RESET`). Never a key, a code or a digest. Using a code at sign-in is logged, never audited.
+- The downgrade refuses while any of the three tables holds a row, a session ended `TWO_STEP_RESET`, a policy column
+  of the revision differs from its default or a `two-step` audit row exists.
 
 ### Scan Station devices
 
@@ -1122,6 +1168,14 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   and no user name with `NONE`. The password of the sign-in to the server is a credential and lives in
   `mail_server_credentials` (below), never on this row. The downgrade refuses once a mail server, a password, a port or
   security other than the defaults, or a `mail-server` audit row exists.
+- `mail_timeout_seconds integer NOT NULL DEFAULT 20` (`ck_application_policy_mail_timeout_seconds_range`, 5–120) and
+  the two-step sign-in policy of Administration → Settings (`0037_phase17_two_step`; owner decisions of 2026-11-17),
+  each `integer NOT NULL` with its default and a range CHECK named `ck_application_policy_<column>_range`:
+  `two_step_window_minutes` (15; 1–60), `two_step_max_codes` (5; 1–20), `two_step_lockout_codes` (10; 3–100),
+  `two_step_email_codes` (3; 1–10), `two_step_email_interval_seconds` (60; 0–3600), `two_step_email_code_digits` (8;
+  6–10), `two_step_recovery_codes` (10; 5–20), `two_step_recovery_code_length` (12; 8–20), `two_step_setup_minutes`
+  (15; 1–60) and `two_step_clock_drift_steps` (1; 0–2). Every sign-in step reads them, so a change applies from the
+  next step.
 - The sign-in and Scan Station role columns are listed under "Sign-in" and "Scan Station devices" below.
 - Later policies are added as typed columns, with a server default where a canonical default exists. There is no
   key/value store.
@@ -1198,13 +1252,16 @@ The sign-in migration `0029_phase14_sign_in` adds the following.
   one credential per User); `password_hash text NOT NULL` (scrypt; `ck_user_credentials_password_hash_format`: begins
   with `scrypt$`); `password_is_temporary boolean NOT NULL`; `password_changed_at timestamptz NOT NULL`;
   `failed_attempts integer NOT NULL DEFAULT 0` (`ck_user_credentials_failed_attempts_non_negative`); `locked_until
-  timestamptz` nullable; `created_at`. The credential is a separate table, never a `users` column, so a response that
-  serializes a user can never carry it.
+  timestamptz` nullable; `created_at`; `failed_codes integer NOT NULL DEFAULT 0`
+  (`ck_user_credentials_failed_codes_non_negative`, `0037_phase17_two_step`: the wrong two-step codes since the User
+  last signed in fully; a correct password resets `failed_attempts`, never this counter). The credential is a
+  separate table, never a `users` column, so a response that serializes a user can never carry it.
 - **`user_sessions`**: PK `pk_user_sessions` `id bigint` identity; `user_id` FK `fk_user_sessions_user_id_users`;
   `token_digest bytea NOT NULL` (the SHA-256 digest of an opaque token; the token itself is never stored) with
   `uq_user_sessions_token_digest` UNIQUE and `ck_user_sessions_token_digest_length` (32 bytes); `created_at`;
   `ended_at` and `end_reason` nullable together (`ck_user_sessions_end_shape`), with `ck_user_sessions_end_reason`
-  (`SIGNED_OUT`, `REPLACED`, `PASSWORD_CHANGED`, `PASSWORD_RESET`, `USER_DEACTIVATED`). Ended rows are kept.
+  (`SIGNED_OUT`, `REPLACED`, `PASSWORD_CHANGED`, `PASSWORD_RESET`, `USER_DEACTIVATED`, and since
+  `0037_phase17_two_step` `TWO_STEP_RESET`). Ended rows are kept.
   `ix_user_sessions_user_id_open` indexes a User's open sessions.
 - `audit_events`, `machine_lifecycle_events` and `work_order_allocations` each gain the nullable `actor_user_id` with
   the foreign key named `fk_<table>_actor_user_id_users` (§16).
@@ -1283,13 +1340,13 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (30 at head `0036_phase17_outgoing_mail`) |
+| Class | `partflow_app` privileges | Tables (33 at head `0037_phase17_two_step`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
 | `READ_ONLY` | SELECT | `alembic_version` |
-| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
 - `partflow_maintenance` holds SELECT only, on `alembic_version`, `application_policy`, `areas`, `machines`,
   `operations`, `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
@@ -1428,7 +1485,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-16 | uncommitted | Migration head `0036_phase17_outgoing_mail`: `users.email`, the outgoing mail server columns of `application_policy` and the `mail-server` audit section. |
+| 2026-11-17 | uncommitted | Migration head `0037_phase17_two_step`: the three tables of two-step sign-in, the two-step policy and mail server timeout columns, `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the lock order and the audit rows (the `two-step` section and the own email change). |
+| 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, the outgoing mail server columns of `application_policy` and the `mail-server` audit section. |
 | 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: the four backup policy columns of `application_policy` and the `backups` audit section. |
 | 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; completing an existing Super User role appends one `UPDATED` audit row. |

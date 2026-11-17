@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0036_phase17_outgoing_mail`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0037_phase17_two_step`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -717,7 +717,8 @@ Các ràng buộc được liệt kê ở §17.
 - Các lần ghi policy toàn cục được audit với `entity_type` `ApplicationPolicy`. `entity_id` là mục Administration:
   `worker-sessions` (timeout của Worker session), `correction-permissions` (policy lý do Undo), `due-soon` (panel cảnh báo
   Due Soon trong Settings), `data-retention` (History archival & purge), `sign-in` (panel Settings → User sign-in),
-  `backups` (Backups) và `mail-server` (panel Settings → Outgoing mail server).
+  `backups` (Backups), `mail-server` (panel Settings → Outgoing mail server) và `two-step` (panel
+  Settings → Two-step sign-in).
 - Mỗi lần `PUT` có hiệu lực trên một trong các mục này append đúng một dòng `UPDATED` trong cùng transaction; một `PUT`
   không thay đổi gì thì không append gì. Các snapshot là:
 
@@ -729,15 +730,18 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/data-retention` (đặt hoặc xóa khoảng thời gian) | `{retention_period_months}` |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
-  | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender}`, với metadata `{mail_password_changed}`; không bao giờ có mật khẩu |
+  | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, với metadata `{mail_password_changed}`; không bao giờ có mật khẩu (các dòng ghi trước `0037_phase17_two_step` không có key `mail_timeout_seconds`) |
+  | `PUT /api/policies/two-step` | `{two_step_window_minutes, two_step_max_codes, two_step_lockout_codes, two_step_email_codes, two_step_email_interval_seconds, two_step_email_code_digits, two_step_recovery_codes, two_step_recovery_code_length, two_step_setup_minutes, two_step_clock_drift_steps}` |
 
-  Các dòng `sign-in`, `backups` và `mail-server` mang `actor_user_id` là User đã đăng nhập. Một lần đổi mật khẩu mail
-  server mà không đổi gì khác vẫn là thay đổi có hiệu lực: hai snapshot bằng nhau và metadata ghi
+  Các dòng `sign-in`, `backups`, `mail-server` và `two-step` mang `actor_user_id` là User đã đăng nhập. Một lần đổi mật
+  khẩu mail server mà không đổi gì khác vẫn là thay đổi có hiệu lực: hai snapshot bằng nhau và metadata ghi
   `mail_password_changed: true`.
 - Các lần ghi mật khẩu append dòng `UPDATED` cho entity type `User` với snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` dạng text ISO-8601; không bao giờ là hash, salt, token hay mật khẩu) và
   khóa metadata `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` hoặc `RECOVERY_CLI`; lệnh khôi phục còn ghi
   `source: cli`).
+- Việc User tự đổi địa chỉ email (`PUT /api/session/email`, nhập lại mật khẩu) append một dòng `UPDATED` cho entity type
+  `User` với snapshot hồ sơ trước và sau và metadata `{"email_change": "BY_USER"}`.
 - Administrator đầu tiên được tạo bởi first-run setup append dòng `User` `CREATED` và dòng mật khẩu `UPDATED` với
   `source: first-run-setup` và `actor_user_id` NULL.
 - Đăng nhập, đăng xuất, lần thử thất bại, khóa tài khoản và kết thúc session được ghi log, không bao giờ được audit.
@@ -783,6 +787,51 @@ Các ràng buộc được liệt kê ở §17.
   thay đổi `users.updated_at`. Lần ghi của nó chỉ lock dòng User (`FOR NO KEY UPDATE`) và không lấy advisory lock
   user-administration, vì nó không thay đổi grant, role, credential hay hoạt động nào.
 - Lần ghi không thay đổi gì hoặc bị từ chối thì không append gì.
+
+### Xác thực hai bước (two-step sign-in)
+
+Migration `0037_phase17_two_step` thêm những điều sau (IMPLEMENTATION_ROADMAP Phase 17 mục 8).
+
+- **`user_totp_factors`**: PK `pk_user_totp_factors` `user_id` (FK `fk_user_totp_factors_user_id_users`: nhiều nhất một
+  app xác thực (authenticator app) cho mỗi User); `secret bytea NOT NULL` (khóa 160 bit của các mật khẩu dùng một lần
+  theo thời gian (TOTP), `ck_user_totp_factors_secret_length`: 20 byte); `confirmed_at timestamptz` có thể null (NULL =
+  một lần thiết lập đang chờ mã đầu tiên trong thời gian thiết lập của policy tính từ `created_at`; xác thực hai bước
+  đang bật đúng khi có một dòng đã xác nhận); `last_used_step bigint` có thể null
+  (`ck_user_totp_factors_last_used_step_non_negative`: bước 30 giây mới nhất đã được chấp nhận, nên mỗi mã chỉ dùng được
+  một lần); `created_at`. Khóa chỉ được trả lời một lần, để thiết lập app, và không bao giờ được ghi log hay audit.
+- **`user_recovery_codes`**: PK `pk_user_recovery_codes` `id bigint` identity; `user_id` FK
+  `fk_user_recovery_codes_user_id_users`; `code_digest bytea NOT NULL` (digest SHA-256 của mã canonical,
+  `ck_user_recovery_codes_code_digest_length`: 32 byte) với `uq_user_recovery_codes_user_id_code_digest`;
+  `used_at timestamptz` có thể null (NULL = chưa dùng); `created_at`. Mã mới xóa mọi mã trước đó của User; tắt xác thực
+  hai bước xóa tất cả chúng.
+- **`user_sign_in_challenges`**: PK `pk_user_sign_in_challenges` `id bigint` identity; `user_id` FK
+  `fk_user_sign_in_challenges_user_id_users`; `token_digest bytea NOT NULL` (digest SHA-256 của token không diễn giải
+  trong cookie `partflow_sign_in`) với `uq_user_sign_in_challenges_token_digest` và
+  `ck_user_sign_in_challenges_token_digest_length`; `failed_attempts integer NOT NULL DEFAULT 0`
+  (`ck_user_sign_in_challenges_failed_attempts_non_negative`); `email_code_digest bytea` và `email_code_sent_at
+  timestamptz` cùng có thể null (`ck_user_sign_in_challenges_email_code_shape`, digest 32 byte:
+  `ck_user_sign_in_challenges_email_code_digest_length`); `email_codes_sent integer NOT NULL DEFAULT 0`
+  (`ck_user_sign_in_challenges_email_codes_sent_non_negative`); `created_at`; `ended_at` và `end_reason` cùng có thể
+  null (`ck_user_sign_in_challenges_end_shape`), với `ck_user_sign_in_challenges_end_reason` (`COMPLETED`, `FAILED`,
+  `REPLACED`, `RESET`). Một challenge mở trong khoảng thời gian (window) của policy tính từ `created_at`, được xét theo
+  policy hiện hành ở mỗi bước; việc hết hạn được suy ra, không bao giờ được ghi lại.
+  `ix_user_sign_in_challenges_user_id_open` index các challenge đang mở của một User. Các dòng không bao giờ bị xóa khi
+  chạy.
+- Cùng migration đó thêm `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, các cột policy xác
+  thực hai bước của `application_policy` và `mail_timeout_seconds` (ở trên).
+- Cả ba bảng là `ORDINARY` với `partflow_app` và nằm ngoài những gì `partflow_maintenance` được đọc.
+- Thứ tự lock của mọi lần ghi đăng nhập và xác thực hai bước: advisory lock `partflow:user-administration` (chỉ với các
+  lần reset của administrator và của lệnh khôi phục), dòng `users`, dòng `user_credentials`, dòng
+  `user_sign_in_challenges`, dòng `user_totp_factors`, các dòng `user_recovery_codes`, rồi `user_sessions` và dòng
+  audit.
+- Mỗi thay đổi các factor của một User append một dòng `UPDATED` cho entity type `User` với snapshot `{two_step,
+  recovery_codes}` (xác thực hai bước có đang bật hay không, và các mã khôi phục chưa dùng) trước và sau, và metadata
+  `{"two_step_change": ...}` (`TOTP_ADDED`, `TOTP_REMOVED`, `RECOVERY_CODES_CREATED`, `RESET_BY_ADMINISTRATOR`, hoặc
+  `RESET_BY_CLI` với `source: cli`); một lần reset còn ghi `sessions_ended` (mọi phiên đăng nhập của User có kết thúc
+  hay không, `TWO_STEP_RESET`). Không bao giờ có khóa, mã hay digest. Việc dùng một mã khi đăng nhập được ghi log, không
+  bao giờ được audit.
+- Downgrade từ chối khi bất kỳ bảng nào trong ba bảng còn dòng, một session đã kết thúc với `TWO_STEP_RESET`, một cột
+  policy của revision khác giá trị mặc định của nó, hoặc đã có dòng audit `two-step`.
 
 ### Thiết bị Scan Station
 
@@ -1116,6 +1165,14 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   không có user name với `NONE`. Mật khẩu đăng nhập vào server là một thông tin đăng nhập (credential) và nằm trong
   `mail_server_credentials` (bên dưới), không bao giờ nằm trên dòng này. Downgrade từ chối khi đã có mail server, mật
   khẩu, port hoặc security khác mặc định, hoặc đã có dòng audit `mail-server`.
+- `mail_timeout_seconds integer NOT NULL DEFAULT 20` (`ck_application_policy_mail_timeout_seconds_range`, 5–120) và
+  policy xác thực hai bước của Administration → Settings (`0037_phase17_two_step`; quyết định của chủ sở hữu ngày
+  2026-11-17), mỗi cột `integer NOT NULL` với giá trị mặc định của nó và một CHECK khoảng giá trị tên
+  `ck_application_policy_<column>_range`: `two_step_window_minutes` (15; 1–60), `two_step_max_codes` (5; 1–20),
+  `two_step_lockout_codes` (10; 3–100), `two_step_email_codes` (3; 1–10), `two_step_email_interval_seconds` (60;
+  0–3600), `two_step_email_code_digits` (8; 6–10), `two_step_recovery_codes` (10; 5–20), `two_step_recovery_code_length`
+  (12; 8–20), `two_step_setup_minutes` (15; 1–60) và `two_step_clock_drift_steps` (1; 0–2). Mọi bước đăng nhập đều đọc
+  chúng, nên một thay đổi có hiệu lực từ bước kế tiếp.
 - Các cột đăng nhập và role của Scan Station được liệt kê ở "Đăng nhập" và "Thiết bị Scan Station" bên dưới.
 - Các policy về sau được thêm dưới dạng cột có kiểu, có server default khi tồn tại giá trị mặc định canonical. Không có
   kho key/value.
@@ -1193,13 +1250,16 @@ Migration đăng nhập `0029_phase14_sign_in` thêm những thứ sau.
   một credential cho mỗi User); `password_hash text NOT NULL` (scrypt; `ck_user_credentials_password_hash_format`: bắt
   đầu bằng `scrypt$`); `password_is_temporary boolean NOT NULL`; `password_changed_at timestamptz NOT NULL`;
   `failed_attempts integer NOT NULL DEFAULT 0` (`ck_user_credentials_failed_attempts_non_negative`); `locked_until
-  timestamptz` có thể null; `created_at`. Credential là một bảng riêng, không bao giờ là cột của `users`, nên một response
-  serialize một user không bao giờ có thể mang nó.
+  timestamptz` có thể null; `created_at`; `failed_codes integer NOT NULL DEFAULT 0`
+  (`ck_user_credentials_failed_codes_non_negative`, `0037_phase17_two_step`: số mã xác thực hai bước sai kể từ lần User
+  đăng nhập đầy đủ gần nhất; một mật khẩu đúng đặt lại `failed_attempts`, không bao giờ đặt lại bộ đếm này). Credential
+  là một bảng riêng, không bao giờ là cột của `users`, nên một response serialize một user không bao giờ có thể mang nó.
 - **`user_sessions`**: PK `pk_user_sessions` `id bigint` identity; `user_id` FK `fk_user_sessions_user_id_users`;
   `token_digest bytea NOT NULL` (digest SHA-256 của một token không diễn giải; bản thân token không bao giờ được lưu) với
   UNIQUE `uq_user_sessions_token_digest` và `ck_user_sessions_token_digest_length` (32 byte); `created_at`; `ended_at` và
   `end_reason` cùng có thể null (`ck_user_sessions_end_shape`), với `ck_user_sessions_end_reason` (`SIGNED_OUT`,
-  `REPLACED`, `PASSWORD_CHANGED`, `PASSWORD_RESET`, `USER_DEACTIVATED`). Các dòng đã kết thúc được giữ lại.
+  `REPLACED`, `PASSWORD_CHANGED`, `PASSWORD_RESET`, `USER_DEACTIVATED`, và từ `0037_phase17_two_step` là
+  `TWO_STEP_RESET`). Các dòng đã kết thúc được giữ lại.
   `ix_user_sessions_user_id_open` index các session đang mở của một User.
 - `audit_events`, `machine_lifecycle_events` và `work_order_allocations` mỗi bảng có thêm `actor_user_id` có thể null với
   foreign key tên `fk_<table>_actor_user_id_users` (§16).
@@ -1277,13 +1337,13 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (30 at head `0036_phase17_outgoing_mail`) |
+| Class | `partflow_app` privileges | Tables (33 at head `0037_phase17_two_step`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (bước đã qua bất biến nhờ trigger và đặc quyền; một lần điều chỉnh xóa các bước tương lai chưa được tham chiếu) |
 | `READ_ONLY` | SELECT | `alembic_version` |
-| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
 - `partflow_maintenance` chỉ có SELECT, trên `alembic_version`, `application_policy`, `areas`, `machines`, `operations`,
   `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`, `scan_stations`, `users`,
@@ -1422,7 +1482,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-16 | uncommitted | Migration head `0036_phase17_outgoing_mail`: `users.email`, các cột mail server gửi đi của `application_policy` và section audit `mail-server`. |
+| 2026-11-17 | uncommitted | Migration head `0037_phase17_two_step`: ba bảng của xác thực hai bước, các cột policy xác thực hai bước và timeout của mail server, `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, thứ tự lock và các dòng audit (section `two-step` và việc tự đổi email). |
+| 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, các cột mail server gửi đi của `application_policy` và section audit `mail-server`. |
 | 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: bốn cột chính sách backup của `application_policy` và section audit `backups`. |
 | 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; việc bổ sung cho một role Super User đã có thêm một dòng audit `UPDATED`. |

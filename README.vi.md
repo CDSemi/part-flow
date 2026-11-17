@@ -2,8 +2,8 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi
-> chưa commit ngày 2026-11-16.
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi
+> chưa commit ngày 2026-11-17.
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -273,7 +273,7 @@ docker compose up --build -V
 ## Migration database (Alembic)
 
 Áp dụng các migration (từ baseline no-op của repository foundation đến head hiện
-tại, `0036_phase17_outgoing_mail`):
+tại, `0037_phase17_two_step`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -549,8 +549,10 @@ Bộ test pytest gồm ba loại:
   tên Area và Planned Route duy nhất;
   `tests/test_phase16_backup_policy_schema.py` bao phủ
   `0035_phase16_backup_policy`, chính sách backup của Administration → Backups;
-  `tests/test_phase17_outgoing_mail_schema.py` bao phủ head duy nhất
-  `0036_phase17_outgoing_mail`, địa chỉ email của user và mail server gửi đi, và
+  `tests/test_phase17_outgoing_mail_schema.py` bao phủ
+  `0036_phase17_outgoing_mail`, địa chỉ email của user và mail server gửi đi;
+  `tests/test_phase17_two_step_schema.py` bao phủ head duy nhất
+  `0037_phase17_two_step`, schema của xác thực hai bước (two-step sign-in), và
   sự tương đồng giữa model và migration.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` và
   `tests/test_revision_cli.py` bao phủ write gate (409 `release_mismatch`, 503
@@ -777,7 +779,8 @@ docs/              canonical project documentation
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Head migration là `0036_phase17_outgoing_mail`, được bao phủ bởi `tests/test_phase17_outgoing_mail_schema.py`. |
+| 2026-11-17 | uncommitted | Head migration là `0037_phase17_two_step`, được bao phủ bởi `tests/test_phase17_two_step_schema.py`. |
+| 2026-11-16 | `252f678` | Head migration là `0036_phase17_outgoing_mail`, được bao phủ bởi `tests/test_phase17_outgoing_mail_schema.py`. |
 | 2026-11-16 | `c1f042b` | Head migration là `0035_phase16_backup_policy`, được bao phủ bởi `tests/test_phase16_backup_policy_schema.py`. |
 | 2026-11-14 | `2a24c2a` | Head migration là `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Head migration là `0033_phase17_super_user_role`, được `tests/test_phase17_schema.py` kiểm tra. |

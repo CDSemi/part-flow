@@ -120,6 +120,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/session"): _PUBLIC,
     ("POST", "/api/session"): _PUBLIC,
     ("DELETE", "/api/session"): _PUBLIC,
+    ("POST", "/api/session/second-step"): _PUBLIC,
+    ("POST", "/api/session/second-step/email-code"): _PUBLIC,
     ("GET", "/api/setup"): _PUBLIC,
     ("POST", "/api/setup/administrator"): _PUBLIC,
     ("GET", "/api/production-board"): _PUBLIC,
@@ -158,9 +160,16 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/sign-in"): _SIGNED_IN,
     ("GET", "/api/policies/backups"): _SIGNED_IN,
     ("GET", "/api/policies/mail-server"): _SIGNED_IN,
+    ("GET", "/api/policies/two-step"): _SIGNED_IN,
     ("GET", "/api/scan-station-devices"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
+    ("PUT", "/api/session/email"): _SIGNED_IN,
     ("PUT", "/api/session/theme-preference"): _SIGNED_IN,
+    ("GET", "/api/session/two-step"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/totp"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/totp/confirm"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/totp/remove"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/recovery-codes"): _SIGNED_IN,
     # Read by Administration and by Management → Machines (OD-S2-2).
     ("GET", "/api/barcode-configuration/machine-asset-tag-format"): _SIGNED_IN,
     # --- PERMISSION (static) ------------------------------------------------
@@ -188,6 +197,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PUT", "/api/policies/backups"): _permission(_CSS),
     ("PUT", "/api/policies/mail-server"): _permission(_CSS),
     ("POST", "/api/policies/mail-server/test"): _permission(_CSS),
+    ("PUT", "/api/policies/two-step"): _permission(_CSS),
     ("PUT", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     ("DELETE", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     # Management (slice 3)
@@ -227,6 +237,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/users"): _permission(_MUAR, conditional=_keys(_MCP)),
     ("PATCH", "/api/users/{user_id}"): _permission(_MUAR, conditional=_keys(_MCP)),
     ("PUT", "/api/users/{user_id}/password"): _permission(_MUAR, conditional=_keys(_MCP)),
+    ("POST", "/api/users/{user_id}/two-step/reset"): _permission(_MUAR, conditional=_keys(_MCP)),
     # Phase 14 slice 4 (OD-S4-9): while the role applied at Scan Stations
     # holds a protected key.
     ("POST", "/api/scan-stations/{station_id}/device-enrollments"): _permission(

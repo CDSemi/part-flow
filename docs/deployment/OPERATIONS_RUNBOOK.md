@@ -978,6 +978,7 @@ emails. No tool deletes them; remove them by hand after review (§9).
 | No `Setup token` line in the log | Setup is already complete (an Administrator exists), or `backend` has not started. While no Administrator exists, `PARTFLOW_BACKEND_WORKERS=1 $PF up -d --force-recreate backend` writes a new token. |
 | First-run setup answers `setup_token_invalid` | The token is old (every restart of `backend` writes a new one: use `$PF logs backend \| grep "Setup token" \| tail -n 1`), or `backend` runs several workers: start it with one worker ([`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1, Backend processes and first-run setup). |
 | Nobody can sign in as an Administrator: forgotten password or login name | Sign-in and user accounts, below. |
+| A user lost the authenticator app of two-step sign-in and the recovery codes | Sign-in and user accounts, below. |
 | Nobody may manage correction permissions any more (the backend logs a warning at startup) | Sign-in and user accounts, below. |
 
 ### Sign-in and user accounts
@@ -1003,6 +1004,27 @@ them on the host, in the release checkout, with `PF` set (Before you run any com
   password, or no Administrator at all); 2 means the outcome is unknown or the database could not be reached: run it
   again, because it sets the password again either way. It works only while an Administrator exists and never
   creates one.
+
+**A lost authenticator app (two-step sign-in).** A user who lost the app signs in with one of their recovery codes,
+or with a code PartFlow emails when the account has an email address and an outgoing mail server is set up, and can
+then turn two-step sign-in off and on again from the account menu. A user who has neither:
+
+- When another user administrator can sign in, they choose **Turn off two-step…** on the user's row in
+  **Administration → Users**. The user then signs in with the password alone. Keep **Sign them out everywhere** ticked
+  when the lost device may be in someone else's hands; if the password may be known too, also choose
+  **Set password…**.
+- When nobody can sign in, for example because the only Administrator lost the app, turn it off with:
+
+  ```sh
+  $PF run --rm --no-deps -T backend python -m app.cli reset-two-step --login-name <login name> --end-sessions
+  ```
+
+  `--end-sessions` also signs the user out everywhere; leave it out to keep their sign-ins. Exit code 0 means done
+  (or already off, which it says); 1 means refused with nothing changed (an unknown login name); 2 means the outcome
+  is unknown or the database could not be reached: run it again.
+
+A user locked after too many wrong codes waits for the lock to end (Settings → User sign-in sets how long), or a
+user administrator sets a new password, which clears the lock.
 
 **A forgotten login name.** Read the login names of the users who may manage users and roles from the database. This
 only reads; it changes nothing. Open the database shell:
@@ -1174,7 +1196,8 @@ log, §2).
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §7: the reconcile form for a Deployment Admin staging instance is removed with that tool. |
+| 2026-11-17 | uncommitted | Common problems and Sign-in and user accounts: a lost authenticator app of two-step sign-in, signing the user out everywhere, and a lock after wrong codes. |
+| 2026-11-16 | `a4cf9a8` | §7: the reconcile form for a Deployment Admin staging instance is removed with that tool. |
 | 2026-11-16 | `5708664` | Before you run any command: the short command `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | §2, §3, §5, §8, §9: the backup task runs `backup.sh --kind scheduled` every hour; Administration → Backups sets the interval and the hourly, daily and weekly backups kept; the `backup_age` limit follows the interval. |
 | 2026-11-14 | `2a24c2a` | §5: the release stops before the write freeze when the new image's `revision` reports `blocked_by_data`. |

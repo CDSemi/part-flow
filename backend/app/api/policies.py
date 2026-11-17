@@ -70,15 +70,21 @@ handlers in ``app.api.errors`` translate typed failures.
   the sender address. The password is never answered. Requires a
   signed-in User.
 - ``PUT /policies/mail-server`` — a full replace of host, port, security,
-  user name and sender (each key required; null clears host, user name and
-  sender); ``mail_password`` left out keeps the stored password, ``null``
-  clears it, a string replaces it. Requires ``CONFIGURE_SYSTEM_SETTINGS``;
-  answers with the stored section, also when nothing changed. Saving sends
-  nothing.
+  user name, sender and timeout (each key required; null clears host, user
+  name and sender); ``mail_password`` left out keeps the stored password,
+  ``null`` clears it, a string replaces it. Requires
+  ``CONFIGURE_SYSTEM_SETTINGS``; answers with the stored section, also when
+  nothing changed. Saving sends nothing.
 - ``POST /policies/mail-server/test`` — sends one test message to ``to``
   through the stored server; ``CONFIGURE_SYSTEM_SETTINGS``. 409 when no
   server is set up or the server does not take the message (the detail says
   why); nothing is written either way.
+- ``GET /policies/two-step`` — Administration → Settings → Two-step
+  sign-in (Phase 17, owner decisions of 2026-11-17): every number of
+  two-step sign-in. Requires a signed-in User.
+- ``PUT /policies/two-step`` — a partial merge like User sign-in (strict
+  integers; an empty body, a ``null`` or an extra field is 422; the ranges
+  are the Application's 422); requires ``CONFIGURE_SYSTEM_SETTINGS``.
 
 Access (Phase 14 slice 2): every read needs a signed-in User except
 ``GET /policies/due-soon``, which stays public (the Production Board and
@@ -86,7 +92,8 @@ the Scan Station read it without signing in). Each write needs its
 section's permission — Worker sessions
 ``MANAGE_WORKER_SESSION_POLICIES``, Correction permissions
 ``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention, user sign-in,
-backups and the outgoing mail server ``CONFIGURE_SYSTEM_SETTINGS`` — and its
+backups, the outgoing mail server and two-step sign-in
+``CONFIGURE_SYSTEM_SETTINGS`` — and its
 audit row names the
 signed-in User (``actor_user_id``).
 """
@@ -402,6 +409,7 @@ class MailServerPolicyResponse(BaseModel):
     # Whether a password is stored; the password itself is never answered.
     mail_password_set: bool
     mail_sender: str | None
+    mail_timeout_seconds: int
     # The singleton row's timestamp, shared by every policy section.
     updated_at: datetime.datetime
 
@@ -416,6 +424,7 @@ class MailServerPolicyPutRequest(BaseModel):
     mail_security: str
     mail_username: str | None
     mail_sender: str | None
+    mail_timeout_seconds: StrictInt
     mail_password: Secret | None = None
 
 
@@ -439,6 +448,7 @@ def _mail_server_response(session: Session, policy: ApplicationPolicy) -> MailSe
         mail_username=settings.username,
         mail_password_set=settings.password_set,
         mail_sender=settings.sender,
+        mail_timeout_seconds=settings.timeout_seconds,
         updated_at=policy.updated_at,
     )
 
@@ -462,6 +472,7 @@ def put_mail_server_policy(
         security=body.mail_security,
         username=body.mail_username,
         sender=body.mail_sender,
+        timeout_seconds=body.mail_timeout_seconds,
         password=password,
         actor_user_id=principal.user_id,
     )
@@ -475,3 +486,63 @@ def send_test_mail(
     return MailTestResponse(
         sent_to=outgoing_mail.send_test_message(session, to=body.to, actor=principal)
     )
+
+
+class TwoStepPolicyResponse(BaseModel):
+    two_step_window_minutes: int
+    two_step_max_codes: int
+    two_step_lockout_codes: int
+    two_step_email_codes: int
+    two_step_email_interval_seconds: int
+    two_step_email_code_digits: int
+    two_step_recovery_codes: int
+    two_step_recovery_code_length: int
+    two_step_setup_minutes: int
+    two_step_clock_drift_steps: int
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class TwoStepPolicyPutRequest(BaseModel):
+    """Any non-empty subset of the section; a field left out keeps its value.
+
+    An explicit ``null`` reaches the service (exclude_unset) and is refused
+    there.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    two_step_window_minutes: StrictInt | None = None
+    two_step_max_codes: StrictInt | None = None
+    two_step_lockout_codes: StrictInt | None = None
+    two_step_email_codes: StrictInt | None = None
+    two_step_email_interval_seconds: StrictInt | None = None
+    two_step_email_code_digits: StrictInt | None = None
+    two_step_recovery_codes: StrictInt | None = None
+    two_step_recovery_code_length: StrictInt | None = None
+    two_step_setup_minutes: StrictInt | None = None
+    two_step_clock_drift_steps: StrictInt | None = None
+
+
+def _two_step_response(policy: ApplicationPolicy) -> TwoStepPolicyResponse:
+    return TwoStepPolicyResponse.model_validate(
+        {
+            **{field: getattr(policy, field) for field in TwoStepPolicyPutRequest.model_fields},
+            "updated_at": policy.updated_at,
+        }
+    )
+
+
+@router.get("/policies/two-step")
+def get_two_step_policy(principal: SignedInDep, session: SessionDep) -> TwoStepPolicyResponse:
+    return _two_step_response(policies.get_policy(session))
+
+
+@router.put("/policies/two-step")
+def put_two_step_policy(
+    principal: SystemSettingsManagerDep, body: TwoStepPolicyPutRequest, session: SessionDep
+) -> TwoStepPolicyResponse:
+    policy = policies.update_two_step_policy(
+        session, changes=body.model_dump(exclude_unset=True), actor_user_id=principal.user_id
+    )
+    return _two_step_response(policy)

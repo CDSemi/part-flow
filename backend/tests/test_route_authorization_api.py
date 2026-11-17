@@ -378,6 +378,20 @@ def _with_user_avatar(client: TestClient) -> tuple[str, dict[str, Any]]:
     return f"/api/users/{user['id']}/avatar", {}
 
 
+def _with_two_step(client: TestClient) -> tuple[str, dict[str, Any]]:
+    """A User with two-step sign-in on (Phase 17), stored directly."""
+    user = _user(client)
+    with engine_of(client).begin() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO user_totp_factors (user_id, secret, confirmed_at)"
+                " VALUES (:user_id, :secret, now())"
+            ),
+            {"user_id": user["id"], "secret": bytes(20)},
+        )
+    return f"/api/users/{user['id']}/two-step/reset", {"json": {"end_sessions": True}}
+
+
 def _enrolled_device(client: TestClient) -> int:
     """An activated device of a new station (Phase 14 slice 4), inserted directly."""
     token = enroll_station_device(engine_of(client), _station(client)["station_id"])
@@ -712,6 +726,25 @@ _WRITES: list[_Write] = [
                     "mail_security": "STARTTLS",
                     "mail_username": None,
                     "mail_sender": None,
+                    "mail_timeout_seconds": 20,
+                }
+            },
+        ),
+        "application_policy",
+    ),
+    _Write(
+        "two-step-policy",
+        "PUT",
+        "/api/policies/two-step",
+        _key(CSS),
+        _key(CSS),
+        lambda c: (
+            "/api/policies/two-step",
+            {
+                "json": {
+                    "two_step_max_codes": _changed_policy_value(
+                        c, "/api/policies/two-step", "two_step_max_codes", 1, 20
+                    )
                 }
             },
         ),
@@ -854,6 +887,16 @@ _WRITES: list[_Write] = [
             {"json": {"new_password": "a-temporary-password"}},
         ),
         "user_credentials",
+        "user_id",
+    ),
+    _Write(
+        "user-two-step-reset",
+        "POST",
+        "/api/users/{user_id}/two-step/reset",
+        _key(MUAR),
+        _key(MUAR),
+        _with_two_step,
+        "user_totp_factors",
         "user_id",
     ),
 ]

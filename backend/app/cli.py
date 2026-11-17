@@ -18,6 +18,14 @@ Commands:
   prompt (twice) or read as one line from a non-interactive stdin —
   never an argument, never printed. Access to the backend container is
   the authority; the audit row records ``source: cli`` and no actor.
+- ``reset-two-step --login-name NAME [--end-sessions]`` (Phase 17,
+  recovery only): turn off the two-step sign-in of a User who lost the
+  authenticator app and the recovery codes — the app and the codes are
+  deleted, so the User signs in with the password alone and can set it up
+  again. The User's sign-ins continue unless ``--end-sessions`` ends them
+  all. Audited like an administrator's reset with ``source: cli`` and no
+  actor; a User whose two-step sign-in is off is answered so, with
+  nothing changed.
 - ``restore-correction-permission-management --role-name NAME`` (Phase
   14 slice 2, recovery only): grant ``MANAGE_CORRECTION_PERMISSIONS`` to
   the named role while no active user with a password holds it — a state
@@ -120,6 +128,7 @@ from app.application import (
     policies,
     reconciliation,
     system_status,
+    two_step,
 )
 from app.application.errors import ApplicationError, RecoveryOutcomeUnknownError
 from app.core.config import DEVELOPMENT_RELEASE, get_settings
@@ -203,6 +212,69 @@ def _run_reset_password(args: argparse.Namespace) -> int:
     )
     if not outcome.is_active:
         print("This user is inactive and cannot sign in until reactivated.")
+    return 0
+
+
+def _add_reset_two_step_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "reset-two-step",
+        help="Turn off a user's two-step sign-in (recovery).",
+        description=(
+            "Delete the authenticator app and the recovery codes of a user who lost them, so"
+            " the user signs in with the password alone and can set up two-step sign-in again."
+            " The user's sign-ins continue unless --end-sessions is given; reset the password"
+            " too if the password may be known to someone else."
+        ),
+    )
+    parser.add_argument("--login-name", required=True, help="The user's login name.")
+    parser.add_argument(
+        "--end-sessions",
+        action="store_true",
+        help="Also sign the user out everywhere (every open sign-in ends).",
+    )
+    parser.set_defaults(handler=_run_reset_two_step)
+
+
+def _run_reset_two_step(args: argparse.Namespace) -> int:
+    try:
+        engine = _engine()
+    except ValidationError:
+        print(_CONFIGURATION_INVALID, file=sys.stderr)
+        return 2
+    try:
+        with Session(engine) as session:
+            outcome = two_step.reset_for_login(
+                session, args.login_name, end_sessions=args.end_sessions
+            )
+    except RecoveryOutcomeUnknownError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    except ApplicationError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    except (OperationalError, InterfaceError):
+        print(_DATABASE_UNAVAILABLE, file=sys.stderr)
+        return 2
+    except SQLAlchemyError:
+        print(_DATABASE_ERROR, file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
+    if outcome.was_on:
+        signed_out = (
+            " Every sign-in of the user ended."
+            if outcome.sessions_ended
+            else " The user's sign-ins continue."
+        )
+        print(
+            f"Two-step sign-in of {outcome.display_name} (user {outcome.user_id}) is off: the"
+            f" authenticator app and the recovery codes were deleted.{signed_out}"
+        )
+    else:
+        print(
+            f"Two-step sign-in of {outcome.display_name} (user {outcome.user_id}) was already"
+            " off. Nothing was changed."
+        )
     return 0
 
 
@@ -1079,6 +1151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_reset_password_parser(subparsers)
+    _add_reset_two_step_parser(subparsers)
     _add_restore_correction_permission_management_parser(subparsers)
     _add_reconcile_parser(subparsers)
     _add_migrate_parser(subparsers)

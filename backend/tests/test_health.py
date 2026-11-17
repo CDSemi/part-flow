@@ -29,7 +29,7 @@ from app.main import create_app
 from tests.conftest import owner_engine
 
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0035_phase16_backup_policy"
+_PREVIOUS = "0036_phase17_outgoing_mail"
 _UNKNOWN = "9999_unknown_to_this_image"
 _OTHER_UNKNOWN = "9998_unknown_to_this_image"
 _NOT_READY_DETAIL = (

@@ -27,6 +27,21 @@ Rules owned here:
   ``require_password_change`` is on (evaluated per request).
 - Permissions are read per request from the User's role, so a role or
   grant change applies at the next request.
+- Two-step sign-in (Phase 17; ``app.application.two_step``): a User with
+  an authenticator app is not signed in by the password alone. The
+  password step opens a second step (``SecondStepRequired``: a challenge
+  whose token travels in its own HttpOnly cookie); ``complete_second_step``
+  signs the User in with a code from the app, a recovery code or an
+  emailed code. Two counters (owner decision of 2026-11-17): a correct
+  password restarts the password counter (``failed_attempts``), while
+  wrong codes count on ``failed_codes``, which only a full sign-in
+  restarts, so knowing the password buys no fresh guesses at a code. At
+  the two-step policy's threshold the account locks for the sign-in
+  policy's lock duration; the policy's wrong codes per sign-in end the
+  second step.
+- A signed-in User changing their own sign-in methods or email address
+  types the password again (``confirm_own_password``); a wrong one is a
+  failed attempt too. The previous address hears of an email change.
 
 Every hashing command first reads the plain values it needs, releases
 its database connection (``session.rollback()``), hashes or verifies
@@ -37,8 +52,10 @@ keys). Every role and user write takes the same advisory lock first
 (Phase 14 slice 2), so no concurrent administration write can change
 the grants, role assignment or activity that re-read saw before
 COMMIT. Lock order: the ``partflow:user-administration`` advisory lock
-→ the ``users`` row → the ``user_credentials`` row → INSERT
-``user_sessions`` → UPDATE ``user_sessions`` → audit.
+→ the ``users`` row → the ``user_credentials`` row → the
+``user_sign_in_challenges`` row → the ``user_totp_factors`` row → the
+``user_recovery_codes`` rows → INSERT ``user_sessions`` → UPDATE
+``user_sessions`` → audit.
 
 Sign-in, sign-out and failures are logged, never audited, and the log
 never carries the typed login name, a password, a hash, a token or its
@@ -57,16 +74,31 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import audit, authorization, password_hashing, roles, user_access, users
-from app.application.common import commit
+from app.application import (
+    audit,
+    authorization,
+    one_time_codes,
+    outgoing_mail,
+    password_hashing,
+    policies,
+    roles,
+    two_step_factors,
+    user_access,
+    users,
+)
+from app.application.common import commit, flush
 from app.application.errors import (
     AUTHENTICATION_REQUIRED_MESSAGE,
     AccountLockedError,
     AuthenticationRequiredError,
     ConflictError,
     InvalidInputError,
+    MailNotSentError,
+    MailServerNotSetUpError,
     RecoveryOutcomeUnknownError,
     RecoveryUnavailableError,
+    SecondStepExpiredError,
+    SecondStepFailedError,
     SignInFailedError,
     UnknownLoginError,
 )
@@ -75,6 +107,8 @@ from app.domain.enums import (
     AuditEntityType,
     AuditEventType,
     Permission,
+    SecondStepMethod,
+    SignInChallengeEndReason,
     ThemePreference,
     UserSessionEndReason,
 )
@@ -86,6 +120,7 @@ from app.domain.password_policy import (
     validate_new_password,
 )
 from app.domain.user_login import InvalidLoginNameError, normalize_login_name
+from app.infrastructure import mail
 from app.infrastructure.models import (
     ApplicationPolicy,
     Role,
@@ -127,10 +162,20 @@ _NO_PASSWORD_YET: Final = (
     "This user has no password yet. An administrator gives it one with Set password… in"
     " Administration → Users."
 )
+SECOND_STEP_EXPIRED_MESSAGE: Final = "This sign-in has ended or expired. Enter your password again."
+_TOO_MANY_CODES: Final = "Too many wrong codes. Sign in again with your password."
+_WRONG_CODE: Final = "That code is not correct. Check the code and try again."
 _RECOVERY_OUTCOME_UNKNOWN: Final = (
     "The connection to the database failed while the reset was being saved, so it is"
     " unknown whether the password was reset. Run the same command again: it sets the"
     " password again either way."
+)
+_EMAIL_CHANGED_SUBJECT: Final = "Your PartFlow email address was changed"
+_EMAIL_CHANGED_BODY: Final = (
+    "The email address of your PartFlow account {login} was {change} on {when} UTC.\n"
+    "\n"
+    "PartFlow sends no more messages to this address. If you did not make this change,"
+    " ask an administrator to check your account and set a new password.\n"
 )
 
 
@@ -148,6 +193,18 @@ class SessionGrant(NamedTuple):
 
     principal: Principal
     token: str
+
+
+class SecondStepRequired(NamedTuple):
+    """A correct password of a User with two-step sign-in: the second step to take.
+
+    ``token`` is the raw challenge token for the cookie only.
+    """
+
+    token: str
+    methods: tuple[SecondStepMethod, ...]
+    email_hint: str | None
+    expires_at: datetime.datetime
 
 
 class RecoveryOutcome(NamedTuple):
@@ -265,6 +322,23 @@ def _count_failure(
     return locked_until
 
 
+def _count_wrong_code(
+    session: Session, credential: UserCredential, now: datetime.datetime, lockout_codes: int
+) -> datetime.datetime | None:
+    """Count one wrong two-step code; lock at the two-step threshold. Returns the lock end."""
+    minutes = session.scalar(
+        select(ApplicationPolicy.sign_in_lockout_minutes).where(ApplicationPolicy.id == _POLICY_ID)
+    )
+    assert minutes is not None  # the policy row is seeded by its migration
+    credential.failed_codes += 1
+    if credential.failed_codes < lockout_codes:
+        return None
+    locked_until = now + datetime.timedelta(minutes=minutes)
+    credential.locked_until = locked_until
+    credential.failed_codes = 0
+    return locked_until
+
+
 def _log_lock(user_id: int, locked_until: datetime.datetime | None) -> None:
     if locked_until is not None:
         logger.info("Sign-in locked for user %s until %s", user_id, locked_until.isoformat())
@@ -345,6 +419,7 @@ def _apply_password_set(
     credential.password_is_temporary = True
     credential.password_changed_at = now
     credential.failed_attempts = 0
+    credential.failed_codes = 0
     credential.locked_until = None
     session.flush()
     user_access.end_user_sessions(session, user.id, UserSessionEndReason.PASSWORD_RESET)
@@ -366,9 +441,20 @@ def _apply_password_set(
 
 
 def sign_in(
-    session: Session, *, login_name: object, password: str, replaced_token: str | None
-) -> SessionGrant:
-    """Sign a User in; ends the session ``replaced_token`` names (REPLACED)."""
+    session: Session,
+    *,
+    login_name: object,
+    password: str,
+    replaced_token: str | None,
+    replaced_challenge_token: str | None = None,
+) -> SessionGrant | SecondStepRequired:
+    """Sign a User in; ends the session ``replaced_token`` names (REPLACED).
+
+    A correct password restarts the password counter. A User with two-step
+    sign-in gets a second step instead of a session: an open one
+    ``replaced_challenge_token`` names ends REPLACED, and the wrong-code
+    counter stays until the second step succeeds.
+    """
     login = _login_or_none(login_name)
     unusable = _cannot_match(password)
     user_id: int | None = None
@@ -412,16 +498,239 @@ def sign_in(
         session.rollback()
         raise _refuse_sign_in(user_id)
 
-    credential.failed_attempts = 0
-    credential.locked_until = None
     if new_hash is not None:
         credential.password_hash = new_hash
+    credential.failed_attempts = 0
+    if two_step_factors.is_enabled(session, user_id):
+        # A known password never buys fresh guesses at a code: the wrong
+        # codes keep counting on ``failed_codes`` until a full sign-in.
+        window = policies.read_two_step_policy(session).window
+        opened = two_step_factors.open_challenge(
+            session, user_id, now, replaced_challenge_token, window
+        )
+        commit(session, {})
+        logger.info("Sign-in password accepted for user %s; second step required", user_id)
+        return SecondStepRequired(
+            token=opened.token,
+            methods=opened.methods,
+            email_hint=opened.email_hint,
+            expires_at=opened.expires_at,
+        )
+    credential.failed_codes = 0
+    credential.locked_until = None
     token, _session_id = _open_session(session, user_id)
     _end_session_by_token(session, replaced_token, UserSessionEndReason.REPLACED)
     grant = _grant(session, token)
     commit(session, {})
     logger.info("Sign-in succeeded for user %s", user_id)
     return grant
+
+
+def complete_second_step(
+    session: Session,
+    *,
+    token: str | None,
+    method: SecondStepMethod,
+    code: str,
+    replaced_token: str | None,
+) -> SessionGrant:
+    """Finish the open second step ``token`` names with ``code``: sign the User in.
+
+    A wrong code counts on the challenge and on the account's wrong-code
+    counter (``failed_codes``); the challenge ends at the two-step policy's
+    wrong codes per sign-in, and the account locks at its threshold. A
+    recovery code and an emailed code work once; an app code's step is
+    remembered so it works once too. A full sign-in restarts both counters
+    and clears a lock.
+    """
+    found = two_step_factors.find_challenge(session, token)
+    if found is None:
+        session.rollback()
+        raise SecondStepExpiredError(SECOND_STEP_EXPIRED_MESSAGE)
+    challenge_id, user_id = found.id, found.user_id
+    # Lock order: the credential first, then the challenge.
+    session.rollback()
+    credential = user_access.lock_credential(session, user_id)
+    challenge = two_step_factors.lock_challenge(session, challenge_id)
+    now = _database_now(session)
+    policy = policies.read_two_step_policy(session)
+    if not two_step_factors.is_open(challenge, now, policy.window):
+        session.rollback()
+        raise SecondStepExpiredError(SECOND_STEP_EXPIRED_MESSAGE)
+    if credential is None or not _is_active(session, user_id):
+        two_step_factors.end_challenge(challenge, SignInChallengeEndReason.FAILED)
+        commit(session, {})
+        raise SecondStepExpiredError(SECOND_STEP_EXPIRED_MESSAGE)
+    if _is_locked(credential, now):
+        two_step_factors.end_challenge(challenge, SignInChallengeEndReason.FAILED)
+        commit(session, {})
+        raise AccountLockedError(_ACCOUNT_LOCKED)
+    factor = two_step_factors.lock_totp(session, user_id)
+    if method is SecondStepMethod.TOTP:
+        accepted = two_step_factors.accept_totp(factor, code, now, policy.clock_drift_steps)
+    elif method is SecondStepMethod.RECOVERY_CODE:
+        accepted = two_step_factors.use_recovery_code(session, user_id, code)
+    else:
+        accepted = two_step_factors.accept_email_code(challenge, code)
+    if not accepted:
+        challenge.failed_attempts += 1
+        locked_until = _count_wrong_code(session, credential, now, policy.lockout_codes)
+        ended = locked_until is not None or challenge.failed_attempts >= policy.max_codes
+        if ended:
+            two_step_factors.end_challenge(challenge, SignInChallengeEndReason.FAILED)
+        commit(session, {})
+        _log_lock(user_id, locked_until)
+        logger.info("Second step refused for user %s", user_id)
+        if locked_until is not None:
+            raise AccountLockedError(_ACCOUNT_LOCKED)
+        if ended:
+            raise SecondStepExpiredError(_TOO_MANY_CODES)
+        raise SecondStepFailedError(_WRONG_CODE)
+
+    credential.failed_attempts = 0
+    credential.failed_codes = 0
+    credential.locked_until = None
+    session_token, _session_id = _open_session(session, user_id)
+    _end_session_by_token(session, replaced_token, UserSessionEndReason.REPLACED)
+    two_step_factors.end_challenge(challenge, SignInChallengeEndReason.COMPLETED)
+    grant = _grant(session, session_token)
+    commit(session, {})
+    logger.info("Sign-in succeeded for user %s (second step %s)", user_id, method.value)
+    return grant
+
+
+class _PasswordCheck(NamedTuple):
+    """The scrypt check of a typed password: its result and the hash it was checked against."""
+
+    ok: bool
+    stored: str | None
+
+
+def _check_own_password(session: Session, user_id: int, password: str) -> _PasswordCheck:
+    """Verify ``password`` against the User's stored hash, outside any transaction."""
+    stored = session.scalar(
+        select(UserCredential.password_hash).where(UserCredential.user_id == user_id)
+    )
+    session.rollback()
+    if stored is None or _cannot_match(password):
+        password_hashing.dummy_verify(password)
+        return _PasswordCheck(ok=False, stored=stored)
+    return _PasswordCheck(ok=password_hashing.verify_password(password, stored), stored=stored)
+
+
+def _judge_own_password(session: Session, user_id: int, check: _PasswordCheck) -> None:
+    """Lock and re-read the credential; refuse a stale, locked or wrong password.
+
+    A wrong password counts as a failed attempt (it cannot be guessed past
+    the lockout) and raises; on return the transaction holds the credential
+    lock.
+    """
+    credential = user_access.lock_credential(session, user_id)
+    if not _is_active(session, user_id):
+        session.rollback()
+        raise AuthenticationRequiredError(AUTHENTICATION_REQUIRED_MESSAGE)
+    if credential is None or credential.password_hash != check.stored:
+        session.rollback()
+        raise ConflictError(_CHANGED_CONCURRENTLY)
+    now = _database_now(session)
+    if _is_locked(credential, now):
+        session.rollback()
+        raise AccountLockedError(_ACCOUNT_LOCKED)
+    if not check.ok:
+        locked_until = _count_failure(session, credential, now)
+        commit(session, {})
+        _log_lock(user_id, locked_until)
+        raise InvalidInputError(_WRONG_CURRENT_PASSWORD)
+
+
+def confirm_own_password(session: Session, principal: Principal, password: str) -> None:
+    """Check the signed-in User's password again before their sign-in methods change.
+
+    The scrypt check runs outside any transaction; then the credential row
+    is locked and re-read (``_judge_own_password``). On return the caller's
+    transaction holds the credential lock.
+    """
+    check = _check_own_password(session, principal.user_id, password)
+    _judge_own_password(session, principal.user_id, check)
+
+
+def change_own_email(
+    session: Session, principal: Principal, *, current_password: str, email: object
+) -> str | None:
+    """Replace the signed-in User's own email address; returns the stored address.
+
+    The address goes through the one domain rule (blank = none) before the
+    password is checked again. Lock order: the ``users`` row (the mode
+    every User write uses), then the ``user_credentials`` row. An
+    effective change is audited on the User like an administrator's edit,
+    with the metadata ``{"email_change": "BY_USER"}``; after COMMIT the
+    previous address, if any, receives a notice (best effort: a missing or
+    failing mail server never undoes the change). Needs no permission: the
+    account is the User's own, so no escalation guard applies.
+    """
+    new_email = users.canonical_email(email)
+    check = _check_own_password(session, principal.user_id, current_password)
+    user = users.lock_user(session, principal.user_id)
+    user_access.recheck_actor(session, principal)
+    _judge_own_password(session, principal.user_id, check)
+    previous = user.email
+    if new_email == previous:
+        session.rollback()
+        return previous
+    before = users.profile_snapshot(user)
+    user.email = new_email
+    user.updated_at = func.now()
+    flush(session, users.USER_CONFLICTS)
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.USER,
+        entity_id=str(user.id),
+        before_data=before,
+        after_data=users.profile_snapshot(user),
+        actor_user_id=principal.user_id,
+        metadata={"email_change": "BY_USER"},
+    )
+    changed_at = _database_now(session)
+    commit(session, users.USER_CONFLICTS)
+    logger.info("Email address changed by user %s", principal.user_id)
+    if previous is not None:
+        _notify_email_changed(session, principal, previous, new_email, changed_at)
+    return new_email
+
+
+def _notify_email_changed(
+    session: Session,
+    principal: Principal,
+    previous: str,
+    new_email: str | None,
+    changed_at: datetime.datetime,
+) -> None:
+    """Tell the previous address of a User's email change (best effort, after COMMIT)."""
+    change = (
+        "removed"
+        if new_email is None
+        else f"changed to {one_time_codes.mask_email_address(new_email)}"
+    )
+    message = mail.OutgoingMessage(
+        to=previous,
+        subject=_EMAIL_CHANGED_SUBJECT,
+        body=_EMAIL_CHANGED_BODY.format(
+            login=principal.login_name,
+            change=change,
+            when=f"{changed_at.astimezone(datetime.UTC):%Y-%m-%d %H:%M}",
+        ),
+    )
+    try:
+        outgoing_mail.send(session, message)
+    except MailServerNotSetUpError:
+        logger.info(
+            "No notice of the email change of user %s: no outgoing mail server", principal.user_id
+        )
+    except MailNotSentError:
+        # The change is committed; the notice is a courtesy, so the mail
+        # server's refusal is logged for the administrator, never raised.
+        logger.warning("The notice of the email change of user %s was not sent", principal.user_id)
 
 
 def sign_out(session: Session, token: str | None) -> None:

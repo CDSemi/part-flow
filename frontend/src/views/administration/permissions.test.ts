@@ -284,6 +284,7 @@ test('only the session UI, the sign-in gate, the Administration sections, the Ma
     'views/administration/SettingsSection.tsx',
     'views/administration/SignInSettingsPanel.tsx',
     'views/administration/StationDevicesDialog.tsx',
+    'views/administration/TwoStepSettingsPanel.tsx',
     'views/administration/UsersSection.tsx',
     'views/administration/WorkerSessionsSection.tsx',
     'views/administration/WorkersSection.tsx',

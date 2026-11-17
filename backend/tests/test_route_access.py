@@ -152,6 +152,9 @@ def test_only_the_content_and_guard_routes_have_conditional_keys() -> None:
         ("POST", "/api/users"),
         ("PATCH", "/api/users/{user_id}"),
         ("PUT", "/api/users/{user_id}/password"),
+        # Phase 17: turning off a protected user's two-step sign-in, guarded
+        # like setting their password.
+        ("POST", "/api/users/{user_id}/two-step/reset"),
         ("PATCH", "/api/work-orders/{work_order_id}"),
         ("POST", "/api/work-orders/import"),
         ("POST", "/api/hot-list/changes"),

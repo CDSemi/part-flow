@@ -422,8 +422,10 @@ The 4 MiB limit is above the application's own limits (2 MiB pictures, 1 MiB imp
 answers a plausible oversized file itself. The largest allowed import, 2,000 Work Orders, takes about half a minute.
 `web` never retries a request, so one user request is at most one backend execution.
 
-**Rate limits, per client address.** `POST /api/session` (sign-in) allows 10 per minute with a burst of 5.
-`PUT /api/session/password`, `POST /api/setup/administrator` and `PUT /api/users/{user_id}/password` allow 5 per minute
+**Rate limits, per client address.** `POST /api/session` (sign-in) and `POST /api/session/second-step` (the code of
+two-step sign-in) each allow 10 per minute with a burst of 5. `PUT /api/session/password`, `POST
+/api/setup/administrator`, `PUT /api/users/{user_id}/password`, `PUT /api/session/email` and the three two-step changes
+that check the password (`POST /api/session/two-step/totp`, `…/totp/remove` and `…/recovery-codes`) allow 5 per minute
 with a burst of 4. Reads and sign-out are never limited. A 429 from `web` never reaches the application, so it never
 counts as a failed sign-in and never locks an account. Device enrollment codes are not rate limited (50 bits of
 entropy, valid for 15 minutes).
@@ -729,7 +731,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §3.1: `backend` reaches the outgoing mail server set in Administration → Settings through the `edge` network. |
+| 2026-11-17 | uncommitted | §3.1: the rate limits of the second step of two-step sign-in, the own email change and the two-step changes that check the password. |
+| 2026-11-16 | `252f678` | §3.1: `backend` reaches the outgoing mail server set in Administration → Settings through the `edge` network. |
 | 2026-11-16 | `a4cf9a8` | §1.2, §6: the Deployment Admin tool and its guide are removed. |
 | 2026-11-16 | `5708664` | §1.2: the short command `deploy/production/pf` for the production stack. |
 | 2026-11-13 | `4a99914` | §3.1 Logs: the successful automatic refreshes of the Production Board feed are not logged. |

@@ -100,6 +100,7 @@ from app.domain.enums import (
     QuantityFlowStatus,
     RequestType,
     RouteMode,
+    SignInChallengeEndReason,
     StationDeviceRevokedReason,
     ThemePreference,
     UserSessionEndReason,
@@ -443,6 +444,58 @@ POLICY_MAIL_SERVER_SHAPE_SQL = (
     " AND (mail_username IS NULL OR mail_security <> 'NONE')"
 )
 MAIL_SERVER_PASSWORD_SQL = "char_length(password) BETWEEN 1 AND 1024"
+
+# Two-step sign-in (Phase 17, owner decision of 2026-11-13): the 160-bit
+# key of an authenticator app, the SHA-256 digests of recovery codes, of
+# second-step tokens and of emailed codes, and the end of a second step.
+# Repeated verbatim by migration `0037_phase17_two_step`.
+TOTP_SECRET_SQL = "octet_length(secret) = 20"
+TOTP_LAST_USED_STEP_SQL = "last_used_step IS NULL OR last_used_step >= 0"
+RECOVERY_CODE_DIGEST_SQL = "octet_length(code_digest) = 32"
+CHALLENGE_TOKEN_DIGEST_SQL = "octet_length(token_digest) = 32"
+CHALLENGE_FAILED_ATTEMPTS_SQL = "failed_attempts >= 0"
+CHALLENGE_EMAIL_CODE_SQL = "email_code_digest IS NULL OR octet_length(email_code_digest) = 32"
+CHALLENGE_EMAIL_CODE_SHAPE_SQL = "(email_code_digest IS NULL) = (email_code_sent_at IS NULL)"
+CHALLENGE_EMAIL_CODES_SENT_SQL = "email_codes_sent >= 0"
+CHALLENGE_END_REASON_SQL = (
+    "end_reason IN (" + ", ".join(f"'{reason}'" for reason in SignInChallengeEndReason) + ")"
+)
+CHALLENGE_END_SHAPE_SQL = "(ended_at IS NULL) = (end_reason IS NULL)"
+
+# The two-step sign-in policy (Phase 17, owner decisions of 2026-11-17;
+# Administration → Settings → Two-step sign-in): every number of two-step
+# sign-in is configuration — how long a second step stays open (minutes),
+# the wrong codes one second step takes, the wrong codes since the last
+# full sign-in that lock the account, the codes one second step may email
+# and the seconds between two of them, the digits of an emailed code, the
+# recovery codes made at a time and their length, how long a new
+# authenticator app waits for its first code (minutes) and the 30-second
+# steps an app's clock may be off. Only the authenticator app standard
+# stays fixed (6 digits, 30 seconds, HMAC-SHA-1, a 160-bit key): apps
+# ignore other values. Then the outgoing mail server's timeout (seconds;
+# the mail-server section). Each column's (minimum, maximum); its CHECK is
+# `ck_application_policy_<column>_range`. Repeated verbatim by migration
+# `0037_phase17_two_step`, as is the wrong-code counter of a credential.
+TWO_STEP_POLICY_RANGES: dict[str, tuple[int, int]] = {
+    "two_step_window_minutes": (1, 60),
+    "two_step_max_codes": (1, 20),
+    "two_step_lockout_codes": (3, 100),
+    "two_step_email_codes": (1, 10),
+    "two_step_email_interval_seconds": (0, 3600),
+    "two_step_email_code_digits": (6, 10),
+    "two_step_recovery_codes": (5, 20),
+    "two_step_recovery_code_length": (8, 20),
+    "two_step_setup_minutes": (1, 60),
+    "two_step_clock_drift_steps": (0, 2),
+}
+MAIL_TIMEOUT_SECONDS_RANGE: tuple[int, int] = (5, 120)
+USER_CREDENTIAL_FAILED_CODES_SQL = "failed_codes >= 0"
+
+
+def policy_range_sql(column: str, bounds: tuple[int, int]) -> str:
+    """The range CHECK of one whole-number policy column."""
+    return f"{column} BETWEEN {bounds[0]} AND {bounds[1]}"
+
 
 # Users, roles and permissions (Phase 13 slice 12; PROJECT_PROFILE §7,
 # §20; owner decisions OD-8, OD-19): the closed permission vocabulary,
@@ -1237,7 +1290,10 @@ class ApplicationPolicy(Base):
     optional user name of the sign-in to the server and the sender
     address; its password is a credential and lives in
     `mail_server_credentials`, never here. Read when PartFlow sends a
-    message; never by a production command.
+    message; never by a production command. The owner decisions of
+    2026-11-17 add the server's timeout and the two-step sign-in policy of
+    Administration → Settings (`TWO_STEP_POLICY_RANGES`), read by every
+    sign-in step.
     """
 
     __tablename__ = "application_policy"
@@ -1310,6 +1366,42 @@ class ApplicationPolicy(Base):
     )
     mail_username: Mapped[str | None] = mapped_column(Text, nullable=True)
     mail_sender: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Seconds each connect, read or write with the mail server may take.
+    mail_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("20")
+    )
+    # Two-step sign-in (Phase 17, owner decisions of 2026-11-17): every
+    # number of it; the ranges are TWO_STEP_POLICY_RANGES.
+    two_step_window_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("15")
+    )
+    two_step_max_codes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("5")
+    )
+    two_step_lockout_codes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("10")
+    )
+    two_step_email_codes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
+    two_step_email_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("60")
+    )
+    two_step_email_code_digits: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("8")
+    )
+    two_step_recovery_codes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("10")
+    )
+    two_step_recovery_code_length: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("12")
+    )
+    two_step_setup_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("15")
+    )
+    two_step_clock_drift_steps: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
     # The role applied at Scan Stations (Phase 14 slice 4): its station
     # keys authorize each station command. Set once by migration.
     scan_station_role_id: Mapped[int] = mapped_column(
@@ -1391,6 +1483,16 @@ class ApplicationPolicy(Base):
         ),
         CheckConstraint(
             POLICY_MAIL_SERVER_SHAPE_SQL, name=conv("ck_application_policy_mail_server_shape")
+        ),
+        CheckConstraint(
+            policy_range_sql("mail_timeout_seconds", MAIL_TIMEOUT_SECONDS_RANGE),
+            name=conv("ck_application_policy_mail_timeout_seconds_range"),
+        ),
+        *(
+            CheckConstraint(
+                policy_range_sql(column, bounds), name=conv(f"ck_application_policy_{column}_range")
+            )
+            for column, bounds in TWO_STEP_POLICY_RANGES.items()
         ),
     )
 
@@ -1554,7 +1656,10 @@ class UserCredential(Base):
     yet replaced by the User; whether that forces a change is the current
     sign-in policy's `require_password_change`, evaluated per request.
     The failure counter and the lock are per credential and cleared by
-    every password set.
+    every password set. `failed_codes` (Phase 17) counts the wrong
+    two-step codes since the User last signed in fully: a correct password
+    resets `failed_attempts`, never this counter, so knowing the password
+    buys no fresh guesses at a code.
     """
 
     __tablename__ = "user_credentials"
@@ -1575,6 +1680,7 @@ class UserCredential(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    failed_codes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         CheckConstraint(
@@ -1583,6 +1689,10 @@ class UserCredential(Base):
         CheckConstraint(
             USER_CREDENTIAL_FAILED_ATTEMPTS_SQL,
             name=conv("ck_user_credentials_failed_attempts_non_negative"),
+        ),
+        CheckConstraint(
+            USER_CREDENTIAL_FAILED_CODES_SQL,
+            name=conv("ck_user_credentials_failed_codes_non_negative"),
         ),
     )
 
@@ -1597,7 +1707,7 @@ class UserSession(Base):
     sign-ins do not expire), so an administrator shortening the expiry
     ends long sessions at once. `ended_at` / `end_reason` record when
     PartFlow closed the row and why (sign-out, replacement, password
-    change or reset, deactivation) — expiry is never recorded. Rows are
+    change or reset, deactivation, two-step reset) — expiry is never recorded. Rows are
     never deleted at runtime; ended rows are history. User sessions are
     never Worker Sessions (`worker_sessions`, PROJECT_PROFILE §7).
     """
@@ -1625,6 +1735,139 @@ class UserSession(Base):
         # Serves "end every open session of this User".
         Index(
             "ix_user_sessions_user_id_open",
+            "user_id",
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+    )
+
+
+class UserTotpFactor(Base):
+    """The authenticator app of one User's two-step sign-in (Phase 17).
+
+    One row per User at most (the primary key is the User's id). A row
+    without `confirmed_at` is a setup waiting for its first code; two-step
+    sign-in is on exactly while a confirmed row exists. `secret` is the
+    160-bit TOTP key (RFC 6238): a credential, so it never lives on `users`,
+    and it is answered only once, to set the app up — never logged or
+    audited. `last_used_step` is the newest 30-second step accepted, so each
+    code works once.
+    """
+
+    __tablename__ = "user_totp_factors"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_user_totp_factors_user_id_users"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    secret: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    confirmed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_step: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(TOTP_SECRET_SQL, name=conv("ck_user_totp_factors_secret_length")),
+        CheckConstraint(
+            TOTP_LAST_USED_STEP_SQL, name=conv("ck_user_totp_factors_last_used_step_non_negative")
+        ),
+    )
+
+
+class UserRecoveryCode(Base):
+    """One recovery code of a User's two-step sign-in (Phase 17).
+
+    Only the SHA-256 digest of the canonical code is stored (unique per
+    User); `used_at` is set when it signs the User in, after which it never
+    works again. New codes replace (delete) every earlier code of the User;
+    turning two-step sign-in off deletes them.
+    """
+
+    __tablename__ = "user_recovery_codes"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_user_recovery_codes_user_id_users"),
+        nullable=False,
+    )
+    code_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "code_digest", name="uq_user_recovery_codes_user_id_code_digest"
+        ),
+        CheckConstraint(
+            RECOVERY_CODE_DIGEST_SQL, name=conv("ck_user_recovery_codes_code_digest_length")
+        ),
+    )
+
+
+class UserSignInChallenge(Base):
+    """The open second step of one sign-in (Phase 17, two-step sign-in).
+
+    Created when a User with two-step sign-in gives the right password: the
+    browser receives an opaque token in an HttpOnly cookie and only its
+    SHA-256 digest is stored, like a session token. It is open for the
+    two-step policy's window from `created_at` (expiry is derived from the
+    current policy, never recorded) until
+    `ended_at` / `end_reason` record its end. `failed_attempts` counts the
+    wrong codes it took; the last emailed code is kept only as a digest with
+    the time it was sent. Rows are never deleted at runtime.
+    """
+
+    __tablename__ = "user_sign_in_challenges"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_user_sign_in_challenges_user_id_users"),
+        nullable=False,
+    )
+    token_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    email_code_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
+    email_code_sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    email_codes_sent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    end_reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_user_sign_in_challenges_token_digest"),
+        CheckConstraint(
+            CHALLENGE_TOKEN_DIGEST_SQL, name=conv("ck_user_sign_in_challenges_token_digest_length")
+        ),
+        CheckConstraint(
+            CHALLENGE_FAILED_ATTEMPTS_SQL,
+            name=conv("ck_user_sign_in_challenges_failed_attempts_non_negative"),
+        ),
+        CheckConstraint(
+            CHALLENGE_EMAIL_CODE_SQL,
+            name=conv("ck_user_sign_in_challenges_email_code_digest_length"),
+        ),
+        CheckConstraint(
+            CHALLENGE_EMAIL_CODE_SHAPE_SQL, name=conv("ck_user_sign_in_challenges_email_code_shape")
+        ),
+        CheckConstraint(
+            CHALLENGE_EMAIL_CODES_SENT_SQL,
+            name=conv("ck_user_sign_in_challenges_email_codes_sent_non_negative"),
+        ),
+        CheckConstraint(
+            CHALLENGE_END_REASON_SQL, name=conv("ck_user_sign_in_challenges_end_reason")
+        ),
+        CheckConstraint(CHALLENGE_END_SHAPE_SQL, name=conv("ck_user_sign_in_challenges_end_shape")),
+        # Serves "end every open second step of this User".
+        Index(
+            "ix_user_sign_in_challenges_user_id_open",
             "user_id",
             postgresql_where=text("ended_at IS NULL"),
         ),

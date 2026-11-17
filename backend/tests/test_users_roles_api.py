@@ -85,8 +85,8 @@ _USER_KEYS = {
 }
 # What a caller who may manage users and roles (the harness administrator)
 # sees: slice 12's shape plus the slice 1 sign-in state and (Phase 17) the
-# email address.
-_ADMIN_USER_KEYS = _USER_KEYS | {"sign_in_state", "email"}
+# email address and whether two-step sign-in is on.
+_ADMIN_USER_KEYS = _USER_KEYS | {"sign_in_state", "email", "two_step"}
 
 _E_R1 = "Role name must not be empty."
 _E_R2 = "A role with this name already exists."
@@ -1056,6 +1056,10 @@ def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
     assert user_references == {
         "fk_user_credentials_user_id_users",
         "fk_user_sessions_user_id_users",
+        # Phase 17: two-step sign-in.
+        "fk_user_totp_factors_user_id_users",
+        "fk_user_recovery_codes_user_id_users",
+        "fk_user_sign_in_challenges_user_id_users",
         "fk_audit_events_actor_user_id_users",
         "fk_machine_lifecycle_events_actor_user_id_users",
         "fk_work_order_allocations_actor_user_id_users",
@@ -1216,6 +1220,9 @@ _USER_ROLE_READERS = {
     "app/application/user_access.py",
     "app/application/authentication.py",
     "app/application/first_run.py",
+    # Phase 17: two-step sign-in reads the User's email address and login.
+    "app/application/two_step.py",
+    "app/application/two_step_factors.py",
     "app/api/users.py",
     "app/api/roles.py",
 }

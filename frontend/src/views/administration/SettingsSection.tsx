@@ -26,6 +26,7 @@ import { ADMIN_SECTIONS } from './sections';
 import { MailServerPanel } from './MailServerPanel';
 import { GeneralSettingsPreviews } from './SettingPreviews';
 import { SignInSettingsPanel } from './SignInSettingsPanel';
+import { TwoStepSettingsPanel } from './TwoStepSettingsPanel';
 
 // Administration → Settings (Phase 13; GUI_DESIGN §9 Policies and
 // §3.12): the Due Soon warning panel — the one global policy behind
@@ -34,7 +35,8 @@ import { SignInSettingsPanel } from './SignInSettingsPanel';
 // application policy (`/api/policies/due-soon`), audited and
 // re-validated by the server. The three fields share a cross-field rule
 // (minimum ≤ maximum), so Save replaces them together. The User sign-in
-// panel (SignInSettingsPanel) and the Outgoing mail server panel
+// panel (SignInSettingsPanel), the Two-step sign-in panel
+// (TwoStepSettingsPanel) and the Outgoing mail server panel
 // (MailServerPanel, Phase 17) follow it and load their own data. The
 // other general settings are not available yet: they are disabled
 // previews marked so (Phase 17, SettingPreviews), never a control that
@@ -144,6 +146,7 @@ export function SettingsSection() {
           />
         )}
         <SignInSettingsPanel />
+        <TwoStepSettingsPanel />
         <MailServerPanel />
         <h2>Other settings</h2>
         <p className="admin-confighelp">

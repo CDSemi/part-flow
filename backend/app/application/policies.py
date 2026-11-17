@@ -52,7 +52,12 @@ NONE) and the sender address. The password is a credential: it lives in
 ``mail_server_credentials`` (one row at most; none = no password), never on
 the policy row, and is read for sending only — no answer, log or audit row
 carries it. PartFlow reads the server when it sends a message
-(``app.application.outgoing_mail``).
+(``app.application.outgoing_mail``). The owner decisions of 2026-11-17 add
+the server's timeout (5-120 seconds, default 20) to that section and the
+Two-step sign-in panel of Administration → Settings (``entity_id``
+``two-step``, a partial merge like User sign-in): every number of two-step
+sign-in, each a whole number in its range (``TWO_STEP_POLICY_RANGES``).
+Every sign-in step reads it, so a change applies from the next step.
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -72,6 +77,7 @@ dialogs or Movements and never rewrites history: it applies from each
 session's next refresh or sign-in, and from each command's own read.
 """
 
+import datetime
 import ipaddress
 import re
 from typing import Any, Final, NamedTuple, TypeGuard
@@ -100,6 +106,7 @@ from app.infrastructure.models import (
     MAIL_PASSWORD_MAX_LENGTH,
     MAIL_PORT_MAX,
     MAIL_PORT_MIN,
+    MAIL_TIMEOUT_SECONDS_RANGE,
     MAIL_USERNAME_MAX_LENGTH,
     RETENTION_PERIOD_MONTHS_MAX,
     RETENTION_PERIOD_MONTHS_MIN,
@@ -107,6 +114,7 @@ from app.infrastructure.models import (
     SIGN_IN_LOCKOUT_ATTEMPTS_MIN,
     SIGN_IN_LOCKOUT_MINUTES_MAX,
     SIGN_IN_LOCKOUT_MINUTES_MIN,
+    TWO_STEP_POLICY_RANGES,
     USER_SESSION_DAYS_MAX,
     USER_SESSION_DAYS_MIN,
     WORKER_SESSION_TIMEOUT_MAX,
@@ -135,6 +143,9 @@ BACKUPS_SECTION: Final = "backups"
 # The audit entity_id and API path segment of Administration → Settings →
 # Outgoing mail server (Phase 17; CD3).
 MAIL_SERVER_SECTION: Final = "mail-server"
+# The audit entity_id and API path segment of Administration → Settings →
+# Two-step sign-in (Phase 17, owner decisions of 2026-11-17; CD3).
+TWO_STEP_SECTION: Final = "two-step"
 # The scheduled backup intervals Administration → Backups admits: the
 # whole hours that divide the day (the backup-due command's choices too).
 BACKUP_INTERVALS: Final = BACKUP_INTERVAL_HOURS
@@ -578,6 +589,10 @@ _MAIL_HOST_MESSAGE: Final = (
     " spaces or a port."
 )
 _MAIL_PORT_MESSAGE: Final = "The port must be a whole number from 1 to 65535."
+_MAIL_TIMEOUT_MESSAGE: Final = (
+    "The mail server timeout must be a whole number of seconds from"
+    f" {MAIL_TIMEOUT_SECONDS_RANGE[0]} to {MAIL_TIMEOUT_SECONDS_RANGE[1]}."
+)
 _MAIL_SECURITY_MESSAGE: Final = "Choose STARTTLS, SSL/TLS or None as the connection security."
 _MAIL_USERNAME_MESSAGE: Final = (
     "The user name must be at most 254 characters, without line breaks or other control characters."
@@ -605,6 +620,7 @@ class MailServerSettings(NamedTuple):
     username: str | None
     password_set: bool
     sender: str | None
+    timeout_seconds: int
 
 
 # The one row a mail server password may have (CHECK id = 1).
@@ -624,12 +640,13 @@ def mail_server_settings(session: Session, policy: ApplicationPolicy) -> MailSer
         username=policy.mail_username,
         password_set=bool(password_set),
         sender=policy.mail_sender,
+        timeout_seconds=policy.mail_timeout_seconds,
     )
 
 
 def read_mail_server(session: Session) -> SmtpServer | None:
     """The stored mail server for sending, or None when none is set up (unlocked)."""
-    host, port, security, username, password, sender = session.execute(
+    host, port, security, username, password, sender, timeout = session.execute(
         select(
             ApplicationPolicy.mail_host,
             ApplicationPolicy.mail_port,
@@ -637,6 +654,7 @@ def read_mail_server(session: Session) -> SmtpServer | None:
             ApplicationPolicy.mail_username,
             MailServerCredential.password,
             ApplicationPolicy.mail_sender,
+            ApplicationPolicy.mail_timeout_seconds,
         )
         .select_from(ApplicationPolicy)
         .outerjoin(MailServerCredential, MailServerCredential.id == _CREDENTIAL_ID)
@@ -651,6 +669,7 @@ def read_mail_server(session: Session) -> SmtpServer | None:
         username=username,
         password=password,
         sender=sender,
+        timeout_seconds=timeout,
     )
 
 
@@ -712,6 +731,7 @@ def _mail_server_snapshot(policy: ApplicationPolicy, password_set: bool) -> dict
         "mail_username": policy.mail_username,
         "mail_password_set": password_set,
         "mail_sender": policy.mail_sender,
+        "mail_timeout_seconds": policy.mail_timeout_seconds,
     }
 
 
@@ -723,6 +743,7 @@ def update_mail_server_policy(
     security: object,
     username: object,
     sender: object,
+    timeout_seconds: object,
     password: object = UNSET,
     actor_user_id: int,
 ) -> ApplicationPolicy:
@@ -731,7 +752,8 @@ def update_mail_server_policy(
     A full replace like Backups, except the password: left out, the
     stored one is kept (and dropped when no user name remains); ``None``
     clears it; a string replaces it. A blank host removes the server,
-    which then keeps no sender, user name or password. Saving sends
+    which then keeps no sender, user name or password; the port, the
+    security and the timeout are kept either way. Saving sends
     nothing. The audit row records whether a password is stored and, in
     its metadata, whether it changed — never the password.
 
@@ -751,6 +773,8 @@ def update_mail_server_policy(
     clean_host = _mail_host(host)
     if not _is_whole_in(port, MAIL_PORT_MIN, MAIL_PORT_MAX):
         raise InvalidInputError(_MAIL_PORT_MESSAGE)
+    if not _is_whole_in(timeout_seconds, *MAIL_TIMEOUT_SECONDS_RANGE):
+        raise InvalidInputError(_MAIL_TIMEOUT_MESSAGE)
     if not isinstance(security, str) or security not in MailSecurity.__members__:
         raise InvalidInputError(_MAIL_SECURITY_MESSAGE)
     clean_security = MailSecurity(security)
@@ -779,6 +803,7 @@ def update_mail_server_policy(
         "mail_username": clean_username,
         "mail_password_set": new_password is not None,
         "mail_sender": clean_sender,
+        "mail_timeout_seconds": timeout_seconds,
     }
     if after == before and not password_changed:
         return policy
@@ -787,6 +812,7 @@ def update_mail_server_policy(
     policy.mail_security = clean_security.value
     policy.mail_username = clean_username
     policy.mail_sender = clean_sender
+    policy.mail_timeout_seconds = timeout_seconds
     policy.updated_at = func.now()
     if new_password is None:
         if credential is not None:
@@ -805,6 +831,120 @@ def update_mail_server_policy(
         after_data=_mail_server_snapshot(policy, new_password is not None),
         actor_user_id=actor_user_id,
         metadata={"mail_password_changed": password_changed},
+    )
+    commit(session, {})
+    return policy
+
+
+class TwoStepPolicy(NamedTuple):
+    """The two-step sign-in policy of Administration → Settings, as stored."""
+
+    window_minutes: int
+    max_codes: int
+    lockout_codes: int
+    email_codes: int
+    email_interval_seconds: int
+    email_code_digits: int
+    recovery_codes: int
+    recovery_code_length: int
+    setup_minutes: int
+    clock_drift_steps: int
+
+    @property
+    def window(self) -> datetime.timedelta:
+        """How long a second step stays open from the password step."""
+        return datetime.timedelta(minutes=self.window_minutes)
+
+    @property
+    def email_interval(self) -> datetime.timedelta:
+        return datetime.timedelta(seconds=self.email_interval_seconds)
+
+    @property
+    def setup_time(self) -> datetime.timedelta:
+        """How long a new authenticator app waits for its first code."""
+        return datetime.timedelta(minutes=self.setup_minutes)
+
+
+# What each field must be, completed with its range below.
+_TWO_STEP_RULES: Final = {
+    "two_step_window_minutes": "The time to finish the second step must be a whole number of"
+    " minutes",
+    "two_step_max_codes": "The wrong codes one sign-in may take must be a whole number",
+    "two_step_lockout_codes": "The wrong codes before a lock must be a whole number",
+    "two_step_email_codes": "The codes one sign-in may email must be a whole number",
+    "two_step_email_interval_seconds": "The wait between two emailed codes must be a whole number"
+    " of seconds",
+    "two_step_email_code_digits": "The digits of an emailed code must be a whole number",
+    "two_step_recovery_codes": "The number of recovery codes must be a whole number",
+    "two_step_recovery_code_length": "The characters of a recovery code must be a whole number",
+    "two_step_setup_minutes": "The time to finish setting up an authenticator app must be a whole"
+    " number of minutes",
+    "two_step_clock_drift_steps": "The clock drift allowed must be a whole number of 30-second"
+    " steps",
+}
+_TWO_STEP_MESSAGES: Final = {
+    column: f"{_TWO_STEP_RULES[column]} from {low} to {high}."
+    for column, (low, high) in TWO_STEP_POLICY_RANGES.items()
+}
+
+
+def read_two_step_policy(session: Session) -> TwoStepPolicy:
+    """The stored two-step policy (unlocked; a column select, no policy instance)."""
+    row = session.execute(
+        select(
+            ApplicationPolicy.two_step_window_minutes,
+            ApplicationPolicy.two_step_max_codes,
+            ApplicationPolicy.two_step_lockout_codes,
+            ApplicationPolicy.two_step_email_codes,
+            ApplicationPolicy.two_step_email_interval_seconds,
+            ApplicationPolicy.two_step_email_code_digits,
+            ApplicationPolicy.two_step_recovery_codes,
+            ApplicationPolicy.two_step_recovery_code_length,
+            ApplicationPolicy.two_step_setup_minutes,
+            ApplicationPolicy.two_step_clock_drift_steps,
+        ).where(ApplicationPolicy.id == _POLICY_ID)
+    ).one()
+    return TwoStepPolicy(*row)
+
+
+def _two_step_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {column: getattr(policy, column) for column in TWO_STEP_POLICY_RANGES}
+
+
+def update_two_step_policy(
+    session: Session, *, changes: dict[str, object], actor_user_id: int
+) -> ApplicationPolicy:
+    """Merge the given two-step settings; a no-op writes and audits nothing.
+
+    The User sign-in protocol: a field not given keeps its stored value;
+    each given one is a whole number in its range. Every sign-in step reads
+    the policy, so a change applies from the next step — an open second
+    step included.
+    """
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    if not changes:
+        raise InvalidInputError("Change at least one two-step sign-in setting.")
+    for column, value in changes.items():
+        if not _is_whole_in(value, *TWO_STEP_POLICY_RANGES[column]):
+            raise InvalidInputError(_TWO_STEP_MESSAGES[column])
+    before = _two_step_snapshot(policy)
+    if {**before, **changes} == before:
+        return policy
+    for column, value in changes.items():
+        setattr(policy, column, value)
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=TWO_STEP_SECTION,
+        before_data=before,
+        after_data=_two_step_snapshot(policy),
+        actor_user_id=actor_user_id,
     )
     commit(session, {})
     return policy

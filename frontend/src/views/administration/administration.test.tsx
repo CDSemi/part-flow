@@ -82,6 +82,8 @@ interface UserRow {
     'NO_PASSWORD' | 'TEMPORARY_PASSWORD' | 'PASSWORD_SET' | 'LOCKED';
   /** The optional email address (Phase 17; default: none). */
   email?: string | null;
+  /** Two-step sign-in is on (Phase 17; default: off). */
+  two_step?: boolean;
 }
 
 /** The fake Roles and Users routes a test can make fail. */
@@ -386,6 +388,7 @@ interface MailServerRow {
   mail_username: string | null;
   mail_password: string | null;
   mail_sender: string | null;
+  mail_timeout_seconds: number;
 }
 
 const NO_MAIL_SERVER: MailServerRow = {
@@ -395,12 +398,41 @@ const NO_MAIL_SERVER: MailServerRow = {
   mail_username: null,
   mail_password: null,
   mail_sender: null,
+  mail_timeout_seconds: 20,
 };
 let mailServer: MailServerRow;
 /** A refusal (or no answer) of every `/api/policies/mail-server*` call. */
 let mailServerFailure: FakeFailure | null;
 /** The addresses the fake test-message route "sent" to, oldest first. */
 let mailSent: string[];
+
+// Settings → Two-step sign-in (Phase 17, owner decisions of 2026-11-17):
+// each setting's server range.
+const TWO_STEP_RANGES: Record<string, [number, number]> = {
+  two_step_window_minutes: [1, 60],
+  two_step_max_codes: [1, 20],
+  two_step_lockout_codes: [3, 100],
+  two_step_email_codes: [1, 10],
+  two_step_email_interval_seconds: [0, 3600],
+  two_step_email_code_digits: [6, 10],
+  two_step_recovery_codes: [5, 20],
+  two_step_recovery_code_length: [8, 20],
+  two_step_setup_minutes: [1, 60],
+  two_step_clock_drift_steps: [0, 2],
+};
+const DEFAULT_TWO_STEP_POLICY: Record<string, number> = {
+  two_step_window_minutes: 15,
+  two_step_max_codes: 5,
+  two_step_lockout_codes: 10,
+  two_step_email_codes: 3,
+  two_step_email_interval_seconds: 60,
+  two_step_email_code_digits: 8,
+  two_step_recovery_codes: 10,
+  two_step_recovery_code_length: 12,
+  two_step_setup_minutes: 15,
+  two_step_clock_drift_steps: 1,
+};
+let twoStepPolicy: Record<string, number>;
 
 const E_B1 = 'Seconds per displayed row must be a whole number from 1 to 60.';
 const E_B2 =
@@ -467,6 +499,9 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
   if (url.startsWith('/api/policies/mail-server')) {
     return handleMailServer(url, method, body);
+  }
+  if (url === '/api/policies/two-step') {
+    return handleTwoStepPolicy(method, body);
   }
   if (url === '/api/workers' || url.startsWith('/api/workers/')) {
     return handleWorkers(url, method, body);
@@ -1118,12 +1153,16 @@ async function handleRoles(
 /** The server's two user response shapes: `sign_in_state` only for a
  * caller who may manage users and roles, absent for everyone else. */
 function userWire(user: UserRow) {
-  const { sign_in_state, email, ...profile } = user;
+  const { sign_in_state, email, two_step, ...profile } = user;
   return {
     ...stamp(profile),
     role_name: state.roles.find((r) => r.id === user.role_id)!.name,
     ...(hasPermission(session.user, 'MANAGE_USERS_AND_ROLES')
-      ? { sign_in_state: sign_in_state ?? 'NO_PASSWORD', email: email ?? null }
+      ? {
+          sign_in_state: sign_in_state ?? 'NO_PASSWORD',
+          email: email ?? null,
+          two_step: two_step ?? false,
+        }
       : {}),
   };
 }
@@ -1193,6 +1232,7 @@ function handleMailServer(
             ? null
             : mailServer.mail_password,
       mail_sender: body.mail_sender === null ? null : String(body.mail_sender),
+      mail_timeout_seconds: Number(body.mail_timeout_seconds),
     };
   }
   const { mail_password, ...answered } = mailServer;
@@ -1201,6 +1241,30 @@ function handleMailServer(
     mail_password_set: mail_password !== null,
     updated_at: T0,
   });
+}
+
+/** `GET`/`PUT /api/policies/two-step` (partial merge, server ranges). */
+function handleTwoStepPolicy(
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  if (method === 'PUT') {
+    const entries = Object.entries(body);
+    if (entries.length === 0) {
+      return json(
+        { detail: 'Change at least one two-step sign-in setting.' },
+        422,
+      );
+    }
+    for (const [key, value] of entries) {
+      const range = TWO_STEP_RANGES[key];
+      if (range === undefined || !wholeIn(value, range[0], range[1])) {
+        return json({ detail: 'Out of range.' }, 422);
+      }
+    }
+    twoStepPolicy = { ...twoStepPolicy, ...(body as Record<string, number>) };
+  }
+  return json({ ...twoStepPolicy, updated_at: T0 });
 }
 
 function duplicateLogin(login: string, exceptId?: number): Response | null {
@@ -1248,7 +1312,8 @@ async function handleUsers(
     state.users.push(user);
     return json(userWire(user), 201);
   }
-  const match = /^\/api\/users\/(\d+)(\/avatar|\/password)?$/.exec(url);
+  const match =
+    /^\/api\/users\/(\d+)(\/avatar|\/password|\/two-step\/reset)?$/.exec(url);
   const user = state.users.find((u) => u.id === Number(match?.[1]));
   if (!match || !user) {
     return json({ detail: `User ${match?.[1]} does not exist.` }, 404);
@@ -1270,6 +1335,10 @@ async function handleUsers(
     if ('email' in body) {
       user.email = typeof body.email === 'string' ? body.email : null;
     }
+    return json(userWire(user));
+  }
+  if (match[2] === '/two-step/reset' && method === 'POST') {
+    user.two_step = false;
     return json(userWire(user));
   }
   if (match[2] === '/password' && method === 'PUT') {
@@ -1316,6 +1385,7 @@ beforeEach(() => {
   mailServer = { ...NO_MAIL_SERVER };
   mailServerFailure = null;
   mailSent = [];
+  twoStepPolicy = { ...DEFAULT_TWO_STEP_POLICY };
   userHold = null;
   deviceFailure = null;
   enrollmentFailure = null;
@@ -5659,16 +5729,20 @@ test('FA-S2: signed in without the permission, the settings read without an edit
   expect(
     screen.queryByRole('button', { name: 'Edit user sign-in settings…' }),
   ).toBeNull();
-  // The panels come in order, Other settings stays last; the mail server
-  // reads without an edit or test control too.
+  // The panels come in order, Other settings stays last; two-step sign-in
+  // and the mail server read without an edit or test control too.
   expect(
     screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
   ).toEqual([
     'Due Soon warning',
     'User sign-in',
+    'Two-step sign-in',
     'Outgoing mail server',
     'Other settings',
   ]);
+  expect(
+    screen.queryByRole('button', { name: 'Edit two-step sign-in settings…' }),
+  ).toBeNull();
   expect(
     screen.queryByRole('button', { name: /outgoing mail server…$/ }),
   ).toBeNull();
@@ -6874,6 +6948,7 @@ const STORED_MAIL_SERVER: MailServerRow = {
   mail_username: 'partflow',
   mail_password: 'stored-secret',
   mail_sender: 'partflow@example.com',
+  mail_timeout_seconds: 20,
 };
 
 test('FA-MS1: a settings administrator sets up the mail server; the password is never shown', async () => {
@@ -6903,6 +6978,10 @@ test('FA-MS1: a settings administrator sets up the mail server; the password is 
   fireEvent.change(within(dialog).getByLabelText('Sender address'), {
     target: { value: 'PartFlow@Example.COM' },
   });
+  expect(within(dialog).getByLabelText('Timeout (seconds)')).toHaveValue(20);
+  fireEvent.change(within(dialog).getByLabelText('Timeout (seconds)'), {
+    target: { value: '45' },
+  });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
 
   await waitFor(() =>
@@ -6920,6 +6999,7 @@ test('FA-MS1: a settings administrator sets up the mail server; the password is 
         mail_security: 'TLS',
         mail_username: 'partflow',
         mail_sender: 'PartFlow@example.com',
+        mail_timeout_seconds: 45,
         mail_password: 'app-password',
       },
     },
@@ -6930,6 +7010,7 @@ test('FA-MS1: a settings administrator sets up the mail server; the password is 
       'Connection security': 'SSL/TLS',
       'Sign-in': 'partflow, password stored',
       'Sender address': 'PartFlow@example.com',
+      Timeout: '45 seconds',
     }),
   );
   expect(document.body.textContent).not.toContain('app-password');
@@ -6969,6 +7050,7 @@ test('FA-MS2: an edit keeps, removes or replaces the stored password; Remove mai
     mail_security: 'STARTTLS',
     mail_username: 'partflow',
     mail_sender: 'partflow@example.com',
+    mail_timeout_seconds: 20,
   });
 
   // Ticked, the stored password is removed (null).
@@ -6985,7 +7067,7 @@ test('FA-MS2: an edit keeps, removes or replaces the stored password; Remove mai
     expect(mailServerRows()['Sign-in']).toBe('partflow, no password'),
   );
 
-  // Remove mail server sends nothing but the kept port and security.
+  // Remove mail server sends nothing but the kept port, security and timeout.
   dialog = await open();
   fireEvent.click(
     within(dialog).getByRole('button', { name: 'Remove mail server' }),
@@ -6997,6 +7079,7 @@ test('FA-MS2: an edit keeps, removes or replaces the stored password; Remove mai
     mail_security: 'STARTTLS',
     mail_username: null,
     mail_sender: null,
+    mail_timeout_seconds: 20,
     mail_password: null,
   });
   await waitFor(() =>
@@ -7017,6 +7100,9 @@ test('FA-MS3: invalid entries are refused in place and nothing is sent', async (
   fireEvent.change(within(dialog).getByLabelText('Port'), {
     target: { value: '70000' },
   });
+  fireEvent.change(within(dialog).getByLabelText('Timeout (seconds)'), {
+    target: { value: '4' },
+  });
   fireEvent.change(within(dialog).getByLabelText('Connection security'), {
     target: { value: 'NONE' },
   });
@@ -7033,6 +7119,7 @@ test('FA-MS3: invalid entries are refused in place and nothing is sent', async (
   expect(alerts).toEqual([
     'Enter the mail server as a host name or IP address, such as smtp.example.com, without spaces or a port.',
     'The port must be a whole number from 1 to 65535.',
+    'The mail server timeout must be a whole number of seconds from 5 to 120.',
     'Signing in to the mail server needs STARTTLS or SSL/TLS, so the password never crosses the network unencrypted.',
     'Enter an email address such as name@example.com: no spaces, a domain with a dot after the @, and at most 254 characters.',
   ]);
@@ -7153,4 +7240,204 @@ test('FA-U8: user administrators add, see and clear a user email address', async
     url: '/api/users/50',
     body: { email: null },
   });
+});
+
+test('FA-U9: user administrators see two-step sign-in and turn it off after a confirmation', async () => {
+  signInUserAdministrator();
+  seedJane({ sign_in_state: 'PASSWORD_SET', two_step: true });
+  seedJane({ id: 51, login_name: 'tlam', display_name: 'Tuan Lam' });
+  seedJane({
+    id: 52,
+    login_name: 'kng',
+    display_name: 'Kim Ng',
+    sign_in_state: 'PASSWORD_SET',
+    two_step: true,
+  });
+  await openUsers();
+  expect(signInCell('Jane Doe')).toBe('Password set · Two-step');
+  expect(signInCell('Tuan Lam')).toBe('No password');
+  expect(
+    screen.queryByRole('button', {
+      name: 'Turn off two-step sign-in for Tuan Lam',
+    }),
+  ).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('button', {
+      name: 'Turn off two-step sign-in for Jane Doe',
+    }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Turn off two-step sign-in for Jane Doe?',
+  });
+  expect(screen.queryByRole('dialog', { name: 'Edit user' })).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(writes).toEqual([]);
+
+  fireEvent.click(
+    screen.getByRole('button', {
+      name: 'Turn off two-step sign-in for Jane Doe',
+    }),
+  );
+  const confirm = screen.getByRole('dialog', {
+    name: 'Turn off two-step sign-in for Jane Doe?',
+  });
+  // Signing out everywhere is offered and on by default.
+  expect(
+    within(confirm).getByRole('checkbox', { name: 'Sign them out everywhere' }),
+  ).toBeChecked();
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Turn off two-step' }),
+  );
+  expect(
+    await screen.findByText(
+      'Two-step sign-in is off for Jane Doe, and they are signed out everywhere.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/users/50/two-step/reset',
+      body: { end_sessions: true },
+    },
+  ]);
+  await waitFor(() => expect(signInCell('Jane Doe')).toBe('Password set'));
+
+  // Unticked, the user's sign-ins continue.
+  fireEvent.click(
+    screen.getByRole('button', {
+      name: 'Turn off two-step sign-in for Kim Ng',
+    }),
+  );
+  const kim = screen.getByRole('dialog', {
+    name: 'Turn off two-step sign-in for Kim Ng?',
+  });
+  fireEvent.click(
+    within(kim).getByRole('checkbox', { name: 'Sign them out everywhere' }),
+  );
+  fireEvent.click(
+    within(kim).getByRole('button', { name: 'Turn off two-step' }),
+  );
+  expect(
+    await screen.findByText('Two-step sign-in is off for Kim Ng.'),
+  ).toBeInTheDocument();
+  expect(writes.at(-1)).toEqual({
+    method: 'POST',
+    url: '/api/users/52/two-step/reset',
+    body: { end_sessions: false },
+  });
+});
+
+/* ============ Settings → Two-step sign-in (Phase 17) ============ */
+
+function twoStepRows(): Record<string, string> {
+  const list = Array.from(
+    document.querySelectorAll('.admin-configpreview'),
+  ).find((candidate) =>
+    candidate.textContent?.includes('Wrong codes per sign-in'),
+  );
+  return list ? readOnlyRows(list) : {};
+}
+
+async function openTwoStepSettings(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  renderAdmin(status);
+  openSection('Settings');
+  await screen.findByRole('heading', { name: 'Two-step sign-in' });
+  await waitFor(() =>
+    expect(twoStepRows()['Wrong codes per sign-in']).toBeDefined(),
+  );
+}
+
+test('FA-TS1: every number of two-step sign-in reads in Settings and saves only what changed', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openTwoStepSettings();
+  expect(twoStepRows()).toEqual({
+    'Time to finish the second step': '15 minutes',
+    'Wrong codes per sign-in': '5',
+    'Wrong codes before a lock': '10',
+    'Emailed codes per sign-in': '3',
+    'Wait between emailed codes': '60 seconds',
+    'Digits of an emailed code': '8',
+    'Recovery codes per set': '10',
+    'Characters of a recovery code': '12',
+    'Time to set up an authenticator app': '15 minutes',
+    'Clock drift allowed': '±30 seconds',
+  });
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit two-step sign-in settings…' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Two-step sign-in settings',
+  });
+  fireEvent.change(within(dialog).getByLabelText('Wrong codes per sign-in'), {
+    target: { value: '3' },
+  });
+  fireEvent.change(
+    within(dialog).getByLabelText('Clock drift allowed (30-second steps)'),
+    { target: { value: '0' } },
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Two-step sign-in settings' }),
+    ).toBeNull(),
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/two-step',
+      body: { two_step_max_codes: 3, two_step_clock_drift_steps: 0 },
+    },
+  ]);
+  await waitFor(() =>
+    expect(twoStepRows()['Wrong codes per sign-in']).toBe('3'),
+  );
+  expect(twoStepRows()['Clock drift allowed']).toBe('None');
+});
+
+test('FA-TS2: invalid numbers are refused in place; without the permission or offline nothing is edited', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openTwoStepSettings();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit two-step sign-in settings…' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Two-step sign-in settings',
+  });
+  fireEvent.change(within(dialog).getByLabelText('Digits of an emailed code'), {
+    target: { value: '5' },
+  });
+  fireEvent.change(
+    within(dialog).getByLabelText('Wait between emailed codes (seconds)'),
+    { target: { value: '1.5' } },
+  );
+  expect(
+    within(dialog)
+      .getAllByRole('alert')
+      .map((alert) => alert.textContent),
+  ).toEqual([
+    'The wait between two emailed codes must be a whole number of seconds from 0 to 3600.',
+    'The digits of an emailed code must be a whole number from 6 to 10.',
+  ]);
+  expect(
+    within(dialog).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  expect(writes).toEqual([]);
+  cleanup();
+
+  session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
+  await openTwoStepSettings();
+  expect(
+    screen.queryByRole('button', { name: 'Edit two-step sign-in settings…' }),
+  ).toBeNull();
+  cleanup();
+
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openTwoStepSettings('unavailable');
+  expect(
+    screen.getByRole('button', { name: 'Edit two-step sign-in settings…' }),
+  ).toBeDisabled();
 });

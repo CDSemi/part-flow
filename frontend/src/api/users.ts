@@ -47,6 +47,9 @@ export interface User {
   /** The email address PartFlow sends a one-time sign-in code to; null =
    * none. Present only for callers who may manage users and roles. */
   email?: string | null;
+  /** Two-step sign-in is on. Present only for callers who may manage
+   * users and roles. */
+  twoStep?: boolean;
 }
 
 interface UserWire {
@@ -61,6 +64,7 @@ interface UserWire {
   updated_at: string;
   sign_in_state?: string;
   email?: string | null;
+  two_step?: boolean;
 }
 
 function toSignInState(value: string): SignInState {
@@ -84,6 +88,7 @@ function toUser(wire: UserWire): User {
       ? { signInState: toSignInState(wire.sign_in_state) }
       : {}),
     ...(wire.email !== undefined ? { email: wire.email } : {}),
+    ...(wire.two_step !== undefined ? { twoStep: wire.two_step } : {}),
   };
 }
 
@@ -166,6 +171,22 @@ export async function setUserPassword(
   const wire = await apiRequest<UserWire>(`/api/users/${id}/password`, {
     method: 'PUT',
     body: { new_password: newPassword },
+  });
+  return toUser(wire);
+}
+
+/**
+ * Turn off another User's two-step sign-in (user administrators only): the
+ * authenticator app and the recovery codes are deleted. With `endSessions`
+ * every sign-in of the User ends too; otherwise they continue.
+ */
+export async function resetUserTwoStep(
+  id: number,
+  endSessions: boolean,
+): Promise<User> {
+  const wire = await apiRequest<UserWire>(`/api/users/${id}/two-step/reset`, {
+    method: 'POST',
+    body: { end_sessions: endSessions },
   });
   return toUser(wire);
 }

@@ -765,7 +765,7 @@ def test_administrator_sets_a_temporary_password(client: TestClient, db_engine: 
         id=target.user_id,
     )
     body = _ok(_set_password(client, admin_token, target.user_id, _NEW_PASSWORD))
-    assert set(body) == _USER_KEYS | {"sign_in_state", "email"}
+    assert set(body) == _USER_KEYS | {"sign_in_state", "email", "two_step"}
     assert body["sign_in_state"] == "TEMPORARY_PASSWORD"
     reasons = {row["end_reason"] for row in _sessions(db_engine, target.user_id)}
     assert reasons == {"PASSWORD_RESET"}
@@ -854,7 +854,7 @@ def test_sign_in_state_is_shown_only_to_user_administrators(
     assert listed and all(set(item) == _USER_KEYS for item in listed)
     assert all(item["avatar_updated_at"] is None for item in listed)
     listed = _listed(client.get("/api/users", headers=_cookie_header(admin_token)))
-    assert all(set(item) == _USER_KEYS | {"sign_in_state", "email"} for item in listed)
+    assert all(set(item) == _USER_KEYS | {"sign_in_state", "email", "two_step"} for item in listed)
     states = {item["id"]: item["sign_in_state"] for item in listed}
     assert states[no_password.user_id] == "NO_PASSWORD"
     assert states[temporary.user_id] == "TEMPORARY_PASSWORD"

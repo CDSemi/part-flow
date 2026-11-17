@@ -279,3 +279,14 @@ class MailNotSentError(ConflictError):
     Nothing was written; the cause is the server's configuration or
     availability, never the request's shape.
     """
+
+
+class SecondStepFailedError(ApplicationError):
+    """A wrong code at the second step of a sign-in (401, Phase 17): the second
+    step stays open and the attempt was counted."""
+
+
+class SecondStepExpiredError(ApplicationError):
+    """The second step of a sign-in is over or was never open (401, Phase 17):
+    expired, too many wrong codes, replaced or two-step sign-in turned off —
+    the password has to be entered again."""

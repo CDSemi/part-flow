@@ -6,8 +6,9 @@ what the email address of a User and the outgoing mail server of
 Administration → Settings add (owner decision of 2026-11-13;
 IMPLEMENTATION_ROADMAP Phase 17 item 8):
 
-- exact head boundary: ``0036_phase17_outgoing_mail`` is the single head,
-  and the models match the schema migrated to it;
+- the cases run against this revision inside the current chain; the head
+  boundary and the models parity moved to
+  ``tests/test_phase17_two_step_schema.py`` with ``0037_phase17_two_step``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install stores no address, no mail server (port 587, STARTTLS)
   and no mail server password, and the CHECKs refuse every value outside
@@ -17,7 +18,8 @@ IMPLEMENTATION_ROADMAP Phase 17 item 8):
 - the downgrade drops the columns and the password table while nothing was
   written, and refuses once an address, a mail server, a password, a port
   or security other than the defaults, or an audit row of the
-  ``mail-server`` section exists, the revision staying at 0036.
+  ``mail-server`` section exists, the database staying at the head the
+  downgrade started from (one transaction).
 """
 
 import datetime
@@ -31,7 +33,6 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -39,7 +40,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from alembic import command
 from app.application import policies
 from app.domain.enums import MailSecurity, ThemePreference
-from app.infrastructure import models
+from app.infrastructure import models, schema_revision
 
 # Schema assertions: owner connections in the application-role test mode
 # (Phase 16 slice 4).
@@ -47,7 +48,9 @@ pytestmark = pytest.mark.database_owner
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0035_phase16_backup_policy"
-_HEAD_REVISION = "0036_phase17_outgoing_mail"
+_REVISION = "0036_phase17_outgoing_mail"
+# The newest revision of the code; this revision's cases run inside its chain.
+_CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _BACKEND_DIR / "alembic" / "versions" / "20261116_0036_phase17_outgoing_mail.py"
 _HEAD_TEMPLATE_DATABASE = "partflow_test_phase17_mail_template"
 _DEFAULTS = {
@@ -106,13 +109,15 @@ def _policy_row(connection: Connection) -> dict[str, Any]:
 
 
 def _mail_columns(connection: Connection) -> list[str]:
-    """The columns 0036 adds, the password table's included."""
+    """The columns 0036 adds, the password table's included (not the
+    ``mail_timeout_seconds`` of 0037)."""
     return [
         str(name)
         for name in connection.execute(
             sa.text(
                 "SELECT table_name || '.' || column_name FROM information_schema.columns"
-                " WHERE (table_name = 'application_policy' AND column_name LIKE 'mail\\_%')"
+                " WHERE (table_name = 'application_policy' AND column_name LIKE 'mail\\_%'"
+                " AND column_name <> 'mail_timeout_seconds')"
                 " OR (table_name = 'users' AND column_name = 'email')"
                 " OR table_name = 'mail_server_credentials'"
                 " ORDER BY 1"
@@ -168,24 +173,9 @@ def head_engine(head_database: URL) -> Iterator[Engine]:
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-
-
-def test_models_metadata_matches_the_migrated_schema(head_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 def test_the_migration_literals_match_the_model() -> None:
     migration = _load_migration()
-    assert migration.revision == _HEAD_REVISION
+    assert migration.revision == _REVISION
     assert migration.down_revision == _PREVIOUS_REVISION
     assert migration._SECTION == policies.MAIL_SERVER_SECTION
     assert migration._USER_EMAIL_CHECK == ("ck_users_email_canonical", models.USER_EMAIL_SQL)
@@ -429,7 +419,7 @@ def test_the_upgrade_keeps_users_and_every_other_section(admin_engine: Engine) -
             before = _policy_row(connection)
         command.upgrade(_alembic_config(_url(name)), "head")
         with engine.connect() as connection:
-            assert _version(connection) == _HEAD_REVISION
+            assert _version(connection) == _CODE_HEAD
             after = _policy_row(connection)
             user = connection.execute(
                 sa.text("SELECT login_name, email FROM users WHERE login_name = 'ann'")
@@ -478,6 +468,6 @@ def test_the_downgrade_refuses_once_written(
     with pytest.raises(DBAPIError, match="mail server configuration exist"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         # The policy columns, users.email and the password table's id, password, updated_at.
         assert len(_mail_columns(connection)) == len(_DEFAULTS) + 1 + 3

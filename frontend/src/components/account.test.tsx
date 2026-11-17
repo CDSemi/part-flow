@@ -17,9 +17,9 @@ import { SessionProvider } from '../app/session-provider';
 import { AccountChip } from './AccountChip';
 
 // The user account chip and its dialogs (Sign in, Change password —
-// voluntary and forced — and Set up PartFlow) through the real session
-// provider, against an in-memory fake of the /api/session and /api/setup
-// wire contract.
+// voluntary and forced — Set up PartFlow, Two-step sign-in and Email
+// address) through the real session provider, against an in-memory fake
+// of the /api/session and /api/setup wire contract.
 
 const A5 =
   'Sign-in failed. Check your login name and password. If it keeps failing, ask an administrator — the account may be locked or inactive.';
@@ -74,6 +74,16 @@ interface Fake {
   /** login name → [password, temporary] */
   accounts: Record<string, [string, boolean]>;
   eligibleRoles: { id: number; name: string }[];
+  /** Phase 17: logins with two-step sign-in on. */
+  twoStep: Set<string>;
+  recoveryCodes: string[];
+  emailHint: string | null;
+  /** The signed-in user's own address (Phase 17). */
+  email: string | null;
+  /** The login whose second step is open, if any. */
+  pendingStep: string | null;
+  wrongCodes: number;
+  emailCodeSent: boolean;
 }
 
 let fake: Fake;
@@ -86,6 +96,113 @@ let holds: Partial<Record<string, Promise<void>>>;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
+}
+
+const APP_CODE = '123456';
+const EMAIL_CODE = '87654321';
+const NEW_CODES = Array.from(
+  { length: 10 },
+  (_, index) => `abcd-efgh-jk${String(index).padStart(2, '2')}`,
+);
+const WRONG_CODE = 'That code is not correct. Check the code and try again.';
+const STEP_ENDED = 'Too many wrong codes. Sign in again with your password.';
+const WRONG_CURRENT = 'The current password is not correct.';
+
+function twoStepStatus(): unknown {
+  const login = fake.user?.login_name ?? '';
+  return {
+    enabled: fake.twoStep.has(login),
+    recovery_codes_left: fake.twoStep.has(login)
+      ? fake.recoveryCodes.length
+      : 0,
+    email: fake.email,
+    email_ready: fake.email !== null,
+  };
+}
+
+function handleTwoStep(
+  url: string,
+  method: string,
+  body: Record<string, unknown> | undefined,
+): Response | null {
+  if (url === '/api/session/second-step' && method === 'POST') {
+    const login = fake.pendingStep;
+    if (login === null) {
+      return json({ detail: STEP_ENDED, second_step_expired: true }, 401);
+    }
+    const code = String(body?.code);
+    const ok =
+      (body?.method === 'TOTP' && code === APP_CODE) ||
+      (body?.method === 'RECOVERY_CODE' && fake.recoveryCodes.includes(code)) ||
+      (body?.method === 'EMAIL_CODE' &&
+        fake.emailCodeSent &&
+        code === EMAIL_CODE);
+    if (!ok) {
+      fake.wrongCodes += 1;
+      if (fake.wrongCodes >= 2) {
+        fake.pendingStep = null;
+        return json({ detail: STEP_ENDED, second_step_expired: true }, 401);
+      }
+      return json({ detail: WRONG_CODE, second_step_failed: true }, 401);
+    }
+    if (body?.method === 'RECOVERY_CODE') {
+      fake.recoveryCodes = fake.recoveryCodes.filter((c) => c !== code);
+    }
+    fake.pendingStep = null;
+    fake.user = { ...JANE, login_name: login };
+    return json(sessionState());
+  }
+  if (url === '/api/session/second-step/email-code' && method === 'POST') {
+    fake.emailCodeSent = true;
+    return json({
+      sent_to: fake.emailHint,
+      resend_after_seconds: 60,
+      sends_left: 2,
+    });
+  }
+  if (!url.startsWith('/api/session/two-step')) return null;
+  const login = fake.user?.login_name ?? '';
+  if (url === '/api/session/two-step' && method === 'GET') {
+    return json(twoStepStatus());
+  }
+  if (
+    body !== undefined &&
+    'current_password' in body &&
+    body.current_password !== fake.accounts[login]?.[0]
+  ) {
+    return json({ detail: WRONG_CURRENT }, 422);
+  }
+  if (url === '/api/session/two-step/totp' && method === 'POST') {
+    return json({
+      secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+      uri: 'otpauth://totp/PartFlow:jdoe?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+      qr: ['1101', '0110', '1011', '0101'],
+    });
+  }
+  if (url === '/api/session/two-step/totp/confirm' && method === 'POST') {
+    if (body?.code !== APP_CODE) {
+      return json(
+        {
+          detail:
+            'That code does not match. Type the 6-digit code your authenticator app shows now.',
+        },
+        422,
+      );
+    }
+    fake.twoStep.add(login);
+    fake.recoveryCodes = [...NEW_CODES];
+    return json({ recovery_codes: NEW_CODES });
+  }
+  if (url === '/api/session/two-step/totp/remove' && method === 'POST') {
+    fake.twoStep.delete(login);
+    fake.recoveryCodes = [];
+    return json(twoStepStatus());
+  }
+  if (url === '/api/session/two-step/recovery-codes' && method === 'POST') {
+    fake.recoveryCodes = NEW_CODES.map((code) => code.toUpperCase());
+    return json({ recovery_codes: fake.recoveryCodes });
+  }
+  return null;
 }
 
 function sessionState(): unknown {
@@ -115,6 +232,22 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     if (!account || account[0] !== body?.password) {
       return json({ detail: A5, sign_in_failed: true }, 401);
     }
+    if (fake.twoStep.has(login)) {
+      fake.pendingStep = login;
+      fake.wrongCodes = 0;
+      return json(
+        {
+          methods: [
+            'TOTP',
+            ...(fake.recoveryCodes.length ? ['RECOVERY_CODE'] : []),
+            ...(fake.emailHint !== null ? ['EMAIL_CODE'] : []),
+          ],
+          email_hint: fake.emailHint,
+          expires_at: '2026-11-16T10:15:00Z',
+        },
+        202,
+      );
+    }
     fake.user = { ...JANE, must_change_password: account[1] };
     return json(sessionState());
   }
@@ -134,6 +267,18 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     fake.user = { ...fake.user, must_change_password: false };
     return json(sessionState());
   }
+  if (url === '/api/session/email' && method === 'PUT') {
+    if (!fake.user) {
+      return json({ detail: A1, authentication_required: true }, 401);
+    }
+    if (body?.current_password !== fake.accounts[fake.user.login_name][0]) {
+      return json({ detail: P3 }, 422);
+    }
+    fake.email = body.email === null ? null : String(body.email);
+    return json({ email: fake.email });
+  }
+  const twoStep = handleTwoStep(url, method, body);
+  if (twoStep) return twoStep;
   if (url === '/api/setup' && method === 'GET') {
     return json({
       open: fake.setupOpen,
@@ -169,6 +314,13 @@ beforeEach(() => {
     setupOpen: false,
     accounts: { jdoe: [PASSWORD, false] },
     eligibleRoles: [{ id: 1, name: 'Administrator' }],
+    twoStep: new Set<string>(),
+    recoveryCodes: [],
+    emailHint: null,
+    email: null,
+    pendingStep: null,
+    wrongCodes: 0,
+    emailCodeSent: false,
   };
   requests = [];
   failures = {};
@@ -279,7 +431,12 @@ test('signed in, the chip opens a menu with the role, Change password… and Sig
     within(menu)
       .getAllByRole('menuitem')
       .map((item) => item.textContent),
-  ).toEqual(['Change password…', 'Sign out']);
+  ).toEqual([
+    'Change password…',
+    'Two-step sign-in…',
+    'Email address…',
+    'Sign out',
+  ]);
   expect(
     within(menu).getByRole('menuitem', { name: 'Change password…' }),
   ).toHaveFocus();
@@ -1016,4 +1173,351 @@ test('Set up PartFlow closes unchanged at once; entered input asks Discard setup
   fireEvent.click(within(ask).getByRole('button', { name: 'Discard input' }));
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(sent('POST', '/api/setup/administrator')).toHaveLength(0);
+});
+
+/* ============ Two-step sign-in (Phase 17) ============ */
+
+async function passwordStep() {
+  await renderShell();
+  const dialog = openSignIn();
+  fillSignIn(dialog, 'jdoe', PASSWORD);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  await within(dialog).findByLabelText('Code from your authenticator app');
+  return dialog;
+}
+
+function typeCode(dialog: HTMLElement, label: string, code: string) {
+  fireEvent.change(within(dialog).getByLabelText(label), {
+    target: { value: code },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+}
+
+test('two-step: after the password, the app code signs in; a wrong code stays in the second step', async () => {
+  fake.twoStep.add('jdoe');
+  fake.recoveryCodes = [...NEW_CODES];
+  const dialog = await passwordStep();
+  const field = within(dialog).getByLabelText(
+    'Code from your authenticator app',
+  );
+  expect(field).toHaveFocus();
+  expect(field).toHaveAttribute('autocomplete', 'one-time-code');
+  expect(within(dialog).queryByLabelText('Password')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: /^Email me/ }),
+  ).toBeNull();
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Enter the 6-digit code your authenticator app shows.',
+  );
+  expect(sent('POST', '/api/session/second-step')).toHaveLength(0);
+
+  typeCode(dialog, 'Code from your authenticator app', '000000');
+  expect(await within(dialog).findByText(WRONG_CODE)).toBeInTheDocument();
+  expect(
+    within(dialog).getByLabelText('Code from your authenticator app'),
+  ).toHaveValue('');
+
+  typeCode(dialog, 'Code from your authenticator app', APP_CODE);
+  expect(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: 'Sign in' })).toBeNull();
+  expect(sent('POST', '/api/session/second-step').at(-1)?.body).toEqual({
+    method: 'TOTP',
+    code: APP_CODE,
+  });
+});
+
+test('two-step: a recovery code signs in instead', async () => {
+  fake.twoStep.add('jdoe');
+  fake.recoveryCodes = [...NEW_CODES];
+  const dialog = await passwordStep();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Use a recovery code' }),
+  );
+  typeCode(dialog, 'Recovery code', NEW_CODES[3]);
+  expect(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  ).toBeInTheDocument();
+  expect(sent('POST', '/api/session/second-step').at(-1)?.body).toEqual({
+    method: 'RECOVERY_CODE',
+    code: NEW_CODES[3],
+  });
+});
+
+test('two-step: Email me a code names the masked address and its code signs in', async () => {
+  fake.twoStep.add('jdoe');
+  fake.emailHint = 'j•••@example.com';
+  const dialog = await passwordStep();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Use a recovery code' }),
+  ).toBeNull();
+  fireEvent.click(
+    within(dialog).getByRole('button', {
+      name: 'Email me a code at j•••@example.com',
+    }),
+  );
+  expect(
+    await within(dialog).findByText(
+      'PartFlow sent a code to j•••@example.com.',
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByLabelText('Code from the email')).toHaveFocus();
+  expect(
+    within(dialog).getByRole('button', { name: 'Email me another code' }),
+  ).toBeInTheDocument();
+  typeCode(dialog, 'Code from the email', EMAIL_CODE);
+  expect(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  ).toBeInTheDocument();
+  expect(sent('POST', '/api/session/second-step/email-code')).toHaveLength(1);
+});
+
+test('two-step: an ended second step returns to the password with the reason', async () => {
+  fake.twoStep.add('jdoe');
+  const dialog = await passwordStep();
+  typeCode(dialog, 'Code from your authenticator app', '000000');
+  await within(dialog).findByText(WRONG_CODE);
+  typeCode(dialog, 'Code from your authenticator app', '000001');
+  expect(await within(dialog).findByText(STEP_ENDED)).toBeInTheDocument();
+  expect(within(dialog).getByLabelText('Login name')).toHaveValue('jdoe');
+  expect(within(dialog).getByLabelText('Password')).toHaveValue('');
+  expect(
+    within(dialog).queryByLabelText('Code from your authenticator app'),
+  ).toBeNull();
+});
+
+async function openTwoStep() {
+  fireEvent.click(await signInAsJane());
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Two-step sign-in…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Two-step sign-in' });
+  await waitFor(() =>
+    expect(within(dialog).queryByText('Loading…')).toBeNull(),
+  );
+  return dialog;
+}
+
+function enterPassword(
+  dialog: HTMLElement,
+  button: string,
+  password = PASSWORD,
+) {
+  fireEvent.change(within(dialog).getByLabelText('Password'), {
+    target: { value: password },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: button }));
+}
+
+test('Two-step sign-in…: setting up asks for the password, shows the code and key, and turns on with the first code', async () => {
+  const dialog = await openTwoStep();
+  expect(dialog).toHaveTextContent('Two-step sign-in is off.');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Set up…' }));
+  enterPassword(dialog, 'Continue', 'not my password');
+  expect(await within(dialog).findByText(WRONG_CURRENT)).toBeInTheDocument();
+  enterPassword(dialog, 'Continue');
+
+  expect(
+    await within(dialog).findByRole('img', {
+      name: 'QR code for your authenticator app',
+    }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText('JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP'),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('link', {
+      name: 'Open in an authenticator app on this device',
+    }),
+  ).toHaveAttribute(
+    'href',
+    'otpauth://totp/PartFlow:jdoe?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+  );
+  fireEvent.change(
+    within(dialog).getByLabelText('Code from your authenticator app'),
+    { target: { value: APP_CODE } },
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Turn on' }));
+
+  const list = await within(dialog).findByRole('list', {
+    name: 'Recovery codes',
+  });
+  expect(within(list).getAllByRole('listitem')).toHaveLength(10);
+  expect(dialog).toHaveTextContent('Two-step sign-in is on.');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'I saved them' }));
+  expect(
+    await within(dialog).findByText(
+      'You have 10 recovery codes left. Each works once if you lose the app.',
+    ),
+  ).toBeInTheDocument();
+  expect(sent('POST', '/api/session/two-step/totp')[1].body).toEqual({
+    current_password: PASSWORD,
+  });
+});
+
+test('Two-step sign-in…: on, new recovery codes and turning off each ask for the password', async () => {
+  fake.twoStep.add('jdoe');
+  fake.recoveryCodes = [...NEW_CODES];
+  const dialog = await openTwoStep();
+  expect(dialog).toHaveTextContent(
+    'Your account has no email address, so PartFlow cannot email you a sign-in code.',
+  );
+
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'New recovery codes…' }),
+  );
+  expect(dialog).toHaveTextContent(
+    'Your current recovery codes stop working when the new ones are made.',
+  );
+  enterPassword(dialog, 'Create new codes');
+  expect(await within(dialog).findByText('ABCD-EFGH-JK22')).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'I saved them' }));
+
+  fireEvent.click(
+    await within(dialog).findByRole('button', { name: 'Turn off…' }),
+  );
+  enterPassword(dialog, 'Turn off');
+  expect(
+    await within(dialog).findByText(/^Two-step sign-in is off\./),
+  ).toBeInTheDocument();
+  expect(sent('POST', '/api/session/two-step/totp/remove')[0].body).toEqual({
+    current_password: PASSWORD,
+  });
+});
+
+test('Two-step sign-in…: offline, nothing can be changed', async () => {
+  fake.user = JANE;
+  await renderShell('unavailable');
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  );
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Two-step sign-in…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Two-step sign-in' });
+  expect(
+    await within(dialog).findByRole('button', { name: 'Set up…' }),
+  ).toBeDisabled();
+});
+
+/* ============ Email address… (Phase 17) ============ */
+
+const EMAIL_ERROR =
+  'Enter an email address such as name@example.com: no spaces, a domain with a dot after the @, and at most 254 characters.';
+
+async function openEmail() {
+  fireEvent.click(await signInAsJane());
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Email address…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Email address' });
+  await waitFor(() =>
+    expect(within(dialog).queryByText('Loading…')).toBeNull(),
+  );
+  return dialog;
+}
+
+test('Email address…: the password again saves the canonical address', async () => {
+  const dialog = await openEmail();
+  const field = within(dialog).getByLabelText('Email address');
+  expect(field).toHaveValue('');
+  expect(field).toHaveFocus();
+
+  // Checked here first: a malformed address never costs a password try.
+  fireEvent.change(field, { target: { value: 'jane@' } });
+  fireEvent.change(within(dialog).getByLabelText('Password'), {
+    target: { value: PASSWORD },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Save email address' }),
+  );
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(EMAIL_ERROR);
+  expect(sent('PUT', '/api/session/email')).toHaveLength(0);
+
+  fireEvent.change(field, { target: { value: ' Jane@Example.COM ' } });
+  fireEvent.change(within(dialog).getByLabelText('Password'), {
+    target: { value: 'not my password' },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Save email address' }),
+  );
+  expect(await within(dialog).findByText(WRONG_CURRENT)).toBeInTheDocument();
+  // A refusal asks for the password again and keeps the address (an
+  // email field drops the spaces around it as it is typed).
+  expect(within(dialog).getByLabelText('Password')).toHaveValue('');
+  expect(field).toHaveValue('Jane@Example.COM');
+
+  fireEvent.change(within(dialog).getByLabelText('Password'), {
+    target: { value: PASSWORD },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Save email address' }),
+  );
+  expect(
+    await within(dialog).findByText(
+      'Saved: your email address is now Jane@example.com.',
+    ),
+  ).toBeInTheDocument();
+  expect(sent('PUT', '/api/session/email').at(-1)?.body).toEqual({
+    current_password: PASSWORD,
+    email: 'Jane@example.com',
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+  expect(screen.queryByRole('dialog', { name: 'Email address' })).toBeNull();
+});
+
+test('Email address…: an empty field removes the address; the old one hears of it', async () => {
+  fake.email = 'jane@example.com';
+  const dialog = await openEmail();
+  const field = within(dialog).getByLabelText('Email address');
+  expect(field).toHaveValue('jane@example.com');
+  // The same address is no change.
+  fireEvent.change(within(dialog).getByLabelText('Password'), {
+    target: { value: PASSWORD },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Save email address' }),
+  );
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'This is already your email address.',
+  );
+  expect(sent('PUT', '/api/session/email')).toHaveLength(0);
+
+  fireEvent.change(field, { target: { value: '  ' } });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Save email address' }),
+  );
+  expect(
+    await within(dialog).findByText(
+      'Saved: your account has no email address now.',
+    ),
+  ).toBeInTheDocument();
+  expect(dialog).toHaveTextContent(
+    'When an outgoing mail server is set up, PartFlow tells jane@example.com about the change.',
+  );
+  expect(sent('PUT', '/api/session/email').at(-1)?.body).toEqual({
+    current_password: PASSWORD,
+    email: null,
+  });
+});
+
+test('Email address…: typed input asks before closing; offline nothing is saved', async () => {
+  const dialog = await openEmail();
+  fireEvent.change(within(dialog).getByLabelText('Email address'), {
+    target: { value: 'jane@example.com' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Discard email address change?' }),
+  ).toBeInTheDocument();
+  cleanup();
+  requests = [];
+
+  fake.user = JANE;
+  await renderShell('unavailable');
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  );
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Email address…' }));
+  const offline = screen.getByRole('dialog', { name: 'Email address' });
+  expect(
+    await within(offline).findByRole('button', { name: 'Save email address' }),
+  ).toBeDisabled();
 });

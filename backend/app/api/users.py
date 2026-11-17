@@ -44,15 +44,21 @@ Deliberate surface decisions:
   sets another User's temporary password, ends the User's sign-ins and
   clears a lock; one's own password is changed through
   ``/api/session/password``.
+- ``POST /users/{id}/two-step/reset`` (Phase 17, ``MANAGE_USERS_AND_ROLES``,
+  the protected-user guard as for a password set) turns another User's
+  two-step sign-in off — their authenticator app and recovery codes are
+  deleted — and, with ``{"end_sessions": true}``, ends every sign-in of the
+  User (the key is required); one's own is turned off through
+  ``/api/session/two-step``.
 - Every route answering with Users adds ``sign_in_state`` (no password,
-  temporary password, password set, locked) and ``email`` (Phase 17; null
-  = none) only for a signed-in caller holding ``MANAGE_USERS_AND_ROLES`` —
-  the keys are absent for everyone else, whose responses keep the slice 12
-  shape exactly. A create or update may send ``email``; on update ``null``
-  or a blank value clears it. A declared
-  response model would drop a subclass-only field, so these routes
-  render their answer explicitly (``_render``); the OpenAPI schema
-  documents both shapes.
+  temporary password, password set, locked), ``email`` (Phase 17; null =
+  none) and ``two_step`` (Phase 17: two-step sign-in is on) only for a
+  signed-in caller holding ``MANAGE_USERS_AND_ROLES`` — the keys are absent
+  for everyone else, whose responses keep the slice 12 shape exactly. A
+  create or update may send ``email``; on update ``null`` or a blank value
+  clears it. A declared response model would drop a subclass-only field,
+  so these routes render their answer explicitly (``_render``); the
+  OpenAPI schema documents both shapes.
 """
 
 import datetime
@@ -61,14 +67,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, StrictInt
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 from sqlalchemy.orm import Session
 
 from app.api.authorization import RequirePermission, SignedInDep, holds
 from app.api.dependencies import SessionDep
 from app.api.session import Secret
 from app.api.uploads import UploadedImage, read_image_body, stored_image_response
-from app.application import authentication, user_access, users
+from app.application import authentication, two_step, two_step_factors, user_access, users
 from app.application.authentication import Principal
 from app.domain.enums import Permission, SignInState
 
@@ -97,6 +103,8 @@ class UserAdministrationResponse(UserResponse):
     sign_in_state: SignInState
     # The canonical email address (Phase 17); null = none.
     email: str | None
+    # Two-step sign-in is on (Phase 17).
+    two_step: bool
 
 
 class UserCreateRequest(BaseModel):
@@ -130,6 +138,13 @@ class UserPasswordSetRequest(BaseModel):
     new_password: Secret
 
 
+class TwoStepResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # End every sign-in of the User too.
+    end_sessions: StrictBool
+
+
 def user_response(view: users.UserView) -> UserResponse:
     return UserResponse(
         id=view.id,
@@ -145,10 +160,13 @@ def user_response(view: users.UserView) -> UserResponse:
 
 
 def _administration_response(
-    view: users.UserView, state: SignInState
+    view: users.UserView, state: SignInState, two_step_on: bool
 ) -> UserAdministrationResponse:
     return UserAdministrationResponse(
-        **user_response(view).model_dump(), sign_in_state=state, email=view.email
+        **user_response(view).model_dump(),
+        sign_in_state=state,
+        email=view.email,
+        two_step=two_step_on,
     )
 
 
@@ -158,8 +176,10 @@ def _answers(
     """S12's shape, plus ``sign_in_state`` for a caller who may manage users."""
     if not holds(principal, Permission.MANAGE_USERS_AND_ROLES):
         return [user_response(view) for view in views]
-    states = user_access.sign_in_states(session, [view.id for view in views])
-    return [_administration_response(view, states[view.id]) for view in views]
+    ids = [view.id for view in views]
+    states = user_access.sign_in_states(session, ids)
+    enabled = two_step_factors.enabled_users(session, ids)
+    return [_administration_response(view, states[view.id], view.id in enabled) for view in views]
 
 
 # Documents the per-caller shape; the routes return a rendered response,
@@ -234,7 +254,21 @@ def set_user_password(
     view = authentication.set_user_password(
         session, user_id, new_password=body.new_password.get_secret_value(), actor=principal
     )
-    return _administration_response(view, user_access.sign_in_states(session, [view.id])[view.id])
+    return _administration_response(
+        view,
+        user_access.sign_in_states(session, [view.id])[view.id],
+        bool(two_step_factors.enabled_users(session, [view.id])),
+    )
+
+
+@router.post("/users/{user_id}/two-step/reset", response_model=_EitherUser)
+def reset_two_step(
+    principal: UserManagerDep, user_id: int, body: TwoStepResetRequest, session: SessionDep
+) -> JSONResponse:
+    view = two_step.reset_for_user(
+        session, user_id, end_sessions=body.end_sessions, actor=principal
+    )
+    return _render(_answers(session, principal, [view])[0])
 
 
 @router.get("/users/{user_id}/avatar")

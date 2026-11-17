@@ -67,7 +67,7 @@ _DATABASE = "partflow_test_database_roles"
 _FRESH_DATABASE = "partflow_test_database_roles_fresh"
 _OWNED_DATABASE = "partflow_test_database_roles_owned"
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0035_phase16_backup_policy"
+_PREVIOUS = "0036_phase17_outgoing_mail"
 _NOT_SUPERUSER = (
     "The database-role tests need a superuser test database role (the Compose and CI"
     " partflow_user is one)."
@@ -349,6 +349,9 @@ def test_every_model_table_is_classified() -> None:
             "user_sessions",
             "scan_station_devices",
             "mail_server_credentials",
+            "user_totp_factors",
+            "user_recovery_codes",
+            "user_sign_in_challenges",
         }
         & MAINTENANCE_SELECT
     )
@@ -367,7 +370,7 @@ def test_the_migrated_relations_are_the_classified_ones(context: Context) -> Non
             ).scalars()
         )
     assert relations == set(TABLE_CLASSES)
-    assert len(relations) == 30
+    assert len(relations) == 33
 
 
 def _triggers(engine: Engine) -> dict[str, tuple[str, str, str, str]]:
@@ -622,13 +625,13 @@ def test_apply_grants_on_a_fresh_database_twice(
                     "application": context.roles.app,
                     "maintenance": context.roles.maintenance,
                 },
-                "tables": 30,
-                "sequences": 23,
+                "tables": 33,
+                "sequences": 25,
                 "default_privileges_removed": 0,
                 "foreign_grantees": [],
             }
             assert result.stderr.startswith(
-                f"apply-grants: granted 30 tables to {context.roles.app} and"
+                f"apply-grants: granted 33 tables to {context.roles.app} and"
                 f" {context.roles.maintenance} at revision {_HEAD} ("
             )
             # AG-11: no URL, password or path.
@@ -1388,8 +1391,8 @@ def test_check_h_passes_through_the_cli(
     assert check["title"] == "Append-only guards and database-role privileges intact"
     assert check["examined"] == {
         "roles": 2,
-        "tables": 30,
-        "sequences": 23,
+        "tables": 33,
+        "sequences": 25,
         "triggers": 11,
         "guard_functions": 10,
     }

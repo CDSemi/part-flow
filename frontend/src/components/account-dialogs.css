@@ -45,3 +45,73 @@
 .acct-form .row {
   margin-top: 8px;
 }
+
+/* The second step's alternatives (a recovery code, an emailed code):
+   quiet text buttons under the code field. */
+.acct-form .acct-alts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: -2px 0 0;
+}
+
+.acct-form .acct-alt {
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  color: var(--info);
+  font-size: 12.5px;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.acct-form .acct-alt:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+/* Two-step sign-in setup: the QR code beside the key. The code stays
+   dark on light in both themes, so scanners can read it. */
+.acct-form .acct-qrbox {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 18px;
+}
+
+.acct-form .acct-qr {
+  width: 176px;
+  height: 176px;
+  flex: none;
+  border-radius: 6px;
+}
+
+.acct-form .acct-key {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 200px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.acct-form .acct-keylabel {
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+}
+
+/* The recovery codes, shown once: two columns of monospaced codes. */
+.acct-form .acct-codes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px 18px;
+  margin: 0;
+  padding: 10px 12px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}

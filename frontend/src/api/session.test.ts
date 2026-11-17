@@ -2,8 +2,10 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ApiError, setAuthFailureListener } from './client';
 import {
+  changeOwnEmail,
   changeOwnPassword,
   getSession,
+  getTwoStepStatus,
   isPasswordCheckBusy,
   saveOwnThemePreference,
   signIn,
@@ -83,8 +85,10 @@ test('getSession maps the signed-in user and the setup state', async () => {
 
 test('signIn, changeOwnPassword and signOut send the exact requests', async () => {
   fetchMock.mockResolvedValue(json({ user: WIRE_USER, setup_open: false }));
-  const state = await signIn('JDoe', 'correct horse battery');
-  expect(state.user?.loginName).toBe('jdoe');
+  const result = await signIn('JDoe', 'correct horse battery');
+  expect(result.kind === 'signed-in' && result.state.user?.loginName).toBe(
+    'jdoe',
+  );
   expect(sent()).toEqual({
     path: '/api/session',
     method: 'POST',
@@ -232,4 +236,51 @@ test('saveOwnThemePreference sends the exact request without a sign-in prompt an
   } finally {
     setAuthFailureListener(null);
   }
+});
+
+test('changeOwnEmail sends the password and the address (null removes it) and maps the answer', async () => {
+  fetchMock.mockResolvedValueOnce(json({ email: 'Jane@example.com' }));
+  await expect(changeOwnEmail('secret', 'Jane@example.com')).resolves.toBe(
+    'Jane@example.com',
+  );
+  expect(sent()).toEqual({
+    path: '/api/session/email',
+    method: 'PUT',
+    body: { current_password: 'secret', email: 'Jane@example.com' },
+  });
+  fetchMock.mockResolvedValueOnce(json({ email: null }));
+  await expect(changeOwnEmail('secret', null)).resolves.toBeNull();
+  expect(sent().body).toEqual({ current_password: 'secret', email: null });
+  fetchMock.mockResolvedValueOnce(json({ email: 7 }));
+  await expect(changeOwnEmail('secret', null)).rejects.toThrow(
+    'The server answered a malformed user sign-in state.',
+  );
+});
+
+test('getTwoStepStatus maps the own address and refuses a masked-only answer', async () => {
+  fetchMock.mockResolvedValueOnce(
+    json({
+      enabled: true,
+      recovery_codes_left: 9,
+      email: 'jane@example.com',
+      email_ready: false,
+    }),
+  );
+  await expect(getTwoStepStatus()).resolves.toEqual({
+    enabled: true,
+    recoveryCodesLeft: 9,
+    email: 'jane@example.com',
+    emailReady: false,
+  });
+  fetchMock.mockResolvedValueOnce(
+    json({
+      enabled: true,
+      recovery_codes_left: 9,
+      email_hint: 'j•••@example.com',
+      email_ready: false,
+    }),
+  );
+  await expect(getTwoStepStatus()).rejects.toThrow(
+    'The server answered a malformed user sign-in state.',
+  );
 });

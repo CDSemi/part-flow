@@ -3,7 +3,8 @@
 Two pure ASGI middlewares, registered by ``app.main.create_app``:
 
 - ``CsrfMiddleware`` — a state-changing request (``POST``, ``PUT``,
-  ``PATCH``, ``DELETE``) that carries the ``partflow_session`` cookie,
+  ``PATCH``, ``DELETE``) that carries the ``partflow_session`` cookie or
+  the ``partflow_sign_in`` cookie of an open second step (Phase 17),
   and every such request to ``/api/session`` or
   ``/api/setup/administrator``, must carry the header
   ``X-PartFlow-CSRF: 1``; otherwise it is answered 403 at once — no
@@ -27,6 +28,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.application.authentication import SESSION_COOKIE
+from app.application.two_step_factors import SIGN_IN_COOKIE
 from app.core import log_context
 
 CSRF_HEADER: Final = "x-partflow-csrf"
@@ -49,7 +51,8 @@ class CsrfMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["method"] in _UNSAFE_METHODS:
             headers = Headers(scope=scope)
-            carries_cookie = SESSION_COOKIE in cookie_parser(headers.get("cookie", ""))
+            cookies = cookie_parser(headers.get("cookie", ""))
+            carries_cookie = SESSION_COOKIE in cookies or SIGN_IN_COOKIE in cookies
             if (carries_cookie or scope["path"] in _ALWAYS_CHECKED_PATHS) and headers.get(
                 CSRF_HEADER
             ) != "1":

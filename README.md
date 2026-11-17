@@ -260,7 +260,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0036_phase17_outgoing_mail`):
+current head, `0037_phase17_two_step`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -540,9 +540,11 @@ The pytest suite holds three kinds of tests:
   `0034_phase17_unique_names`, which makes Area and Planned Route names
   unique; `tests/test_phase16_backup_policy_schema.py` covers
   `0035_phase16_backup_policy`, the backup policy of Administration → Backups;
-  `tests/test_phase17_outgoing_mail_schema.py` covers the single head
+  `tests/test_phase17_outgoing_mail_schema.py` covers
   `0036_phase17_outgoing_mail`, the users' email addresses and the outgoing
-  mail server, and the parity between the models and the migrations.
+  mail server; `tests/test_phase17_two_step_schema.py` covers the single head
+  `0037_phase17_two_step`, the schema of two-step sign-in, and the parity
+  between the models and the migrations.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -769,7 +771,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | The migration head is `0036_phase17_outgoing_mail`, covered by `tests/test_phase17_outgoing_mail_schema.py`. |
+| 2026-11-17 | uncommitted | The migration head is `0037_phase17_two_step`, covered by `tests/test_phase17_two_step_schema.py`. |
+| 2026-11-16 | `252f678` | The migration head is `0036_phase17_outgoing_mail`, covered by `tests/test_phase17_outgoing_mail_schema.py`. |
 | 2026-11-16 | `c1f042b` | The migration head is `0035_phase16_backup_policy`, covered by `tests/test_phase16_backup_policy_schema.py`. |
 | 2026-11-14 | `2a24c2a` | The migration head is `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | The migration head is `0033_phase17_super_user_role`, covered by `tests/test_phase17_schema.py`. |

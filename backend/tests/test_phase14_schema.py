@@ -21,8 +21,8 @@ checks the single head):
   included), and the three `actor_user_id` columns with their FKs and
   no index;
 - every migration literal repeats its model constant
-  (`_END_REASONS == UserSessionEndReason`, `_SECTION ==
-  policies.SIGN_IN_SECTION`);
+  (`_END_REASONS` is the Phase 14 prefix of `UserSessionEndReason`, which
+  0037 extended; `_SECTION == policies.SIGN_IN_SECTION`);
 - the database refuses out-of-range policy values, a non-scrypt hash, a
   negative counter, a 31-byte or duplicate token digest, an unknown end
   reason and an end time without a reason;
@@ -373,9 +373,14 @@ def test_migration_literals_repeat_the_model_constants() -> None:
     assert migration._HASH_FORMAT_SQL == models.USER_CREDENTIAL_HASH_FORMAT_SQL
     assert migration._FAILED_ATTEMPTS_SQL == models.USER_CREDENTIAL_FAILED_ATTEMPTS_SQL
     assert migration._TOKEN_DIGEST_SQL == models.USER_SESSION_TOKEN_DIGEST_SQL
-    assert migration._END_REASON_SQL == models.USER_SESSION_END_REASON_SQL
+    # 0037 (Phase 17) appended TWO_STEP_RESET and recreated the CHECK: the
+    # 0029 literals are the Phase 14 vocabulary, a prefix of the model's
+    # (test_phase17_two_step_schema pins the rest).
+    assert (
+        "end_reason IN (" + ", ".join(f"'{reason}'" for reason in migration._END_REASONS) + ")"
+    ) == migration._END_REASON_SQL
     assert migration._END_SHAPE_SQL == models.USER_SESSION_END_SHAPE_SQL
-    assert tuple(UserSessionEndReason) == migration._END_REASONS
+    assert tuple(UserSessionEndReason)[: len(migration._END_REASONS)] == migration._END_REASONS
     assert migration._SECTION == policies.SIGN_IN_SECTION
     assert migration._ACTOR_TABLES == _ACTOR_TABLES
     assert (models.USER_SESSION_DAYS_MIN, models.USER_SESSION_DAYS_MAX) == (1, 365)
@@ -456,11 +461,11 @@ def test_credential_and_session_rows_are_refused_when_malformed(connection: Conn
             {"id": session_id},
         ),
     )
-    for reason in UserSessionEndReason:
+    for reason in _load_migration()._END_REASONS:
         savepoint = connection.begin_nested()
         connection.execute(
             sa.text("UPDATE user_sessions SET ended_at = now(), end_reason = :r WHERE id = :id"),
-            {"r": str(reason), "id": session_id},
+            {"r": reason, "id": session_id},
         )
         savepoint.rollback()
 

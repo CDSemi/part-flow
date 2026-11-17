@@ -25,7 +25,10 @@
 // whose role may configure system settings. Backups holds how often the
 // server's hourly backup task takes a scheduled backup and how many its
 // rotation keeps — replaced as a whole, read by that task at its next
-// run. The server validates and stays authoritative;
+// run. Settings → Outgoing mail server and Two-step sign-in (Phase 17)
+// hold the mail server PartFlow sends through, with its timeout, and every
+// number of two-step sign-in (a partial merge like User sign-in). The
+// server validates and stays authoritative;
 // this module only maps the wire shape, and refuses a Due Soon answer
 // outside the server's ranges rather than letting it degrade the
 // countdowns silently.
@@ -385,6 +388,8 @@ export interface MailServerPolicy {
   passwordSet: boolean;
   /** The address PartFlow sends from; null exactly when there is no host. */
   sender: string | null;
+  /** Seconds each connect, read or write with the server may take. */
+  timeoutSeconds: number;
 }
 
 interface MailServerPolicyWire {
@@ -394,6 +399,7 @@ interface MailServerPolicyWire {
   mail_username: string | null;
   mail_password_set: boolean;
   mail_sender: string | null;
+  mail_timeout_seconds: number;
   updated_at: string;
 }
 
@@ -413,6 +419,7 @@ function toMailServerPolicy(wire: MailServerPolicyWire): MailServerPolicy {
     username: wire.mail_username,
     passwordSet: wire.mail_password_set,
     sender: wire.mail_sender,
+    timeoutSeconds: wire.mail_timeout_seconds,
   };
 }
 
@@ -433,6 +440,7 @@ export async function updateMailServerPolicy(server: {
   security: MailSecurity;
   username: string | null;
   sender: string | null;
+  timeoutSeconds: number;
   password?: string | null;
 }): Promise<MailServerPolicy> {
   const wire = await apiRequest<MailServerPolicyWire>(MAIL_SERVER_POLICY_PATH, {
@@ -443,6 +451,7 @@ export async function updateMailServerPolicy(server: {
       mail_security: server.security,
       mail_username: server.username,
       mail_sender: server.sender,
+      mail_timeout_seconds: server.timeoutSeconds,
       ...(server.password !== undefined
         ? { mail_password: server.password }
         : {}),
@@ -459,4 +468,88 @@ export async function sendTestMail(to: string): Promise<string> {
     { method: 'POST', body: { to } },
   );
   return wire.sent_to;
+}
+
+/** Every number of two-step sign-in (Administration → Settings → Two-step
+ * sign-in; owner decisions of 2026-11-17). */
+export interface TwoStepPolicy {
+  /** Minutes a second step stays open after the password. */
+  windowMinutes: number;
+  /** Wrong codes one sign-in may take before it ends. */
+  maxCodes: number;
+  /** Wrong codes since the last full sign-in that lock the account. */
+  lockoutCodes: number;
+  /** Codes one sign-in may email. */
+  emailCodes: number;
+  /** Seconds between two emailed codes. */
+  emailIntervalSeconds: number;
+  /** Digits of an emailed code. */
+  emailCodeDigits: number;
+  /** Recovery codes made at a time. */
+  recoveryCodes: number;
+  /** Characters of a recovery code. */
+  recoveryCodeLength: number;
+  /** Minutes a new authenticator app waits for its first code. */
+  setupMinutes: number;
+  /** 30-second steps an authenticator app's clock may be early or late. */
+  clockDriftSteps: number;
+  /** The policy singleton's timestamp (shared by every section). */
+  updatedAt: string;
+}
+
+export type TwoStepSetting = Exclude<keyof TwoStepPolicy, 'updatedAt'>;
+
+/** The wire name of each setting. */
+const TWO_STEP_WIRE: Record<TwoStepSetting, string> = {
+  windowMinutes: 'two_step_window_minutes',
+  maxCodes: 'two_step_max_codes',
+  lockoutCodes: 'two_step_lockout_codes',
+  emailCodes: 'two_step_email_codes',
+  emailIntervalSeconds: 'two_step_email_interval_seconds',
+  emailCodeDigits: 'two_step_email_code_digits',
+  recoveryCodes: 'two_step_recovery_codes',
+  recoveryCodeLength: 'two_step_recovery_code_length',
+  setupMinutes: 'two_step_setup_minutes',
+  clockDriftSteps: 'two_step_clock_drift_steps',
+};
+
+export const TWO_STEP_SETTINGS = Object.keys(TWO_STEP_WIRE) as TwoStepSetting[];
+
+const TWO_STEP_POLICY_PATH = '/api/policies/two-step';
+
+function toTwoStepPolicy(wire: Record<string, unknown>): TwoStepPolicy {
+  const policy: Record<string, unknown> = { updatedAt: wire.updated_at };
+  for (const setting of TWO_STEP_SETTINGS) {
+    const value = wire[TWO_STEP_WIRE[setting]];
+    if (typeof value !== 'number') {
+      throw new Error(`Missing two-step setting from the server: ${setting}`);
+    }
+    policy[setting] = value;
+  }
+  return policy as unknown as TwoStepPolicy;
+}
+
+/** The two-step sign-in policy (Administration → Settings). */
+export async function getTwoStepPolicy(): Promise<TwoStepPolicy> {
+  return toTwoStepPolicy(
+    await apiRequest<Record<string, unknown>>(TWO_STEP_POLICY_PATH),
+  );
+}
+
+/** Store ONLY the provided two-step settings (a partial merge: every other
+ * setting keeps its stored value); an unchanged value is a server no-op. */
+export async function updateTwoStepPolicy(
+  patch: Partial<Record<TwoStepSetting, number>>,
+): Promise<TwoStepPolicy> {
+  const body: Record<string, number> = {};
+  for (const setting of TWO_STEP_SETTINGS) {
+    const value = patch[setting];
+    if (value !== undefined) body[TWO_STEP_WIRE[setting]] = value;
+  }
+  return toTwoStepPolicy(
+    await apiRequest<Record<string, unknown>>(TWO_STEP_POLICY_PATH, {
+      method: 'PUT',
+      body,
+    }),
+  );
 }

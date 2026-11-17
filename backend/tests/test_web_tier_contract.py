@@ -34,11 +34,15 @@ _RAW_BODY_ROUTES = {
     ("POST", "/api/work-orders/import/preview"),
     ("POST", "/api/work-orders/import"),
 }
-_SIGN_IN_ZONE = {("POST", "/api/session")}
+_SIGN_IN_ZONE = {("POST", "/api/session"), ("POST", "/api/session/second-step")}
 _PASSWORD_ZONE = {
     ("PUT", "/api/session/password"),
     ("POST", "/api/setup/administrator"),
     ("PUT", "/api/users/{user_id}/password"),
+    ("POST", "/api/session/two-step/totp"),
+    ("POST", "/api/session/two-step/totp/remove"),
+    ("POST", "/api/session/two-step/recovery-codes"),
+    ("PUT", "/api/session/email"),
 }
 # Not rate limited (OD-S2-6): a 10-character code of a 32-symbol alphabet
 # (50 bits) that expires after 15 minutes cannot be guessed in its lifetime.

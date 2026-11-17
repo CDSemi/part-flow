@@ -1264,6 +1264,7 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "rows[0].part_number",
         "station_id",
     ],
+    "two_step": ["login", "login_name.strip()"],
     "users": ["display_name", "role_id", "suffix", "user_id"],
     "work_order_import": ["', '.join(bom)", "column"],
     "work_orders": [

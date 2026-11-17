@@ -100,9 +100,13 @@ server {
     location /api/ { include /etc/nginx/partflow/proxy-api.conf; }
     location = /api/health { access_log off; include /etc/nginx/partflow/proxy-api.conf; }
 
-    # Network rate limits per client address (sign-in; password routes).
+    # Network rate limits per client address (sign-in and its second step;
+    # password routes, the two-step and email changes that check the password included).
     location = /api/session { limit_req zone=partflow_sign_in burst=5 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/session/second-step { limit_req zone=partflow_sign_in burst=5 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+    location ~ ^/api/session/two-step/(totp|totp/remove|recovery-codes)$ { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
     location = /api/session/password { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
+    location = /api/session/email { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
     location = /api/setup/administrator { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
     location ~ ^/api/users/[^/]+/password$ { limit_req zone=partflow_password burst=4 nodelay; include /etc/nginx/partflow/proxy-api.conf; }
 

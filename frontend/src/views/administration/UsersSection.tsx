@@ -8,6 +8,7 @@ import {
   createUser,
   listUsers,
   removeUserAvatar,
+  resetUserTwoStep,
   updateUser,
   uploadUserAvatar,
   userAvatarUrl,
@@ -16,6 +17,7 @@ import type { SignInState, User } from '../../api/users';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
 import { Avatar } from '../../components/Avatar';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useCloseGuard } from '../../components/close-guard';
 import {
   DiscardInputDialog,
@@ -93,7 +95,8 @@ const SIGN_IN_STATE_LABELS: Record<SignInState, string> = {
 type PendingDialog =
   | { kind: 'new' }
   | { kind: 'edit'; user: User }
-  | { kind: 'password'; user: User };
+  | { kind: 'password'; user: User }
+  | { kind: 'two-step'; user: User };
 
 export function UsersSection() {
   const { status } = useConnectivity();
@@ -221,7 +224,7 @@ export function UsersSection() {
                   {administersUsers ? (
                     <td data-label="Sign-in">
                       {user.signInState
-                        ? SIGN_IN_STATE_LABELS[user.signInState]
+                        ? `${SIGN_IN_STATE_LABELS[user.signInState]}${user.twoStep ? ' · Two-step' : ''}`
                         : '—'}
                     </td>
                   ) : null}
@@ -242,6 +245,20 @@ export function UsersSection() {
                           }}
                         >
                           Set password…
+                        </button>
+                      ) : null}
+                      {user.twoStep &&
+                      user.id !== signedInId &&
+                      !(guarded && inProtectedRole(user)) ? (
+                        <button
+                          className="btn"
+                          aria-label={`Turn off two-step sign-in for ${user.displayName}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setDialog({ kind: 'two-step', user });
+                          }}
+                        >
+                          Turn off two-step…
                         </button>
                       ) : null}
                     </td>
@@ -304,8 +321,24 @@ export function UsersSection() {
           }}
         />
       ) : null}
+      {dialog?.kind === 'two-step' ? (
+        <TwoStepResetDialog
+          user={dialog.user}
+          writeBlocked={writeBlocked}
+          onCancel={() => setDialog(null)}
+          onDone={(user, signedOut) => {
+            setDialog(null);
+            showNotice(
+              signedOut
+                ? `Two-step sign-in is off for ${user.displayName}, and they are signed out everywhere.`
+                : `Two-step sign-in is off for ${user.displayName}.`,
+            );
+            usersData.reload();
+          }}
+        />
+      ) : null}
       {dialog &&
-      dialog.kind !== 'password' &&
+      (dialog.kind === 'new' || dialog.kind === 'edit') &&
       rolesData.state.status === 'ready' ? (
         <UserDialog
           user={dialog.kind === 'edit' ? dialog.user : undefined}
@@ -764,5 +797,60 @@ function UserDialog({
         />
       ) : null}
     </ModalDialog>
+  );
+}
+
+function TwoStepResetDialog({
+  user,
+  writeBlocked,
+  onCancel,
+  onDone,
+}: {
+  user: User;
+  writeBlocked: boolean;
+  onCancel: () => void;
+  onDone: (user: User, signedOut: boolean) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  // Signing out everywhere is the safe default for a lost device.
+  const [endSessions, setEndSessions] = useState(true);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const confirm = async () => {
+    if (busy || writeBlocked) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      onDone(await resetUserTwoStep(user.id, endSessions), endSessions);
+    } catch (error) {
+      setServerError(
+        error instanceof ApiError ? error.message : UNKNOWN_OUTCOME_MESSAGE,
+      );
+      setBusy(false);
+    }
+  };
+  return (
+    <ConfirmDialog
+      title={`Turn off two-step sign-in for ${user.displayName}?`}
+      tone="danger"
+      cancelLabel="Cancel (Esc)"
+      confirmLabel="Turn off two-step"
+      confirmDisabled={writeBlocked || busy}
+      onConfirm={() => void confirm()}
+      onCancel={busy ? () => undefined : onCancel}
+    >
+      Their authenticator app and recovery codes stop working, and they sign in
+      with their password alone until they set it up again. If someone else may
+      know their password, also set a new one.
+      <label className="admin-check">
+        <input
+          type="checkbox"
+          checked={endSessions}
+          disabled={busy}
+          onChange={(event) => setEndSessions(event.target.checked)}
+        />
+        <span>Sign them out everywhere</span>
+      </label>
+      <ServerErrorNote message={serverError} />
+    </ConfirmDialog>
   );
 }

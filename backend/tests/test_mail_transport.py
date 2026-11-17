@@ -5,8 +5,9 @@ Phase 17 (owner decision of 2026-11-13). Against the stand-in of
 
 - each connection security opens the right connection: STARTTLS a plain
   one upgraded before the sign-in, TLS an encrypted one from the start,
-  NONE a plain one and never a sign-in; the timeout and a verifying TLS
-  context are always passed;
+  NONE a plain one and never a sign-in; the timeout set in Administration
+  (owner decisions of 2026-11-17) and a verifying TLS context are always
+  passed;
 - the message carries PartFlow as the sender name, the recipient, the
   subject, a date, a message id in the sender's domain and the body;
 - every failure becomes one actionable sentence (``MailDeliveryError``)
@@ -31,6 +32,7 @@ _SERVER = mail.SmtpServer(
     username="partflow@example.com",
     password=_PASSWORD,
     sender="partflow@example.com",
+    timeout_seconds=20,
 )
 _MESSAGE = mail.OutgoingMessage(to="ann@example.org", subject="Hello", body="Body text\n")
 
@@ -44,7 +46,7 @@ def test_starttls_upgrades_signs_in_and_sends(smtp: fake_smtp.Recorder) -> None:
     mail.send_message(_SERVER, _MESSAGE)
     [connection] = smtp.connections
     assert (connection.kind, connection.host, connection.port) == ("SMTP", "smtp.example.com", 587)
-    assert connection.timeout == mail.TIMEOUT_SECONDS
+    assert connection.timeout == 20
     [starttls, login, send, quit_] = connection.calls
     assert starttls[0] == "starttls"
     assert isinstance(starttls[1], ssl.SSLContext)
@@ -62,9 +64,11 @@ def test_starttls_upgrades_signs_in_and_sends(smtp: fake_smtp.Recorder) -> None:
 
 
 def test_tls_encrypts_from_the_start(smtp: fake_smtp.Recorder) -> None:
-    mail.send_message(_SERVER._replace(security=MailSecurity.TLS, port=465), _MESSAGE)
+    mail.send_message(
+        _SERVER._replace(security=MailSecurity.TLS, port=465, timeout_seconds=45), _MESSAGE
+    )
     [connection] = smtp.connections
-    assert (connection.kind, connection.port) == ("SMTP_SSL", 465)
+    assert (connection.kind, connection.port, connection.timeout) == ("SMTP_SSL", 465, 45)
     assert isinstance(connection.context, ssl.SSLContext)
     assert connection.context.verify_mode is ssl.CERT_REQUIRED
     assert [call[0] if isinstance(call, tuple) else call for call in connection.calls] == [

@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `a4cf9a8` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -52,11 +52,12 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0036_phase17_outgoing_mail`
-(`backend/alembic/versions/20261116_0036_phase17_outgoing_mail.py`). Phase 15 không thêm migration nào; Phase 16 thêm
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0037_phase17_two_step`
+(`backend/alembic/versions/20261117_0037_phase17_two_step.py`). Phase 15 không thêm migration nào; Phase 16 thêm
 `0035_phase16_backup_policy` (chính sách backup của Administration → Backups); Phase 17 thêm
-`0033_phase17_super_user_role` (role Super User), `0034_phase17_unique_names` (tên Area và Planned Route duy nhất) và
-`0036_phase17_outgoing_mail` (địa chỉ email của user và mail server gửi đi).
+`0033_phase17_super_user_role` (role Super User), `0034_phase17_unique_names` (tên Area và Planned Route duy nhất),
+`0036_phase17_outgoing_mail` (địa chỉ email của user và mail server gửi đi) và `0037_phase17_two_step`
+(xác thực hai bước, two-step sign-in).
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
 NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
@@ -1373,8 +1374,14 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    phục dùng một lần hoặc khôi phục qua email, việc này cần một máy chủ gửi mail được đặt trong General settings và một
    địa chỉ email trên user. Đã có cho đến nay: một địa chỉ email tùy chọn trên mỗi user (Administration → Users, do
    user administrator xem và đặt) và mail server gửi đi kèm test email (Administration → Settings → Outgoing mail
-   server; migration `0036_phase17_outgoing_mail`). Các mã dùng một lần, các mã khôi phục, mã gửi qua email và passkey
-   sẽ theo sau.
+   server; migration `0036_phase17_outgoing_mail`), và xác thực hai bước (two-step sign-in; migration
+   `0037_phase17_two_step`): một app xác thực (authenticator app; mã dùng một lần, TOTP) được thiết lập từ menu tài
+   khoản bằng việc nhập lại mật khẩu và mã đầu tiên của nó, các mã khôi phục (recovery code) dùng một lần, và khi đăng
+   nhập một bước thứ hai nhận mã của app, một mã khôi phục hoặc một mã gửi qua email cho user. Quyết định của chủ sở
+   hữu ngày 2026-11-17: mọi con số của nó được đặt trong Administration → Settings → Two-step sign-in, một mã sai được
+   đếm riêng với một mật khẩu sai, user tự đổi địa chỉ email của mình, và một user administrator, hoặc lệnh khôi phục
+   `reset-two-step`, khi tắt xác thực hai bước của một user đã mất app và các mã cũng có thể đăng xuất user đó ở mọi
+   nơi. Passkey sẽ theo sau.
 
 Phase này thay đổi GUI_DESIGN §9 (một mục chưa có hiển thị bản xem trước bị vô hiệu hóa thay vì chỉ một câu thông báo)
 và PROJECT_PROFILE §20 (bốn role tạo sẵn); mỗi mục cập nhật các tài liệu sở hữu nó khi được đưa vào.
@@ -1422,7 +1429,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | Phase 17 mục 8 đang thực hiện: địa chỉ email của user và mail server gửi đi đã có; migration `0036_phase17_outgoing_mail` trở thành head của lược đồ. |
+| 2026-11-17 | uncommitted | Phase 17 mục 8: xác thực hai bước đã có (app xác thực, mã khôi phục, mã gửi qua email, các con số của nó trong Settings, địa chỉ email của chính user); migration `0037_phase17_two_step` trở thành head của lược đồ. |
+| 2026-11-16 | `252f678` | Phase 17 mục 8 đang thực hiện: địa chỉ email của user và mail server gửi đi đã có; migration `0036_phase17_outgoing_mail` trở thành head của lược đồ. |
 | 2026-11-16 | `a4cf9a8` | Phase 16: Deployment Admin được gỡ bỏ, hoàn tất `pf` tối giản; việc còn mở của nó được đóng. |
 | 2026-11-16 | `5708664` | Phase 16: `pf` tối giản đã có dưới dạng `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | Phase 16: backup cấu hình trong Administration đã có; migration `0035_phase16_backup_policy` trở thành head của lược đồ. |

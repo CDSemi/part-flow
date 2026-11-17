@@ -75,8 +75,8 @@ _G1 = (
 )
 _G2 = (
     "This user's role holds correction permissions or the permission to manage them."
-    " Setting their password or email address, or changing whether they are active, needs"
-    " the Manage correction permissions permission."
+    " Setting their password or email address, turning off their two-step sign-in, or"
+    " changing whether they are active needs the Manage correction permissions permission."
 )
 _G3 = (
     "Giving a user a role that holds correction permissions or the permission to manage"

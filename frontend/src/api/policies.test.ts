@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-import { getSignInPolicy, updateSignInPolicy } from './policies';
+import {
+  getSignInPolicy,
+  getTwoStepPolicy,
+  updateSignInPolicy,
+  updateTwoStepPolicy,
+} from './policies';
 
 // The user sign-in policy: wire mapping and the partial PUT body (only
 // the provided settings travel, so a stale editor never reverts another
@@ -63,4 +68,56 @@ test('updateSignInPolicy sends only the provided settings, in snake_case', async
       require_password_change: false,
     },
   ]);
+});
+
+const TWO_STEP_WIRE = {
+  two_step_window_minutes: 15,
+  two_step_max_codes: 5,
+  two_step_lockout_codes: 10,
+  two_step_email_codes: 3,
+  two_step_email_interval_seconds: 60,
+  two_step_email_code_digits: 8,
+  two_step_recovery_codes: 10,
+  two_step_recovery_code_length: 12,
+  two_step_setup_minutes: 15,
+  two_step_clock_drift_steps: 1,
+  updated_at: '2026-11-17T08:00:00Z',
+};
+
+test('the two-step policy maps every number and sends only the provided ones', async () => {
+  fetchMock.mockImplementation(() =>
+    Promise.resolve(
+      new Response(JSON.stringify(TWO_STEP_WIRE), { status: 200 }),
+    ),
+  );
+  expect(await getTwoStepPolicy()).toEqual({
+    windowMinutes: 15,
+    maxCodes: 5,
+    lockoutCodes: 10,
+    emailCodes: 3,
+    emailIntervalSeconds: 60,
+    emailCodeDigits: 8,
+    recoveryCodes: 10,
+    recoveryCodeLength: 12,
+    setupMinutes: 15,
+    clockDriftSteps: 1,
+    updatedAt: '2026-11-17T08:00:00Z',
+  });
+  await updateTwoStepPolicy({ maxCodes: 3, clockDriftSteps: 0 });
+  const [path, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+  expect(path).toBe('/api/policies/two-step');
+  expect(init.method).toBe('PUT');
+  expect(JSON.parse(init.body as string)).toEqual({
+    two_step_max_codes: 3,
+    two_step_clock_drift_steps: 0,
+  });
+
+  const partial: Record<string, unknown> = { ...TWO_STEP_WIRE };
+  delete partial.two_step_max_codes;
+  fetchMock.mockImplementationOnce(() =>
+    Promise.resolve(new Response(JSON.stringify(partial), { status: 200 })),
+  );
+  await expect(getTwoStepPolicy()).rejects.toThrow(
+    'Missing two-step setting from the server: maxCodes',
+  );
 });

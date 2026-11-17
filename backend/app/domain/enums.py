@@ -432,7 +432,9 @@ class UserSessionEndReason(StrEnum):
     SIGNED_OUT — the User signed out; REPLACED — a new sign-in in the same
     browser; PASSWORD_CHANGED — the User changed the password (every other
     session of the User); PASSWORD_RESET — an administrator or the recovery
-    command set the password; USER_DEACTIVATED — the User was deactivated.
+    command set the password; USER_DEACTIVATED — the User was deactivated;
+    TWO_STEP_RESET (Phase 17) — an administrator or the recovery command
+    turned the User's two-step sign-in off and chose to sign them out.
     Expiry is never recorded: it is derived from the current sign-in policy.
     User sessions are never Worker Sessions (PROJECT_PROFILE §7).
     """
@@ -442,6 +444,7 @@ class UserSessionEndReason(StrEnum):
     PASSWORD_CHANGED = "PASSWORD_CHANGED"
     PASSWORD_RESET = "PASSWORD_RESET"
     USER_DEACTIVATED = "USER_DEACTIVATED"
+    TWO_STEP_RESET = "TWO_STEP_RESET"
 
 
 class SignInState(StrEnum):
@@ -473,6 +476,34 @@ class MailSecurity(StrEnum):
     STARTTLS = "STARTTLS"
     TLS = "TLS"
     NONE = "NONE"
+
+
+class SecondStepMethod(StrEnum):
+    """How a User with two-step sign-in finishes signing in (Phase 17).
+
+    TOTP — the 6-digit code of their authenticator app; RECOVERY_CODE — one
+    of their one-time recovery codes; EMAIL_CODE — the code PartFlow emailed
+    for this sign-in (its length is set in Administration → Settings).
+    """
+
+    TOTP = "TOTP"
+    RECOVERY_CODE = "RECOVERY_CODE"
+    EMAIL_CODE = "EMAIL_CODE"
+
+
+class SignInChallengeEndReason(StrEnum):
+    """Why the second step of a sign-in ended (Phase 17).
+
+    COMPLETED — the User signed in; FAILED — too many wrong codes, a lock, or
+    the User became unable to sign in; REPLACED — a newer password step in
+    the same browser; RESET — two-step sign-in was turned off meanwhile.
+    Expiry is never recorded: it is derived from the creation time.
+    """
+
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    REPLACED = "REPLACED"
+    RESET = "RESET"
 
 
 class StationDeviceState(StrEnum):

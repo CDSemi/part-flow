@@ -381,7 +381,8 @@ def test_the_cli_reads_no_model() -> None:
             assert node.attr not in {"User", "Role", "RolePermission", "Permission"}
             assert node.attr not in {"UserCredential", "UserSession"}
     # `errors` is the shared refusal vocabulary the CLI renders; `policies`
-    # serves `backup-policy`, the host task's read of Administration → Backups.
+    # serves `backup-policy`, the host task's read of Administration → Backups;
+    # `two_step` serves `reset-two-step` (Phase 17).
     assert "authentication" in application
     assert application <= {
         "authentication",
@@ -392,6 +393,7 @@ def test_the_cli_reads_no_model() -> None:
         "backups",
         "policies",
         "system_status",
+        "two_step",
     }
 
 

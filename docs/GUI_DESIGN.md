@@ -122,11 +122,23 @@ Stations and the Production Board never ask for sign-in; a Scan Station is used 
 
 - **Account chip.** The top navigation ends with an account chip. When nobody is signed in it shows `Sign in` (and
   `Set up PartFlow` while PartFlow has no Administrator yet). Otherwise it shows the avatar and name, with a menu
-  holding `Change password…` and `Sign out`. The chip is absent wherever the top navigation is hidden: Scan Station
-  production mode and the Production Board kiosk.
+  holding `Change password…`, `Two-step sign-in…`, `Email address…` and `Sign out`. The chip is absent wherever the
+  top navigation is hidden: Scan Station production mode and the Production Board kiosk.
 - **Sign-in is a modal dialog over the current view.** The route and any open work stay as they are. An expired
   sign-in reopens the sign-in dialog over the current view. The exception is a theme save that finds the sign-in
   ended (§2.1): the dialog then opens at the next refused request.
+- **Two-step sign-in.** A user may turn on two-step sign-in from the account menu; it is never required,
+  Administrators included. `Set up…` asks for the password again, shows a QR code and the key for an authenticator
+  app (for example 1Password) and turns two-step sign-in on with the first 6-digit code the app shows; the recovery
+  codes are then shown once, with `Copy codes`. With it on, after a correct password the Sign in dialog asks for the
+  code the app shows, or a recovery code (`Use a recovery code`), or — when the account has an email address and an
+  outgoing mail server is set up — a code PartFlow emails (`Email me a code at a•••@example.com`). A wrong code keeps
+  the step open; when the step ends (its time is up, too many wrong codes, or a lock) the dialog returns to the
+  password with the reason. `New recovery codes…` and `Turn off…` ask for the password again. Every number of
+  two-step sign-in is set in Settings → Two-step sign-in (§9).
+- **Email address.** `Email address…` in the account menu shows the user's own address, where PartFlow emails a
+  sign-in code, and changes or removes it with the password again. When an outgoing mail server is set up, the
+  previous address receives a notice of the change.
 - **Replacing an administrator-set password.** While a password set by an administrator must be replaced
   (Administration → Settings → User sign-in, §9), the `Choose a new password` dialog cannot be dismissed except by
   signing out.
@@ -2601,7 +2613,7 @@ confirmed through.
 - **Department display settings** are configured **per Department, never globally**: a table of Departments with an
   editor for the Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; defaults
   3 and 6).
-- **Settings** hosts three panels:
+- **Settings** hosts four panels:
   - the **Due Soon warning** panel owns the configuration behind every derived due countdown (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) and **Maximum warning days** (0–365, never below
     the minimum), with the initial values 2 days, 15 % and 7 days. It is one global policy;
@@ -2610,10 +2622,19 @@ confirmed through.
     (15 minutes), and whether users must replace an administrator-set password at their next sign-in (On). It is read
     by a signed-in user (anyone else sees a prompt to sign in) and editable only by users whose role may configure
     system settings;
+  - the **Two-step sign-in** panel: every number of two-step sign-in, each a whole number in its range (initial value
+    in brackets) — the time to finish the second step (1–60 minutes, 15), the wrong codes per sign-in (1–20, 5), the
+    wrong codes before a lock (3–100, 10; the lock lasts as long as in User sign-in), the emailed codes per sign-in
+    (1–10, 3), the wait between emailed codes (0–3600 seconds, 60), the digits of an emailed code (6–10, 8), the
+    recovery codes per set (5–20, 10) and their characters (8–20, 12), the time to set up an authenticator app (1–60
+    minutes, 15) and the clock drift allowed (0–2 steps of 30 seconds, 1). Authenticator app codes stay 6 digits and
+    change every 30 seconds, the standard the apps rely on. It is read and edited like User sign-in, and a change
+    applies from the next sign-in step;
   - the **Outgoing mail server** panel: the mail server PartFlow sends email through — a one-time sign-in code to a
     user who has lost their other ways to sign in. It shows `Not set up`, or the host and port, the connection security
     (STARTTLS, SSL/TLS or None), the sign-in to the server (a user name, and whether a password is stored; the
-    password is never shown) and the sender address. Users whose role may configure system settings set it up, edit it
+    password is never shown), the sender address and the timeout of each connection step (5–120 seconds, initially
+    20). Users whose role may configure system settings set it up, edit it
     and remove it, and send a test email to an address they type, which says where it went or the server's reason for
     refusing it. Choosing a connection security moves a port still at the previous security's usual value (587, 465,
     25) to the new one. A password field left empty keeps the stored password; `Remove the stored password` clears it.
@@ -2661,7 +2682,8 @@ write the live environment with explicit loading, error and retry states; server
 editor configure the Worker ID mode: Disabled, Fixed Worker with its Fixed Worker, or Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, the Department display settings, the
-Settings section's Due Soon warning, User sign-in and Outgoing mail server panels, the History archival & purge
+Settings section's Due Soon warning, User sign-in, Two-step sign-in and Outgoing mail server panels, the History
+archival & purge
 retention period, the
 Backups policy and the Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users sign
 in with a login name and password and which permissions are checked so far.
@@ -2761,8 +2783,11 @@ entity (§4.12, PROJECT_PROFILE §8.13).
   administrator who may not manage correction permissions sees it as text for a user whose role holds them, like that
   user's role and status. The section states that users sign in with a login name and password, that `Set password…`
   gives a user a password, and which permissions are checked so far. For user administrators the Users table also has
-  an `Email` column and a `Sign-in` column showing each user's sign-in state, and `Set password…` sets a temporary
-  password, ends the user's sign-ins and clears a lock.
+  an `Email` column and a `Sign-in` column showing each user's sign-in state (with `· Two-step` while the user's
+  two-step sign-in is on); `Set password…` sets a temporary password, ends the user's sign-ins and clears a lock, and
+  `Turn off two-step…` turns off the two-step sign-in of a user who lost the authenticator app and the recovery codes.
+  Its confirmation offers `Sign them out everywhere`, ticked by default, for a lost device that may be in someone
+  else's hands. Neither is offered on the signed-in user's own row.
 - **Roles & permissions** lists named roles (initially Administrator, Manager, Operator and Super User, with exactly the
   capabilities PROJECT_PROFILE §20 lists as initial grants) and edits each role's name and its permissions, grouped as
   Administration, Production master data, Work Orders, priority and reports, and Scan Station. The four correction
@@ -3947,7 +3972,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-16 | uncommitted | §9: Settings → Outgoing mail server, with a test email, and an optional email address in the Users editor. |
+| 2026-11-17 | uncommitted | §2: two-step sign-in and the own email address from the account menu, and the second step of the Sign in dialog; §9: Settings → Two-step sign-in, the mail server timeout, and the two-step state and `Turn off two-step…` in Users. |
+| 2026-11-16 | 252f678 | §9: Settings → Outgoing mail server, with a test email, and an optional email address in the Users editor. |
 | 2026-11-16 | c1f042b | §9: Administration → Backups sets the scheduled backup interval and the hourly, daily and weekly backups kept. |
 | 2026-11-16 | 0e983ec | §9: Scan behavior and Other settings show their candidate settings as disabled previews tagged `Not available yet`. |
 | 2026-11-16 | a04179f | §11.3: Add to Hot list in the New Work Order header. |

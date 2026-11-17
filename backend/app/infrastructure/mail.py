@@ -2,9 +2,10 @@
 
 PartFlow's SMTP client: ``smtplib`` from the standard library, one
 connection per message, the certificate verified against the system's
-trusted authorities (``ssl.create_default_context``) and a 20-second
-timeout per network operation. The connection security is the one
-configured in Administration → Settings (``MailSecurity``): STARTTLS
+trusted authorities (``ssl.create_default_context``) and the timeout set in
+Administration → Settings (``SmtpServer.timeout_seconds``) per network
+operation. The connection security is the one
+configured there too (``MailSecurity``): STARTTLS
 upgrades a plain connection before anything is sent, TLS encrypts from the
 first byte, NONE sends in the clear and never signs in (the policy refuses
 a user name with it).
@@ -24,8 +25,6 @@ from typing import Final, NamedTuple
 
 from app.domain.enums import MailSecurity
 
-#: Seconds each connect, read or write may take.
-TIMEOUT_SECONDS: Final = 20
 #: The display name of the sender address.
 SENDER_NAME: Final = "PartFlow"
 _MAX_QUOTED: Final = 200
@@ -40,6 +39,8 @@ class SmtpServer(NamedTuple):
     username: str | None
     password: str | None
     sender: str
+    # Seconds each connect, read or write may take.
+    timeout_seconds: int
 
 
 class OutgoingMessage(NamedTuple):
@@ -80,7 +81,7 @@ def _connection_failure(server: SmtpServer, error: OSError) -> MailDeliveryError
         )
     if isinstance(error, TimeoutError):
         return MailDeliveryError(
-            f"The mail server {where} did not answer within {TIMEOUT_SECONDS} seconds."
+            f"The mail server {where} did not answer within {server.timeout_seconds} seconds."
             " Check the host name, the port and that the server accepts connections from"
             " PartFlow."
         )
@@ -99,10 +100,10 @@ def send_message(server: SmtpServer, message: OutgoingMessage) -> None:
         client: smtplib.SMTP
         if server.security is MailSecurity.TLS:
             client = smtplib.SMTP_SSL(
-                server.host, server.port, timeout=TIMEOUT_SECONDS, context=context
+                server.host, server.port, timeout=server.timeout_seconds, context=context
             )
         else:
-            client = smtplib.SMTP(server.host, server.port, timeout=TIMEOUT_SECONDS)
+            client = smtplib.SMTP(server.host, server.port, timeout=server.timeout_seconds)
         with client:
             if server.security is MailSecurity.STARTTLS:
                 stage = "starttls"

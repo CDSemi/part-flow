@@ -421,7 +421,7 @@ class BackupRehearsal(Rehearsal):
             manifest = self.manifest(name)
             observed["manifest"] = {k: manifest.get(k) for k in ("name", "kind", "alembic_revision", "dump_started_at", "release", "dump", "database")}
             check(manifest["alembic_revision"] == self.code_head, "manifest revision is not A's head")
-            check(manifest["dump"]["tables_checked"] is True and manifest["dump"]["table_data_entries"] == 30, "table data entries")
+            check(manifest["dump"]["tables_checked"] is True and manifest["dump"]["table_data_entries"] == 33, "table data entries")
             check(manifest["dump"]["extra_tables"] == [], "extra tables")
             check(manifest["release"]["tag"] == RELEASES["A"], "manifest release is not A")
             check(sorted(p.name for p in (self.backup_dir / name).iterdir()) ==
