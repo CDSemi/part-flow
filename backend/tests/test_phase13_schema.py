@@ -120,8 +120,10 @@ OD-10, OD-11, OD-13, S2-F6). Later Phase 13 slices extend this module:
   (Administrator 17, Manager 10, Operator 10), no user and no `User` /
   `Role` audit row; the database refuses an unknown permission, a
   non-canonical login name, a lowercase theme and a partial avatar; the
-  ORM round-trips a User; the downgrade restores the 0027 boundary and
-  refuses while a user or a `User` / `Role` audit row exists.
+  downgrade restores the 0027 boundary and refuses while a user or a
+  `User` / `Role` audit row exists. The ORM round trip of a User runs at
+  the head, where the model and the schema match
+  (`tests/test_phase17_outgoing_mail_schema.py`).
 
 Pinned to the last Phase 13 revision since Phase 14 slice 1 added
 `0029_phase14_sign_in`; the head-level coverage lives in
@@ -3885,56 +3887,6 @@ def test_database_admits_canonical_users_and_the_user_role_audit_entities(
         "ck_audit_events_entity_type",
         lambda: _insert_audit(connection, "CREATED", "Nobody"),
     )
-
-
-def test_user_model_round_trips_every_column(connection: Connection) -> None:
-    """S-9: the ORM writes and reads back a User, theme preference included."""
-    from sqlalchemy.orm import Session
-
-    stamp = datetime.datetime(2026, 10, 6, 8, 30, tzinfo=datetime.UTC)
-    role_id = _role_id(connection, "Operator")
-    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
-        user = models.User(
-            login_name="roundtrip",
-            display_name="Round Trip",
-            role_id=role_id,
-            avatar_image=b"\x89PNG\r\n\x1a\n",
-            avatar_image_type="image/png",
-            avatar_image_updated_at=stamp,
-            theme_preference=ThemePreference.LIGHT,
-            is_active=False,
-        )
-        session.add(user)
-        session.flush()
-        user_id = user.id
-        session.expunge_all()
-        loaded = session.get(models.User, user_id)
-        assert loaded is not None
-        assert (
-            loaded.login_name,
-            loaded.display_name,
-            loaded.role_id,
-            loaded.avatar_image,
-            loaded.avatar_image_type,
-            loaded.avatar_image_updated_at,
-            loaded.theme_preference,
-            loaded.is_active,
-        ) == (
-            "roundtrip",
-            "Round Trip",
-            role_id,
-            b"\x89PNG\r\n\x1a\n",
-            "image/png",
-            stamp,
-            "LIGHT",
-            False,
-        )
-        assert loaded.created_at is not None and loaded.updated_at is not None
-        loaded.theme_preference = None
-        session.flush()
-        session.expire_all()
-        reloaded = session.get(models.User, user_id)
-        assert reloaded is not None and reloaded.theme_preference is None
 
 
 def test_downgrade_to_retention_period_revision_drops_users_and_roles(

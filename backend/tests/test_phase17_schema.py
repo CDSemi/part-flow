@@ -7,8 +7,8 @@ Phase 17 item 3; PROJECT_PROFILE §20) and `0034_phase17_unique_names`
 (item 4; PROJECT_PROFILE §8.4, §8.8) do:
 
 - the earlier cases run against their own revision; the head boundary
-  and the models parity moved to `tests/test_phase16_backup_policy_schema.py`
-  with `0035_phase16_backup_policy`;
+  and the models parity moved to `tests/test_phase17_outgoing_mail_schema.py`
+  with `0036_phase17_outgoing_mail`;
 - 0033: the migration's permission literal is exactly the 0028
   vocabulary;
 - a fresh install seeds `Super User` with every key of

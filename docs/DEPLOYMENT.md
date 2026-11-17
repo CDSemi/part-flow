@@ -157,7 +157,7 @@ This section is reference. The installation steps are in the platform guides ([`
 | Service | What it does | Details |
 | --- | --- | --- |
 | `db` | PostgreSQL 16 (`postgres:16.14`, Debian variant) | Network `internal` only; no published port. Data in the volume `partflow-production_postgres_data`. Never an `-alpine` image: text sorting (collation) and the identity check "Canonical identity under the running interpreter and database" (reconcile check (j)) depend on the GNU C Library (glibc). Logs errors without detail lines (`log_error_verbosity=terse`). 60 s stop grace period. |
-| `backend` | The API, image `partflow/backend:<release>` | Networks `internal` and `edge`. Connects as the database role `partflow_app` and mounts only its password file. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` and `DATABASE_ROLES_REQUIRED` are fixed to `true`. Worker count from `PARTFLOW_BACKEND_WORKERS`; forwarded headers trusted from the `edge` subnet only. 200 s stop grace period, above the longest request time of `web` (180 s), so that a running import can finish. `restart: unless-stopped`, never `on-failure`, because with several workers a configuration refusal exits with code 0. |
+| `backend` | The API, image `partflow/backend:<release>` | Networks `internal` and `edge`. Connects as the database role `partflow_app` and mounts only its password file. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` and `DATABASE_ROLES_REQUIRED` are fixed to `true`. Worker count from `PARTFLOW_BACKEND_WORKERS`; forwarded headers trusted from the `edge` subnet only. 200 s stop grace period, above the longest request time of `web` (180 s), so that a running import can finish. `restart: unless-stopped`, never `on-failure`, because with several workers a configuration refusal exits with code 0. When an outgoing mail server is set in Administration → Settings, `backend` connects to it through the `edge` network to send email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. The only published port: `127.0.0.1:${PARTFLOW_HTTP_PORT}` to container port 80; there is deliberately no setting for the bind address. No `depends_on`, so it keeps serving the screens while `backend` is stopped. 200 s stop grace period. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Applies database migrations and grants in one transaction. Needs a backup option (Migrations, below). Mounts the backup folder read-only at `/backups`. |
 | `db-roles` | Ops job: `python -m app.cli provision-roles` (default) or `apply-grants` | Creates or repairs the database roles and applies the grants (Database roles, below). Connects as the owner role and mounts the three secret files. |
@@ -729,7 +729,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §1.2, §6: the Deployment Admin tool and its guide are removed. |
+| 2026-11-16 | uncommitted | §3.1: `backend` reaches the outgoing mail server set in Administration → Settings through the `edge` network. |
+| 2026-11-16 | `a4cf9a8` | §1.2, §6: the Deployment Admin tool and its guide are removed. |
 | 2026-11-16 | `5708664` | §1.2: the short command `deploy/production/pf` for the production stack. |
 | 2026-11-13 | `4a99914` | §3.1 Logs: the successful automatic refreshes of the Production Board feed are not logged. |
 | 2026-11-12 | `de4d99f` | §3.1 Logs: an open Production Board adds `web` records every 5 s instead of 15 s. |

@@ -33,7 +33,7 @@ from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0034_phase17_unique_names"
+_PREVIOUS = "0035_phase16_backup_policy"
 _ALL = schema_revision.pending_revisions(None)
 
 

@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0035_phase16_backup_policy`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0036_phase17_outgoing_mail`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -716,8 +716,8 @@ Các ràng buộc được liệt kê ở §17.
 
 - Các lần ghi policy toàn cục được audit với `entity_type` `ApplicationPolicy`. `entity_id` là mục Administration:
   `worker-sessions` (timeout của Worker session), `correction-permissions` (policy lý do Undo), `due-soon` (panel cảnh báo
-  Due Soon trong Settings), `data-retention` (History archival & purge), `sign-in` (panel Settings → User sign-in) và
-  `backups` (Backups).
+  Due Soon trong Settings), `data-retention` (History archival & purge), `sign-in` (panel Settings → User sign-in),
+  `backups` (Backups) và `mail-server` (panel Settings → Outgoing mail server).
 - Mỗi lần `PUT` có hiệu lực trên một trong các mục này append đúng một dòng `UPDATED` trong cùng transaction; một `PUT`
   không thay đổi gì thì không append gì. Các snapshot là:
 
@@ -729,8 +729,11 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/data-retention` (đặt hoặc xóa khoảng thời gian) | `{retention_period_months}` |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
+  | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender}`, với metadata `{mail_password_changed}`; không bao giờ có mật khẩu |
 
-  Các dòng `sign-in` và `backups` mang `actor_user_id` là User đã đăng nhập.
+  Các dòng `sign-in`, `backups` và `mail-server` mang `actor_user_id` là User đã đăng nhập. Một lần đổi mật khẩu mail
+  server mà không đổi gì khác vẫn là thay đổi có hiệu lực: hai snapshot bằng nhau và metadata ghi
+  `mail_password_changed: true`.
 - Các lần ghi mật khẩu append dòng `UPDATED` cho entity type `User` với snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` dạng text ISO-8601; không bao giờ là hash, salt, token hay mật khẩu) và
   khóa metadata `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` hoặc `RECOVERY_CLI`; lệnh khôi phục còn ghi
@@ -763,7 +766,8 @@ Các ràng buộc được liệt kê ở §17.
   - tạo role là `CREATED` với `before_data` NULL và `after_data` `{name, permissions}` (các permission key sắp theo giá
     trị);
   - đổi tên role, hoặc một thay đổi grant hay revoke, là một dòng `UPDATED` với cùng snapshot trước và sau;
-  - tạo user là `CREATED` với snapshot hồ sơ `{login_name, display_name, role_id, is_active}`;
+  - tạo user là `CREATED` với snapshot hồ sơ `{login_name, display_name, role_id, is_active, email}` (các dòng ghi
+    trước `0036_phase17_outgoing_mail` không có key `email`);
   - sửa hồ sơ user là một dòng `UPDATED` với snapshot đó trước và sau;
   - đổi avatar user là một dòng `UPDATED` với `{"avatar": null | digest}`: một digest, không bao giờ là byte ảnh, như với
     Worker.
@@ -1101,6 +1105,17 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   `ck_application_policy_backup_keep_weekly_range`, 0–520) (`0035_phase16_backup_policy`): `integer NOT NULL`, chính
   sách backup của Administration → Backups. Chỉ tác vụ backup của máy chủ (`app.cli backup-policy`) và `status` đọc nó;
   không đường sản xuất nào đọc. Downgrade từ chối khi section này đã từng được ghi.
+- `mail_host text NULL` (`ck_application_policy_mail_host_shape`: tên host viết thường hoặc địa chỉ IP dài tối đa 253
+  ký tự; NULL nghĩa là không có mail server), `mail_port integer NOT NULL DEFAULT 587`
+  (`ck_application_policy_mail_port_range`, 1–65535), `mail_security text NOT NULL DEFAULT 'STARTTLS'`
+  (`ck_application_policy_mail_security_allowed`: `STARTTLS`, `TLS` hoặc `NONE`), `mail_username text NULL`
+  (`ck_application_policy_mail_username_length`, 1–254 ký tự) và `mail_sender text NULL`
+  (`ck_application_policy_mail_sender_canonical`, dạng địa chỉ email canonical của `users.email`)
+  (`0036_phase17_outgoing_mail`): mail server gửi đi của Administration → Settings.
+  `ck_application_policy_mail_server_shape` giữ cho nó trọn vẹn: host đi cùng sender, user name chỉ khi có host, và
+  không có user name với `NONE`. Mật khẩu đăng nhập vào server là một thông tin đăng nhập (credential) và nằm trong
+  `mail_server_credentials` (bên dưới), không bao giờ nằm trên dòng này. Downgrade từ chối khi đã có mail server, mật
+  khẩu, port hoặc security khác mặc định, hoặc đã có dòng audit `mail-server`.
 - Các cột đăng nhập và role của Scan Station được liệt kê ở "Đăng nhập" và "Thiết bị Scan Station" bên dưới.
 - Các policy về sau được thêm dưới dạng cột có kiểu, có server default khi tồn tại giá trị mặc định canonical. Không có
   kho key/value.
@@ -1148,6 +1163,11 @@ bằng nhau). Một khả năng mới về sau mở rộng CHECK; một key khô
 - `theme_preference text` có thể null với `ck_users_theme_preference` (`DARK` hoặc `LIGHT`; NULL nghĩa là không có ưa
   thích), chỉ được ghi bởi nút chuyển của chính User (`PUT /api/session/theme-preference`; không audit) và được đọc cùng
   principal của session.
+- `email text` có thể null với `ck_users_email_canonical` (`0036_phase17_outgoing_mail`): địa chỉ canonical của
+  `app.domain.email_address` — phần local 1–64 ký tự ASCII được phép, `@` và một domain viết thường có dấu chấm, tối
+  đa 254 ký tự — nơi PartFlow gửi mã đăng nhập dùng một lần. Nó không unique. User administrator đặt nó; nó là một
+  phần của hồ sơ được audit, và chỉ người gọi được quản lý user và role mới thấy nó. Downgrade của
+  `0036_phase17_outgoing_mail` từ chối khi còn User nào có địa chỉ.
 - `is_active boolean NOT NULL DEFAULT true`; `created_at`, `updated_at`.
 - Không có cột credential và không có foreign key giữa `users` và `workers` theo chiều nào.
 - Downgrade của `0028_phase13_users_roles` từ chối khi còn bất kỳ dòng `users` nào hoặc bất kỳ dòng audit `User` hay
@@ -1162,6 +1182,13 @@ Migration đăng nhập `0029_phase14_sign_in` thêm những thứ sau.
   15` và `require_password_change boolean NOT NULL DEFAULT true`, với `ck_application_policy_user_session_days_range`
   (1–365), `ck_application_policy_sign_in_lockout_attempts_range` (3–100) và
   `ck_application_policy_sign_in_lockout_minutes_range` (1–1440).
+- **`mail_server_credentials`** (`0036_phase17_outgoing_mail`): mật khẩu đăng nhập vào mail server gửi đi. PK
+  `pk_mail_server_credentials` `id` với `ck_mail_server_credentials_singleton` (`id = 1`), nên có tối đa một dòng và
+  không có dòng nghĩa là không có mật khẩu; `password text NOT NULL` với `ck_mail_server_credentials_password_length`
+  (1–1024 ký tự); `updated_at`. Ứng dụng chỉ giữ mật khẩu khi server có user name. Nó chỉ được đọc để gửi một thư và
+  không bao giờ được trả lời, ghi log hay audit: snapshot audit `mail-server` chỉ ghi `mail_password_set`. Một lần ghi
+  khóa dòng `application_policy` trước, rồi tới dòng này. Bảng là `ORDINARY` với `partflow_app` và nằm ngoài những
+  gì `partflow_maintenance` được đọc.
 - **`user_credentials`**: PK `pk_user_credentials` `user_id` (FK `fk_user_credentials_user_id_users` tới `users (id)`:
   một credential cho mỗi User); `password_hash text NOT NULL` (scrypt; `ck_user_credentials_password_hash_format`: bắt
   đầu bằng `scrypt$`); `password_is_temporary boolean NOT NULL`; `password_changed_at timestamptz NOT NULL`;
@@ -1250,13 +1277,13 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0035_phase16_backup_policy`) |
+| Class | `partflow_app` privileges | Tables (30 at head `0036_phase17_outgoing_mail`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (bước đã qua bất biến nhờ trigger và đặc quyền; một lần điều chỉnh xóa các bước tương lai chưa được tham chiếu) |
 | `READ_ONLY` | SELECT | `alembic_version` |
-| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
 - `partflow_maintenance` chỉ có SELECT, trên `alembic_version`, `application_policy`, `areas`, `machines`, `operations`,
   `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`, `scan_stations`, `users`,
@@ -1395,7 +1422,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-16 | uncommitted | Migration head `0035_phase16_backup_policy`: bốn cột chính sách backup của `application_policy` và section audit `backups`. |
+| 2026-11-16 | uncommitted | Migration head `0036_phase17_outgoing_mail`: `users.email`, các cột mail server gửi đi của `application_policy` và section audit `mail-server`. |
+| 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: bốn cột chính sách backup của `application_policy` và section audit `backups`. |
 | 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; việc bổ sung cho một role Super User đã có thêm một dòng audit `UPDATED`. |
 | 2026-11-13 | `6c0fa6c` | §18 và §20: việc trả số lượng đã nhập kho và đồng bộ quét offline đã được chốt bởi các quyết định của chủ sở hữu ngày 2026-11-13. |

@@ -32,6 +32,7 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
+import { canonicalEmail, EMAIL_ADDRESS_ERROR } from './email-address';
 import { roleHoldsProtected } from './permissions';
 import {
   ActiveField,
@@ -56,11 +57,14 @@ import { canonicalLoginName, loginNameError } from './user-login';
 // section is view-only (hidden, not disabled). A user administrator who
 // may not manage correction permissions may still rename users whose
 // role holds a correction permission or the permission to manage them,
-// but neither changes their role or activity nor sets their password,
-// and gives only roles without those permissions (the server's
-// permission-management guard decides). The server owns every rule
-// (login-name canonical form and uniqueness, image limits); the editor
-// mirrors the login-name rule only to answer early.
+// but changes neither their role, activity nor email address, does not
+// set their password, and gives only roles without those permissions (the
+// server's permission-management guard decides). User administrators also
+// see and edit each user's optional email address (Phase 17), where
+// PartFlow sends a one-time sign-in code. The server owns every rule
+// (login-name and email canonical forms, login-name uniqueness, image
+// limits); the editor mirrors the login-name and email rules only to
+// answer early.
 //
 // A save is up to two audited writes — the profile, then an avatar
 // change on its own binary endpoint — so the editor handles a
@@ -174,6 +178,7 @@ export function UsersSection() {
               <tr>
                 <th>User</th>
                 <th>Login name</th>
+                {administersUsers ? <th>Email</th> : null}
                 <th>Role</th>
                 {administersUsers ? <th>Sign-in</th> : null}
                 <th>Status</th>
@@ -209,6 +214,9 @@ export function UsersSection() {
                   <td className="mono" data-label="Login name">
                     {user.loginName}
                   </td>
+                  {administersUsers ? (
+                    <td data-label="Email">{user.email ?? '—'}</td>
+                  ) : null}
                   <td data-label="Role">{user.roleName}</td>
                   {administersUsers ? (
                     <td data-label="Sign-in">
@@ -329,7 +337,7 @@ function UserDialog({
   roles: Role[];
   /** The user may manage correction permissions; otherwise only roles
    * without them are offered, and a user in such a role keeps their
-   * role and activity (shown as text). */
+   * role, activity and email address (shown as text). */
   managesCorrections: boolean;
   writeBlocked: boolean;
   /** Close request; `wroteAny` = at least one write was sent. */
@@ -343,6 +351,7 @@ function UserDialog({
   const [login, setLogin] = useState(user?.loginName ?? '');
   const [roleId, setRoleId] = useState<number | null>(user?.roleId ?? null);
   const [isActive, setIsActive] = useState(user?.isActive ?? true);
+  const [email, setEmail] = useState(user?.email ?? '');
   const [staged, setStaged] = useState<StagedAvatar>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
@@ -378,6 +387,9 @@ function UserDialog({
 
   const trimmedName = name.trim();
   const canonical = canonicalLoginName(login);
+  // '' = no address; null = an address the server would refuse.
+  const canonicalAddress = canonicalEmail(email);
+  const savedEmail = saved?.email ?? '';
   // Cancel, Escape and the backdrop are ignored while a save is in
   // flight: its writes cannot be recalled, so the editor stays open
   // until they settle. Otherwise entries a save would still write ask
@@ -390,13 +402,18 @@ function UserDialog({
         ? trimmedName !== saved.displayName ||
           canonical !== saved.loginName ||
           roleId !== saved.roleId ||
-          isActive !== saved.isActive
-        : trimmedName !== '' || canonical !== '' || roleId !== null),
+          isActive !== saved.isActive ||
+          canonicalAddress !== savedEmail
+        : trimmedName !== '' ||
+          canonical !== '' ||
+          roleId !== null ||
+          email.trim() !== ''),
     busy,
     onClose: close,
   });
   const nameInvalid = !trimmedName;
   const loginInvalid = loginNameError(login);
+  const emailInvalid = canonicalAddress === null;
   const roleInvalid = roleId === null;
   const title = saved ? 'Edit user' : 'New user';
   // Without Manage correction permissions: a saved user in a protected
@@ -449,7 +466,12 @@ function UserDialog({
   };
 
   const submit = async () => {
-    if (nameInvalid || loginInvalid || roleId === null) {
+    if (
+      nameInvalid ||
+      loginInvalid ||
+      roleId === null ||
+      canonicalAddress === null
+    ) {
       setAttempted(true);
       return;
     }
@@ -462,6 +484,9 @@ function UserDialog({
           ...(canonical !== saved.loginName ? { loginName: canonical } : {}),
           ...(roleId !== saved.roleId ? { roleId } : {}),
           ...(isActive !== saved.isActive ? { isActive } : {}),
+          ...(canonicalAddress !== savedEmail
+            ? { email: canonicalAddress === '' ? null : canonicalAddress }
+            : {}),
         }
       : null;
     const sendProfile = delta === null || Object.keys(delta).length > 0;
@@ -482,6 +507,7 @@ function UserDialog({
           displayName: trimmedName,
           loginName: canonical,
           roleId,
+          ...(canonicalAddress !== '' ? { email: canonicalAddress } : {}),
         });
         profileChanged = true;
         setSaved(record);
@@ -566,6 +592,10 @@ function UserDialog({
         {roleFixed ? (
           <div className="admin-identity">
             <div className="idrow">
+              <span className="k">Email</span>
+              <span className="v">{saved?.email ?? 'None'}</span>
+            </div>
+            <div className="idrow">
               <span className="k">Role</span>
               <span className="v">{savedRole?.name ?? saved?.roleName}</span>
             </div>
@@ -578,6 +608,41 @@ function UserDialog({
           </div>
         ) : (
           <>
+            <AdminField
+              label={
+                <>
+                  Email <span className="field-optional">(optional)</span>
+                </>
+              }
+            >
+              <input
+                className="field"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="e.g. jane@example.com"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </AdminField>
+            <div className="admin-fieldnotes">
+              <div aria-live="polite">
+                {canonicalAddress && canonicalAddress !== email.trim() ? (
+                  <p className="admin-fieldnote">
+                    Saved as: <span className="mono">{canonicalAddress}</span>
+                  </p>
+                ) : null}
+              </div>
+              <p className="admin-fieldhelp">
+                Where PartFlow sends a one-time sign-in code when this user has
+                lost their other ways to sign in.
+              </p>
+            </div>
+            {emailInvalid && attempted ? (
+              <div className="err" role="alert">
+                {EMAIL_ADDRESS_ERROR}
+              </div>
+            ) : null}
             <AdminField label="Role">
               <select
                 className="field"

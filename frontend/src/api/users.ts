@@ -44,6 +44,9 @@ export interface User {
   /** Present only when the signed-in caller may manage users and roles
    * (the server omits it for everyone else). */
   signInState?: SignInState;
+  /** The email address PartFlow sends a one-time sign-in code to; null =
+   * none. Present only for callers who may manage users and roles. */
+  email?: string | null;
 }
 
 interface UserWire {
@@ -57,6 +60,7 @@ interface UserWire {
   created_at: string;
   updated_at: string;
   sign_in_state?: string;
+  email?: string | null;
 }
 
 function toSignInState(value: string): SignInState {
@@ -79,6 +83,7 @@ function toUser(wire: UserWire): User {
     ...(wire.sign_in_state !== undefined
       ? { signInState: toSignInState(wire.sign_in_state) }
       : {}),
+    ...(wire.email !== undefined ? { email: wire.email } : {}),
   };
 }
 
@@ -92,6 +97,8 @@ export async function createUser(input: {
   loginName: string;
   displayName: string;
   roleId: number;
+  /** Optional; blank or null = no address. */
+  email?: string | null;
 }): Promise<User> {
   const wire = await apiRequest<UserWire>('/api/users', {
     method: 'POST',
@@ -99,6 +106,7 @@ export async function createUser(input: {
       login_name: input.loginName,
       display_name: input.displayName,
       role_id: input.roleId,
+      ...(input.email !== undefined ? { email: input.email } : {}),
     },
   });
   return toUser(wire);
@@ -113,6 +121,8 @@ export async function updateUser(
     displayName?: string;
     roleId?: number;
     isActive?: boolean;
+    /** null (or blank) clears the address. */
+    email?: string | null;
   },
 ): Promise<User> {
   const wire = await apiRequest<UserWire>(`/api/users/${id}`, {
@@ -124,6 +134,7 @@ export async function updateUser(
         : {}),
       ...(patch.roleId !== undefined ? { role_id: patch.roleId } : {}),
       ...(patch.isActive !== undefined ? { is_active: patch.isActive } : {}),
+      ...(patch.email !== undefined ? { email: patch.email } : {}),
     },
   });
   return toUser(wire);

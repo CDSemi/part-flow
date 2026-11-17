@@ -157,6 +157,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/data-retention"): _SIGNED_IN,
     ("GET", "/api/policies/sign-in"): _SIGNED_IN,
     ("GET", "/api/policies/backups"): _SIGNED_IN,
+    ("GET", "/api/policies/mail-server"): _SIGNED_IN,
     ("GET", "/api/scan-station-devices"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
     ("PUT", "/api/session/theme-preference"): _SIGNED_IN,
@@ -185,6 +186,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PUT", "/api/policies/data-retention"): _permission(_CSS),
     ("PUT", "/api/policies/sign-in"): _permission(_CSS),
     ("PUT", "/api/policies/backups"): _permission(_CSS),
+    ("PUT", "/api/policies/mail-server"): _permission(_CSS),
+    ("POST", "/api/policies/mail-server/test"): _permission(_CSS),
     ("PUT", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     ("DELETE", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     # Management (slice 3)

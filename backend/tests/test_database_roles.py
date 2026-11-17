@@ -67,7 +67,7 @@ _DATABASE = "partflow_test_database_roles"
 _FRESH_DATABASE = "partflow_test_database_roles_fresh"
 _OWNED_DATABASE = "partflow_test_database_roles_owned"
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0034_phase17_unique_names"
+_PREVIOUS = "0035_phase16_backup_policy"
 _NOT_SUPERUSER = (
     "The database-role tests need a superuser test database role (the Compose and CI"
     " partflow_user is one)."
@@ -343,7 +343,15 @@ def test_every_model_table_is_classified() -> None:
     assert all(isinstance(value, TableClass) for value in TABLE_CLASSES.values())
     assert set(MAINTENANCE_SELECT) <= set(TABLE_CLASSES)
     assert len(MAINTENANCE_SELECT) == 14
-    assert not {"user_credentials", "user_sessions", "scan_station_devices"} & MAINTENANCE_SELECT
+    assert (
+        not {
+            "user_credentials",
+            "user_sessions",
+            "scan_station_devices",
+            "mail_server_credentials",
+        }
+        & MAINTENANCE_SELECT
+    )
 
 
 def test_the_migrated_relations_are_the_classified_ones(context: Context) -> None:
@@ -359,7 +367,7 @@ def test_the_migrated_relations_are_the_classified_ones(context: Context) -> Non
             ).scalars()
         )
     assert relations == set(TABLE_CLASSES)
-    assert len(relations) == 29
+    assert len(relations) == 30
 
 
 def _triggers(engine: Engine) -> dict[str, tuple[str, str, str, str]]:
@@ -528,6 +536,7 @@ def test_the_maintenance_role_reads_its_tables_only(context: Context) -> None:
         "user_credentials",
         "user_sessions",
         "scan_station_devices",
+        "mail_server_credentials",
         "audit_events",
         "work_orders",
     ):
@@ -613,13 +622,13 @@ def test_apply_grants_on_a_fresh_database_twice(
                     "application": context.roles.app,
                     "maintenance": context.roles.maintenance,
                 },
-                "tables": 29,
+                "tables": 30,
                 "sequences": 23,
                 "default_privileges_removed": 0,
                 "foreign_grantees": [],
             }
             assert result.stderr.startswith(
-                f"apply-grants: granted 29 tables to {context.roles.app} and"
+                f"apply-grants: granted 30 tables to {context.roles.app} and"
                 f" {context.roles.maintenance} at revision {_HEAD} ("
             )
             # AG-11: no URL, password or path.
@@ -1379,7 +1388,7 @@ def test_check_h_passes_through_the_cli(
     assert check["title"] == "Append-only guards and database-role privileges intact"
     assert check["examined"] == {
         "roles": 2,
-        "tables": 29,
+        "tables": 30,
         "sequences": 23,
         "triggers": 11,
         "guard_functions": 10,

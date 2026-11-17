@@ -460,6 +460,21 @@ class SignInState(StrEnum):
     LOCKED = "LOCKED"
 
 
+class MailSecurity(StrEnum):
+    """How PartFlow protects its connection to the outgoing mail server (Phase 17).
+
+    STARTTLS — a plain connection upgraded to TLS before anything is sent
+    (usually port 587); TLS — TLS from the first byte (usually port 465);
+    NONE — no encryption (usually port 25), only for a server that needs no
+    sign-in, since a user name and password would cross the network in
+    the clear.
+    """
+
+    STARTTLS = "STARTTLS"
+    TLS = "TLS"
+    NONE = "NONE"
+
+
 class StationDeviceState(StrEnum):
     """How a Scan Station device presents (Phase 14 slice 4; owner decision OD-P6).
 

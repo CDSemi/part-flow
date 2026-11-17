@@ -53,9 +53,10 @@ from alembic import command
 from app.application import roles as roles_service
 from app.application import users as users_service
 from app.core.config import get_settings
+from app.domain.enums import Permission
 from app.infrastructure import models
 from app.main import create_app
-from tests.auth_harness import admin_of, station_device_client
+from tests.auth_harness import admin_of, client_as, station_device_client
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _APP_DIR = _BACKEND_DIR / "app"
@@ -83,8 +84,9 @@ _USER_KEYS = {
     "updated_at",
 }
 # What a caller who may manage users and roles (the harness administrator)
-# sees: slice 12's shape plus the slice 1 sign-in state.
-_ADMIN_USER_KEYS = _USER_KEYS | {"sign_in_state"}
+# sees: slice 12's shape plus the slice 1 sign-in state and (Phase 17) the
+# email address.
+_ADMIN_USER_KEYS = _USER_KEYS | {"sign_in_state", "email"}
 
 _E_R1 = "Role name must not be empty."
 _E_R2 = "A role with this name already exists."
@@ -100,6 +102,10 @@ _E_U8 = "Choose a role for this user."
 _E_U9 = "User active status must be true or false."
 _E_R1_NUL = "Role name must not contain a NUL character."
 _E_U1_NUL = "Name must not contain a NUL character."
+_E_EMAIL = (
+    "Enter an email address such as name@example.com: no spaces, a domain with a dot after"
+    " the @, and at most 254 characters."
+)
 # One past the largest id PostgreSQL can bind to an ``integer`` key: it
 # names no row and must be answered as missing, never fail in the driver.
 _UNBINDABLE_ID = 2**31
@@ -571,6 +577,7 @@ def test_create_user_canonicalizes_and_audits(client: TestClient, db_engine: Eng
     assert created["role_name"] == "Manager"
     assert created["is_active"] is True
     assert created["avatar_updated_at"] is None
+    assert created["email"] is None
     assert _stored_user(db_engine, created["id"])["theme_preference"] is None
     rows = _audit_rows(db_engine, "User", created["id"])
     assert len(rows) == 1
@@ -581,11 +588,39 @@ def test_create_user_canonicalizes_and_audits(client: TestClient, db_engine: Eng
         "display_name": f"Jane Doe {suffix}",
         "role_id": manager["id"],
         "is_active": True,
+        "email": None,
     }
     assert rows[0].actor_reference is None
     assert _roles(client)["Manager"]["user_count"] == manager["user_count"] + 1
     listed = {user["id"]: user for user in _users(client)}
     assert listed[created["id"]] == created
+
+
+def test_only_user_administrators_see_email_addresses(client: TestClient) -> None:
+    """Phase 17: the address is answered to callers who may manage users only."""
+    role_id = _seeded_role_id(client, "Operator")
+    suffix = _suffix()
+    created = _ok(
+        admin_of(client).post(
+            "/api/users",
+            json={
+                "login_name": f"mail-{suffix}",
+                "display_name": f"Mail {suffix}",
+                "role_id": role_id,
+                "email": f" Mail.{suffix}@Example.com ",
+            },
+        ),
+        201,
+    )
+    assert created["email"] == f"Mail.{suffix}@example.com"
+    listed = {user["id"]: user for user in _users(client)}
+    assert listed[created["id"]]["email"] == f"Mail.{suffix}@example.com"
+    viewer = client_as(client, Permission.VIEW_PRODUCTION_DATA)
+    answered = viewer.get("/api/users")
+    assert answered.status_code == 200, answered.text
+    seen = {user["id"]: user for user in answered.json()}
+    assert set(seen[created["id"]]) == _USER_KEYS
+    assert "email" not in seen[created["id"]]
 
 
 def test_users_are_listed_by_display_name_then_id(client: TestClient) -> None:
@@ -745,6 +780,9 @@ def test_login_change_race_lost_at_flush_is_a_conflict_never_500(
         ),
         pytest.param({"password": "secret"}, None, id="password-field"),
         pytest.param({"theme_preference": "DARK"}, None, id="theme-field"),
+        pytest.param({"email": "jane@example"}, _E_EMAIL, id="email-without-dot"),
+        pytest.param({"email": "jane doe@example.com"}, _E_EMAIL, id="email-space"),
+        pytest.param({"email": 5}, None, id="email-number"),
     ],
 )
 def test_create_user_refusals_write_nothing(
@@ -784,6 +822,7 @@ def test_user_edits_are_audited_with_exact_snapshots(client: TestClient, db_engi
         "display_name": f"Jane {suffix}",
         "role_id": manager,
         "is_active": True,
+        "email": None,
     }
     steps: list[tuple[dict[str, Any], dict[str, Any]]] = [
         ({"display_name": f" Janet {suffix} "}, {"display_name": f"Janet {suffix}"}),
@@ -791,6 +830,9 @@ def test_user_edits_are_audited_with_exact_snapshots(client: TestClient, db_engi
         ({"role_id": operator}, {"role_id": operator}),
         ({"is_active": False}, {"is_active": False}),
         ({"is_active": True}, {"is_active": True}),
+        ({"email": f" Jane.{suffix}@Example.COM "}, {"email": f"Jane.{suffix}@example.com"}),
+        ({"email": f"jane.{suffix}@example.com"}, {"email": f"jane.{suffix}@example.com"}),
+        ({"email": "  "}, {"email": None}),
     ]
     for body, change in steps:
         before = dict(profile)
@@ -821,6 +863,8 @@ def test_user_no_ops_and_explicit_nulls_write_nothing(
         {"login_name": f" JDOE-{suffix} "},
         {"display_name": f" {user['display_name']} "},
         {"role_id": role_id, "is_active": True},
+        {"email": None},
+        {"email": " "},
         {},
     ):
         assert _ok(admin_of(client).patch(path, json=no_op))["login_name"] == f"jdoe-{suffix}"
@@ -833,6 +877,8 @@ def test_user_no_ops_and_explicit_nulls_write_nothing(
         ({"role_id": 999999}, "Role 999999 does not exist."),
         ({"display_name": "A\x00B"}, _E_U1_NUL),
         ({"role_id": _UNBINDABLE_ID}, f"Role {_UNBINDABLE_ID} does not exist."),
+        ({"email": "jane@"}, _E_EMAIL),
+        ({"email": "jäne@example.com"}, _E_EMAIL),
     ):
         _refused(admin_of(client).patch(path, json=body), 422, detail)
     _refused(admin_of(client).patch(path, json={"role_id": "1"}), 422)
@@ -1133,6 +1179,7 @@ def test_every_public_mutator_is_audited() -> None:
         for module in (users_service, roles_service)
     }
     assert public["users"] == {
+        "canonical_email",
         "canonical_login_name",
         "profile_snapshot",
         "list_users",

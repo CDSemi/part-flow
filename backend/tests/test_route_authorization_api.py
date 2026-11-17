@@ -696,6 +696,28 @@ _WRITES: list[_Write] = [
         "application_policy",
     ),
     _Write(
+        "mail-server-policy",
+        "PUT",
+        "/api/policies/mail-server",
+        _key(CSS),
+        _key(CSS),
+        lambda c: (
+            "/api/policies/mail-server",
+            {
+                "json": {
+                    "mail_host": None,
+                    "mail_port": _changed_policy_value(
+                        c, "/api/policies/mail-server", "mail_port", 25, 2525
+                    ),
+                    "mail_security": "STARTTLS",
+                    "mail_username": None,
+                    "mail_sender": None,
+                }
+            },
+        ),
+        "application_policy",
+    ),
+    _Write(
         "sign-in-policy",
         "PUT",
         "/api/policies/sign-in",
@@ -890,6 +912,28 @@ _MANAGEMENT_WRITES = {
 }
 
 
+# Permission routes that write nothing, so no audit row proves the call:
+# each has its own test below.
+_NON_WRITING_ROUTES = {("POST", "/api/policies/mail-server/test")}
+
+
+def test_the_test_message_needs_configure_system_settings(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Phase 17: sending a test message needs Configure system settings; it writes nothing."""
+    path, body = "/api/policies/mail-server/test", {"json": {"to": "ann@example.org"}}
+    lacking = client_as(client, *(key for key in ALL_PERMISSIONS if key is not CSS))
+    caller = client_as(client, CSS)
+    count = _audit_count(db_engine)
+    assert anonymous_client(client).post(path, **body).status_code == 401
+    _denied(lacking.post(path, **body), [CSS], _A2)
+    # Allowed: with no mail server stored the answer says so (409), never 401 or 403.
+    response = caller.post(path, **body)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"].startswith("No outgoing mail server is set up.")
+    assert _audit_count(db_engine) == count
+
+
 def test_the_write_table_covers_every_permission_route() -> None:
     """Every Administration write route has a row whose keys match the
     registry; together with the Management writes (MA-1) every write
@@ -902,7 +946,8 @@ def test_the_write_table_covers_every_permission_route() -> None:
     }
     administration = {(write.method, write.route) for write in _WRITES}
     assert not administration & _MANAGEMENT_WRITES
-    assert administration | _MANAGEMENT_WRITES == permission_routes
+    assert not administration & _NON_WRITING_ROUTES
+    assert administration | _MANAGEMENT_WRITES | _NON_WRITING_ROUTES == permission_routes
     for write in _WRITES:
         access = ROUTE_ACCESS[(write.method, write.route)]
         assert access.requires == write.static, write.name

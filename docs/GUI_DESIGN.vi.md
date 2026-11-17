@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `0e983ec` cộng các thay đổi chưa commit ngày 2026-11-16.
+> Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi chưa commit ngày 2026-11-16.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2627,14 +2627,22 @@ không phải xác nhận cho qua.
 - **Department display settings** được cấu hình **theo Department, không bao giờ toàn cục**: một bảng các Department
   với một editor cho thời gian rotation của Production Board (số giây cho mỗi dòng hiển thị 1–60, thời gian dừng tối
   thiểu mỗi trang 1–300 s; mặc định 3 và 6).
-- **Settings** chứa hai panel:
+- **Settings** chứa ba panel:
   - panel **Due Soon warning** sở hữu cấu hình đứng sau mọi due countdown được suy ra (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ
     dưới giá trị minimum), với các giá trị ban đầu 2 ngày, 15 % và 7 ngày. Đó là một policy toàn cục;
   - panel **User sign-in**, chỉ dành cho các application User và tách biệt khỏi **Worker sessions**: thời hạn đăng nhập của người dùng tính theo ngày hoặc không bao giờ (ban đầu 30 ngày), số lần đăng nhập thất bại trước khi khóa (10) và thời gian
     khóa (15 phút), và việc người dùng có phải thay mật khẩu do administrator đặt ở lần đăng nhập kế tiếp hay không (On). Nó được
     đọc bởi một người dùng đã đăng nhập (người khác thấy lời nhắc đăng nhập) và chỉ người dùng có role được cấu hình system settings mới
-    sửa được.
+    sửa được;
+  - panel **Outgoing mail server**: mail server mà PartFlow gửi email qua — một mã đăng nhập dùng một lần gửi cho
+    người dùng đã mất các cách đăng nhập khác. Nó hiển thị `Not set up`, hoặc host và port, connection security
+    (STARTTLS, SSL/TLS hoặc None), thông tin đăng nhập vào server (một user name, và có lưu mật khẩu hay không; mật
+    khẩu không bao giờ được hiển thị) và sender address. Người dùng có role được cấu hình system settings thiết lập,
+    sửa và gỡ nó, và gửi một test email tới một địa chỉ họ nhập, cho biết thư đã đi đâu hoặc lý do server từ chối.
+    Chọn một connection security sẽ chuyển một port còn ở giá trị thường dùng của security trước đó (587, 465, 25)
+    sang giá trị của security mới. Một ô mật khẩu để trống giữ nguyên mật khẩu đã lưu; `Remove the stored password`
+    xóa nó. Đăng nhập vào server qua kết nối không mã hóa (None) bị từ chối.
 
   Bên dưới chúng, **Other settings** hiển thị các general setting ứng viên thành bản xem trước bị vô hiệu hóa (xem
   *Cấu hình được lưu và các section chưa khả dụng*).
@@ -2678,9 +2686,9 @@ chạy với các trạng thái loading, error và retry tường minh; các l�
 ID mode: Disabled, Fixed Worker kèm Fixed Worker của nó, hoặc Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, Department display settings, các panel Due
-Soon warning và User sign-in của section Settings, retention period của History archival & purge, chính sách Backups và
-statement Machine assignment cũng là cấu hình được lưu. Users và Roles & permissions nêu rằng người dùng đăng nhập bằng
-login name và mật khẩu, và những permission nào đã được kiểm tra cho đến nay.
+Soon warning, User sign-in và Outgoing mail server của section Settings, retention period của History archival & purge,
+chính sách Backups và statement Machine assignment cũng là cấu hình được lưu. Users và Roles & permissions nêu rằng
+người dùng đăng nhập bằng login name và mật khẩu, và những permission nào đã được kiểm tra cho đến nay.
 
 Mọi thứ khác tự trình bày một cách trung thực: không gì chưa khả dụng được làm cho trông như đang hoạt động.
 
@@ -2772,11 +2780,15 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
 - **Editor Workers.** Nó lưu badge bằng chữ in hoa và hiển thị preview `Saved as:` khi giá trị đó khác với những gì đã
   được gõ hoặc quét. Nó upload một avatar (PNG, JPEG hoặc WebP; ảnh lớn được resize trước khi upload) hoặc xóa avatar,
   hiển thị chữ cái đầu khi không có avatar, và deactivate một Worker mà không có thao tác xóa nào.
-- **Editor Users.** Nó lưu tên, một login name bằng chữ thường (kèm preview `Saved as:`), đúng một role và một avatar tùy
-  chọn, và deactivate một người dùng mà không có thao tác xóa nào. Section nêu rằng người dùng đăng nhập bằng login name và mật khẩu,
-  rằng `Set password…` cấp cho một người dùng một mật khẩu, và những permission nào đã được kiểm tra cho đến nay. Với quản trị viên
-  người dùng, bảng Users còn có cột `Sign-in` hiển thị trạng thái đăng nhập của từng người dùng, và `Set password…` đặt một
-  mật khẩu tạm, kết thúc các phiên đăng nhập của người dùng và xóa khóa.
+- **Editor Users.** Nó lưu tên, một login name bằng chữ thường (kèm preview `Saved as:`), một địa chỉ email tùy chọn
+  (kèm preview `Saved as:` khi domain của nó được chuyển sang chữ thường), đúng một role và một avatar tùy chọn, và
+  deactivate một người dùng mà không có thao tác xóa nào. Địa chỉ email là nơi PartFlow gửi mã đăng nhập dùng một lần;
+  một quản trị viên người dùng không được quản lý correction permissions thấy nó dưới dạng văn bản với người dùng có
+  role đang giữ chúng, giống role và trạng thái của người dùng đó. Section nêu rằng người dùng đăng nhập bằng login
+  name và mật khẩu, rằng `Set password…` cấp cho một người dùng một mật khẩu, và những permission nào đã được kiểm tra
+  cho đến nay. Với quản trị viên người dùng, bảng Users còn có cột `Email` và cột `Sign-in` hiển thị trạng thái đăng
+  nhập của từng người dùng, và `Set password…` đặt một mật khẩu tạm, kết thúc các phiên đăng nhập của người dùng và
+  xóa khóa.
 - **Roles & permissions** liệt kê các role có tên (ban đầu là Administrator, Manager, Operator và Super User, với đúng
   các capability mà PROJECT_PROFILE §20 liệt kê là quyền cấp ban đầu) và sửa tên của từng role cùng các permission của
   nó, nhóm thành Administration, Production master data, Work Orders, priority and reports, và Scan Station. Bốn
@@ -3980,7 +3992,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-16 | uncommitted | §9: Administration → Backups đặt khoảng thời gian backup scheduled và số backup hourly, daily và weekly được giữ. |
+| 2026-11-16 | uncommitted | §9: Settings → Outgoing mail server, kèm test email, và một địa chỉ email tùy chọn trong editor Users. |
+| 2026-11-16 | c1f042b | §9: Administration → Backups đặt khoảng thời gian backup scheduled và số backup hourly, daily và weekly được giữ. |
 | 2026-11-16 | 0e983ec | §9: Scan behavior và Other settings hiển thị các setting ứng viên thành bản xem trước bị vô hiệu hóa, gắn nhãn `Not available yet`. |
 | 2026-11-16 | a04179f | §11.3: Add to Hot list trong phần đầu của New Work Order. |
 | 2026-11-15 | a3a7e87 | §7.2 mục 7 và §11.6: một entry phân bổ của trạm Stockroom nêu tên Worker mà trạm đó đã xác định. |

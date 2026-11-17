@@ -30,6 +30,11 @@ Rules owned here (owner decision OD-8; slice 12 decisions):
   pre-check only gives the friendly message naming the holder. It is an
   identifier, not a credential.
 - The display name is required, not unique.
+- The optional email address (Phase 17) goes through the one domain
+  rule (``app.domain.email_address``); an empty value clears it. It is
+  not unique and is part of the audited profile. Changing it for a User
+  whose role holds a protected key also needs
+  ``MANAGE_CORRECTION_PERMISSIONS``, as setting their password does.
 - Each User holds exactly one existing role.
 - Users are deactivated, never deleted: no delete service exists.
 - The optional avatar is stored on the row (CD1/OD-10) after the shared
@@ -42,7 +47,7 @@ Rules owned here (owner decision OD-8; slice 12 decisions):
   SAME transaction (entity ``User``; ``actor_user_id`` is the signed-in
   User since Phase 14 slice 2; ``actor_reference`` is legacy and stays
   NULL). Profile rows snapshot ``{login_name, display_name, role_id,
-  is_active}``; avatar rows snapshot ``{"avatar": digest-or-null}`` —
+  is_active, email}``; avatar rows snapshot ``{"avatar": digest-or-null}`` —
   never bytes. Rejected writes and no-ops append nothing.
 
 Each mutating service commits its own transaction and returns a
@@ -73,6 +78,7 @@ from app.application.common import (
 )
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.user_access import Principal
+from app.domain.email_address import InvalidEmailAddressError, normalize_email_address
 from app.domain.enums import AuditEntityType, AuditEventType, Permission, UserSessionEndReason
 from app.domain.user_login import (
     EMPTY_LOGIN_NAME_MESSAGE,
@@ -111,6 +117,8 @@ class UserView(NamedTuple):
     role_id: int
     role_name: str
     is_active: bool
+    # The canonical email address; None = none.
+    email: str | None
     # The avatar's cache version; None = no avatar.
     avatar_updated_at: datetime.datetime | None
     created_at: datetime.datetime
@@ -124,7 +132,26 @@ def profile_snapshot(user: User) -> dict[str, Any]:
         "display_name": user.display_name,
         "role_id": user.role_id,
         "is_active": user.is_active,
+        "email": user.email,
     }
+
+
+def canonical_email(value: object) -> str | None:
+    """The canonical address of ``value``; None or blank = no address.
+
+    Thin translation of the domain rule (``app.domain.email_address``) into
+    the application error vocabulary.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidInputError("Email address must be text.")
+    if not value.strip():
+        return None
+    try:
+        return normalize_email_address(value)
+    except InvalidEmailAddressError as exc:
+        raise InvalidInputError(str(exc)) from exc
 
 
 def canonical_login_name(value: object) -> str:
@@ -218,6 +245,7 @@ def user_view(session: Session, user: User) -> UserView:
         role_id=user.role_id,
         role_name=role.name,
         is_active=user.is_active,
+        email=user.email,
         avatar_updated_at=user.avatar_image_updated_at,
         created_at=user.created_at,
         updated_at=user.updated_at,
@@ -239,6 +267,7 @@ def list_users(session: Session) -> list[UserView]:
             role_id=user.role_id,
             role_name=role_name,
             is_active=user.is_active,
+            email=user.email,
             avatar_updated_at=user.avatar_image_updated_at,
             created_at=user.created_at,
             updated_at=user.updated_at,
@@ -253,16 +282,24 @@ def create_user(
     login_name: object,
     display_name: object,
     role_id: object,
+    email: object = None,
     actor: Principal,
 ) -> UserView:
     acting = _act(session, actor)
     clean_name = required_text(display_name, "Name")
     login = canonical_login_name(login_name)
+    clean_email = canonical_email(email)
     role = require_role(session, role_id)
     if user_access.role_holds_protected(session, role.id):
         _guard(session, acting, authorization.PROTECTED_ROLE_MESSAGE)
     reject_duplicate_login(session, login)
-    user = User(login_name=login, display_name=clean_name, role_id=role.id, is_active=True)
+    user = User(
+        login_name=login,
+        display_name=clean_name,
+        role_id=role.id,
+        email=clean_email,
+        is_active=True,
+    )
     session.add(user)
     # The id is the audit entity id; a login race lost here surfaces as
     # the same conflict as one lost at COMMIT.
@@ -289,12 +326,14 @@ def update_user(
     display_name: object = UNSET,
     role_id: object = UNSET,
     is_active: object = UNSET,
+    email: object = UNSET,
     actor: Principal,
 ) -> UserView:
     """Apply the provided profile fields; a no-op writes and audits nothing.
 
-    A role change touching a protected role, or an activity change of a
-    User in one, also needs ``MANAGE_CORRECTION_PERMISSIONS`` (checked
+    A role change touching a protected role, or an activity or email
+    address change of a User in one, also needs
+    ``MANAGE_CORRECTION_PERMISSIONS`` (checked
     after every read the change needs, before any write). A role change
     or deactivation counts the management keys' holders before the first
     assignment and again after the flush; losing the last holder of one
@@ -328,11 +367,15 @@ def update_user(
         active = required_flag(is_active, "User active status")
         if active != user.is_active:
             changes["is_active"] = active
+    if not isinstance(email, UnsetType):
+        clean_email = canonical_email(email)
+        if clean_email != user.email:
+            changes["email"] = clean_email
     if not changes:
         return user_view(session, user)
     if "role_id" in changes:
         require_role(session, changes["role_id"])
-    if ("role_id" in changes or "is_active" in changes) and (
+    if ("role_id" in changes or "is_active" in changes or "email" in changes) and (
         user_access.role_holds_protected(session, user.role_id)
         or ("role_id" in changes and user_access.role_holds_protected(session, changes["role_id"]))
     ):

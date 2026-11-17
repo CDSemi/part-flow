@@ -80,6 +80,8 @@ interface UserRow {
   /** How the user can sign in (default: no password). */
   sign_in_state?:
     'NO_PASSWORD' | 'TEMPORARY_PASSWORD' | 'PASSWORD_SET' | 'LOCKED';
+  /** The optional email address (Phase 17; default: none). */
+  email?: string | null;
 }
 
 /** The fake Roles and Users routes a test can make fail. */
@@ -377,6 +379,29 @@ let signInPolicy: SignInPolicyRow;
 /** A refusal (or no answer) of every `/api/policies/sign-in` call. */
 let signInPolicyFailure: FakeFailure | null;
 
+interface MailServerRow {
+  mail_host: string | null;
+  mail_port: number;
+  mail_security: string;
+  mail_username: string | null;
+  mail_password: string | null;
+  mail_sender: string | null;
+}
+
+const NO_MAIL_SERVER: MailServerRow = {
+  mail_host: null,
+  mail_port: 587,
+  mail_security: 'STARTTLS',
+  mail_username: null,
+  mail_password: null,
+  mail_sender: null,
+};
+let mailServer: MailServerRow;
+/** A refusal (or no answer) of every `/api/policies/mail-server*` call. */
+let mailServerFailure: FakeFailure | null;
+/** The addresses the fake test-message route "sent" to, oldest first. */
+let mailSent: string[];
+
 const E_B1 = 'Seconds per displayed row must be a whole number from 1 to 60.';
 const E_B2 =
   'The minimum page dwell must be a whole number of seconds from 1 to 300.';
@@ -439,6 +464,9 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
   if (url === '/api/policies/sign-in') {
     return handleSignInPolicy(method, body);
+  }
+  if (url.startsWith('/api/policies/mail-server')) {
+    return handleMailServer(url, method, body);
   }
   if (url === '/api/workers' || url.startsWith('/api/workers/')) {
     return handleWorkers(url, method, body);
@@ -1090,12 +1118,12 @@ async function handleRoles(
 /** The server's two user response shapes: `sign_in_state` only for a
  * caller who may manage users and roles, absent for everyone else. */
 function userWire(user: UserRow) {
-  const { sign_in_state, ...profile } = user;
+  const { sign_in_state, email, ...profile } = user;
   return {
     ...stamp(profile),
     role_name: state.roles.find((r) => r.id === user.role_id)!.name,
     ...(hasPermission(session.user, 'MANAGE_USERS_AND_ROLES')
-      ? { sign_in_state: sign_in_state ?? 'NO_PASSWORD' }
+      ? { sign_in_state: sign_in_state ?? 'NO_PASSWORD', email: email ?? null }
       : {}),
   };
 }
@@ -1126,6 +1154,53 @@ function handleSignInPolicy(
     signInPolicy = { ...signInPolicy, ...body };
   }
   return json({ ...signInPolicy, updated_at: T0 });
+}
+
+/** `GET`/`PUT /api/policies/mail-server` and `POST …/test` (Phase 17). */
+function handleMailServer(
+  url: string,
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  const failure = routeFailure(mailServerFailure ?? undefined);
+  if (failure) return failure;
+  if (url.endsWith('/test') && method === 'POST') {
+    if (mailServer.mail_host === null) {
+      return json(
+        {
+          detail:
+            'No outgoing mail server is set up. An administrator sets one up in Administration → Settings → Outgoing mail server.',
+        },
+        409,
+      );
+    }
+    const to = String(body.to).trim();
+    mailSent.push(to);
+    return json({ sent_to: to });
+  }
+  if (method === 'PUT') {
+    const host = body.mail_host === null ? null : String(body.mail_host);
+    mailServer = {
+      mail_host: host,
+      mail_port: Number(body.mail_port),
+      mail_security: String(body.mail_security),
+      mail_username:
+        body.mail_username === null ? null : String(body.mail_username),
+      mail_password:
+        'mail_password' in body
+          ? (body.mail_password as string | null)
+          : body.mail_username === null
+            ? null
+            : mailServer.mail_password,
+      mail_sender: body.mail_sender === null ? null : String(body.mail_sender),
+    };
+  }
+  const { mail_password, ...answered } = mailServer;
+  return json({
+    ...answered,
+    mail_password_set: mail_password !== null,
+    updated_at: T0,
+  });
 }
 
 function duplicateLogin(login: string, exceptId?: number): Response | null {
@@ -1168,6 +1243,7 @@ async function handleUsers(
       role_id: Number(body.role_id),
       is_active: true,
       avatar_updated_at: null,
+      email: typeof body.email === 'string' ? body.email : null,
     };
     state.users.push(user);
     return json(userWire(user), 201);
@@ -1191,6 +1267,9 @@ async function handleUsers(
     }
     if (typeof body.role_id === 'number') user.role_id = body.role_id;
     if (typeof body.is_active === 'boolean') user.is_active = body.is_active;
+    if ('email' in body) {
+      user.email = typeof body.email === 'string' ? body.email : null;
+    }
     return json(userWire(user));
   }
   if (match[2] === '/password' && method === 'PUT') {
@@ -1234,6 +1313,9 @@ beforeEach(() => {
   roleHold = null;
   signInPolicy = { ...DEFAULT_SIGN_IN_POLICY };
   signInPolicyFailure = null;
+  mailServer = { ...NO_MAIL_SERVER };
+  mailServerFailure = null;
+  mailSent = [];
   userHold = null;
   deviceFailure = null;
   enrollmentFailure = null;
@@ -5340,7 +5422,7 @@ test('FA-U6: user administrators see every sign-in state and Set password… on 
 
   expect(
     screen.getAllByRole('columnheader').map((th) => th.textContent),
-  ).toEqual(['User', 'Login name', 'Role', 'Sign-in', 'Status', '']);
+  ).toEqual(['User', 'Login name', 'Email', 'Role', 'Sign-in', 'Status', '']);
   expect(signInCell('Jane Doe')).toBe('Password set');
   expect(signInCell('Tuan Lam')).toBe('Temporary password');
   expect(signInCell('Mai Nguyen')).toBe('Locked');
@@ -5525,8 +5607,13 @@ test('FA-U7: Set password… closes without a request, ignores closing in flight
 /** The User sign-in panel's values: the last read-only value list of
  * Settings (a view-only Due Soon panel lists its values first). */
 function signInPolicyRows(): Record<string, string> {
-  const lists = document.querySelectorAll('.admin-configpreview');
-  return readOnlyRows(lists[lists.length - 1]);
+  // The User sign-in panel's list (the mail server panel follows it).
+  const list = Array.from(
+    document.querySelectorAll('.admin-configpreview'),
+  ).find((candidate) =>
+    candidate.textContent?.includes('User sign-ins expire'),
+  );
+  return list ? readOnlyRows(list) : {};
 }
 
 function signInPolicyReads(): number {
@@ -5572,10 +5659,20 @@ test('FA-S2: signed in without the permission, the settings read without an edit
   expect(
     screen.queryByRole('button', { name: 'Edit user sign-in settings…' }),
   ).toBeNull();
-  // The panels come in order, Other settings stays last.
+  // The panels come in order, Other settings stays last; the mail server
+  // reads without an edit or test control too.
   expect(
     screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
-  ).toEqual(['Due Soon warning', 'User sign-in', 'Other settings']);
+  ).toEqual([
+    'Due Soon warning',
+    'User sign-in',
+    'Outgoing mail server',
+    'Other settings',
+  ]);
+  expect(
+    screen.queryByRole('button', { name: /outgoing mail server…$/ }),
+  ).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Send test email…' })).toBeNull();
   // User sign-in never says "sessions" (those are Worker Sessions).
   expect(document.querySelector('.admin-config')?.textContent).not.toMatch(
     /session/i,
@@ -6247,7 +6344,7 @@ test('FA-4: a user administrator without Manage correction permissions renames p
   expect(within(dialog).queryByRole('checkbox', { name: 'Active' })).toBeNull();
   expect(
     Array.from(dialog.querySelectorAll('.idrow'), (row) => row.textContent),
-  ).toEqual(['RoleManager', 'StatusActive']);
+  ).toEqual(['EmailNone', 'RoleManager', 'StatusActive']);
   fireEvent.change(within(dialog).getByLabelText('Name'), {
     target: { value: 'Jane D' },
   });
@@ -6749,3 +6846,311 @@ test.each(GUARD_CASES)(
     expect(writes).toEqual([]);
   },
 );
+
+// ---------------------------------------------------------------------------
+// Phase 17: the outgoing mail server and the users' email addresses
+// ---------------------------------------------------------------------------
+
+function mailServerRows(): Record<string, string> {
+  const list = Array.from(
+    document.querySelectorAll('.admin-configpreview'),
+  ).find((candidate) => candidate.textContent?.includes('Mail server'));
+  return list ? readOnlyRows(list) : {};
+}
+
+async function openMailServer(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  renderAdmin(status);
+  openSection('Settings');
+  await screen.findByRole('heading', { name: 'Outgoing mail server' });
+  await waitFor(() => expect(mailServerRows()['Mail server']).toBeDefined());
+}
+
+const STORED_MAIL_SERVER: MailServerRow = {
+  mail_host: 'smtp.example.com',
+  mail_port: 587,
+  mail_security: 'STARTTLS',
+  mail_username: 'partflow',
+  mail_password: 'stored-secret',
+  mail_sender: 'partflow@example.com',
+};
+
+test('FA-MS1: a settings administrator sets up the mail server; the password is never shown', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openMailServer();
+  expect(mailServerRows()).toEqual({ 'Mail server': 'Not set up' });
+  expect(screen.queryByRole('button', { name: 'Send test email…' })).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Set up the outgoing mail server…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Outgoing mail server' });
+  fireEvent.change(within(dialog).getByLabelText('Mail server'), {
+    target: { value: ' SMTP.Example.com ' },
+  });
+  // A port still at the old security's usual value follows the new one.
+  fireEvent.change(within(dialog).getByLabelText('Connection security'), {
+    target: { value: 'TLS' },
+  });
+  expect(within(dialog).getByLabelText('Port')).toHaveValue(465);
+  fireEvent.change(within(dialog).getByLabelText(/^User name/), {
+    target: { value: ' partflow ' },
+  });
+  fireEvent.change(within(dialog).getByLabelText(/^Password/), {
+    target: { value: 'app-password' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Sender address'), {
+    target: { value: 'PartFlow@Example.COM' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Outgoing mail server' }),
+    ).toBeNull(),
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/mail-server',
+      body: {
+        mail_host: 'smtp.example.com',
+        mail_port: 465,
+        mail_security: 'TLS',
+        mail_username: 'partflow',
+        mail_sender: 'PartFlow@example.com',
+        mail_password: 'app-password',
+      },
+    },
+  ]);
+  await waitFor(() =>
+    expect(mailServerRows()).toEqual({
+      'Mail server': 'smtp.example.com, port 465',
+      'Connection security': 'SSL/TLS',
+      'Sign-in': 'partflow, password stored',
+      'Sender address': 'PartFlow@example.com',
+    }),
+  );
+  expect(document.body.textContent).not.toContain('app-password');
+});
+
+test('FA-MS2: an edit keeps, removes or replaces the stored password; Remove mail server clears it all', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  mailServer = { ...STORED_MAIL_SERVER };
+  await openMailServer();
+  const open = async () => {
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit outgoing mail server…' }),
+    );
+    return screen.getByRole('dialog', { name: 'Outgoing mail server' });
+  };
+  const closed = () =>
+    waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'Outgoing mail server' }),
+      ).toBeNull(),
+    );
+
+  // Left empty, the password is not sent: the server keeps it.
+  let dialog = await open();
+  expect(within(dialog).getByLabelText(/^Password/)).toHaveAttribute(
+    'placeholder',
+    'Stored — type a new one to replace it',
+  );
+  fireEvent.change(within(dialog).getByLabelText('Port'), {
+    target: { value: '2525' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await closed();
+  expect(writes.at(-1)?.body).toEqual({
+    mail_host: 'smtp.example.com',
+    mail_port: 2525,
+    mail_security: 'STARTTLS',
+    mail_username: 'partflow',
+    mail_sender: 'partflow@example.com',
+  });
+
+  // Ticked, the stored password is removed (null).
+  dialog = await open();
+  fireEvent.click(
+    within(dialog).getByRole('checkbox', {
+      name: 'Remove the stored password',
+    }),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await closed();
+  expect(writes.at(-1)?.body).toMatchObject({ mail_password: null });
+  await waitFor(() =>
+    expect(mailServerRows()['Sign-in']).toBe('partflow, no password'),
+  );
+
+  // Remove mail server sends nothing but the kept port and security.
+  dialog = await open();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove mail server' }),
+  );
+  await closed();
+  expect(writes.at(-1)?.body).toEqual({
+    mail_host: null,
+    mail_port: 2525,
+    mail_security: 'STARTTLS',
+    mail_username: null,
+    mail_sender: null,
+    mail_password: null,
+  });
+  await waitFor(() =>
+    expect(mailServerRows()).toEqual({ 'Mail server': 'Not set up' }),
+  );
+});
+
+test('FA-MS3: invalid entries are refused in place and nothing is sent', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openMailServer();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Set up the outgoing mail server…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Outgoing mail server' });
+  fireEvent.change(within(dialog).getByLabelText('Mail server'), {
+    target: { value: 'smtp example.com' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Port'), {
+    target: { value: '70000' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Connection security'), {
+    target: { value: 'NONE' },
+  });
+  fireEvent.change(within(dialog).getByLabelText(/^User name/), {
+    target: { value: 'partflow' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Sender address'), {
+    target: { value: 'partflow' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  const alerts = within(dialog)
+    .getAllByRole('alert')
+    .map((alert) => alert.textContent);
+  expect(alerts).toEqual([
+    'Enter the mail server as a host name or IP address, such as smtp.example.com, without spaces or a port.',
+    'The port must be a whole number from 1 to 65535.',
+    'Signing in to the mail server needs STARTTLS or SSL/TLS, so the password never crosses the network unencrypted.',
+    'Enter an email address such as name@example.com: no spaces, a domain with a dot after the @, and at most 254 characters.',
+  ]);
+  expect(writes).toEqual([]);
+});
+
+test('FA-MS4: Send test email… sends to the typed address and says where it went', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  mailServer = { ...STORED_MAIL_SERVER };
+  await openMailServer();
+  fireEvent.click(screen.getByRole('button', { name: 'Send test email…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Send a test email' });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Send test email' }),
+  );
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Enter an email address such as name@example.com',
+  );
+  expect(writes).toEqual([]);
+
+  fireEvent.change(within(dialog).getByLabelText('Send to'), {
+    target: { value: ' Ann@Example.ORG ' },
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Send test email' }),
+  );
+  expect(
+    await within(dialog).findByText(
+      'Sent to Ann@example.org. If it does not arrive within a few minutes, check the spam folder.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/policies/mail-server/test',
+      body: { to: 'Ann@example.org' },
+    },
+  ]);
+  expect(mailSent).toEqual(['Ann@example.org']);
+});
+
+test('FA-MS5: offline, the mail server reads but neither edits nor sends', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  mailServer = { ...STORED_MAIL_SERVER };
+  await openMailServer('unavailable');
+  expect(
+    screen.getByRole('button', { name: 'Edit outgoing mail server…' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Send test email…' }),
+  ).toBeDisabled();
+});
+
+test('FA-U8: user administrators add, see and clear a user email address', async () => {
+  signInUserAdministrator();
+  seedJane({ email: 'jane@example.com' });
+  await openUsers();
+  const janeRow = screen
+    .getByRole('button', { name: 'Edit Jane Doe' })
+    .closest('tr') as HTMLElement;
+  expect(within(janeRow).getByText('jane@example.com')).toHaveAttribute(
+    'data-label',
+    'Email',
+  );
+
+  // A new user: an invalid address is refused in place; the canonical
+  // address is previewed and sent.
+  fireEvent.click(screen.getByRole('button', { name: '+ New user' }));
+  let dialog = screen.getByRole('dialog', { name: 'New user' });
+  fillUser(dialog, 'Tuan Lam', 'tlam');
+  fireEvent.change(within(dialog).getByLabelText(/^Email/), {
+    target: { value: 'tuan@' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Role'), {
+    target: { value: String(MANAGER_ID) },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add user' }));
+  expect(
+    within(dialog).getByText(
+      'Enter an email address such as name@example.com: no spaces, a domain with a dot after the @, and at most 254 characters.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([]);
+  fireEvent.change(within(dialog).getByLabelText(/^Email/), {
+    target: { value: 'Tuan@Example.COM' },
+  });
+  expect(within(dialog).getByText('Tuan@example.com')).toHaveClass('mono');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add user' }));
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'New user' })).toBeNull(),
+  );
+  expect(writes.at(-1)).toEqual({
+    method: 'POST',
+    url: '/api/users',
+    body: {
+      login_name: 'tlam',
+      display_name: 'Tuan Lam',
+      role_id: MANAGER_ID,
+      email: 'Tuan@example.com',
+    },
+  });
+
+  // Clearing an address sends null.
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Jane Doe' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit user' });
+  expect(within(dialog).getByLabelText(/^Email/)).toHaveValue(
+    'jane@example.com',
+  );
+  fireEvent.change(within(dialog).getByLabelText(/^Email/), {
+    target: { value: '  ' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'Edit user' })).toBeNull(),
+  );
+  expect(writes.at(-1)).toEqual({
+    method: 'PATCH',
+    url: '/api/users/50',
+    body: { email: null },
+  });
+});

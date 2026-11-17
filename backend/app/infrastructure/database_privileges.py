@@ -52,6 +52,7 @@ TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
     "machine_asset_tag_config": TableClass.ORDINARY,
     "machine_lifecycle_events": TableClass.APPEND_ONLY,
     "machines": TableClass.ORDINARY,
+    "mail_server_credentials": TableClass.ORDINARY,
     "operations": TableClass.ORDINARY,
     "part_movements": TableClass.APPEND_ONLY,
     "part_numbers": TableClass.ORDINARY,

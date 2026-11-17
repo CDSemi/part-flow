@@ -2601,7 +2601,7 @@ confirmed through.
 - **Department display settings** are configured **per Department, never globally**: a table of Departments with an
   editor for the Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; defaults
   3 and 6).
-- **Settings** hosts two panels:
+- **Settings** hosts three panels:
   - the **Due Soon warning** panel owns the configuration behind every derived due countdown (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) and **Maximum warning days** (0–365, never below
     the minimum), with the initial values 2 days, 15 % and 7 days. It is one global policy;
@@ -2609,7 +2609,15 @@ confirmed through.
     expiry in days or never (initially 30 days), the number of failed sign-ins before a lock (10) and the lock duration
     (15 minutes), and whether users must replace an administrator-set password at their next sign-in (On). It is read
     by a signed-in user (anyone else sees a prompt to sign in) and editable only by users whose role may configure
-    system settings.
+    system settings;
+  - the **Outgoing mail server** panel: the mail server PartFlow sends email through — a one-time sign-in code to a
+    user who has lost their other ways to sign in. It shows `Not set up`, or the host and port, the connection security
+    (STARTTLS, SSL/TLS or None), the sign-in to the server (a user name, and whether a password is stored; the
+    password is never shown) and the sender address. Users whose role may configure system settings set it up, edit it
+    and remove it, and send a test email to an address they type, which says where it went or the server's reason for
+    refusing it. Choosing a connection security moves a port still at the previous security's usual value (587, 465,
+    25) to the new one. A password field left empty keeps the stored password; `Remove the stored password` clears it.
+    Signing in to the server over an unencrypted (None) connection is refused.
 
   Below them, **Other settings** shows the candidate general settings as disabled previews (see *Persisted
   configuration and sections not available yet*).
@@ -2653,7 +2661,8 @@ write the live environment with explicit loading, error and retry states; server
 editor configure the Worker ID mode: Disabled, Fixed Worker with its Fixed Worker, or Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, the Department display settings, the
-Settings section's Due Soon warning and User sign-in panels, the History archival & purge retention period, the
+Settings section's Due Soon warning, User sign-in and Outgoing mail server panels, the History archival & purge
+retention period, the
 Backups policy and the Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users sign
 in with a login name and password and which permissions are checked so far.
 
@@ -2746,11 +2755,14 @@ entity (§4.12, PROJECT_PROFILE §8.13).
 - **Workers editor.** It saves the badge in capital letters and shows a `Saved as:` preview when that differs from what
   was typed or scanned. It uploads an avatar (PNG, JPEG or WebP; a large image is resized before upload) or removes it,
   shows initials when there is no avatar, and deactivates a Worker without any delete.
-- **Users editor.** It saves the name, a login name in small letters (with a `Saved as:` preview), exactly one role and
-  an optional avatar, and deactivates a user without any delete. The section states that users sign in with a login
-  name and password, that `Set password…` gives a user a password, and which permissions are checked so far. For user
-  administrators the Users table also has a `Sign-in` column showing each user's sign-in state, and `Set password…` sets
-  a temporary password, ends the user's sign-ins and clears a lock.
+- **Users editor.** It saves the name, a login name in small letters (with a `Saved as:` preview), an optional email
+  address (with a `Saved as:` preview when its domain is lowercased), exactly one role and an optional avatar, and
+  deactivates a user without any delete. The email address is where PartFlow sends a one-time sign-in code; a user
+  administrator who may not manage correction permissions sees it as text for a user whose role holds them, like that
+  user's role and status. The section states that users sign in with a login name and password, that `Set password…`
+  gives a user a password, and which permissions are checked so far. For user administrators the Users table also has
+  an `Email` column and a `Sign-in` column showing each user's sign-in state, and `Set password…` sets a temporary
+  password, ends the user's sign-ins and clears a lock.
 - **Roles & permissions** lists named roles (initially Administrator, Manager, Operator and Super User, with exactly the
   capabilities PROJECT_PROFILE §20 lists as initial grants) and edits each role's name and its permissions, grouped as
   Administration, Production master data, Work Orders, priority and reports, and Scan Station. The four correction
@@ -3935,7 +3947,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-16 | uncommitted | §9: Administration → Backups sets the scheduled backup interval and the hourly, daily and weekly backups kept. |
+| 2026-11-16 | uncommitted | §9: Settings → Outgoing mail server, with a test email, and an optional email address in the Users editor. |
+| 2026-11-16 | c1f042b | §9: Administration → Backups sets the scheduled backup interval and the hourly, daily and weekly backups kept. |
 | 2026-11-16 | 0e983ec | §9: Scan behavior and Other settings show their candidate settings as disabled previews tagged `Not available yet`. |
 | 2026-11-16 | a04179f | §11.3: Add to Hot list in the New Work Order header. |
 | 2026-11-15 | a3a7e87 | §7.2 item 7 and §11.6: a Stockroom station allocation entry names the Worker its station identified. |

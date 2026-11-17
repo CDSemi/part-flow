@@ -368,3 +368,95 @@ export async function updateSignInPolicy(
   });
   return toSignInPolicy(wire);
 }
+
+/** How PartFlow protects its connection to the outgoing mail server. */
+export const MAIL_SECURITIES = ['STARTTLS', 'TLS', 'NONE'] as const;
+
+export type MailSecurity = (typeof MAIL_SECURITIES)[number];
+
+export interface MailServerPolicy {
+  /** The server's host name or IP address; null = no mail server. */
+  host: string | null;
+  port: number;
+  security: MailSecurity;
+  /** The user name of the sign-in to the server; null = no sign-in. */
+  username: string | null;
+  /** Whether a password is stored (the password is never answered). */
+  passwordSet: boolean;
+  /** The address PartFlow sends from; null exactly when there is no host. */
+  sender: string | null;
+}
+
+interface MailServerPolicyWire {
+  mail_host: string | null;
+  mail_port: number;
+  mail_security: string;
+  mail_username: string | null;
+  mail_password_set: boolean;
+  mail_sender: string | null;
+  updated_at: string;
+}
+
+const MAIL_SERVER_POLICY_PATH = '/api/policies/mail-server';
+const KNOWN_MAIL_SECURITIES: ReadonlySet<string> = new Set(MAIL_SECURITIES);
+
+function toMailServerPolicy(wire: MailServerPolicyWire): MailServerPolicy {
+  if (!KNOWN_MAIL_SECURITIES.has(wire.mail_security)) {
+    throw new Error(
+      `Unknown mail connection security from the server: ${wire.mail_security}`,
+    );
+  }
+  return {
+    host: wire.mail_host,
+    port: wire.mail_port,
+    security: wire.mail_security as MailSecurity,
+    username: wire.mail_username,
+    passwordSet: wire.mail_password_set,
+    sender: wire.mail_sender,
+  };
+}
+
+/** The outgoing mail server (Administration → Settings). */
+export async function getMailServerPolicy(): Promise<MailServerPolicy> {
+  const wire = await apiRequest<MailServerPolicyWire>(MAIL_SERVER_POLICY_PATH);
+  return toMailServerPolicy(wire);
+}
+
+/**
+ * Replace the outgoing mail server. `password`: left out (undefined) keeps
+ * the stored password, null clears it, a string replaces it. An unchanged
+ * server is a server no-op; saving sends nothing.
+ */
+export async function updateMailServerPolicy(server: {
+  host: string | null;
+  port: number;
+  security: MailSecurity;
+  username: string | null;
+  sender: string | null;
+  password?: string | null;
+}): Promise<MailServerPolicy> {
+  const wire = await apiRequest<MailServerPolicyWire>(MAIL_SERVER_POLICY_PATH, {
+    method: 'PUT',
+    body: {
+      mail_host: server.host,
+      mail_port: server.port,
+      mail_security: server.security,
+      mail_username: server.username,
+      mail_sender: server.sender,
+      ...(server.password !== undefined
+        ? { mail_password: server.password }
+        : {}),
+    },
+  });
+  return toMailServerPolicy(wire);
+}
+
+/** Send one test message through the stored mail server; answers with the
+ * address it went to. */
+export async function sendTestMail(to: string): Promise<string> {
+  const wire = await apiRequest<{ sent_to: string }>(
+    `${MAIL_SERVER_POLICY_PATH}/test`,
+    { method: 'POST', body: { to } },
+  );
+  return wire.sent_to;
+}

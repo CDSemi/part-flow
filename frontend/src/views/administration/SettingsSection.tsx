@@ -23,6 +23,7 @@ import {
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
+import { MailServerPanel } from './MailServerPanel';
 import { GeneralSettingsPreviews } from './SettingPreviews';
 import { SignInSettingsPanel } from './SignInSettingsPanel';
 
@@ -33,7 +34,8 @@ import { SignInSettingsPanel } from './SignInSettingsPanel';
 // application policy (`/api/policies/due-soon`), audited and
 // re-validated by the server. The three fields share a cross-field rule
 // (minimum ≤ maximum), so Save replaces them together. The User sign-in
-// panel (SignInSettingsPanel) follows it and loads its own data. The
+// panel (SignInSettingsPanel) and the Outgoing mail server panel
+// (MailServerPanel, Phase 17) follow it and load their own data. The
 // other general settings are not available yet: they are disabled
 // previews marked so (Phase 17, SettingPreviews), never a control that
 // pretends to work. Without the Configure system settings permission
@@ -142,6 +144,7 @@ export function SettingsSection() {
           />
         )}
         <SignInSettingsPanel />
+        <MailServerPanel />
         <h2>Other settings</h2>
         <p className="admin-confighelp">
           These settings are not available yet. Each control shows what PartFlow

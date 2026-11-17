@@ -42,6 +42,17 @@ backups (1, 2, 3, 4, 6, 8, 12 or 24 hours, default 1) and the hourly
 (0-720, default 48), daily (1-3650, default 30) and weekly (0-520, default
 52) backups their rotation keeps. Only the host's hourly backup task
 (``app.cli backup-policy``) and ``status`` read it, from their next run.
+Phase 17 adds the outgoing mail server of Administration → Settings (owner
+decision of 2026-11-13; ``entity_id`` ``mail-server``, a full replace like
+Backups except the password, which is kept unless replaced or cleared):
+the host (none = no mail server), the port (1-65535, default 587), the
+connection security (STARTTLS, TLS or NONE, default STARTTLS), the
+optional user name and password of the sign-in to the server (never with
+NONE) and the sender address. The password is a credential: it lives in
+``mail_server_credentials`` (one row at most; none = no password), never on
+the policy row, and is read for sending only — no answer, log or audit row
+carries it. PartFlow reads the server when it sends a message
+(``app.application.outgoing_mail``).
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -61,15 +72,18 @@ dialogs or Movements and never rewrites history: it applies from each
 session's next refresh or sign-in, and from each command's own read.
 """
 
+import ipaddress
+import re
 from typing import Any, Final, NamedTuple, TypeGuard
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.application import audit
+from app.application import audit, users
 from app.application.common import UNSET, UnsetType, commit
 from app.application.errors import InvalidInputError, NotFoundError
-from app.domain.enums import AuditEntityType, AuditEventType
+from app.domain.enums import AuditEntityType, AuditEventType, MailSecurity
+from app.infrastructure.mail import SmtpServer
 from app.infrastructure.models import (
     BACKUP_INTERVAL_HOURS,
     BACKUP_KEEP_DAILY_MAX,
@@ -82,6 +96,11 @@ from app.infrastructure.models import (
     DUE_SOON_DAYS_MIN,
     DUE_SOON_PERCENT_MAX,
     DUE_SOON_PERCENT_MIN,
+    MAIL_HOST_MAX_LENGTH,
+    MAIL_PASSWORD_MAX_LENGTH,
+    MAIL_PORT_MAX,
+    MAIL_PORT_MIN,
+    MAIL_USERNAME_MAX_LENGTH,
     RETENTION_PERIOD_MONTHS_MAX,
     RETENTION_PERIOD_MONTHS_MIN,
     SIGN_IN_LOCKOUT_ATTEMPTS_MAX,
@@ -93,6 +112,7 @@ from app.infrastructure.models import (
     WORKER_SESSION_TIMEOUT_MAX,
     WORKER_SESSION_TIMEOUT_MIN,
     ApplicationPolicy,
+    MailServerCredential,
 )
 
 _POLICY_ID: Final = 1
@@ -112,6 +132,9 @@ SIGN_IN_SECTION: Final = "sign-in"
 # The audit entity_id and API path segment of Administration → Backups
 # (Phase 16; CD3: the sidebar section id).
 BACKUPS_SECTION: Final = "backups"
+# The audit entity_id and API path segment of Administration → Settings →
+# Outgoing mail server (Phase 17; CD3).
+MAIL_SERVER_SECTION: Final = "mail-server"
 # The scheduled backup intervals Administration → Backups admits: the
 # whole hours that divide the day (the backup-due command's choices too).
 BACKUP_INTERVALS: Final = BACKUP_INTERVAL_HOURS
@@ -542,6 +565,246 @@ def update_backup_policy(
         before_data=before,
         after_data=_backup_snapshot(policy),
         actor_user_id=actor_user_id,
+    )
+    commit(session, {})
+    return policy
+
+
+# The outgoing mail server (Phase 17, Administration → Settings).
+_MAIL_HOST: Final = re.compile(r"[a-z0-9.:-]+")
+_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
+_MAIL_HOST_MESSAGE: Final = (
+    "Enter the mail server as a host name or IP address, such as smtp.example.com, without"
+    " spaces or a port."
+)
+_MAIL_PORT_MESSAGE: Final = "The port must be a whole number from 1 to 65535."
+_MAIL_SECURITY_MESSAGE: Final = "Choose STARTTLS, SSL/TLS or None as the connection security."
+_MAIL_USERNAME_MESSAGE: Final = (
+    "The user name must be at most 254 characters, without line breaks or other control characters."
+)
+_MAIL_PASSWORD_MESSAGE: Final = (
+    "The password must be 1 to 1024 characters, without line breaks or other control characters."
+)
+_MAIL_SENDER_MISSING: Final = "Enter the sender address PartFlow sends its messages from."
+_MAIL_FIELDS_WITHOUT_HOST: Final = (
+    "Without a mail server, leave the sender address and the user name empty."
+)
+_MAIL_PASSWORD_WITHOUT_USERNAME: Final = "A password needs a user name."
+_MAIL_SIGN_IN_NEEDS_TLS: Final = (
+    "Signing in to the mail server needs STARTTLS or SSL/TLS, so the password never crosses"
+    " the network unencrypted."
+)
+
+
+class MailServerSettings(NamedTuple):
+    """The outgoing mail server as answered: the password only as whether one is stored."""
+
+    host: str | None
+    port: int
+    security: MailSecurity
+    username: str | None
+    password_set: bool
+    sender: str | None
+
+
+# The one row a mail server password may have (CHECK id = 1).
+_CREDENTIAL_ID: Final = 1
+
+
+def mail_server_settings(session: Session, policy: ApplicationPolicy) -> MailServerSettings:
+    password_set = session.scalar(
+        select(func.count())
+        .select_from(MailServerCredential)
+        .where(MailServerCredential.id == _CREDENTIAL_ID)
+    )
+    return MailServerSettings(
+        host=policy.mail_host,
+        port=policy.mail_port,
+        security=MailSecurity(policy.mail_security),
+        username=policy.mail_username,
+        password_set=bool(password_set),
+        sender=policy.mail_sender,
+    )
+
+
+def read_mail_server(session: Session) -> SmtpServer | None:
+    """The stored mail server for sending, or None when none is set up (unlocked)."""
+    host, port, security, username, password, sender = session.execute(
+        select(
+            ApplicationPolicy.mail_host,
+            ApplicationPolicy.mail_port,
+            ApplicationPolicy.mail_security,
+            ApplicationPolicy.mail_username,
+            MailServerCredential.password,
+            ApplicationPolicy.mail_sender,
+        )
+        .select_from(ApplicationPolicy)
+        .outerjoin(MailServerCredential, MailServerCredential.id == _CREDENTIAL_ID)
+        .where(ApplicationPolicy.id == _POLICY_ID)
+    ).one()
+    if host is None or sender is None:
+        return None
+    return SmtpServer(
+        host=host,
+        port=port,
+        security=MailSecurity(security),
+        username=username,
+        password=password,
+        sender=sender,
+    )
+
+
+def _mail_host(value: object) -> str | None:
+    """A lowercase host name or IP address; None or blank = no mail server."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidInputError(_MAIL_HOST_MESSAGE)
+    stripped = value.strip()
+    if not stripped:
+        return None
+    # ASCII before lowering, as the login-name rule does.
+    if not stripped.isascii():
+        raise InvalidInputError(_MAIL_HOST_MESSAGE)
+    host = stripped.lower()
+    if len(host) > MAIL_HOST_MAX_LENGTH or _MAIL_HOST.fullmatch(host) is None:
+        raise InvalidInputError(_MAIL_HOST_MESSAGE)
+    if ":" in host:
+        # Only an IPv6 address holds a colon: a typed "host:port" is refused.
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError as exc:
+            raise InvalidInputError(_MAIL_HOST_MESSAGE) from exc
+    return host
+
+
+def _mail_username(value: object) -> str | None:
+    """The trimmed user name of the sign-in to the server; None or blank = no sign-in."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidInputError(_MAIL_USERNAME_MESSAGE)
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if len(stripped) > MAIL_USERNAME_MAX_LENGTH or _CONTROL.search(stripped):
+        raise InvalidInputError(_MAIL_USERNAME_MESSAGE)
+    return stripped
+
+
+def _mail_password(value: object) -> str:
+    """A new password exactly as typed (never trimmed)."""
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= MAIL_PASSWORD_MAX_LENGTH
+        or _CONTROL.search(value)
+    ):
+        raise InvalidInputError(_MAIL_PASSWORD_MESSAGE)
+    return value
+
+
+def _mail_server_snapshot(policy: ApplicationPolicy, password_set: bool) -> dict[str, Any]:
+    """The audited section — whether a password is stored, never the password."""
+    return {
+        "mail_host": policy.mail_host,
+        "mail_port": policy.mail_port,
+        "mail_security": policy.mail_security,
+        "mail_username": policy.mail_username,
+        "mail_password_set": password_set,
+        "mail_sender": policy.mail_sender,
+    }
+
+
+def update_mail_server_policy(
+    session: Session,
+    *,
+    host: object,
+    port: object,
+    security: object,
+    username: object,
+    sender: object,
+    password: object = UNSET,
+    actor_user_id: int,
+) -> ApplicationPolicy:
+    """Replace the outgoing mail server; a no-op writes and audits nothing.
+
+    A full replace like Backups, except the password: left out, the
+    stored one is kept (and dropped when no user name remains); ``None``
+    clears it; a string replaces it. A blank host removes the server,
+    which then keeps no sender, user name or password. Saving sends
+    nothing. The audit row records whether a password is stored and, in
+    its metadata, whether it changed — never the password.
+
+    Lock order: the policy row, then the password row. Every writer of the
+    password takes the policy row first, so a password row that does not
+    exist yet cannot be inserted twice.
+    """
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    credential = session.get(
+        MailServerCredential, _CREDENTIAL_ID, with_for_update=True, populate_existing=True
+    )
+    stored_password = None if credential is None else credential.password
+    clean_host = _mail_host(host)
+    if not _is_whole_in(port, MAIL_PORT_MIN, MAIL_PORT_MAX):
+        raise InvalidInputError(_MAIL_PORT_MESSAGE)
+    if not isinstance(security, str) or security not in MailSecurity.__members__:
+        raise InvalidInputError(_MAIL_SECURITY_MESSAGE)
+    clean_security = MailSecurity(security)
+    clean_username = _mail_username(username)
+    clean_sender = users.canonical_email(sender)
+    if clean_host is None and (clean_sender is not None or clean_username is not None):
+        raise InvalidInputError(_MAIL_FIELDS_WITHOUT_HOST)
+    if clean_host is not None and clean_sender is None:
+        raise InvalidInputError(_MAIL_SENDER_MISSING)
+    if isinstance(password, UnsetType):
+        new_password = stored_password if clean_username is not None else None
+    elif password is None:
+        new_password = None
+    else:
+        new_password = _mail_password(password)
+        if clean_username is None:
+            raise InvalidInputError(_MAIL_PASSWORD_WITHOUT_USERNAME)
+    if clean_username is not None and clean_security is MailSecurity.NONE:
+        raise InvalidInputError(_MAIL_SIGN_IN_NEEDS_TLS)
+    before = _mail_server_snapshot(policy, stored_password is not None)
+    password_changed = new_password != stored_password
+    after = {
+        "mail_host": clean_host,
+        "mail_port": port,
+        "mail_security": clean_security.value,
+        "mail_username": clean_username,
+        "mail_password_set": new_password is not None,
+        "mail_sender": clean_sender,
+    }
+    if after == before and not password_changed:
+        return policy
+    policy.mail_host = clean_host
+    policy.mail_port = port
+    policy.mail_security = clean_security.value
+    policy.mail_username = clean_username
+    policy.mail_sender = clean_sender
+    policy.updated_at = func.now()
+    if new_password is None:
+        if credential is not None:
+            session.delete(credential)
+    elif credential is None:
+        session.add(MailServerCredential(id=_CREDENTIAL_ID, password=new_password))
+    elif password_changed:
+        credential.password = new_password
+        credential.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=MAIL_SERVER_SECTION,
+        before_data=before,
+        after_data=_mail_server_snapshot(policy, new_password is not None),
+        actor_user_id=actor_user_id,
+        metadata={"mail_password_changed": password_changed},
     )
     commit(session, {})
     return policy

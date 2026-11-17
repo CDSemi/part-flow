@@ -277,6 +277,7 @@ test('only the session UI, the sign-in gate, the Administration sections, the Ma
     'views/administration/DepartmentDisplaySection.tsx',
     'views/administration/DepartmentsSection.tsx',
     'views/administration/HistoryArchivalSection.tsx',
+    'views/administration/MailServerPanel.tsx',
     'views/administration/OperationsSection.tsx',
     'views/administration/RolesSection.tsx',
     'views/administration/ScanStationsSection.tsx',

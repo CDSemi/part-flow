@@ -6,8 +6,10 @@ what the backup policy of Administration → Backups adds (owner decision of
 2026-11-13; IMPLEMENTATION_ROADMAP Phase 16 "backups set in
 Administration"):
 
-- exact head boundary: ``0035_phase16_backup_policy`` is the single head,
-  and the models match the schema migrated to it;
+- the cases run against this revision inside the current chain; the head
+  boundary and the models parity moved to
+  ``tests/test_phase17_outgoing_mail_schema.py`` with
+  ``0036_phase17_outgoing_mail``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install holds the owner's defaults (every hour; 48 hourly, 30
   daily and 52 weekly backups kept) and the CHECKs refuse every value
@@ -15,8 +17,8 @@ Administration"):
 - an upgrade from 0034 keeps every other section of the singleton;
 - the downgrade drops the columns while the policy is untouched, and
   refuses once the section was written (a value other than the defaults,
-  or an audit row of the ``backups`` section), the revision staying at
-  0035.
+  or an audit row of the ``backups`` section), the database staying at
+  the head the downgrade started from (one transaction).
 """
 
 import importlib.util
@@ -29,14 +31,13 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.application import policies
-from app.infrastructure import models
+from app.infrastructure import models, schema_revision
 
 # Schema assertions: owner connections in the application-role test mode
 # (Phase 16 slice 4).
@@ -44,7 +45,9 @@ pytestmark = pytest.mark.database_owner
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0034_phase17_unique_names"
-_HEAD_REVISION = "0035_phase16_backup_policy"
+_REVISION = "0035_phase16_backup_policy"
+# The newest revision of the code; this revision's cases run inside its chain.
+_CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _BACKEND_DIR / "alembic" / "versions" / "20261116_0035_phase16_backup_policy.py"
 _HEAD_TEMPLATE_DATABASE = "partflow_test_phase16_backup_template"
 _DEFAULTS = {
@@ -141,28 +144,13 @@ def head_engine(head_database: URL) -> Iterator[Engine]:
 
 
 # ---------------------------------------------------------------------------
-# Head and literals
+# Literals
 # ---------------------------------------------------------------------------
-
-
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-
-
-def test_models_metadata_matches_the_migrated_schema(head_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
 
 
 def test_the_migration_literals_match_the_model() -> None:
     migration = _load_migration()
-    assert migration.revision == _HEAD_REVISION
+    assert migration.revision == _REVISION
     assert migration.down_revision == _PREVIOUS_REVISION
     assert migration._SECTION == policies.BACKUPS_SECTION
     assert [(column, default) for column, default, _, _ in migration._COLUMNS] == [
@@ -248,7 +236,7 @@ def test_the_upgrade_keeps_every_other_section(admin_engine: Engine) -> None:
             before = _policy_row(connection)
         command.upgrade(_alembic_config(_url(name)), "head")
         with engine.connect() as connection:
-            assert _version(connection) == _HEAD_REVISION
+            assert _version(connection) == _CODE_HEAD
             after = _policy_row(connection)
         assert {key: after[key] for key in _DEFAULTS} == _DEFAULTS
         assert {key: after[key] for key in before} == before
@@ -288,5 +276,5 @@ def test_the_downgrade_refuses_a_written_policy(
     with pytest.raises(DBAPIError, match="Backup policy configuration exists"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         assert len(_backup_columns(connection)) == len(_DEFAULTS)

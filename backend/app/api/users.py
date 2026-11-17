@@ -1,7 +1,7 @@
 """User endpoints (Phase 13 slice 12 — Administration → Users).
 
 HTTP surface of the application accounts: list, create and edit Users
-(login name, display name, role, active flag) and set, remove or read a
+(login name, display name, role, active flag, email address) and set, remove or read a
 User's avatar image. Users sign in through ``/api/session`` (Phase 14
 slice 1); credentials are never part of a user response. Users are never
 Workers: the Workers registry is ``/api/workers``.
@@ -11,8 +11,8 @@ needs ``MANAGE_USERS_AND_ROLES``, checked by the route and again by the
 service on the acting User re-read under the User-administration lock.
 Creating a User in a role holding a correction permission or
 ``MANAGE_CORRECTION_PERMISSIONS``, moving a User into or out of such a
-role, changing whether such a User is active or setting their password
-also needs ``MANAGE_CORRECTION_PERMISSIONS``; a role change or
+role, changing whether such a User is active, or setting their password or
+email address also needs ``MANAGE_CORRECTION_PERMISSIONS``; a role change or
 deactivation that would leave no active User with a password holding a
 management key is 409 ``last_permission_holder``. The avatar image
 stays public.
@@ -45,9 +45,11 @@ Deliberate surface decisions:
   clears a lock; one's own password is changed through
   ``/api/session/password``.
 - Every route answering with Users adds ``sign_in_state`` (no password,
-  temporary password, password set, locked) only for a signed-in caller
-  holding ``MANAGE_USERS_AND_ROLES`` — the key is absent for everyone
-  else, whose responses keep the slice 12 shape exactly. A declared
+  temporary password, password set, locked) and ``email`` (Phase 17; null
+  = none) only for a signed-in caller holding ``MANAGE_USERS_AND_ROLES`` —
+  the keys are absent for everyone else, whose responses keep the slice 12
+  shape exactly. A create or update may send ``email``; on update ``null``
+  or a blank value clears it. A declared
   response model would drop a subclass-only field, so these routes
   render their answer explicitly (``_render``); the OpenAPI schema
   documents both shapes.
@@ -93,6 +95,8 @@ class UserAdministrationResponse(UserResponse):
     """A User as answered to a caller who may manage users and roles."""
 
     sign_in_state: SignInState
+    # The canonical email address (Phase 17); null = none.
+    email: str | None
 
 
 class UserCreateRequest(BaseModel):
@@ -106,6 +110,7 @@ class UserCreateRequest(BaseModel):
     login_name: str
     display_name: str
     role_id: StrictInt
+    email: str | None = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -115,6 +120,8 @@ class UserUpdateRequest(BaseModel):
     display_name: str | None = None
     role_id: StrictInt | None = None
     is_active: bool | None = None
+    # Sent as null (or blank), it clears the address.
+    email: str | None = None
 
 
 class UserPasswordSetRequest(BaseModel):
@@ -140,7 +147,9 @@ def user_response(view: users.UserView) -> UserResponse:
 def _administration_response(
     view: users.UserView, state: SignInState
 ) -> UserAdministrationResponse:
-    return UserAdministrationResponse(**user_response(view).model_dump(), sign_in_state=state)
+    return UserAdministrationResponse(
+        **user_response(view).model_dump(), sign_in_state=state, email=view.email
+    )
 
 
 def _answers(
@@ -178,6 +187,7 @@ def create_user(
         login_name=body.login_name,
         display_name=body.display_name,
         role_id=body.role_id,
+        email=body.email,
         actor=principal,
     )
     return _render(_answers(session, principal, [view])[0], 201)

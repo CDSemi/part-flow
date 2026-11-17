@@ -94,6 +94,7 @@ from app.domain.enums import (
     LineageRelation,
     MachineLifecycleEventType,
     MachineLifecycleState,
+    MailSecurity,
     MovementType,
     Permission,
     QuantityFlowStatus,
@@ -398,6 +399,50 @@ POLICY_BACKUP_INTERVAL_SQL = "backup_interval_hours IN (1, 2, 3, 4, 6, 8, 12, 24
 POLICY_BACKUP_KEEP_HOURLY_SQL = "backup_keep_hourly BETWEEN 0 AND 720"
 POLICY_BACKUP_KEEP_DAILY_SQL = "backup_keep_daily BETWEEN 1 AND 3650"
 POLICY_BACKUP_KEEP_WEEKLY_SQL = "backup_keep_weekly BETWEEN 0 AND 520"
+
+
+def _email_address_sql(column: str) -> str:
+    """The canonical shape of an email address (``app.domain.email_address``)."""
+    return (
+        f'{column} IS NULL OR (char_length({column}) <= 254 AND {column} COLLATE "C" ~'
+        " '^[A-Za-z0-9!#$%&''*+/=?^_`{|}~.-]{1,64}@[a-z0-9-]{1,63}(\\.[a-z0-9-]{1,63})+$')"
+    )
+
+
+# Outgoing mail (Phase 17, owner decision of 2026-11-13; Administration →
+# Settings → Outgoing mail server): the optional email address of a User,
+# where PartFlow sends a one-time sign-in code, and the mail server it
+# sends through — the host (a lowercase host name or IP address; NULL = no
+# mail server, and then nothing else is stored but the port and the
+# security), the port, the connection security, the optional user name of
+# the sign-in to the server (never over an unencrypted connection) and the
+# sender address. The password of that sign-in is a credential: it lives
+# in its own table (`mail_server_credentials`), never on the configuration
+# row. An address is canonical (`app.domain.email_address`): a local part,
+# `@` and a lowercase domain with a dot. Repeated verbatim by migration
+# `0036_phase17_outgoing_mail`.
+MAIL_HOST_MAX_LENGTH = 253
+MAIL_PORT_MIN = 1
+MAIL_PORT_MAX = 65535
+MAIL_USERNAME_MAX_LENGTH = 254
+MAIL_PASSWORD_MAX_LENGTH = 1024
+USER_EMAIL_SQL = _email_address_sql("email")
+POLICY_MAIL_SENDER_SQL = _email_address_sql("mail_sender")
+POLICY_MAIL_HOST_SQL = (
+    "mail_host IS NULL OR (char_length(mail_host) <= 253"
+    """ AND mail_host COLLATE "C" ~ '^[a-z0-9.:-]+$')"""
+)
+POLICY_MAIL_PORT_SQL = "mail_port BETWEEN 1 AND 65535"
+POLICY_MAIL_SECURITY_SQL = (
+    "mail_security IN (" + ", ".join(f"'{security}'" for security in MailSecurity) + ")"
+)
+POLICY_MAIL_USERNAME_SQL = "mail_username IS NULL OR char_length(mail_username) BETWEEN 1 AND 254"
+POLICY_MAIL_SERVER_SHAPE_SQL = (
+    "(mail_host IS NULL) = (mail_sender IS NULL)"
+    " AND (mail_host IS NOT NULL OR mail_username IS NULL)"
+    " AND (mail_username IS NULL OR mail_security <> 'NONE')"
+)
+MAIL_SERVER_PASSWORD_SQL = "char_length(password) BETWEEN 1 AND 1024"
 
 # Users, roles and permissions (Phase 13 slice 12; PROJECT_PROFILE §7,
 # §20; owner decisions OD-8, OD-19): the closed permission vocabulary,
@@ -1186,6 +1231,13 @@ class ApplicationPolicy(Base):
     the numbers of hourly, daily and weekly backups their rotation keeps.
     Read by the host's hourly backup task (`app.cli backup-policy`) and by
     `status` for the backup-age limit; never by a production command.
+
+    Phase 17 adds the outgoing mail server of Administration → Settings
+    (owner decision of 2026-11-13): host, port, connection security, the
+    optional user name of the sign-in to the server and the sender
+    address; its password is a credential and lives in
+    `mail_server_credentials`, never here. Read when PartFlow sends a
+    message; never by a production command.
     """
 
     __tablename__ = "application_policy"
@@ -1250,6 +1302,14 @@ class ApplicationPolicy(Base):
     backup_keep_weekly: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("52")
     )
+    # The outgoing mail server (Phase 17): NULL host = none set up.
+    mail_host: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mail_port: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("587"))
+    mail_security: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'STARTTLS'")
+    )
+    mail_username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mail_sender: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The role applied at Scan Stations (Phase 14 slice 4): its station
     # keys authorize each station command. Set once by migration.
     scan_station_role_id: Mapped[int] = mapped_column(
@@ -1317,6 +1377,48 @@ class ApplicationPolicy(Base):
         CheckConstraint(
             POLICY_BACKUP_KEEP_WEEKLY_SQL,
             name=conv("ck_application_policy_backup_keep_weekly_range"),
+        ),
+        CheckConstraint(POLICY_MAIL_HOST_SQL, name=conv("ck_application_policy_mail_host_shape")),
+        CheckConstraint(POLICY_MAIL_PORT_SQL, name=conv("ck_application_policy_mail_port_range")),
+        CheckConstraint(
+            POLICY_MAIL_SECURITY_SQL, name=conv("ck_application_policy_mail_security_allowed")
+        ),
+        CheckConstraint(
+            POLICY_MAIL_USERNAME_SQL, name=conv("ck_application_policy_mail_username_length")
+        ),
+        CheckConstraint(
+            POLICY_MAIL_SENDER_SQL, name=conv("ck_application_policy_mail_sender_canonical")
+        ),
+        CheckConstraint(
+            POLICY_MAIL_SERVER_SHAPE_SQL, name=conv("ck_application_policy_mail_server_shape")
+        ),
+    )
+
+
+class MailServerCredential(Base):
+    """The password of the sign-in to the outgoing mail server (Phase 17).
+
+    At most one row (CHECK id = 1); no row = no password. It is a
+    credential, so it never lives on the `application_policy` configuration
+    row (the maintenance role reads that row and never this table, the way
+    `user_credentials` keeps passwords off `users`). It is read only to send
+    a message: never answered, logged or audited — the audit records only
+    whether a password is stored. The application keeps a password only
+    while the server has a user name.
+    """
+
+    __tablename__ = "mail_server_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    password: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name=conv("ck_mail_server_credentials_singleton")),
+        CheckConstraint(
+            MAIL_SERVER_PASSWORD_SQL, name=conv("ck_mail_server_credentials_password_length")
         ),
     )
 
@@ -1387,7 +1489,9 @@ class User(Base):
     written only by the User's own toggle through `PUT
     /api/session/theme-preference` (Phase 14 slice 8). It is a display
     preference: never audited, never part of the `User` audit snapshot,
-    and it does not change `updated_at`.
+    and it does not change `updated_at`. `email` (Phase 17, optional) is
+    the canonical address PartFlow sends a one-time sign-in code to; set
+    by user administrators, part of the audited profile, not unique.
     """
 
     __tablename__ = "users"
@@ -1405,6 +1509,7 @@ class User(Base):
         DateTime(timezone=True)
     )
     theme_preference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -1433,6 +1538,7 @@ class User(Base):
             name=conv("ck_users_avatar_image_size"),
         ),
         CheckConstraint(USER_THEME_PREFERENCE_SQL, name=conv("ck_users_theme_preference")),
+        CheckConstraint(USER_EMAIL_SQL, name=conv("ck_users_email_canonical")),
     )
 
 

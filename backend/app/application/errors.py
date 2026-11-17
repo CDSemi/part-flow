@@ -267,3 +267,15 @@ class EnrollmentCodeInvalidError(ApplicationError):
 class RecoveryOutcomeUnknownError(ApplicationError):
     """The recovery reset's COMMIT failed without an answer: the reset may
     or may not have been stored (recovery command only; never HTTP)."""
+
+
+class MailServerNotSetUpError(ConflictError):
+    """No outgoing mail server is set up in Administration → Settings (409; Phase 17)."""
+
+
+class MailNotSentError(ConflictError):
+    """The outgoing mail server did not take a message; the text says why (409; Phase 17).
+
+    Nothing was written; the cause is the server's configuration or
+    availability, never the request's shape.
+    """

@@ -42,7 +42,13 @@ _PASSWORD_ZONE = {
 }
 # Not rate limited (OD-S2-6): a 10-character code of a 32-symbol alphabet
 # (50 bits) that expires after 15 minutes cannot be guessed in its lifetime.
-_UNLIMITED_SECRET_ROUTES = {("POST", "/api/scan-stations/{station_id}/device-activations")}
+# The outgoing mail server password (Phase 17) is an administrator's
+# configuration write: nothing is checked or hashed, so there is nothing to
+# guess and no work to exhaust.
+_UNLIMITED_SECRET_ROUTES = {
+    ("POST", "/api/scan-stations/{station_id}/device-activations"),
+    ("PUT", "/api/policies/mail-server"),
+}
 
 
 def _walk(routes: list[BaseRoute]) -> Iterator[BaseRoute]:

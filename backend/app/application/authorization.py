@@ -173,8 +173,8 @@ def hot_list_change_permissions(
 #: G-2: the target User's role is protected; their password or activity changes.
 PROTECTED_USER_MESSAGE = (
     "This user's role holds correction permissions or the permission to manage them."
-    " Setting their password or changing whether they are active needs the Manage"
-    " correction permissions permission."
+    " Setting their password or email address, or changing whether they are active, needs"
+    " the Manage correction permissions permission."
 )
 #: G-3: a User moves into or out of a protected role (or is created in one).
 PROTECTED_ROLE_MESSAGE = (

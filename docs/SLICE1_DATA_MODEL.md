@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0035_phase16_backup_policy`. The slice's own tables
+The schema described here is the current schema at migration head `0036_phase17_outgoing_mail`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -724,7 +724,7 @@ The constraints are listed in §17.
 - Global policy writes are audited with `entity_type` `ApplicationPolicy`. `entity_id` is the Administration section:
   `worker-sessions` (the Worker session timeout), `correction-permissions` (the Undo reason policy), `due-soon` (the Due
   Soon warning panel of Settings), `data-retention` (History archival & purge), `sign-in` (the Settings → User
-  sign-in panel) and `backups` (Backups).
+  sign-in panel), `backups` (Backups) and `mail-server` (the Settings → Outgoing mail server panel).
 - Every effective `PUT` on one of these sections appends exactly one `UPDATED` row in the same transaction; a `PUT`
   that changes nothing appends nothing. The snapshots are:
 
@@ -736,8 +736,11 @@ The constraints are listed in §17.
   | `PUT /api/policies/data-retention` (setting or clearing the period) | `{retention_period_months}` |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
+  | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender}`, with the metadata `{mail_password_changed}`; never the password |
 
-  The `sign-in` and `backups` rows carry `actor_user_id` set to the signed-in User.
+  The `sign-in`, `backups` and `mail-server` rows carry `actor_user_id` set to the signed-in User. A changed mail
+  server password with nothing else changed is an effective change: the snapshots are equal and the metadata says
+  `mail_password_changed: true`.
 - Password writes append `UPDATED` rows for entity type `User` with the snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` as ISO-8601 text; never a hash, salt, token or password) and the
   metadata key `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` or `RECOVERY_CLI`; the recovery command
@@ -768,7 +771,8 @@ The constraints are listed in §17.
   - a role create is `CREATED` with `before_data` NULL and `after_data` `{name, permissions}` (the permission keys
     sorted by value);
   - a role rename, or a grant or revoke delta, is one `UPDATED` row with the same snapshot before and after;
-  - a user create is `CREATED` with the profile snapshot `{login_name, display_name, role_id, is_active}`;
+  - a user create is `CREATED` with the profile snapshot `{login_name, display_name, role_id, is_active, email}`
+    (rows written before `0036_phase17_outgoing_mail` have no `email` key);
   - a user profile edit is one `UPDATED` row with that snapshot before and after;
   - a user avatar change is an `UPDATED` row with `{"avatar": null | digest}`: a digest, never image bytes, as for
     Workers.
@@ -1107,6 +1111,17 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   `ck_application_policy_backup_keep_weekly_range`, 0–520) (`0035_phase16_backup_policy`): `integer NOT NULL`, the
   backup policy of Administration → Backups. Only the host's backup task (`app.cli backup-policy`) and `status` read
   it; no production path does. The downgrade refuses once the section was written.
+- `mail_host text NULL` (`ck_application_policy_mail_host_shape`: a lowercase host name or IP address of at most 253
+  characters; NULL means no mail server), `mail_port integer NOT NULL DEFAULT 587`
+  (`ck_application_policy_mail_port_range`, 1–65535), `mail_security text NOT NULL DEFAULT 'STARTTLS'`
+  (`ck_application_policy_mail_security_allowed`: `STARTTLS`, `TLS` or `NONE`), `mail_username text NULL`
+  (`ck_application_policy_mail_username_length`, 1–254 characters) and `mail_sender text NULL`
+  (`ck_application_policy_mail_sender_canonical`, the canonical email address shape of `users.email`)
+  (`0036_phase17_outgoing_mail`): the outgoing mail server of Administration → Settings.
+  `ck_application_policy_mail_server_shape` keeps it whole: a host exactly with a sender, a user name only with a host,
+  and no user name with `NONE`. The password of the sign-in to the server is a credential and lives in
+  `mail_server_credentials` (below), never on this row. The downgrade refuses once a mail server, a password, a port or
+  security other than the defaults, or a `mail-server` audit row exists.
 - The sign-in and Scan Station role columns are listed under "Sign-in" and "Scan Station devices" below.
 - Later policies are added as typed columns, with a server default where a canonical default exists. There is no
   key/value store.
@@ -1154,6 +1169,11 @@ test). A later capability widens the CHECK; a key is never renamed.
 - `theme_preference text` nullable with `ck_users_theme_preference` (`DARK` or `LIGHT`; NULL means no preference),
   written only by the User's own toggle (`PUT /api/session/theme-preference`; not audited) and read with the session
   principal.
+- `email text` nullable with `ck_users_email_canonical` (`0036_phase17_outgoing_mail`): the canonical address of
+  `app.domain.email_address` — a local part of 1–64 permitted ASCII characters, `@` and a lowercase domain with a dot,
+  at most 254 characters — where PartFlow sends a one-time sign-in code. It is not unique. User administrators set it;
+  it is part of the audited profile, and only callers who may manage users and roles see it. The downgrade of
+  `0036_phase17_outgoing_mail` refuses while any User has an address.
 - `is_active boolean NOT NULL DEFAULT true`; `created_at`, `updated_at`.
 - There is no credential column and no foreign key between `users` and `workers` in either direction.
 - The downgrade of `0028_phase13_users_roles` refuses while any `users` row or any `User` or `Role` audit row exists.
@@ -1167,6 +1187,13 @@ The sign-in migration `0029_phase14_sign_in` adds the following.
   DEFAULT 15` and `require_password_change boolean NOT NULL DEFAULT true`, with
   `ck_application_policy_user_session_days_range` (1–365), `ck_application_policy_sign_in_lockout_attempts_range`
   (3–100) and `ck_application_policy_sign_in_lockout_minutes_range` (1–1440).
+- **`mail_server_credentials`** (`0036_phase17_outgoing_mail`): the password of the sign-in to the outgoing mail
+  server. PK `pk_mail_server_credentials` `id` with `ck_mail_server_credentials_singleton` (`id = 1`), so there is at
+  most one row and no row means no password; `password text NOT NULL` with
+  `ck_mail_server_credentials_password_length` (1–1024 characters); `updated_at`. The application keeps a password
+  only while the server has a user name. It is read only to send a message and is never answered, logged or audited:
+  the `mail-server` audit snapshot records only `mail_password_set`. A writer locks the `application_policy` row
+  first, then this row. It is `ORDINARY` for `partflow_app` and outside `partflow_maintenance`'s reads.
 - **`user_credentials`**: PK `pk_user_credentials` `user_id` (FK `fk_user_credentials_user_id_users` to `users (id)`:
   one credential per User); `password_hash text NOT NULL` (scrypt; `ck_user_credentials_password_hash_format`: begins
   with `scrypt$`); `password_is_temporary boolean NOT NULL`; `password_changed_at timestamptz NOT NULL`;
@@ -1256,13 +1283,13 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (29 at head `0035_phase16_backup_policy`) |
+| Class | `partflow_app` privileges | Tables (30 at head `0036_phase17_outgoing_mail`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
 | `READ_ONLY` | SELECT | `alembic_version` |
-| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_sessions`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
 - `partflow_maintenance` holds SELECT only, on `alembic_version`, `application_policy`, `areas`, `machines`,
   `operations`, `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
@@ -1401,7 +1428,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-16 | uncommitted | Migration head `0035_phase16_backup_policy`: the four backup policy columns of `application_policy` and the `backups` audit section. |
+| 2026-11-16 | uncommitted | Migration head `0036_phase17_outgoing_mail`: `users.email`, the outgoing mail server columns of `application_policy` and the `mail-server` audit section. |
+| 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: the four backup policy columns of `application_policy` and the `backups` audit section. |
 | 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |
 | 2026-11-14 | `15a2120` | Migration head `0033_phase17_super_user_role`; completing an existing Super User role appends one `UPDATED` audit row. |
 | 2026-11-13 | `6c0fa6c` | §18 and §20: the return of stocked quantity and offline scan synchronization are settled by the owner decisions of 2026-11-13. |

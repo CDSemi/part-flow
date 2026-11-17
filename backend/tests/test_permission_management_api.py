@@ -75,8 +75,8 @@ _G1 = (
 )
 _G2 = (
     "This user's role holds correction permissions or the permission to manage them."
-    " Setting their password or changing whether they are active needs the Manage"
-    " correction permissions permission."
+    " Setting their password or email address, or changing whether they are active, needs"
+    " the Manage correction permissions permission."
 )
 _G3 = (
     "Giving a user a role that holds correction permissions or the permission to manage"
@@ -512,6 +512,18 @@ def test_users_in_protected_roles_need_the_guard_key(client: TestClient, db_engi
         users_only.patch(f"/api/users/{protected['id']}", json={"display_name": "Renamed"})
     )
     assert renamed["display_name"] == "Renamed"
+    # Phase 17: a plain user's email address needs no guard key; a protected one's does.
+    _ok(users_only.patch(f"/api/users/{plain['id']}", json={"email": "plain@example.com"}))
+    _refused(
+        db_engine,
+        lambda: users_only.patch(
+            f"/api/users/{protected['id']}", json={"email": "protected@example.com"}
+        ),
+        403,
+        _G2,
+        [MCP, MUAR],
+        protected_target,
+    )
     _ok(
         users_only.put(
             f"/api/users/{protected['id']}/avatar",
@@ -550,6 +562,7 @@ def test_users_in_protected_roles_need_the_guard_key(client: TestClient, db_engi
 
     # PM-5: everything refused above succeeds with both keys.
     _ok(both.patch(f"/api/users/{protected['id']}", json={"is_active": True}))
+    _ok(both.patch(f"/api/users/{protected['id']}", json={"email": "protected@example.com"}))
     _ok(both.patch(f"/api/users/{plain['id']}", json={"role_id": operator}))
     _ok(both.patch(f"/api/users/{protected['id']}", json={"role_id": plain_role}))
     _ok(both.put(f"/api/users/{plain['id']}/password", json={"new_password": _NEW_PASSWORD}))

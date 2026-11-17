@@ -1,6 +1,6 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `5708664` cộng các thay đổi chưa
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `a4cf9a8` cộng các thay đổi chưa
 > commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -163,7 +163,7 @@ liệu đó trỏ về đây khi bạn cần một chi tiết.
 | Service | Chức năng | Chi tiết |
 | --- | --- | --- |
 | `db` | PostgreSQL 16 (`postgres:16.14`, biến thể Debian) | Chỉ ở network `internal`; không công bố port. Dữ liệu nằm trong volume `partflow-production_postgres_data`. Không bao giờ dùng image `-alpine`: việc sắp xếp văn bản (collation) và kiểm tra định danh "Canonical identity under the running interpreter and database" (kiểm tra đối soát (j)) phụ thuộc vào GNU C Library (glibc). Ghi lỗi không kèm dòng chi tiết (`log_error_verbosity=terse`). Thời gian chờ dừng (stop grace period) 60 s. |
-| `backend` | API, image `partflow/backend:<release>` | Các network `internal` và `edge`. Kết nối bằng database role `partflow_app` và chỉ mount tệp mật khẩu của role đó. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` và `DATABASE_ROLES_REQUIRED` được cố định là `true`. Số worker lấy từ `PARTFLOW_BACKEND_WORKERS`; chỉ tin các header được chuyển tiếp từ subnet `edge`. Thời gian chờ dừng 200 s, cao hơn thời gian yêu cầu dài nhất của `web` (180 s), để một lần import đang chạy có thể hoàn tất. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lỗi cấu hình thoát với mã 0. |
+| `backend` | API, image `partflow/backend:<release>` | Các network `internal` và `edge`. Kết nối bằng database role `partflow_app` và chỉ mount tệp mật khẩu của role đó. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` và `DATABASE_ROLES_REQUIRED` được cố định là `true`. Số worker lấy từ `PARTFLOW_BACKEND_WORKERS`; chỉ tin các header được chuyển tiếp từ subnet `edge`. Thời gian chờ dừng 200 s, cao hơn thời gian yêu cầu dài nhất của `web` (180 s), để một lần import đang chạy có thể hoàn tất. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lỗi cấu hình thoát với mã 0. Khi một outgoing mail server được đặt trong Administration → Settings, `backend` kết nối tới nó qua network `edge` để gửi email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. Port được công bố duy nhất: `127.0.0.1:${PARTFLOW_HTTP_PORT}` tới port 80 của container; cố ý không có thiết lập nào cho địa chỉ bind. Không có `depends_on`, nên nó vẫn phục vụ các màn hình khi `backend` đang dừng. Thời gian chờ dừng 200 s. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Áp dụng các migration database và quyền (grants) trong một transaction. Cần một tùy chọn sao lưu (Migrations, bên dưới). Mount thư mục sao lưu ở chế độ chỉ đọc tại `/backups`. |
 | `db-roles` | Ops job: `python -m app.cli provision-roles` (mặc định) hoặc `apply-grants` | Tạo hoặc sửa các database role và áp dụng các quyền (Database roles, bên dưới). Kết nối bằng owner role và mount ba tệp bí mật. |
@@ -738,7 +738,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §1.2, §6: công cụ Deployment Admin và hướng dẫn của nó được gỡ bỏ. |
+| 2026-11-16 | uncommitted | §3.1: `backend` truy cập outgoing mail server được đặt trong Administration → Settings qua network `edge`. |
+| 2026-11-16 | `a4cf9a8` | §1.2, §6: công cụ Deployment Admin và hướng dẫn của nó được gỡ bỏ. |
 | 2026-11-16 | `5708664` | §1.2: lệnh ngắn `deploy/production/pf` cho production stack. |
 | 2026-11-13 | `4a99914` | §3.1 Log: các lần Production Board tự làm mới thành công không được ghi log. |
 | 2026-11-12 | `de4d99f` | §3.1 Log: mỗi Production Board đang mở thêm các bản ghi `web` mỗi 5 s thay vì 15 s. |

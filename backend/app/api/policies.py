@@ -64,14 +64,30 @@ handlers in ``app.api.errors`` translate typed failures.
   ranges are the Application's 422; requires ``CONFIGURE_SYSTEM_SETTINGS``;
   answers with the stored policy, also when nothing changed. Saving takes
   or removes no backup: the host's hourly backup task reads it.
+- ``GET /policies/mail-server`` — Administration → Settings → Outgoing mail
+  server (Phase 17, owner decision of 2026-11-13): host (null = none),
+  port, connection security, user name, whether a password is stored and
+  the sender address. The password is never answered. Requires a
+  signed-in User.
+- ``PUT /policies/mail-server`` — a full replace of host, port, security,
+  user name and sender (each key required; null clears host, user name and
+  sender); ``mail_password`` left out keeps the stored password, ``null``
+  clears it, a string replaces it. Requires ``CONFIGURE_SYSTEM_SETTINGS``;
+  answers with the stored section, also when nothing changed. Saving sends
+  nothing.
+- ``POST /policies/mail-server/test`` — sends one test message to ``to``
+  through the stored server; ``CONFIGURE_SYSTEM_SETTINGS``. 409 when no
+  server is set up or the server does not take the message (the detail says
+  why); nothing is written either way.
 
 Access (Phase 14 slice 2): every read needs a signed-in User except
 ``GET /policies/due-soon``, which stays public (the Production Board and
 the Scan Station read it without signing in). Each write needs its
 section's permission — Worker sessions
 ``MANAGE_WORKER_SESSION_POLICIES``, Correction permissions
-``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention, user sign-in
-and backups ``CONFIGURE_SYSTEM_SETTINGS`` — and its audit row names the
+``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention, user sign-in,
+backups and the outgoing mail server ``CONFIGURE_SYSTEM_SETTINGS`` — and its
+audit row names the
 signed-in User (``actor_user_id``).
 """
 
@@ -80,12 +96,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
+from sqlalchemy.orm import Session
 
 from app.api.authorization import RequirePermission, SignedInDep
 from app.api.dependencies import SessionDep
-from app.application import policies
+from app.api.session import Secret
+from app.application import outgoing_mail, policies
 from app.application.authentication import Principal
-from app.domain.enums import Permission
+from app.application.common import UNSET
+from app.domain.enums import MailSecurity, Permission
 from app.infrastructure.models import ApplicationPolicy
 
 router = APIRouter(prefix="/api")
@@ -373,3 +392,86 @@ def put_backup_policy(
         actor_user_id=principal.user_id,
     )
     return _backup_response(policy)
+
+
+class MailServerPolicyResponse(BaseModel):
+    mail_host: str | None
+    mail_port: int
+    mail_security: MailSecurity
+    mail_username: str | None
+    # Whether a password is stored; the password itself is never answered.
+    mail_password_set: bool
+    mail_sender: str | None
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class MailServerPolicyPutRequest(BaseModel):
+    """The whole section; ``mail_password`` left out keeps the stored one, null clears it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mail_host: str | None
+    mail_port: StrictInt
+    mail_security: str
+    mail_username: str | None
+    mail_sender: str | None
+    mail_password: Secret | None = None
+
+
+class MailTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    to: str
+
+
+class MailTestResponse(BaseModel):
+    # The canonical address the test message went to.
+    sent_to: str
+
+
+def _mail_server_response(session: Session, policy: ApplicationPolicy) -> MailServerPolicyResponse:
+    settings = policies.mail_server_settings(session, policy)
+    return MailServerPolicyResponse(
+        mail_host=settings.host,
+        mail_port=settings.port,
+        mail_security=settings.security,
+        mail_username=settings.username,
+        mail_password_set=settings.password_set,
+        mail_sender=settings.sender,
+        updated_at=policy.updated_at,
+    )
+
+
+@router.get("/policies/mail-server")
+def get_mail_server_policy(principal: SignedInDep, session: SessionDep) -> MailServerPolicyResponse:
+    return _mail_server_response(session, policies.get_policy(session))
+
+
+@router.put("/policies/mail-server")
+def put_mail_server_policy(
+    principal: SystemSettingsManagerDep, body: MailServerPolicyPutRequest, session: SessionDep
+) -> MailServerPolicyResponse:
+    password: object = UNSET
+    if "mail_password" in body.model_fields_set:
+        password = None if body.mail_password is None else body.mail_password.get_secret_value()
+    policy = policies.update_mail_server_policy(
+        session,
+        host=body.mail_host,
+        port=body.mail_port,
+        security=body.mail_security,
+        username=body.mail_username,
+        sender=body.mail_sender,
+        password=password,
+        actor_user_id=principal.user_id,
+    )
+    return _mail_server_response(session, policy)
+
+
+@router.post("/policies/mail-server/test")
+def send_test_mail(
+    principal: SystemSettingsManagerDep, body: MailTestRequest, session: SessionDep
+) -> MailTestResponse:
+    return MailTestResponse(
+        sent_to=outgoing_mail.send_test_message(session, to=body.to, actor=principal)
+    )
