@@ -37,9 +37,18 @@ export interface PartNumberMaster {
   imageUpdatedAt: string | null;
 }
 
+/** One row of the Management → Part Numbers list page. */
+export interface PartNumberListRow extends PartNumberMaster {
+  /** Date added: when the saved details were created (ISO timestamp). */
+  createdAt: string;
+  /** Last use in a Work Order: the newest demand line naming the PN
+   * (ISO timestamp), or null when no Work Order names it. */
+  lastUsedAt: string | null;
+}
+
 /** One bounded page of the Management → Part Numbers list. */
 export interface PartNumberPage {
-  rows: PartNumberMaster[];
+  rows: PartNumberListRow[];
   total: number;
   offset: number;
   limit: number;
@@ -62,8 +71,13 @@ interface PartNumberWire {
   image_updated_at: string | null;
 }
 
+interface PartNumberListRowWire extends PartNumberWire {
+  created_at: string;
+  last_used_at: string | null;
+}
+
 interface PartNumberPageWire {
-  rows: PartNumberWire[];
+  rows: PartNumberListRowWire[];
   total: number;
   offset: number;
   limit: number;
@@ -117,19 +131,33 @@ export async function resolvePartNumber(
 }
 
 /**
+ * Orders of the Part Numbers list page (the server sorts):
+ * `part_number` Part Number A–Z (the default), `name` Name A–Z,
+ * `added` date added newest first, `last_used` last use in a Work
+ * Order newest first.
+ */
+export type PartNumberSort = 'part_number' | 'name' | 'added' | 'last_used';
+
+/**
  * One bounded page of saved Part Number details for Management → Part
- * Numbers: ordered by PN, `search` a server-side contains-match over
- * the PN, name, revision and ERP ID.
+ * Numbers: ordered by `sort` (Part Number A–Z by default), `search` a
+ * server-side contains-match over the PN, name, revision and ERP ID.
  */
 export async function listPartNumberPage(
   search: string,
   limit: number,
+  sort: PartNumberSort = 'part_number',
 ): Promise<PartNumberPage> {
+  const sortQuery = sort === 'part_number' ? '' : `&sort=${sort}`;
   const wire = await apiRequest<PartNumberPageWire>(
-    `/api/part-numbers/page?search=${encodeURIComponent(search.trim())}&limit=${limit}`,
+    `/api/part-numbers/page?search=${encodeURIComponent(search.trim())}&limit=${limit}${sortQuery}`,
   );
   return {
-    rows: wire.rows.map(toMaster),
+    rows: wire.rows.map((row) => ({
+      ...toMaster(row),
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+    })),
     total: wire.total,
     offset: wire.offset,
     limit: wire.limit,
@@ -244,4 +272,52 @@ export function partNumberSecondaryLine(
     [name, revision ? `rev ${revision}` : null].filter(Boolean).join(' · ') ||
     undefined
   );
+}
+
+/** One PN of a running Work Order, with its saved Name / Description. */
+export interface RunningWorkOrderPart {
+  partNumber: string;
+  name: string | null;
+}
+
+/**
+ * A running Work Order — released and not completed (the Work Orders
+ * list shows it as Released) — with the PNs of its demand lines in line
+ * order.
+ */
+export interface RunningWorkOrder {
+  id: number;
+  workOrderNumber: string | null;
+  receivedDate: string;
+  dueDate: string | null;
+  partNumbers: RunningWorkOrderPart[];
+}
+
+interface RunningWorkOrderWire {
+  id: number;
+  work_order_number: string | null;
+  received_date: string;
+  due_date: string | null;
+  part_numbers: { part_number: string; name: string | null }[];
+}
+
+/**
+ * The running Work Orders with their PNs, in the Work Orders list order
+ * (newest received first) — the groups of Print barcodes on Management
+ * → Part Numbers.
+ */
+export async function listRunningWorkOrders(): Promise<RunningWorkOrder[]> {
+  const wires = await apiRequest<RunningWorkOrderWire[]>(
+    '/api/part-numbers/running-work-orders',
+  );
+  return wires.map((wire) => ({
+    id: wire.id,
+    workOrderNumber: wire.work_order_number,
+    receivedDate: wire.received_date,
+    dueDate: wire.due_date,
+    partNumbers: wire.part_numbers.map((part) => ({
+      partNumber: part.part_number,
+      name: part.name,
+    })),
+  }));
 }

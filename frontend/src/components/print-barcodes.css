@@ -1,0 +1,475 @@
+/* Print barcodes — the ONE multi-label dialog of Management → Machines
+   and Management → Part Numbers (GUI_DESIGN §12.6, §14.5). On screen
+   the cards use the theme tokens; the PRINTED labels are the callers'
+   own single labels (white with black ink), laid out on the print
+   sheet below. */
+
+/* The dialog is a fixed-height column: the head (title, controls,
+   selection bar) and the footer stay put, only the card area scrolls. */
+.dlg.pbx-dlg {
+  display: flex;
+  flex-direction: column;
+  height: 92vh;
+  overflow: hidden;
+}
+
+/* Narrow viewports: the near-full-screen workflow dialog (§2.5). */
+@media (max-width: 760px) {
+  .dlg.pbx-dlg {
+    height: 100dvh;
+  }
+}
+
+.pbx-head {
+  flex: none;
+}
+
+.pbx-head .sub {
+  margin-bottom: 12px;
+}
+
+/* The grouping switch, search and sort of the Part Numbers dialog. */
+.pbx-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.pbx-controls input[type='search'],
+.pbx-controls select {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 14px;
+  padding: 0 12px;
+  min-height: var(--touch-min);
+  outline: none;
+}
+
+.pbx-controls input[type='search'] {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.pbx-controls select {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-right: 32px;
+}
+
+.pbx-controls input[type='search']:focus,
+.pbx-controls select:focus {
+  border-color: var(--info-t);
+}
+
+/* The grouping slide toggle: the Area Board toggle presentation — the
+   button carries the switch semantics, track and knob are visual. */
+.pbx-switch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+  min-height: var(--touch-min);
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.pbx-switch .knob {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.pbx-switch .knob::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition:
+    transform 0.15s,
+    background 0.15s;
+}
+
+.pbx-switch.on {
+  color: var(--text);
+  background: var(--info-surface);
+  border-color: var(--info-t);
+}
+
+.pbx-switch.on .knob {
+  border-color: var(--info-t);
+}
+
+.pbx-switch.on .knob::after {
+  transform: translateX(16px);
+  background: var(--info-t);
+}
+
+/* Selection bar: Select all and the selected count. */
+.pbx-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.pbx-count {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.pbx-count b {
+  color: var(--text);
+}
+
+/* ---- Checkboxes --------------------------------------------------- */
+
+.pbx-box {
+  position: relative;
+  flex: none;
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 2px solid var(--border2);
+  background: var(--field-bg);
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.pbx-box.on,
+.pbx-box.mixed {
+  background: var(--info);
+  border-color: var(--info);
+}
+
+.pbx-box.on::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--on-accent);
+  border-width: 0 2.5px 2.5px 0;
+  transform: rotate(45deg);
+}
+
+.pbx-box.mixed::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  width: 10px;
+  height: 2.5px;
+  border-radius: 2px;
+  background: var(--on-accent);
+}
+
+.pbx-checkbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 750;
+  color: var(--text);
+  text-align: left;
+}
+
+.pbx-checkbtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pbx-checkbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 1px;
+}
+
+/* ---- Card area ---------------------------------------------------- */
+
+/* The only scrolling region. With a mouse it shows the themed vertical
+   scrollbar (gutter reserved, so cards never jump); on touch screens it
+   has no visible scrollbar and is browsed by swiping. It is also the
+   size container of the card grid. */
+.pbx-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  container-type: inline-size;
+  padding: 0 4px 4px 2px;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .pbx-scroll {
+    scrollbar-width: none;
+    scrollbar-gutter: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .pbx-scroll::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.pbx-empty {
+  padding: 28px 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.pbx-group {
+  padding-top: 4px;
+}
+
+.pbx-group + .pbx-group {
+  margin-top: 14px;
+}
+
+/* The group heading stays visible while its cards scroll. */
+.pbx-grouphead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  margin-bottom: 6px;
+  background: var(--panel);
+}
+
+.pbx-grouptitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pbx-grouptitle .meta {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.pbx-groupcount {
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* Responsive grid: as many columns as fit cards of at least the
+   minimum width; the leftover width is shared — the cards widen (1fr)
+   and the spacing grows with the area width — so a row always ends
+   flush with the area, at every column count. */
+.pbx-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 230px), 1fr));
+  gap: clamp(10px, 1.8cqi, 22px);
+  padding: 2px;
+}
+
+/* One selectable card: the label in the theme's colors (the barcode
+   takes the text color), the checkbox in the top-left corner, the
+   selected card outlined and tinted in the info tone. */
+.pbx-card {
+  position: relative;
+  min-width: 0;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px 10px;
+  color: var(--text);
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    border-color 0.12s,
+    background 0.12s,
+    box-shadow 0.12s;
+}
+
+.pbx-card:hover {
+  border-color: var(--border2);
+}
+
+.pbx-card.on {
+  background: var(--info-surface);
+  border-color: var(--info-t);
+  box-shadow: inset 0 0 0 1px var(--info-t);
+}
+
+.pbx-card:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+.pbx-card > .pbx-box {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+}
+
+/* Card label content — the single label's order and hierarchy. */
+.pbx-ltitle {
+  padding: 0 22px;
+  font-size: 17px;
+  font-weight: 850;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.pbx-ltitle.mono {
+  font-family: var(--mono), monospace;
+  font-size: 16px;
+}
+
+.pbx-lmeta {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  margin: 1px 0 6px;
+  overflow-wrap: anywhere;
+}
+
+.pbx-lbars {
+  display: block;
+  width: 100%;
+  max-width: 300px;
+  height: 50px;
+  margin: 2px auto 0;
+  fill: currentColor;
+}
+
+/* A PN card leads with the barcode: keep it clear of the checkbox. */
+.pbx-lbars.lead {
+  margin-top: 22px;
+}
+
+.pbx-lvalue {
+  font-family: var(--mono), monospace;
+  font-size: 11.5px;
+  color: var(--faint);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.pbx-lnote {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.pbx-lnote.faint {
+  color: var(--faint);
+}
+
+/* The bounded-list line under the flat Part Numbers list. */
+.pbx-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 14px;
+  padding: 14px 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Fixed footer. */
+.dlg .row.pbx-foot {
+  flex: none;
+  margin-top: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--hair);
+}
+
+/* ---- Print sheet -------------------------------------------------- */
+
+/* Hidden on screen; it exists only while the dialog is open. */
+.pbx-sheet {
+  display: none;
+}
+
+/* A named page, so these margins never change the single-label prints.
+   No paper size is assumed: the labels fill whatever width the page has. */
+@page pbx-labels {
+  margin: 10mm;
+}
+
+@media print {
+  html:has(> body > .pbx-sheet),
+  body:has(> .pbx-sheet) {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  /* While the sheet exists, it is the only thing printed. */
+  body:has(> .pbx-sheet) > :not(.pbx-sheet) {
+    display: none !important;
+  }
+
+  /* Labels flow as inline blocks: left to right, then the next row,
+     then the next page; a line of labels never splits across pages. */
+  .pbx-sheet {
+    display: block;
+    page: pbx-labels;
+    font-size: 0;
+    line-height: 0;
+  }
+
+  /* Overrides the single-label rules that hide everything else. */
+  .pbx-sheet,
+  .pbx-sheet * {
+    visibility: visible;
+  }
+
+  /* The single label's physical size: 90 mm wide, black on white. */
+  .pbx-plabel {
+    display: inline-block;
+    vertical-align: top;
+    width: 90mm;
+    font-size: 16px;
+    line-height: normal;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .pbx-sheet .pbx-plabel > * {
+    margin: 0;
+    border: none;
+    border-radius: 0;
+  }
+}

@@ -2154,3 +2154,76 @@ test('FM-5: the lifecycle converter maps a missing or null recording User to nul
     'The server answered a malformed Machine history event.',
   );
 });
+
+/* ============ Print barcodes (GUI_DESIGN §12.6) ============ */
+
+test('Print barcodes… lists the active Machines by Area and prints the selected single labels', async () => {
+  await renderMachines();
+  const toolbar = document.querySelector('.mg-toolbar') as HTMLElement;
+  expect(
+    within(toolbar)
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('aria-label')),
+  ).toEqual(['+ New Machine', 'Print barcodes…']);
+  const opener = screen.getByRole('button', { name: 'Print barcodes…' });
+  expect(opener.querySelector('.lbl-short')?.textContent).toBe('Print…');
+  opener.focus();
+  fireEvent.click(opener);
+
+  const dialog = screen.getByRole('dialog', { name: 'Print Machine barcodes' });
+  // Groups follow the Area order; an Area without active Machines is
+  // left out, and retired Machines are never listed.
+  expect(
+    Array.from(dialog.querySelectorAll('.pbx-group')).map((g) =>
+      g.getAttribute('aria-label'),
+    ),
+  ).toEqual(['Cut', 'Lathe', 'Mill']);
+  const cards = within(dialog)
+    .getAllByRole('checkbox')
+    .map((c) => c.getAttribute('aria-label'));
+  expect(cards).toContain('Lathe 1 · CD-0512');
+  expect(cards).not.toContain('Lathe 1 · CD-0104');
+  expect(cards).not.toContain('Saw 2 · CD-0202');
+
+  const lathe = within(dialog).getByRole('checkbox', {
+    name: 'Select all in Lathe',
+  });
+  fireEvent.click(
+    within(dialog).getByRole('checkbox', { name: 'Lathe 2 · CD-0105' }),
+  );
+  expect(lathe).toHaveAttribute('aria-checked', 'mixed');
+  fireEvent.click(lathe);
+  expect(lathe).toHaveAttribute('aria-checked', 'true');
+  expect(within(dialog).getByRole('status')).toHaveTextContent(
+    '4 labels selected',
+  );
+
+  const sheet = document.body.querySelector(':scope > .pbx-sheet')!;
+  const printed = Array.from(sheet.querySelectorAll('.mg-label'));
+  expect(
+    printed.map((label) => label.querySelector('.ltag')?.textContent),
+  ).toEqual(['CD-0512', 'CD-0105', 'CD-0106', 'CD-0107']);
+  // The printed label is the single label: white card markup, real bars.
+  expect(printed[1].querySelector('.lname')?.textContent).toBe('Lathe 2');
+  expect(printed[1].querySelector('.lvalue')?.textContent).toBe(
+    'PF:MACHINE:CD-0105',
+  );
+  expect(printed[1].classList.contains('mg-labelprint')).toBe(false);
+  expect(
+    printed[1].querySelector('svg.lbarcode')?.querySelectorAll('rect').length,
+  ).toBeGreaterThan(20);
+
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', { name: 'Print Machine barcodes' }),
+  ).toBeNull();
+  expect(document.body.querySelector('.pbx-sheet')).toBeNull();
+  expect(opener).toHaveFocus();
+});
+
+test('without Manage Machines the toolbar still offers Print barcodes…', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
+  await renderMachines();
+  expect(screen.queryByRole('button', { name: '+ New Machine' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Print barcodes…' })).toBeEnabled();
+});

@@ -42,8 +42,13 @@ Deliberate surface decisions:
   Manage Part Numbers and is audited with the signed-in User
   (``actor_user_id``); the lookup needs View production data or a key
   of a view that reads it (Work Orders or Part Numbers), the management
-  page View production data or Manage Part Numbers; the image read
-  stays public.
+  page and the running Work Orders View production data or Manage Part
+  Numbers; the image read stays public.
+- ``page`` takes a ``sort`` (``part_number`` default, ``name``,
+  ``added``, ``last_used``) and each of its rows adds ``last_used_at``
+  (``part_numbers.PartNumberSort`` defines both dates);
+  ``running-work-orders`` lists the running Work Orders with the PNs of
+  their demand lines for Print barcodes (GUI_DESIGN §14.5).
 """
 
 import datetime
@@ -60,7 +65,7 @@ from app.api.authorization import (
 )
 from app.api.dependencies import SessionDep
 from app.api.uploads import UploadedImage, read_image_body, stored_image_response
-from app.application import part_numbers
+from app.application import part_numbers, work_orders
 from app.application.authentication import Principal
 from app.domain.enums import Permission
 from app.infrastructure.models import PartNumber
@@ -85,8 +90,13 @@ class PartNumberResponse(BaseModel):
     updated_at: datetime.datetime
 
 
+class PartNumberPageRowResponse(PartNumberResponse):
+    # The latest demand-line creation for the PN; null = never used.
+    last_used_at: datetime.datetime | None
+
+
 class PartNumberPageResponse(BaseModel):
-    rows: list[PartNumberResponse]
+    rows: list[PartNumberPageRowResponse]
     # Masters matching the search; `rows` is the page at `offset`.
     total: int
     offset: int
@@ -165,16 +175,58 @@ def part_number_page(
     search: str | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(part_numbers.DEFAULT_PAGE_LIMIT, ge=1, le=part_numbers.MAX_PAGE_LIMIT),
+    sort: part_numbers.PartNumberSort = part_numbers.PartNumberSort.PART_NUMBER,
 ) -> PartNumberPageResponse:
     """The management list: a bounded page and the total of matches."""
-    page = part_numbers.part_number_page(session, search=search, offset=offset, limit=limit)
+    page = part_numbers.part_number_page(
+        session, search=search, offset=offset, limit=limit, sort=sort
+    )
     return PartNumberPageResponse(
-        rows=[part_number_response(master) for master in page.rows],
+        rows=[
+            PartNumberPageRowResponse(
+                **part_number_response(row.master).model_dump(), last_used_at=row.last_used_at
+            )
+            for row in page.rows
+        ],
         total=page.total,
         offset=page.offset,
         limit=page.limit,
         has_more=page.has_more,
     )
+
+
+class RunningWorkOrderPartResponse(BaseModel):
+    part_number: str
+    # The saved Name / Description, or null.
+    name: str | None
+
+
+class RunningWorkOrderResponse(BaseModel):
+    id: int
+    work_order_number: str | None
+    received_date: datetime.date
+    due_date: datetime.date | None
+    part_numbers: list[RunningWorkOrderPartResponse]
+
+
+@router.get("/part-numbers/running-work-orders")
+def running_work_orders(
+    principal: PartNumberPageReaderDep, session: SessionDep
+) -> list[RunningWorkOrderResponse]:
+    """The running Work Orders (derived RELEASED) with their PNs."""
+    return [
+        RunningWorkOrderResponse(
+            id=running.work_order.id,
+            work_order_number=running.work_order.work_order_number,
+            received_date=running.work_order.received_date,
+            due_date=running.work_order.due_date,
+            part_numbers=[
+                RunningWorkOrderPartResponse(part_number=part.part_number, name=part.name)
+                for part in running.parts
+            ],
+        )
+        for running in work_orders.running_work_orders(session)
+    ]
 
 
 @router.post("/part-numbers", status_code=201)

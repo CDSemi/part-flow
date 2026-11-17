@@ -1937,7 +1937,7 @@ It must provide:
 - whole-row activation: selecting a Machine row opens the Edit Machine dialog,
 - a separate Retired Machines table with sortable data columns: name, `Retired on YYYY-MM-DD`, asset metadata, notes — historical display and reporting with no action column; whole-row activation opens the read-only Retired Machine Details dialog, and **Reactivate** (§8.6 return to service) lives only inside that dialog; retired Machines still never appear in assignment choices and accept no new scans,
 - a New Machine / Edit Machine dialog: display name (required), Area (selectable for a new Machine, fixed for an existing one — §8.6), the read-only Machine identity — the Asset Tag assigned automatically at creation per the configured format (§8.6) and the barcode derived from it (`PF:MACHINE:<asset-tag>`, §10; neither is ever entered or edited) — optional manufacturer, model, serial number, installed date, and notes, and the Machine's append-only lifecycle audit events (`RETIRED` / `REACTIVATED` — §8.6),
-- a printable Machine barcode label from the Edit Machine dialog: the display name, the Asset Tag, and the `PF:MACHINE:<asset-tag>` barcode,
+- a printable Machine barcode label from the Edit Machine dialog: the display name, the Asset Tag, and the `PF:MACHINE:<asset-tag>` barcode; and printing the labels of many active Machines at once, chosen by Area (retired Machines are not offered) — every printed label is that same label,
 - staged creation: a new Machine is added only after a summary and a final explicit confirmation stating that a Machine record cannot be deleted — only retired,
 - retirement as the Edit dialog's **Danger Zone** action: `Retire…` requires a typed identifier confirmation — always the Asset Tag, never the reusable display name — after an explicit consequences warning, and a final explicit confirmation that the retirement is recorded permanently in the Machine lifecycle,
 - retirement blocked while active quantity is assigned, with the quantity completing or transferring through the normal production workflow first,
@@ -2051,7 +2051,7 @@ It must provide:
 - whole-row activation: selecting a record opens the metadata edit dialog,
 - creating a master record ahead of first production use: the entered PN is canonicalized (trimmed, internal whitespace rejected, uppercased — §7 Part Number), and one master record may exist per canonical PN; create-on-first-use at intake (§8.1) is unaffected,
 - editing the metadata: name/description, informational revision, ERP id, and uploading, changing, or removing the PN image (removing returns to the shared default placeholder),
-- viewing and printing a simple PN barcode label: the `PF:PN:<part-number>` barcode with the PN text beneath it — no additional barcode configuration,
+- viewing and printing a simple PN barcode label: the `PF:PN:<part-number>` barcode with the PN text beneath it — no additional barcode configuration; and printing the labels of many PNs at once, chosen from the PNs of the running Work Orders (released and not completed, §8.2) or from the master records, which can be ordered by PN, name, date added (when the master record was created) or last use in a Work Order (when the newest Work Order Demand line for the PN was created, completed Work Orders included) — every printed label is that same label,
 - hard deletion of a master record per §8.1/§28: deletion removes only the metadata, never cascades into WorkOrderDemand, QuantityFlow, PartMovement, Allocation, or history, every surface keeps displaying the canonical PN normally, and a record may be created again later for the same canonical PN. There is no PN archive, no soft-delete, and no active/inactive lifecycle.
 
 ---
@@ -2457,7 +2457,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Administrative Archival and Purge: the interim operator command that permanently deletes Work Orders and Part Numbers entered only for testing. |
+| 2026-11-17 | uncommitted | Machines and Part Numbers: printing many barcode labels at once; the date added and last-use orders of the Part Number master records. |
+| 2026-11-17 | 01ce427 | Administrative Archival and Purge: the interim operator command that permanently deletes Work Orders and Part Numbers entered only for testing. |
 | 2026-11-16 | a04179f | §21: a new Work Order can put its demand lines on the Hot list when it is created. |
 | 2026-11-14 | 2a24c2a | §8.4 and §8.8: Area names are unique within a Department and active Planned Route names are unique. |
 | 2026-11-14 | 15a2120 | §20: a fourth initial role, Super User, grants every permission key, and a release that adds a key grants it to every role that holds every other key. |

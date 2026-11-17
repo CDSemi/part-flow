@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa commit ngày 2026-11-17.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -312,8 +312,14 @@ Mọi view đều hỗ trợ viewport có chiều rộng điện thoại (khoả
   Sắp xếp theo cột là tiện ích của bố cục rộng và không khả dụng khi bảng đang thu gọn; việc kích hoạt cả hàng và các
   control trong hàng vẫn hoạt động không đổi. Các breakpoint thu gọn được suy ra từ chiều rộng nội dung thực của từng
   bảng, không phải từ một breakpoint thiết bị dùng chung.
-- **Toolbar giữ action chính trên hàng tìm kiếm.** Trên Machines, `+ New Machine` không bao giờ rơi xuống dưới ô tìm
-  kiếm: ô tìm kiếm co lại vào phần chiều rộng còn lại, và nhãn nút xuống thành hai dòng khi cần.
+- **Toolbar của Machines và Part Numbers cho ô tìm kiếm một hàng riêng trước khi bất cứ thứ gì bị ép.** Ô tìm kiếm,
+  action `+ New …` và `Print barcodes…` (với một khoảng cách rõ ràng giữa hai nút) chung một hàng khi cả ba vừa; ô tìm
+  kiếm có thể co từ 280 px xuống 220 px trước. Khi chúng không còn vừa, ô tìm kiếm chiếm một hàng toàn chiều rộng của
+  riêng nó và hai nút chia đều hàng kế tiếp thành hai nửa bằng nhau (người đọc không có action `+ New …` nhận
+  `Print barcodes…` trên cả hàng). Khi một nửa không còn chứa được nhãn đầy đủ dài hơn, các nút đọc là `+ New` và
+  `Print…`; tên truy cập (accessible name) của chúng vẫn là nhãn đầy đủ. Các chiều rộng được đo trên chính toolbar (một
+  CSS size container), không phải trên viewport, và các ghi chú trạng thái bị vô hiệu hóa của `+ New Machine` giữ
+  nguyên.
 - **Hàng quét và header của Scan Station thích ứng mà không mất ưu tiên cho việc quét.** Nút **⌨ Enter PN manually**
   co lại còn khoảng một nửa chiều rộng tự nhiên (nhãn của nó xuống thành hai dòng) trước khi ô nhập barcode phải nhường
   chiều rộng. Hàng Operations của header giữ trên một dòng và bỏ bớt phần trình bày theo từng tầng, đo theo không gian
@@ -3460,9 +3466,9 @@ nhất để giám sát vận hành Machine và cấu hình Machine có thẩm q
 
 ## 12.1 Bảng Active Machines
 
-Bảng có một hàng cho mỗi Machine đang hoạt động, với một ô tìm kiếm (Machine, Area, asset tag, model, nhà sản xuất) và
-một action **+ New Machine**. Các cột là **Machine | State | Assigned now | Asset | Maintenance**; không có cột Actions
-riêng.
+Bảng có một hàng cho mỗi Machine đang hoạt động, với một ô tìm kiếm (Machine, Area, asset tag, model, nhà sản xuất), một
+action **+ New Machine** và, ngay sau nó, **Print barcodes…** (§12.6; bố cục toolbar là §2.5). Các cột là
+**Machine | State | Assigned now | Asset | Maintenance**; không có cột Actions riêng.
 
 **Header cột có thể sắp xếp.** Mọi header cột là một nút bật/tắt xoay vòng **tăng dần → giảm dần → không sắp xếp**
 (không sắp xếp nghĩa là thứ tự trong registry). Header mang một mũi tên chỉ chiều (`↑`/`↓`; một `↕` mờ khi chưa sắp
@@ -3545,7 +3551,7 @@ Maintenance là một override tường minh và không gì hơn.
   unit test về cấu trúc) trên một **thẻ nhãn trắng với mực đen ở cả hai theme**, cùng văn bản giá trị. Trên nhãn, **tên
   hiển thị là thông tin chính**, lớn và đậm, trong khi Asset Tag lùi lại thành metadata phụ nhỏ (chính barcode mang nó để
   quét). `Print Label` in đúng chính xác nhãn (print style ẩn mọi thứ khác trên trang); `Cancel (Esc)` quay lại dialog
-  Edit.
+  Edit. Nhãn là MỘT component dùng chung, nên một nhãn in qua Print barcodes (§12.6) giống hệt.
 - **Tên hiển thị.** Nó là bắt buộc và không được trùng với một Machine đang hoạt động của cùng Area: tên hiển thị phải duy
   nhất giữa các Machine đang hoạt động của một Area, và một tên trùng là lỗi trường, không có gì được lưu.
   - Cột tên mang **phản hồi trực tiếp theo từng trường đúng chính xác như dialog Reactivate** (§12.4): một sự trùng tên
@@ -3775,6 +3781,42 @@ View là UI Management được lưu trữ bền vững, dựa trên `/api/machi
 - Việc suy ra trạng thái là logic trình bày dùng chung, độc lập với framework (`src/views/machine-state.ts`), được dùng
   lại bởi các thẻ giám sát của Scan Station và Area Board.
 
+## 12.6 Print barcodes
+
+`Print barcodes…` in nhiều nhãn Machine cùng lúc. Việc in không ghi gì, nên mọi người dùng mở được Machines đều có
+action này, dù có hay không có Manage Machines, và nó vẫn dùng được khi mất kết nối (nó in danh sách đã tải). Nó mở
+**`Print Machine barcodes`**, MỘT dialog Print barcodes dùng chung mà Part Numbers cũng dùng (§14.5):
+
+- **Các Machine được liệt kê.** Mọi Machine **đang hoạt động**, kể cả Machine đang bảo trì. Machine đã retire không được
+  liệt kê: chúng không thể nhận việc, và bản ghi của chúng vẫn nằm trong lịch sử.
+- **Nhóm.** Một nhóm cho mỗi Area, theo thứ tự Area dùng trong toàn ứng dụng, với tiêu đề là chấm màu và tên Area; một
+  Area không có Machine đang hoạt động thì không có nhóm. Trong một nhóm, các Machine theo thứ tự tên hiển thị. Tiêu đề
+  nhóm vẫn hiển thị khi các thẻ của nó cuộn và cho biết `{selected} of {total}`.
+- **Thẻ.** Mỗi thẻ hiển thị nội dung nhãn của `Machine barcode label` (§12.3): tên hiển thị, Asset Tag, barcode Code 128
+  và giá trị `PF:MACHINE:…`. Trên màn hình thẻ dùng màu của theme (tông panel, màu chữ cho tên và các vạch, tông nhẹ cho
+  Asset Tag và giá trị), không bao giờ là thẻ in màu trắng. Một thẻ được chọn có viền và nền nhạt theo tông thông tin.
+- **Lựa chọn.** Mỗi thẻ có một checkbox ở góc trên bên trái; nhấp vào bất cứ đâu trên thẻ, hoặc vào checkbox của nó, sẽ
+  đảo trạng thái chọn. Với bàn phím và trình đọc màn hình, thẻ chính là checkbox (`role="checkbox"`, `aria-checked`, tên
+  truy cập `{Machine} · {Asset Tag}`, Space hoặc Enter đảo trạng thái, có vòng focus hiển thị). Mỗi tiêu đề nhóm là một
+  checkbox nhóm (tên truy cập `Select all in {Area}`): được chọn khi mọi thẻ của nhóm được chọn, bỏ chọn khi không thẻ
+  nào được chọn, và ở trạng thái mixed (`aria-checked="mixed"`, một gạch ngang trong ô) khi chỉ một số được chọn; kích
+  hoạt nó chọn cả nhóm, hoặc bỏ chọn cả nhóm khi nhóm đã được chọn hết. **`Select all`** phía trên các thẻ hoạt động
+  giống vậy trên mọi thẻ đang hiển thị, và bên cạnh nó dòng đếm đọc là `{n} labels selected`.
+- **Lưới thẻ.** Các thẻ lấp đầy một lưới với số cột bằng số thẻ rộng ít nhất 230 px vừa được: màn hình rộng hiển thị
+  nhiều cột, màn hình hẹp ít hơn, điện thoại một cột. Ở mọi số cột, phần chiều rộng dư được chia sẻ — các thẻ rộng ra
+  và khoảng cách giữa chúng tăng theo chiều rộng vùng — nên mọi hàng đều kết thúc sát mép vùng.
+- **Bố cục.** Tiêu đề, mô tả `Select the Machine labels to print. Labels fill the page left to right, then row by row.`
+  và thanh lựa chọn đứng yên ở trên, footer đứng yên ở dưới: chỉ vùng thẻ cuộn. Với chuột, vùng thẻ hiển thị thanh cuộn
+  dọc theo theme; trên màn hình cảm ứng (không hover và con trỏ thô) nó không hiển thị thanh cuộn và được duyệt bằng cách
+  vuốt. Trên viewport hẹp, dialog chiếm toàn màn hình như các dialog quy trình khác.
+- **Footer.** `Cancel (Esc)` đóng dialog (Escape và nhấp vào nền phía sau cũng vậy), và focus trở về `Print barcodes…`.
+  **`Print Labels`** bị vô hiệu hóa khi chưa có gì được chọn.
+- **In.** `Print Labels` in mỗi nhãn được chọn một lần, theo thứ tự hiển thị. Mỗi nhãn in ra đúng là nhãn đơn của §12.3
+  — rộng 90 mm, đen trên trắng, cùng bố cục và barcode, nên quét được đúng như nhãn đơn. Các nhãn lấp đầy giấy từ trái
+  sang phải, sang hàng kế tiếp khi một hàng đầy, rồi sang trang mới khi trang đầy; một nhãn không bao giờ bị chia qua hai
+  trang. Lề trang là 10 mm và không giả định khổ giấy nào: số nhãn mỗi hàng theo khổ giấy người dùng chọn. Chỉ các nhãn
+  được in, không bao giờ là trang hay dialog, và các lần in nhãn đơn không bị ảnh hưởng.
+
 ---
 
 # 13. Planned Routes (Management)
@@ -3908,8 +3950,8 @@ code. Mô tả trang là đúng chính xác `Manage optional Part Number details
 
 ## 14.1 Danh sách Part Number
 
-Một danh sách có thể tìm kiếm (PN, tên/mô tả, revision, ERP id) với một action **+ New Part Number**, dùng chung bố cục
-toolbar của Machines (§12.1). Các cột là **Image | Part Number | Name / Description | Revision | ERP ID | Barcode**.
+Một danh sách có thể tìm kiếm (PN, tên/mô tả, revision, ERP id) với một action **+ New Part Number** và, ngay sau nó,
+**Print barcodes…** (§14.5), dùng chung bố cục toolbar của Machines (§12.1, §2.5). Các cột là **Image | Part Number | Name / Description | Revision | ERP ID | Barcode**.
 
 - **Image.** Hình ảnh PN đã upload của bản ghi, hoặc **MỘT placeholder hình ảnh PN mặc định dùng chung**, đúng chính xác
   placeholder mà panel Part Details của Tracking dùng (§7.2). Không có hình ảnh mặc định thứ hai nào ở bất cứ đâu.
@@ -3986,7 +4028,8 @@ Dialog được giữ đơn giản một cách có chủ ý: không có cấu h�
 Administration → Barcode configuration, §9). Dialog này là **MỘT bề mặt nhãn PN duy nhất** trong ứng dụng:
 Management → Part Numbers (§14.2) và dialog `Edit Part Number` của dòng demand (§11.2) đi tới nó thông qua
 `Barcode label…`, và luồng Add Part (§11.2, §11.3) mở nó trực tiếp. Tất cả chúng render các vạch thông qua một component
-Code 128 dùng chung; không có thẻ nhãn PN thứ hai và không có bộ mã hóa thứ hai nào ở bất cứ đâu.
+Code 128 dùng chung; không có thẻ nhãn PN thứ hai và không có bộ mã hóa thứ hai nào ở bất cứ đâu. Print barcodes (§14.5)
+in cùng component nhãn này, nên một nhãn in ở đó giống hệt.
 
 ## 14.4 Các trạng thái và ranh giới triển khai
 
@@ -3997,7 +4040,43 @@ View là UI sản xuất trên bề mặt `/api/part-numbers`: một tìm kiếm
 (`Showing N of T Part Numbers`, `Show more`, tối đa 200 hàng), tạo mới, chỉnh sửa, upload và gỡ bỏ hình ảnh, và xóa cứng,
 với các thao tác ghi bị chặn khi mất kết nối. Các bản xem trước `?state=` chỉ dành cho phát triển là có sẵn. Dòng danh
 sách có giới hạn là một chỉ báo trạng thái danh sách (mẫu PN Tracking của §7.1), không phải ghi chú cấp trang mà §14.1
-loại trừ.
+loại trừ. Cùng trang có giới hạn đó cũng sắp xếp trên server cho Print barcodes, và Print barcodes đọc các Work Order
+đang chạy cùng PN của chúng từ cùng bề mặt này (§14.5).
+
+## 14.5 Print barcodes
+
+`Print barcodes…` in nhiều nhãn Part Number cùng lúc. Việc in không ghi gì, nên mọi người dùng mở được Part Numbers đều
+có action này. Nó mở **`Print Part Number barcodes`**, dialog Print barcodes dùng chung của §12.6, với mô tả
+`Select the Part Number labels to print. Labels fill the page left to right, then row by row.` Mọi điều §12.6 nêu về
+lựa chọn, checkbox nhóm, `Select all`, lưới thẻ, phần đầu và footer cố định, cuộn, `Cancel (Esc)`, trả focus và in đều
+áp dụng ở đây; mục này chỉ nêu những điểm khác.
+
+- **Thẻ.** Mỗi thẻ hiển thị nội dung nhãn của `Part Number barcode label` (§14.3) theo màu của theme: barcode Code 128,
+  PN bên dưới nó, giá trị `PF:PN:…` và, khi đã lưu, Name / Description thành một dòng nhỏ để dễ nhận ra. Tên truy cập của
+  thẻ là `{PN} · {Name}` (`{PN}` khi chưa lưu tên). Nhãn in ra chỉ là nhãn của §14.3, không có tên.
+- **`Group by running Work Order`** là một công tắc trượt (kiểu trình bày công tắc của Area Board, `role="switch"`), bật
+  khi dialog mở.
+  - **Bật:** một nhóm cho mỗi Work Order đang chạy, với tiêu đề `WO {number}` (`WO —` khi không có số) cùng `Due {date}`
+    khi có hạn, theo thứ tự của danh sách Work Orders (nhận mới nhất trước). Một Work Order đang chạy là Work Order mà
+    danh sách Work Orders hiển thị là Released (§11.1): mọi dòng demand hiện tại đã được release đủ và nó chưa hoàn tất.
+    Các thẻ của nó là PN của các dòng demand theo thứ tự dòng, kể cả PN chưa có chi tiết được lưu. Một PN xuất hiện trên
+    nhiều Work Order đang chạy là MỘT lựa chọn: chọn nó ở bất cứ đâu sẽ hiển thị nó được chọn trong mọi nhóm, và nó chỉ
+    được in một lần. Khi không có Work Order nào đang chạy, vùng thẻ đọc là `No Work Order is running right now.`
+  - **Tắt:** một danh sách phẳng các chi tiết Part Number đã lưu với ô tìm kiếm của danh sách Part Numbers
+    (`Search: PN, name, revision, ERP id…`, cùng tìm kiếm có giới hạn trên server với `Showing N of T Part Numbers`,
+    `Show more` và giới hạn 200 hàng của §14.4) và một select sắp xếp với `Part Number (A–Z)` (mặc định), `Name (A–Z)`,
+    `Date added (newest first)` và `Last used in a Work Order (newest first)`. Với một cách sắp xếp theo ngày, mỗi thẻ
+    thêm một dòng nhẹ `Added {date}` hoặc `Last used {date}` (`Not used in a Work Order yet` khi không Work Order nào ghi
+    PN đó). Các thông điệp rỗng là của §14.4. **Date added** là thời điểm chi tiết đã lưu được tạo (trong view này, hoặc ở
+    lần dùng PN đầu tiên bởi một Work Order hoặc một lần nhận tại Scan Station). **Last used in a Work Order** là thời
+    điểm dòng demand mới nhất ghi PN đó được thêm vào bất kỳ Work Order nào, kể cả Work Order đã hoàn tất. Một PN không có
+    tên xếp cuối khi sắp theo tên, và một PN không Work Order nào ghi xếp cuối khi sắp theo lần dùng cuối.
+- **Lựa chọn tồn tại lâu hơn những gì đang hiển thị.** Tìm kiếm, sắp xếp và chuyển chế độ nhóm không bao giờ thay đổi lựa
+  chọn. `Select all` áp dụng cho các thẻ đang hiển thị; dòng đếm thêm `· {m} not shown` cho các PN đã chọn mà danh sách
+  hiện tại không hiển thị, và `Print Labels` cũng in chúng: trước tiên là các nhãn được chọn theo thứ tự hiển thị, sau đó
+  là các nhãn khác theo thứ tự đã được chọn.
+- **Trạng thái.** Mỗi danh sách hiển thị trạng thái loading tiêu chuẩn, và một trạng thái lỗi kèm Retry
+  (`Running Work Orders could not be loaded.` / `Part Number data could not be loaded.`), chẳng hạn khi mất kết nối.
 
 ---
 
@@ -4024,7 +4103,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §2: passkey — đăng nhập chỉ bằng passkey, passkey làm bước thứ hai, thêm và gỡ passkey; §9: thời gian thiết lập bao gồm cả passkey, và `Turn off two-step…` cũng xóa chúng. |
+| 2026-11-17 | uncommitted | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` trên Machines và Part Numbers in nhiều nhãn cùng lúc từ một dialog dùng chung, và cả hai toolbar chuyển ô tìm kiếm xuống hàng riêng khi các nút không còn vừa. |
+| 2026-11-17 | 1fc96e1 | §2: passkey — đăng nhập chỉ bằng passkey, passkey làm bước thứ hai, thêm và gỡ passkey; §9: thời gian thiết lập bao gồm cả passkey, và `Turn off two-step…` cũng xóa chúng. |
 | 2026-11-17 | aa6287d | §2: xác thực hai bước và địa chỉ email của chính người dùng từ menu tài khoản, và bước thứ hai của dialog Sign in; §9: Settings → Two-step sign-in, timeout của mail server, và trạng thái xác thực hai bước cùng `Turn off two-step…` trong Users. |
 | 2026-11-16 | 252f678 | §9: Settings → Outgoing mail server, kèm test email, và một địa chỉ email tùy chọn trong editor Users. |
 | 2026-11-16 | c1f042b | §9: Administration → Backups đặt khoảng thời gian backup scheduled và số backup hourly, daily và weekly được giữ. |

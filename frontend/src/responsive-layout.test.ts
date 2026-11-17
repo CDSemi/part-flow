@@ -91,10 +91,33 @@ test('the active Machines list sheds columns, then compacts to single-line wrapp
     /\.mg-table\.mg-active tbody tr \{[^}]*display: flex;[^}]*flex-wrap: wrap;/s,
   );
   expect(sheet).toMatch(/\.mg-retired \.mg-table thead \{\s*display: none;/s);
-  // The toolbar keeps the primary action on the search row: the row
-  // never wraps, the search field shrinks instead.
-  const toolbar = /\.mg-toolbar \{[^}]*}/s.exec(sheet)![0];
-  expect(toolbar).toContain('flex-wrap: nowrap');
+});
+
+test('the Machines and Part Numbers toolbars move the search to its own row, then shorten the button labels', () => {
+  for (const [file, toolbar] of [
+    ['views/machines/machines.css', 'mg-toolbar'],
+    ['views/part-numbers/part-numbers.css', 'pnm-toolbar'],
+  ] as const) {
+    const sheet = css(file);
+    // The toolbar is its own size container.
+    const block = new RegExp(`\\.${toolbar} \\{[^}]*}`, 's').exec(sheet)![0];
+    expect(block).toContain('container-type: inline-size');
+    // Below the one-row width: a full-width search row, then the two
+    // buttons in equal halves.
+    expect(sheet).toMatch(
+      new RegExp(
+        `@container \\(max-width: \\d+px\\) \\{[^@]*\\.${toolbar} input\\[type='search'\\] \\{\\s*flex: 1 0 100%;[^@]*\\.${toolbar} \\.btn \\{\\s*flex: 1 1 0;`,
+        's',
+      ),
+    );
+    // Narrower still: the short labels replace the full ones.
+    expect(sheet).toMatch(
+      new RegExp(
+        `@container \\(max-width: \\d+px\\) \\{[^@]*\\.${toolbar} \\.lbl-full \\{\\s*display: none;[^@]*\\.${toolbar} \\.lbl-short \\{\\s*display: inline;`,
+        's',
+      ),
+    );
+  }
 });
 
 test('the Management sub-navigation is a sticky frosted-glass bar on its own panel tone', () => {

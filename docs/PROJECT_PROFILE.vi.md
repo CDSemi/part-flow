@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `2a24c2a` cộng các thay đổi chưa commit ngày 2026-11-16.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `01ce427` cộng các thay đổi chưa commit ngày 2026-11-17.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -1940,7 +1940,7 @@ Màn hình này phải cung cấp:
 - kích hoạt toàn dòng: chọn một dòng Machine sẽ mở hộp thoại Edit Machine,
 - một bảng Retired Machines riêng với các cột dữ liệu có thể sắp xếp: tên, `Retired on YYYY-MM-DD`, siêu dữ liệu tài sản, ghi chú — dùng để hiển thị lịch sử và báo cáo, không có cột thao tác; kích hoạt toàn dòng sẽ mở hộp thoại chỉ đọc Retired Machine Details, và **Reactivate** (§8.6 return to service) chỉ nằm bên trong hộp thoại đó; Machine đã ngừng sử dụng vẫn không bao giờ xuất hiện trong các lựa chọn gán và không nhận lần quét mới nào,
 - một hộp thoại New Machine / Edit Machine: tên hiển thị (bắt buộc), Area (chọn được đối với Machine mới, cố định đối với Machine đã có — §8.6), danh tính Machine chỉ đọc — Asset Tag được gán tự động khi tạo theo định dạng đã cấu hình (§8.6) và barcode được suy ra từ nó (`PF:MACHINE:<asset-tag>`, §10; không giá trị nào trong hai giá trị này từng được nhập hay chỉnh sửa) — nhà sản xuất, model, số sê-ri, ngày lắp đặt và ghi chú tùy chọn, cùng các sự kiện audit vòng đời chỉ ghi thêm (append-only) của Machine (`RETIRED` / `REACTIVATED` — §8.6),
-- một nhãn barcode Machine có thể in từ hộp thoại Edit Machine: tên hiển thị, Asset Tag và barcode `PF:MACHINE:<asset-tag>`,
+- một nhãn barcode Machine có thể in từ hộp thoại Edit Machine: tên hiển thị, Asset Tag và barcode `PF:MACHINE:<asset-tag>`; và in nhãn của nhiều Machine đang hoạt động cùng lúc, chọn theo Area (Machine đã retire không được đưa ra) — mọi nhãn in ra đều là chính nhãn đó,
 - tạo theo từng bước: một Machine mới chỉ được thêm sau một bản tóm tắt và một xác nhận tường minh cuối cùng nói rõ rằng bản ghi Machine không thể bị xóa — chỉ có thể cho ngừng sử dụng,
 - cho ngừng sử dụng (retire) là thao tác **Danger Zone** của hộp thoại Edit: `Retire…` yêu cầu xác nhận bằng cách gõ lại định danh — luôn là Asset Tag, không bao giờ là tên hiển thị có thể tái sử dụng — sau một cảnh báo tường minh về hậu quả, và một xác nhận tường minh cuối cùng rằng việc ngừng sử dụng được ghi vĩnh viễn trong vòng đời Machine,
 - việc ngừng sử dụng bị chặn khi vẫn còn số lượng đang được gán; số lượng đó phải hoàn tất hoặc được chuyển đi qua quy trình sản xuất thông thường trước,
@@ -2054,7 +2054,7 @@ Màn hình này phải cung cấp:
 - kích hoạt toàn dòng: chọn một bản ghi sẽ mở hộp thoại chỉnh sửa siêu dữ liệu,
 - tạo bản ghi master trước lần dùng đầu tiên trong sản xuất: PN được nhập sẽ được chuẩn hóa (cắt khoảng trắng ở đầu và cuối, từ chối khoảng trắng bên trong, chuyển thành chữ in hoa — §7 Part Number), và mỗi PN chuẩn chỉ có thể có một bản ghi master; việc tạo khi dùng lần đầu ở bước tiếp nhận (intake) (§8.1) không bị ảnh hưởng,
 - chỉnh sửa siêu dữ liệu: tên/mô tả, revision mang tính thông tin, ERP id, và tải lên, thay đổi hoặc gỡ bỏ hình ảnh PN (gỡ bỏ sẽ trở về ảnh giữ chỗ mặc định dùng chung),
-- xem và in một nhãn barcode PN đơn giản: barcode `PF:PN:<part-number>` với văn bản PN bên dưới — không có cấu hình barcode bổ sung,
+- xem và in một nhãn barcode PN đơn giản: barcode `PF:PN:<part-number>` với văn bản PN bên dưới — không có cấu hình barcode bổ sung; và in nhãn của nhiều PN cùng lúc, chọn từ các PN của các Work Order đang chạy (đã release và chưa hoàn tất, §8.2) hoặc từ các bản ghi master, có thể sắp theo PN, tên, ngày thêm (khi bản ghi master được tạo) hoặc lần dùng cuối trong một Work Order (khi dòng Work Order Demand mới nhất của PN được tạo, kể cả Work Order đã hoàn tất) — mọi nhãn in ra đều là chính nhãn đó,
 - xóa vĩnh viễn (hard delete) một bản ghi master theo §8.1/§28: việc xóa chỉ gỡ bỏ siêu dữ liệu, không bao giờ lan sang WorkOrderDemand, QuantityFlow, PartMovement, Allocation hay lịch sử, mọi bề mặt vẫn hiển thị PN chuẩn bình thường, và sau này có thể tạo lại một bản ghi cho cùng PN chuẩn đó. Không có lưu trữ (archive) PN, không có xóa mềm (soft delete) và không có vòng đời active/inactive.
 
 ---
@@ -2460,7 +2460,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Administrative Archival and Purge: lệnh vận hành tạm thời xóa vĩnh viễn các Work Order và Part Number chỉ nhập để thử nghiệm. |
+| 2026-11-17 | uncommitted | Machines và Part Numbers: in nhiều nhãn barcode cùng lúc; thứ tự theo ngày thêm và lần dùng cuối của các bản ghi master Part Number. |
+| 2026-11-17 | 01ce427 | Administrative Archival and Purge: lệnh vận hành tạm thời xóa vĩnh viễn các Work Order và Part Number chỉ nhập để thử nghiệm. |
 | 2026-11-16 | a04179f | §21: một Work Order mới có thể đưa các demand line của nó vào Hot list khi được tạo. |
 | 2026-11-14 | 2a24c2a | §8.4 và §8.8: tên Area là duy nhất trong một Department và tên Planned Route đang dùng là duy nhất. |
 | 2026-11-14 | 15a2120 | §20: vai trò ban đầu thứ tư, Super User, cấp mọi permission key, và một bản phát hành thêm một key sẽ cấp key đó cho mọi vai trò đang giữ tất cả các key khác. |

@@ -285,6 +285,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/route-templates/management"): _any_of(_ROUTES_VIEW),
     ("GET", "/api/route-templates/{template_id}/usage"): _any_of(_ROUTES_VIEW),
     # No view reads it yet: View production data ∪ its write surface's key.
+    ("GET", "/api/part-numbers/running-work-orders"): _any_of(_PN_VIEW),
     ("GET", "/api/allocations"): _any_of(_keys(_VPD, _EWOA)),
     # Phase 15 slice 2: the import write workflow's own surfaces — the
     # dry run and the header-only templates — open for either write key

@@ -45,7 +45,6 @@ import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
-import { Code128Svg } from '../../components/Code128Svg';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
@@ -57,6 +56,8 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { formatAssetTag, machineBarcode } from '../asset-tags';
+import { MachineBarcodeLabel } from './MachineBarcodeLabel';
+import { PrintMachineBarcodesDialog } from './PrintMachineBarcodesDialog';
 import {
   LIFECYCLE_EVENT_LABEL,
   MACHINE_STATE_LABEL,
@@ -226,6 +227,7 @@ export function MachinesView() {
   const formatData = useApiData(getMachineAssetTagFormat);
   const [search, setSearch] = useState('');
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  const [printOpen, setPrintOpen] = useState(false);
   // Clear maintenance runs through the generic ConfirmDialog, so its
   // request state lives here with the dialog selection.
   const [clearBusy, setClearBusy] = useState(false);
@@ -427,12 +429,23 @@ export function MachinesView() {
         {canManage ? (
           <button
             className="btn primary"
+            aria-label="+ New Machine"
             disabled={writeBlocked || !canCreate}
             onClick={() => openDialog({ kind: 'new' })}
           >
-            + New Machine
+            <span className="lbl-full">+ New Machine</span>
+            <span className="lbl-short">+ New</span>
           </button>
         ) : null}
+        {/* Printing labels writes nothing: every reader may print. */}
+        <button
+          className="btn ghost"
+          aria-label="Print barcodes…"
+          onClick={() => setPrintOpen(true)}
+        >
+          <span className="lbl-full">Print barcodes…</span>
+          <span className="lbl-short">Print…</span>
+        </button>
       </div>
       {canManage && !canCreate ? (
         <PageNote>
@@ -604,6 +617,13 @@ export function MachinesView() {
         </div>
       ) : null}
 
+      {printOpen ? (
+        <PrintMachineBarcodesDialog
+          machines={preview === 'empty' ? [] : baseMachines}
+          areas={areas}
+          onClose={() => setPrintOpen(false)}
+        />
+      ) : null}
       {dialog?.kind === 'new' ? (
         <MachineEditDialog
           machines={machines}
@@ -1229,19 +1249,13 @@ function BarcodeLabelDialog({
   machine: Machine;
   onClose: () => void;
 }) {
-  const value = machineBarcode(machine.assetTag);
   return (
     <ModalDialog label="Machine barcode label" onClose={onClose}>
       <h3>Machine barcode label</h3>
       <div className="sub">
         Scan this label to identify <b>{machine.name}</b>.
       </div>
-      <div className="mg-label mg-labelprint">
-        <div className="lname">{machine.name}</div>
-        <div className="ltag">{machine.assetTag}</div>
-        <Code128Svg className="lbarcode" value={value} />
-        <div className="lvalue">{value}</div>
-      </div>
+      <MachineBarcodeLabel machine={machine} className="mg-labelprint" />
       <div className="row">
         <button className="bigbtn ghost" onClick={onClose}>
           Cancel (Esc)

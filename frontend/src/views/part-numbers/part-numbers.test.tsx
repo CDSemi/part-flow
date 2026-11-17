@@ -44,6 +44,7 @@ interface FakeRecord {
 
 type RouteKey =
   | 'GET page'
+  | 'GET running'
   | 'GET number'
   | 'POST'
   | 'PATCH'
@@ -117,6 +118,9 @@ const canonical = (value: string) => value.trim().toUpperCase();
 
 function routeKey(method: string, path: string): RouteKey | null {
   if (path === '/api/part-numbers/page' && method === 'GET') return 'GET page';
+  if (path === '/api/part-numbers/running-work-orders' && method === 'GET') {
+    return 'GET running';
+  }
   if (path === '/api/part-numbers' && method === 'GET') return 'GET number';
   if (path === '/api/part-numbers' && method === 'POST') return 'POST';
   if (path === '/api/part-numbers' && method === 'PATCH') return 'PATCH';
@@ -178,6 +182,20 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     );
 
   switch (key) {
+    case 'GET running':
+      // One running Work Order naming two saved PNs (Print barcodes).
+      return json([
+        {
+          id: 7,
+          work_order_number: 'WO-7',
+          received_date: '2026-10-01',
+          due_date: null,
+          part_numbers: [
+            { part_number: '142-260', name: 'PLATE, BASE' },
+            { part_number: '214-406', name: null },
+          ],
+        },
+      ]);
     case 'GET page': {
       const term = (params.get('search') ?? '').trim().toLowerCase();
       const limit = Number(params.get('limit'));
@@ -192,7 +210,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         .sort((a, b) => a.part_number.localeCompare(b.part_number));
       const rows = matching.slice(0, limit);
       return json({
-        rows: rows.map(wire),
+        rows: rows.map((r) => ({ ...wire(r), last_used_at: null })),
         total: matching.length,
         offset: 0,
         limit,
@@ -1279,4 +1297,65 @@ test('FM-4: a Part Number without saved details opens read-only as details, neve
   await waitFor(() => expect(within(dialog).getAllByText('—')).toHaveLength(3));
   expect(screen.queryByRole('dialog', { name: 'New Part Number' })).toBeNull();
   expect(writes).toEqual([]);
+});
+
+/* ============ Print barcodes (GUI_DESIGN §14.5) ============ */
+
+test('Print barcodes… sits after + New Part Number for every reader and prints the selected running-Work-Order labels', async () => {
+  session = signedInSession(['VIEW_PRODUCTION_DATA']);
+  await renderPartNumbers();
+  // Printing writes nothing: a view-only reader has the action too.
+  const opener = screen.getByRole('button', { name: 'Print barcodes…' });
+  // Both labels render; the narrow-toolbar CSS shows one of them.
+  expect(opener.querySelector('.lbl-full')?.textContent).toBe(
+    'Print barcodes…',
+  );
+  expect(opener.querySelector('.lbl-short')?.textContent).toBe('Print…');
+  opener.focus();
+  fireEvent.click(opener);
+
+  const dialog = screen.getByRole('dialog', {
+    name: 'Print Part Number barcodes',
+  });
+  expect(
+    within(dialog).getByRole('switch', { name: 'Group by running Work Order' }),
+  ).toHaveAttribute('aria-checked', 'true');
+  const card = await within(dialog).findByRole('checkbox', {
+    name: '142-260 · PLATE, BASE',
+  });
+  expect(calls).toContain('GET /api/part-numbers/running-work-orders');
+  fireEvent.click(card);
+  const original = window.print;
+  const print = vi.fn();
+  window.print = print;
+  try {
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Print Labels' }),
+    );
+  } finally {
+    window.print = original;
+  }
+  expect(print).toHaveBeenCalledTimes(1);
+  const sheet = document.body.querySelector(':scope > .pbx-sheet')!;
+  expect(
+    Array.from(sheet.querySelectorAll('.pnb-label .lpn')).map(
+      (el) => el.textContent,
+    ),
+  ).toEqual(['142-260']);
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(document.body.querySelector('.pbx-sheet')).toBeNull();
+  expect(opener).toHaveFocus();
+  expect(writes).toEqual([]);
+});
+
+test('the toolbar keeps + New Part Number with its full accessible name beside Print barcodes…', async () => {
+  await renderPartNumbers();
+  const toolbar = document.querySelector('.pnm-toolbar')!;
+  const buttons = within(toolbar as HTMLElement).getAllByRole('button');
+  expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
+    '+ New Part Number',
+    'Print barcodes…',
+  ]);
+  expect(buttons[0].querySelector('.lbl-short')?.textContent).toBe('+ New');
 });

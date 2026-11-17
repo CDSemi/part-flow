@@ -18,6 +18,12 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { pnBarcode } from '../scan-station/barcode';
+import {
+  PART_NUMBERS_MAX_ROWS,
+  PART_NUMBERS_PAGE_SIZE,
+  SEARCH_DEBOUNCE_MS,
+} from './part-number-list';
+import { PrintPartNumberBarcodesDialog } from './PrintPartNumberBarcodesDialog';
 
 // Management → Part Numbers: the single place for saved Part Number
 // details (GUI_DESIGN §14; PROJECT_PROFILE §8.1, §20, §21) — a REAL view
@@ -34,11 +40,6 @@ import { pnBarcode } from '../scan-station/barcode';
 // more records exist than are listed. The list reloads only after the
 // shared `Edit Part Number` dialog closes having written something, so
 // a failing refresh never unmounts an open dialog.
-
-/** First page size and the most rows the list ever shows. */
-const PART_NUMBERS_PAGE_SIZE = 100;
-const PART_NUMBERS_MAX_ROWS = 200;
-const SEARCH_DEBOUNCE_MS = 250;
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; pn: string };
 
@@ -84,6 +85,7 @@ export function PartNumbersView() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [limit, setLimit] = useState(PART_NUMBERS_PAGE_SIZE);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  const [printOpen, setPrintOpen] = useState(false);
 
   // The search field reaches the server debounced; a new search starts
   // again from the first page. An unchanged search arms no timer, so it
@@ -171,12 +173,23 @@ export function PartNumbersView() {
         {canManage ? (
           <button
             className="btn primary"
+            aria-label="+ New Part Number"
             disabled={writeBlocked}
             onClick={() => setDialog({ kind: 'new' })}
           >
-            + New Part Number
+            <span className="lbl-full">+ New Part Number</span>
+            <span className="lbl-short">+ New</span>
           </button>
         ) : null}
+        {/* Printing labels writes nothing: every reader may print. */}
+        <button
+          className="btn ghost"
+          aria-label="Print barcodes…"
+          onClick={() => setPrintOpen(true)}
+        >
+          <span className="lbl-full">Print barcodes…</span>
+          <span className="lbl-short">Print…</span>
+        </button>
       </div>
 
       {rows.length === 0 ? (
@@ -264,6 +277,9 @@ export function PartNumbersView() {
           </div>
         </>
       )}
+      {printOpen ? (
+        <PrintPartNumberBarcodesDialog onClose={() => setPrintOpen(false)} />
+      ) : null}
       {dialog ? (
         <EditPartNumberDialog
           pn={dialog.kind === 'edit' ? dialog.pn : undefined}

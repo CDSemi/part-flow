@@ -726,10 +726,14 @@ def test_no_list_payload_or_list_query_carries_image_bytes(
 
     for response in responses:
         assert response.status_code in {200, 201}, response.text
-    for body in (responses[0].json(), responses[1].json(), responses[3].json()["rows"]):
+    for body in (responses[0].json(), responses[1].json()):
         assert body
         for row in body:
             assert set(row) == _RESPONSE_KEYS
+    assert responses[3].json()["rows"]
+    for row in responses[3].json()["rows"]:
+        # The management page adds the last Work Order use.
+        assert set(row) == _RESPONSE_KEYS | {"last_used_at"}
     assert set(responses[4].json()) == _RESPONSE_KEYS
     assert set(responses[5].json()) == _RESPONSE_KEYS
     assert statements
@@ -1187,3 +1191,146 @@ def test_read_models_carry_the_saved_details(client: TestClient) -> None:
     )
     assert master["image_updated_at"] == uploaded["image_updated_at"]
     assert _tracking_detail(client, without_master)["master"] is None
+
+
+# ---------------------------------------------------------------------------
+# Print barcodes (GUI_DESIGN §14.5): the list sorts and dates, and the
+# running Work Orders with their PNs
+# ---------------------------------------------------------------------------
+
+
+def _page_order(client: TestClient, search: str, sort: str | None = None) -> list[str]:
+    params = {"search": search, **({"sort": sort} if sort else {})}
+    response = admin_of(client).get("/api/part-numbers/page", params=params)
+    assert response.status_code == 200, response.text
+    return [row["part_number"] for row in response.json()["rows"]]
+
+
+def test_page_sorts_by_name_date_added_and_last_use(client: TestClient, db_engine: Engine) -> None:
+    prefix = f"SORT{uuid.uuid4().hex[:6].upper()}"
+    first = _create(client, f"{prefix}-A", name="beta housing")["part_number"]
+    second = _create(client, f"{prefix}-B", name="Alpha plate")["part_number"]
+    third = _create(client, f"{prefix}-C")["part_number"]
+    _work_order(client, third)
+    _work_order(client, first)
+
+    assert _page_order(client, prefix) == [first, second, third]
+    assert _page_order(client, prefix, "part_number") == [first, second, third]
+    # Name A–Z ignoring case; no name last.
+    assert _page_order(client, prefix, "name") == [second, first, third]
+    # Date added: the master's creation, newest first.
+    assert _page_order(client, prefix, "added") == [third, second, first]
+    # Last used: the newest demand line first; never used last.
+    assert _page_order(client, prefix, "last_used") == [first, third, second]
+
+    rows = {
+        row["part_number"]: row
+        for row in admin_of(client)
+        .get("/api/part-numbers/page", params={"search": prefix})
+        .json()["rows"]
+    }
+    assert set(rows[first]) == _RESPONSE_KEYS | {"last_used_at"}
+    with db_engine.connect() as connection:
+        demand_times: dict[str, datetime.datetime] = {
+            pn: used
+            for pn, used in connection.execute(
+                sa.select(
+                    models.WorkOrderDemand.part_number,
+                    sa.func.max(models.WorkOrderDemand.created_at),
+                )
+                .where(models.WorkOrderDemand.part_number.in_([first, third]))
+                .group_by(models.WorkOrderDemand.part_number)
+            )
+        }
+    for pn in (first, third):
+        assert datetime.datetime.fromisoformat(rows[pn]["last_used_at"]) == demand_times[pn]
+    assert rows[second]["last_used_at"] is None
+
+    # A later use moves the PN to the front.
+    _work_order(client, second)
+    assert _page_order(client, prefix, "last_used") == [second, first, third]
+    assert (
+        admin_of(client).get("/api/part-numbers/page", params={"sort": "newest"}).status_code == 422
+    )
+
+
+def _release_line(
+    client: TestClient, cell: _Cell, work_order: dict[str, Any], index: int, quantity: int
+) -> None:
+    demand = work_order["demands"][index]
+    response = admin_of(client).post(
+        f"/api/work-orders/{work_order['id']}/demands/{demand['id']}/release",
+        json={
+            "part_number": demand["part_number"],
+            "quantity": quantity,
+            "route_mode": "FLOATING",
+            "starting_area_id": cell.area_id,
+            "operation_id": cell.operation_id,
+            "confirm_active_quantity": True,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def _work_order_lines(client: TestClient, *lines: tuple[str, int]) -> dict[str, Any]:
+    response = admin_of(client).post(
+        "/api/work-orders",
+        json={
+            "lines": [{"part_number": pn, "requested_quantity": quantity} for pn, quantity in lines]
+        },
+    )
+    assert response.status_code == 201, response.text
+    return cast(dict[str, Any], response.json())
+
+
+def test_running_work_orders_are_the_released_ones_with_their_pns(
+    client: TestClient, db_engine: Engine
+) -> None:
+    cell = _Cell(client)
+    named, plain, partial, shared = (_unique("RUN") for _ in range(4))
+    _create(client, named, name="RUNNING PLATE")
+
+    released = _work_order_lines(client, (named, 4), (plain, 2))
+    _release_line(client, cell, released, 0, 4)
+    _release_line(client, cell, released, 1, 2)
+    partly = _work_order_lines(client, (partial, 5))
+    _release_line(client, cell, partly, 0, 2)
+    never = _work_order_lines(client, (shared, 3))
+    second = _work_order_lines(client, (named, 1), (shared, 1))
+    _release_line(client, cell, second, 0, 1)
+    _release_line(client, cell, second, 1, 1)
+    completed = _work_order_lines(client, (shared, 2))
+    _release_line(client, cell, completed, 0, 2)
+    # A completed Work Order left the active set (its done date is the
+    # allocation projection; set directly here on the test database).
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.update(models.WorkOrder)
+            .where(models.WorkOrder.id == completed["id"])
+            .values(completed_at=sa.func.now())
+        )
+
+    response = admin_of(client).get("/api/part-numbers/running-work-orders")
+    assert response.status_code == 200, response.text
+    running = {row["id"]: row for row in response.json()}
+    assert released["id"] in running and second["id"] in running
+    for excluded in (partly, never, completed):
+        assert excluded["id"] not in running
+    assert running[released["id"]] == {
+        "id": released["id"],
+        "work_order_number": released["work_order_number"],
+        "received_date": released["received_date"],
+        "due_date": released["due_date"],
+        "part_numbers": [
+            {"part_number": named, "name": "RUNNING PLATE"},
+            {"part_number": plain, "name": None},
+        ],
+    }
+    assert [part["part_number"] for part in running[second["id"]]["part_numbers"]] == [
+        named,
+        shared,
+    ]
+    # The WO list order: the newest Work Order first on the same day.
+    ids = [row["id"] for row in response.json()]
+    assert ids.index(second["id"]) < ids.index(released["id"])

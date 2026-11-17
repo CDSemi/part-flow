@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import {
   deletePartNumber,
   listPartNumberPage,
+  listRunningWorkOrders,
   partNumberImageUrl,
   partNumberSecondaryLine,
   removePartNumberImage,
@@ -86,7 +87,7 @@ test('the page search is encoded and the PATCH sends only the given keys', async
     async () =>
       new Response(
         JSON.stringify({
-          rows: [WIRE],
+          rows: [{ ...WIRE, last_used_at: null }],
           total: 1,
           offset: 0,
           limit: 100,
@@ -108,6 +109,8 @@ test('the page search is encoded and the PATCH sends only the given keys', async
         currentRevision: null,
         erpId: null,
         imageUpdatedAt: null,
+        createdAt: '2026-10-01T08:00:00+00:00',
+        lastUsedAt: null,
       },
     ],
     total: 1,
@@ -128,4 +131,55 @@ test('the secondary line joins the saved name and revision', () => {
   expect(partNumberSecondaryLine('BRACKET', null)).toBe('BRACKET');
   expect(partNumberSecondaryLine(null, 'C')).toBe('rev C');
   expect(partNumberSecondaryLine(null, null)).toBeUndefined();
+});
+
+test('the page sends a sort other than Part Number, and the running Work Orders map their PNs', async () => {
+  const page = (rows: unknown[]) =>
+    new Response(
+      JSON.stringify({
+        rows,
+        total: 1,
+        offset: 0,
+        limit: 100,
+        has_more: false,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  fetchMock.mockImplementationOnce(async () =>
+    page([{ ...WIRE, last_used_at: '2026-11-03T10:00:00+00:00' }]),
+  );
+  fetchMock.mockImplementationOnce(async () => page([]));
+  const used = await listPartNumberPage('', 100, 'last_used');
+  await listPartNumberPage('x', 200, 'part_number');
+  expect(requestedUrls()).toEqual([
+    '/api/part-numbers/page?search=&limit=100&sort=last_used',
+    '/api/part-numbers/page?search=x&limit=200',
+  ]);
+  expect(used.rows[0].lastUsedAt).toBe('2026-11-03T10:00:00+00:00');
+
+  fetchMock.mockImplementationOnce(
+    async () =>
+      new Response(
+        JSON.stringify([
+          {
+            id: 4,
+            work_order_number: null,
+            received_date: '2026-11-01',
+            due_date: '2026-11-20',
+            part_numbers: [{ part_number: 'A+B', name: 'PLATE' }],
+          },
+        ]),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+  );
+  expect(await listRunningWorkOrders()).toEqual([
+    {
+      id: 4,
+      workOrderNumber: null,
+      receivedDate: '2026-11-01',
+      dueDate: '2026-11-20',
+      partNumbers: [{ partNumber: 'A+B', name: 'PLATE' }],
+    },
+  ]);
+  expect(requestedUrls()[2]).toBe('/api/part-numbers/running-work-orders');
 });

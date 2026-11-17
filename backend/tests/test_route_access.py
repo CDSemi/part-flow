@@ -250,6 +250,7 @@ def test_management_read_sets_equal_the_spec_literals() -> None:
         ("GET", "/api/tracking/audit-trail"): _TRACKING_VIEW,
         ("GET", "/api/area-board"): {_VPD},
         ("GET", "/api/machines/{machine_id}"): _MACHINES_VIEW,
+        ("GET", "/api/part-numbers/running-work-orders"): _PN_VIEW,
         ("GET", "/api/machines/{machine_id}/lifecycle-events"): _MACHINES_VIEW,
         ("GET", "/api/route-templates/management"): _ROUTES_VIEW,
         ("GET", "/api/route-templates/{template_id}/usage"): _ROUTES_VIEW,

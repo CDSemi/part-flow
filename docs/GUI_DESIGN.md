@@ -301,8 +301,14 @@ Every view supports phone-width viewports (about 390 px and wider). The rules ar
   Column sorting is a wide-layout convenience and is unavailable while a table is collapsed; whole-row activation and
   in-row controls keep working unchanged. Collapse breakpoints derive from each table's real content width, not from
   one shared device breakpoint.
-- **Toolbars keep their primary action on the search row.** On Machines, `+ New Machine` never drops below the search
-  field: the field shrinks into the remaining width, and the button label wraps onto two lines when needed.
+- **The Machines and Part Numbers toolbars give the search its own row before anything is squeezed.** The search
+  field, the `+ New …` action and `Print barcodes…` (with a clear gap between the two buttons) share one row while all
+  three fit; the field may shrink from 280 px to 220 px first. When they no longer fit, the search field takes a
+  full-width row of its own and the two buttons share the next row in equal halves (a reader without the `+ New …`
+  action gets `Print barcodes…` across the whole row). When a half can no longer hold the longer full label, the
+  buttons read `+ New` and `Print…`; their accessible names stay the full labels. The widths are measured on the
+  toolbar itself (a CSS size container), not on the viewport, and the disabled-state notes of `+ New Machine` stay
+  unchanged.
 - **The Scan Station scan row and header adapt without losing scan priority.** The **⌨ Enter PN manually** button
   compresses to roughly half its natural width (its label wrapping onto two lines) before the barcode input gives up
   width. The header's Operations row keeps one line and sheds presentation in tiers measured against the available
@@ -3426,9 +3432,9 @@ identification (PROJECT_PROFILE §7 Machine, §8.6, §20).
 
 ## 12.1 Active Machines table
 
-The table has one row per active Machine, with a search field (Machine, Area, asset tag, model, manufacturer) and a
-**+ New Machine** action. The columns are **Machine | State | Assigned now | Asset | Maintenance**; there is no separate
-Actions column.
+The table has one row per active Machine, with a search field (Machine, Area, asset tag, model, manufacturer), a
+**+ New Machine** action and, right after it, **Print barcodes…** (§12.6; the toolbar layout is §2.5). The columns are
+**Machine | State | Assigned now | Asset | Maintenance**; there is no separate Actions column.
 
 **Sortable column headers.** Every column header is a toggle that cycles **ascending → descending → unsorted**
 (unsorted means the registry order). The header carries a direction arrow (`↑`/`↓`; a faint `↕` while unsorted marks
@@ -3510,7 +3516,8 @@ Maintenance is an explicit override and nothing more.
   structural unit-test guards) on a **white label card with black ink in both themes**, plus the value text. On the
   label the **display name is the primary information**, big and bold, while the Asset Tag recedes to small secondary
   metadata (the barcode itself carries it for scanning). `Print Label` prints exactly the label (print styles hide
-  everything else on the page); `Cancel (Esc)` returns to the Edit dialog.
+  everything else on the page); `Cancel (Esc)` returns to the Edit dialog. The label is ONE shared component, so a
+  label printed through Print barcodes (§12.6) is identical.
 - **Display name.** It is required and must not collide with an active Machine of the same Area: display names stay
   unique among the active Machines of one Area, and a duplicate is a field error with nothing saved.
   - The name column carries **live per-field feedback exactly like the Reactivate dialog** (§12.4): a collision shows
@@ -3736,6 +3743,44 @@ The view is persisted Management UI backed by `/api/machines`.
 - The state derivation is shared, framework-independent presentation logic (`src/views/machine-state.ts`), reused by
   the Scan Station and Area Board monitoring cards.
 
+## 12.6 Print barcodes
+
+`Print barcodes…` prints many Machine labels at once. Printing writes nothing, so every user who can open Machines has
+the action, with or without Manage Machines, and it stays available while disconnected (it prints the loaded list).
+It opens **`Print Machine barcodes`**, the ONE shared Print barcodes dialog that Part Numbers uses too (§14.5):
+
+- **Listed Machines.** Every **active** Machine, Machines under maintenance included. Retired Machines are not listed:
+  they cannot receive work, and their records stay in history.
+- **Groups.** One group per Area, in the Area order used throughout the application, headed by the Area color dot and
+  name; an Area without active Machines has no group. Inside a group the Machines are in display-name order. The group
+  heading stays visible while its cards scroll and shows `{selected} of {total}`.
+- **Cards.** Each card shows the label content of `Machine barcode label` (§12.3): the display name, the Asset Tag, the
+  Code 128 barcode and the `PF:MACHINE:…` value. On screen the card uses the theme colors (the panel tone, the text
+  color for name and bars, quiet tones for the Asset Tag and value), never the white print card. A selected card is
+  outlined and tinted in the information tone.
+- **Selection.** Each card has a checkbox in its top-left corner; clicking anywhere on the card, or on its checkbox,
+  toggles it. The card is the checkbox for keyboards and screen readers (`role="checkbox"`, `aria-checked`, accessible
+  name `{Machine} · {Asset Tag}`, Space or Enter toggles it, a visible focus ring). Each group heading is a group
+  checkbox (accessible name `Select all in {Area}`) that is checked when all its cards are selected, unchecked when none
+  are, and mixed (`aria-checked="mixed"`, a dash in the box) when some are; activating it selects the whole group, or
+  clears it when it was fully selected. **`Select all`** above the cards works the same way over every card shown,
+  and beside it the count line reads `{n} labels selected`.
+- **Card grid.** The cards fill a grid of as many columns as fit cards of at least 230 px: wide screens show several
+  columns, narrow screens fewer, a phone one. At every column count the leftover width is shared — the cards widen and
+  the spacing between them grows with the area width — so every row ends flush with the area.
+- **Layout.** The title, the description `Select the Machine labels to print. Labels fill the page left to right, then row by row.`
+  and the selection bar stay at the top, and the footer stays at the bottom: only the card area scrolls. With a mouse
+  the card area shows the themed vertical scrollbar; on a touch screen (no hover and a coarse pointer) it shows none
+  and is browsed by swiping. On narrow viewports the dialog takes the whole screen like the other workflow dialogs.
+- **Footer.** `Cancel (Esc)` closes the dialog (so do Escape and a click on the backdrop), and focus returns to
+  `Print barcodes…`. **`Print Labels`** is disabled while nothing is selected.
+- **Printing.** `Print Labels` prints every selected label once, in the order shown. Each printed label is exactly the
+  single label of §12.3 — 90 mm wide, black on white, the same layout and barcode, so it scans exactly like it. The
+  labels fill the paper left to right, then the next row when a row is full, then a new page when the page is full;
+  a label never splits across pages. The page margin is 10 mm and no paper size is assumed: the number of labels per
+  row follows the paper the user chooses. Only the labels print, never the page or the dialog, and the single-label
+  prints are unaffected.
+
 ---
 
 # 13. Planned Routes (Management)
@@ -3863,8 +3908,9 @@ description is exactly `Manage optional Part Number details, images, ERP IDs, an
 
 ## 14.1 Part Number list
 
-A searchable list (PN, name/description, revision, ERP id) with a **+ New Part Number** action, sharing the Machines
-toolbar layout (§12.1). The columns are **Image | Part Number | Name / Description | Revision | ERP ID | Barcode**.
+A searchable list (PN, name/description, revision, ERP id) with a **+ New Part Number** action and, right after it,
+**Print barcodes…** (§14.5), sharing the Machines toolbar layout (§12.1, §2.5). The columns are
+**Image | Part Number | Name / Description | Revision | ERP ID | Barcode**.
 
 - **Image.** The record's uploaded PN image, or the **ONE shared default PN image placeholder**, exactly the placeholder
   that the Tracking Part Details panel uses (§7.2). No second default image exists anywhere.
@@ -3941,7 +3987,8 @@ The dialog is deliberately simple: no barcode configuration exists here (the `PF
 Administration → Barcode configuration, §9). This dialog is the **ONE PN label surface** in the application:
 Management → Part Numbers (§14.2) and the demand-line `Edit Part Number` dialog (§11.2) reach it through
 `Barcode label…`, and the Add Part flow (§11.2, §11.3) opens it directly. All of them render the bars through the one
-shared Code 128 component; no second PN label card and no second encoder exist anywhere.
+shared Code 128 component; no second PN label card and no second encoder exist anywhere. Print barcodes (§14.5) prints
+this same label component, so a label printed there is identical.
 
 ## 14.4 States and implementation boundary
 
@@ -3951,7 +3998,46 @@ Loading, error and empty states follow the standard view-state presentation (`No
 The view is production UI on the `/api/part-numbers` surface: a bounded search on the server
 (`Showing N of T Part Numbers`, `Show more`, at most 200 rows), create, edit, image upload and removal, and hard delete,
 with writes blocked while disconnected. The development-only `?state=` previews are available. The bounded-list line is
-a list-state indicator (the PN Tracking pattern of §7.1), not the page-level note that §14.1 excludes.
+a list-state indicator (the PN Tracking pattern of §7.1), not the page-level note that §14.1 excludes. The same bounded
+page also sorts on the server for Print barcodes, and Print barcodes reads the running Work Orders with their PNs from
+the same surface (§14.5).
+
+## 14.5 Print barcodes
+
+`Print barcodes…` prints many Part Number labels at once. Printing writes nothing, so every user who can open Part
+Numbers has the action. It opens **`Print Part Number barcodes`**, the shared Print barcodes dialog of §12.6, with the
+description `Select the Part Number labels to print. Labels fill the page left to right, then row by row.` Everything
+§12.6 states about selection, group checkboxes, `Select all`, the card grid, the fixed head and footer, scrolling,
+`Cancel (Esc)`, focus return and printing applies here; this section states only what differs.
+
+- **Cards.** Each card shows the label content of `Part Number barcode label` (§14.3) in the theme colors: the Code 128
+  barcode, the PN beneath it, the `PF:PN:…` value and, when saved, the Name / Description as a small line for
+  recognition. The card's accessible name is `{PN} · {Name}` (`{PN}` when no name is saved). The printed label is the
+  §14.3 label only, without the name.
+- **`Group by running Work Order`** is a slide toggle (the Area Board toggle presentation, `role="switch"`), on when the
+  dialog opens.
+  - **On:** one group per running Work Order, headed `WO {number}` (`WO —` without a number) with `Due {date}` when it
+    has a due date, in the Work Orders list order (newest received first). A running Work Order is one the Work Orders
+    list shows as Released (§11.1): every current demand line is fully released and it is not completed. Its cards are
+    the PNs of its demand lines in line order, including PNs without saved details. A PN that appears on several
+    running Work Orders is ONE selection: selecting it anywhere shows it selected in every group, and it prints once.
+    With no running Work Order the card area reads `No Work Order is running right now.`
+  - **Off:** one flat list of the saved Part Number details with the Part Numbers list's search
+    (`Search: PN, name, revision, ERP id…`, the same bounded server-side search with `Showing N of T Part Numbers`,
+    `Show more` and the 200-row limit of §14.4) and a sort select with `Part Number (A–Z)` (the default), `Name (A–Z)`,
+    `Date added (newest first)` and `Last used in a Work Order (newest first)`. With a date sort, each card adds a quiet
+    `Added {date}` or `Last used {date}` line (`Not used in a Work Order yet` when no Work Order names the PN). The empty
+    messages are those of §14.4. **Date added** is when the saved details were created (in this view, or on the first
+    use of the PN by a Work Order or a Scan Station receipt). **Last used in a Work Order** is when the newest demand line
+    naming the PN was added to any Work Order, completed ones included. A PN without a name sorts last by name, and a PN
+    that no Work Order names sorts last by last use.
+- **The selection outlives what is shown.** Searching, sorting and switching the grouping never change the selection.
+  `Select all` covers the cards shown; the count line adds `· {m} not shown` for selected PNs that the current list
+  does not show, and `Print Labels` prints them too: first the selected labels in the order shown, then the others in
+  the order they were selected.
+- **States.** Each list shows the standard loading state, and an error state with Retry
+  (`Running Work Orders could not be loaded.` / `Part Number data could not be loaded.`), for example while
+  disconnected.
 
 ---
 
@@ -3978,7 +4064,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §2: passkeys — signing in with a passkey alone, a passkey as the second step, adding and removing passkeys; §9: the setup time covers passkeys, and `Turn off two-step…` deletes them too. |
+| 2026-11-17 | uncommitted | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` on Machines and Part Numbers prints many labels at once from one shared dialog, and both toolbars move the search to its own row when the buttons no longer fit. |
+| 2026-11-17 | 1fc96e1 | §2: passkeys — signing in with a passkey alone, a passkey as the second step, adding and removing passkeys; §9: the setup time covers passkeys, and `Turn off two-step…` deletes them too. |
 | 2026-11-17 | aa6287d | §2: two-step sign-in and the own email address from the account menu, and the second step of the Sign in dialog; §9: Settings → Two-step sign-in, the mail server timeout, and the two-step state and `Turn off two-step…` in Users. |
 | 2026-11-16 | 252f678 | §9: Settings → Outgoing mail server, with a test email, and an optional email address in the Users editor. |
 | 2026-11-16 | c1f042b | §9: Administration → Backups sets the scheduled backup interval and the hourly, daily and weekly backups kept. |

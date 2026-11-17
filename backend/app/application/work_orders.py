@@ -125,7 +125,7 @@ from app.application.part_numbers import (
 )
 from app.core.config import get_settings
 from app.domain.enums import AuditEntityType, AuditEventType, RequestType, WorkOrderStatus
-from app.infrastructure.models import WorkOrder, WorkOrderAllocation, WorkOrderDemand
+from app.infrastructure.models import PartNumber, WorkOrder, WorkOrderAllocation, WorkOrderDemand
 
 _WORK_ORDER_CONFLICTS: Final = {
     "uq_work_orders_work_order_number": (
@@ -444,6 +444,63 @@ def list_work_orders(
             status=derived_status(work_order.completed_at, work_order.status, lines, released),
         )
         for work_order, count, values, lines in rows
+    ]
+
+
+class RunningWorkOrderPart(NamedTuple):
+    """One PN of a running Work Order, with its saved Name / Description."""
+
+    part_number: str
+    # The master's name, or None (no master, or no name saved).
+    name: str | None
+
+
+class RunningWorkOrder(NamedTuple):
+    """A running Work Order and the PNs of its demand lines."""
+
+    work_order: WorkOrder
+    # In demand-line creation order; one entry per line (a PN appears at
+    # most once per Work Order).
+    parts: list[RunningWorkOrderPart]
+
+
+def running_work_orders(session: Session) -> list[RunningWorkOrder]:
+    """The running Work Orders with their PNs (GUI_DESIGN §14.5).
+
+    A Work Order is running while its derived status is RELEASED: every
+    current demand line is fully released (:func:`derived_status`) and it
+    is not completed — exactly the Work Orders the WO list shows as
+    Released. Ordered like the WO list (received date newest first, then
+    the newest Work Order first). Not bounded: it reads only the active
+    Work Orders — the set the Production Board reads in full — with ONE
+    query plus ONE released-evidence query.
+    """
+    rows = session.execute(
+        select(
+            WorkOrder,
+            WorkOrderDemand.id,
+            WorkOrderDemand.part_number,
+            WorkOrderDemand.requested_quantity,
+            PartNumber.name,
+        )
+        .join(WorkOrderDemand, WorkOrderDemand.work_order_id == WorkOrder.id)
+        .outerjoin(PartNumber, PartNumber.part_number == WorkOrderDemand.part_number)
+        .where(WorkOrder.completed_at.is_(None))
+        .order_by(WorkOrder.received_date.desc(), WorkOrder.id.desc(), WorkOrderDemand.id)
+    ).all()
+    grouped: dict[int, tuple[WorkOrder, list[tuple[int, int]], list[RunningWorkOrderPart]]] = {}
+    for work_order, demand_id, part_number, requested, name in rows:
+        _, lines, parts = grouped.setdefault(work_order.id, (work_order, [], []))
+        lines.append((demand_id, requested))
+        parts.append(RunningWorkOrderPart(part_number=part_number, name=name))
+    released = production_release.released_quantities(
+        session, [demand_id for _, lines, _ in grouped.values() for demand_id, _ in lines]
+    )
+    return [
+        RunningWorkOrder(work_order=work_order, parts=parts)
+        for work_order, lines, parts in grouped.values()
+        if derived_status(work_order.completed_at, work_order.status, lines, released)
+        == WorkOrderStatus.RELEASED
     ]
 
 

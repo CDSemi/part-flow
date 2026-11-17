@@ -60,6 +60,7 @@ SLICE1_DATA_MODEL §6, §16):
 
 import datetime
 from collections.abc import Collection, Iterable
+from enum import StrEnum
 from typing import Any, Final, NamedTuple
 
 from sqlalchemy import ColumnElement, false, func, or_, select
@@ -70,7 +71,7 @@ from app.application.common import UNSET, UnsetType, commit, flush, optional_tex
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType, QuantityFlowStatus
 from app.domain.part_number import InvalidPartNumberError, normalize_part_number
-from app.infrastructure.models import Area, PartNumber, QuantityFlow
+from app.infrastructure.models import Area, PartNumber, QuantityFlow, WorkOrderDemand
 
 PART_NUMBER_CONFLICTS: Final = {
     "pk_part_numbers": (
@@ -368,10 +369,42 @@ class PartNumberImage(NamedTuple):
     updated_at: datetime.datetime
 
 
+class PartNumberSort(StrEnum):
+    """Orders of the management list (GUI_DESIGN §14.1, §14.5).
+
+    Every order ends on the canonical PN, so equal values never swap
+    between pages.
+
+    - ``PART_NUMBER``: the canonical PN, A–Z (the default).
+    - ``NAME``: the Name / Description, A–Z ignoring case; masters
+      without a name come last.
+    - ``ADDED``: the date added, newest first — ``part_numbers.created_at``,
+      the moment the master row was created (explicitly in Management,
+      or on first use by a Work Order save or a Scan Station receipt).
+    - ``LAST_USED``: the last use in a Work Order, newest first — the
+      latest ``work_order_demands.created_at`` of the PN over every Work
+      Order, completed ones included; a PN no demand line names comes
+      last.
+    """
+
+    PART_NUMBER = "part_number"
+    NAME = "name"
+    ADDED = "added"
+    LAST_USED = "last_used"
+
+
+class PartNumberListRow(NamedTuple):
+    """One management-list row: the master and its last Work Order use."""
+
+    master: PartNumber
+    # The latest demand-line creation for the PN; None = never used.
+    last_used_at: datetime.datetime | None
+
+
 class PartNumberPage(NamedTuple):
     """One bounded page of the management list and the matching total."""
 
-    rows: list[PartNumber]
+    rows: list[PartNumberListRow]
     total: int
     offset: int
     limit: int
@@ -460,16 +493,45 @@ def _commit_detached(
 
 
 def part_number_page(
-    session: Session, *, search: str | None, offset: int, limit: int
+    session: Session,
+    *,
+    search: str | None,
+    offset: int,
+    limit: int,
+    sort: PartNumberSort = PartNumberSort.PART_NUMBER,
 ) -> PartNumberPage:
-    """One page of the management list in canonical-PN order.
+    """One page of the management list in the requested order.
 
     A non-blank ``search`` is an escaped case-insensitive contains-match
     over the PN, the Name / Description, the revision and the ERP id
-    (GUI_DESIGN §14.1); ``total`` counts every match. The API bounds
-    ``offset`` and ``limit``.
+    (GUI_DESIGN §14.1); ``total`` counts every match. Every row carries
+    its last use in a Work Order (:class:`PartNumberSort`). The API
+    bounds ``offset`` and ``limit``.
     """
-    rows_query = select(PartNumber).order_by(PartNumber.part_number).offset(offset).limit(limit)
+    # Correlated per master: an index lookup on the demand PN
+    # (``ix_work_order_demands_part_number``), never a whole-table
+    # aggregate.
+    last_used_at = (
+        select(func.max(WorkOrderDemand.created_at))
+        .where(WorkOrderDemand.part_number == PartNumber.part_number)
+        .correlate(PartNumber)
+        .scalar_subquery()
+    )
+    order: tuple[Any, ...]
+    if sort is PartNumberSort.NAME:
+        order = (func.lower(PartNumber.name).asc().nulls_last(), PartNumber.part_number)
+    elif sort is PartNumberSort.ADDED:
+        order = (PartNumber.created_at.desc(), PartNumber.part_number)
+    elif sort is PartNumberSort.LAST_USED:
+        order = (last_used_at.desc().nulls_last(), PartNumber.part_number)
+    else:
+        order = (PartNumber.part_number,)
+    rows_query = (
+        select(PartNumber, last_used_at.label("last_used_at"))
+        .order_by(*order)
+        .offset(offset)
+        .limit(limit)
+    )
     count_query = select(func.count()).select_from(PartNumber)
     if search is not None and search.strip():
         condition = _matches_any(
@@ -483,7 +545,13 @@ def part_number_page(
         count_query = count_query.where(condition)
     total = session.scalar(count_query) or 0
     return PartNumberPage(
-        rows=list(session.scalars(rows_query)), total=total, offset=offset, limit=limit
+        rows=[
+            PartNumberListRow(master=master, last_used_at=used)
+            for master, used in session.execute(rows_query)
+        ],
+        total=total,
+        offset=offset,
+        limit=limit,
     )
 
 

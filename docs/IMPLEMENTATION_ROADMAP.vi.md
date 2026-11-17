@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `01ce427` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -1404,7 +1404,10 @@ phát hành với tag riêng, và mục nào đã có thì ghi rõ:
    transaction bằng database role chủ sở hữu (owner); từ chối và nêu tên mọi liên kết tới dữ liệu còn lại; đúng một
    dòng audit cho mỗi Work Order hoặc Part Number đã xóa. Đây là công cụ tạm thời: chức năng xóa trong ứng dụng cho
    Super User được thiết kế cùng với việc lưu trữ và xóa dọn lịch sử Movement.
-2. **Print barcodes — dự kiến.** Management → Machines và Management → Part Numbers in nhiều nhãn barcode cùng lúc.
+2. **Print barcodes — đã có.** Management → Machines và Management → Part Numbers in nhiều nhãn barcode cùng lúc
+   (GUI_DESIGN §12.6, §14.5): các thẻ chọn được, nhóm theo Area, hoặc với Part Numbers theo Work Order đang chạy hay
+   thành một danh sách tìm được, sắp theo PN, tên, ngày thêm hoặc lần dùng cuối trong một Work Order; Select all và
+   chọn theo nhóm; và bản in lấp đầy trang bằng đúng các nhãn của hộp thoại in một nhãn.
 3. **Xem một Scan Station — dự kiến.** Người có quyền Manage Scan Stations mở bất kỳ Scan Station nào ở chế độ thường
    mà không cần thiết bị đã đăng ký, chỉ để xem.
 4. **Administration → Security — dự kiến.** Quy tắc mật khẩu, Remember me, và mọi thiết lập đăng nhập trong một mục.
@@ -1452,7 +1455,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Mở Phase 18 với các yêu cầu của chủ sở hữu ngày 2026-11-17, mục 1 (`pf delete-permanently`) đã có; ghi lại việc chủ sở hữu xem xét thiết kế lưu trữ. |
+| 2026-11-17 | uncommitted | Phase 18 mục 2 đã có: Print barcodes trên Management → Machines và Management → Part Numbers. |
+| 2026-11-17 | `01ce427` | Mở Phase 18 với các yêu cầu của chủ sở hữu ngày 2026-11-17, mục 1 (`pf delete-permanently`) đã có; ghi lại việc chủ sở hữu xem xét thiết kế lưu trữ. |
 | 2026-11-17 | `1fc96e1` | Phase 17 mục 8 đã có cùng passkey, việc này đóng Phase 17; migration `0038_phase17_passkeys` trở thành head của lược đồ. |
 | 2026-11-17 | `aa6287d` | Phase 17 mục 8: xác thực hai bước đã có (app xác thực, mã khôi phục, mã gửi qua email, các con số của nó trong Settings, địa chỉ email của chính user); migration `0037_phase17_two_step` trở thành head của lược đồ. |
 | 2026-11-16 | `252f678` | Phase 17 mục 8 đang thực hiện: địa chỉ email của user và mail server gửi đi đã có; migration `0036_phase17_outgoing_mail` trở thành head của lược đồ. |
