@@ -2317,6 +2317,15 @@ Vận hành sản xuất bình thường chỉ ghi thêm (append-only) và khôn
 - nếu PN xuất hiện lại sau này, có thể tạo một bản ghi metadata master mới cho cùng định danh PN chuẩn;
 - không có kho lưu trữ PN, xóa mềm (soft delete) hay bản ghi bia mộ (tombstone) nào được giữ chỉ để bảo toàn định danh PN — chính chuỗi PN chuẩn đảm nhận trách nhiệm đó.
 
+**Xóa vĩnh viễn dữ liệu thử nghiệm (công cụ vận hành tạm thời).** Các Work Order và Part Number mà chủ sở hữu đã nhập chỉ để thử nghiệm trên production có thể bị xóa vĩnh viễn, như thể chúng chưa từng được nhập, bằng lệnh vận hành `deploy/production/pf delete-permanently` (`python -m app.cli delete-permanently`; OPERATIONS_RUNBOOK §10). Đây là ngoại lệ duy nhất của quy tắc chỉ ghi thêm (append-only) ở trên, và là công cụ tạm thời cho đến khi chức năng xóa trong ứng dụng dành cho Super User được thiết kế cùng với việc lưu trữ và xóa dọn lịch sử:
+
+- lệnh chỉ chạy bằng database role chủ sở hữu (owner), không bao giờ qua role của ứng dụng hay một quy trình nào của ứng dụng; role của ứng dụng không được thêm quyền nào;
+- mặc định lệnh chỉ hiển thị bản xem trước; với `--confirm` lệnh tạo trước một bản sao lưu thủ công đã kiểm tra, rồi xóa trong một transaction;
+- lệnh xóa một Work Order cùng các demand line, các allocation của chúng, các Quantity Flow đã release cho chúng và mọi flow liên kết với các flow đó qua lineage, các Movement, cạnh lineage và bản sao Assigned Route của chúng; một Part Number cùng bản ghi master và mọi flow, demand line và allocation của PN đó; và các dòng audit chỉ liên quan đến các bản ghi này;
+- lệnh từ chối, không xóa gì và nêu tên từng liên kết, mỗi khi dữ liệu cần xóa liên kết với dữ liệu còn lại (một liên kết lineage, một lệnh hay một lần đảo ngược trải trên dữ liệu còn lại, số lượng đã nhập kho mà các allocation còn lại cần, một Part Number vẫn được một Work Order còn lại dùng, một demand line nằm trong Hot list);
+- lệnh giữ đúng một dòng audit mới (`DELETED`) cho mỗi Work Order và mỗi Part Number đã xóa, ghi lại người vận hành, thời điểm, lý do, bản sao lưu và số dòng đã xóa; các dòng audit cũng liên quan đến các bản ghi còn lại được giữ nguyên;
+- dữ liệu đã xóa vẫn còn trong các bản sao lưu hiện có và các bản sao ngoài máy chủ (off-host) của chúng cho đến khi chúng hết hạn.
+
 **Lưu giữ, lưu trữ và xóa dọn lịch sử Movement.** PartMovement là bất biến trong lúc vận hành sản xuất: các quy trình thông thường không bao giờ sửa hoặc xóa bản ghi Movement. Tính bất biến **không** có nghĩa là mọi dòng Movement phải nằm mãi mãi trong cơ sở dữ liệu PostgreSQL chính — lưu trữ và xóa dọn theo một chính sách lưu giữ (retention) tường minh là việc bảo trì vòng đời/lưu trữ, tách biệt với vận hành sản xuất. Khi lịch sử Movement lớn dần, PartFlow có thể áp dụng một **chính sách lưu giữ có thể cấu hình** (ví dụ: giữ N năm lịch sử trong cơ sở dữ liệu chính — thời hạn lưu giữ là cấu hình, không bao giờ là một số năm hard-code trong quy tắc domain). Khi đó, lịch sử cũ hơn được:
 
 1. chọn theo mốc cắt lưu giữ (retention cutoff);
@@ -2451,7 +2460,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §21: một Work Order mới có thể đưa các demand line của nó vào Hot list khi được tạo. |
+| 2026-11-17 | uncommitted | Administrative Archival and Purge: lệnh vận hành tạm thời xóa vĩnh viễn các Work Order và Part Number chỉ nhập để thử nghiệm. |
+| 2026-11-16 | a04179f | §21: một Work Order mới có thể đưa các demand line của nó vào Hot list khi được tạo. |
 | 2026-11-14 | 2a24c2a | §8.4 và §8.8: tên Area là duy nhất trong một Department và tên Planned Route đang dùng là duy nhất. |
 | 2026-11-14 | 15a2120 | §20: vai trò ban đầu thứ tư, Super User, cấp mọi permission key, và một bản phát hành thêm một key sẽ cấp key đó cho mọi vai trò đang giữ tất cả các key khác. |
 | 2026-11-13 | 6c0fa6c | §18 và §32: số lượng đã nhập kho không bao giờ quay lại sản xuất đang hoạt động, đồng bộ lần quét ngoại tuyến nằm ngoài phạm vi đã lên kế hoạch, và không còn quyết định sản phẩm nào để mở. |

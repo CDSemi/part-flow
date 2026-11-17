@@ -8,8 +8,13 @@
 #   backup   a manual deploy/production/backup.sh (OPERATIONS_RUNBOOK §3)
 #   restore  the new-instance restore of a backup into an empty database (OPERATIONS_RUNBOOK §6)
 #   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
+#   delete-permanently
+#            the preview, or with --confirm a verified manual backup and then the deletion, of Work Orders and Part
+#            Numbers entered only for testing (`app.cli delete-permanently` in the owner's one-shot db-roles service;
+#            OPERATIONS_RUNBOOK §10)
 # `deploy/production/pf --help` prints the usage. Exit status: 0 done, 1 refused or a check failed (nothing was
-# changed by the refusal), 2 could not run; update and backup end with the exit status of release.sh and backup.sh.
+# changed by the refusal), 2 could not run; update and backup end with the exit status of release.sh and backup.sh,
+# delete-permanently with the exit status of `app.cli delete-permanently`.
 set -eu
 
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -35,12 +40,17 @@ Commands:
                             restore the backup NAME into this host's empty database, then start PartFlow on it
                             (OPERATIONS_RUNBOOK §6, New-instance restore); the checkout must be at the backup's release
   status [--url URL]        the containers, /api/health and the status report; with --url the full check.sh
+  delete-permanently (--work-order NUMBER | --part-number PN)... --reason TEXT [--confirm]
+                            show what would be deleted of Work Orders and Part Numbers entered only for testing; with
+                            --confirm take a verified manual backup, then delete them in one transaction
+                            (OPERATIONS_RUNBOOK §10); --work-order and --part-number may be repeated
 Options of every command:
   --env-file FILE           default .env.production
   --operator NAME           recorded as the operator (default: the login name)
-Text values: 1-500 characters, no control characters, no " or \.
+Text values: 1-500 characters, no control characters, no " or \. A Work Order Number or Part Number: 1-500
+characters, no control characters, given exactly as PartFlow shows it.
 Exit: 0 done, 1 refused or a check failed, 2 could not run; update and backup end with the exit status of release.sh
-      and backup.sh.
+      and backup.sh, delete-permanently with the exit status of the deletion command.
 EOF
 }
 
@@ -72,6 +82,21 @@ check_text() {
     [ "$(printf '%s' "$2" | tr -d '[:cntrl:]')" = "$2" ] || usage_error "$1 must not contain control characters."
 }
 
+# check_value NAME VALUE: a Work Order Number or Part Number passed on verbatim (quotes allowed).
+check_value() {
+    case "$2" in
+        *[![:space:]]*) ;;
+        *) usage_error "$1 must not be empty." ;;
+    esac
+    [ "${#2}" -le 500 ] || usage_error "$1 must be at most 500 characters."
+    [ "$(printf '%s' "$2" | tr -d '[:cntrl:]')" = "$2" ] || usage_error "$1 must not contain control characters."
+}
+
+# shell_quote VALUE: VALUE as one single-quoted shell word, for `eval set --`.
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 utc() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
@@ -89,7 +114,7 @@ case "${1:-}" in
         usage
         exit 0
         ;;
-    install | update | backup | restore | status) COMMAND=$1; shift ;;
+    install | update | backup | restore | status | delete-permanently) COMMAND=$1; shift ;;
     '') usage_error "a command is required." ;;
     *) usage_error "unknown command $1." ;;
 esac
@@ -101,6 +126,8 @@ APPROVED_BY=
 REASON=
 URL=
 TARGET=
+TARGETS=
+CONFIRM=
 SEEN=' '
 while [ "$#" -gt 0 ]; do
     option=$1
@@ -109,11 +136,23 @@ while [ "$#" -gt 0 ]; do
             usage
             exit 0
             ;;
+        --confirm)
+            [ "$COMMAND" = delete-permanently ] || usage_error "--confirm is not an option of pf $COMMAND."
+            [ -z "$CONFIRM" ] || usage_error "--confirm is given twice."
+            CONFIRM=1
+            shift
+            continue
+            ;;
         --*)
-            case "$SEEN" in
-                *" $option "*) usage_error "$option is given twice." ;;
+            case "$option" in
+                --work-order | --part-number) ;;
+                *)
+                    case "$SEEN" in
+                        *" $option "*) usage_error "$option is given twice." ;;
+                    esac
+                    SEEN="$SEEN$option "
+                    ;;
             esac
-            SEEN="$SEEN$option "
             [ "$#" -ge 2 ] || usage_error "$option needs a value."
             value=$2
             shift 2
@@ -129,7 +168,11 @@ while [ "$#" -gt 0 ]; do
         *:--env-file) ENV_FILE=$value ;;
         *:--operator) check_text "$option" "$value"; OPERATOR=$value ;;
         update:--approver) check_text "$option" "$value"; APPROVER=$value ;;
-        backup:--reason | restore:--reason) check_text "$option" "$value"; REASON=$value ;;
+        backup:--reason | restore:--reason | delete-permanently:--reason) check_text "$option" "$value"; REASON=$value ;;
+        delete-permanently:--work-order | delete-permanently:--part-number)
+            check_value "$option" "$value"
+            TARGETS="$TARGETS $option $(shell_quote "$value")"
+            ;;
         restore:--approved-by) check_text "$option" "$value"; APPROVED_BY=$value ;;
         status:--url) URL=$value ;;
         *) usage_error "$option is not an option of pf $COMMAND." ;;
@@ -148,6 +191,11 @@ case "$COMMAND" in
             || usage_error "NAME must name a backup folder created by backup.sh (for example 20261008T020000Z-scheduled)."
         [ -n "$APPROVED_BY" ] \
             || usage_error "pf restore needs --approved-by NAME: the owner who approved restoring this backup into production."
+        ;;
+    delete-permanently)
+        [ -z "$TARGET" ] || usage_error "pf delete-permanently takes no argument $TARGET: name each record with --work-order or --part-number."
+        [ -n "$TARGETS" ] || usage_error "pf delete-permanently needs at least one --work-order NUMBER or --part-number PN."
+        [ -n "$REASON" ] || usage_error "pf delete-permanently needs --reason TEXT: why the data is deleted (recorded)."
         ;;
     *) [ -z "$TARGET" ] || usage_error "pf $COMMAND takes no argument $TARGET." ;;
 esac
@@ -410,10 +458,59 @@ cmd_status() {
     exit "$status"
 }
 
+# ---------------------------------------------------------------------------
+# pf delete-permanently (OPERATIONS_RUNBOOK §10)
+# ---------------------------------------------------------------------------
+
+# delete_command [OPTION...]: app.cli delete-permanently as the database owner (the one-shot db-roles service holds the
+# owner credential); its JSON document goes to stdout.
+delete_command() {
+    pf_compose --profile ops run --rm --no-deps -T db-roles delete-permanently "$@"
+}
+
+cmd_delete_permanently() {
+    eval "set -- $TARGETS"
+    if [ -z "$CONFIRM" ]; then
+        step "preview only: nothing is changed (add --confirm to delete)"
+        rc=0
+        delete_command "$@" --operator "$OPERATOR" --reason "$REASON" || rc=$?
+        exit "$rc"
+    fi
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    step "checking what would be deleted (preview)"
+    rc=0
+    delete_command "$@" --operator "$OPERATOR" --reason "$REASON" >"$WORK/preview.json" || rc=$?
+    case "$rc" in
+        0) cat "$WORK/preview.json" >&2 ;;
+        1)
+            cat "$WORK/preview.json"
+            refuse "the deletion would be refused (see the refusals above). No backup was taken and nothing was deleted."
+            ;;
+        *)
+            cat "$WORK/preview.json"
+            could_not_run "the preview failed (exit $rc, see above). No backup was taken and nothing was deleted."
+            ;;
+    esac
+    step "taking a verified manual backup first (backup.sh --kind manual)"
+    rc=0
+    sh deploy/production/backup.sh --kind manual --operator "$OPERATOR" --reason "before pf delete-permanently" \
+        --env-file "$ENV_FILE" >"$WORK/backup.out" || rc=$?
+    [ "$rc" -eq 0 ] || could_not_run "the backup failed (backup.sh exit $rc, see above). Nothing was deleted."
+    name=$(sed -n 's/^BACKUP \([^ ]*\) .*$/\1/p' "$WORK/backup.out" | tail -n 1)
+    printf '%s' "$name" | grep -Eq "$BACKUP_NAME_PATTERN" \
+        || could_not_run "backup.sh did not name the backup it published. Nothing was deleted."
+    step "deleting in one transaction (the backup $name holds the data until it ages out)"
+    rc=0
+    delete_command "$@" --operator "$OPERATOR" --reason "$REASON" --confirm --backup-name "$name" || rc=$?
+    exit "$rc"
+}
+
 case "$COMMAND" in
     install) cmd_install ;;
     update) cmd_update ;;
     backup) cmd_backup ;;
     restore) cmd_restore ;;
     status) cmd_status ;;
+    delete-permanently) cmd_delete_permanently ;;
 esac

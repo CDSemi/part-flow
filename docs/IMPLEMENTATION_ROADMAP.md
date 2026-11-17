@@ -52,6 +52,7 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration and the minimal `pf` since 2026-11-16; the host checks after go-live, the open follow-ups and Movement-history archival remain. |
 | Phase 17 — Owner Decisions After Go-Live | Closed (2026-11-17) | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
+| Phase 18 — Owner Requests of 2026-11-17 | In progress | Permanent deletion of test data, printing many barcode labels at once, viewing a Scan Station without an enrolled device, and an Administration → Security section. |
 
 **Database schema.** The current Alembic migration head is `0038_phase17_passkeys`
 (`backend/alembic/versions/20261117_0038_phase17_passkeys.py`). Phase 15 added no migration; Phase 16 added
@@ -1322,8 +1323,11 @@ Owner decisions of 2026-11-13; the History archival & purge section of Administr
 - the threshold: the live Movement row count by default, or the age of the history, or the database size;
 - automatic runs: a policy may start runs by itself, switched on or off in Administration.
 
-The owner reviews the design of these three steps before the build starts, because a purge deletes production
-history.
+The owner reviewed the design on 2026-11-17 and approved it with changes: every number in it is a setting in
+Administration, including the shortest allowed retention period, the days between automatic runs and the minute of
+the hourly work; nothing stays in the database forever (a final expiry with per-PN totals); archived history can be
+opened for viewing in PartFlow; and a Super User's in-app permanent deletion follows the same safeguards as a purge.
+The last three additions wait for the owner's confirmation, and the build starts after Phase 18.
 
 ### Temporary limitations
 
@@ -1399,6 +1403,23 @@ order, and a delivered item says so:
 This phase changes GUI_DESIGN §9 (a section not available yet shows disabled previews instead of only a statement) and
 PROJECT_PROFILE §20 (four seeded roles); each item updates its owning documents when it lands.
 
+## Phase 18 — Owner Requests of 2026-11-17
+
+The owner asked for these changes on 2026-11-17, after release `v2.0.1`. Each lands as a change of its own and is
+released with its own tag, and a delivered item says so:
+
+1. **Deleting test data permanently — delivered.** Work Orders and Part Numbers entered only for testing in production
+   are deleted as if they had never been entered by the operator command `deploy/production/pf delete-permanently`
+   (OPERATIONS_RUNBOOK §10): a preview by default; with `--confirm`, a verified manual backup and then one transaction
+   as the database owner role; a refusal that names every link to data that stays; exactly one audit row per deleted
+   Work Order or Part Number. It is an interim tool: the in-app deletion for a Super User is designed together with
+   Movement-history archival and purge.
+2. **Print barcodes — planned.** Management → Machines and Management → Part Numbers print many barcode labels at
+   once.
+3. **Viewing a Scan Station — planned.** A user who holds Manage Scan Stations opens any Scan Station in its standard
+   mode without an enrolled device, to view it only.
+4. **Administration → Security — planned.** Password rules, Remember me, and every sign-in setting in one section.
+
 ## Deferred
 
 Each item below waits for an owner decision or a canonical requirement; none has an owning phase yet.
@@ -1442,7 +1463,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 17 item 8 delivered with passkeys, which closes Phase 17; migration `0038_phase17_passkeys` becomes the schema head. |
+| 2026-11-17 | uncommitted | Phase 18 opened with the owner's requests of 2026-11-17, item 1 (`pf delete-permanently`) delivered; the owner's review of the archival design recorded. |
+| 2026-11-17 | `1fc96e1` | Phase 17 item 8 delivered with passkeys, which closes Phase 17; migration `0038_phase17_passkeys` becomes the schema head. |
 | 2026-11-17 | `aa6287d` | Phase 17 item 8: two-step sign-in delivered (authenticator app, recovery codes, emailed code, its numbers in Settings, the own email address); migration `0037_phase17_two_step` becomes the schema head. |
 | 2026-11-16 | `252f678` | Phase 17 item 8 in progress: users' email addresses and the outgoing mail server delivered; migration `0036_phase17_outgoing_mail` becomes the schema head. |
 | 2026-11-16 | `a4cf9a8` | Phase 16: the Deployment Admin removed, which completes the minimal `pf`; its open follow-up closed. |

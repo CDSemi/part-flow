@@ -61,9 +61,10 @@ the installation.
 | Look up a setting, a limit or what a container does | §3.1 of this guide |
 | Name and publish a release (developers) | §10 of this guide |
 
-`deploy/production/pf` is the short command for the production stack: `install`, `update`, `backup`, `restore` and
-`status`, each running the documented procedure
-([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any command).
+`deploy/production/pf` is the short command for the production stack: `install`, `update`, `backup`, `restore`,
+`status` and `delete-permanently` (Work Orders and Part Numbers entered only for testing, runbook §10), each running
+the documented procedure ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any
+command).
 
 ### 1.3 What is supported
 
@@ -160,7 +161,7 @@ This section is reference. The installation steps are in the platform guides ([`
 | `backend` | The API, image `partflow/backend:<release>` | Networks `internal` and `edge`. Connects as the database role `partflow_app` and mounts only its password file. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` and `DATABASE_ROLES_REQUIRED` are fixed to `true`. Worker count from `PARTFLOW_BACKEND_WORKERS`; forwarded headers trusted from the `edge` subnet only. 200 s stop grace period, above the longest request time of `web` (180 s), so that a running import can finish. `restart: unless-stopped`, never `on-failure`, because with several workers a configuration refusal exits with code 0. When an outgoing mail server is set in Administration → Settings, `backend` connects to it through the `edge` network to send email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. The only published port: `127.0.0.1:${PARTFLOW_HTTP_PORT}` to container port 80; there is deliberately no setting for the bind address. No `depends_on`, so it keeps serving the screens while `backend` is stopped. 200 s stop grace period. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Applies database migrations and grants in one transaction. Needs a backup option (Migrations, below). Mounts the backup folder read-only at `/backups`. |
-| `db-roles` | Ops job: `python -m app.cli provision-roles` (default) or `apply-grants` | Creates or repairs the database roles and applies the grants (Database roles, below). Connects as the owner role and mounts the three secret files. |
+| `db-roles` | Ops job: `python -m app.cli provision-roles` (default), `apply-grants` or `delete-permanently` | Creates or repairs the database roles and applies the grants (Database roles, below); `pf delete-permanently` runs the deletion of test data in it ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §10). Connects as the owner role and mounts the three secret files. |
 | `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` or `backup-rotate` | Used by `backup.sh`. No network, no database and no secret; mounts only the backup folder at `/backups`. |
 | `status` | Ops job: `python -m app.cli status` | A read-only report as `partflow_app`, with the backup folder mounted read-only. Used by `check.sh`. |
 
@@ -733,7 +734,8 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §3.1: the rate limits of the passkey requests. |
+| 2026-11-17 | uncommitted | §1.2, §3.1: `pf delete-permanently` in the list of `pf` commands and as a command of `db-roles`. |
+| 2026-11-17 | `1fc96e1` | §3.1: the rate limits of the passkey requests. |
 | 2026-11-17 | `aa6287d` | §3.1: the rate limits of the second step of two-step sign-in, the own email change and the two-step changes that check the password. |
 | 2026-11-16 | `252f678` | §3.1: `backend` reaches the outgoing mail server set in Administration → Settings through the `edge` network. |
 | 2026-11-16 | `a4cf9a8` | §1.2, §6: the Deployment Admin tool and its guide are removed. |

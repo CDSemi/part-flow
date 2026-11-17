@@ -2314,6 +2314,15 @@ Normal production runtime is append-only and never silently rewrites or deletes 
 - if the PN appears again later, a new master metadata record may be created for the same canonical PN identity;
 - there is no PN archive, soft-delete, or tombstone kept merely to preserve PN identity — the canonical PN string itself fulfills that responsibility.
 
+**Permanent deletion of test data (interim operator tool).** Work Orders and Part Numbers that the owner entered only for testing in production may be deleted permanently, as if they had never been entered, by the operator command `deploy/production/pf delete-permanently` (`python -m app.cli delete-permanently`; OPERATIONS_RUNBOOK §10). It is the one exception to the append-only rule above, and an interim tool until an in-app delete for a Super User is designed together with history archival and purge:
+
+- it runs only as the database owner role, never through the application role or any application workflow; the application role gains no privilege;
+- it shows a preview by default; with `--confirm` it first takes a verified manual backup, then deletes in one transaction;
+- it deletes a Work Order with its demand lines, their allocations, the Quantity Flows released for them and every flow linked to those by lineage, their Movements, lineage edges and Assigned Route snapshots; a Part Number with its master record and every flow, demand line and allocation of that PN; and the audit rows that concern only these records;
+- it refuses, deleting nothing and naming each link, whenever the data to delete is linked to data that stays (a lineage link, one command or reversal spanning data that stays, stocked quantity that remaining allocations need, a Part Number still used by a Work Order that stays, a demand line on the Hot list);
+- it keeps exactly one new audit row (`DELETED`) per deleted Work Order and per deleted Part Number, recording the operator, the time, the reason, the backup and the row counts; audit rows that also concern records that stay are kept unchanged;
+- the deleted data remains in existing backups and their off-host copies until they age out.
+
 **Movement history retention, archival, and purge.** PartMovement is immutable during active production runtime: normal workflows never modify or delete Movement records. Immutability does **not** mean that every Movement row must live in the primary PostgreSQL database forever — archival and purge under an explicit retention policy is lifecycle/storage maintenance, separate from production runtime. As Movement history grows, PartFlow may apply a **configurable retention policy** (for example: keep N years of history in the primary database — the retention period is configuration, never a hard-coded number of years in domain rules). Older history is then:
 
 1. selected by the retention cutoff;
@@ -2448,7 +2457,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-16 | uncommitted | §21: a new Work Order can put its demand lines on the Hot list when it is created. |
+| 2026-11-17 | uncommitted | Administrative Archival and Purge: the interim operator command that permanently deletes Work Orders and Part Numbers entered only for testing. |
+| 2026-11-16 | a04179f | §21: a new Work Order can put its demand lines on the Hot list when it is created. |
 | 2026-11-14 | 2a24c2a | §8.4 and §8.8: Area names are unique within a Department and active Planned Route names are unique. |
 | 2026-11-14 | 15a2120 | §20: a fourth initial role, Super User, grants every permission key, and a release that adds a key grants it to every role that holds every other key. |
 | 2026-11-13 | 6c0fa6c | §18 and §32: stocked quantity never returns to active production, offline scan synchronization stays outside the planned scope, and no product decision remains open. |

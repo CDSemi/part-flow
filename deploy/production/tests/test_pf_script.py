@@ -305,6 +305,105 @@ class Restore(PfHarness):
 
 
 # ---------------------------------------------------------------------------
+# delete-permanently (OPERATIONS_RUNBOOK §10)
+# ---------------------------------------------------------------------------
+
+DELETE_RUN = ["--profile", "ops", "run", "--rm", "--no-deps", "-T", "db-roles", "delete-permanently"]
+DELETE_RULE = r" --profile ops run --rm --no-deps -T db-roles delete-permanently "
+MANUAL_BACKUP = "20261117T010203Z-manual"
+
+
+def deletion_doc(result, exit_code):
+    return out(json.dumps({"report_version": 1, "command": "delete-permanently", "result": result,
+                           "exit_code": exit_code}, indent=2) + "\n", rc=exit_code)
+
+
+class DeletePermanently(PfHarness):
+    TARGETS = ["--work-order", " WO 'quoted' \"x\" $HOME `id` \\ * ", "--work-order", "WO-2", "--part-number",
+               "pn-1"]
+
+    def setUp(self):
+        super().setUp()
+        self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("deleted", 0)),
+                     rule(DELETE_RULE, deletion_doc("preview", 0)))
+        self.prepend("backup.sh", rule(r".*", out(f"BACKUP {MANUAL_BACKUP} /backups/{MANUAL_BACKUP}\n")))
+
+    def deletions(self):
+        calls = []
+        for entry in self.calls("docker"):
+            argv = entry["argv"]
+            if "db-roles" in argv:
+                start = argv.index("--profile")
+                self.assertEqual(argv[start:start + len(DELETE_RUN)], DELETE_RUN)
+                calls.append(argv[start + len(DELETE_RUN):])
+        return calls
+
+    def test_preview_passes_every_value_verbatim_and_changes_nothing(self):
+        self.pf("delete-permanently", *self.TARGETS, "--reason", "typo test data")
+        self.assertExit(0)
+        self.assertEqual(self.deletions(), [[*self.TARGETS, "--operator", "ops", "--reason", "typo test data"]])
+        self.assertIn('"result": "preview"', self.result.stdout)
+        self.assertEqual(self.stub_calls("backup.sh"), [])
+
+    def test_confirm_takes_a_backup_then_deletes(self):
+        self.pf("delete-permanently", *self.TARGETS, "--reason", "typo", "--operator", "Ops Person", "--confirm")
+        self.assertExit(0)
+        common = [*self.TARGETS, "--operator", "Ops Person", "--reason", "typo"]
+        self.assertEqual(self.deletions(), [common, [*common, "--confirm", "--backup-name", MANUAL_BACKUP]])
+        self.assertEqual(self.stub_calls("backup.sh"), [["--kind", "manual", "--operator", "Ops Person", "--reason",
+                                                        "before pf delete-permanently", "--env-file",
+                                                        ".env.production"]])
+        order = [entry["tool"] for entry in self.calls() if entry["tool"] in ("docker", "backup.sh")]
+        self.assertEqual(order, ["docker", "backup.sh", "docker"])
+        self.assertIn('"result": "deleted"', self.result.stdout)
+        self.assertNotIn('"result": "preview"', self.result.stdout)
+
+    def test_a_refused_preview_takes_no_backup(self):
+        self.prepend("docker", rule(DELETE_RULE, deletion_doc("refused", 1)))
+        self.pf("delete-permanently", "--work-order", "WO-1", "--reason", "typo", "--confirm")
+        self.assertExit(1)
+        self.assertIn('"result": "refused"', self.result.stdout)
+        self.assertIn("No backup was taken and nothing was deleted", self.result.stderr)
+        self.assertEqual(len(self.deletions()), 1)
+        self.assertEqual(self.stub_calls("backup.sh"), [])
+
+    def test_a_failed_backup_deletes_nothing(self):
+        for name, answer in (("backup fails", out("", rc=3)), ("no backup named", out("", rc=0))):
+            with self.subTest(case=name):
+                self.reset()
+                self.prepend("backup.sh", rule(r".*", answer))
+                self.pf("delete-permanently", "--part-number", "PN-1", "--reason", "typo", "--confirm")
+                self.assertExit(2)
+                self.assertIn("Nothing was deleted", self.result.stderr)
+                self.assertEqual([call[-1] for call in self.deletions()], ["typo"])
+
+    def test_the_deletion_exit_status_is_pf_exit_status(self):
+        self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("failed", 2)))
+        self.pf("delete-permanently", "--work-order", "WO-1", "--reason", "typo", "--confirm")
+        self.assertExit(2)
+        self.assertEqual(len(self.deletions()), 2)
+
+    def test_usage_errors(self):
+        for arguments, message in (
+            (("delete-permanently", "--reason", "x"), "needs at least one --work-order NUMBER or --part-number PN"),
+            (("delete-permanently", "--work-order", "W"), "needs --reason TEXT"),
+            (("delete-permanently", "--work-order", "  ", "--reason", "x"), "--work-order must not be empty."),
+            (("delete-permanently", "--part-number", "a\tb", "--reason", "x"),
+             "--part-number must not contain control characters."),
+            (("delete-permanently", "W", "--reason", "x"), "takes no argument W"),
+            (("delete-permanently", "--work-order", "W", "--reason", "x", "--confirm", "--confirm"),
+             "--confirm is given twice."),
+            (("backup", "--confirm"), "--confirm is not an option of pf backup."),
+            (("backup", "--work-order", "W"), "--work-order is not an option of pf backup."),
+        ):
+            with self.subTest(arguments=arguments):
+                self.pf(*arguments)
+                self.assertExit(2)
+                self.assertIn(message, self.result.stderr)
+                self.assertEqual(self.calls(), [])
+
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 

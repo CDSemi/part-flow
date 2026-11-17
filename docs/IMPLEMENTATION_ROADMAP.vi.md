@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -51,6 +51,7 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đã đóng (2026-11-17) | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
+| Phase 18 — Owner Requests of 2026-11-17 | Đang làm | Xóa vĩnh viễn dữ liệu thử nghiệm, in nhiều nhãn barcode cùng lúc, xem một Scan Station không cần thiết bị đã đăng ký, và mục Administration → Security. |
 
 **Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0038_phase17_passkeys`
 (`backend/alembic/versions/20261117_0038_phase17_passkeys.py`). Phase 15 không thêm migration nào; Phase 16 thêm
@@ -1311,7 +1312,11 @@ Các quyết định của chủ sở hữu ngày 2026-11-13; mục History arch
 - ngưỡng: mặc định là số dòng Movement hiện có, hoặc tuổi của lịch sử, hoặc dung lượng database;
 - chạy tự động: một chính sách có thể tự bắt đầu lần chạy, bật hay tắt trong Administration.
 
-Chủ sở hữu duyệt bản thiết kế của ba bước này trước khi bắt đầu xây, vì một lần purge xóa lịch sử production.
+Chủ sở hữu đã xem xét bản thiết kế ngày 2026-11-17 và duyệt với các thay đổi: mọi con số trong đó là một thiết lập
+trong Administration, kể cả thời hạn lưu giữ ngắn nhất được phép, số ngày giữa các run tự động và phút bắt đầu phần
+việc hằng giờ; không có gì ở lại database mãi mãi (hết hạn cuối cùng kèm tổng theo từng PN); lịch sử đã lưu trữ có thể
+mở xem ngay trong PartFlow; và việc xóa vĩnh viễn trong ứng dụng của Super User theo cùng các biện pháp an toàn như
+purge. Ba bổ sung cuối chờ chủ sở hữu xác nhận, và việc xây bắt đầu sau Phase 18.
 
 ### Giới hạn tạm thời
 
@@ -1388,6 +1393,22 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
 Phase này thay đổi GUI_DESIGN §9 (một mục chưa có hiển thị bản xem trước bị vô hiệu hóa thay vì chỉ một câu thông báo)
 và PROJECT_PROFILE §20 (bốn role tạo sẵn); mỗi mục cập nhật các tài liệu sở hữu nó khi được đưa vào.
 
+## Phase 18 — Owner Requests of 2026-11-17
+
+Chủ sở hữu yêu cầu các thay đổi này ngày 2026-11-17, sau bản phát hành `v2.0.1`. Mỗi thay đổi được đưa vào riêng và
+phát hành với tag riêng, và mục nào đã có thì ghi rõ:
+
+1. **Xóa vĩnh viễn dữ liệu thử nghiệm — đã có.** Các Work Order và Part Number chỉ nhập để thử nghiệm trên production
+   được xóa như thể chưa từng được nhập bằng lệnh vận hành `deploy/production/pf delete-permanently`
+   (OPERATIONS_RUNBOOK §10): mặc định chỉ xem trước; với `--confirm`, một bản sao lưu thủ công đã kiểm tra rồi một
+   transaction bằng database role chủ sở hữu (owner); từ chối và nêu tên mọi liên kết tới dữ liệu còn lại; đúng một
+   dòng audit cho mỗi Work Order hoặc Part Number đã xóa. Đây là công cụ tạm thời: chức năng xóa trong ứng dụng cho
+   Super User được thiết kế cùng với việc lưu trữ và xóa dọn lịch sử Movement.
+2. **Print barcodes — dự kiến.** Management → Machines và Management → Part Numbers in nhiều nhãn barcode cùng lúc.
+3. **Xem một Scan Station — dự kiến.** Người có quyền Manage Scan Stations mở bất kỳ Scan Station nào ở chế độ thường
+   mà không cần thiết bị đã đăng ký, chỉ để xem.
+4. **Administration → Security — dự kiến.** Quy tắc mật khẩu, Remember me, và mọi thiết lập đăng nhập trong một mục.
+
 ## Deferred
 
 Mỗi mục dưới đây chờ một quyết định của chủ sở hữu hoặc một yêu cầu chuẩn; chưa mục nào có phase sở hữu.
@@ -1431,7 +1452,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 17 mục 8 đã có cùng passkey, việc này đóng Phase 17; migration `0038_phase17_passkeys` trở thành head của lược đồ. |
+| 2026-11-17 | uncommitted | Mở Phase 18 với các yêu cầu của chủ sở hữu ngày 2026-11-17, mục 1 (`pf delete-permanently`) đã có; ghi lại việc chủ sở hữu xem xét thiết kế lưu trữ. |
+| 2026-11-17 | `1fc96e1` | Phase 17 mục 8 đã có cùng passkey, việc này đóng Phase 17; migration `0038_phase17_passkeys` trở thành head của lược đồ. |
 | 2026-11-17 | `aa6287d` | Phase 17 mục 8: xác thực hai bước đã có (app xác thực, mã khôi phục, mã gửi qua email, các con số của nó trong Settings, địa chỉ email của chính user); migration `0037_phase17_two_step` trở thành head của lược đồ. |
 | 2026-11-16 | `252f678` | Phase 17 mục 8 đang thực hiện: địa chỉ email của user và mail server gửi đi đã có; migration `0036_phase17_outgoing_mail` trở thành head của lược đồ. |
 | 2026-11-16 | `a4cf9a8` | Phase 16: Deployment Admin được gỡ bỏ, hoàn tất `pf` tối giản; việc còn mở của nó được đóng. |

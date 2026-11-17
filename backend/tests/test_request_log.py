@@ -1177,6 +1177,13 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
     ],
     "migration": ["MAX_TEXT_LENGTH", "after", "report.expected_revision"],
     "part_numbers": ["_DETAIL_LABELS[field]", "canonical"],
+    "permanent_deletion": [
+        "deleted",
+        "len(ids)",
+        "row.who",
+        "sorted(r.tgname for r in disabled)",
+        "table",
+    ],
     "production_board": ["department_id", "names"],
     "production_release": [
         "allocated",

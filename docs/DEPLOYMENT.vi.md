@@ -1,6 +1,6 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa
 > commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -63,9 +63,10 @@ Các script trong `deploy/production/` làm giúp bạn những việc rủi ro:
 | Tra cứu một thiết lập, một giới hạn hoặc chức năng của một container | §3.1 của hướng dẫn này |
 | Đặt tên và công bố một bản phát hành (dành cho lập trình viên) | §10 của hướng dẫn này |
 
-`deploy/production/pf` là lệnh ngắn cho production stack: `install`, `update`, `backup`, `restore` và `status`, mỗi lệnh
-chạy quy trình đã mô tả ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md), Trước khi chạy
-bất kỳ lệnh nào).
+`deploy/production/pf` là lệnh ngắn cho production stack: `install`, `update`, `backup`, `restore`, `status` và
+`delete-permanently` (các Work Order và Part Number chỉ nhập để thử nghiệm, runbook §10), mỗi lệnh chạy quy trình đã
+mô tả ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md), Trước khi chạy bất kỳ lệnh
+nào).
 
 ### 1.3 Những gì được hỗ trợ
 
@@ -166,7 +167,7 @@ liệu đó trỏ về đây khi bạn cần một chi tiết.
 | `backend` | API, image `partflow/backend:<release>` | Các network `internal` và `edge`. Kết nối bằng database role `partflow_app` và chỉ mount tệp mật khẩu của role đó. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` và `DATABASE_ROLES_REQUIRED` được cố định là `true`. Số worker lấy từ `PARTFLOW_BACKEND_WORKERS`; chỉ tin các header được chuyển tiếp từ subnet `edge`. Thời gian chờ dừng 200 s, cao hơn thời gian yêu cầu dài nhất của `web` (180 s), để một lần import đang chạy có thể hoàn tất. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lỗi cấu hình thoát với mã 0. Khi một outgoing mail server được đặt trong Administration → Settings, `backend` kết nối tới nó qua network `edge` để gửi email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. Port được công bố duy nhất: `127.0.0.1:${PARTFLOW_HTTP_PORT}` tới port 80 của container; cố ý không có thiết lập nào cho địa chỉ bind. Không có `depends_on`, nên nó vẫn phục vụ các màn hình khi `backend` đang dừng. Thời gian chờ dừng 200 s. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Áp dụng các migration database và quyền (grants) trong một transaction. Cần một tùy chọn sao lưu (Migrations, bên dưới). Mount thư mục sao lưu ở chế độ chỉ đọc tại `/backups`. |
-| `db-roles` | Ops job: `python -m app.cli provision-roles` (mặc định) hoặc `apply-grants` | Tạo hoặc sửa các database role và áp dụng các quyền (Database roles, bên dưới). Kết nối bằng owner role và mount ba tệp bí mật. |
+| `db-roles` | Ops job: `python -m app.cli provision-roles` (mặc định), `apply-grants` hoặc `delete-permanently` | Tạo hoặc sửa các database role và áp dụng các quyền (Database roles, bên dưới); `pf delete-permanently` chạy việc xóa dữ liệu thử nghiệm trong đó ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) §10). Kết nối bằng owner role và mount ba tệp bí mật. |
 | `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` hoặc `backup-rotate` | Do `backup.sh` dùng. Không có network, không có database và không có bí mật; chỉ mount thư mục sao lưu tại `/backups`. |
 | `status` | Ops job: `python -m app.cli status` | Báo cáo chỉ đọc dưới role `partflow_app`, với thư mục sao lưu được mount chỉ đọc. Do `check.sh` dùng. |
 
@@ -743,7 +744,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §3.1: giới hạn tần suất của các yêu cầu passkey. |
+| 2026-11-17 | uncommitted | §1.2, §3.1: `pf delete-permanently` trong danh sách các lệnh `pf` và là một lệnh của `db-roles`. |
+| 2026-11-17 | `1fc96e1` | §3.1: giới hạn tần suất của các yêu cầu passkey. |
 | 2026-11-17 | `aa6287d` | §3.1: giới hạn tần suất của bước thứ hai trong xác thực hai bước, của việc user tự đổi địa chỉ email và của các thay đổi xác thực hai bước có kiểm tra mật khẩu. |
 | 2026-11-16 | `252f678` | §3.1: `backend` truy cập outgoing mail server được đặt trong Administration → Settings qua network `edge`. |
 | 2026-11-16 | `a4cf9a8` | §1.2, §6: công cụ Deployment Admin và hướng dẫn của nó được gỡ bỏ. |

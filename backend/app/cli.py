@@ -94,12 +94,21 @@ Commands:
   (``deploy/production/check.sh``); without ``--max-backup-age-hours`` the
   age limit is the interval of Administration → Backups plus two hours.
   0 ok, 1 a finding, 2 could not run.
+- ``delete-permanently (--work-order NUMBER | --part-number PN)... --operator
+  TEXT --reason TEXT [--confirm] [--backup-name NAME] [--lock-timeout
+  SECONDS]`` (interim test-data tool; OPERATIONS_RUNBOOK §10): preview, or
+  with ``--confirm`` delete, Work Orders and Part Numbers entered only for
+  testing in one transaction, keeping one audit row per deleted record;
+  refused (nothing deleted) when the data is linked to data that stays.
+  Runs as the database owner role (``app.application.permanent_deletion``).
+  0 preview shown or deleted, 1 refused, 2 failed or its outcome is unknown.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
 ``provision-roles``, ``apply-grants``, ``backup-manifest``, ``backup-verify``,
-``backup-rotate``, ``backup-due``, ``backup-policy``, ``status``: their JSON
-document); refusals and errors go to stderr.
+``backup-rotate``, ``backup-due``, ``backup-policy``, ``status``,
+``delete-permanently``: their JSON document); refusals and errors go to
+stderr.
 """
 
 import argparse
@@ -125,6 +134,7 @@ from app.application import (
     backups,
     database_roles,
     migration,
+    permanent_deletion,
     policies,
     reconciliation,
     system_status,
@@ -1148,6 +1158,125 @@ def _run_status(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+_DELETE_PERMANENTLY_HELP = (
+    "Preview, or with --confirm delete, Work Orders and Part Numbers entered only for testing,"
+    " as if they had never been entered (one audit row per deleted record). Runs as the"
+    " database owner role; refused when the data is linked to data that stays."
+)
+
+
+def _work_order_number(value: str) -> str:
+    """A Work Order Number as PartFlow stores it: matched verbatim, never trimmed."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be blank")
+    if "\x00" in value:
+        raise argparse.ArgumentTypeError("must not contain a NUL character")
+    return value
+
+
+def _part_number(value: str) -> str:
+    """The canonical Part Number, by PartFlow's own normalization."""
+    try:
+        return permanent_deletion.requested_part_number(value)
+    except ApplicationError as exc:
+        raise argparse.ArgumentTypeError(exc.message) from None
+
+
+def _backup_name_text(value: str) -> str:
+    _backup_name(value)
+    return value
+
+
+def _add_delete_permanently_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "delete-permanently", help=_DELETE_PERMANENTLY_HELP, description=_DELETE_PERMANENTLY_HELP
+    )
+    parser.add_argument(
+        "--work-order",
+        dest="work_orders",
+        action="append",
+        default=[],
+        type=_work_order_number,
+        metavar="NUMBER",
+        help="A Work Order Number, exactly as stored (repeatable).",
+    )
+    parser.add_argument(
+        "--part-number",
+        dest="part_numbers",
+        action="append",
+        default=[],
+        type=_part_number,
+        metavar="PN",
+        help="A Part Number (repeatable); every Work Order with a line of it must be deleted too.",
+    )
+    parser.add_argument(
+        "--operator", type=_operator_text, required=True, metavar="TEXT", help="Who runs it."
+    )
+    parser.add_argument(
+        "--reason", type=_operator_text, required=True, metavar="TEXT", help="Why (recorded)."
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Delete. Without it the command only shows what it would delete.",
+    )
+    parser.add_argument(
+        "--backup-name",
+        type=_backup_name_text,
+        metavar="NAME",
+        help="The backup taken before the deletion (recorded in the audit rows).",
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=_bounded_int(1, 600),
+        default=migration.DEFAULT_LOCK_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help="How long it may wait for a table lock (1-600, default %(default)s).",
+    )
+
+    def handler(args: argparse.Namespace) -> int:
+        if not args.work_orders and not args.part_numbers:
+            parser.error("give at least one --work-order or --part-number")
+        return _run_delete_permanently(args)
+
+    parser.set_defaults(handler=handler)
+
+
+def _delete_permanently_report(args: argparse.Namespace) -> permanent_deletion.DeletionReport:
+    request = permanent_deletion.DeletionRequest(
+        work_order_numbers=tuple(args.work_orders),
+        part_numbers=tuple(args.part_numbers),
+        operator=args.operator,
+        reason=args.reason,
+        confirm=args.confirm,
+        backup_name=args.backup_name,
+    )
+    try:
+        get_settings()
+        engine = _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        report = permanent_deletion.DeletionReport(
+            started_at=datetime.datetime.now(datetime.UTC), request=request
+        )
+        return permanent_deletion.deletion_failure(
+            report, "configuration_invalid", _CONFIGURATION_INVALID
+        )
+    try:
+        return permanent_deletion.run_deletion(
+            engine, request, lock_timeout_seconds=args.lock_timeout
+        )
+    finally:
+        engine.dispose()
+
+
+def _run_delete_permanently(args: argparse.Namespace) -> int:
+    report = _delete_permanently_report(args)
+    _print_document(permanent_deletion.deletion_document(report))
+    _print_error_traceback(report.error)
+    print(permanent_deletion.deletion_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1165,6 +1294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_backup_due_parser(subparsers)
     _add_backup_policy_parser(subparsers)
     _add_status_parser(subparsers)
+    _add_delete_permanently_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result

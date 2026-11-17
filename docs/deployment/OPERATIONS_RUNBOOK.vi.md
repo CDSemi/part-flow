@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi
 > chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -26,6 +26,7 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Lấy lại mật khẩu hoặc login name đã quên, đổi tên đăng nhập của một user, hoặc thu hồi quyền truy cập của một user | §8 (Đăng nhập và tài khoản người dùng) |
 | Tìm xem một bản phát hành trước đây đã làm gì | §1 |
 | Dùng lệnh ngắn `pf` để cài đặt, cập nhật, sao lưu, khôi phục hoặc xem trạng thái | Trước khi chạy bất kỳ lệnh nào |
+| Xóa các Work Order và Part Number chỉ được nhập để thử nghiệm | §10 |
 
 ## Trước khi chạy bất kỳ lệnh nào
 
@@ -57,6 +58,7 @@ nó.
 | `pf backup [--reason TEXT]` | Một bản sao lưu thủ công (§3). |
 | `pf restore <NAME> --approved-by <owner>` | Khôi phục vào instance mới (new-instance restore) của §6 vào một database trống, với sự phê duyệt của chủ sở hữu được ghi vào `restore.json` trước khi `backend` khởi động. |
 | `pf status [--url https://<partflow-host>]` | Các container, `/api/health` và tóm tắt của `status` (§2); với `--url`, `check.sh --no-state`. |
+| `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | Bản xem trước việc xóa các Work Order và Part Number chỉ nhập để thử nghiệm; với `--confirm`, một bản sao lưu thủ công đã kiểm tra rồi việc xóa trong một transaction (§10). |
 
 Quy ước: tác vụ chạy một lần (one-shot job) đọc hoặc ghi thư mục sao lưu chạy với `--user "$(id -u):$(id -g)"`, vì
 thư mục đó có mode 0700. `<partflow-host>` là tên miền truy cập (host name) mà mọi người gõ trên trình duyệt,
@@ -1212,11 +1214,93 @@ nó, §2).
   chmod 0444 "<secrets-dir>/postgres_password"
   ```
 
+## 10. Xóa vĩnh viễn dữ liệu thử nghiệm
+
+Lịch sử production chỉ được ghi thêm (append-only): bản thân PartFlow không bao giờ xóa một Work Order đã có lịch sử
+sản xuất, một Movement hay một allocation ([`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md), Administrative Archival
+and Purge). Lệnh `pf delete-permanently` là ngoại lệ duy nhất, và chỉ dành cho một trường hợp: các Work Order và Part
+Number mà chủ sở hữu đã nhập **chỉ để thử nghiệm** trên production. Lệnh xóa chúng như thể chúng chưa từng được nhập
+và giữ lại một dòng audit cho mỗi Work Order và mỗi Part Number đã xóa. Đây là công cụ tạm thời: chức năng xóa ngay
+trong PartFlow, dành cho Super User, sẽ được thiết kế sau cùng với việc lưu trữ và dọn lịch sử (history archival and
+purge). Không bao giờ dùng lệnh này để sửa dữ liệu production thật; hãy dùng các chức năng sửa sai mà PartFlow cung
+cấp.
+
+### Xem trước, rồi xác nhận
+
+1. Xem những gì sẽ bị xóa. Không có gì bị thay đổi:
+
+   ```sh
+   deploy/production/pf delete-permanently --work-order "<Work Order Number>" --part-number "<Part Number>" \
+       --reason "<lý do xóa dữ liệu>"
+   ```
+
+   Lặp lại `--work-order` và `--part-number` cho mỗi bản ghi; phải có ít nhất một trong hai. Viết Work Order Number
+   đúng như PartFlow hiển thị, kể cả khoảng trắng và chữ hoa: số này được so khớp chính xác. Part Number được chuẩn hóa
+   như PartFlow chuẩn hóa mọi Part Number (bỏ khoảng trắng ở hai đầu, chuyển thành chữ hoa). `--reason` là bắt buộc
+   và được ghi lại; `--operator` mặc định là tên đăng nhập của bạn, như các lệnh `pf` khác.
+2. Đọc báo cáo mà lệnh in ra standard output (một tài liệu JSON): `work_orders` và `part_numbers` nêu tên các bản ghi,
+   `rows` cho biết số dòng của mỗi bảng sẽ bị xóa, `kept_audit_rows` liệt kê các dòng audit được giữ lại vì chúng cũng
+   liên quan đến các bản ghi còn lại, và `refusals` liệt kê mọi lý do khiến việc xóa không thể chạy.
+3. Xóa: chạy lại đúng lệnh đó với `--confirm`. Khi đó `pf` chạy các bước sau và dừng ở bước đầu tiên thất bại:
+   1. xem trước một lần nữa; một lần từ chối dừng ở đây, trước mọi bản sao lưu;
+   2. một bản sao lưu thủ công đã được kiểm tra, `backup.sh --kind manual` với lý do `before pf delete-permanently`
+      (§3);
+   3. việc xóa trong **một** giao dịch (transaction) database, với tên của bản sao lưu đó được ghi vào các dòng audit.
+
+Lệnh chạy bằng database role chủ sở hữu (owner), trong service chạy một lần `db-roles`, vì database role của ứng dụng
+không bao giờ được xóa lịch sử. Khi không dùng `pf`, hãy sao lưu trước (§3), rồi chạy
+`$PF --profile ops run --rm --no-deps -T db-roles delete-permanently <các tùy chọn như trên> --operator "<tên bạn>" --confirm --backup-name <NAME>`.
+Việc xóa khóa các bảng mà nó thay đổi trong chốc lát: PartFlow vẫn hiển thị các trang, và một thao tác ghi đến trong
+lúc đó sẽ chờ đến khi việc xóa xong (`--lock-timeout`, mặc định 30 giây, giới hạn thời gian chính việc xóa chờ một
+khóa). Hãy chạy vào lúc ít hoạt động.
+
+### Những gì bị xóa, và những gì còn lại
+
+| Bị xóa cho một Work Order | Bị xóa cho một Part Number |
+| --- | --- |
+| Work Order, các demand line của nó, mọi allocation của các line đó, mọi Quantity Flow đã release cho các line đó và mọi flow liên kết với chúng qua một lần tách (split) hay gộp (combine), mọi Movement và bản ghi lineage của các flow đó, các bản sao Assigned Route của các flow đó cùng các bước của chúng, và các dòng audit chỉ liên quan đến các bản ghi này. | Bản ghi Part Number cùng thông tin chi tiết và hình ảnh, mọi Quantity Flow của Part Number với cùng phạm vi liên kết, mọi demand line và allocation của Part Number, và các dòng audit chỉ liên quan đến các bản ghi này. Mọi Work Order có một line của Part Number phải được xóa trong cùng lệnh; một Work Order nội bộ (không có Work Order Number, do một lần nhận hàng tại Scan Station tạo ra) mà mọi line đều thuộc Part Number đang bị xóa sẽ bị xóa cùng. |
+
+Dữ liệu gốc (master data) được giữ lại: Department, Area, Operation, Machine, Worker, Worker Session, Scan Station,
+Route Template và các bản ghi Part Number không được nêu tên. Sau đó có thể nhập lại một Work Order Number đã xóa.
+
+**Dòng audit duy nhất.** Với mỗi Work Order và Part Number đã xóa, lệnh thêm một dòng audit (sự kiện `DELETED`) với
+các giá trị cuối cùng của bản ghi, và trong metadata (`permanent_deletion`) có người vận hành, lý do, bản sao lưu, tên
+của mọi bản ghi bị xóa cùng lúc, và số dòng đã xóa của mỗi bảng; thời điểm của dòng là thời điểm xóa. Một dòng audit
+cũng liên quan đến các bản ghi còn lại (ví dụ một thay đổi Hot list cũng dời một line còn lại) được giữ nguyên.
+
+**Dữ liệu đã xóa vẫn còn trong các bản sao lưu.** Mọi bản sao lưu được tạo trước khi xóa, kể cả bản mà `pf` tạo trước
+tiên, và mọi bản sao ngoài máy chủ (off-host) của các bản sao lưu đó vẫn chứa dữ liệu đã xóa cho đến khi chúng hết hạn
+theo chính sách giữ lại của §3. Khôi phục một bản sao lưu như vậy sẽ đưa dữ liệu trở lại.
+
+### Các trường hợp từ chối
+
+Lệnh từ chối, không xóa gì và nêu tên từng liên kết khi dữ liệu cần xóa liên kết với dữ liệu còn lại:
+
+| Mã | Ý nghĩa | Cần làm gì |
+| --- | --- | --- |
+| `unknown_work_order`, `unknown_part_number` | Không có Work Order nào có đúng số này, hoặc Part Number không có bản ghi cũng không có dữ liệu nào. | Kiểm tra lại cách viết. |
+| `part_number_used_by_work_order` | Một Work Order không bị xóa có một demand line của Part Number. | Xóa luôn Work Order đó trong cùng lệnh, hoặc giữ Part Number. |
+| `on_hot_list` | Một demand line cần xóa đang ở trong Hot list; xóa nó sẽ để lại một khoảng trống trong thứ hạng của các line còn lại. | Gỡ nó khỏi Hot list trong PartFlow trước. |
+| `lineage_link` | Một lần tách hay gộp liên kết một flow cần xóa với một flow còn lại (đã release cho một Work Order còn lại, hoặc số lượng được thêm không qua Work Order). | Xóa Work Order đó trong cùng lệnh, hoặc giữ dữ liệu. |
+| `stock_needed` | Số lượng đã nhập kho của các flow cần xóa vẫn cần cho các allocation của các Work Order còn lại. | Đảo ngược (reverse) các allocation đó trong PartFlow trước, hoặc xóa luôn các Work Order đó. |
+| `allocation_command_shared`, `allocation_reversal_link` | Một allocation, hoặc lần đảo ngược của nó, cũng liên quan đến một demand line còn lại. | Xóa Work Order đó trong cùng lệnh, hoặc giữ dữ liệu. |
+| `movement_command_shared`, `movement_reversal_link`, `route_snapshot_shared`, `movement_references_deleted_data` | Một lệnh sản xuất, một lần Undo, một bản sao Assigned Route hoặc bản ghi của một Movement cũng liên quan đến một flow còn lại. | Xóa Work Order của flow đó trong cùng lệnh, hoặc giữ dữ liệu. |
+| `owner_role_required` | Lệnh không chạy bằng database role chủ sở hữu. | Chạy nó qua `pf` hoặc service `db-roles`. |
+
+### Mã thoát
+
+| Mã thoát | Ý nghĩa |
+| --- | --- |
+| 0 | Đã hiển thị bản xem trước, hoặc (với `--confirm`) các bản ghi đã bị xóa. |
+| 1 | Bị từ chối: không có gì bị xóa, và với `--confirm` không có bản sao lưu nào được tạo. |
+| 2 | Không thể chạy hoặc thất bại: không có gì bị xóa (ví dụ việc sao lưu thất bại, không kết nối được database, hoặc không được cấp khóa bảng kịp thời). Khi kết nối database bị lỗi đúng lúc commit, báo cáo ghi `outcome_unknown`: hãy chạy lại bản xem trước để biết bản ghi nào còn tồn tại. |
+
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất một passkey, và một lần reset cũng xóa các passkey. |
+| 2026-11-17 | uncommitted | §10 và bảng `pf`: `pf delete-permanently` xóa các Work Order và Part Number chỉ nhập để thử nghiệm, sau một lần xem trước và một bản sao lưu đã kiểm tra. |
+| 2026-11-17 | `1fc96e1` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất một passkey, và một lần reset cũng xóa các passkey. |
 | 2026-11-17 | `aa6287d` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất app xác thực của xác thực hai bước, đăng xuất user ở mọi nơi, và khóa sau các mã sai. |
 | 2026-11-16 | `a4cf9a8` | §7: dạng reconcile cho một instance staging của Deployment Admin được bỏ cùng với công cụ đó. |
 | 2026-11-16 | `5708664` | Trước khi chạy bất kỳ lệnh nào: lệnh ngắn `deploy/production/pf`. |

@@ -24,6 +24,7 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | Reset a forgotten password or login name, rename a user, or remove a user's access | §8 (Sign-in and user accounts) |
 | Find what a past release did | §1 |
 | Use the short `pf` command for an installation, an update, a backup, a restore or the status | Before you run any command |
+| Delete Work Orders and Part Numbers that were entered only for testing | §10 |
 
 ## Before you run any command
 
@@ -53,6 +54,7 @@ its options.
 | `pf backup [--reason TEXT]` | A manual backup (§3). |
 | `pf restore <NAME> --approved-by <owner>` | The new-instance restore of §6 into an empty database, with the owner's approval recorded in `restore.json` before `backend` starts. |
 | `pf status [--url https://<partflow-host>]` | The containers, `/api/health` and the `status` summary (§2); with `--url`, `check.sh --no-state`. |
+| `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | The preview of deleting Work Orders and Part Numbers entered only for testing; with `--confirm`, a verified manual backup and then the deletion in one transaction (§10). |
 
 Conventions: a one-shot job that reads or writes the backup folder runs with `--user "$(id -u):$(id -g)"`, because
 that folder has mode 0700. `<partflow-host>` is the host name people type in the browser, `<backup-dir>` is the value
@@ -1195,11 +1197,94 @@ log, §2).
   chmod 0444 "<secrets-dir>/postgres_password"
   ```
 
+## 10. Deleting test data permanently
+
+Production history is append-only: PartFlow itself never deletes a Work Order that has production history, a
+Movement or an allocation ([`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md), Administrative Archival and Purge). The
+command `pf delete-permanently` is the one exception, and it is meant for one case only: Work Orders and Part Numbers
+that the owner entered **only for testing** in production. It deletes them as if they had never been entered and
+keeps one audit row for each deleted Work Order and Part Number. It is an interim tool: a delete inside PartFlow, for a
+Super User, will be designed later together with the history archival and purge. Never use it to correct real
+production data; use the corrections that PartFlow offers instead.
+
+### Preview, then confirm
+
+1. Show what would be deleted. Nothing is changed:
+
+   ```sh
+   deploy/production/pf delete-permanently --work-order "<Work Order Number>" --part-number "<Part Number>" \
+       --reason "<why the data is deleted>"
+   ```
+
+   Repeat `--work-order` and `--part-number` for every record; give at least one of them. Write the Work Order Number
+   exactly as PartFlow shows it, including spaces and capital letters: it is matched exactly. The Part Number is
+   normalized as PartFlow normalizes every Part Number (surrounding spaces removed, capital letters). `--reason` is
+   required and is recorded; `--operator` defaults to your login name, as in the other `pf` commands.
+2. Read the report that the command prints on the standard output (one JSON document): `work_orders` and
+   `part_numbers` name the records, `rows` gives how many rows of each table would be deleted, `kept_audit_rows` lists
+   the audit rows that are kept because they also concern records that stay, and `refusals` lists every reason why
+   the deletion cannot run.
+3. Delete: run the same command again with `--confirm`. `pf` then runs these steps and stops at the first one that
+   fails:
+   1. the preview again; a refusal stops here, before any backup;
+   2. a verified manual backup, `backup.sh --kind manual` with the reason `before pf delete-permanently` (§3);
+   3. the deletion in **one** database transaction, with the name of that backup recorded in the audit rows.
+
+The command runs as the database owner role, in the one-shot `db-roles` service, because the application database
+role can never delete history. Without `pf`, take the backup first (§3), then run
+`$PF --profile ops run --rm --no-deps -T db-roles delete-permanently <the same options> --operator "<your name>" --confirm --backup-name <NAME>`.
+The deletion locks the tables it changes for a moment: PartFlow keeps showing pages, and a write that arrives meanwhile
+waits until the deletion has finished (`--lock-timeout`, 30 seconds by default, limits how long the deletion itself
+waits for a lock). Run it at a quiet moment.
+
+### What is deleted, and what stays
+
+| Deleted for a Work Order | Deleted for a Part Number |
+| --- | --- |
+| The Work Order, its demand lines, every allocation of those lines, every Quantity Flow released for those lines and every flow linked to them by a split or a combine, every Movement and lineage record of those flows, the Assigned Route copies of those flows with their steps, and the audit rows that concern only these records. | The Part Number record with its details and image, every Quantity Flow of the Part Number with the same closure, every demand line and allocation of the Part Number, and the audit rows that concern only these records. Every Work Order with a line of the Part Number must be deleted in the same command; an internal Work Order (one without a Work Order Number, created by a Scan Station receipt) whose every line is of a Part Number being deleted is deleted with it. |
+
+Master data stays: Departments, Areas, Operations, Machines, Workers, Worker Sessions, Scan Stations, Route Templates
+and the Part Number records that were not named. A deleted Work Order Number can be entered again afterwards.
+
+**The one audit row.** For each deleted Work Order and Part Number the command adds one audit row (event `DELETED`)
+with the last values of the record, and in its metadata (`permanent_deletion`) the operator, the reason, the backup,
+the names of every record deleted together, and the number of rows deleted from each table; its time is the time of
+the deletion. An audit row that also concerns records that stay (for example a Hot list change that also moved a line
+that stays) is kept unchanged.
+
+**The deleted data stays in the backups.** Every backup taken before the deletion, including the one `pf` takes
+first, and every off-host copy of those backups still holds the deleted data until it ages out under the retention of
+§3. Restoring such a backup brings the data back.
+
+### Refusals
+
+The command refuses, deletes nothing and names each link when the data to delete is linked to data that stays:
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `unknown_work_order`, `unknown_part_number` | No Work Order has this exact number, or the Part Number has neither a record nor any data. | Check the spelling. |
+| `part_number_used_by_work_order` | A Work Order that is not being deleted has a demand line of the Part Number. | Delete that Work Order in the same command too, or keep the Part Number. |
+| `on_hot_list` | A demand line to delete is on the Hot list; deleting it would leave a gap in the ranks of the lines that stay. | Take it off the Hot list in PartFlow first. |
+| `lineage_link` | A split or a combine links a flow to delete with a flow that stays (released for a Work Order that stays, or quantity added without a Work Order). | Delete that Work Order in the same command, or keep the data. |
+| `stock_needed` | The stocked quantity of the flows to delete is still needed by the allocations of Work Orders that stay. | Reverse those allocations in PartFlow first, or delete those Work Orders too. |
+| `allocation_command_shared`, `allocation_reversal_link` | One allocation, or its reversal, also concerns a demand line that stays. | Delete that Work Order in the same command, or keep the data. |
+| `movement_command_shared`, `movement_reversal_link`, `route_snapshot_shared`, `movement_references_deleted_data` | One production command, an Undo, an Assigned Route copy or the record of a Movement also concerns a flow that stays. | Delete the Work Order of that flow in the same command, or keep the data. |
+| `owner_role_required` | The command does not run as the database owner role. | Run it through `pf` or the `db-roles` service. |
+
+### Exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | The preview was shown, or (with `--confirm`) the records were deleted. |
+| 1 | Refused: nothing was deleted, and with `--confirm` no backup was taken. |
+| 2 | Could not run or failed: nothing was deleted (for example the backup failed, the database could not be reached, or a table lock was not granted in time). When the database connection failed while committing, the report says `outcome_unknown`: run the preview again to see which records still exist. |
+
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Common problems and Sign-in and user accounts: a lost passkey, and a reset that deletes the passkeys too. |
+| 2026-11-17 | uncommitted | §10 and the `pf` table: `pf delete-permanently` deletes Work Orders and Part Numbers entered only for testing, after a preview and a verified backup. |
+| 2026-11-17 | `1fc96e1` | Common problems and Sign-in and user accounts: a lost passkey, and a reset that deletes the passkeys too. |
 | 2026-11-17 | `aa6287d` | Common problems and Sign-in and user accounts: a lost authenticator app of two-step sign-in, signing the user out everywhere, and a lock after wrong codes. |
 | 2026-11-16 | `a4cf9a8` | §7: the reconcile form for a Deployment Admin staging instance is removed with that tool. |
 | 2026-11-16 | `5708664` | Before you run any command: the short command `deploy/production/pf`. |
