@@ -21,7 +21,17 @@ Rules owned here:
 - Expiry is absolute from sign-in and derived on every request from the
   CURRENT policy (never recorded), so a policy change applies to open
   sessions at their next request; sign-out, a password change or reset
-  and deactivation end sessions explicitly.
+  and deactivation end sessions explicitly — a remembered one too.
+- Remember me (Administration → Security, owner request of 2026-11-17):
+  while the sign-in dialog offers it, every way of signing in — the
+  password, the second step and a passkey alone — carries the user's
+  choice. A remembered session lasts the Remember me time (or until
+  sign-out) with a persistent cookie; an unremembered one keeps the User
+  sign-in lifetime but its cookie lasts only until the browser closes.
+  While Remember me is not offered, every session keeps the User sign-in
+  lifetime with a persistent cookie, as before.
+- Every new password passes ``check_new_password``: the stored password
+  rules, whichever command sets it.
 - A password set by an administrator or the recovery command is
   temporary; the User must replace it while the policy's
   ``require_password_change`` is on (evaluated per request).
@@ -280,8 +290,18 @@ def resolve_principal(session: Session, token: str | None) -> Principal | None:
     return user_access.principal_where(session, UserSession.token_digest == _digest(usable))
 
 
-def cookie_max_age(principal: Principal) -> int:
-    """The cookie's Max-Age: the session's remaining lifetime under the current policy."""
+def cookie_max_age(principal: Principal) -> int | None:
+    """The cookie's Max-Age: the session's remaining lifetime under the current policy.
+
+    ``None`` = a browser-session cookie, which the browser drops when it
+    closes: a sign-in without Remember me while the sign-in dialog offers
+    it. A session that never expires (sign-ins that never expire, or a
+    remembered sign-in that lasts until sign-out) gets the browser's cap of
+    400 days, renewed by every ``GET /api/session``, so it lasts as long as
+    PartFlow is opened at least once in that time.
+    """
+    if not principal.persistent_cookie:
+        return None
     if principal.session_expires_at is None:
         return NEVER_EXPIRES_COOKIE_SECONDS
     remaining = principal.session_expires_at - datetime.datetime.now(datetime.UTC)
@@ -307,9 +327,15 @@ def _cannot_match(password: str) -> bool:
     return is_over_long(password) or not is_encodable(password)
 
 
-def _new_password(raw: str) -> None:
+def check_new_password(session: Session, raw: str) -> None:
+    """The one check of every new password: the stored password rules.
+
+    First-run setup, Change password, an administrator's Set password and
+    the recovery command all call it before any hashing; the refusal names
+    every unmet rule.
+    """
     try:
-        validate_new_password(raw)
+        validate_new_password(raw, policies.read_password_rules(session))
     except InvalidPasswordError as exc:
         raise InvalidInputError(str(exc)) from exc
 
@@ -388,10 +414,16 @@ def password_snapshot(credential: UserCredential | None) -> dict[str, Any]:
     }
 
 
-def _open_session(session: Session, user_id: int) -> tuple[str, int]:
-    """INSERT a new session row; returns the raw token and the row id."""
+def _open_session(session: Session, user_id: int, *, remember_me: bool = False) -> tuple[str, int]:
+    """INSERT a new session row; returns the raw token and the row id.
+
+    ``remember_me`` is the user's choice; it is stored only while the
+    sign-in dialog offers Remember me (read in this transaction), so a
+    later offer never turns an old sign-in into a remembered one.
+    """
+    remembered = remember_me and policies.read_remember_me(session).offered
     token, digest = new_session_token()
-    row = UserSession(user_id=user_id, token_digest=digest)
+    row = UserSession(user_id=user_id, token_digest=digest, remembered=remembered)
     session.add(row)
     session.flush()
     return token, row.id
@@ -473,14 +505,17 @@ def sign_in(
     replaced_token: str | None,
     replaced_challenge_token: str | None = None,
     origin: str | None = None,
+    remember_me: bool = False,
 ) -> SessionGrant | SecondStepRequired:
     """Sign a User in; ends the session ``replaced_token`` names (REPLACED).
 
     A correct password restarts the password counter. A User with two-step
     sign-in gets a second step instead of a session: an open one
     ``replaced_challenge_token`` names ends REPLACED, and the wrong-code
-    counter stays until the second step succeeds. ``origin`` is the page
-    the password was typed at: a passkey made at its host is offered.
+    counter stays until the second step succeeds; the request that
+    finishes it carries the Remember me choice again. ``origin`` is the
+    page the password was typed at: a passkey made at its host is offered.
+    ``remember_me`` is the user's Remember me choice (``_open_session``).
     """
     login = _login_or_none(login_name)
     unusable = _cannot_match(password)
@@ -550,7 +585,7 @@ def sign_in(
         )
     credential.failed_codes = 0
     credential.locked_until = None
-    token, _session_id = _open_session(session, user_id)
+    token, _session_id = _open_session(session, user_id, remember_me=remember_me)
     _end_session_by_token(session, replaced_token, UserSessionEndReason.REPLACED)
     grant = _grant(session, token)
     commit(session, {})
@@ -571,6 +606,7 @@ def complete_second_step(
     method: SecondStepMethod,
     code: str,
     replaced_token: str | None,
+    remember_me: bool = False,
 ) -> SessionGrant:
     """Finish the open second step ``token`` names with ``code``: sign the User in.
 
@@ -595,7 +631,12 @@ def complete_second_step(
         return two_step_factors.accept_email_code(challenge, code)
 
     return _finish_second_step(
-        session, token=token, method=method, accept=accept, replaced_token=replaced_token
+        session,
+        token=token,
+        method=method,
+        accept=accept,
+        replaced_token=replaced_token,
+        remember_me=remember_me,
     )
 
 
@@ -606,6 +647,7 @@ def complete_second_step_with_passkey(
     credential: dict[str, Any],
     origin: str | None,
     replaced_token: str | None,
+    remember_me: bool = False,
 ) -> SessionGrant:
     """Finish the open second step ``token`` names with a passkey's answer.
 
@@ -636,6 +678,7 @@ def complete_second_step_with_passkey(
         method=SecondStepMethod.PASSKEY,
         accept=accept,
         replaced_token=replaced_token,
+        remember_me=remember_me,
     )
 
 
@@ -692,6 +735,7 @@ def sign_in_with_passkey(
     credential: dict[str, Any],
     origin: str | None,
     replaced_token: str | None,
+    remember_me: bool = False,
 ) -> SessionGrant:
     """Sign in the User whose passkey answered the open passkey sign-in ``token`` names.
 
@@ -747,7 +791,7 @@ def sign_in_with_passkey(
     credential_row.locked_until = None
     challenge.user_id = user_id
     two_step_factors.end_challenge(challenge, SignInChallengeEndReason.COMPLETED)
-    session_token, _session_id = _open_session(session, user_id)
+    session_token, _session_id = _open_session(session, user_id, remember_me=remember_me)
     _end_session_by_token(session, replaced_token, UserSessionEndReason.REPLACED)
     grant = _grant(session, session_token)
     commit(session, {})
@@ -762,6 +806,7 @@ def _finish_second_step(
     method: SecondStepMethod,
     accept: _Accept,
     replaced_token: str | None,
+    remember_me: bool,
 ) -> SessionGrant:
     """Judge one answer of the open second step ``token`` names; sign the User in when right.
 
@@ -814,7 +859,7 @@ def _finish_second_step(
     credential.failed_attempts = 0
     credential.failed_codes = 0
     credential.locked_until = None
-    session_token, _session_id = _open_session(session, user_id)
+    session_token, _session_id = _open_session(session, user_id, remember_me=remember_me)
     _end_session_by_token(session, replaced_token, UserSessionEndReason.REPLACED)
     two_step_factors.end_challenge(challenge, SignInChallengeEndReason.COMPLETED)
     grant = _grant(session, session_token)
@@ -971,7 +1016,7 @@ def change_own_password(
     Allowed while a change is required. The caller's session ends too and
     a new one is granted (the API rotates the cookie).
     """
-    _new_password(new_password)
+    check_new_password(session, new_password)
     if normalize_password(new_password) == normalize_password(current_password):
         raise InvalidInputError(_SAME_PASSWORD)
     user_id = principal.user_id
@@ -1013,7 +1058,8 @@ def change_own_password(
     credential.password_changed_at = now
     credential.failed_attempts = 0
     credential.locked_until = None
-    token, session_id = _open_session(session, user_id)
+    # The new sign-in keeps the Remember me choice of the one it replaces.
+    token, session_id = _open_session(session, user_id, remember_me=principal.remembered)
     user_access.end_user_sessions(
         session, user_id, UserSessionEndReason.PASSWORD_CHANGED, keep_session_id=session_id
     )
@@ -1079,7 +1125,7 @@ def set_user_password(
     """
     if actor.user_id == user_id:
         raise ConflictError(_OWN_PASSWORD)
-    _new_password(new_password)
+    check_new_password(session, new_password)
     # Release the connection principal resolution used before scrypt.
     session.rollback()
     new_hash = password_hashing.hash_password(new_password)
@@ -1121,7 +1167,7 @@ def reset_password_for_login(
     password becomes temporary, the lock is cleared and every sign-in of
     the User ends; the audit row carries no actor (``source: cli``).
     """
-    _new_password(new_password)
+    check_new_password(session, new_password)
     try:
         login = users.canonical_login_name(login_name)
     except InvalidInputError as exc:

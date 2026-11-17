@@ -54,10 +54,21 @@ the policy row, and is read for sending only — no answer, log or audit row
 carries it. PartFlow reads the server when it sends a message
 (``app.application.outgoing_mail``). The owner decisions of 2026-11-17 add
 the server's timeout (5-120 seconds, default 20) to that section and the
-Two-step sign-in panel of Administration → Settings (``entity_id``
-``two-step``, a partial merge like User sign-in): every number of two-step
-sign-in, each a whole number in its range (``TWO_STEP_POLICY_RANGES``).
-Every sign-in step reads it, so a change applies from the next step.
+Two-step sign-in panel (``entity_id`` ``two-step``, a partial merge like
+User sign-in): every number of two-step sign-in, each a whole number in its
+range (``TWO_STEP_POLICY_RANGES``). Every sign-in step reads it, so a change
+applies from the next step. The owner request of 2026-11-17 moves User
+sign-in and Two-step sign-in to Administration → Security and adds two
+panels there, each a partial merge like User sign-in: Password rules
+(``entity_id`` ``password-rules``: the minimum and maximum length, 4-256
+characters with the minimum never above the maximum, defaults 6 and 256,
+and whether a digit, a special character, an uppercase and a lowercase
+letter are required, default off), read by every command that sets a
+password (``read_password_rules``) — never at sign-in, so an existing
+password stays valid — and Remember me (``entity_id`` ``remember-me``:
+whether the sign-in dialog offers it, default off, and how long a
+remembered sign-in lasts: whole days 1-365, default 30, or until the user
+signs out), read with every User session (``user_access.principal_where``).
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -89,6 +100,7 @@ from app.application import audit, users
 from app.application.common import UNSET, UnsetType, commit
 from app.application.errors import InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType, MailSecurity
+from app.domain.password_policy import PasswordRules
 from app.infrastructure.mail import SmtpServer
 from app.infrastructure.models import (
     BACKUP_INTERVAL_HOURS,
@@ -110,6 +122,7 @@ from app.infrastructure.models import (
     MAIL_USERNAME_MAX_LENGTH,
     RETENTION_PERIOD_MONTHS_MAX,
     RETENTION_PERIOD_MONTHS_MIN,
+    SECURITY_POLICY_RANGES,
     SIGN_IN_LOCKOUT_ATTEMPTS_MAX,
     SIGN_IN_LOCKOUT_ATTEMPTS_MIN,
     SIGN_IN_LOCKOUT_MINUTES_MAX,
@@ -146,6 +159,10 @@ MAIL_SERVER_SECTION: Final = "mail-server"
 # The audit entity_id and API path segment of Administration → Settings →
 # Two-step sign-in (Phase 17, owner decisions of 2026-11-17; CD3).
 TWO_STEP_SECTION: Final = "two-step"
+# The audit entity_ids and API path segments of Administration → Security →
+# Password rules and Remember me (owner request of 2026-11-17; CD3).
+PASSWORD_RULES_SECTION: Final = "password-rules"
+REMEMBER_ME_SECTION: Final = "remember-me"
 # The scheduled backup intervals Administration → Backups admits: the
 # whole hours that divide the day (the backup-due command's choices too).
 BACKUP_INTERVALS: Final = BACKUP_INTERVAL_HOURS
@@ -944,6 +961,181 @@ def update_two_step_policy(
         entity_id=TWO_STEP_SECTION,
         before_data=before,
         after_data=_two_step_snapshot(policy),
+        actor_user_id=actor_user_id,
+    )
+    commit(session, {})
+    return policy
+
+
+# The password rules of Administration → Security: column → its rule field.
+_PASSWORD_RULE_COLUMNS: Final = {
+    "password_min_length": "min_length",
+    "password_max_length": "max_length",
+    "password_require_digit": "require_digit",
+    "password_require_special": "require_special",
+    "password_require_uppercase": "require_uppercase",
+    "password_require_lowercase": "require_lowercase",
+}
+_PASSWORD_LENGTH_MESSAGES: Final = {
+    "password_min_length": "The minimum password length must be a whole number of characters",
+    "password_max_length": "The maximum password length must be a whole number of characters",
+}
+_PASSWORD_LENGTH_ORDER: Final = (
+    "The minimum password length cannot be greater than the maximum password length."
+)
+_REMEMBER_ME_COLUMNS: Final = ("remember_me_offered", "remember_me_expires", "remember_me_days")
+_REMEMBER_ME_DAYS_MESSAGE: Final = "A remembered sign-in must last a whole number of days"
+
+
+class RememberMePolicy(NamedTuple):
+    """Remember me of Administration → Security, as stored."""
+
+    offered: bool
+    expires: bool
+    days: int
+
+
+def _policy_for_edit(session: Session) -> ApplicationPolicy:
+    """The singleton under its edit lock, re-read (the configuration protocol)."""
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    return policy
+
+
+def _range_message(column: str, prefix: str) -> str:
+    low, high = SECURITY_POLICY_RANGES[column]
+    return f"{prefix} from {low} to {high}."
+
+
+def password_rules(policy: ApplicationPolicy) -> PasswordRules:
+    """The password rules a policy row holds."""
+    return PasswordRules(
+        **{field: getattr(policy, column) for column, field in _PASSWORD_RULE_COLUMNS.items()}
+    )
+
+
+def read_password_rules(session: Session) -> PasswordRules:
+    """The stored password rules (unlocked; a column select, no policy instance).
+
+    Every command that sets a password reads them first: first-run setup,
+    Change password, an administrator's Set password and the recovery
+    command ``reset-password``.
+    """
+    columns = [getattr(ApplicationPolicy, column) for column in _PASSWORD_RULE_COLUMNS]
+    row = session.execute(select(*columns).where(ApplicationPolicy.id == _POLICY_ID)).one()
+    return PasswordRules(*row)
+
+
+def _password_rules_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {column: getattr(policy, column) for column in _PASSWORD_RULE_COLUMNS}
+
+
+def update_password_rules(
+    session: Session, *, changes: dict[str, object], actor_user_id: int
+) -> ApplicationPolicy:
+    """Merge the given password rules; a no-op writes and audits nothing.
+
+    The User sign-in protocol: a field not given keeps its stored value.
+    Each length is a whole number in its range and, after the merge, the
+    minimum is never above the maximum; each requirement is On or Off. A
+    change applies to the next password set — never to a stored one.
+    """
+    policy = _policy_for_edit(session)
+    if not changes:
+        raise InvalidInputError("Change at least one password rule.")
+    for column, value in changes.items():
+        if column in _PASSWORD_LENGTH_MESSAGES:
+            if not _is_whole_in(value, *SECURITY_POLICY_RANGES[column]):
+                raise InvalidInputError(_range_message(column, _PASSWORD_LENGTH_MESSAGES[column]))
+        elif not isinstance(value, bool):
+            raise InvalidInputError("Each password requirement must be On or Off.")
+    before = _password_rules_snapshot(policy)
+    after = {**before, **changes}
+    if after["password_min_length"] > after["password_max_length"]:
+        raise InvalidInputError(_PASSWORD_LENGTH_ORDER)
+    if after == before:
+        return policy
+    for column, value in changes.items():
+        setattr(policy, column, value)
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=PASSWORD_RULES_SECTION,
+        before_data=before,
+        after_data=_password_rules_snapshot(policy),
+        actor_user_id=actor_user_id,
+    )
+    commit(session, {})
+    return policy
+
+
+def remember_me_policy(policy: ApplicationPolicy) -> RememberMePolicy:
+    """Remember me as a policy row holds it."""
+    return RememberMePolicy(
+        offered=policy.remember_me_offered,
+        expires=policy.remember_me_expires,
+        days=policy.remember_me_days,
+    )
+
+
+def read_remember_me(session: Session) -> RememberMePolicy:
+    """Remember me as stored (unlocked; a column select, no policy instance)."""
+    row = session.execute(
+        select(
+            ApplicationPolicy.remember_me_offered,
+            ApplicationPolicy.remember_me_expires,
+            ApplicationPolicy.remember_me_days,
+        ).where(ApplicationPolicy.id == _POLICY_ID)
+    ).one()
+    return RememberMePolicy(*row)
+
+
+def _remember_me_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {column: getattr(policy, column) for column in _REMEMBER_ME_COLUMNS}
+
+
+def update_remember_me(
+    session: Session, *, changes: dict[str, object], actor_user_id: int
+) -> ApplicationPolicy:
+    """Merge the given Remember me settings; a no-op writes and audits nothing.
+
+    The User sign-in protocol: a field not given keeps its stored value
+    (the day count is kept while a remembered sign-in lasts until sign-out).
+    Every request reads the policy, so a change applies to open remembered
+    sign-ins at their next request; turning the offer off returns them to
+    the User sign-in lifetime.
+    """
+    policy = _policy_for_edit(session)
+    if not changes:
+        raise InvalidInputError("Change at least one Remember me setting.")
+    if "remember_me_days" in changes and not _is_whole_in(
+        changes["remember_me_days"], *SECURITY_POLICY_RANGES["remember_me_days"]
+    ):
+        raise InvalidInputError(_range_message("remember_me_days", _REMEMBER_ME_DAYS_MESSAGE))
+    if any(
+        not isinstance(changes[name], bool)
+        for name in ("remember_me_offered", "remember_me_expires")
+        if name in changes
+    ):
+        raise InvalidInputError("Each Remember me option must be On or Off.")
+    before = _remember_me_snapshot(policy)
+    if {**before, **changes} == before:
+        return policy
+    for column, value in changes.items():
+        setattr(policy, column, value)
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=REMEMBER_ME_SECTION,
+        before_data=before,
+        after_data=_remember_me_snapshot(policy),
         actor_user_id=actor_user_id,
     )
     commit(session, {})

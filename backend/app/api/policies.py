@@ -85,6 +85,24 @@ handlers in ``app.api.errors`` translate typed failures.
 - ``PUT /policies/two-step`` — a partial merge like User sign-in (strict
   integers; an empty body, a ``null`` or an extra field is 422; the ranges
   are the Application's 422); requires ``CONFIGURE_SYSTEM_SETTINGS``.
+- ``GET /policies/password-rules`` — Administration → Security → Password
+  rules (owner request of 2026-11-17): the minimum and maximum length and
+  whether a digit, a special character, an uppercase and a lowercase letter
+  are required. Requires a signed-in User.
+- ``PUT /policies/password-rules`` — a partial merge like User sign-in
+  (strict integers and booleans; an empty body, a ``null`` or an extra
+  field is 422; the ranges and the minimum ≤ maximum rule are the
+  Application's 422); requires ``CONFIGURE_SYSTEM_SETTINGS``.
+- ``GET /policies/remember-me`` — Administration → Security → Remember me
+  (owner request of 2026-11-17): whether the sign-in dialog offers it,
+  whether a remembered sign-in expires and after how many days. Requires a
+  signed-in User.
+- ``PUT /policies/remember-me`` — a partial merge like User sign-in;
+  requires ``CONFIGURE_SYSTEM_SETTINGS``.
+
+The User sign-in, Two-step sign-in, Password rules and Remember me
+sections are shown in Administration → Security; the others in their own
+sections or in Administration → Settings.
 
 Access (Phase 14 slice 2): every read needs a signed-in User except
 ``GET /policies/due-soon``, which stays public (the Production Board and
@@ -92,8 +110,8 @@ the Scan Station read it without signing in). Each write needs its
 section's permission — Worker sessions
 ``MANAGE_WORKER_SESSION_POLICIES``, Correction permissions
 ``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention, user sign-in,
-backups, the outgoing mail server and two-step sign-in
-``CONFIGURE_SYSTEM_SETTINGS`` — and its
+backups, the outgoing mail server, two-step sign-in, the password rules and
+Remember me ``CONFIGURE_SYSTEM_SETTINGS`` — and its
 audit row names the
 signed-in User (``actor_user_id``).
 """
@@ -546,3 +564,106 @@ def put_two_step_policy(
         session, changes=body.model_dump(exclude_unset=True), actor_user_id=principal.user_id
     )
     return _two_step_response(policy)
+
+
+class PasswordRulesPolicyResponse(BaseModel):
+    password_min_length: int
+    password_max_length: int
+    password_require_digit: bool
+    password_require_special: bool
+    password_require_uppercase: bool
+    password_require_lowercase: bool
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class PasswordRulesPolicyPutRequest(BaseModel):
+    """Any non-empty subset of the section; a field left out keeps its value.
+
+    An explicit ``null`` reaches the service (exclude_unset) and is refused
+    there.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    password_min_length: StrictInt | None = None
+    password_max_length: StrictInt | None = None
+    password_require_digit: StrictBool | None = None
+    password_require_special: StrictBool | None = None
+    password_require_uppercase: StrictBool | None = None
+    password_require_lowercase: StrictBool | None = None
+
+
+def _password_rules_response(policy: ApplicationPolicy) -> PasswordRulesPolicyResponse:
+    return PasswordRulesPolicyResponse.model_validate(
+        {
+            **{
+                field: getattr(policy, field)
+                for field in PasswordRulesPolicyPutRequest.model_fields
+            },
+            "updated_at": policy.updated_at,
+        }
+    )
+
+
+@router.get("/policies/password-rules")
+def get_password_rules_policy(
+    principal: SignedInDep, session: SessionDep
+) -> PasswordRulesPolicyResponse:
+    return _password_rules_response(policies.get_policy(session))
+
+
+@router.put("/policies/password-rules")
+def put_password_rules_policy(
+    principal: SystemSettingsManagerDep, body: PasswordRulesPolicyPutRequest, session: SessionDep
+) -> PasswordRulesPolicyResponse:
+    policy = policies.update_password_rules(
+        session, changes=body.model_dump(exclude_unset=True), actor_user_id=principal.user_id
+    )
+    return _password_rules_response(policy)
+
+
+class RememberMePolicyResponse(BaseModel):
+    remember_me_offered: bool
+    remember_me_expires: bool
+    remember_me_days: int
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class RememberMePolicyPutRequest(BaseModel):
+    """Any non-empty subset of the section; a field left out keeps its value.
+
+    An explicit ``null`` reaches the service (exclude_unset) and is refused
+    there.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    remember_me_offered: StrictBool | None = None
+    remember_me_expires: StrictBool | None = None
+    remember_me_days: StrictInt | None = None
+
+
+def _remember_me_response(policy: ApplicationPolicy) -> RememberMePolicyResponse:
+    return RememberMePolicyResponse(
+        remember_me_offered=policy.remember_me_offered,
+        remember_me_expires=policy.remember_me_expires,
+        remember_me_days=policy.remember_me_days,
+        updated_at=policy.updated_at,
+    )
+
+
+@router.get("/policies/remember-me")
+def get_remember_me_policy(principal: SignedInDep, session: SessionDep) -> RememberMePolicyResponse:
+    return _remember_me_response(policies.get_policy(session))
+
+
+@router.put("/policies/remember-me")
+def put_remember_me_policy(
+    principal: SystemSettingsManagerDep, body: RememberMePolicyPutRequest, session: SessionDep
+) -> RememberMePolicyResponse:
+    policy = policies.update_remember_me(
+        session, changes=body.model_dump(exclude_unset=True), actor_user_id=principal.user_id
+    )
+    return _remember_me_response(policy)

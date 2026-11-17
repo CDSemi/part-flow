@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `4cfaf35` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `4be2389` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -51,14 +51,14 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
 | Phase 17 — Owner Decisions After Go-Live | Đã đóng (2026-11-17) | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
-| Phase 18 — Owner Requests of 2026-11-17 | Đang làm | Xóa vĩnh viễn dữ liệu thử nghiệm, in nhiều nhãn barcode cùng lúc, xem một Scan Station không cần thiết bị đã đăng ký, và mục Administration → Security. |
+| Phase 18 — Owner Requests of 2026-11-17 | Đã đóng (2026-11-17) | Xóa vĩnh viễn dữ liệu thử nghiệm, in nhiều nhãn barcode cùng lúc, xem một Scan Station không cần thiết bị đã đăng ký, và mục Administration → Security. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0038_phase17_passkeys`
-(`backend/alembic/versions/20261117_0038_phase17_passkeys.py`). Phase 15 không thêm migration nào; Phase 16 thêm
-`0035_phase16_backup_policy` (chính sách backup của Administration → Backups); Phase 17 thêm
-`0033_phase17_super_user_role` (role Super User), `0034_phase17_unique_names` (tên Area và Planned Route duy nhất),
-`0036_phase17_outgoing_mail` (địa chỉ email của user và mail server gửi đi), `0037_phase17_two_step`
-(xác thực hai bước, two-step sign-in) và `0038_phase17_passkeys` (passkey).
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0039_security_settings`
+(`backend/alembic/versions/20261117_0039_security_settings.py`: quy tắc mật khẩu và Remember me của Administration →
+Security). Phase 15 không thêm migration nào; Phase 16 thêm `0035_phase16_backup_policy` (chính sách backup của
+Administration → Backups); Phase 17 thêm `0033_phase17_super_user_role` (role Super User), `0034_phase17_unique_names`
+(tên Area và Planned Route duy nhất), `0036_phase17_outgoing_mail` (địa chỉ email của user và mail server gửi đi),
+`0037_phase17_two_step` (xác thực hai bước, two-step sign-in) và `0038_phase17_passkeys` (passkey).
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
 NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
@@ -932,10 +932,11 @@ Một lần lệch route đã ghi trên Movement `TRANSFERRED` thực tế khôn
 
 - **Đăng nhập** (migration `0029_phase14_sign_in`). Tài khoản cục bộ (quyết định của chủ sở hữu): `user_credentials` giữ
   hash scrypt, cờ mật khẩu tạm, bộ đếm lần sai và trạng thái khóa; `user_sessions` giữ digest của một token mờ, không bao
-  giờ giữ chính token. Administration → Settings → User sign-in cấu hình thời hạn (mặc định bật, 30 ngày, hoặc không bao
+  giờ giữ chính token. Administration → Security → User sign-in cấu hình thời hạn (mặc định bật, 30 ngày, hoặc không bao
   giờ; tính tuyệt đối từ lúc đăng nhập), việc khóa (10 lần đăng nhập sai thì khóa 15 phút) và yêu cầu mật khẩu mới ở lần
   đăng nhập đầu (mặc định bật); khoảng cấu hình được là 1 đến 365 ngày, 3 đến 100 lần đăng nhập sai và 1 đến 1440 phút.
-  Mật khẩu có 6 đến 256 ký tự sau chuẩn hóa NFKC và không có quy tắc thành phần. API:
+  Mật khẩu tuân theo quy tắc mật khẩu của Administration → Security (ban đầu 6 đến 256 ký tự sau khi chuẩn hóa NFKC và
+  không có quy tắc thành phần). API:
   `GET`/`POST`/`DELETE /api/session`, `PUT /api/session/password`, `PUT /api/users/{id}/password` (mật khẩu tạm; kết
   thúc các phiên đăng nhập của User và gỡ khóa) và `GET`/`PUT /api/policies/sign-in`. Mọi thao tác ghi cần header
   `X-PartFlow-CSRF: 1`; cookie phiên `partflow_session` là `HttpOnly`, `SameSite=Strict` và `Secure` khi đặt
@@ -1385,7 +1386,7 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    nhập một bước thứ hai nhận mã của app, một mã khôi phục hoặc một mã gửi qua email cho user; và passkey (migration
    `0038_phase17_passkeys`), được thêm từ menu tài khoản bằng việc nhập lại mật khẩu, đăng nhập một user chỉ bằng
    passkey hoặc trả lời bước thứ hai, chỉ tại địa chỉ HTTPS của PartFlow. Quyết định của chủ sở hữu ngày 2026-11-17:
-   mọi con số của xác thực hai bước được đặt trong Administration → Settings → Two-step sign-in, một mã sai được đếm
+   mọi con số của xác thực hai bước được đặt trong Administration → Security → Two-step sign-in, một mã sai được đếm
    riêng với một mật khẩu sai, user tự đổi địa chỉ email của mình, và một user administrator, hoặc lệnh khôi phục
    `reset-two-step`, khi tắt xác thực hai bước của một user đã mất app, các passkey và các mã cũng có thể đăng xuất user
    đó ở mọi nơi.
@@ -1412,7 +1413,11 @@ phát hành với tag riêng, và mục nào đã có thì ghi rõ:
    một trình duyệt không phải thiết bị đã đăng ký, chỉ để xem: context của station và tồn của Area trả lời người xem
    đó, mọi thao tác ghi vẫn cần một thiết bị đã đăng ký của station đó, và chế độ production vẫn chỉ mở trên thiết bị
    đã đăng ký (PROJECT_PROFILE §15, §20; GUI_DESIGN §4.13).
-4. **Administration → Security — dự kiến.** Quy tắc mật khẩu, Remember me, và mọi thiết lập đăng nhập trong một mục.
+4. **Administration → Security — đã có.** Các thiết lập đăng nhập (User sign-in và Two-step sign-in) chuyển từ Settings
+   sang mục Security trong nhóm Access, mục này thêm Password rules (độ dài tối thiểu và tối đa 4–256, ban đầu 6 và 256;
+   tùy chọn yêu cầu chữ số, ký tự đặc biệt, chữ hoa và chữ thường, ban đầu tắt), áp dụng ở first-run setup, Change
+   password, Set password… và `reset-password`, và Remember me (ban đầu không cung cấp; 1–365 ngày, ban đầu 30, hoặc đến
+   khi đăng xuất). Migration `0039_security_settings`. Outgoing mail server vẫn ở Settings.
 
 ## Deferred
 
@@ -1457,7 +1462,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 18 mục 3 đã có: người có quyền Manage Scan Stations xem bất kỳ Scan Station nào mà không cần thiết bị đã đăng ký. |
+| 2026-11-17 | uncommitted | Phase 18 mục 4 đã có (Administration → Security với quy tắc mật khẩu và Remember me), việc này đóng Phase 18; migration `0039_security_settings` trở thành head của lược đồ. |
+| 2026-11-17 | `4be2389` | Phase 18 mục 3 đã có: người có quyền Manage Scan Stations xem bất kỳ Scan Station nào mà không cần thiết bị đã đăng ký. |
 | 2026-11-17 | `4cfaf35` | Phase 18 mục 2 đã có: Print barcodes trên Management → Machines và Management → Part Numbers. |
 | 2026-11-17 | `01ce427` | Mở Phase 18 với các yêu cầu của chủ sở hữu ngày 2026-11-17, mục 1 (`pf delete-permanently`) đã có; ghi lại việc chủ sở hữu xem xét thiết kế lưu trữ. |
 | 2026-11-17 | `1fc96e1` | Phase 17 mục 8 đã có cùng passkey, việc này đóng Phase 17; migration `0038_phase17_passkeys` trở thành head của lược đồ. |

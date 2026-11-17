@@ -1002,8 +1002,9 @@ them on the host, in the release checkout, with `PF` set (Before you run any com
   The command asks for the new password twice (`New temporary password`) and does not show what you type; it has no
   `-T`, because it needs the terminal for that prompt. The password is temporary: the user chooses a new one at the
   next sign-in when that option is on. Every sign-in of the user ends and a lock is cleared. Exit code 0 means done;
-  1 means refused with nothing changed (an unknown login name, two different passwords, a user who never had a
-  password, or no Administrator at all); 2 means the outcome is unknown or the database could not be reached: run it
+  1 means refused with nothing changed (an unknown login name, two different passwords, a password that breaks the
+  password rules of Administration → Security — the message names each rule —, a user who never had a password, or no
+  Administrator at all); 2 means the outcome is unknown or the database could not be reached: run it
   again, because it sets the password again either way. It works only while an Administrator exists and never
   creates one.
 
@@ -1028,7 +1029,7 @@ and an outgoing mail server is set up. They then remove the lost one and add a n
   (or already off, which it says); 1 means refused with nothing changed (an unknown login name); 2 means the outcome
   is unknown or the database could not be reached: run it again.
 
-A user locked after too many wrong codes waits for the lock to end (Settings → User sign-in sets how long), or a
+A user locked after too many wrong codes waits for the lock to end (Security → User sign-in sets how long), or a
 user administrator sets a new password, which clears the lock.
 
 **A forgotten login name.** Read the login names of the users who may manage users and roles from the database. This
@@ -1283,7 +1284,8 @@ The command refuses, deletes nothing and names each link when the data to delete
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §10 and the `pf` table: `pf delete-permanently` deletes Work Orders and Part Numbers entered only for testing, after a preview and a verified backup. |
+| 2026-11-17 | uncommitted | The recovery command refuses a password that breaks the password rules, and the sign-in settings moved to Administration → Security. |
+| 2026-11-17 | `01ce427` | §10 and the `pf` table: `pf delete-permanently` deletes Work Orders and Part Numbers entered only for testing, after a preview and a verified backup. |
 | 2026-11-17 | `1fc96e1` | Common problems and Sign-in and user accounts: a lost passkey, and a reset that deletes the passkeys too. |
 | 2026-11-17 | `aa6287d` | Common problems and Sign-in and user accounts: a lost authenticator app of two-step sign-in, signing the user out everywhere, and a lock after wrong codes. |
 | 2026-11-16 | `a4cf9a8` | §7: the reconcile form for a Deployment Admin staging instance is removed with that tool. |

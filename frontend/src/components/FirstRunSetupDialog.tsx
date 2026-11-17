@@ -9,7 +9,8 @@ import { createFirstAdministrator, getSetupStatus } from '../api/setup';
 import type { SetupRole } from '../api/setup';
 import { useApiData } from '../api/use-api-data';
 import { useConnectivity } from '../app/connectivity-context';
-import { PASSWORD_LENGTH_HINT, newPasswordError } from '../app/password-rules';
+import { newPasswordError } from '../app/password-rules';
+import { usePasswordRules } from '../app/sign-in-options';
 import {
   canonicalLoginName,
   loginNameError,
@@ -17,6 +18,7 @@ import {
 import { useCloseGuard } from './close-guard';
 import { DiscardInputDialog } from './close-guard-dialogs';
 import { ModalDialog } from './ModalDialog';
+import { PasswordRulesHint } from './PasswordRulesHint';
 import { ErrorState, LoadingState } from './view-states';
 
 const SETUP_CLOSED = 'PartFlow already has an administrator. Sign in instead.';
@@ -197,7 +199,8 @@ function SetupForm({
   const canonical = canonicalLoginName(login);
   const tokenMissing = token.trim() === '';
   const loginInvalid = loginNameError(login);
-  const passwordInvalid = newPasswordError(password, repeat);
+  const rules = usePasswordRules();
+  const passwordInvalid = newPasswordError(password, repeat, rules);
   const noRole = roles.length === 0;
 
   const submit = async () => {
@@ -347,7 +350,7 @@ function SetupForm({
           autoComplete="new-password"
         />
       </label>
-      <p className="acct-help">{PASSWORD_LENGTH_HINT}</p>
+      <PasswordRulesHint rules={rules} password={password} />
       <label>
         <span>Repeat password</span>
         <input

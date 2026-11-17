@@ -1,7 +1,11 @@
-"""Unit tests for the password rule (Phase 14 slice 1, ``app.domain.password_policy``).
+"""Unit tests for the password rules (``app.domain.password_policy``).
 
-Length counts characters of the NFKC form (12-256), nothing is stripped,
-and no composition rule applies (PLAN OD-P3 default, OD-S1-9).
+Phase 14 slice 1 and Administration → Security (owner request of
+2026-11-17): length counts characters of the NFKC form, nothing is
+stripped, and by default (6-256 characters) no composition rule applies
+(PLAN OD-P3 default, OD-S1-9). The stored rules may set the lengths (4-256)
+and require a digit, a special character, an uppercase and a lowercase
+letter, judged by Unicode general category; every unmet rule is named.
 """
 
 import ast
@@ -10,12 +14,15 @@ from pathlib import Path
 import pytest
 
 from app.domain.password_policy import (
+    DEFAULT_PASSWORD_RULES,
     MAX_PASSWORD_LENGTH,
-    MIN_PASSWORD_LENGTH,
+    PASSWORD_LENGTH_BOUNDS,
     InvalidPasswordError,
+    PasswordRules,
     is_encodable,
     is_over_long,
     normalize_password,
+    unmet_rules,
     validate_new_password,
 )
 
@@ -26,7 +33,9 @@ _DOMAIN_DIR = Path(__file__).resolve().parent.parent / "app" / "domain"
 
 
 def test_bounds() -> None:
-    assert (MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH) == (6, 256)
+    assert PASSWORD_LENGTH_BOUNDS == (4, 256)
+    assert MAX_PASSWORD_LENGTH == 256
+    assert PasswordRules(6, 256, False, False, False, False) == DEFAULT_PASSWORD_RULES
 
 
 @pytest.mark.parametrize(("length", "message"), [(5, _P1), (257, _P2)])
@@ -110,3 +119,47 @@ def test_the_assigned_route_rules_stay_framework_free() -> None:
         for module in modules
         if module.startswith(("app.application", "app.infrastructure", "sqlalchemy", "fastapi"))
     }
+
+
+_DIGIT = "A password must contain a digit."
+_SPECIAL = "A password must contain a special character such as ! # % or *."
+_UPPER = "A password must contain an uppercase letter."
+_LOWER = "A password must contain a lowercase letter."
+_ALL = PasswordRules(8, 20, True, True, True, True)
+
+
+@pytest.mark.parametrize(
+    ("password", "unmet"),
+    [
+        ("Abcdef1!", []),
+        ("abcdef1!", [_UPPER]),
+        ("ABCDEF1!", [_LOWER]),
+        ("Abcdefg!", [_DIGIT]),
+        ("Abcdefg1", [_SPECIAL]),
+        ("Abcdefg 1", [_SPECIAL]),  # a space is not a special character
+        ("abc", ["A password must be at least 8 characters long.", _DIGIT, _SPECIAL, _UPPER]),
+        ("Abcdef1!" * 3, ["A password can be at most 20 characters long."]),
+        # Unicode letters and digits count: Vietnamese capitals, Arabic-Indic digits.
+        ("Mật-khẩu٣x", []),
+        ("ĐƯỜNG-đi-٣", []),
+        # NFKC first: the full-width digit is a digit, the full-width "！" is "!".
+        ("Abcdefg１！", []),
+        ("€uro-Price1a", []),  # a currency symbol is a special character
+    ],
+)
+def test_every_unmet_rule_is_named(password: str, unmet: list[str]) -> None:
+    assert unmet_rules(password, _ALL) == unmet
+    if unmet:
+        with pytest.raises(InvalidPasswordError) as raised:
+            validate_new_password(password, _ALL)
+        assert raised.value.messages == unmet
+        assert str(raised.value) == " ".join(unmet)
+    else:
+        assert validate_new_password(password, _ALL) == normalize_password(password)
+
+
+def test_the_default_rules_ask_only_for_the_length() -> None:
+    assert unmet_rules("aaaaaa", DEFAULT_PASSWORD_RULES) == []
+    assert unmet_rules("aaaaa", DEFAULT_PASSWORD_RULES) == [_P1]
+    lowered = PasswordRules(min_length=4)
+    assert validate_new_password("abcd", lowered) == "abcd"

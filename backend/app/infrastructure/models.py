@@ -108,6 +108,7 @@ from app.domain.enums import (
     WorkerIdentificationMode,
     WorkerSessionEndReason,
 )
+from app.domain.password_policy import PASSWORD_LENGTH_BOUNDS
 
 # Canonical PN form (PROJECT_PROFILE §7): uppercase, non-empty, and free
 # of any whitespace. Reused verbatim by every table that keeps a PN by
@@ -491,6 +492,21 @@ TWO_STEP_POLICY_RANGES: dict[str, tuple[int, int]] = {
 }
 MAIL_TIMEOUT_SECONDS_RANGE: tuple[int, int] = (5, 120)
 USER_CREDENTIAL_FAILED_CODES_SQL = "failed_codes >= 0"
+
+# Administration → Security (owner request of 2026-11-17): the password
+# rules — the minimum and maximum length (each 4-256 characters, the
+# minimum never above the maximum; `app.domain.password_policy`) and four
+# composition switches — and Remember me: whether the sign-in dialog offers
+# it and how long a remembered sign-in lasts (whole days 1-365, or until
+# the user signs out). Each range CHECK is
+# `ck_application_policy_<column>_range`. Repeated verbatim by migration
+# `0039_security_settings`, as is the remembered flag of a User session.
+SECURITY_POLICY_RANGES: dict[str, tuple[int, int]] = {
+    "password_min_length": PASSWORD_LENGTH_BOUNDS,
+    "password_max_length": PASSWORD_LENGTH_BOUNDS,
+    "remember_me_days": (1, 365),
+}
+POLICY_PASSWORD_LENGTH_ORDER_SQL = "password_min_length <= password_max_length"
 
 # Passkeys (Phase 17, owner decision of 2026-11-13): WebAuthn credentials
 # such as those a password manager, a phone or a security key keeps — the
@@ -1324,6 +1340,10 @@ class ApplicationPolicy(Base):
     2026-11-17 add the server's timeout and the two-step sign-in policy of
     Administration → Settings (`TWO_STEP_POLICY_RANGES`), read by every
     sign-in step.
+
+    Administration → Security (owner request of 2026-11-17) adds the
+    password rules, read by every command that sets a password, and
+    Remember me, read with every User session (`SECURITY_POLICY_RANGES`).
     """
 
     __tablename__ = "application_policy"
@@ -1432,6 +1452,34 @@ class ApplicationPolicy(Base):
     two_step_clock_drift_steps: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1")
     )
+    # Security (owner request of 2026-11-17): the password rules every new
+    # password must satisfy (never applied at sign-in) and Remember me — whether the
+    # sign-in dialog offers it and how long a remembered sign-in lasts (whole
+    # days unless `remember_me_expires` is off: until the user signs out).
+    # The ranges are SECURITY_POLICY_RANGES.
+    password_min_length: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("6")
+    )
+    password_max_length: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("256")
+    )
+    password_require_digit: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    password_require_special: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    password_require_uppercase: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    password_require_lowercase: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    remember_me_offered: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    remember_me_expires: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    remember_me_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("30")
+    )
     # The role applied at Scan Stations (Phase 14 slice 4): its station
     # keys authorize each station command. Set once by migration.
     scan_station_role_id: Mapped[int] = mapped_column(
@@ -1523,6 +1571,16 @@ class ApplicationPolicy(Base):
                 policy_range_sql(column, bounds), name=conv(f"ck_application_policy_{column}_range")
             )
             for column, bounds in TWO_STEP_POLICY_RANGES.items()
+        ),
+        *(
+            CheckConstraint(
+                policy_range_sql(column, bounds), name=conv(f"ck_application_policy_{column}_range")
+            )
+            for column, bounds in SECURITY_POLICY_RANGES.items()
+        ),
+        CheckConstraint(
+            POLICY_PASSWORD_LENGTH_ORDER_SQL,
+            name=conv("ck_application_policy_password_length_order"),
         ),
     )
 
@@ -1735,7 +1793,11 @@ class UserSession(Base):
     read never yields a usable cookie. No expiry column: a session
     expires at `created_at` plus the CURRENT sign-in policy (never, when
     sign-ins do not expire), so an administrator shortening the expiry
-    ends long sessions at once. `ended_at` / `end_reason` record when
+    ends long sessions at once. `remembered` records that the user chose
+    Remember me at sign-in (Administration → Security, 2026-11-17): while
+    the policy offers Remember me, such a session lasts the Remember me
+    time instead (or until sign-out); the choice is stored only when it
+    was offered. `ended_at` / `end_reason` record when
     PartFlow closed the row and why (sign-out, replacement, password
     change or reset, deactivation, two-step reset) — expiry is never recorded. Rows are
     never deleted at runtime; ended rows are history. User sessions are
@@ -1749,6 +1811,7 @@ class UserSession(Base):
         Integer, ForeignKey("users.id", name="fk_user_sessions_user_id_users"), nullable=False
     )
     token_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    remembered: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

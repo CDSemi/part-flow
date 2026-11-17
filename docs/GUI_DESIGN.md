@@ -128,6 +128,11 @@ Stations and the Production Board never ask for sign-in; a Scan Station is used 
 - **Sign-in is a modal dialog over the current view.** The route and any open work stay as they are. An expired
   sign-in reopens the sign-in dialog over the current view. The exception is a theme save that finds the sign-in
   ended (§2.1): the dialog then opens at the next refused request.
+- **Remember me.** While Administration → Security offers it (§9), the Sign in dialog shows a `Remember me for 30
+  days` checkbox (the configured number of days) or `Remember me until I sign out`, unticked when the dialog opens,
+  under the password. The choice goes with whichever request finishes the sign-in: the password, the second step of
+  two-step sign-in or `Sign in with a passkey`. How long each sign-in lasts is PROJECT_PROFILE §20 User Sign-in.
+  While Remember me is not offered, no checkbox is shown.
 - **Two-step sign-in.** A user may turn on two-step sign-in from the account menu (`Two-step sign-in…`); it is
   never required, Administrators included, and it is on while an authenticator app or a passkey is set up. `Set up…`
   asks for the password again, shows a QR code and the key for an authenticator app (for example 1Password) and sets
@@ -139,7 +144,7 @@ Stations and the Production Board never ask for sign-in; a Scan Station is used 
   at a•••@example.com`). A wrong code keeps the step open; when the step ends (its time is up, too many wrong codes,
   or a lock) the dialog returns to the password with the reason. `New recovery codes…` and every `Remove…` ask for the
   password again; removing the last app or passkey turns two-step sign-in off and deletes the recovery codes. Every
-  number of two-step sign-in is set in Settings → Two-step sign-in (§9).
+  number of two-step sign-in is set in Security → Two-step sign-in (§9).
 - **Signing in with a passkey.** `Sign in with a passkey` in the Sign in dialog signs in with a passkey alone, without
   the login name or the password: the browser asks for the passkey, and the device verifies the person. Passkeys work
   only where PartFlow is opened at its HTTPS address; elsewhere no passkey control is shown.
@@ -147,8 +152,13 @@ Stations and the Production Board never ask for sign-in; a Scan Station is used 
   sign-in code, and changes or removes it with the password again. When an outgoing mail server is set up, the
   previous address receives a notice of the change.
 - **Replacing an administrator-set password.** While a password set by an administrator must be replaced
-  (Administration → Settings → User sign-in, §9), the `Choose a new password` dialog cannot be dismissed except by
+  (Administration → Security → User sign-in, §9), the `Choose a new password` dialog cannot be dismissed except by
   signing out.
+- **Password rules in the password dialogs.** `Change password`, `Choose a new password`, `Set up PartFlow` and
+  `Set password…` (§9 Users) list the active password rules of Administration → Security under the new-password
+  field before anything is typed (for example `6 to 256 characters`, `A digit`, `An uppercase letter`), mark each
+  `✓` or `✕` as the password is typed, and on a save with an unmet rule show one error line that names every unmet
+  rule and send nothing. The server applies the same rules (PROJECT_PROFILE §20 User Sign-in).
 - **Set up PartFlow.** The first-run dialog is available only while no Administrator exists. It asks for the setup
   token printed in the server log and creates the first Administrator.
 - **Who is never asked.** Scan Stations and the Production Board never ask for sign-in. Workers are identified by
@@ -2605,7 +2615,7 @@ as follows:
 |----------------------|----------|
 | **Organization**     | Departments, Areas, Operations, Workers |
 | **Production setup** | Scan Stations, Barcode configuration, Scan behavior |
-| **Access**           | Users, Roles & permissions |
+| **Access**           | Users, Roles & permissions, Security |
 | **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Backups, Department display settings, Settings |
 
 Each section is a standard table-plus-editor pattern. The Areas table is the reference example: Area (color and name),
@@ -2645,35 +2655,52 @@ confirmed through.
 - **Department display settings** are configured **per Department, never globally**: a table of Departments with an
   editor for the Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; defaults
   3 and 6).
-- **Settings** hosts four panels:
+- **Settings** hosts two panels:
   - the **Due Soon warning** panel owns the configuration behind every derived due countdown (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) and **Maximum warning days** (0–365, never below
     the minimum), with the initial values 2 days, 15 % and 7 days. It is one global policy;
-  - the **User sign-in** panel, for application Users only and distinct from **Worker sessions**: the user sign-in
-    expiry in days or never (initially 30 days), the number of failed sign-ins before a lock (10) and the lock duration
-    (15 minutes), and whether users must replace an administrator-set password at their next sign-in (On). It is read
-    by a signed-in user (anyone else sees a prompt to sign in) and editable only by users whose role may configure
-    system settings;
-  - the **Two-step sign-in** panel: every number of two-step sign-in, each a whole number in its range (initial value
-    in brackets) — the time to finish the second step (1–60 minutes, 15), the wrong codes per sign-in (1–20, 5), the
-    wrong codes before a lock (3–100, 10; the lock lasts as long as in User sign-in), the emailed codes per sign-in
-    (1–10, 3), the wait between emailed codes (0–3600 seconds, 60), the digits of an emailed code (6–10, 8), the
-    recovery codes per set (5–20, 10) and their characters (8–20, 12), the time to set up an authenticator app or a
-    passkey (1–60 minutes, 15) and the clock drift allowed (0–2 steps of 30 seconds, 1). Authenticator app codes stay
-    6 digits and change every 30 seconds, the standard the apps rely on. It is read and edited like User sign-in, and
-    a change applies from the next sign-in step;
   - the **Outgoing mail server** panel: the mail server PartFlow sends email through — a one-time sign-in code to a
-    user who has lost their other ways to sign in. It shows `Not set up`, or the host and port, the connection security
-    (STARTTLS, SSL/TLS or None), the sign-in to the server (a user name, and whether a password is stored; the
-    password is never shown), the sender address and the timeout of each connection step (5–120 seconds, initially
-    20). Users whose role may configure system settings set it up, edit it
-    and remove it, and send a test email to an address they type, which says where it went or the server's reason for
-    refusing it. Choosing a connection security moves a port still at the previous security's usual value (587, 465,
-    25) to the new one. A password field left empty keeps the stored password; `Remove the stored password` clears it.
-    Signing in to the server over an unencrypted (None) connection is refused.
+    user who has lost their other ways to sign in. It stays in Settings because it is general infrastructure, not a
+    sign-in setting. It shows `Not set up`, or the host and port, the connection security (STARTTLS, SSL/TLS or None),
+    the sign-in to the server (a user name, and whether a password is stored; the password is never shown), the sender
+    address and the timeout of each connection step (5–120 seconds, initially 20). Users whose role may configure
+    system settings set it up, edit it and remove it, and send a test email to an address they type, which says where
+    it went or the server's reason for refusing it. Choosing a connection security moves a port still at the previous
+    security's usual value (587, 465, 25) to the new one. A password field left empty keeps the stored password;
+    `Remove the stored password` clears it. Signing in to the server over an unencrypted (None) connection is refused.
 
   Below them, **Other settings** shows the candidate general settings as disabled previews (see *Persisted
   configuration and sections not available yet*).
+
+### Security
+
+The **Security** section (Access; owner request of 2026-11-17) gathers every setting of how users sign in. Every
+signed-in user reads it; changes need the Configure system settings permission, and without it one `View only` line
+under the header names that permission and no edit control is shown. Each panel shows its values as a list and edits
+them in a dialog (`Edit … settings…`, `Save changes`, `Cancel (Esc)`, the shared unsaved-changes question); a save
+sends only the changed values. The rules themselves are PROJECT_PROFILE §20 User Sign-in. The panels, in order:
+
+- **User sign-in**, for application Users only and distinct from **Worker sessions**: the user sign-in expiry in days
+  or never (initially 30 days), the number of failed sign-ins before a lock (10) and the lock duration (15 minutes),
+  and whether users must replace an administrator-set password at their next sign-in (On). A change applies to open
+  sign-ins at their next request;
+- **Remember me**: `Offer Remember me` (Off) and how long a remembered sign-in lasts — `Remember for (days)` (1–365,
+  30) or `Remember until the user signs out`, which disables the days field and keeps its value. The panel explains
+  that, while it is offered, a sign-in without Remember me ends when the browser closes, and that a sign-in remembered
+  until the user signs out stays while PartFlow is opened at least once every 400 days;
+- **Password rules**: the password length (`6 to 256 characters`; the minimum and maximum each 4–256, the minimum
+  never above the maximum) and four switches, initially Off — `Require a digit`, `Require a special character` (a
+  punctuation mark or a symbol; a space does not count), `Require an uppercase letter` and `Require a lowercase
+  letter`. The panel explains that the rules apply the next time a password is set and that existing passwords keep
+  working;
+- **Two-step sign-in**: every number of two-step sign-in, each a whole number in its range (initial value in brackets)
+  — the time to finish the second step (1–60 minutes, 15), the wrong codes per sign-in (1–20, 5), the wrong codes
+  before a lock (3–100, 10; the lock lasts as long as in User sign-in), the emailed codes per sign-in (1–10, 3), the
+  wait between emailed codes (0–3600 seconds, 60), the digits of an emailed code (6–10, 8), the recovery codes per set
+  (5–20, 10) and their characters (8–20, 12), the time to set up an authenticator app or a passkey (1–60 minutes, 15)
+  and the clock drift allowed (0–2 steps of 30 seconds, 1). Authenticator app codes stay 6 digits and change every 30
+  seconds, the standard the apps rely on. The panel says that emailed codes are sent through the outgoing mail server
+  set up in Administration → Settings → Outgoing mail server. A change applies from the next sign-in step.
 
 ### No Machines, no Route Templates and no PartNumbers sections
 
@@ -2714,11 +2741,10 @@ write the live environment with explicit loading, error and retry states; server
 editor configure the Worker ID mode: Disabled, Fixed Worker with its Fixed Worker, or Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, the Department display settings, the
-Settings section's Due Soon warning, User sign-in, Two-step sign-in and Outgoing mail server panels, the History
-archival & purge
-retention period, the
-Backups policy and the Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users sign
-in with a login name and password and which permissions are checked so far.
+Settings section's Due Soon warning and Outgoing mail server panels, the Security section's User sign-in, Remember
+me, Password rules and Two-step sign-in panels, the History archival & purge retention period, the Backups policy and
+the Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users
+sign in with a login name and password and which permissions are checked so far.
 
 Everything else presents itself honestly: nothing that is not available yet is made to appear functional.
 
@@ -2755,7 +2781,7 @@ Routes and Part Numbers stay managed in Management by authorized production role
   the `Choose a new password` dialog (the same user's open work stays).
 - **Viewing and changing.** Any signed-in user may view the sections. Each section's changes need its own permission
   (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, Backups, and Roles & permissions / Users each name theirs). Without it the section is
+  permissions, Settings, Security, Backups, and Roles & permissions / Users each name theirs). Without it the section is
   view-only: its controls are hidden and a `View only` line names the permission. The server checks these permissions.
 - Worker badges are shown only to users who may manage Workers.
 - **Correction permissions guard.** Changing correction permissions, the permission to manage them, or users whose role
@@ -4084,7 +4110,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §1.2, §4.1 and §4.13: a User who may manage Scan Stations views a station without an enrolled device, with every action unavailable and a way to enroll the device. |
+| 2026-11-17 | uncommitted | §1.2 and §9: Administration → Security gathers User sign-in, Remember me, Password rules and Two-step sign-in; the Sign in dialog offers Remember me and the password dialogs list the password rules. |
+| 2026-11-17 | 4be2389 | §1.2, §4.1 and §4.13: a User who may manage Scan Stations views a station without an enrolled device, with every action unavailable and a way to enroll the device. |
 | 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` on Machines and Part Numbers prints many labels at once from one shared dialog, and both toolbars move the search to its own row when the buttons no longer fit. |
 | 2026-11-17 | 1fc96e1 | §2: passkeys — signing in with a passkey alone, a passkey as the second step, adding and removing passkeys; §9: the setup time covers passkeys, and `Turn off two-step…` deletes them too. |
 | 2026-11-17 | aa6287d | §2: two-step sign-in and the own email address from the account menu, and the second step of the Sign in dialog; §9: Settings → Two-step sign-in, the mail server timeout, and the two-step state and `Turn off two-step…` in Users. |

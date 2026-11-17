@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `4cfaf35` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `4be2389` cộng các thay đổi chưa commit ngày 2026-11-17.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -133,6 +133,11 @@ từ một trình duyệt chưa enroll (§4.13, xem một station).
 - **Đăng nhập là một dialog modal phủ lên view hiện tại.** Route và mọi công việc đang mở vẫn giữ nguyên. Một phiên đăng
   nhập hết hạn sẽ mở lại dialog đăng nhập phủ lên view hiện tại. Ngoại lệ là khi một lần lưu theme phát hiện phiên đăng
   nhập đã kết thúc (§2.1): khi đó dialog mở ở request bị từ chối tiếp theo.
+- **Remember me (Ghi nhớ đăng nhập).** Khi Administration → Security đưa ra lựa chọn này (§9), dialog Sign in hiển thị
+  một checkbox `Remember me for 30 days` (số ngày được cấu hình) hoặc `Remember me until I sign out`, chưa được tích khi
+  dialog mở, bên dưới ô mật khẩu. Lựa chọn đi kèm request hoàn tất việc đăng nhập: mật khẩu, bước thứ hai của xác thực
+  hai bước hoặc `Sign in with a passkey`. Mỗi lần đăng nhập kéo dài bao lâu được nêu ở PROJECT_PROFILE §20 Đăng nhập
+  của User. Khi Remember me không được đưa ra, không có checkbox nào được hiển thị.
 - **Xác thực hai bước (two-step sign-in).** Một người dùng có thể bật xác thực hai bước từ menu tài khoản
   (`Two-step sign-in…`); nó không bao giờ bắt buộc, kể cả với Administrator, và nó đang bật khi đã thiết lập một app
   xác thực (authenticator app) hoặc một passkey (khóa đăng nhập lưu trên thiết bị hoặc trình quản lý mật khẩu).
@@ -145,7 +150,7 @@ từ một trình duyệt chưa enroll (§4.13, xem một station).
   PartFlow gửi qua email (`Email me a code at a•••@example.com`). Một mã sai giữ bước đó mở; khi bước kết thúc (hết
   thời gian, quá nhiều mã sai, hoặc bị khóa), dialog quay lại bước mật khẩu kèm lý do. `New recovery codes…` và mọi
   `Remove…` hỏi lại mật khẩu; gỡ app xác thực hoặc passkey cuối cùng sẽ tắt xác thực hai bước và xóa các mã khôi phục.
-  Mọi con số của xác thực hai bước được đặt trong Settings → Two-step sign-in (§9).
+  Mọi con số của xác thực hai bước được đặt trong Security → Two-step sign-in (§9).
 - **Đăng nhập bằng passkey.** `Sign in with a passkey` trong dialog Sign in đăng nhập chỉ bằng một passkey, không cần
   tên đăng nhập hay mật khẩu: trình duyệt hỏi passkey, và thiết bị xác minh người dùng. Passkey chỉ dùng được khi
   PartFlow được mở tại địa chỉ HTTPS của nó; ở nơi khác, không có nút điều khiển passkey nào được hiển thị.
@@ -153,8 +158,14 @@ từ một trình duyệt chưa enroll (§4.13, xem một station).
   đăng nhập qua email, và đổi hoặc gỡ nó khi nhập lại mật khẩu. Khi đã thiết lập một outgoing mail server, địa chỉ
   trước đó nhận một thông báo về thay đổi.
 - **Thay mật khẩu do administrator đặt.** Trong khi một mật khẩu do administrator đặt phải được thay
-  (Administration → Settings → User sign-in, §9), dialog `Choose a new password` không thể bị đóng, trừ khi
+  (Administration → Security → User sign-in, §9), dialog `Choose a new password` không thể bị đóng, trừ khi
   đăng xuất.
+- **Quy tắc mật khẩu trong các dialog mật khẩu.** `Change password`, `Choose a new password`, `Set up PartFlow` và
+  `Set password…` (§9 Users) liệt kê các quy tắc mật khẩu đang áp dụng của Administration → Security bên dưới ô mật
+  khẩu mới trước khi gõ bất cứ thứ gì (ví dụ `6 to 256 characters`, `A digit`, `An uppercase letter`), đánh dấu từng
+  quy tắc `✓` hoặc `✕` khi mật khẩu được gõ, và khi lưu mà còn quy tắc chưa đáp ứng thì hiển thị một dòng lỗi nêu tên
+  mọi quy tắc chưa đáp ứng và không gửi gì. Server áp dụng cùng các quy tắc đó (PROJECT_PROFILE §20 Đăng nhập của
+  User).
 - **Set up PartFlow.** Dialog chạy lần đầu (first-run) chỉ khả dụng khi chưa có Administrator nào. Dialog yêu cầu setup
   token được in trong log của server và tạo Administrator đầu tiên.
 - **Ai không bao giờ bị hỏi.** Scan Station và Production Board không bao giờ yêu cầu đăng nhập. Worker được nhận diện
@@ -2633,7 +2644,7 @@ sau:
 |----------------------|-------------|
 | **Organization**     | Departments, Areas, Operations, Workers |
 | **Production setup** | Scan Stations, Barcode configuration, Scan behavior |
-| **Access**           | Users, Roles & permissions |
+| **Access**           | Users, Roles & permissions, Security |
 | **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Backups, Department display settings, Settings |
 
 Mỗi section là một mẫu bảng-cộng-editor chuẩn. Bảng Areas là ví dụ tham chiếu: Area (màu và tên), Operations, Machine
@@ -2673,34 +2684,53 @@ không phải xác nhận cho qua.
 - **Department display settings** được cấu hình **theo Department, không bao giờ toàn cục**: một bảng các Department
   với một editor cho thời gian rotation của Production Board (số giây cho mỗi dòng hiển thị 1–60, thời gian dừng tối
   thiểu mỗi trang 1–300 s; mặc định 3 và 6).
-- **Settings** chứa bốn panel:
+- **Settings** chứa hai panel:
   - panel **Due Soon warning** sở hữu cấu hình đứng sau mọi due countdown được suy ra (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ
     dưới giá trị minimum), với các giá trị ban đầu 2 ngày, 15 % và 7 ngày. Đó là một policy toàn cục;
-  - panel **User sign-in**, chỉ dành cho các application User và tách biệt khỏi **Worker sessions**: thời hạn đăng nhập của người dùng tính theo ngày hoặc không bao giờ (ban đầu 30 ngày), số lần đăng nhập thất bại trước khi khóa (10) và thời gian
-    khóa (15 phút), và việc người dùng có phải thay mật khẩu do administrator đặt ở lần đăng nhập kế tiếp hay không (On). Nó được
-    đọc bởi một người dùng đã đăng nhập (người khác thấy lời nhắc đăng nhập) và chỉ người dùng có role được cấu hình system settings mới
-    sửa được;
-  - panel **Two-step sign-in**: mọi con số của xác thực hai bước, mỗi số là một số nguyên trong khoảng của nó (giá trị
-    ban đầu trong ngoặc) — thời gian để hoàn tất bước thứ hai (1–60 phút, 15), số mã sai mỗi lần đăng nhập (1–20, 5), số
-    mã sai trước khi khóa (3–100, 10; thời gian khóa bằng thời gian khóa trong User sign-in), số mã gửi qua email mỗi
-    lần đăng nhập (1–10, 3), thời gian chờ giữa các mã gửi qua email (0–3600 giây, 60), số chữ số của một mã gửi qua
-    email (6–10, 8), số mã khôi phục mỗi bộ (5–20, 10) và số ký tự của chúng (8–20, 12), thời gian để thiết lập một app
-    xác thực hoặc một passkey (1–60 phút, 15) và độ lệch đồng hồ cho phép (0–2 bước 30 giây, 1). Mã của app xác thực vẫn
-    có 6 chữ số và đổi mỗi 30 giây, theo chuẩn mà các app dựa vào. Nó được đọc và sửa giống User sign-in, và một
-    thay đổi có hiệu lực từ bước đăng nhập kế tiếp;
   - panel **Outgoing mail server**: mail server mà PartFlow gửi email qua — một mã đăng nhập dùng một lần gửi cho
-    người dùng đã mất các cách đăng nhập khác. Nó hiển thị `Not set up`, hoặc host và port, connection security
-    (STARTTLS, SSL/TLS hoặc None), thông tin đăng nhập vào server (một user name, và có lưu mật khẩu hay không; mật
-    khẩu không bao giờ được hiển thị), sender address và timeout của từng bước kết nối (5–120 giây, ban đầu 20).
-    Người dùng có role được cấu hình system settings thiết lập, sửa và gỡ nó, và gửi một test email tới một địa chỉ họ
-    nhập, cho biết thư đã đi đâu hoặc lý do server từ chối. Chọn một connection security sẽ chuyển một port còn ở giá
-    trị thường dùng của security trước đó (587, 465, 25) sang giá trị của security mới. Một ô mật khẩu để trống giữ
-    nguyên mật khẩu đã lưu; `Remove the stored password` xóa nó. Đăng nhập vào server qua kết nối không mã hóa (None) bị
-    từ chối.
+    người dùng đã mất các cách đăng nhập khác. Panel ở lại Settings vì đây là hạ tầng chung, không phải một thiết lập
+    đăng nhập. Nó hiển thị `Not set up`, hoặc host và port, connection security (STARTTLS, SSL/TLS hoặc None), thông
+    tin đăng nhập vào server (một user name, và có lưu mật khẩu hay không; mật khẩu không bao giờ được hiển thị),
+    sender address và timeout của từng bước kết nối (5–120 giây, ban đầu 20). Người dùng có role được cấu hình system
+    settings thiết lập, sửa và gỡ nó, và gửi một test email tới một địa chỉ họ nhập, cho biết thư đã đi đâu hoặc lý do
+    server từ chối. Chọn một connection security sẽ chuyển một port còn ở giá trị thường dùng của security trước đó
+    (587, 465, 25) sang giá trị của security mới. Một ô mật khẩu để trống giữ nguyên mật khẩu đã lưu; `Remove the
+    stored password` xóa nó. Đăng nhập vào server qua kết nối không mã hóa (None) bị từ chối.
 
   Bên dưới chúng, **Other settings** hiển thị các general setting ứng viên thành bản xem trước bị vô hiệu hóa (xem
   *Cấu hình được lưu và các section chưa khả dụng*).
+
+### Security
+
+Section **Security** (Access; yêu cầu của chủ dự án ngày 2026-11-17) gom mọi thiết lập về cách người dùng đăng nhập.
+Mọi người dùng đã đăng nhập đều đọc được; thay đổi cần permission Configure system settings, và khi không có nó, một
+dòng `View only` dưới tiêu đề nêu permission đó và không có control chỉnh sửa nào được hiển thị. Mỗi panel hiển thị
+giá trị của nó dưới dạng danh sách và sửa chúng trong một dialog (`Edit … settings…`, `Save changes`, `Cancel (Esc)`,
+câu hỏi dùng chung về thay đổi chưa lưu); một lần lưu chỉ gửi các giá trị đã thay đổi. Bản thân các quy tắc nằm ở
+PROJECT_PROFILE §20 Đăng nhập của User. Các panel, theo thứ tự:
+
+- **User sign-in**, chỉ dành cho các application User và tách biệt khỏi **Worker sessions**: thời hạn đăng nhập của
+  người dùng tính theo ngày hoặc không bao giờ (ban đầu 30 ngày), số lần đăng nhập thất bại trước khi khóa (10) và
+  thời gian khóa (15 phút), và việc người dùng có phải thay mật khẩu do administrator đặt ở lần đăng nhập kế tiếp hay
+  không (On). Một thay đổi áp dụng cho các lần đăng nhập đang mở ở request kế tiếp của chúng;
+- **Remember me**: `Offer Remember me` (Off) và một lần đăng nhập được ghi nhớ kéo dài bao lâu — `Remember for (days)`
+  (1–365, 30) hoặc `Remember until the user signs out`, lựa chọn này vô hiệu hóa ô số ngày và giữ nguyên giá trị của
+  nó. Panel giải thích rằng, khi lựa chọn được đưa ra, một lần đăng nhập không chọn Remember me kết thúc khi trình
+  duyệt đóng, và một lần đăng nhập được ghi nhớ cho đến khi người dùng đăng xuất vẫn còn chừng nào PartFlow được mở ít
+  nhất một lần mỗi 400 ngày;
+- **Password rules**: độ dài mật khẩu (`6 to 256 characters`; tối thiểu và tối đa mỗi giá trị 4–256, tối thiểu không
+  bao giờ lớn hơn tối đa) và bốn công tắc, ban đầu Off — `Require a digit`, `Require a special character` (một dấu câu
+  hoặc một ký hiệu; dấu cách không tính), `Require an uppercase letter` và `Require a lowercase letter`. Panel giải
+  thích rằng các quy tắc áp dụng ở lần đặt mật khẩu kế tiếp và các mật khẩu hiện có vẫn dùng được;
+- **Two-step sign-in**: mọi con số của xác thực hai bước, mỗi số là một số nguyên trong khoảng của nó (giá trị ban đầu
+  trong ngoặc) — thời gian để hoàn tất bước thứ hai (1–60 phút, 15), số mã sai mỗi lần đăng nhập (1–20, 5), số mã sai
+  trước khi khóa (3–100, 10; thời gian khóa bằng thời gian khóa trong User sign-in), số mã gửi qua email mỗi lần đăng
+  nhập (1–10, 3), thời gian chờ giữa các mã gửi qua email (0–3600 giây, 60), số chữ số của một mã gửi qua email (6–10,
+  8), số mã khôi phục mỗi bộ (5–20, 10) và số ký tự của chúng (8–20, 12), thời gian để thiết lập một app xác thực hoặc
+  một passkey (1–60 phút, 15) và độ lệch đồng hồ cho phép (0–2 bước 30 giây, 1). Mã của app xác thực vẫn có 6 chữ số
+  và đổi mỗi 30 giây, theo chuẩn mà các app dựa vào. Panel nói rằng mã gửi qua email đi qua outgoing mail server được
+  thiết lập trong Administration → Settings → Outgoing mail server. Một thay đổi có hiệu lực từ bước đăng nhập kế tiếp.
 
 ### Không có section Machines, Route Templates hay PartNumbers
 
@@ -2741,8 +2771,9 @@ chạy với các trạng thái loading, error và retry tường minh; các l�
 ID mode: Disabled, Fixed Worker kèm Fixed Worker của nó, hoặc Scanned session.
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, Department display settings, các panel Due
-Soon warning, User sign-in, Two-step sign-in và Outgoing mail server của section Settings, retention period của History
-archival & purge, chính sách Backups và statement Machine assignment cũng là cấu hình được lưu. Users và Roles &
+Soon warning và Outgoing mail server của section Settings, các panel User sign-in, Remember me, Password rules và
+Two-step sign-in của section Security, retention period của History archival & purge, chính sách Backups và statement
+Machine assignment cũng là cấu hình được lưu. Users và Roles &
 permissions nêu rằng người dùng đăng nhập bằng login name và mật khẩu, và những permission nào đã được kiểm tra cho đến
 nay.
 
@@ -2782,7 +2813,7 @@ quyền.
   `Choose a new password` (công việc đang mở của cùng người dùng được giữ lại).
 - **Xem và thay đổi.** Mọi người dùng đã đăng nhập đều được xem các section. Các thay đổi của mỗi section cần permission riêng
   của nó (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, Backups, và Roles & permissions / Users đều nêu permission của mình). Không có nó thì section
+  permissions, Settings, Security, Backups, và Roles & permissions / Users đều nêu permission của mình). Không có nó thì section
   là view-only: các control của nó bị ẩn và một dòng `View only` nêu permission. Server kiểm tra các permission này.
 - Badge của Worker chỉ được hiển thị cho người dùng được quản lý Workers.
 - **Bảo vệ Correction permissions.** Việc thay đổi các correction permission, permission quản lý chúng, hoặc người dùng có
@@ -4124,7 +4155,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §1.2, §4.1 và §4.13: một User có quyền quản lý Scan Station xem một station mà không cần thiết bị đã enroll, với mọi action không khả dụng và một cách để enroll thiết bị. |
+| 2026-11-17 | uncommitted | §1.2 và §9: Administration → Security gom User sign-in, Remember me, Password rules và Two-step sign-in; dialog Sign in đưa ra Remember me và các dialog mật khẩu liệt kê quy tắc mật khẩu. |
+| 2026-11-17 | 4be2389 | §1.2, §4.1 và §4.13: một User có quyền quản lý Scan Station xem một station mà không cần thiết bị đã enroll, với mọi action không khả dụng và một cách để enroll thiết bị. |
 | 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` trên Machines và Part Numbers in nhiều nhãn cùng lúc từ một dialog dùng chung, và cả hai toolbar chuyển ô tìm kiếm xuống hàng riêng khi các nút không còn vừa. |
 | 2026-11-17 | 1fc96e1 | §2: passkey — đăng nhập chỉ bằng passkey, passkey làm bước thứ hai, thêm và gỡ passkey; §9: thời gian thiết lập bao gồm cả passkey, và `Turn off two-step…` cũng xóa chúng. |
 | 2026-11-17 | aa6287d | §2: xác thực hai bước và địa chỉ email của chính người dùng từ menu tài khoản, và bước thứ hai của dialog Sign in; §9: Settings → Two-step sign-in, timeout của mail server, và trạng thái xác thực hai bước cùng `Turn off two-step…` trong Users. |

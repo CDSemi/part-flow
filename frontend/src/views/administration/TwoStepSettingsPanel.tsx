@@ -17,7 +17,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { AdminField, ServerErrorNote } from './section-widgets';
 
-// Administration → Settings → Two-step sign-in (Phase 17, owner decisions
+// Administration → Security → Two-step sign-in (Phase 17, owner decisions
 // of 2026-11-17): every number of two-step sign-in — how long a second
 // step stays open and how many wrong codes it takes, the wrong codes that
 // lock an account, the emailed codes, the recovery codes and the clock
@@ -158,7 +158,9 @@ export function TwoStepSettingsPanel() {
         step allows, emailed codes, recovery codes and how far an authenticator
         app&apos;s clock may be off. Authenticator app codes always have 6
         digits and change every 30 seconds — the standard every app uses. A lock
-        lasts as long as User sign-in says.
+        lasts as long as User sign-in says. Emailed codes are sent through the
+        outgoing mail server, set up in Administration → Settings → Outgoing
+        mail server; without one, no code can be emailed.
       </p>
       <TwoStepPolicyView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
     </>

@@ -89,6 +89,17 @@ interface Fake {
 }
 
 let fake: Fake;
+/** The answer of `GET /api/session/sign-in-options` (Administration →
+ * Security); null = the route is not answered (404). */
+let signInOptions: unknown;
+const DEFAULT_RULES_WIRE = {
+  min_length: 6,
+  max_length: 256,
+  require_digit: false,
+  require_special: false,
+  require_uppercase: false,
+  require_lowercase: false,
+};
 /** Requests received, oldest first (method, url, parsed body). */
 let requests: { method: string; url: string; body: unknown }[];
 /** Per "METHOD url": the next answer is this failure instead. */
@@ -307,6 +318,9 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     return json(failure.body, failure.status);
   }
   if (url === '/api/health') return json({ status: 'ok' });
+  if (url === '/api/session/sign-in-options' && signInOptions !== null) {
+    return json(signInOptions);
+  }
   if (url === '/api/session' && method === 'GET') return json(sessionState());
   if (url === '/api/session' && method === 'POST') {
     const login = String(body?.login_name).trim().toLowerCase();
@@ -408,6 +422,7 @@ beforeEach(() => {
   requests = [];
   failures = {};
   holds = {};
+  signInOptions = null;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -791,7 +806,7 @@ test('a temporary password opens the forced dialog: no Cancel, Escape ignored, S
     within(dialog).getByRole('button', { name: 'Change password' }),
   );
   expect(within(dialog).getByRole('alert')).toHaveTextContent(
-    'At least 6 characters.',
+    'A password must be at least 6 characters long.',
   );
   fillChange(dialog, PASSWORD, NEW_PASSWORD, `${NEW_PASSWORD}!`);
   fireEvent.click(
@@ -1817,4 +1832,167 @@ test('Two-step sign-in…: a passkey is added with the password and a name, and 
   expect(
     sent('POST', '/api/session/two-step/passkeys/1/remove')[0].body,
   ).toEqual({ current_password: PASSWORD });
+});
+
+/* ============ Security: Remember me and the password rules ============ */
+
+test('Remember me: not offered, the dialog shows no checkbox and sends no choice', async () => {
+  await renderShell();
+  const dialog = openSignIn();
+  await waitFor(() =>
+    expect(sent('GET', '/api/session/sign-in-options')).toHaveLength(1),
+  );
+  expect(within(dialog).queryByRole('checkbox')).toBeNull();
+  fillSignIn(dialog, 'jdoe', PASSWORD);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  await screen.findByRole('button', { name: 'Account: Jane Doe' });
+  expect(sent('POST', '/api/session')[0].body).toEqual({
+    login_name: 'jdoe',
+    password: PASSWORD,
+  });
+});
+
+test('Remember me: offered, the checkbox names the time and the choice goes with the password', async () => {
+  signInOptions = {
+    remember_me: { days: 30 },
+    password_rules: DEFAULT_RULES_WIRE,
+  };
+  await renderShell();
+  const dialog = openSignIn();
+  const box = await within(dialog).findByRole('checkbox', {
+    name: 'Remember me for 30 days',
+  });
+  expect(box).not.toBeChecked();
+  fireEvent.click(box);
+  fillSignIn(dialog, 'jdoe', PASSWORD);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  await screen.findByRole('button', { name: 'Account: Jane Doe' });
+  expect(sent('POST', '/api/session')[0].body).toEqual({
+    login_name: 'jdoe',
+    password: PASSWORD,
+    remember_me: true,
+  });
+});
+
+test('Remember me: until signed out, the choice goes with the second step too', async () => {
+  signInOptions = {
+    remember_me: { days: null },
+    password_rules: DEFAULT_RULES_WIRE,
+  };
+  fake.twoStep.add('jdoe');
+  await renderShell();
+  const dialog = openSignIn();
+  fireEvent.click(
+    await within(dialog).findByRole('checkbox', {
+      name: 'Remember me until I sign out',
+    }),
+  );
+  fillSignIn(dialog, 'jdoe', PASSWORD);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  await within(dialog).findByLabelText('Code from your authenticator app');
+  typeCode(dialog, 'Code from your authenticator app', APP_CODE);
+  await screen.findByRole('button', { name: 'Account: Jane Doe' });
+  expect(sent('POST', '/api/session')[0].body).toMatchObject({
+    remember_me: true,
+  });
+  expect(sent('POST', '/api/session/second-step').at(-1)?.body).toEqual({
+    method: 'TOTP',
+    code: APP_CODE,
+    remember_me: true,
+  });
+});
+
+test('Remember me: a passkey alone carries the choice', async () => {
+  signInOptions = {
+    remember_me: { days: 7 },
+    password_rules: DEFAULT_RULES_WIRE,
+  };
+  installWebAuthn();
+  await renderShell();
+  const dialog = openSignIn();
+  fireEvent.click(
+    await within(dialog).findByRole('checkbox', {
+      name: 'Remember me for 7 days',
+    }),
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Sign in with a passkey' }),
+  );
+  await screen.findByRole('button', { name: 'Account: Jane Doe' });
+  expect(sent('POST', '/api/session/passkey')[0].body).toMatchObject({
+    remember_me: true,
+  });
+});
+
+test('password rules: Change password lists the stored rules before typing and names each unmet one', async () => {
+  signInOptions = {
+    remember_me: null,
+    password_rules: {
+      ...DEFAULT_RULES_WIRE,
+      min_length: 10,
+      require_digit: true,
+      require_uppercase: true,
+    },
+  };
+  const chip = await signInAsJane();
+  fireEvent.click(chip);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Change password…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Change password' });
+  const rules = await within(dialog).findByRole('list', {
+    name: 'Password rules',
+  });
+  await waitFor(() =>
+    expect(
+      within(rules)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual(['• 10 to 256 characters', '• A digit', '• An uppercase letter']),
+  );
+
+  fillChange(dialog, PASSWORD, 'lowercase words');
+  expect(
+    within(rules)
+      .getAllByRole('listitem')
+      .map((item) => item.textContent),
+  ).toEqual([
+    '✓ 10 to 256 characters — met',
+    '✕ A digit — not met',
+    '✕ An uppercase letter — not met',
+  ]);
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Change password' }),
+  );
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'A password must contain a digit. A password must contain an uppercase letter.',
+  );
+  expect(sent('PUT', '/api/session/password')).toHaveLength(0);
+
+  fillChange(dialog, PASSWORD, 'Lowercase words 2');
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Change password' }),
+  );
+  await waitFor(() =>
+    expect(sent('PUT', '/api/session/password')).toHaveLength(1),
+  );
+});
+
+test('password rules: Set up PartFlow names an unmet stored rule', async () => {
+  fake.setupOpen = true;
+  signInOptions = {
+    remember_me: null,
+    password_rules: { ...DEFAULT_RULES_WIRE, require_special: true },
+  };
+  await renderShell();
+  const dialog = openSetup();
+  await within(dialog).findByText('A special character such as ! # % or *', {
+    exact: false,
+  });
+  fillSetup(dialog);
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Create administrator' }),
+  );
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'A password must contain a special character such as ! # % or *.',
+  );
+  expect(sent('POST', '/api/setup/administrator')).toHaveLength(0);
 });

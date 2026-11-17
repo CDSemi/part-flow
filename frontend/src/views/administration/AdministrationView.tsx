@@ -18,6 +18,7 @@ import { OperationsSection } from './OperationsSection';
 import { RolesSection } from './RolesSection';
 import { ScanBehaviorSection } from './ScanBehaviorSection';
 import { ScanStationsSection } from './ScanStationsSection';
+import { SecuritySection } from './SecuritySection';
 import { SettingsSection } from './SettingsSection';
 import { UsersSection } from './UsersSection';
 import { WorkerSessionsSection } from './WorkerSessionsSection';
@@ -37,8 +38,10 @@ import type { AdminSection } from './sections';
 // permissions (the real Undo reason policy and the role ×
 // correction-permission table), Department display settings (the
 // per-Department Production Board rotation timing), Settings (the real
-// Due Soon warning and User sign-in policies; the other general
-// settings are disabled previews marked Not available yet) and History
+// Due Soon warning and the outgoing mail server; the other general
+// settings are disabled previews marked Not available yet), Security
+// (every sign-in setting: User sign-in, Remember me, the password rules
+// and two-step sign-in; owner request of 2026-11-17) and History
 // archival & purge (the real retention period; archival and purge runs
 // say they are not available yet). Machine assignment is a read-only
 // statement of the two Area modes. Backups (Phase 16) reads and writes
@@ -167,6 +170,8 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <DepartmentDisplaySection />;
     case 'settings':
       return <SettingsSection />;
+    case 'security':
+      return <SecuritySection />;
     case 'machine-assignment':
       return <MachineAssignmentSection />;
     case 'scan-behavior':

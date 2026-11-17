@@ -18,16 +18,20 @@
 // replaced as a whole (its fields share a cross-field rule). It also
 // holds the Movement-history retention period of History archival &
 // purge, stored for later archival maintenance only — nothing reads it
-// to archive or purge. Settings → User sign-in reads the user sign-in
+// to archive or purge. Security → User sign-in reads the user sign-in
 // policy (how long a user's sign-in lasts, when failed sign-ins lock an
 // account, whether an administrator-set password must be replaced) —
 // readable by any signed-in user, written as a partial merge by users
 // whose role may configure system settings. Backups holds how often the
 // server's hourly backup task takes a scheduled backup and how many its
 // rotation keeps — replaced as a whole, read by that task at its next
-// run. Settings → Outgoing mail server and Two-step sign-in (Phase 17)
-// hold the mail server PartFlow sends through, with its timeout, and every
-// number of two-step sign-in (a partial merge like User sign-in). The
+// run. Settings → Outgoing mail server and Security → Two-step sign-in
+// (Phase 17) hold the mail server PartFlow sends through, with its
+// timeout, and every number of two-step sign-in (a partial merge like User
+// sign-in). Security → Password rules and Remember me (owner request of
+// 2026-11-17) hold the rules every new password must satisfy and whether
+// the sign-in dialog offers Remember me, for how long (both partial
+// merges like User sign-in). The
 // server validates and stays authoritative;
 // this module only maps the wire shape, and refuses a Due Soon answer
 // outside the server's ranges rather than letting it degrade the
@@ -337,7 +341,7 @@ function toSignInPolicy(wire: SignInPolicyWire): SignInPolicy {
   };
 }
 
-/** The user sign-in policy (Administration → Settings → User sign-in). */
+/** The user sign-in policy (Administration → Security → User sign-in). */
 export async function getSignInPolicy(): Promise<SignInPolicy> {
   const wire = await apiRequest<SignInPolicyWire>(SIGN_IN_POLICY_PATH);
   return toSignInPolicy(wire);
@@ -470,7 +474,7 @@ export async function sendTestMail(to: string): Promise<string> {
   return wire.sent_to;
 }
 
-/** Every number of two-step sign-in (Administration → Settings → Two-step
+/** Every number of two-step sign-in (Administration → Security → Two-step
  * sign-in; owner decisions of 2026-11-17). */
 export interface TwoStepPolicy {
   /** Minutes a second step stays open after the password. */
@@ -529,7 +533,7 @@ function toTwoStepPolicy(wire: Record<string, unknown>): TwoStepPolicy {
   return policy as unknown as TwoStepPolicy;
 }
 
-/** The two-step sign-in policy (Administration → Settings). */
+/** The two-step sign-in policy (Administration → Security). */
 export async function getTwoStepPolicy(): Promise<TwoStepPolicy> {
   return toTwoStepPolicy(
     await apiRequest<Record<string, unknown>>(TWO_STEP_POLICY_PATH),
@@ -550,6 +554,135 @@ export async function updateTwoStepPolicy(
     await apiRequest<Record<string, unknown>>(TWO_STEP_POLICY_PATH, {
       method: 'PUT',
       body,
+    }),
+  );
+}
+
+/** The password rules of Administration → Security → Password rules. */
+export interface PasswordRulesPolicy {
+  /** Fewest characters a new password may have (4–256). */
+  minLength: number;
+  /** Most characters a new password may have (4–256, never below the
+   * minimum). */
+  maxLength: number;
+  requireDigit: boolean;
+  requireSpecial: boolean;
+  requireUppercase: boolean;
+  requireLowercase: boolean;
+  /** The policy singleton's timestamp (shared by every section). */
+  updatedAt: string;
+}
+
+export type PasswordRuleSetting = Exclude<
+  keyof PasswordRulesPolicy,
+  'updatedAt'
+>;
+
+/** The wire name of each password rule. */
+const PASSWORD_RULES_WIRE: Record<PasswordRuleSetting, string> = {
+  minLength: 'password_min_length',
+  maxLength: 'password_max_length',
+  requireDigit: 'password_require_digit',
+  requireSpecial: 'password_require_special',
+  requireUppercase: 'password_require_uppercase',
+  requireLowercase: 'password_require_lowercase',
+};
+
+const PASSWORD_RULES_PATH = '/api/policies/password-rules';
+
+function toPasswordRulesPolicy(
+  wire: Record<string, unknown>,
+): PasswordRulesPolicy {
+  const policy: Record<string, unknown> = { updatedAt: wire.updated_at };
+  for (const [setting, name] of Object.entries(PASSWORD_RULES_WIRE)) {
+    const value = wire[name];
+    const expected = setting.endsWith('Length') ? 'number' : 'boolean';
+    if (typeof value !== expected) {
+      throw new Error(`Missing password rule from the server: ${setting}`);
+    }
+    policy[setting] = value;
+  }
+  return policy as unknown as PasswordRulesPolicy;
+}
+
+/** The stored password rules (Administration → Security). */
+export async function getPasswordRulesPolicy(): Promise<PasswordRulesPolicy> {
+  return toPasswordRulesPolicy(
+    await apiRequest<Record<string, unknown>>(PASSWORD_RULES_PATH),
+  );
+}
+
+/** Store ONLY the provided password rules (a partial merge: every other
+ * rule keeps its stored value); an unchanged value is a server no-op. */
+export async function updatePasswordRulesPolicy(
+  patch: Partial<Omit<PasswordRulesPolicy, 'updatedAt'>>,
+): Promise<PasswordRulesPolicy> {
+  const body: Record<string, number | boolean> = {};
+  for (const [setting, name] of Object.entries(PASSWORD_RULES_WIRE)) {
+    const value = patch[setting as PasswordRuleSetting];
+    if (value !== undefined) body[name] = value;
+  }
+  return toPasswordRulesPolicy(
+    await apiRequest<Record<string, unknown>>(PASSWORD_RULES_PATH, {
+      method: 'PUT',
+      body,
+    }),
+  );
+}
+
+/** Remember me of Administration → Security → Remember me. */
+export interface RememberMePolicy {
+  /** The sign-in dialog offers Remember me. */
+  offered: boolean;
+  /** A remembered sign-in ends after `days`; false = until sign-out. */
+  expires: boolean;
+  /** Whole days a remembered sign-in lasts (kept while `expires` is off). */
+  days: number;
+  /** The policy singleton's timestamp (shared by every section). */
+  updatedAt: string;
+}
+
+interface RememberMePolicyWire {
+  remember_me_offered: boolean;
+  remember_me_expires: boolean;
+  remember_me_days: number;
+  updated_at: string;
+}
+
+const REMEMBER_ME_PATH = '/api/policies/remember-me';
+
+function toRememberMePolicy(wire: RememberMePolicyWire): RememberMePolicy {
+  return {
+    offered: wire.remember_me_offered,
+    expires: wire.remember_me_expires,
+    days: wire.remember_me_days,
+    updatedAt: wire.updated_at,
+  };
+}
+
+/** Remember me as stored (Administration → Security). */
+export async function getRememberMePolicy(): Promise<RememberMePolicy> {
+  return toRememberMePolicy(
+    await apiRequest<RememberMePolicyWire>(REMEMBER_ME_PATH),
+  );
+}
+
+/** Store ONLY the provided Remember me settings (a partial merge). */
+export async function updateRememberMePolicy(
+  patch: Partial<Omit<RememberMePolicy, 'updatedAt'>>,
+): Promise<RememberMePolicy> {
+  return toRememberMePolicy(
+    await apiRequest<RememberMePolicyWire>(REMEMBER_ME_PATH, {
+      method: 'PUT',
+      body: {
+        ...(patch.offered !== undefined
+          ? { remember_me_offered: patch.offered }
+          : {}),
+        ...(patch.expires !== undefined
+          ? { remember_me_expires: patch.expires }
+          : {}),
+        ...(patch.days !== undefined ? { remember_me_days: patch.days } : {}),
+      },
     }),
   );
 }

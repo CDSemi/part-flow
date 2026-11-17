@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `01ce427` cộng các thay đổi
 > chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -1019,8 +1019,9 @@ trên máy chủ, trong thư mục mã nguồn của bản phát hành, sau khi 
   Lệnh hỏi mật khẩu mới hai lần (`New temporary password`) và không hiện những gì bạn gõ; lệnh không có `-T`, vì nó
   cần terminal cho lời hỏi đó. Mật khẩu là mật khẩu tạm: user chọn mật khẩu mới ở lần đăng nhập sau khi tùy chọn đó
   đang bật. Mọi phiên đăng nhập của user kết thúc và khóa tài khoản được gỡ. Mã thoát 0 nghĩa là xong; 1 nghĩa là bị
-  từ chối và không có gì thay đổi (login name không tồn tại, hai lần gõ mật khẩu khác nhau, user chưa từng có mật
-  khẩu, hoặc không còn Administrator nào); 2 nghĩa là chưa rõ kết quả hoặc không kết nối được database: hãy chạy lại,
+  từ chối và không có gì thay đổi (login name không tồn tại, hai lần gõ mật khẩu khác nhau, mật khẩu vi phạm quy tắc
+  mật khẩu của Administration → Security — thông báo nêu tên từng quy tắc —, user chưa từng có mật khẩu, hoặc không còn
+  Administrator nào); 2 nghĩa là chưa rõ kết quả hoặc không kết nối được database: hãy chạy lại,
   vì lệnh đặt lại mật khẩu dù lần trước đã thành công hay chưa. Lệnh chỉ chạy khi còn một Administrator và không bao
   giờ tạo Administrator mới.
 
@@ -1044,7 +1045,7 @@ bằng một trong các mã khôi phục của mình, hoặc bằng một mã m�
   và không có gì thay đổi (login name không tồn tại); 2 nghĩa là chưa rõ kết quả hoặc không kết nối được database: hãy
   chạy lại.
 
-Một user bị khóa sau quá nhiều mã sai thì chờ khóa kết thúc (Settings → User sign-in đặt thời gian khóa), hoặc một
+Một user bị khóa sau quá nhiều mã sai thì chờ khóa kết thúc (Security → User sign-in đặt thời gian khóa), hoặc một
 quản trị viên người dùng đặt mật khẩu mới, việc này gỡ khóa.
 
 **Quên login name.** Đọc login name của những user có quyền quản lý user và role từ database. Việc này chỉ đọc, không
@@ -1299,7 +1300,8 @@ Lệnh từ chối, không xóa gì và nêu tên từng liên kết khi dữ li
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §10 và bảng `pf`: `pf delete-permanently` xóa các Work Order và Part Number chỉ nhập để thử nghiệm, sau một lần xem trước và một bản sao lưu đã kiểm tra. |
+| 2026-11-17 | uncommitted | Lệnh khôi phục từ chối mật khẩu vi phạm quy tắc mật khẩu, và các thiết lập đăng nhập chuyển sang Administration → Security. |
+| 2026-11-17 | `01ce427` | §10 và bảng `pf`: `pf delete-permanently` xóa các Work Order và Part Number chỉ nhập để thử nghiệm, sau một lần xem trước và một bản sao lưu đã kiểm tra. |
 | 2026-11-17 | `1fc96e1` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất một passkey, và một lần reset cũng xóa các passkey. |
 | 2026-11-17 | `aa6287d` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất app xác thực của xác thực hai bước, đăng xuất user ở mọi nơi, và khóa sau các mã sai. |
 | 2026-11-16 | `a4cf9a8` | §7: dạng reconcile cho một instance staging của Deployment Admin được bỏ cùng với công cụ đó. |

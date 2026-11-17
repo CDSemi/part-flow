@@ -769,6 +769,42 @@ _WRITES: list[_Write] = [
         "application_policy",
     ),
     _Write(
+        "password-rules-policy",
+        "PUT",
+        "/api/policies/password-rules",
+        _key(CSS),
+        _key(CSS),
+        lambda c: (
+            "/api/policies/password-rules",
+            {
+                "json": {
+                    "password_min_length": _changed_policy_value(
+                        c, "/api/policies/password-rules", "password_min_length", 6, 12
+                    )
+                }
+            },
+        ),
+        "application_policy",
+    ),
+    _Write(
+        "remember-me-policy",
+        "PUT",
+        "/api/policies/remember-me",
+        _key(CSS),
+        _key(CSS),
+        lambda c: (
+            "/api/policies/remember-me",
+            {
+                "json": {
+                    "remember_me_days": _changed_policy_value(
+                        c, "/api/policies/remember-me", "remember_me_days", 30, 60
+                    )
+                }
+            },
+        ),
+        "application_policy",
+    ),
+    _Write(
         "role-create",
         "POST",
         "/api/roles",

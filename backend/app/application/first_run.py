@@ -46,7 +46,6 @@ from app.application.errors import (
     SetupTokenInvalidError,
 )
 from app.domain.enums import AuditEntityType, AuditEventType, Permission
-from app.domain.password_policy import InvalidPasswordError, validate_new_password
 from app.infrastructure.models import Role, RolePermission, User, UserCredential
 
 # The one logger that may carry a secret: the setup token announcement.
@@ -216,10 +215,7 @@ def create_first_administrator(
     chosen_role_id = role.id
     if not _eligible(session, chosen_role_id):
         raise _not_eligible(chosen_role_id)
-    try:
-        validate_new_password(password)
-    except InvalidPasswordError as exc:
-        raise InvalidInputError(str(exc)) from exc
+    authentication.check_new_password(session, password)
     # Release the connection before scrypt.
     session.rollback()
     password_hash = password_hashing.hash_password(password)

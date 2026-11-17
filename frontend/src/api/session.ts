@@ -137,6 +137,86 @@ export async function getSession(): Promise<SessionState> {
   return toSessionState(await apiRequest<unknown>(SESSION_PATH));
 }
 
+/** The password rules every new password must satisfy (Administration →
+ * Security); the server applies them, the dialogs show them. */
+export interface PasswordRules {
+  minLength: number;
+  maxLength: number;
+  requireDigit: boolean;
+  requireSpecial: boolean;
+  requireUppercase: boolean;
+  requireLowercase: boolean;
+}
+
+/** What the sign-in and password dialogs show before anyone types. */
+export interface SignInOptions {
+  /** The sign-in dialog offers Remember me: for `days` days, or until
+   * the user signs out (`days` null). Null = not offered. */
+  rememberMe: { days: number | null } | null;
+  passwordRules: PasswordRules;
+}
+
+function toPasswordRules(wire: unknown): PasswordRules {
+  if (!isRecord(wire)) throw malformed();
+  const {
+    min_length,
+    max_length,
+    require_digit,
+    require_special,
+    require_uppercase,
+    require_lowercase,
+  } = wire;
+  if (
+    typeof min_length !== 'number' ||
+    typeof max_length !== 'number' ||
+    typeof require_digit !== 'boolean' ||
+    typeof require_special !== 'boolean' ||
+    typeof require_uppercase !== 'boolean' ||
+    typeof require_lowercase !== 'boolean'
+  ) {
+    throw malformed();
+  }
+  return {
+    minLength: min_length,
+    maxLength: max_length,
+    requireDigit: require_digit,
+    requireSpecial: require_special,
+    requireUppercase: require_uppercase,
+    requireLowercase: require_lowercase,
+  };
+}
+
+/** Map one `SignInOptionsResponse`; throws on a malformed body. */
+export function toSignInOptions(wire: unknown): SignInOptions {
+  if (!isRecord(wire)) throw malformed();
+  const remember = wire.remember_me;
+  if (
+    remember !== null &&
+    (!isRecord(remember) ||
+      (remember.days !== null && typeof remember.days !== 'number'))
+  ) {
+    throw malformed();
+  }
+  return {
+    rememberMe:
+      remember === null ? null : { days: remember.days as number | null },
+    passwordRules: toPasswordRules(wire.password_rules),
+  };
+}
+
+/** Remember me and the password rules (public: read before signing in). */
+export async function getSignInOptions(): Promise<SignInOptions> {
+  return toSignInOptions(
+    await apiRequest<unknown>(`${SESSION_PATH}/sign-in-options`),
+  );
+}
+
+/** The Remember me field of a sign-in request: sent only when chosen
+ * (the server's default is not remembered). */
+function rememberBody(rememberMe: boolean): { remember_me?: true } {
+  return rememberMe ? { remember_me: true } : {};
+}
+
 /** How a user with two-step sign-in proves it is them after the password. */
 export const SECOND_STEP_METHODS = [
   'TOTP',
@@ -199,10 +279,11 @@ function toSecondStep(wire: unknown): SecondStep {
 export async function signIn(
   loginName: string,
   password: string,
+  rememberMe = false,
 ): Promise<SignInResult> {
   const { status, data } = await apiRequestWithStatus<unknown>(SESSION_PATH, {
     method: 'POST',
-    body: { login_name: loginName, password },
+    body: { login_name: loginName, password, ...rememberBody(rememberMe) },
   });
   if (status === 202) return { kind: 'second-step', step: toSecondStep(data) };
   return { kind: 'signed-in', state: toSessionState(data) };
@@ -212,11 +293,12 @@ export async function signIn(
 export async function completeSecondStep(
   method: SecondStepMethod,
   code: string,
+  rememberMe = false,
 ): Promise<SessionState> {
   return toSessionState(
     await apiRequest<unknown>(`${SESSION_PATH}/second-step`, {
       method: 'POST',
-      body: { method, code },
+      body: { method, code, ...rememberBody(rememberMe) },
     }),
   );
 }
@@ -234,11 +316,12 @@ export async function passkeyStepOptions(): Promise<PasskeyOptionsJson> {
 /** Finish the open second step with a passkey's answer; signs in on success. */
 export async function completeSecondStepWithPasskey(
   credential: PasskeyCredentialJson,
+  rememberMe = false,
 ): Promise<SessionState> {
   return toSessionState(
     await apiRequest<unknown>(`${SESSION_PATH}/second-step/passkey`, {
       method: 'POST',
-      body: { credential },
+      body: { credential, ...rememberBody(rememberMe) },
     }),
   );
 }
@@ -256,11 +339,12 @@ export async function startPasskeySignIn(): Promise<PasskeyOptionsJson> {
  * earlier one of this browser. */
 export async function finishPasskeySignIn(
   credential: PasskeyCredentialJson,
+  rememberMe = false,
 ): Promise<SessionState> {
   return toSessionState(
     await apiRequest<unknown>(`${SESSION_PATH}/passkey`, {
       method: 'POST',
-      body: { credential },
+      body: { credential, ...rememberBody(rememberMe) },
     }),
   );
 }

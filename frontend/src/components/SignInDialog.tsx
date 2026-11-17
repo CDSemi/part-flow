@@ -26,6 +26,7 @@ import type {
 } from '../api/session';
 import { useConnectivity } from '../app/connectivity-context';
 import { connectionReason } from '../app/release-copy';
+import { useSignInOptions } from '../app/sign-in-options';
 import { ModalDialog } from './ModalDialog';
 
 const UNREACHABLE = 'The PartFlow server could not be reached. Try again.';
@@ -45,6 +46,13 @@ const CODE_MISSING: Record<CodeMethod, string> = {
   RECOVERY_CODE: 'Enter one of your recovery codes.',
   EMAIL_CODE: 'Enter the code from the email.',
 };
+
+/** The Remember me checkbox's text: for how long a remembered sign-in
+ * lasts (null days = until the user signs out). */
+function rememberLabel(days: number | null): string {
+  if (days === null) return 'Remember me until I sign out';
+  return `Remember me for ${days} ${days === 1 ? 'day' : 'days'}`;
+}
 
 /** The way a second step starts: the first the user has, a typed code
  * last (an emailed one must be asked for first). */
@@ -71,7 +79,10 @@ function firstMethod(methods: SecondStepMethod[]): SecondStepMethod {
  * disabled while disconnected; nothing is queued. A failed sign-in
  * clears the password (or the code) and keeps the login name; an
  * unanswered one re-reads the sign-in once (it may have succeeded) and is
- * never resent on its own.
+ * never resent on its own. While Administration → Security offers it, a
+ * `Remember me` checkbox (off by default) names how long a remembered
+ * sign-in lasts; the choice goes with whichever request finishes the
+ * sign-in — the password, the second step or a passkey alone.
  */
 export function SignInDialog({
   notice,
@@ -94,6 +105,10 @@ export function SignInDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<SecondStep | null>(null);
+  const [rememberMe, setRememberMe] = useState(false);
+  const rememberOffer = useSignInOptions()?.rememberMe ?? null;
+  // Only an offered choice is sent.
+  const remember = rememberOffer !== null && rememberMe;
 
   // Focused from an effect (after ModalDialog's own), never `autoFocus`:
   // ModalDialog records the opener only while focus is still outside.
@@ -117,7 +132,7 @@ export function SignInDialog({
     try {
       const options = await startPasskeySignIn();
       const credential = await getPasskey(options);
-      onSignedIn(await finishPasskeySignIn(credential));
+      onSignedIn(await finishPasskeySignIn(credential, remember));
     } catch (failure) {
       if (failure instanceof PasskeyCancelledError) {
         setBusy(false);
@@ -148,7 +163,7 @@ export function SignInDialog({
     setBusy(true);
     setError(null);
     try {
-      const result = await signIn(loginName, password);
+      const result = await signIn(loginName, password, remember);
       if (result.kind === 'signed-in') {
         onSignedIn(result.state);
         return;
@@ -181,6 +196,7 @@ export function SignInDialog({
       {step !== null ? (
         <SecondStepForm
           step={step}
+          rememberMe={remember}
           offline={offline}
           busy={busy}
           setBusy={setBusy}
@@ -239,6 +255,17 @@ export function SignInDialog({
                 Enter your password.
               </div>
             ) : null}
+            {rememberOffer !== null ? (
+              <label className="acct-check">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  disabled={busy}
+                  onChange={(event) => setRememberMe(event.target.checked)}
+                />
+                <span>{rememberLabel(rememberOffer.days)}</span>
+              </label>
+            ) : null}
             {error ? (
               <div className="err" role="alert">
                 {error}
@@ -290,6 +317,7 @@ export function SignInDialog({
 
 function SecondStepForm({
   step,
+  rememberMe,
   offline,
   busy,
   setBusy,
@@ -299,6 +327,8 @@ function SecondStepForm({
   onEnded,
 }: {
   step: SecondStep;
+  /** The Remember me choice of the password step. */
+  rememberMe: boolean;
   offline: boolean;
   busy: boolean;
   setBusy: (busy: boolean) => void;
@@ -347,7 +377,7 @@ function SecondStepForm({
     try {
       const options = await passkeyStepOptions();
       const credential = await getPasskey(options);
-      onSignedIn(await completeSecondStepWithPasskey(credential));
+      onSignedIn(await completeSecondStepWithPasskey(credential, rememberMe));
     } catch (failure) {
       if (failure instanceof PasskeyCancelledError) {
         setBusy(false);
@@ -387,7 +417,7 @@ function SecondStepForm({
     setBusy(true);
     setError(null);
     try {
-      onSignedIn(await completeSecondStep(method, code));
+      onSignedIn(await completeSecondStep(method, code, rememberMe));
     } catch (failure) {
       setCode('');
       setAttempted(false);

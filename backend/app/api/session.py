@@ -8,13 +8,21 @@ HTTP surface of ``app.application.authentication``:
   open. A resolved session's cookie is re-issued with its remaining
   lifetime under the current policy, so a lengthened expiry or "never"
   reaches the browser; an unusable cookie is cleared.
+- ``GET /session/sign-in-options`` — what the sign-in and password dialogs
+  show before anyone types (Administration → Security, owner request of
+  2026-11-17): whether the sign-in dialog offers Remember me and for how
+  many days (null = until signed out), and the password rules. Public,
+  like the sign-in itself.
 - ``POST /session`` — sign in with a login name and password; a new
   session token is always issued (a presented cookie is never adopted,
   and its session ends REPLACED). One generic 401 for every refusal. A
   User with two-step sign-in (Phase 17) is answered 202 with the second
   step instead — the ways to finish, the masked email address a code can
   go to and when it ends — and its token in the ``partflow_sign_in``
-  cookie (path ``/api/session``), never a session.
+  cookie (path ``/api/session``), never a session. ``remember_me`` (default
+  false) is the user's Remember me choice; every request that ends in a
+  session (the second step and a passkey sign-in too) carries it, and it
+  counts only while the policy offers Remember me.
 - ``POST /session/second-step`` — finish the second step with
   ``{method, code}``; signs in like ``POST /session`` and clears the
   second-step cookie. 401 ``second_step_failed`` for a wrong code (the
@@ -67,7 +75,7 @@ import math
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
 
 from app.api.authorization import (
     CurrentUserDep,
@@ -77,7 +85,7 @@ from app.api.authorization import (
 )
 from app.api.dependencies import SessionDep, SetupGateDep
 from app.api.scan_station import ThemePreferenceLiteral
-from app.application import authentication, first_run, two_step, two_step_factors
+from app.application import authentication, first_run, policies, two_step, two_step_factors
 from app.application.authentication import (
     SESSION_COOKIE,
     Principal,
@@ -120,6 +128,7 @@ class SignInRequest(BaseModel):
 
     login_name: str = Field(max_length=1024)
     password: Secret
+    remember_me: StrictBool = False
 
 
 class OwnPasswordChangeRequest(BaseModel):
@@ -145,6 +154,7 @@ class SecondStepRequest(BaseModel):
 
     method: SecondStepMethod
     code: Secret
+    remember_me: StrictBool = False
 
 
 class EmailCodeResponse(BaseModel):
@@ -169,11 +179,32 @@ class PasskeyOptionsResponse(BaseModel):
 
 
 class PasskeyCredentialRequest(BaseModel):
-    """The browser's ``PublicKeyCredential`` in its JSON form."""
+    """The browser's ``PublicKeyCredential`` in its JSON form, and Remember me."""
 
     model_config = ConfigDict(extra="forbid")
 
     credential: dict[str, Any]
+    remember_me: StrictBool = False
+
+
+class RememberMeOptionResponse(BaseModel):
+    # null = a remembered sign-in lasts until the user signs out.
+    days: int | None
+
+
+class PasswordRulesResponse(BaseModel):
+    min_length: int
+    max_length: int
+    require_digit: bool
+    require_special: bool
+    require_uppercase: bool
+    require_lowercase: bool
+
+
+class SignInOptionsResponse(BaseModel):
+    # null = the sign-in dialog does not offer Remember me.
+    remember_me: RememberMeOptionResponse | None
+    password_rules: PasswordRulesResponse
 
 
 class PasskeyAddRequest(BaseModel):
@@ -323,6 +354,19 @@ def get_session_state(
     return session_state(principal, first_run.is_setup_open(session, gate))
 
 
+@router.get("/session/sign-in-options")
+def get_sign_in_options(session: SessionDep) -> SignInOptionsResponse:
+    remember_me = policies.read_remember_me(session)
+    return SignInOptionsResponse(
+        remember_me=(
+            RememberMeOptionResponse(days=remember_me.days if remember_me.expires else None)
+            if remember_me.offered
+            else None
+        ),
+        password_rules=PasswordRulesResponse(**policies.read_password_rules(session)._asdict()),
+    )
+
+
 @router.post("/session", response_model=SessionStateResponse | SecondStepResponse)
 def sign_in(
     body: SignInRequest,
@@ -338,6 +382,7 @@ def sign_in(
         replaced_token=request.cookies.get(SESSION_COOKIE),
         replaced_challenge_token=request.cookies.get(two_step_factors.SIGN_IN_COOKIE),
         origin=_origin(request),
+        remember_me=body.remember_me,
     )
     if isinstance(result, SecondStepRequired):
         response.status_code = 202
@@ -367,6 +412,7 @@ def complete_second_step(
         method=body.method,
         code=body.code.get_secret_value(),
         replaced_token=request.cookies.get(SESSION_COOKIE),
+        remember_me=body.remember_me,
     )
     grant_session(response, grant)
     _clear_sign_in_cookie(response)
@@ -396,6 +442,7 @@ def complete_second_step_with_passkey(
         credential=body.credential,
         origin=_origin(request),
         replaced_token=request.cookies.get(SESSION_COOKIE),
+        remember_me=body.remember_me,
     )
     grant_session(response, grant)
     _clear_sign_in_cookie(response)
@@ -429,6 +476,7 @@ def sign_in_with_passkey(
         credential=body.credential,
         origin=_origin(request),
         replaced_token=request.cookies.get(SESSION_COOKIE),
+        remember_me=body.remember_me,
     )
     grant_session(response, grant)
     _clear_sign_in_cookie(response)

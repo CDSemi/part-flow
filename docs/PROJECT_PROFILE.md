@@ -1817,6 +1817,44 @@ No permission rewrites historical data directly: the initial Operator role holds
 
 The initial Super User role grants every permission key: every capability listed in this section. Its grants are ordinary grants, not an implicit superuser: an authorized administrator may rename the role or change what it grants like any other role's. When a release adds a permission key, every role that holds every other key at that moment receives the new key too, so a role that holds every key keeps holding every key, and a role an administrator has narrowed stays narrowed.
 
+## User Sign-in
+
+A User (§7) signs in with a login name and a password; Workers never sign in (§19). Every sign-in setting lives in
+Administration → Security, readable by every signed-in User and changed only with the permission to configure system
+settings; every change is audited. The values in parentheses are the allowed range and the initial value.
+
+- **Sign-in lifetime.** A sign-in ends a configured number of whole days after it began (1 to 365, initially 30), or
+  never when sign-ins are configured not to expire. A change applies to open sign-ins at their next request.
+- **Account lock.** A configured number of failed sign-ins (3 to 100, initially 10) locks the account for a configured
+  time (1 to 1440 minutes, initially 15). An administrator who sets the password clears the lock.
+- **Temporary passwords.** A password an administrator or the recovery command sets is temporary; while configured
+  (initially on), the User must choose a new one at the next sign-in before doing anything else.
+- **Password rules.** Every new password — at first-run setup, with Change password, when an administrator sets one,
+  and with the recovery command — must have at least the configured minimum and at most the configured maximum
+  number of characters (each 4 to 256, the minimum never above the maximum; initially 6 and 256) and, when
+  configured, a digit, a special character (a punctuation mark or a symbol; a space is not one), an uppercase letter
+  and a lowercase letter (initially none is required). Characters are counted after Unicode NFKC normalization, and
+  nothing is stripped. The rules apply only when a password is set: a stored password keeps working when they change.
+  The password dialogs show the active rules before the user types and name every rule a new password does not meet;
+  the server decides.
+- **Remember me.** Administration decides whether the Sign in dialog offers Remember me (initially not) and how long
+  a remembered sign-in lasts: a number of whole days (1 to 365, initially 30) or until the User signs out. While it is
+  offered, a sign-in without Remember me ends when the browser closes, and at the latest when the sign-in lifetime
+  ends; a remembered sign-in survives closing the browser for the Remember me time. A sign-in remembered until the
+  User signs out lasts as long as PartFlow is opened in that browser at least once every 400 days, the longest a
+  browser keeps a sign-in, because each visit renews it. While Remember me is not offered, every sign-in survives
+  closing the browser and lasts the sign-in lifetime. The choice goes with every way of signing in: the password, the
+  second step of two-step sign-in and a passkey alone. Turning the offer off returns remembered sign-ins to the
+  sign-in lifetime.
+- **Two-step sign-in.** Each User may add an authenticator app or passkeys; then a correct password is followed by a
+  second step — a code from the app, a passkey, a recovery code or a code emailed to the User — and a passkey alone
+  may also sign the User in. It is never required. Its numbers are configured in Administration → Security; emailed
+  codes go through the outgoing mail server, which is set up in Administration → Settings because PartFlow sends its
+  other messages through it too.
+- **Ending sign-ins.** Signing out ends that sign-in. Changing one's own password ends every other sign-in of the
+  User. An administrator setting a User's password, deactivating a User, or turning off a User's two-step sign-in with
+  sign-out everywhere ends every sign-in of that User. Each of these ends remembered sign-ins too.
+
 ---
 
 # 21. Application Views
@@ -2092,6 +2130,8 @@ Administration stays focused on system administration:
 - users,
 - roles,
 - permissions,
+- security — how Users sign in: the sign-in lifetime, account locks, temporary passwords, Remember me, the password
+  rules and two-step sign-in (§20 User Sign-in),
 - barcode configuration (the `PF:` prefix scheme and the Machine Asset Tag format — prefix + zero-padded numeric sequence, §8.6, §10),
 - scan behavior,
 - Worker session policies (the scanned-session sliding inactivity timeout — one default value with per-Area overrides — and the badge-confirmation options of `DONE`, `QUEUE` return and Undo, §19),
@@ -2459,7 +2499,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §15 and §20: a User who may manage Scan Stations can view any Scan Station from a browser that is not enrolled, read-only. |
+| 2026-11-17 | uncommitted | §20 and §21: Administration → Security gathers the sign-in settings, with configurable password rules and Remember me. |
+| 2026-11-17 | 4be2389 | §15 and §20: a User who may manage Scan Stations can view any Scan Station from a browser that is not enrolled, read-only. |
 | 2026-11-17 | 4cfaf35 | Machines and Part Numbers: printing many barcode labels at once; the date added and last-use orders of the Part Number master records. |
 | 2026-11-17 | 01ce427 | Administrative Archival and Purge: the interim operator command that permanently deletes Work Orders and Part Numbers entered only for testing. |
 | 2026-11-16 | a04179f | §21: a new Work Order can put its demand lines on the Hot list when it is created. |

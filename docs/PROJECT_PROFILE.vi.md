@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `4cfaf35` cộng các thay đổi chưa commit ngày 2026-11-17.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `4be2389` cộng các thay đổi chưa commit ngày 2026-11-17.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -1820,6 +1820,46 @@ Không có quyền nào ghi đè trực tiếp lên dữ liệu lịch sử: vai
 
 Vai trò Super User ban đầu cấp mọi permission key: mọi năng lực được liệt kê trong mục này. Các quyền đó là quyền cấp bình thường, không phải siêu người dùng ngầm định: một quản trị viên được ủy quyền có thể đổi tên vai trò này hoặc thay đổi những gì nó cấp như mọi vai trò khác. Khi một bản phát hành thêm một permission key, mọi vai trò đang giữ tất cả các key khác vào lúc đó cũng nhận key mới, nên một vai trò giữ mọi key vẫn tiếp tục giữ mọi key, còn một vai trò đã bị quản trị viên thu hẹp thì vẫn bị thu hẹp.
 
+## Đăng nhập của User (User Sign-in)
+
+Một User (§7) đăng nhập bằng tên đăng nhập và mật khẩu; Worker không bao giờ đăng nhập (§19). Mọi thiết lập đăng nhập
+nằm trong Administration → Security, mọi User đã đăng nhập đều đọc được và chỉ thay đổi được khi có quyền cấu hình thiết
+lập hệ thống; mọi thay đổi đều được ghi audit. Các giá trị trong ngoặc là khoảng cho phép và giá trị ban đầu.
+
+- **Thời hạn đăng nhập.** Một lần đăng nhập kết thúc sau một số ngày nguyên được cấu hình kể từ khi bắt đầu (1 đến
+  365, ban đầu là 30), hoặc không bao giờ khi được cấu hình để đăng nhập không hết hạn. Một thay đổi áp dụng cho các
+  lần đăng nhập đang mở ở yêu cầu kế tiếp của chúng.
+- **Khóa tài khoản.** Một số lần đăng nhập thất bại được cấu hình (3 đến 100, ban đầu là 10) sẽ khóa tài khoản trong
+  một khoảng thời gian được cấu hình (1 đến 1440 phút, ban đầu là 15). Một quản trị viên đặt mật khẩu sẽ gỡ khóa.
+- **Mật khẩu tạm thời.** Mật khẩu do quản trị viên hoặc lệnh khôi phục đặt là tạm thời; khi được cấu hình (ban đầu là
+  bật), User phải chọn mật khẩu mới ở lần đăng nhập kế tiếp trước khi làm bất cứ việc gì khác.
+- **Quy tắc mật khẩu.** Mọi mật khẩu mới — khi thiết lập lần đầu, với Change password, khi quản trị viên đặt mật khẩu,
+  và với lệnh khôi phục — phải có ít nhất số ký tự tối thiểu và nhiều nhất số ký tự tối đa được cấu hình (mỗi giá trị
+  từ 4 đến 256, giá trị tối thiểu không bao giờ lớn hơn giá trị tối đa; ban đầu là 6 và 256) và, khi được cấu hình,
+  một chữ số, một ký tự đặc biệt (một dấu câu hoặc một ký hiệu; dấu cách không phải là ký tự đặc biệt), một chữ hoa và
+  một chữ thường (ban đầu không yêu cầu điều nào). Ký tự được đếm sau khi chuẩn hóa Unicode NFKC, và không có gì bị cắt
+  bỏ. Các quy tắc chỉ áp dụng khi đặt mật khẩu: mật khẩu đã lưu vẫn dùng được khi quy tắc thay đổi. Các hộp thoại mật
+  khẩu hiển thị các quy tắc đang áp dụng trước khi người dùng gõ và nêu tên mọi quy tắc mà mật khẩu mới chưa đáp ứng;
+  máy chủ là bên quyết định.
+- **Remember me (Ghi nhớ đăng nhập).** Administration quyết định hộp thoại Sign in có đưa ra Remember me hay không (ban
+  đầu là không) và một lần đăng nhập được ghi nhớ kéo dài bao lâu: một số ngày nguyên (1 đến 365, ban đầu là 30) hoặc
+  cho đến khi User đăng xuất. Khi Remember me được đưa ra, một lần đăng nhập không chọn Remember me sẽ kết thúc khi
+  trình duyệt đóng, và muộn nhất là khi hết thời hạn đăng nhập; một lần đăng nhập được ghi nhớ vẫn còn sau khi đóng
+  trình duyệt trong suốt thời gian của Remember me. Một lần đăng nhập được ghi nhớ cho đến khi User đăng xuất sẽ còn
+  hiệu lực chừng nào PartFlow được mở trong trình duyệt đó ít nhất một lần mỗi 400 ngày, khoảng thời gian dài nhất mà
+  trình duyệt giữ một lần đăng nhập, vì mỗi lần truy cập sẽ gia hạn nó. Khi Remember me không được đưa ra, mọi lần đăng
+  nhập vẫn còn sau khi đóng trình duyệt và kéo dài theo thời hạn đăng nhập. Lựa chọn này đi kèm mọi cách đăng nhập:
+  mật khẩu, bước thứ hai của xác thực hai bước và chỉ dùng passkey. Tắt việc đưa ra Remember me sẽ đưa các lần đăng
+  nhập được ghi nhớ trở về thời hạn đăng nhập.
+- **Xác thực hai bước (Two-step sign-in).** Mỗi User có thể thêm một ứng dụng xác thực hoặc passkey; khi đó, sau mật
+  khẩu đúng là một bước thứ hai — mã từ ứng dụng, một passkey, một mã khôi phục hoặc một mã được gửi qua email cho User
+  — và chỉ một passkey cũng có thể đăng nhập cho User. Việc này không bao giờ là bắt buộc. Các con số của nó được cấu
+  hình trong Administration → Security; mã gửi qua email đi qua máy chủ thư đi, được thiết lập trong Administration →
+  Settings vì PartFlow cũng gửi các thư khác qua máy chủ đó.
+- **Kết thúc đăng nhập.** Đăng xuất kết thúc lần đăng nhập đó. Tự đổi mật khẩu kết thúc mọi lần đăng nhập khác của
+  User. Một quản trị viên đặt mật khẩu cho User, vô hiệu hóa User, hoặc tắt xác thực hai bước của User kèm đăng xuất ở
+  mọi nơi sẽ kết thúc mọi lần đăng nhập của User đó. Mỗi việc này cũng kết thúc các lần đăng nhập được ghi nhớ.
+
 ---
 
 # 21. Các màn hình ứng dụng (Application Views)
@@ -2095,6 +2135,8 @@ Administration tập trung vào quản trị hệ thống:
 - người dùng,
 - vai trò,
 - quyền,
+- bảo mật (security) — cách User đăng nhập: thời hạn đăng nhập, khóa tài khoản, mật khẩu tạm thời, Remember me, quy tắc
+  mật khẩu và xác thực hai bước (§20 Đăng nhập của User),
 - cấu hình barcode (lược đồ tiền tố `PF:` và định dạng Asset Tag của Machine — tiền tố + chuỗi số tuần tự được đệm số 0 ở đầu, §8.6, §10),
 - hành vi quét,
 - chính sách Worker session (thời gian chờ không hoạt động trượt của phiên quét thẻ — một giá trị mặc định cùng các giá trị ghi đè theo từng Area — và các tùy chọn xác nhận bằng thẻ của `DONE`, thao tác trả về `QUEUE` và Undo, §19),
@@ -2462,7 +2504,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §15 và §20: một User có quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, chỉ để đọc. |
+| 2026-11-17 | uncommitted | §20 và §21: Administration → Security gom các thiết lập đăng nhập, với quy tắc mật khẩu và Remember me có thể cấu hình. |
+| 2026-11-17 | 4be2389 | §15 và §20: một User có quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, chỉ để đọc. |
 | 2026-11-17 | 4cfaf35 | Machines và Part Numbers: in nhiều nhãn barcode cùng lúc; thứ tự theo ngày thêm và lần dùng cuối của các bản ghi master Part Number. |
 | 2026-11-17 | 01ce427 | Administrative Archival and Purge: lệnh vận hành tạm thời xóa vĩnh viễn các Work Order và Part Number chỉ nhập để thử nghiệm. |
 | 2026-11-16 | a04179f | §21: một Work Order mới có thể đưa các demand line của nó vào Hot list khi được tạo. |

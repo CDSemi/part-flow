@@ -116,6 +116,15 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     subtitle: 'Named roles and the permissions each one grants',
   },
   {
+    id: 'security',
+    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
+    phase: 'full',
+    group: 'Access',
+    label: 'Security',
+    subtitle:
+      'How users sign in — how long a sign-in lasts, account locks, Remember me, password rules and two-step sign-in',
+  },
+  {
     id: 'worker-sessions',
     writePermission: 'MANAGE_WORKER_SESSION_POLICIES',
     phase: 'full',

@@ -6,11 +6,13 @@ import { ApiError } from '../api/client';
 import { changeOwnPassword, signInWriteOutcomeUnknown } from '../api/session';
 import type { SessionState } from '../api/session';
 import { useConnectivity } from '../app/connectivity-context';
-import { PASSWORD_LENGTH_HINT, newPasswordError } from '../app/password-rules';
+import { newPasswordError } from '../app/password-rules';
 import { OUTDATED_REASON, RELOAD_PAGE_LABEL } from '../app/release-copy';
+import { usePasswordRules } from '../app/sign-in-options';
 import { useCloseGuard } from './close-guard';
 import { DiscardInputDialog } from './close-guard-dialogs';
 import { ModalDialog } from './ModalDialog';
+import { PasswordRulesHint } from './PasswordRulesHint';
 
 const UNKNOWN_OUTCOME =
   'The server did not answer — your password may or may not have been changed. If signing in with the new password fails, use the old one.';
@@ -31,6 +33,10 @@ const UNKNOWN_OUTCOME =
  * means it did not, and the submit is available again. A re-read that
  * could not be answered is repeated once the connection is regained
  * (once per regained connection — never a polling loop).
+ *
+ * The new password's field lists the stored password rules before the
+ * user types (Administration → Security) and marks each as it is met;
+ * a save with an unmet rule names every one and sends nothing.
  */
 export function ChangePasswordDialog({
   forced,
@@ -89,8 +95,9 @@ export function ChangePasswordDialog({
     if (regained && unsettled && !settling.current) void settle();
   }, [offline, unsettled, settle]);
 
+  const rules = usePasswordRules();
   const currentMissing = current === '';
-  const nextError = newPasswordError(next, repeat);
+  const nextError = newPasswordError(next, repeat, rules);
 
   // The fields open empty: any typed password asks before a close drops
   // it. The forced dialog cannot be closed at all.
@@ -176,7 +183,7 @@ export function ChangePasswordDialog({
             autoComplete="new-password"
           />
         </label>
-        <p className="acct-help">{PASSWORD_LENGTH_HINT}</p>
+        <PasswordRulesHint rules={rules} password={next} />
         <label>
           <span>Repeat new password</span>
           <input

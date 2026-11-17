@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0038_phase17_passkeys`. The slice's own tables
+The schema described here is the current schema at migration head `0039_security_settings`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -739,6 +739,8 @@ The constraints are listed in §17.
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
   | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, with the metadata `{mail_password_changed}`; never the password (rows written before `0037_phase17_two_step` have no `mail_timeout_seconds` key) |
   | `PUT /api/policies/two-step` | `{two_step_window_minutes, two_step_max_codes, two_step_lockout_codes, two_step_email_codes, two_step_email_interval_seconds, two_step_email_code_digits, two_step_recovery_codes, two_step_recovery_code_length, two_step_setup_minutes, two_step_clock_drift_steps}` |
+  | `PUT /api/policies/password-rules` | `{password_min_length, password_max_length, password_require_digit, password_require_special, password_require_uppercase, password_require_lowercase}` |
+  | `PUT /api/policies/remember-me` | `{remember_me_offered, remember_me_expires, remember_me_days}` |
 
   The `sign-in`, `backups`, `mail-server` and `two-step` rows carry `actor_user_id` set to the signed-in User. A
   changed mail server password with nothing else changed is an effective change: the snapshots are equal and the
@@ -1206,6 +1208,16 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   6–10), `two_step_recovery_codes` (10; 5–20), `two_step_recovery_code_length` (12; 8–20), `two_step_setup_minutes`
   (15; 1–60) and `two_step_clock_drift_steps` (1; 0–2). Every sign-in step reads them, so a change applies from the
   next step.
+- The password rules and Remember me of Administration → Security (`0039_security_settings`; owner request of
+  2026-11-17): `password_min_length integer NOT NULL DEFAULT 6` and `password_max_length integer NOT NULL DEFAULT 256`
+  (`ck_application_policy_password_min_length_range` and `ck_application_policy_password_max_length_range`, 4–256,
+  with `ck_application_policy_password_length_order`: the minimum never above the maximum);
+  `password_require_digit`, `password_require_special`, `password_require_uppercase` and `password_require_lowercase`
+  (`boolean NOT NULL DEFAULT false`); `remember_me_offered boolean NOT NULL DEFAULT false`, `remember_me_expires
+  boolean NOT NULL DEFAULT true` and `remember_me_days integer NOT NULL DEFAULT 30`
+  (`ck_application_policy_remember_me_days_range`, 1–365). Every command that sets a password reads the rules; every
+  request reads Remember me with the User session. The downgrade refuses while a value differs from its default, a
+  session is remembered or a `password-rules` or `remember-me` audit row exists.
 - The sign-in and Scan Station role columns are listed under "Sign-in" and "Scan Station devices" below.
 - Later policies are added as typed columns, with a server default where a canonical default exists. There is no
   key/value store.
@@ -1291,7 +1303,8 @@ The sign-in migration `0029_phase14_sign_in` adds the following.
   `uq_user_sessions_token_digest` UNIQUE and `ck_user_sessions_token_digest_length` (32 bytes); `created_at`;
   `ended_at` and `end_reason` nullable together (`ck_user_sessions_end_shape`), with `ck_user_sessions_end_reason`
   (`SIGNED_OUT`, `REPLACED`, `PASSWORD_CHANGED`, `PASSWORD_RESET`, `USER_DEACTIVATED`, and since
-  `0037_phase17_two_step` `TWO_STEP_RESET`). Ended rows are kept.
+  `0037_phase17_two_step` `TWO_STEP_RESET`). Ended rows are kept. `remembered boolean NOT NULL DEFAULT false`
+  (`0039_security_settings`): the User chose Remember me when signing in; stored only while the policy offered it.
   `ix_user_sessions_user_id_open` indexes a User's open sessions.
 - `audit_events`, `machine_lifecycle_events` and `work_order_allocations` each gain the nullable `actor_user_id` with
   the foreign key named `fk_<table>_actor_user_id_users` (§16).
@@ -1370,7 +1383,7 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (35 at head `0038_phase17_passkeys`) |
+| Class | `partflow_app` privileges | Tables (35 at head `0039_security_settings`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
@@ -1515,7 +1528,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, the passkey columns of `user_sign_in_challenges`, the lock order and the audit snapshot with passkeys. |
+| 2026-11-17 | uncommitted | Migration head `0039_security_settings`: the password rules and Remember me columns of `application_policy`, their audit sections and `user_sessions.remembered`. |
+| 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, the passkey columns of `user_sign_in_challenges`, the lock order and the audit snapshot with passkeys. |
 | 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: the three tables of two-step sign-in, the two-step policy and mail server timeout columns, `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the lock order and the audit rows (the `two-step` section and the own email change). |
 | 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, the outgoing mail server columns of `application_policy` and the `mail-server` audit section. |
 | 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: the four backup policy columns of `application_policy` and the `backups` audit section. |

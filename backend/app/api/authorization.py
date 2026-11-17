@@ -33,7 +33,8 @@ derived on the server from the session — never from a request body.
 Also the cookie helpers: the raw token goes only into ``Set-Cookie``
 (``HttpOnly``, ``SameSite=Strict``, ``Path=/api``, ``Secure`` when
 ``SESSION_COOKIE_SECURE`` is on, ``Max-Age`` the session's remaining
-lifetime).
+lifetime — none for a sign-in without Remember me while it is offered,
+so the browser drops it when it closes).
 """
 
 from typing import Annotated, Final
@@ -206,7 +207,8 @@ def actor_of(principal: Principal) -> Actor:
     return Actor(principal.user_id, principal.permissions)
 
 
-def set_session_cookie(response: Response, token: str, max_age: int) -> None:
+def set_session_cookie(response: Response, token: str, max_age: int | None) -> None:
+    """Set the session cookie; ``max_age`` None = a browser-session cookie (no Max-Age)."""
     response.set_cookie(
         SESSION_COOKIE,
         token,

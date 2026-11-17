@@ -5,9 +5,11 @@ import { signInWriteOutcomeUnknown } from '../../api/session';
 import { setUserPassword } from '../../api/users';
 import type { User } from '../../api/users';
 import { newPasswordError } from '../../app/password-rules';
+import { usePasswordRules } from '../../app/sign-in-options';
 import { useCloseGuard } from '../../components/close-guard';
 import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PasswordRulesHint } from '../../components/PasswordRulesHint';
 import { AdminField, ServerErrorNote } from './section-widgets';
 
 const UNKNOWN_OUTCOME =
@@ -18,8 +20,10 @@ const UNKNOWN_OUTCOME =
  * another user a new password (the server refuses it for the signed-in
  * user's own account). The new password replaces the old one, ends every
  * sign-in of that user and clears a lock; it is stored as temporary, so
- * the user chooses their own at the next sign-in when Settings → User
- * sign-in requires it. Setting the same password again is safe.
+ * the user chooses their own at the next sign-in when Security → User
+ * sign-in requires it. Setting the same password again is safe. The new
+ * password must satisfy the password rules of Security, listed under the
+ * field before anything is typed; a save with an unmet rule names each.
  */
 export function SetPasswordDialog({
   user,
@@ -43,7 +47,8 @@ export function SetPasswordDialog({
     passwordField.current?.focus();
   }, []);
 
-  const passwordInvalid = newPasswordError(password, repeat);
+  const rules = usePasswordRules();
+  const passwordInvalid = newPasswordError(password, repeat, rules);
 
   // Cancel, Escape and the backdrop are ignored while the write is in
   // flight; an entered password asks first (useCloseGuard).
@@ -79,7 +84,7 @@ export function SetPasswordDialog({
       <h3>{title}</h3>
       <p className="sub">
         This replaces the password and signs {user.displayName} out everywhere.
-        Give the new password to them in person. If Settings → User sign-in
+        Give the new password to them in person. If Security → User sign-in
         requires it, they choose their own password at their next sign-in. A
         lock on the account is cleared.
       </p>
@@ -101,6 +106,7 @@ export function SetPasswordDialog({
             autoComplete="new-password"
           />
         </AdminField>
+        <PasswordRulesHint rules={rules} password={password} />
         <AdminField label="Repeat password">
           <input
             className="field"

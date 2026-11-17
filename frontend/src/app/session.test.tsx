@@ -12,7 +12,11 @@ import { apiRequest } from '../api/client';
 import type { SessionUser } from '../api/session';
 import { ConnectivityContext } from './connectivity-context';
 import type { ConnectivityStatus } from './connectivity-context';
-import { newPasswordError } from './password-rules';
+import {
+  DEFAULT_PASSWORD_RULES,
+  newPasswordError,
+  passwordRuleChecks,
+} from './password-rules';
 import { RouterProvider } from './router-provider';
 import { SessionContext, hasPermission, useSession } from './session-context';
 import type { SessionValue } from './session-context';
@@ -345,17 +349,48 @@ test('hasPermission: no user holds nothing; a user holds exactly the role keys',
   expect(hasPermission(user, 'MANAGE_USERS_AND_ROLES')).toBe(false);
 });
 
-test('newPasswordError mirrors the 6–256 character rule after NFKC and the repetition', () => {
-  expect(newPasswordError('', '')).toBe('At least 6 characters.');
-  expect(newPasswordError('five5', 'five5')).toBe('At least 6 characters.');
-  expect(newPasswordError('six ch', 'six ch')).toBeNull();
+test('newPasswordError mirrors the default 6–256 character rule after NFKC and the repetition', () => {
+  const rules = DEFAULT_PASSWORD_RULES;
+  const short = 'A password must be at least 6 characters long.';
+  expect(newPasswordError('', '', rules)).toBe(short);
+  expect(newPasswordError('five5', 'five5', rules)).toBe(short);
+  expect(newPasswordError('six ch', 'six ch', rules)).toBeNull();
   // NFKC: the ligature "ﬁ" counts as the two characters "fi".
-  expect(newPasswordError('ﬁﬁﬁ', 'ﬁﬁﬁ')).toBeNull();
+  expect(newPasswordError('ﬁﬁﬁ', 'ﬁﬁﬁ', rules)).toBeNull();
   const long = 'x'.repeat(257);
-  expect(newPasswordError(long, long)).toBe(
+  expect(newPasswordError(long, long, rules)).toBe(
     'A password can be at most 256 characters long.',
   );
-  expect(newPasswordError('twelve chars', 'twelve chars!')).toBe(
+  expect(newPasswordError('twelve chars', 'twelve chars!', rules)).toBe(
     'The new passwords do not match.',
   );
+});
+
+test('newPasswordError names every unmet stored rule, judged like the server', () => {
+  const rules = {
+    minLength: 8,
+    maxLength: 20,
+    requireDigit: true,
+    requireSpecial: true,
+    requireUppercase: true,
+    requireLowercase: true,
+  };
+  expect(newPasswordError('abc', 'abc', rules)).toBe(
+    'A password must be at least 8 characters long. A password must contain a digit. A password must contain a special character such as ! # % or *. A password must contain an uppercase letter.',
+  );
+  expect(newPasswordError('Abcdefg 1', 'Abcdefg 1', rules)).toBe(
+    'A password must contain a special character such as ! # % or *.',
+  );
+  // Unicode letters and digits count, after NFKC (full-width "１！").
+  expect(newPasswordError('Mật-khẩu٣x', 'Mật-khẩu٣x', rules)).toBeNull();
+  expect(newPasswordError('Abcdefg１！', 'Abcdefg１！', rules)).toBeNull();
+  expect(
+    passwordRuleChecks('', rules).map((check) => [check.label, check.met]),
+  ).toEqual([
+    ['8 to 20 characters', false],
+    ['A digit', false],
+    ['A special character such as ! # % or *', false],
+    ['An uppercase letter', false],
+    ['A lowercase letter', false],
+  ]);
 });

@@ -13,13 +13,13 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { AdminField, PolicySwitch, ServerErrorNote } from './section-widgets';
 
-// Administration → Settings → User sign-in (application Users — never the
+// Administration → Security → User sign-in (application Users — never the
 // Worker Sessions of the Scan Stations, which live in Policies → Worker
 // sessions): how long a user's sign-in lasts (or that it never expires),
 // how many failed sign-ins lock an account and for how long, and whether
 // a password an administrator set must be replaced. Administration is
 // shown only to signed-in users, who all read it; users whose role may
-// configure system settings edit it (Settings says once when the user
+// configure system settings edit it (Security says once when the user
 // may not). Save sends
 // only the changed settings (the server merges them), so a stale editor
 // never reverts another administrator's change. The server validates and

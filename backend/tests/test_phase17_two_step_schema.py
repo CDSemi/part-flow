@@ -7,7 +7,8 @@ the schema of two-step sign-in (owner decisions of 2026-11-13 and
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_phase17_passkeys_schema.py`` with ``0038_phase17_passkeys``;
+  ``tests/test_security_settings_schema.py`` with
+  ``0039_security_settings``;
 - the migration's literals equal the model constants: the three tables'
   CHECKs, the policy columns with their defaults and ranges, the
   wrong-code counter, the User session end reasons (the Phase 14 ones of

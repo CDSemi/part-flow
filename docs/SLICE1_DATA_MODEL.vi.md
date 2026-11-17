@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0038_phase17_passkeys`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0039_security_settings`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -732,6 +732,8 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
   | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, với metadata `{mail_password_changed}`; không bao giờ có mật khẩu (các dòng ghi trước `0037_phase17_two_step` không có key `mail_timeout_seconds`) |
   | `PUT /api/policies/two-step` | `{two_step_window_minutes, two_step_max_codes, two_step_lockout_codes, two_step_email_codes, two_step_email_interval_seconds, two_step_email_code_digits, two_step_recovery_codes, two_step_recovery_code_length, two_step_setup_minutes, two_step_clock_drift_steps}` |
+  | `PUT /api/policies/password-rules` | `{password_min_length, password_max_length, password_require_digit, password_require_special, password_require_uppercase, password_require_lowercase}` |
+  | `PUT /api/policies/remember-me` | `{remember_me_offered, remember_me_expires, remember_me_days}` |
 
   Các dòng `sign-in`, `backups`, `mail-server` và `two-step` mang `actor_user_id` là User đã đăng nhập. Một lần đổi mật
   khẩu mail server mà không đổi gì khác vẫn là thay đổi có hiệu lực: hai snapshot bằng nhau và metadata ghi
@@ -1201,6 +1203,16 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   0–3600), `two_step_email_code_digits` (8; 6–10), `two_step_recovery_codes` (10; 5–20), `two_step_recovery_code_length`
   (12; 8–20), `two_step_setup_minutes` (15; 1–60) và `two_step_clock_drift_steps` (1; 0–2). Mọi bước đăng nhập đều đọc
   chúng, nên một thay đổi có hiệu lực từ bước kế tiếp.
+- Quy tắc mật khẩu và Remember me của Administration → Security (`0039_security_settings`; yêu cầu của chủ dự án ngày
+  2026-11-17): `password_min_length integer NOT NULL DEFAULT 6` và `password_max_length integer NOT NULL DEFAULT 256`
+  (`ck_application_policy_password_min_length_range` và `ck_application_policy_password_max_length_range`, 4–256, cùng
+  `ck_application_policy_password_length_order`: giá trị tối thiểu không bao giờ lớn hơn giá trị tối đa);
+  `password_require_digit`, `password_require_special`, `password_require_uppercase` và `password_require_lowercase`
+  (`boolean NOT NULL DEFAULT false`); `remember_me_offered boolean NOT NULL DEFAULT false`, `remember_me_expires boolean
+  NOT NULL DEFAULT true` và `remember_me_days integer NOT NULL DEFAULT 30`
+  (`ck_application_policy_remember_me_days_range`, 1–365). Mọi lệnh đặt mật khẩu đều đọc các quy tắc; mọi yêu cầu đều
+  đọc Remember me cùng với session của User. Downgrade từ chối khi một giá trị khác giá trị mặc định, một session được
+  ghi nhớ, hoặc còn một dòng audit `password-rules` hay `remember-me`.
 - Các cột đăng nhập và role của Scan Station được liệt kê ở "Đăng nhập" và "Thiết bị Scan Station" bên dưới.
 - Các policy về sau được thêm dưới dạng cột có kiểu, có server default khi tồn tại giá trị mặc định canonical. Không có
   kho key/value.
@@ -1287,7 +1299,8 @@ Migration đăng nhập `0029_phase14_sign_in` thêm những thứ sau.
   UNIQUE `uq_user_sessions_token_digest` và `ck_user_sessions_token_digest_length` (32 byte); `created_at`; `ended_at` và
   `end_reason` cùng có thể null (`ck_user_sessions_end_shape`), với `ck_user_sessions_end_reason` (`SIGNED_OUT`,
   `REPLACED`, `PASSWORD_CHANGED`, `PASSWORD_RESET`, `USER_DEACTIVATED`, và từ `0037_phase17_two_step` là
-  `TWO_STEP_RESET`). Các dòng đã kết thúc được giữ lại.
+  `TWO_STEP_RESET`). Các dòng đã kết thúc được giữ lại. `remembered boolean NOT NULL DEFAULT false`
+  (`0039_security_settings`): User đã chọn Remember me khi đăng nhập; chỉ được lưu khi policy đang đưa ra lựa chọn đó.
   `ix_user_sessions_user_id_open` index các session đang mở của một User.
 - `audit_events`, `machine_lifecycle_events` và `work_order_allocations` mỗi bảng có thêm `actor_user_id` có thể null với
   foreign key tên `fk_<table>_actor_user_id_users` (§16).
@@ -1365,7 +1378,7 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (35 at head `0038_phase17_passkeys`) |
+| Class | `partflow_app` privileges | Tables (35 at head `0039_security_settings`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
@@ -1510,7 +1523,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, các cột passkey của `user_sign_in_challenges`, thứ tự lock và snapshot audit có passkey. |
+| 2026-11-17 | uncommitted | Migration head `0039_security_settings`: các cột quy tắc mật khẩu và Remember me của `application_policy`, các mục audit của chúng và `user_sessions.remembered`. |
+| 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, các cột passkey của `user_sign_in_challenges`, thứ tự lock và snapshot audit có passkey. |
 | 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: ba bảng của xác thực hai bước, các cột policy xác thực hai bước và timeout của mail server, `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, thứ tự lock và các dòng audit (section `two-step` và việc tự đổi email). |
 | 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, các cột mail server gửi đi của `application_policy` và section audit `mail-server`. |
 | 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: bốn cột chính sách backup của `application_policy` và section audit `backups`. |

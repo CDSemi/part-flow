@@ -10,7 +10,9 @@ users, user_access, authentication``.
 
 - ``Principal`` / ``principal_where`` — the signed-in User of one usable
   session (not ended, not expired under the current policy, the User
-  active with a password), with its role's permissions;
+  active with a password), with its role's permissions; a session the
+  User chose to remember lasts the Remember me time (or until sign-out)
+  while the policy offers Remember me (Administration → Security);
 - ``recheck_actor`` — the acting User's own session re-read under the
   User-administration lock, so every role, user and password write
   judges the actor's CURRENT sign-in and permissions (slice 2);
@@ -44,7 +46,7 @@ import logging
 from collections.abc import Callable, Collection, Iterable
 from typing import Final, NamedTuple
 
-from sqlalchemy import ColumnElement, Interval, case, func, or_, select, update
+from sqlalchemy import ColumnElement, Interval, and_, case, func, null, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.application.authorization import Actor
@@ -98,6 +100,11 @@ class Principal(NamedTuple):
     must_change_password: bool
     # None = the session never expires.
     session_expires_at: datetime.datetime | None
+    # The user chose Remember me when signing in (stored only while offered).
+    remembered: bool
+    # Whether the cookie outlives the browser: false only for a sign-in
+    # without Remember me while the sign-in dialog offers it.
+    persistent_cookie: bool
     # The User's saved theme (GUI_DESIGN §2.1 User tier); None = no preference.
     theme_preference: ThemePreference | None
 
@@ -118,7 +125,16 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
     No lock and no write; column selects only, so the identity map holds
     no User or policy instance afterwards.
     """
+    # Remember me counts only while the sign-in dialog offers it: turning
+    # the offer off returns remembered sessions to the User sign-in lifetime.
+    remembered = and_(UserSession.remembered, ApplicationPolicy.remember_me_offered)
     expires_at = case(
+        (
+            and_(remembered, ApplicationPolicy.remember_me_expires),
+            UserSession.created_at
+            + func.make_interval(0, 0, 0, ApplicationPolicy.remember_me_days, type_=Interval),
+        ),
+        (remembered, null()),
         (
             ApplicationPolicy.user_session_expires,
             UserSession.created_at
@@ -139,6 +155,8 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
             UserCredential.password_is_temporary,
             ApplicationPolicy.require_password_change,
             expires_at,
+            UserSession.remembered,
+            ApplicationPolicy.remember_me_offered,
         )
         .select_from(UserSession)
         .join(User, User.id == UserSession.user_id)
@@ -166,6 +184,8 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
         temporary,
         require_change,
         session_expires_at,
+        stored_remembered,
+        remember_me_offered,
     ) = row
     return Principal(
         session_id=session_id,
@@ -178,6 +198,8 @@ def principal_where(session: Session, which: ColumnElement[bool]) -> Principal |
         permissions=role_permissions(session, role_id),
         must_change_password=bool(temporary and require_change),
         session_expires_at=session_expires_at,
+        remembered=bool(stored_remembered),
+        persistent_cookie=bool(stored_remembered or not remember_me_offered),
         # The column reads as ``str``: convert, so the principal never
         # carries an unchecked value.
         theme_preference=(

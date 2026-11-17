@@ -178,7 +178,11 @@ function renderAt(path: string) {
 /** The Management requests sent (sign-in, health and policy reads are
  * not Management reads). */
 function managementRequests(): string[] {
-  return requests.filter((r) => !r.endsWith('/api/policies/due-soon'));
+  return requests.filter(
+    (r) =>
+      !r.endsWith('/api/policies/due-soon') &&
+      !r.endsWith('/api/session/sign-in-options'),
+  );
 }
 
 /** The application content (the account chip in the navigation has

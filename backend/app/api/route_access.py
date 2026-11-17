@@ -134,6 +134,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/session/second-step/passkey"): _PUBLIC,
     ("POST", "/api/session/passkey/options"): _PUBLIC,
     ("POST", "/api/session/passkey"): _PUBLIC,
+    # What the sign-in and password dialogs show before anyone types.
+    ("GET", "/api/session/sign-in-options"): _PUBLIC,
     ("GET", "/api/setup"): _PUBLIC,
     ("POST", "/api/setup/administrator"): _PUBLIC,
     ("GET", "/api/production-board"): _PUBLIC,
@@ -173,6 +175,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/backups"): _SIGNED_IN,
     ("GET", "/api/policies/mail-server"): _SIGNED_IN,
     ("GET", "/api/policies/two-step"): _SIGNED_IN,
+    ("GET", "/api/policies/password-rules"): _SIGNED_IN,
+    ("GET", "/api/policies/remember-me"): _SIGNED_IN,
     ("GET", "/api/scan-station-devices"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
     ("PUT", "/api/session/email"): _SIGNED_IN,
@@ -213,6 +217,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PUT", "/api/policies/mail-server"): _permission(_CSS),
     ("POST", "/api/policies/mail-server/test"): _permission(_CSS),
     ("PUT", "/api/policies/two-step"): _permission(_CSS),
+    ("PUT", "/api/policies/password-rules"): _permission(_CSS),
+    ("PUT", "/api/policies/remember-me"): _permission(_CSS),
     ("PUT", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     ("DELETE", "/api/users/{user_id}/avatar"): _permission(_MUAR),
     # Management (slice 3)
@@ -279,6 +285,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/work-orders/{work_order_id}"): _any_of(_WO_VIEW),
     ("GET", "/api/part-numbers"): _any_of(_WO_VIEW, _PN_VIEW),
     ("GET", "/api/part-numbers/page"): _any_of(_PN_VIEW),
+    ("GET", "/api/part-numbers/running-work-orders"): _any_of(_PN_VIEW),
     ("GET", "/api/hot-list"): _any_of(_PRIORITY_VIEW),
     ("GET", "/api/hot-list/candidates"): _any_of(_PRIORITY_VIEW),
     ("GET", "/api/tracking"): _any_of(_TRACKING_VIEW),
@@ -293,7 +300,6 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/route-templates/management"): _any_of(_ROUTES_VIEW),
     ("GET", "/api/route-templates/{template_id}/usage"): _any_of(_ROUTES_VIEW),
     # No view reads it yet: View production data ∪ its write surface's key.
-    ("GET", "/api/part-numbers/running-work-orders"): _any_of(_PN_VIEW),
     ("GET", "/api/allocations"): _any_of(_keys(_VPD, _EWOA)),
     # Phase 15 slice 2: the import write workflow's own surfaces — the
     # dry run and the header-only templates — open for either write key

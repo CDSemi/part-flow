@@ -4,7 +4,10 @@ import { ApiError, setAuthFailureListener } from './client';
 import {
   changeOwnEmail,
   changeOwnPassword,
+  completeSecondStep,
+  finishPasskeySignIn,
   getSession,
+  getSignInOptions,
   getTwoStepStatus,
   isPasswordCheckBusy,
   saveOwnThemePreference,
@@ -305,4 +308,88 @@ test('getTwoStepStatus maps the own address and refuses a masked-only answer', a
   await expect(getTwoStepStatus()).rejects.toThrow(
     'The server answered a malformed user sign-in state.',
   );
+});
+
+test('getSignInOptions maps Remember me and the password rules; a malformed answer throws', async () => {
+  const rules = {
+    min_length: 8,
+    max_length: 64,
+    require_digit: true,
+    require_special: false,
+    require_uppercase: true,
+    require_lowercase: false,
+  };
+  fetchMock.mockResolvedValue(
+    json({ remember_me: { days: null }, password_rules: rules }),
+  );
+  expect(await getSignInOptions()).toEqual({
+    rememberMe: { days: null },
+    passwordRules: {
+      minLength: 8,
+      maxLength: 64,
+      requireDigit: true,
+      requireSpecial: false,
+      requireUppercase: true,
+      requireLowercase: false,
+    },
+  });
+  expect(sent()).toEqual({
+    path: '/api/session/sign-in-options',
+    method: 'GET',
+    body: undefined,
+  });
+  fetchMock.mockResolvedValue(
+    json({ remember_me: null, password_rules: rules }),
+  );
+  expect((await getSignInOptions()).rememberMe).toBeNull();
+  fetchMock.mockResolvedValue(
+    json({ remember_me: { days: '30' }, password_rules: rules }),
+  );
+  await expect(getSignInOptions()).rejects.toThrow(
+    'The server answered a malformed user sign-in state.',
+  );
+  fetchMock.mockResolvedValue(
+    json({ remember_me: null, password_rules: { ...rules, min_length: '8' } }),
+  );
+  await expect(getSignInOptions()).rejects.toThrow(
+    'The server answered a malformed user sign-in state.',
+  );
+});
+
+test('Remember me travels only when chosen, with whichever request finishes the sign-in', async () => {
+  const state = { user: WIRE_USER, setup_open: false };
+  fetchMock.mockImplementation(() => Promise.resolve(json(state)));
+  await signIn('jdoe', 'secret-password', true);
+  expect(sent().body).toEqual({
+    login_name: 'jdoe',
+    password: 'secret-password',
+    remember_me: true,
+  });
+  await signIn('jdoe', 'secret-password');
+  expect(sent().body).toEqual({
+    login_name: 'jdoe',
+    password: 'secret-password',
+  });
+  await completeSecondStep('TOTP', '123456', true);
+  expect(sent()).toEqual({
+    path: '/api/session/second-step',
+    method: 'POST',
+    body: { method: 'TOTP', code: '123456', remember_me: true },
+  });
+  const credential = {
+    id: 'Y3JlZC0x',
+    rawId: 'Y3JlZC0x',
+    type: 'public-key',
+    response: {},
+    clientExtensionResults: {},
+  };
+  await finishPasskeySignIn(
+    credential as unknown as Parameters<typeof finishPasskeySignIn>[0],
+    true,
+  );
+  expect(sent()).toEqual({
+    path: '/api/session/passkey',
+    method: 'POST',
+    body: { credential, remember_me: true },
+  });
 });

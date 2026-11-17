@@ -506,6 +506,39 @@ def test_setup_refusals_write_nothing_and_keep_the_token(
     _ok(_create(client, _body(token, role_id)), 201)
 
 
+def test_setup_applies_the_stored_password_rules(
+    client: TestClient, db_engine: Engine, announcements: list[str]
+) -> None:
+    """Administration → Security (2026-11-17): first-run setup checks the stored
+    password rules like every other password path, naming each unmet rule."""
+    token = _current_token(client, db_engine, announcements)
+    role_id = _role_id(db_engine, "Administrator")
+    _execute(
+        db_engine,
+        "UPDATE application_policy SET password_min_length = 30, password_require_digit = true,"
+        " password_require_uppercase = true",
+    )
+    try:
+        before = _counts(db_engine)
+        _refused(
+            _create(client, _body(token, role_id, password="all lowercase words")),
+            422,
+            "A password must be at least 30 characters long. A password must contain a digit."
+            " A password must contain an uppercase letter.",
+        )
+        assert _counts(db_engine) == before
+        _ok(
+            _create(client, _body(token, role_id, password="Thirty characters or more, 2026!")),
+            201,
+        )
+    finally:
+        _execute(
+            db_engine,
+            "UPDATE application_policy SET password_min_length = 6,"
+            " password_require_digit = false, password_require_uppercase = false",
+        )
+
+
 def test_setup_reopens_when_no_administrator_remains(
     client: TestClient, db_engine: Engine, announcements: list[str]
 ) -> None:

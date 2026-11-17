@@ -434,6 +434,23 @@ const DEFAULT_TWO_STEP_POLICY: Record<string, number> = {
 };
 let twoStepPolicy: Record<string, number>;
 
+// Security → Password rules and Remember me (owner request of 2026-11-17).
+const DEFAULT_PASSWORD_RULES: Record<string, number | boolean> = {
+  password_min_length: 6,
+  password_max_length: 256,
+  password_require_digit: false,
+  password_require_special: false,
+  password_require_uppercase: false,
+  password_require_lowercase: false,
+};
+let passwordRules: Record<string, number | boolean>;
+const DEFAULT_REMEMBER_ME: Record<string, number | boolean> = {
+  remember_me_offered: false,
+  remember_me_expires: true,
+  remember_me_days: 30,
+};
+let rememberMe: Record<string, number | boolean>;
+
 const E_B1 = 'Seconds per displayed row must be a whole number from 1 to 60.';
 const E_B2 =
   'The minimum page dwell must be a whole number of seconds from 1 to 300.';
@@ -502,6 +519,31 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
   if (url === '/api/policies/two-step') {
     return handleTwoStepPolicy(method, body);
+  }
+  if (url === '/api/policies/password-rules') {
+    return handlePasswordRules(method, body);
+  }
+  if (url === '/api/policies/remember-me') {
+    return handleRememberMe(method, body);
+  }
+  if (url === '/api/session/sign-in-options') {
+    return json({
+      remember_me: rememberMe.remember_me_offered
+        ? {
+            days: rememberMe.remember_me_expires
+              ? rememberMe.remember_me_days
+              : null,
+          }
+        : null,
+      password_rules: {
+        min_length: passwordRules.password_min_length,
+        max_length: passwordRules.password_max_length,
+        require_digit: passwordRules.password_require_digit,
+        require_special: passwordRules.password_require_special,
+        require_uppercase: passwordRules.password_require_uppercase,
+        require_lowercase: passwordRules.password_require_lowercase,
+      },
+    });
   }
   if (url === '/api/workers' || url.startsWith('/api/workers/')) {
     return handleWorkers(url, method, body);
@@ -1267,6 +1309,51 @@ function handleTwoStepPolicy(
   return json({ ...twoStepPolicy, updated_at: T0 });
 }
 
+/** `GET`/`PUT /api/policies/password-rules` (partial merge, server rules). */
+function handlePasswordRules(
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  if (method === 'PUT') {
+    for (const [key, value] of Object.entries(body)) {
+      const valid = key.endsWith('_length')
+        ? wholeIn(value, 4, 256)
+        : key in passwordRules && typeof value === 'boolean';
+      if (!valid) return json({ detail: 'Invalid request.' }, 422);
+    }
+    const merged = { ...passwordRules, ...(body as typeof passwordRules) };
+    if (merged.password_min_length > merged.password_max_length) {
+      return json(
+        {
+          detail:
+            'The minimum password length cannot be greater than the maximum password length.',
+        },
+        422,
+      );
+    }
+    passwordRules = merged;
+  }
+  return json({ ...passwordRules, updated_at: T0 });
+}
+
+/** `GET`/`PUT /api/policies/remember-me` (partial merge, server ranges). */
+function handleRememberMe(
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  if (method === 'PUT') {
+    for (const [key, value] of Object.entries(body)) {
+      const valid =
+        key === 'remember_me_days'
+          ? wholeIn(value, 1, 365)
+          : key in rememberMe && typeof value === 'boolean';
+      if (!valid) return json({ detail: 'Invalid request.' }, 422);
+    }
+    rememberMe = { ...rememberMe, ...(body as typeof rememberMe) };
+  }
+  return json({ ...rememberMe, updated_at: T0 });
+}
+
 function duplicateLogin(login: string, exceptId?: number): Response | null {
   const holder = state.users.find(
     (u) => u.login_name === login && u.id !== exceptId,
@@ -1386,6 +1473,8 @@ beforeEach(() => {
   mailServerFailure = null;
   mailSent = [];
   twoStepPolicy = { ...DEFAULT_TWO_STEP_POLICY };
+  passwordRules = { ...DEFAULT_PASSWORD_RULES };
+  rememberMe = { ...DEFAULT_REMEMBER_ME };
   userHold = null;
   deviceFailure = null;
   enrollmentFailure = null;
@@ -5447,7 +5536,7 @@ test('FA-C6: a failed roles load offers Retry while the Undo reason switch keeps
 /* ============ Users — sign-in states and Set password… (Phase 14) ============ */
 
 const SET_PASSWORD_TEXT =
-  'This replaces the password and signs Jane Doe out everywhere. Give the new password to them in person. If Settings → User sign-in requires it, they choose their own password at their next sign-in. A lock on the account is cleared.';
+  'This replaces the password and signs Jane Doe out everywhere. Give the new password to them in person. If Security → User sign-in requires it, they choose their own password at their next sign-in. A lock on the account is cleared.';
 const SET_PASSWORD_UNKNOWN =
   'The server did not answer — the password may or may not have been set. Set it again to be sure.';
 
@@ -5560,7 +5649,7 @@ test('FA-U7: Set password… sends exactly the new password; a mismatch or a sho
   fireEvent.change(repeat, { target: { value: 'short' } });
   fireEvent.click(submit);
   expect(within(dialog).getByRole('alert')).toHaveTextContent(
-    'At least 6 characters.',
+    'A password must be at least 6 characters long.',
   );
   fireEvent.change(next, { target: { value: 'correct horse battery' } });
   fireEvent.change(repeat, { target: { value: 'correct horse battery!' } });
@@ -5674,12 +5763,11 @@ test('FA-U7: Set password… closes without a request, ignores closing in flight
   ).toBeDisabled();
 });
 
-/* ============ Settings → User sign-in (Phase 14) ============ */
+/* ============ Security → User sign-in (Phase 14) ============ */
 
-/** The User sign-in panel's values: the last read-only value list of
- * Settings (a view-only Due Soon panel lists its values first). */
+/** The User sign-in panel's values: its read-only value list in
+ * Security. */
 function signInPolicyRows(): Record<string, string> {
-  // The User sign-in panel's list (the mail server panel follows it).
   const list = Array.from(
     document.querySelectorAll('.admin-configpreview'),
   ).find((candidate) =>
@@ -5699,8 +5787,7 @@ async function openSignInSettings(
   status: 'connected' | 'unavailable' = 'connected',
 ) {
   renderAdmin(status);
-  openSection('Settings');
-  await screen.findByRole('heading', { name: 'Due Soon warning' });
+  openSection('Security');
   await screen.findByRole('heading', { name: 'User sign-in' });
 }
 
@@ -5731,28 +5818,39 @@ test('FA-S2: signed in without the permission, the settings read without an edit
   expect(
     screen.queryByRole('button', { name: 'Edit user sign-in settings…' }),
   ).toBeNull();
-  // The panels come in order, Other settings stays last; two-step sign-in
-  // and the mail server read without an edit or test control too.
+  // Security gathers every sign-in setting, in order; none of them offers
+  // an edit control without the permission.
   expect(
     screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
   ).toEqual([
-    'Due Soon warning',
     'User sign-in',
+    'Remember me',
+    'Password rules',
     'Two-step sign-in',
-    'Outgoing mail server',
-    'Other settings',
   ]);
+  for (const name of [
+    'Edit two-step sign-in settings…',
+    'Edit Remember me settings…',
+    'Edit password rules…',
+  ]) {
+    expect(screen.queryByRole('button', { name })).toBeNull();
+  }
+  // Security never says "sessions" (those are Worker Sessions).
+  expect(document.querySelector('.admin-config')?.textContent).not.toMatch(
+    /session/i,
+  );
+
+  // Settings keeps the Due Soon warning and the outgoing mail server, which
+  // reads without an edit or test control too.
+  openSection('Settings');
+  await screen.findByRole('heading', { name: 'Outgoing mail server' });
   expect(
-    screen.queryByRole('button', { name: 'Edit two-step sign-in settings…' }),
-  ).toBeNull();
+    screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent),
+  ).toEqual(['Due Soon warning', 'Outgoing mail server', 'Other settings']);
   expect(
     screen.queryByRole('button', { name: /outgoing mail server…$/ }),
   ).toBeNull();
   expect(screen.queryByRole('button', { name: 'Send test email…' })).toBeNull();
-  // User sign-in never says "sessions" (those are Worker Sessions).
-  expect(document.querySelector('.admin-config')?.textContent).not.toMatch(
-    /session/i,
-  );
 });
 
 test('FA-S3: the editor saves only the changed setting and re-reads', async () => {
@@ -7330,7 +7428,7 @@ test('FA-U9: user administrators see two-step sign-in and turn it off after a co
   });
 });
 
-/* ============ Settings → Two-step sign-in (Phase 17) ============ */
+/* ============ Security → Two-step sign-in (Phase 17) ============ */
 
 function twoStepRows(): Record<string, string> {
   const list = Array.from(
@@ -7345,14 +7443,14 @@ async function openTwoStepSettings(
   status: 'connected' | 'unavailable' = 'connected',
 ) {
   renderAdmin(status);
-  openSection('Settings');
+  openSection('Security');
   await screen.findByRole('heading', { name: 'Two-step sign-in' });
   await waitFor(() =>
     expect(twoStepRows()['Wrong codes per sign-in']).toBeDefined(),
   );
 }
 
-test('FA-TS1: every number of two-step sign-in reads in Settings and saves only what changed', async () => {
+test('FA-TS1: every number of two-step sign-in reads in Security and saves only what changed', async () => {
   session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
   await openTwoStepSettings();
   expect(twoStepRows()).toEqual({
@@ -7442,4 +7540,173 @@ test('FA-TS2: invalid numbers are refused in place; without the permission or of
   expect(
     screen.getByRole('button', { name: 'Edit two-step sign-in settings…' }),
   ).toBeDisabled();
+});
+
+/* ============ Security → Password rules and Remember me (2026-11-17) ============ */
+
+function previewRows(includes: string): Record<string, string> {
+  const list = Array.from(
+    document.querySelectorAll('.admin-configpreview'),
+  ).find((candidate) => candidate.textContent?.includes(includes));
+  return list ? readOnlyRows(list) : {};
+}
+
+async function openSecurity() {
+  renderAdmin();
+  openSection('Security');
+  await screen.findByRole('heading', { name: 'Password rules' });
+  await waitFor(() =>
+    expect(previewRows('Password length')['Password length']).toBeDefined(),
+  );
+  await waitFor(() =>
+    expect(previewRows('Offer Remember me')['Offer Remember me']).toBeDefined(),
+  );
+}
+
+test('FA-SEC1: the password rules read in Security and save only what changed', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openSecurity();
+  expect(previewRows('Password length')).toEqual({
+    'Password length': '6 to 256 characters',
+    'Require a digit': 'Off',
+    'Require a special character': 'Off',
+    'Require an uppercase letter': 'Off',
+    'Require a lowercase letter': 'Off',
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit password rules…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Password rules' });
+  const min = within(dialog).getByLabelText('Minimum length (characters)');
+  const max = within(dialog).getByLabelText('Maximum length (characters)');
+  const save = within(dialog).getByRole('button', { name: 'Save changes' });
+  fireEvent.change(min, { target: { value: '3' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'The minimum password length must be a whole number of characters from 4 to 256.',
+  );
+  expect(save).toBeDisabled();
+  fireEvent.change(min, { target: { value: '20' } });
+  fireEvent.change(max, { target: { value: '12' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'The minimum password length cannot be greater than the maximum password length.',
+  );
+  expect(save).toBeDisabled();
+  fireEvent.change(min, { target: { value: '12' } });
+  fireEvent.change(max, { target: { value: '256' } });
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'Require a digit' }),
+  );
+  fireEvent.click(save);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/password-rules',
+      body: { password_min_length: 12, password_require_digit: true },
+    },
+  ]);
+  await waitFor(() =>
+    expect(previewRows('Password length')['Password length']).toBe(
+      '12 to 256 characters',
+    ),
+  );
+  expect(previewRows('Password length')['Require a digit']).toBe('On');
+});
+
+test('FA-SEC2: Remember me reads in Security and saves only what changed', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openSecurity();
+  expect(previewRows('Offer Remember me')).toEqual({
+    'Offer Remember me': 'Off',
+    'A remembered sign-in lasts': '30 days',
+  });
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit Remember me settings…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Remember me settings' });
+  const days = within(dialog).getByLabelText('Remember for (days)');
+  fireEvent.change(days, { target: { value: '366' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'A remembered sign-in must last a whole number of days from 1 to 365.',
+  );
+  fireEvent.click(
+    within(dialog).getByRole('switch', {
+      name: 'Remember until the user signs out',
+    }),
+  );
+  // Until sign-out: the days are kept, neither checked nor sent.
+  expect(days).toBeDisabled();
+  expect(within(dialog).queryByRole('alert')).toBeNull();
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'Offer Remember me' }),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/remember-me',
+      body: { remember_me_offered: true, remember_me_expires: false },
+    },
+  ]);
+  await waitFor(() =>
+    expect(previewRows('Offer Remember me')).toEqual({
+      'Offer Remember me': 'On',
+      'A remembered sign-in lasts': 'Until the user signs out',
+    }),
+  );
+});
+
+test('FA-SEC3: Security names where emailed codes are set up; the mail server stays in Settings', async () => {
+  session = sessionValue(signedInUser(['CONFIGURE_SYSTEM_SETTINGS']));
+  await openSecurity();
+  expect(
+    screen.getByText(
+      /set up in Administration → Settings → Outgoing mail server/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('heading', { name: 'Outgoing mail server' }),
+  ).toBeNull();
+  expect(
+    within(
+      screen.getByRole('navigation', { name: 'Administration sections' }),
+    ).getByRole('button', { name: 'Security' }),
+  ).toBeInTheDocument();
+});
+
+test('FA-SEC4: Set password… lists the stored rules and names each unmet one', async () => {
+  passwordRules = {
+    ...DEFAULT_PASSWORD_RULES,
+    password_min_length: 8,
+    password_require_uppercase: true,
+  };
+  signInUserAdministrator();
+  seedJane({ sign_in_state: 'PASSWORD_SET' });
+  await openUsers();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Set password for Jane Doe' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Set password for Jane Doe',
+  });
+  const rules = within(dialog).getByRole('list', { name: 'Password rules' });
+  await waitFor(() =>
+    expect(
+      within(rules)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual(['• 8 to 256 characters', '• An uppercase letter']),
+  );
+  fireEvent.change(within(dialog).getByLabelText('New password'), {
+    target: { value: 'short' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Repeat password'), {
+    target: { value: 'short' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Set password' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'A password must be at least 8 characters long. A password must contain an uppercase letter.',
+  );
+  expect(writes).toEqual([]);
 });

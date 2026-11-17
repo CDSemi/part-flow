@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import {
+  getPasswordRulesPolicy,
+  getRememberMePolicy,
   getSignInPolicy,
   getTwoStepPolicy,
+  updatePasswordRulesPolicy,
+  updateRememberMePolicy,
   updateSignInPolicy,
   updateTwoStepPolicy,
 } from './policies';
@@ -120,4 +124,72 @@ test('the two-step policy maps every number and sends only the provided ones', a
   await expect(getTwoStepPolicy()).rejects.toThrow(
     'Missing two-step setting from the server: maxCodes',
   );
+});
+
+function answer(body: unknown) {
+  fetchMock.mockImplementation(() =>
+    Promise.resolve(new Response(JSON.stringify(body), { status: 200 })),
+  );
+}
+
+function lastRequest(): { path: string; method?: string; body: unknown } {
+  const [path, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+  return {
+    path,
+    method: init.method,
+    body: JSON.parse(init.body as string),
+  };
+}
+
+test('the password rules map every rule and send only the provided ones', async () => {
+  const wire = {
+    password_min_length: 6,
+    password_max_length: 256,
+    password_require_digit: false,
+    password_require_special: true,
+    password_require_uppercase: false,
+    password_require_lowercase: false,
+    updated_at: '2026-11-17T08:00:00Z',
+  };
+  answer(wire);
+  expect(await getPasswordRulesPolicy()).toEqual({
+    minLength: 6,
+    maxLength: 256,
+    requireDigit: false,
+    requireSpecial: true,
+    requireUppercase: false,
+    requireLowercase: false,
+    updatedAt: '2026-11-17T08:00:00Z',
+  });
+  await updatePasswordRulesPolicy({ minLength: 10, requireDigit: true });
+  expect(lastRequest()).toEqual({
+    path: '/api/policies/password-rules',
+    method: 'PUT',
+    body: { password_min_length: 10, password_require_digit: true },
+  });
+  answer({ ...wire, password_require_digit: 'yes' });
+  await expect(getPasswordRulesPolicy()).rejects.toThrow(
+    'Missing password rule from the server: requireDigit',
+  );
+});
+
+test('Remember me maps the three settings and sends only the provided ones', async () => {
+  answer({
+    remember_me_offered: true,
+    remember_me_expires: false,
+    remember_me_days: 30,
+    updated_at: '2026-11-17T08:00:00Z',
+  });
+  expect(await getRememberMePolicy()).toEqual({
+    offered: true,
+    expires: false,
+    days: 30,
+    updatedAt: '2026-11-17T08:00:00Z',
+  });
+  await updateRememberMePolicy({ days: 90 });
+  expect(lastRequest()).toEqual({
+    path: '/api/policies/remember-me',
+    method: 'PUT',
+    body: { remember_me_days: 90 },
+  });
 });
