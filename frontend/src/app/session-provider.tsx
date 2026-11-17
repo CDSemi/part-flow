@@ -5,9 +5,11 @@ import { setAuthFailureListener } from '../api/client';
 import { getSession, signOut as signOutRequest } from '../api/session';
 import type { SessionState, SessionUser } from '../api/session';
 import { ChangePasswordDialog } from '../components/ChangePasswordDialog';
+import { EmailDialog } from '../components/EmailDialog';
 import { FirstRunSetupDialog } from '../components/FirstRunSetupDialog';
 import { SignInDialog } from '../components/SignInDialog';
 import { useToastNotice } from '../components/toast-notice';
+import { TwoStepDialog } from '../components/TwoStepDialog';
 import { useConnectivity } from './connectivity-context';
 import { useRouter } from './router-context';
 import { isChromeHidden } from './router-core';
@@ -32,14 +34,24 @@ import type {
 // theme save) records the ended sign-in without opening the Sign-in
 // dialog.
 //
-// The sign-in, change-password and first-run setup dialogs render AFTER
-// the routed view, so they stack above any view dialog and the view
-// underneath stays mounted with its drafts. A password an administrator
-// set opens the forced change dialog, which stays until the password is
-// changed or the user signs out. Scan Station production mode and the
-// Production Board kiosk never show these dialogs.
+// The sign-in, change-password, two-step sign-in, email address and
+// first-run setup dialogs render AFTER the routed view, so they stack
+// above any view dialog and the view underneath stays mounted with its
+// drafts. They never render inside the top navigation: its backdrop
+// filter makes it the containing block of their fixed-position overlay,
+// which would center them on the navigation bar instead of the screen.
+// A password an administrator set opens the forced change dialog, which
+// stays until the password is changed or the user signs out. The two-step
+// sign-in and email address dialogs close when the sign-in ends. Scan
+// Station production mode and the Production Board kiosk never show these
+// dialogs.
 
-type DialogKind = 'sign-in' | 'setup' | 'change-password';
+type DialogKind =
+  | 'sign-in'
+  | 'setup'
+  | 'change-password'
+  | 'two-step-sign-in'
+  | 'email-address';
 
 interface KnownState {
   status: SessionStatus;
@@ -163,6 +175,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [applySignedOut, reload, showNotice]);
 
   const { status, user, setupOpen, endedBy } = state;
+
+  // The signed-in user's own dialogs close when the sign-in ends.
+  useEffect(() => {
+    if (user !== null) return;
+    setDialog((current) =>
+      current === 'two-step-sign-in' || current === 'email-address'
+        ? null
+        : current,
+    );
+  }, [user]);
+
   const value = useMemo<SessionValue>(
     () => ({
       status,
@@ -177,6 +200,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
       openSetup: () => setDialog('setup'),
       openChangePassword: () => setDialog('change-password'),
+      openTwoStepSignIn: () => setDialog('two-step-sign-in'),
+      openEmailAddress: () => setDialog('email-address'),
       signOut,
       refresh: async () => {
         await reload();
@@ -197,6 +222,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const forced = user?.mustChangePassword === true;
   const showDialogs = !isChromeHidden(route);
   const changeOpen = forced || (dialog === 'change-password' && user !== null);
+  const ownDialog = showDialogs && !changeOpen && user !== null ? dialog : null;
 
   return (
     <SessionContext.Provider value={value}>
@@ -216,6 +242,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             setDialog('sign-in');
           }}
         />
+      ) : null}
+      {ownDialog === 'two-step-sign-in' ? (
+        <TwoStepDialog onClose={closeDialog} />
+      ) : null}
+      {ownDialog === 'email-address' ? (
+        <EmailDialog onClose={closeDialog} />
       ) : null}
       {showDialogs && !changeOpen && dialog === 'sign-in' ? (
         <SignInDialog

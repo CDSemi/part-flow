@@ -188,6 +188,8 @@ test('an explicit test value supplies the session', () => {
       openSignIn: vi.fn(),
       openSetup: vi.fn(),
       openChangePassword: vi.fn(),
+      openTwoStepSignIn: vi.fn(),
+      openEmailAddress: vi.fn(),
       signOut: vi.fn(async () => {}),
       refresh: vi.fn(async () => {}),
     },

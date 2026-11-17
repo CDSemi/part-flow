@@ -546,6 +546,30 @@ test('offline, Sign out is disabled', async () => {
   expect(screen.getByRole('menuitem', { name: 'Sign out' })).toBeDisabled();
 });
 
+test('the account menu dialogs open outside the top navigation', async () => {
+  // The top navigation's backdrop filter makes it the containing block of
+  // fixed-position content: a dialog opened inside it is centered on the
+  // navigation bar, with its top above the screen.
+  const chip = await signInAsJane();
+  const nav = screen.getByRole('navigation', { name: 'Primary' });
+  for (const [item, name] of [
+    ['Change password…', 'Change password'],
+    ['Two-step sign-in…', 'Two-step sign-in'],
+    ['Email address…', 'Email address'],
+  ] as const) {
+    fireEvent.click(chip);
+    fireEvent.click(screen.getByRole('menuitem', { name: item }));
+    const dialog = screen.getByRole('dialog', { name });
+    expect(nav).not.toContainElement(dialog);
+    await waitFor(() =>
+      expect(within(dialog).queryByText('Loading…')).toBeNull(),
+    );
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(chip).toHaveFocus();
+  }
+});
+
 /* ============ Sign in (FC-5) ============ */
 
 test('Sign in: focus on the login name, client checks, a refusal clears only the password', async () => {

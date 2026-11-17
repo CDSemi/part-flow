@@ -30,6 +30,10 @@ export interface SessionValue {
   openSignIn(): void;
   openSetup(): void;
   openChangePassword(): void;
+  /** The signed-in user's own two-step sign-in (Phase 17). */
+  openTwoStepSignIn(): void;
+  /** The signed-in user's own email address (Phase 17). */
+  openEmailAddress(): void;
   signOut(): Promise<void>;
   /** Re-read the sign-in from the server. */
   refresh(): Promise<void>;

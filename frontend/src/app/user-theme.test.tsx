@@ -1167,6 +1167,8 @@ function sessionValue(user: SessionUser | null): SessionValue {
     openSignIn: vi.fn(),
     openSetup: vi.fn(),
     openChangePassword: vi.fn(),
+    openTwoStepSignIn: vi.fn(),
+    openEmailAddress: vi.fn(),
     signOut: vi.fn(() => Promise.resolve()),
     refresh: vi.fn(() => Promise.resolve()),
   };

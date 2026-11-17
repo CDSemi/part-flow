@@ -215,6 +215,8 @@ test('FE-13: the used Planned Route note names Tracking â†’ Edit assigned Routeâ
     openSignIn: vi.fn(),
     openSetup: vi.fn(),
     openChangePassword: vi.fn(),
+    openTwoStepSignIn: vi.fn(),
+    openEmailAddress: vi.fn(),
     signOut: vi.fn(async () => {}),
     refresh: vi.fn(async () => {}),
   };

@@ -4,17 +4,16 @@ import { userAvatarUrl } from '../api/users';
 import { useConnectivity } from '../app/connectivity-context';
 import { useSession } from '../app/session-context';
 import { Avatar } from './Avatar';
-import { EmailDialog } from './EmailDialog';
-import { TwoStepDialog } from './TwoStepDialog';
 
 /**
  * The user account control of the top navigation. Signed out (or while
  * the sign-in is not known) it offers `Sign in` — and `Set up PartFlow`
  * while PartFlow has no administrator; signed in it shows the user and
  * opens a small menu with the role, `Change password…`, `Two-step
- * sign-in…` (the user's own authenticator app and recovery codes, Phase
- * 17), `Email address…` (the user's own address for emailed sign-in codes,
- * Phase 17) and `Sign out`.
+ * sign-in…` (the user's own authenticator app, passkeys and recovery
+ * codes, Phase 17), `Email address…` (the user's own address for emailed
+ * sign-in codes, Phase 17) and `Sign out`. The session provider renders
+ * the dialogs these items open, outside the top navigation.
  * The top navigation (and with it this chip) is hidden in Scan Station
  * production mode and the Production Board kiosk.
  */
@@ -22,8 +21,6 @@ export function AccountChip() {
   const session = useSession();
   const { status: connectivity } = useConnectivity();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [twoStepOpen, setTwoStepOpen] = useState(false);
-  const [emailOpen, setEmailOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const firstItemRef = useRef<HTMLButtonElement>(null);
@@ -50,11 +47,7 @@ export function AccountChip() {
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!signedIn) {
-      setMenuOpen(false);
-      setTwoStepOpen(false);
-      setEmailOpen(false);
-    }
+    if (!signedIn) setMenuOpen(false);
   }, [signedIn]);
 
   if (!signedIn || session.user === null) {
@@ -127,7 +120,7 @@ export function AccountChip() {
               role="menuitem"
               onClick={() => {
                 closeMenu();
-                setTwoStepOpen(true);
+                session.openTwoStepSignIn();
               }}
             >
               Two-step sign-in…
@@ -136,7 +129,7 @@ export function AccountChip() {
               role="menuitem"
               onClick={() => {
                 closeMenu();
-                setEmailOpen(true);
+                session.openEmailAddress();
               }}
             >
               Email address…
@@ -154,10 +147,6 @@ export function AccountChip() {
           </div>
         </div>
       ) : null}
-      {twoStepOpen ? (
-        <TwoStepDialog onClose={() => setTwoStepOpen(false)} />
-      ) : null}
-      {emailOpen ? <EmailDialog onClose={() => setEmailOpen(false)} /> : null}
     </span>
   );
 }
