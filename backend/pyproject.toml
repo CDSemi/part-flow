@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "openpyxl>=3.1.5",
     "segno>=1.6",
+    "fido2>=2.2",
 ]
 
 [dependency-groups]

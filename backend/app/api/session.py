@@ -23,13 +23,27 @@ HTTP surface of ``app.application.authentication``:
 - ``POST /session/second-step/email-code`` — email a sign-in code for
   the open second step; 409 when no address or mail server is available,
   when the server refuses, or too soon after the previous code.
+- ``POST /session/second-step/passkey-options`` and
+  ``POST /session/second-step/passkey`` — finish the second step with a
+  passkey: WebAuthn request options for the User's passkeys at this host,
+  then the browser's answer ``{credential}``; signs in like
+  ``…/second-step``.
+- ``POST /session/passkey/options`` and ``POST /session/passkey`` — sign
+  in with a passkey alone: WebAuthn request options (with the
+  ``partflow_sign_in`` cookie of this request), then the browser's answer
+  ``{credential}``; one generic 401 ``sign_in_failed`` for every refusal.
 - ``GET /session/two-step`` and ``POST /session/two-step/totp``,
-  ``…/totp/confirm``, ``…/totp/remove``, ``…/recovery-codes`` — the
-  signed-in User's own two-step sign-in (``app.application.two_step``):
+  ``…/totp/confirm``, ``…/totp/remove``, ``…/recovery-codes``,
+  ``…/passkeys/options``, ``…/passkeys`` and ``…/passkeys/{id}/remove`` —
+  the signed-in User's own two-step sign-in (``app.application.two_step``):
   setting up an authenticator app, confirming it with its first code,
-  turning it off and replacing the recovery codes. Every change but the
-  confirmation takes ``current_password``. The status carries the User's
-  own email address.
+  removing it, adding and removing passkeys and replacing the recovery
+  codes. Every change but a confirmation takes ``current_password``. The
+  status carries the User's own email address and passkeys.
+
+Passkeys work only at an HTTPS address (or ``http://localhost``): the
+request's ``Origin`` names the host they are made and used at; elsewhere
+their routes answer 422.
 - ``DELETE /session`` — sign out; 204 also without a session.
 - ``PUT /session/password`` — change the signed-in User's own password
   (allowed while a change is required); every other sign-in of the User
@@ -50,7 +64,7 @@ logs a request body.
 
 import datetime
 import math
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -139,8 +153,40 @@ class EmailCodeResponse(BaseModel):
     sends_left: int
 
 
+class PasskeyResponse(BaseModel):
+    id: int
+    name: str
+    # The host it was made at, the only host it works at.
+    rp_id: str
+    created_at: datetime.datetime
+    last_used_at: datetime.datetime | None
+
+
+class PasskeyOptionsResponse(BaseModel):
+    """WebAuthn options in their JSON form (binary values as unpadded base64url)."""
+
+    options: dict[str, Any]
+
+
+class PasskeyCredentialRequest(BaseModel):
+    """The browser's ``PublicKeyCredential`` in its JSON form."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential: dict[str, Any]
+
+
+class PasskeyAddRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(max_length=200)
+    credential: dict[str, Any]
+
+
 class TwoStepStatusResponse(BaseModel):
     enabled: bool
+    authenticator_app: bool
+    passkeys: list[PasskeyResponse]
     recovery_codes_left: int
     # The User's own address; null = none.
     email: str | None
@@ -243,9 +289,21 @@ def _clear_sign_in_cookie(response: Response) -> None:
     _set_sign_in_cookie(response, "", 0)
 
 
+def _origin(request: Request) -> str | None:
+    """The page a request came from: the host passkeys are made and used at."""
+    return request.headers.get("origin")
+
+
+def _cookie_seconds(expires_at: datetime.datetime) -> int:
+    remaining = expires_at - datetime.datetime.now(datetime.UTC)
+    return max(1, math.ceil(remaining.total_seconds()))
+
+
 def _two_step_status(status: two_step.TwoStepStatus) -> TwoStepStatusResponse:
     return TwoStepStatusResponse(
         enabled=status.enabled,
+        authenticator_app=status.authenticator_app,
+        passkeys=[PasskeyResponse(**passkey._asdict()) for passkey in status.passkeys],
         recovery_codes_left=status.recovery_codes_left,
         email=status.email,
         email_ready=status.email_ready,
@@ -279,11 +337,11 @@ def sign_in(
         password=body.password.get_secret_value(),
         replaced_token=request.cookies.get(SESSION_COOKIE),
         replaced_challenge_token=request.cookies.get(two_step_factors.SIGN_IN_COOKIE),
+        origin=_origin(request),
     )
     if isinstance(result, SecondStepRequired):
         response.status_code = 202
-        remaining = result.expires_at - datetime.datetime.now(datetime.UTC)
-        _set_sign_in_cookie(response, result.token, max(1, math.ceil(remaining.total_seconds())))
+        _set_sign_in_cookie(response, result.token, _cookie_seconds(result.expires_at))
         return SecondStepResponse(
             methods=list(result.methods),
             email_hint=result.email_hint,
@@ -308,6 +366,68 @@ def complete_second_step(
         token=request.cookies.get(two_step_factors.SIGN_IN_COOKIE),
         method=body.method,
         code=body.code.get_secret_value(),
+        replaced_token=request.cookies.get(SESSION_COOKIE),
+    )
+    grant_session(response, grant)
+    _clear_sign_in_cookie(response)
+    return session_state(grant.principal, first_run.is_setup_open(session, gate))
+
+
+@router.post("/session/second-step/passkey-options")
+def passkey_step_options(request: Request, session: SessionDep) -> PasskeyOptionsResponse:
+    return PasskeyOptionsResponse(
+        options=two_step.passkey_step_options(
+            session, request.cookies.get(two_step_factors.SIGN_IN_COOKIE), _origin(request)
+        )
+    )
+
+
+@router.post("/session/second-step/passkey")
+def complete_second_step_with_passkey(
+    body: PasskeyCredentialRequest,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    gate: SetupGateDep,
+) -> SessionStateResponse:
+    grant = authentication.complete_second_step_with_passkey(
+        session,
+        token=request.cookies.get(two_step_factors.SIGN_IN_COOKIE),
+        credential=body.credential,
+        origin=_origin(request),
+        replaced_token=request.cookies.get(SESSION_COOKIE),
+    )
+    grant_session(response, grant)
+    _clear_sign_in_cookie(response)
+    return session_state(grant.principal, first_run.is_setup_open(session, gate))
+
+
+@router.post("/session/passkey/options")
+def begin_passkey_sign_in(
+    request: Request, response: Response, session: SessionDep
+) -> PasskeyOptionsResponse:
+    start = authentication.begin_passkey_sign_in(
+        session,
+        origin=_origin(request),
+        replaced_challenge_token=request.cookies.get(two_step_factors.SIGN_IN_COOKIE),
+    )
+    _set_sign_in_cookie(response, start.token, _cookie_seconds(start.expires_at))
+    return PasskeyOptionsResponse(options=start.options)
+
+
+@router.post("/session/passkey")
+def sign_in_with_passkey(
+    body: PasskeyCredentialRequest,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    gate: SetupGateDep,
+) -> SessionStateResponse:
+    grant = authentication.sign_in_with_passkey(
+        session,
+        token=request.cookies.get(two_step_factors.SIGN_IN_COOKIE),
+        credential=body.credential,
+        origin=_origin(request),
         replaced_token=request.cookies.get(SESSION_COOKIE),
     )
     grant_session(response, grant)
@@ -367,6 +487,49 @@ def create_recovery_codes(
     return RecoveryCodesResponse(
         recovery_codes=two_step.create_recovery_codes(
             session, principal, current_password=body.current_password.get_secret_value()
+        )
+    )
+
+
+@router.post("/session/two-step/passkeys/options")
+def begin_passkey(
+    body: CurrentPasswordRequest, request: Request, principal: SignedInDep, session: SessionDep
+) -> PasskeyOptionsResponse:
+    return PasskeyOptionsResponse(
+        options=two_step.begin_passkey(
+            session,
+            principal,
+            current_password=body.current_password.get_secret_value(),
+            origin=_origin(request),
+        )
+    )
+
+
+@router.post("/session/two-step/passkeys")
+def add_passkey(
+    body: PasskeyAddRequest, request: Request, principal: SignedInDep, session: SessionDep
+) -> RecoveryCodesResponse:
+    return RecoveryCodesResponse(
+        recovery_codes=two_step.add_passkey(
+            session,
+            principal,
+            name=body.name,
+            credential=body.credential,
+            origin=_origin(request),
+        )
+    )
+
+
+@router.post("/session/two-step/passkeys/{passkey_id}/remove")
+def remove_passkey(
+    passkey_id: int, body: CurrentPasswordRequest, principal: SignedInDep, session: SessionDep
+) -> TwoStepStatusResponse:
+    return _two_step_status(
+        two_step.remove_passkey(
+            session,
+            principal,
+            passkey_id,
+            current_password=body.current_password.get_secret_value(),
         )
     )
 

@@ -28,11 +28,17 @@ Rules owned here:
 - Permissions are read per request from the User's role, so a role or
   grant change applies at the next request.
 - Two-step sign-in (Phase 17; ``app.application.two_step``): a User with
-  an authenticator app is not signed in by the password alone. The
-  password step opens a second step (``SecondStepRequired``: a challenge
-  whose token travels in its own HttpOnly cookie); ``complete_second_step``
-  signs the User in with a code from the app, a recovery code or an
-  emailed code. Two counters (owner decision of 2026-11-17): a correct
+  an authenticator app or a passkey is not signed in by the password alone.
+  The password step opens a second step (``SecondStepRequired``: a
+  challenge whose token travels in its own HttpOnly cookie);
+  ``complete_second_step`` signs the User in with a code from the app, a
+  recovery code or an emailed code, and
+  ``complete_second_step_with_passkey`` with a passkey.
+- A passkey also signs its User in alone (``begin_passkey_sign_in`` then
+  ``sign_in_with_passkey``): the authenticator verifies the person, so it
+  is a full sign-in. Its refusal is one generic answer, like a password's,
+  and an inactive, password-less or locked User is refused the same way.
+- Two counters (owner decision of 2026-11-17): a correct
   password restarts the password counter (``failed_attempts``), while
   wrong codes count on ``failed_codes``, which only a full sign-in
   restarts, so knowing the password buys no fresh guesses at a code. At
@@ -54,6 +60,7 @@ the grants, role assignment or activity that re-read saw before
 COMMIT. Lock order: the ``partflow:user-administration`` advisory lock
 → the ``users`` row → the ``user_credentials`` row → the
 ``user_sign_in_challenges`` row → the ``user_totp_factors`` row → the
+``user_passkey_setups`` row → the ``user_passkeys`` rows → the
 ``user_recovery_codes`` rows → INSERT ``user_sessions`` → UPDATE
 ``user_sessions`` → audit.
 
@@ -68,6 +75,7 @@ import hashlib
 import logging
 import math
 import secrets
+from collections.abc import Callable
 from typing import Any, Final, NamedTuple
 
 from sqlalchemy import func, select, update
@@ -79,6 +87,7 @@ from app.application import (
     authorization,
     one_time_codes,
     outgoing_mail,
+    passkeys,
     password_hashing,
     policies,
     roles,
@@ -109,6 +118,7 @@ from app.domain.enums import (
     Permission,
     SecondStepMethod,
     SignInChallengeEndReason,
+    SignInChallengePurpose,
     ThemePreference,
     UserSessionEndReason,
 )
@@ -127,7 +137,9 @@ from app.infrastructure.models import (
     RolePermission,
     User,
     UserCredential,
+    UserPasskey,
     UserSession,
+    UserSignInChallenge,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,6 +175,11 @@ _NO_PASSWORD_YET: Final = (
     " Administration → Users."
 )
 SECOND_STEP_EXPIRED_MESSAGE: Final = "This sign-in has ended or expired. Enter your password again."
+PASSKEY_SIGN_IN_FAILED_MESSAGE: Final = (
+    "Sign-in with a passkey failed. Use a passkey saved for PartFlow at this address, or sign in"
+    " with your login name and password. If it keeps failing, ask an administrator — the account"
+    " may be locked or inactive."
+)
 _TOO_MANY_CODES: Final = "Too many wrong codes. Sign in again with your password."
 _WRONG_CODE: Final = "That code is not correct. Check the code and try again."
 _RECOVERY_OUTCOME_UNKNOWN: Final = (
@@ -204,6 +221,14 @@ class SecondStepRequired(NamedTuple):
     token: str
     methods: tuple[SecondStepMethod, ...]
     email_hint: str | None
+    expires_at: datetime.datetime
+
+
+class PasskeySignInStart(NamedTuple):
+    """A sign-in with a passkey alone: the raw token for the cookie only, and the options."""
+
+    token: str
+    options: dict[str, Any]
     expires_at: datetime.datetime
 
 
@@ -447,13 +472,15 @@ def sign_in(
     password: str,
     replaced_token: str | None,
     replaced_challenge_token: str | None = None,
+    origin: str | None = None,
 ) -> SessionGrant | SecondStepRequired:
     """Sign a User in; ends the session ``replaced_token`` names (REPLACED).
 
     A correct password restarts the password counter. A User with two-step
     sign-in gets a second step instead of a session: an open one
     ``replaced_challenge_token`` names ends REPLACED, and the wrong-code
-    counter stays until the second step succeeds.
+    counter stays until the second step succeeds. ``origin`` is the page
+    the password was typed at: a passkey made at its host is offered.
     """
     login = _login_or_none(login_name)
     unusable = _cannot_match(password)
@@ -506,7 +533,12 @@ def sign_in(
         # codes keep counting on ``failed_codes`` until a full sign-in.
         window = policies.read_two_step_policy(session).window
         opened = two_step_factors.open_challenge(
-            session, user_id, now, replaced_challenge_token, window
+            session,
+            user_id,
+            now,
+            replaced_challenge_token,
+            window,
+            passkeys.relying_party_or_none(origin),
         )
         commit(session, {})
         logger.info("Sign-in password accepted for user %s; second step required", user_id)
@@ -526,6 +558,12 @@ def sign_in(
     return grant
 
 
+# Accepts one answer of a second step: (User id, the locked challenge, now,
+# the policy) → whether it is right. It runs under the credential and the
+# challenge locks and takes the later locks of the order itself.
+_Accept = Callable[[int, UserSignInChallenge, datetime.datetime, policies.TwoStepPolicy], bool]
+
+
 def complete_second_step(
     session: Session,
     *,
@@ -536,15 +574,208 @@ def complete_second_step(
 ) -> SessionGrant:
     """Finish the open second step ``token`` names with ``code``: sign the User in.
 
-    A wrong code counts on the challenge and on the account's wrong-code
+    A recovery code and an emailed code work once; an app code's step is
+    remembered so it works once too. A passkey answers through
+    ``complete_second_step_with_passkey``.
+    """
+    if method is SecondStepMethod.PASSKEY:
+        raise InvalidInputError("A passkey answers the second step with its own request.")
+
+    def accept(
+        user_id: int,
+        challenge: UserSignInChallenge,
+        now: datetime.datetime,
+        policy: policies.TwoStepPolicy,
+    ) -> bool:
+        factor = two_step_factors.lock_totp(session, user_id)
+        if method is SecondStepMethod.TOTP:
+            return two_step_factors.accept_totp(factor, code, now, policy.clock_drift_steps)
+        if method is SecondStepMethod.RECOVERY_CODE:
+            return two_step_factors.use_recovery_code(session, user_id, code)
+        return two_step_factors.accept_email_code(challenge, code)
+
+    return _finish_second_step(
+        session, token=token, method=method, accept=accept, replaced_token=replaced_token
+    )
+
+
+def complete_second_step_with_passkey(
+    session: Session,
+    *,
+    token: str | None,
+    credential: dict[str, Any],
+    origin: str | None,
+    replaced_token: str | None,
+) -> SessionGrant:
+    """Finish the open second step ``token`` names with a passkey's answer.
+
+    The answer must sign the WebAuthn challenge of this second step's last
+    passkey request (``two_step.passkey_step_options``), made at the same
+    host, with one of the User's passkeys made there; the challenge works
+    once. A refused answer counts like a wrong code.
+    """
+    rp_id = passkeys.relying_party(origin)
+
+    def accept(
+        user_id: int,
+        challenge: UserSignInChallenge,
+        now: datetime.datetime,
+        policy: policies.TwoStepPolicy,
+    ) -> bool:
+        two_step_factors.lock_totp(session, user_id)
+        asked, asked_at = challenge.passkey_challenge, challenge.passkey_rp_id
+        challenge.passkey_challenge = None
+        challenge.passkey_rp_id = None
+        if asked is None or asked_at != rp_id:
+            return False
+        return _use_passkey(session, user_id, rp_id, asked, credential, now, second_step=True)
+
+    return _finish_second_step(
+        session,
+        token=token,
+        method=SecondStepMethod.PASSKEY,
+        accept=accept,
+        replaced_token=replaced_token,
+    )
+
+
+def _use_passkey(
+    session: Session,
+    user_id: int,
+    rp_id: str,
+    asked: bytes,
+    credential: dict[str, Any],
+    now: datetime.datetime,
+    *,
+    second_step: bool,
+) -> bool:
+    """Verify an answer against the User's passkeys at ``rp_id``; record the one used."""
+    stored = two_step_factors.lock_passkeys(session, user_id, rp_id)
+    candidates = [
+        passkeys.StoredPasskey(id=p.id, credential_data=p.credential_data, sign_count=p.sign_count)
+        for p in stored
+    ]
+    verify = passkeys.verify_second_step if second_step else passkeys.verify_sign_in
+    asserted = verify(rp_id, asked, candidates, credential)
+    if asserted is None:
+        return False
+    used = next(p for p in stored if p.id == asserted.passkey_id)
+    used.sign_count = asserted.sign_count
+    used.last_used_at = now
+    return True
+
+
+def begin_passkey_sign_in(
+    session: Session, *, origin: str | None, replaced_challenge_token: str | None
+) -> PasskeySignInStart:
+    """Open a sign-in with a passkey alone; answers its WebAuthn request options.
+
+    Any passkey made at this host may answer (the browser lets the person
+    choose); the authenticator must verify the person. An open challenge
+    ``replaced_challenge_token`` names ends REPLACED.
+    """
+    rp_id = passkeys.relying_party(origin)
+    options, challenge = passkeys.sign_in_options(rp_id)
+    now = _database_now(session)
+    window = policies.read_two_step_policy(session).window
+    token = two_step_factors.open_passkey_sign_in(
+        session, now, replaced_challenge_token, window, rp_id, challenge
+    )
+    commit(session, {})
+    return PasskeySignInStart(token=token, options=options, expires_at=now + window)
+
+
+def sign_in_with_passkey(
+    session: Session,
+    *,
+    token: str | None,
+    credential: dict[str, Any],
+    origin: str | None,
+    replaced_token: str | None,
+) -> SessionGrant:
+    """Sign in the User whose passkey answered the open passkey sign-in ``token`` names.
+
+    The answer names its passkey and User; both must match a stored passkey
+    made at this host, and its signature must verify. The request works
+    once: any refusal ends it. An inactive User, one without a password or
+    a locked one is refused with the same generic answer. A sign-in
+    restarts both failure counters and clears a lock, as a full sign-in
+    does; the session ``replaced_token`` names ends REPLACED.
+    """
+    rp_id = passkeys.relying_party(origin)
+    found = two_step_factors.find_challenge(session, token)
+    if found is None or found.purpose != SignInChallengePurpose.PASSKEY_SIGN_IN.value:
+        session.rollback()
+        raise SignInFailedError(PASSKEY_SIGN_IN_FAILED_MESSAGE)
+    challenge_id = found.id
+    answered = passkeys.answered_credential(credential)
+    user_id = (
+        None
+        if answered is None
+        else session.scalar(
+            select(UserPasskey.user_id).where(UserPasskey.credential_id == answered[0])
+        )
+    )
+    # Lock order: the credential first, then the challenge.
+    session.rollback()
+    credential_row = None if user_id is None else user_access.lock_credential(session, user_id)
+    challenge = two_step_factors.lock_challenge(session, challenge_id)
+    now = _database_now(session)
+    policy = policies.read_two_step_policy(session)
+    if not two_step_factors.is_open(challenge, now, policy.window):
+        session.rollback()
+        raise SignInFailedError(PASSKEY_SIGN_IN_FAILED_MESSAGE)
+    asked, asked_at = challenge.passkey_challenge, challenge.passkey_rp_id
+    accepted = (
+        user_id is not None
+        and answered is not None
+        and credential_row is not None
+        and asked is not None
+        and asked_at == rp_id
+        and answered[1] == passkeys.user_handle(user_id)
+        and _is_active(session, user_id)
+        and not _is_locked(credential_row, now)
+        and _use_passkey(session, user_id, rp_id, asked, credential, now, second_step=False)
+    )
+    if not accepted or user_id is None or credential_row is None:
+        two_step_factors.end_challenge(challenge, SignInChallengeEndReason.FAILED)
+        commit(session, {})
+        logger.info("Passkey sign-in refused")
+        raise SignInFailedError(PASSKEY_SIGN_IN_FAILED_MESSAGE)
+    credential_row.failed_attempts = 0
+    credential_row.failed_codes = 0
+    credential_row.locked_until = None
+    challenge.user_id = user_id
+    two_step_factors.end_challenge(challenge, SignInChallengeEndReason.COMPLETED)
+    session_token, _session_id = _open_session(session, user_id)
+    _end_session_by_token(session, replaced_token, UserSessionEndReason.REPLACED)
+    grant = _grant(session, session_token)
+    commit(session, {})
+    logger.info("Sign-in succeeded for user %s (passkey)", user_id)
+    return grant
+
+
+def _finish_second_step(
+    session: Session,
+    *,
+    token: str | None,
+    method: SecondStepMethod,
+    accept: _Accept,
+    replaced_token: str | None,
+) -> SessionGrant:
+    """Judge one answer of the open second step ``token`` names; sign the User in when right.
+
+    A wrong answer counts on the challenge and on the account's wrong-code
     counter (``failed_codes``); the challenge ends at the two-step policy's
-    wrong codes per sign-in, and the account locks at its threshold. A
-    recovery code and an emailed code work once; an app code's step is
-    remembered so it works once too. A full sign-in restarts both counters
-    and clears a lock.
+    wrong codes per sign-in, and the account locks at its threshold. A full
+    sign-in restarts both counters and clears a lock.
     """
     found = two_step_factors.find_challenge(session, token)
-    if found is None:
+    if (
+        found is None
+        or found.purpose != SignInChallengePurpose.SECOND_STEP.value
+        or found.user_id is None
+    ):
         session.rollback()
         raise SecondStepExpiredError(SECOND_STEP_EXPIRED_MESSAGE)
     challenge_id, user_id = found.id, found.user_id
@@ -565,14 +796,7 @@ def complete_second_step(
         two_step_factors.end_challenge(challenge, SignInChallengeEndReason.FAILED)
         commit(session, {})
         raise AccountLockedError(_ACCOUNT_LOCKED)
-    factor = two_step_factors.lock_totp(session, user_id)
-    if method is SecondStepMethod.TOTP:
-        accepted = two_step_factors.accept_totp(factor, code, now, policy.clock_drift_steps)
-    elif method is SecondStepMethod.RECOVERY_CODE:
-        accepted = two_step_factors.use_recovery_code(session, user_id, code)
-    else:
-        accepted = two_step_factors.accept_email_code(challenge, code)
-    if not accepted:
+    if not accept(user_id, challenge, now, policy):
         challenge.failed_attempts += 1
         locked_until = _count_wrong_code(session, credential, now, policy.lockout_codes)
         ended = locked_until is not None or challenge.failed_attempts >= policy.max_codes

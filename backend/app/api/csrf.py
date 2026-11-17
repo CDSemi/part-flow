@@ -5,8 +5,9 @@ Two pure ASGI middlewares, registered by ``app.main.create_app``:
 - ``CsrfMiddleware`` — a state-changing request (``POST``, ``PUT``,
   ``PATCH``, ``DELETE``) that carries the ``partflow_session`` cookie or
   the ``partflow_sign_in`` cookie of an open second step (Phase 17),
-  and every such request to ``/api/session`` or
-  ``/api/setup/administrator``, must carry the header
+  and every such request to ``/api/session``, ``/api/setup/administrator``
+  or a sign-in with a passkey (``/api/session/passkey`` and its
+  ``/options``), must carry the header
   ``X-PartFlow-CSRF: 1``; otherwise it is answered 403 at once — no
   handler runs and nothing is written. A browser sends a custom header
   cross-origin only after a CORS preflight, and PartFlow installs no CORS
@@ -37,8 +38,16 @@ CSRF_REJECTED_MESSAGE: Final = (
     " Reload the page and try again."
 )
 _UNSAFE_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-# Sign-in and first-run setup create a session without presenting one.
-_ALWAYS_CHECKED_PATHS: Final = frozenset({"/api/session", "/api/setup/administrator"})
+# Sign-in, a sign-in with a passkey and first-run setup create a session
+# (or its challenge) without presenting one.
+_ALWAYS_CHECKED_PATHS: Final = frozenset(
+    {
+        "/api/session",
+        "/api/session/passkey",
+        "/api/session/passkey/options",
+        "/api/setup/administrator",
+    }
+)
 _NO_STORE_PREFIXES: Final = ("/api/session", "/api/setup")
 
 

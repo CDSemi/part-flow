@@ -303,6 +303,8 @@ def test_setting_up_takes_the_password_and_the_first_code(
     status = _ok(signed_in.get("/api/session/two-step"))
     assert status == {
         "enabled": False,
+        "authenticator_app": False,
+        "passkeys": [],
         "recovery_codes_left": 0,
         "email": None,
         "email_ready": False,
@@ -342,6 +344,8 @@ def test_setting_up_takes_the_password_and_the_first_code(
     assert all(one_time_codes.canonical_recovery_code(code) for code in codes)
     assert _ok(signed_in.get("/api/session/two-step")) == {
         "enabled": True,
+        "authenticator_app": True,
+        "passkeys": [],
         "recovery_codes_left": 10,
         "email": None,
         "email_ready": False,
@@ -350,12 +354,12 @@ def test_setting_up_takes_the_password_and_the_first_code(
     _refused(
         signed_in.post("/api/session/two-step/totp", json={"current_password": TEST_PASSWORD}),
         409,
-        "Two-step sign-in is already on. Turn it off first to set up another authenticator app.",
+        "An authenticator app is already set up. Remove it first to set up another one.",
     )
     [audit_row] = _two_step_audits(db_engine, signed_in.user_id)
     assert tuple(audit_row) == (
-        {"two_step": False, "recovery_codes": 0},
-        {"two_step": True, "recovery_codes": 10},
+        {"two_step": False, "authenticator_app": False, "passkeys": 0, "recovery_codes": 0},
+        {"two_step": True, "authenticator_app": True, "passkeys": 0, "recovery_codes": 10},
         {"two_step_change": "TOTP_ADDED"},
         signed_in.user_id,
     )
@@ -612,7 +616,7 @@ def test_new_codes_and_turning_off_take_the_password(client: TestClient, db_engi
             "/api/session/two-step/recovery-codes", json={"current_password": TEST_PASSWORD}
         ),
         409,
-        "Two-step sign-in is off. Recovery codes come with an authenticator app.",
+        "Two-step sign-in is off. Recovery codes come with an authenticator app or a passkey.",
     )
 
 
@@ -692,8 +696,8 @@ def test_the_recovery_command_turns_two_step_off(
     assert cli.main(["reset-two-step", "--login-name", user.login.upper()]) == 0
     out = capsys.readouterr().out
     assert (
-        "is off: the authenticator app and the recovery codes were deleted. The user's sign-ins"
-        " continue." in out
+        "is off: the authenticator app, the passkeys and the recovery codes were deleted. The"
+        " user's sign-ins continue." in out
     )
     assert _ok(user.signed_in.get("/api/session/two-step"))["enabled"] is False
     [*_, reset_row] = _two_step_audits(db_engine, user.user_id)
@@ -804,8 +808,8 @@ def test_the_policy_is_read_by_every_signed_in_user_and_audited(
         ),
         (
             {"two_step_setup_minutes": 61},
-            "The time to finish setting up an authenticator app must be a whole number of minutes"
-            " from 1 to 60.",
+            "The time to finish setting up an authenticator app or a passkey must be a whole number"
+            " of minutes from 1 to 60.",
         ),
         (
             {"two_step_clock_drift_steps": 3},

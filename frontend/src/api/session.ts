@@ -19,6 +19,7 @@ import {
   apiRequestWithStatus,
   refusalFlag,
 } from './client';
+import type { PasskeyCredentialJson, PasskeyOptionsJson } from './passkeys';
 import { PERMISSIONS } from './roles';
 import type { Permission } from './roles';
 import { writeOutcomeUnknown } from './scan-station';
@@ -139,6 +140,7 @@ export async function getSession(): Promise<SessionState> {
 /** How a user with two-step sign-in proves it is them after the password. */
 export const SECOND_STEP_METHODS = [
   'TOTP',
+  'PASSKEY',
   'RECOVERY_CODE',
   'EMAIL_CODE',
 ] as const;
@@ -151,7 +153,8 @@ const KNOWN_SECOND_STEP_METHODS: ReadonlySet<string> = new Set(
 
 /** The open second step of a sign-in (its token is an HttpOnly cookie). */
 export interface SecondStep {
-  /** The ways this user may finish signing in, the app code first. */
+  /** The ways this user may finish signing in, the app code first; a
+   * passkey only when one was made at this address. */
   methods: SecondStepMethod[];
   /** The masked address an emailed code goes to; null when none can be
    * sent (no address on the account, or no outgoing mail server). */
@@ -218,6 +221,61 @@ export async function completeSecondStep(
   );
 }
 
+/** WebAuthn request options for the open second step (its user's
+ * passkeys at this address). */
+export async function passkeyStepOptions(): Promise<PasskeyOptionsJson> {
+  return toPasskeyOptions(
+    await apiRequest<unknown>(`${SESSION_PATH}/second-step/passkey-options`, {
+      method: 'POST',
+    }),
+  );
+}
+
+/** Finish the open second step with a passkey's answer; signs in on success. */
+export async function completeSecondStepWithPasskey(
+  credential: PasskeyCredentialJson,
+): Promise<SessionState> {
+  return toSessionState(
+    await apiRequest<unknown>(`${SESSION_PATH}/second-step/passkey`, {
+      method: 'POST',
+      body: { credential },
+    }),
+  );
+}
+
+/** Start a sign-in with a passkey alone: its WebAuthn request options. */
+export async function startPasskeySignIn(): Promise<PasskeyOptionsJson> {
+  return toPasskeyOptions(
+    await apiRequest<unknown>(`${SESSION_PATH}/passkey/options`, {
+      method: 'POST',
+    }),
+  );
+}
+
+/** Finish a sign-in with a passkey alone; a new sign-in replaces any
+ * earlier one of this browser. */
+export async function finishPasskeySignIn(
+  credential: PasskeyCredentialJson,
+): Promise<SessionState> {
+  return toSessionState(
+    await apiRequest<unknown>(`${SESSION_PATH}/passkey`, {
+      method: 'POST',
+      body: { credential },
+    }),
+  );
+}
+
+function toPasskeyOptions(wire: unknown): PasskeyOptionsJson {
+  if (
+    !isRecord(wire) ||
+    !isRecord(wire.options) ||
+    !isRecord(wire.options.publicKey)
+  ) {
+    throw malformed();
+  }
+  return { publicKey: wire.options.publicKey };
+}
+
 export interface SignInCodeSent {
   /** The masked address the code went to. */
   sentTo: string;
@@ -254,9 +312,22 @@ export function secondStepEnded(error: unknown): boolean {
   return refusalFlag(error, 'second_step_expired');
 }
 
+/** One of the signed-in user's passkeys. */
+export interface PasskeyInfo {
+  id: number;
+  name: string;
+  /** The address (host) it was made at; it works only there. */
+  rpId: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
 /** The signed-in user's own two-step sign-in. */
 export interface TwoStepStatus {
+  /** On while an authenticator app or a passkey is set up. */
   enabled: boolean;
+  authenticatorApp: boolean;
+  passkeys: PasskeyInfo[];
   recoveryCodesLeft: number;
   /** The user's own email address; null = none. */
   email: string | null;
@@ -276,10 +347,32 @@ export interface TwoStepSetup {
 
 const TWO_STEP_PATH = `${SESSION_PATH}/two-step`;
 
+function toPasskeyInfo(wire: unknown): PasskeyInfo {
+  if (
+    !isRecord(wire) ||
+    typeof wire.id !== 'number' ||
+    typeof wire.name !== 'string' ||
+    typeof wire.rp_id !== 'string' ||
+    typeof wire.created_at !== 'string' ||
+    (wire.last_used_at !== null && typeof wire.last_used_at !== 'string')
+  ) {
+    throw malformed();
+  }
+  return {
+    id: wire.id,
+    name: wire.name,
+    rpId: wire.rp_id,
+    createdAt: wire.created_at,
+    lastUsedAt: wire.last_used_at,
+  };
+}
+
 function toTwoStepStatus(wire: unknown): TwoStepStatus {
   if (
     !isRecord(wire) ||
     typeof wire.enabled !== 'boolean' ||
+    typeof wire.authenticator_app !== 'boolean' ||
+    !Array.isArray(wire.passkeys) ||
     typeof wire.recovery_codes_left !== 'number' ||
     (wire.email !== null && typeof wire.email !== 'string') ||
     typeof wire.email_ready !== 'boolean'
@@ -288,6 +381,8 @@ function toTwoStepStatus(wire: unknown): TwoStepStatus {
   }
   return {
     enabled: wire.enabled,
+    authenticatorApp: wire.authenticator_app,
+    passkeys: wire.passkeys.map(toPasskeyInfo),
     recoveryCodesLeft: wire.recovery_codes_left,
     email: wire.email,
     emailReady: wire.email_ready,
@@ -339,12 +434,53 @@ export async function confirmTwoStepSetup(
   return wire.recovery_codes === null ? null : toCodes(wire.recovery_codes);
 }
 
-/** Turn two-step sign-in off (the password again). */
+/** Remove the authenticator app (the password again); two-step sign-in
+ * stays on while a passkey remains. */
 export async function turnOffTwoStep(
   currentPassword: string,
 ): Promise<TwoStepStatus> {
   return toTwoStepStatus(
     await apiRequest<unknown>(`${TWO_STEP_PATH}/totp/remove`, {
+      method: 'POST',
+      body: { current_password: currentPassword },
+    }),
+  );
+}
+
+/** Start adding a passkey (the password again): its WebAuthn creation
+ * options. */
+export async function beginPasskeyAdd(
+  currentPassword: string,
+): Promise<PasskeyOptionsJson> {
+  return toPasskeyOptions(
+    await apiRequest<unknown>(`${TWO_STEP_PATH}/passkeys/options`, {
+      method: 'POST',
+      body: { current_password: currentPassword },
+    }),
+  );
+}
+
+/** Store the passkey the browser made, under `name`; answers the recovery
+ * codes when it is the first factor, else null. */
+export async function addPasskey(
+  name: string,
+  credential: PasskeyCredentialJson,
+): Promise<string[] | null> {
+  const wire = await apiRequest<unknown>(`${TWO_STEP_PATH}/passkeys`, {
+    method: 'POST',
+    body: { name, credential },
+  });
+  if (!isRecord(wire)) throw malformed();
+  return wire.recovery_codes === null ? null : toCodes(wire.recovery_codes);
+}
+
+/** Remove one passkey (the password again). */
+export async function removePasskey(
+  id: number,
+  currentPassword: string,
+): Promise<TwoStepStatus> {
+  return toTwoStepStatus(
+    await apiRequest<unknown>(`${TWO_STEP_PATH}/passkeys/${id}/remove`, {
       method: 'POST',
       body: { current_password: currentPassword },
     }),

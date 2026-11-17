@@ -43,6 +43,8 @@ _PASSWORD_ZONE = {
     ("POST", "/api/session/two-step/totp/remove"),
     ("POST", "/api/session/two-step/recovery-codes"),
     ("PUT", "/api/session/email"),
+    ("POST", "/api/session/two-step/passkeys/options"),
+    ("POST", "/api/session/two-step/passkeys/{passkey_id}/remove"),
 }
 # Not rate limited (OD-S2-6): a 10-character code of a 32-symbol alphabet
 # (50 bits) that expires after 15 minutes cannot be guessed in its lifetime.

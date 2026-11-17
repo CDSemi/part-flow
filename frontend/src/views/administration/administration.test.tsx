@@ -7362,7 +7362,7 @@ test('FA-TS1: every number of two-step sign-in reads in Settings and saves only 
     'Digits of an emailed code': '8',
     'Recovery codes per set': '10',
     'Characters of a recovery code': '12',
-    'Time to set up an authenticator app': '15 minutes',
+    'Time to set up an app or a passkey': '15 minutes',
     'Clock drift allowed': '±30 seconds',
   });
 

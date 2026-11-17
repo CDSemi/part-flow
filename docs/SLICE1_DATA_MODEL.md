@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0037_phase17_two_step`. The slice's own tables
+The schema described here is the current schema at migration head `0038_phase17_passkeys`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -800,9 +800,9 @@ The migration `0037_phase17_two_step` adds the following (IMPLEMENTATION_ROADMAP
   authenticator app per User at most); `secret bytea NOT NULL` (the 160-bit key of the time-based one-time
   passwords (TOTP), `ck_user_totp_factors_secret_length`: 20 bytes); `confirmed_at timestamptz` nullable (NULL = a
   setup waiting for its first code within the policy's setup time from `created_at`; two-step sign-in is on exactly
-  while a confirmed row exists); `last_used_step bigint` nullable (`ck_user_totp_factors_last_used_step_non_negative`:
-  the newest 30-second step accepted, so each code works once); `created_at`. The key is answered once, to set the
-  app up, and never logged or audited.
+  while a confirmed row or a passkey exists); `last_used_step bigint` nullable
+  (`ck_user_totp_factors_last_used_step_non_negative`: the newest 30-second step accepted, so each code works once);
+  `created_at`. The key is answered once, to set the app up, and never logged or audited.
 - **`user_recovery_codes`**: PK `pk_user_recovery_codes` `id bigint` identity; `user_id` FK
   `fk_user_recovery_codes_user_id_users`; `code_digest bytea NOT NULL` (the SHA-256 digest of the canonical code,
   `ck_user_recovery_codes_code_digest_length`: 32 bytes) with `uq_user_recovery_codes_user_id_code_digest`;
@@ -822,17 +822,47 @@ The migration `0037_phase17_two_step` adds the following (IMPLEMENTATION_ROADMAP
   User's open challenges. Rows are never deleted at runtime.
 - The same migration adds `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the two-step
   policy columns of `application_policy` and `mail_timeout_seconds` (above).
-- All three tables are `ORDINARY` for `partflow_app` and outside `partflow_maintenance`'s reads.
+- **`user_passkeys`** (`0038_phase17_passkeys`): PK `pk_user_passkeys` `id bigint` identity; `user_id` FK
+  `fk_user_passkeys_user_id_users`, indexed by `ix_user_passkeys_user_id`; `credential_id bytea NOT NULL` (the id the
+  authenticator chose, `ck_user_passkeys_credential_id_length`: 1–1023 bytes) with `uq_user_passkeys_credential_id`;
+  `credential_data bytea NOT NULL` (the attested credential data — the authenticator model, the credential id and the
+  public key — that verifies the passkey's answers: public material, `ck_user_passkeys_credential_data_length`:
+  1–8192 bytes); `rp_id text NOT NULL` (the host it was made at, the WebAuthn relying party id; it works only there,
+  `ck_user_passkeys_rp_id_length`: 1–253 characters); `name text NOT NULL` (given by the User,
+  `ck_user_passkeys_name_length`: 1–80 characters); `sign_count bigint NOT NULL DEFAULT 0`
+  (`ck_user_passkeys_sign_count_non_negative`: the authenticator's latest signature counter; while the stored or the
+  new counter is above zero, an answer needs the new one to be greater); `created_at`; `last_used_at` nullable.
+  Removing a passkey deletes its row.
+- **`user_passkey_setups`** (`0038_phase17_passkeys`): a User's pending passkey registration. PK
+  `pk_user_passkey_setups` `user_id` (FK `fk_user_passkey_setups_user_id_users`); `challenge bytea NOT NULL` (the
+  32-byte WebAuthn challenge, `ck_user_passkey_setups_challenge_length`); `rp_id text NOT NULL`
+  (`ck_user_passkey_setups_rp_id_length`); `created_at`. It is open for the policy's setup time; a new request
+  replaces it and a registration deletes it.
+- `0038_phase17_passkeys` also gives `user_sign_in_challenges` a `purpose text NOT NULL DEFAULT 'SECOND_STEP'`
+  (`ck_user_sign_in_challenges_purpose`: `SECOND_STEP`, or `PASSKEY_SIGN_IN` for a sign-in with a passkey alone),
+  makes its `user_id` nullable for a `PASSKEY_SIGN_IN` row until a passkey answers
+  (`ck_user_sign_in_challenges_user_shape`), and adds `passkey_challenge bytea` and `passkey_rp_id text`, nullable
+  together: the 32-byte WebAuthn challenge of the latest passkey request and the host it was made at
+  (`ck_user_sign_in_challenges_passkey_challenge_length`, `ck_user_sign_in_challenges_passkey_rp_id_length`,
+  `ck_user_sign_in_challenges_passkey_shape`; a `PASSKEY_SIGN_IN` row always has one). An expired `PASSKEY_SIGN_IN`
+  row that no passkey answered is deleted by the next one, so anonymous requests never pile up.
+- All five tables are `ORDINARY` for `partflow_app` and outside `partflow_maintenance`'s reads.
 - Lock order of every sign-in and two-step write: the `partflow:user-administration` advisory lock (administrator and
   recovery-command resets only), the `users` row, the `user_credentials` row, the `user_sign_in_challenges` row, the
-  `user_totp_factors` row, the `user_recovery_codes` rows, then `user_sessions` and the audit row.
+  `user_totp_factors` row, the `user_passkey_setups` row, the `user_passkeys` rows, the `user_recovery_codes` rows,
+  then `user_sessions` and the audit row.
 - Every change of a User's factors appends one `UPDATED` row for entity type `User` with the snapshot `{two_step,
-  recovery_codes}` (whether two-step sign-in is on, and the unused recovery codes) before and after, and the metadata
-  `{"two_step_change": ...}` (`TOTP_ADDED`, `TOTP_REMOVED`, `RECOVERY_CODES_CREATED`, `RESET_BY_ADMINISTRATOR`, or
+  authenticator_app, passkeys, recovery_codes}` (whether two-step sign-in is on, whether an authenticator app is set
+  up, the number of passkeys and the unused recovery codes; rows written before `0038_phase17_passkeys` hold only
+  `two_step` and `recovery_codes`) before and after, and the metadata `{"two_step_change": ...}` (`TOTP_ADDED`,
+  `TOTP_REMOVED`, `PASSKEY_ADDED`, `PASSKEY_REMOVED`, `RECOVERY_CODES_CREATED`, `RESET_BY_ADMINISTRATOR`, or
   `RESET_BY_CLI` with `source: cli`); a reset also records `sessions_ended` (whether every sign-in of the User ended,
-  `TWO_STEP_RESET`). Never a key, a code or a digest. Using a code at sign-in is logged, never audited.
-- The downgrade refuses while any of the three tables holds a row, a session ended `TWO_STEP_RESET`, a policy column
-  of the revision differs from its default or a `two-step` audit row exists.
+  `TWO_STEP_RESET`). Never a key, a code, a digest or a passkey's credential data. Using a code or a passkey at
+  sign-in is logged, never audited.
+- The `0037_phase17_two_step` downgrade refuses while any of its three tables holds a row, a session ended
+  `TWO_STEP_RESET`, a policy column of the revision differs from its default or a `two-step` audit row exists. The
+  `0038_phase17_passkeys` downgrade refuses while a passkey, a pending registration, a `PASSKEY_SIGN_IN` challenge or
+  a passkey request exists.
 
 ### Scan Station devices
 
@@ -1340,13 +1370,13 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (33 at head `0037_phase17_two_step`) |
+| Class | `partflow_app` privileges | Tables (35 at head `0038_phase17_passkeys`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
 | `READ_ONLY` | SELECT | `alembic_version` |
-| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
 - `partflow_maintenance` holds SELECT only, on `alembic_version`, `application_policy`, `areas`, `machines`,
   `operations`, `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
@@ -1485,7 +1515,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0037_phase17_two_step`: the three tables of two-step sign-in, the two-step policy and mail server timeout columns, `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the lock order and the audit rows (the `two-step` section and the own email change). |
+| 2026-11-17 | uncommitted | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, the passkey columns of `user_sign_in_challenges`, the lock order and the audit snapshot with passkeys. |
+| 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: the three tables of two-step sign-in, the two-step policy and mail server timeout columns, `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the lock order and the audit rows (the `two-step` section and the own email change). |
 | 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, the outgoing mail server columns of `application_policy` and the `mail-server` audit section. |
 | 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: the four backup policy columns of `application_policy` and the `backups` audit section. |
 | 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |

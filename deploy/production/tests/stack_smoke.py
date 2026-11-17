@@ -53,7 +53,7 @@ postgres_password, partflow_app_password and partflow_maintenance_password; the 
 (`--profile ops run --rm -T db-roles`) before its migrate, and backend connects as partflow_app. SM-17a/b use an empty
 partflow_app_password (backend no longer mounts postgres_password); new cases:
 - SM-17c: an empty postgres_password stops migrate and db-roles with configuration_invalid (exit 2, one JSON document).
-- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (33 tables).
+- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (35 tables).
 - SM-31: every partflow-api session in pg_stat_activity is partflow_app.
 - SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables.
 - SM-33: reconcile through backend: check (h) pass, connected as partflow_app (not a superuser).
@@ -120,7 +120,7 @@ PROBE_STATEMENTS = {
 }
 PROBE_ALLOWED = {("worker_sessions", "UPDATE"): "UPDATE 0", ("assigned_route_steps", "DELETE"): "DELETE 0"}
 RESTORE_DATABASE = "partflow_restore_s4"
-CLASSIFIED_TABLES = 33
+CLASSIFIED_TABLES = 35
 MULTI_WORKER_STOP = "failed to start, stopping the parent process"
 TOKEN_PATTERN = re.compile(r"Setup token: ([A-Z2-7]{4}(?:-[A-Z2-7]{4})+)")
 IMPORT_HEADER = "Work Order Number,Part Number,Requested Quantity,Job Number,Due Date\r\n"

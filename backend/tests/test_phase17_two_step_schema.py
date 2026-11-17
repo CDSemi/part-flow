@@ -5,8 +5,9 @@ PostgreSQL databases (created and dropped by the fixtures), then verifies
 the schema of two-step sign-in (owner decisions of 2026-11-13 and
 2026-11-17; IMPLEMENTATION_ROADMAP Phase 17 item 8):
 
-- exact head boundary: ``0037_phase17_two_step`` is the single head, and
-  the models match the schema migrated to it;
+- the cases run against this revision inside the current chain; the head
+  boundary and the models parity moved to
+  ``tests/test_phase17_passkeys_schema.py`` with ``0038_phase17_passkeys``;
 - the migration's literals equal the model constants: the three tables'
   CHECKs, the policy columns with their defaults and ranges, the
   wrong-code counter, the User session end reasons (the Phase 14 ones of
@@ -33,7 +34,6 @@ from types import ModuleType
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -41,7 +41,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from alembic import command
 from app.application import policies
 from app.domain.enums import SignInChallengeEndReason, UserSessionEndReason
-from app.infrastructure import models
+from app.infrastructure import models, schema_revision
 
 # Schema assertions: owner connections in the application-role test mode
 # (Phase 16 slice 4).
@@ -50,6 +50,7 @@ pytestmark = pytest.mark.database_owner
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0036_phase17_outgoing_mail"
 _HEAD_REVISION = "0037_phase17_two_step"
+_CODE_HEAD = schema_revision.code_head()
 _VERSIONS = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS / "20261117_0037_phase17_two_step.py"
 _SIGN_IN_MIGRATION_FILE = _VERSIONS / "20261006_0029_phase14_sign_in.py"
@@ -185,21 +186,6 @@ def head_engine(head_database: URL) -> Iterator[Engine]:
 # ---------------------------------------------------------------------------
 # Head and literals
 # ---------------------------------------------------------------------------
-
-
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-
-
-def test_models_metadata_matches_the_migrated_schema(head_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
 
 
 def test_the_migration_literals_match_the_model() -> None:
@@ -423,7 +409,7 @@ def test_the_downgrade_restores_the_previous_schema(
         )
     command.upgrade(_alembic_config(head_database), "head")
     with head_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         assert _tables(connection) == sorted(_TABLES)
 
 
@@ -464,5 +450,5 @@ def test_the_downgrade_refuses_while_two_step_data_exists(
     with pytest.raises(DBAPIError, match="Two-step sign-in data exists"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         assert _tables(connection) == sorted(_TABLES)

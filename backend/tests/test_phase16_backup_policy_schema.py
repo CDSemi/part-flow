@@ -8,8 +8,8 @@ Administration"):
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_phase17_outgoing_mail_schema.py`` with
-  ``0036_phase17_outgoing_mail``;
+  ``tests/test_phase17_passkeys_schema.py`` with
+  ``0038_phase17_passkeys``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install holds the owner's defaults (every hour; 48 hourly, 30
   daily and 52 weekly backups kept) and the CHECKs refuse every value

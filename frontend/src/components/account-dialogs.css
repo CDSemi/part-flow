@@ -115,3 +115,43 @@
   border-radius: 8px;
   font-size: 14px;
 }
+
+/* Two-step sign-in sections (authenticator app, passkeys, recovery
+   codes): a small heading, then lines of a state with its action. */
+.acct-form .acct-subhead {
+  margin: 6px 0 -4px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.acct-form .acct-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+
+.acct-form .acct-line > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.acct-form .acct-line .acct-note {
+  margin: 0;
+}
+
+.acct-form .acct-passkeys {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

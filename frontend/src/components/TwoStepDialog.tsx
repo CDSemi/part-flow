@@ -4,40 +4,98 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import {
+  createPasskey,
+  PasskeyCancelledError,
+  passkeysSupported,
+} from '../api/passkeys';
+import type { PasskeyOptionsJson } from '../api/passkeys';
+import {
+  addPasskey,
+  beginPasskeyAdd,
   beginTwoStepSetup,
   confirmTwoStepSetup,
   createRecoveryCodes,
   getTwoStepStatus,
+  removePasskey,
   signInWriteOutcomeUnknown,
   turnOffTwoStep,
 } from '../api/session';
-import type { TwoStepSetup, TwoStepStatus } from '../api/session';
+import type { PasskeyInfo, TwoStepSetup, TwoStepStatus } from '../api/session';
 import { useConnectivity } from '../app/connectivity-context';
+import { formatTimestampShort } from '../views/dates';
 import { ModalDialog } from './ModalDialog';
 
 const UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Close this window and open it again to see where it stands.';
 const LOAD_FAILED = 'Two-step sign-in could not be loaded. Try again.';
+const PASSKEY_FAILED =
+  'The passkey could not be created. Try again, and let your device or password manager save it.';
+const NAME_RULE =
+  'Name the passkey with 1 to 80 characters, without line breaks or other control characters.';
 
-type PasswordAction = 'setup' | 'codes' | 'off';
+type PasswordAction =
+  | { kind: 'setup' }
+  | { kind: 'codes' }
+  | { kind: 'remove-app' }
+  | { kind: 'add-passkey' }
+  | { kind: 'remove-passkey'; passkey: PasskeyInfo };
 
 type View =
   | { kind: 'status' }
   | { kind: 'password'; action: PasswordAction }
   | { kind: 'setup'; setup: TwoStepSetup }
+  | { kind: 'passkey'; options: PasskeyOptionsJson }
   | { kind: 'codes'; codes: string[]; turnedOn: boolean };
 
-const PASSWORD_ACTIONS: Record<
-  PasswordAction,
-  { title: string; button: string }
-> = {
-  setup: { title: 'Set up two-step sign-in', button: 'Continue' },
-  codes: {
-    title: 'Create new recovery codes',
-    button: 'Create new codes',
-  },
-  off: { title: 'Turn off two-step sign-in', button: 'Turn off' },
-};
+function actionWords(
+  action: PasswordAction,
+  state: TwoStepStatus | null,
+): { title: string; button: string; danger: boolean; note: string | null } {
+  const lastFactor =
+    state !== null &&
+    (state.authenticatorApp ? 1 : 0) + state.passkeys.length === 1;
+  const offNote =
+    'Signing in will take only your password, and your recovery codes are deleted.';
+  switch (action.kind) {
+    case 'setup':
+      return {
+        title: 'Set up an authenticator app',
+        button: 'Continue',
+        danger: false,
+        note: null,
+      };
+    case 'codes':
+      return {
+        title: 'Create new recovery codes',
+        button: 'Create new codes',
+        danger: false,
+        note: 'Your current recovery codes stop working when the new ones are made.',
+      };
+    case 'remove-app':
+      return {
+        title: 'Remove the authenticator app',
+        button: 'Remove app',
+        danger: true,
+        note: lastFactor
+          ? offNote
+          : 'Two-step sign-in stays on with your passkeys.',
+      };
+    case 'add-passkey':
+      return {
+        title: 'Add a passkey',
+        button: 'Continue',
+        danger: false,
+        note: null,
+      };
+    case 'remove-passkey':
+      return {
+        title: `Remove the passkey ${action.passkey.name}`,
+        button: 'Remove passkey',
+        danger: true,
+        note: lastFactor ? offNote : 'Two-step sign-in stays on.',
+      };
+  }
+}
 
 /** The QR code of an `otpauth://` link, always dark on light (scanners
  * need the contrast in both themes), with the standard quiet zone. */
@@ -71,11 +129,14 @@ function grouped(secret: string): string {
 
 /**
  * Two-step sign-in of the signed-in user (the account menu): an
- * authenticator app (one-time codes) and its recovery codes. Never
- * required. Setting it up, creating new recovery codes and turning it
- * off ask for the password again; the server checks it and counts a wrong
- * one as a failed sign-in. Recovery codes are shown once, right after
- * they are made. Every write is disabled while disconnected.
+ * authenticator app (one-time codes), passkeys and the recovery codes that
+ * come with them. Never required; on while an app or a passkey is set up.
+ * Setting up the app, adding or removing a passkey, removing the app and
+ * creating new recovery codes ask for the password again; the server
+ * checks it and counts a wrong one as a failed sign-in. Recovery codes are
+ * shown once, right after they are made. Passkeys can be added only where
+ * the browser can use them (PartFlow at its HTTPS address). Every write is
+ * disabled while disconnected.
  */
 export function TwoStepDialog({ onClose }: { onClose: () => void }) {
   const { status: connectivity } = useConnectivity();
@@ -126,15 +187,30 @@ export function TwoStepDialog({ onClose }: { onClose: () => void }) {
 
   const withPassword = (action: PasswordAction, password: string) =>
     run(async () => {
-      if (action === 'setup') {
-        setView({ kind: 'setup', setup: await beginTwoStepSetup(password) });
-      } else if (action === 'codes') {
-        const codes = await createRecoveryCodes(password);
-        setView({ kind: 'codes', codes, turnedOn: false });
-        await load();
-      } else {
-        setState(await turnOffTwoStep(password));
-        setView({ kind: 'status' });
+      switch (action.kind) {
+        case 'setup':
+          setView({ kind: 'setup', setup: await beginTwoStepSetup(password) });
+          return;
+        case 'codes': {
+          const codes = await createRecoveryCodes(password);
+          setView({ kind: 'codes', codes, turnedOn: false });
+          await load();
+          return;
+        }
+        case 'remove-app':
+          setState(await turnOffTwoStep(password));
+          setView({ kind: 'status' });
+          return;
+        case 'add-passkey':
+          setView({
+            kind: 'passkey',
+            options: await beginPasskeyAdd(password),
+          });
+          return;
+        case 'remove-passkey':
+          setState(await removePasskey(action.passkey.id, password));
+          setView({ kind: 'status' });
+          return;
       }
     });
 
@@ -149,19 +225,49 @@ export function TwoStepDialog({ onClose }: { onClose: () => void }) {
       );
     });
 
+  const create = (options: PasskeyOptionsJson, name: string) => {
+    if (busy || offline) return;
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      try {
+        const credential = await createPasskey(options);
+        const codes = await addPasskey(name, credential);
+        await load();
+        setView(
+          codes === null
+            ? { kind: 'status' }
+            : { kind: 'codes', codes, turnedOn: true },
+        );
+      } catch (failure) {
+        if (failure instanceof PasskeyCancelledError) {
+          setError(null);
+        } else if (failure instanceof ApiError) {
+          failed(failure);
+        } else {
+          setError(PASSKEY_FAILED);
+        }
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const back = () => {
+    setError(null);
+    setView({ kind: 'status' });
+  };
+
   const title = 'Two-step sign-in';
   let body;
   if (view.kind === 'password') {
     body = (
       <PasswordStep
-        action={view.action}
+        words={actionWords(view.action, state)}
         busy={busy}
         offline={offline}
         error={error}
-        onBack={() => {
-          setError(null);
-          setView({ kind: 'status' });
-        }}
+        onBack={back}
         onSubmit={(password) => void withPassword(view.action, password)}
       />
     );
@@ -172,11 +278,18 @@ export function TwoStepDialog({ onClose }: { onClose: () => void }) {
         busy={busy}
         offline={offline}
         error={error}
-        onBack={() => {
-          setError(null);
-          setView({ kind: 'status' });
-        }}
+        onBack={back}
         onConfirm={(code) => void confirm(code)}
+      />
+    );
+  } else if (view.kind === 'passkey') {
+    body = (
+      <PasskeyStep
+        busy={busy}
+        offline={offline}
+        error={error}
+        onBack={back}
+        onCreate={(name) => create(view.options, name)}
       />
     );
   } else if (view.kind === 'codes') {
@@ -258,70 +371,131 @@ function StatusStep({
   return (
     <div className="acct-form">
       {state.enabled ? (
-        <>
-          <p className="sub">
-            Two-step sign-in is on. After your password, PartFlow asks for the
-            6-digit code your authenticator app shows.
-          </p>
-          <p className="acct-note">
-            {`You have ${state.recoveryCodesLeft} recovery ${state.recoveryCodesLeft === 1 ? 'code' : 'codes'} left. Each works once if you lose the app.`}
-          </p>
-          <p className="acct-note">{email}</p>
-        </>
+        <p className="sub">
+          Two-step sign-in is on. After your password, PartFlow asks for a code
+          from your authenticator app or one of your passkeys.
+        </p>
       ) : (
         <p className="sub">
           Two-step sign-in is off. Turned on, signing in takes your password and
-          a 6-digit code from an authenticator app such as 1Password, Google
-          Authenticator or Microsoft Authenticator. It is never required.
+          a second step: a 6-digit code from an authenticator app such as
+          1Password, Google Authenticator or Microsoft Authenticator, or a
+          passkey. It is never required.
         </p>
       )}
-      <div className="row">
-        <button type="button" className="bigbtn ghost" onClick={onClose}>
-          Close (Esc)
-        </button>
-        {state.enabled ? (
-          <>
-            <button
-              type="button"
-              className="bigbtn"
-              disabled={offline}
-              onClick={() => onAction('codes')}
-            >
-              New recovery codes…
-            </button>
-            <button
-              type="button"
-              className="bigbtn danger"
-              disabled={offline}
-              onClick={() => onAction('off')}
-            >
-              Turn off…
-            </button>
-          </>
+
+      <h4 className="acct-subhead">Authenticator app</h4>
+      <div className="acct-line">
+        <span>{state.authenticatorApp ? 'Set up' : 'Not set up'}</span>
+        {state.authenticatorApp ? (
+          <button
+            type="button"
+            className="bigbtn danger"
+            aria-label="Remove the authenticator app…"
+            disabled={offline}
+            onClick={() => onAction({ kind: 'remove-app' })}
+          >
+            Remove…
+          </button>
         ) : (
           <button
             type="button"
             className="bigbtn primary"
             disabled={offline}
-            onClick={() => onAction('setup')}
+            onClick={() => onAction({ kind: 'setup' })}
           >
             Set up…
           </button>
         )}
+      </div>
+
+      <h4 className="acct-subhead">Passkeys</h4>
+      {state.passkeys.length === 0 ? (
+        <p className="acct-note">
+          No passkey yet. A passkey signs you in without your password, using
+          your device, your phone or your password manager.
+        </p>
+      ) : (
+        <ul className="acct-passkeys" aria-label="Passkeys">
+          {state.passkeys.map((passkey) => (
+            <li key={passkey.id} className="acct-line">
+              <span>
+                <strong>{passkey.name}</strong>
+                <span className="acct-note">
+                  {`${passkey.rpId} · added ${formatTimestampShort(passkey.createdAt)}${
+                    passkey.lastUsedAt === null
+                      ? ''
+                      : ` · last used ${formatTimestampShort(passkey.lastUsedAt)}`
+                  }`}
+                </span>
+              </span>
+              <button
+                type="button"
+                className="bigbtn danger"
+                aria-label={`Remove the passkey ${passkey.name}…`}
+                disabled={offline}
+                onClick={() => onAction({ kind: 'remove-passkey', passkey })}
+              >
+                Remove…
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {passkeysSupported() ? (
+        <div className="row">
+          <button
+            type="button"
+            className="bigbtn"
+            disabled={offline}
+            onClick={() => onAction({ kind: 'add-passkey' })}
+          >
+            Add a passkey…
+          </button>
+        </div>
+      ) : (
+        <p className="acct-note">
+          Passkeys can be added when PartFlow is opened at its HTTPS address.
+        </p>
+      )}
+
+      {state.enabled ? (
+        <>
+          <h4 className="acct-subhead">Recovery codes</h4>
+          <div className="acct-line">
+            <span>
+              {`You have ${state.recoveryCodesLeft} recovery ${state.recoveryCodesLeft === 1 ? 'code' : 'codes'} left. Each works once if you lose your app and passkeys.`}
+            </span>
+            <button
+              type="button"
+              className="bigbtn"
+              disabled={offline}
+              onClick={() => onAction({ kind: 'codes' })}
+            >
+              New recovery codes…
+            </button>
+          </div>
+        </>
+      ) : null}
+      <p className="acct-note">{email}</p>
+      <div className="row">
+        <button type="button" className="bigbtn ghost" onClick={onClose}>
+          Close (Esc)
+        </button>
       </div>
     </div>
   );
 }
 
 function PasswordStep({
-  action,
+  words,
   busy,
   offline,
   error,
   onBack,
   onSubmit,
 }: {
-  action: PasswordAction;
+  words: ReturnType<typeof actionWords>;
   busy: boolean;
   offline: boolean;
   error: string | null;
@@ -334,7 +508,6 @@ function PasswordStep({
   useEffect(() => {
     field.current?.focus();
   }, []);
-  const { title, button } = PASSWORD_ACTIONS[action];
   return (
     <form
       className="acct-form"
@@ -349,18 +522,8 @@ function PasswordStep({
         setPassword('');
       }}
     >
-      <p className="sub">{`${title}: enter your password to continue.`}</p>
-      {action === 'codes' ? (
-        <p className="acct-note">
-          Your current recovery codes stop working when the new ones are made.
-        </p>
-      ) : null}
-      {action === 'off' ? (
-        <p className="acct-note">
-          Signing in will take only your password, and your recovery codes are
-          deleted.
-        </p>
-      ) : null}
+      <p className="sub">{`${words.title}: enter your password to continue.`}</p>
+      {words.note !== null ? <p className="acct-note">{words.note}</p> : null}
       <label>
         <span>Password</span>
         <input
@@ -393,10 +556,10 @@ function PasswordStep({
         </button>
         <button
           type="submit"
-          className={action === 'off' ? 'bigbtn danger' : 'bigbtn primary'}
+          className={words.danger ? 'bigbtn danger' : 'bigbtn primary'}
           disabled={busy || offline}
         >
-          {button}
+          {words.button}
         </button>
       </div>
     </form>
@@ -494,6 +657,98 @@ function SetupStep({
   );
 }
 
+/** The name of a passkey as the server takes it: trimmed, 1 to 80
+ * printable characters. */
+function passkeyName(text: string): string | null {
+  const name = text.trim();
+  const control = [...name].some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+  return name.length >= 1 && name.length <= 80 && !control ? name : null;
+}
+
+function PasskeyStep({
+  busy,
+  offline,
+  error,
+  onBack,
+  onCreate,
+}: {
+  busy: boolean;
+  offline: boolean;
+  error: string | null;
+  onBack: () => void;
+  onCreate: (name: string) => void;
+}) {
+  const [text, setText] = useState('');
+  const [attempted, setAttempted] = useState(false);
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    field.current?.focus();
+  }, []);
+  const name = passkeyName(text);
+  return (
+    <form
+      className="acct-form"
+      noValidate
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (name === null) {
+          setAttempted(true);
+          return;
+        }
+        onCreate(name);
+      }}
+    >
+      <p className="sub">
+        Name the passkey so you can tell it apart, for example the device or the
+        password manager that keeps it. Then choose Create passkey: your browser
+        asks where to save it.
+      </p>
+      <label>
+        <span>Passkey name</span>
+        <input
+          ref={field}
+          className="field"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="e.g. Work laptop"
+          maxLength={200}
+          autoComplete="off"
+        />
+      </label>
+      {attempted && name === null ? (
+        <div className="err" role="alert">
+          {NAME_RULE}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="err" role="alert">
+          {error}
+        </div>
+      ) : null}
+      <div className="row">
+        <button
+          type="button"
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={onBack}
+        >
+          Back
+        </button>
+        <button
+          type="submit"
+          className="bigbtn primary"
+          disabled={busy || offline}
+        >
+          Create passkey
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function CodesStep({
   codes,
   turnedOn,
@@ -520,8 +775,8 @@ function CodesStep({
           : 'Your new recovery codes. The old ones no longer work.'}
       </p>
       <p className="acct-note">
-        Each code signs you in once if you lose your authenticator app. They are
-        shown only now.
+        Each code signs you in once if you lose your authenticator app and
+        passkeys. They are shown only now.
       </p>
       <ul className="acct-codes" aria-label="Recovery codes">
         {codes.map((code) => (

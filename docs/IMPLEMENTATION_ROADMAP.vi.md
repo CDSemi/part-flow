@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -50,14 +50,14 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và lưu trữ (archival) lịch sử Movement. |
-| Phase 17 — Owner Decisions After Go-Live | Đang làm | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
+| Phase 17 — Owner Decisions After Go-Live | Đã đóng (2026-11-17) | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0037_phase17_two_step`
-(`backend/alembic/versions/20261117_0037_phase17_two_step.py`). Phase 15 không thêm migration nào; Phase 16 thêm
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0038_phase17_passkeys`
+(`backend/alembic/versions/20261117_0038_phase17_passkeys.py`). Phase 15 không thêm migration nào; Phase 16 thêm
 `0035_phase16_backup_policy` (chính sách backup của Administration → Backups); Phase 17 thêm
 `0033_phase17_super_user_role` (role Super User), `0034_phase17_unique_names` (tên Area và Planned Route duy nhất),
-`0036_phase17_outgoing_mail` (địa chỉ email của user và mail server gửi đi) và `0037_phase17_two_step`
-(xác thực hai bước, two-step sign-in).
+`0036_phase17_outgoing_mail` (địa chỉ email của user và mail server gửi đi), `0037_phase17_two_step`
+(xác thực hai bước, two-step sign-in) và `0038_phase17_passkeys` (passkey).
 
 **Quyết định của chủ sở hữu ngày 2026-11-09: go-live trực tiếp.** PartFlow được đưa vào sử dụng thật trên Synology
 NAS của công ty ngày 2026-11-09, ngay khi production stack được cài xong. Không có giai đoạn pilot và không có danh
@@ -1369,19 +1369,21 @@ theo thứ tự sau, và mục nào đã có thì ghi rõ:
    tay ở Scan Station, phím kết thúc của máy quét và tiền tố hay hậu tố cần bỏ, tự xác nhận khi chỉ đúng một kết quả
    khớp, và số lượng mặc định. General settings: tên và logo của xưởng, múi giờ và định dạng ngày, nhịp làm mới của các
    board và thời gian đếm ngược khi có bản cập nhật. Không gì được lưu, và chưa route nào cần `Manage scan behavior`.
-8. **Đăng nhập đa yếu tố tùy chọn.** Mỗi user có thể thêm mã một lần (TOTP) và passkey (ví dụ lưu trong 1Password), giúp
-   đăng nhập tiện hơn; không bao giờ bắt buộc, kể cả với Administrator. User mất chúng thì đăng nhập bằng một mã khôi
-   phục dùng một lần hoặc khôi phục qua email, việc này cần một máy chủ gửi mail được đặt trong General settings và một
-   địa chỉ email trên user. Đã có cho đến nay: một địa chỉ email tùy chọn trên mỗi user (Administration → Users, do
-   user administrator xem và đặt) và mail server gửi đi kèm test email (Administration → Settings → Outgoing mail
-   server; migration `0036_phase17_outgoing_mail`), và xác thực hai bước (two-step sign-in; migration
+8. **Đăng nhập đa yếu tố tùy chọn — đã có.** Mỗi user có thể thêm mã một lần (TOTP) và passkey (ví dụ lưu trong
+   1Password), giúp đăng nhập tiện hơn; không bao giờ bắt buộc, kể cả với Administrator. User mất chúng thì đăng nhập
+   bằng một mã khôi phục dùng một lần hoặc khôi phục qua email, việc này cần một máy chủ gửi mail được đặt trong
+   General settings và một địa chỉ email trên user. Đã có: một địa chỉ email tùy chọn trên mỗi user (Administration →
+   Users, do user administrator xem và đặt) cùng mail server gửi đi và test email (Administration → Settings →
+   Outgoing mail server; migration `0036_phase17_outgoing_mail`); xác thực hai bước (two-step sign-in; migration
    `0037_phase17_two_step`): một app xác thực (authenticator app; mã dùng một lần, TOTP) được thiết lập từ menu tài
    khoản bằng việc nhập lại mật khẩu và mã đầu tiên của nó, các mã khôi phục (recovery code) dùng một lần, và khi đăng
-   nhập một bước thứ hai nhận mã của app, một mã khôi phục hoặc một mã gửi qua email cho user. Quyết định của chủ sở
-   hữu ngày 2026-11-17: mọi con số của nó được đặt trong Administration → Settings → Two-step sign-in, một mã sai được
-   đếm riêng với một mật khẩu sai, user tự đổi địa chỉ email của mình, và một user administrator, hoặc lệnh khôi phục
-   `reset-two-step`, khi tắt xác thực hai bước của một user đã mất app và các mã cũng có thể đăng xuất user đó ở mọi
-   nơi. Passkey sẽ theo sau.
+   nhập một bước thứ hai nhận mã của app, một mã khôi phục hoặc một mã gửi qua email cho user; và passkey (migration
+   `0038_phase17_passkeys`), được thêm từ menu tài khoản bằng việc nhập lại mật khẩu, đăng nhập một user chỉ bằng
+   passkey hoặc trả lời bước thứ hai, chỉ tại địa chỉ HTTPS của PartFlow. Quyết định của chủ sở hữu ngày 2026-11-17:
+   mọi con số của xác thực hai bước được đặt trong Administration → Settings → Two-step sign-in, một mã sai được đếm
+   riêng với một mật khẩu sai, user tự đổi địa chỉ email của mình, và một user administrator, hoặc lệnh khôi phục
+   `reset-two-step`, khi tắt xác thực hai bước của một user đã mất app, các passkey và các mã cũng có thể đăng xuất user
+   đó ở mọi nơi.
 
 Phase này thay đổi GUI_DESIGN §9 (một mục chưa có hiển thị bản xem trước bị vô hiệu hóa thay vì chỉ một câu thông báo)
 và PROJECT_PROFILE §20 (bốn role tạo sẵn); mỗi mục cập nhật các tài liệu sở hữu nó khi được đưa vào.
@@ -1429,7 +1431,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 17 mục 8: xác thực hai bước đã có (app xác thực, mã khôi phục, mã gửi qua email, các con số của nó trong Settings, địa chỉ email của chính user); migration `0037_phase17_two_step` trở thành head của lược đồ. |
+| 2026-11-17 | uncommitted | Phase 17 mục 8 đã có cùng passkey, việc này đóng Phase 17; migration `0038_phase17_passkeys` trở thành head của lược đồ. |
+| 2026-11-17 | `aa6287d` | Phase 17 mục 8: xác thực hai bước đã có (app xác thực, mã khôi phục, mã gửi qua email, các con số của nó trong Settings, địa chỉ email của chính user); migration `0037_phase17_two_step` trở thành head của lược đồ. |
 | 2026-11-16 | `252f678` | Phase 17 mục 8 đang thực hiện: địa chỉ email của user và mail server gửi đi đã có; migration `0036_phase17_outgoing_mail` trở thành head của lược đồ. |
 | 2026-11-16 | `a4cf9a8` | Phase 16: Deployment Admin được gỡ bỏ, hoàn tất `pf` tối giản; việc còn mở của nó được đóng. |
 | 2026-11-16 | `5708664` | Phase 16: `pf` tối giản đã có dưới dạng `deploy/production/pf`. |

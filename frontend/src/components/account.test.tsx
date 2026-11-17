@@ -80,6 +80,8 @@ interface Fake {
   emailHint: string | null;
   /** The signed-in user's own address (Phase 17). */
   email: string | null;
+  /** The jdoe passkeys (Phase 17); a second step offers PASSKEY with one. */
+  passkeys: { id: number; name: string }[];
   /** The login whose second step is open, if any. */
   pendingStep: string | null;
   wrongCodes: number;
@@ -107,14 +109,46 @@ const NEW_CODES = Array.from(
 const WRONG_CODE = 'That code is not correct. Check the code and try again.';
 const STEP_ENDED = 'Too many wrong codes. Sign in again with your password.';
 const WRONG_CURRENT = 'The current password is not correct.';
+const PASSKEY_FAILED =
+  'Sign-in with a passkey failed. Use a passkey saved for PartFlow at this address, or sign in with your login name and password. If it keeps failing, ask an administrator — the account may be locked or inactive.';
+/** The id the fake WebAuthn answers with (base64url of "cred-1"). */
+const PASSKEY_ID = 'Y3JlZC0x';
+const PASSKEY_REQUEST = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdl',
+    rpId: 'localhost',
+    userVerification: 'required',
+  },
+};
+const PASSKEY_CREATION = {
+  publicKey: {
+    rp: { name: 'PartFlow', id: 'localhost' },
+    user: { id: 'Nw', name: 'jdoe', displayName: 'Jane Doe' },
+    challenge: 'Y2hhbGxlbmdl',
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+    excludeCredentials: [],
+    authenticatorSelection: {
+      residentKey: 'required',
+      userVerification: 'required',
+    },
+  },
+};
 
 function twoStepStatus(): unknown {
   const login = fake.user?.login_name ?? '';
   return {
-    enabled: fake.twoStep.has(login),
-    recovery_codes_left: fake.twoStep.has(login)
-      ? fake.recoveryCodes.length
-      : 0,
+    enabled: fake.twoStep.has(login) || fake.passkeys.length > 0,
+    authenticator_app: fake.twoStep.has(login),
+    passkeys: fake.passkeys.map((passkey) => ({
+      ...passkey,
+      rp_id: 'localhost',
+      created_at: '2026-11-17T08:00:00Z',
+      last_used_at: null,
+    })),
+    recovery_codes_left:
+      fake.twoStep.has(login) || fake.passkeys.length > 0
+        ? fake.recoveryCodes.length
+        : 0,
     email: fake.email,
     email_ready: fake.email !== null,
   };
@@ -150,6 +184,31 @@ function handleTwoStep(
     }
     fake.pendingStep = null;
     fake.user = { ...JANE, login_name: login };
+    return json(sessionState());
+  }
+  if (url === '/api/session/second-step/passkey-options' && method === 'POST') {
+    return json({ options: PASSKEY_REQUEST });
+  }
+  if (url === '/api/session/second-step/passkey' && method === 'POST') {
+    const login = fake.pendingStep;
+    if (login === null) {
+      return json({ detail: STEP_ENDED, second_step_expired: true }, 401);
+    }
+    if ((body?.credential as { id?: string }).id !== PASSKEY_ID) {
+      return json({ detail: WRONG_CODE, second_step_failed: true }, 401);
+    }
+    fake.pendingStep = null;
+    fake.user = { ...JANE, login_name: login };
+    return json(sessionState());
+  }
+  if (url === '/api/session/passkey/options' && method === 'POST') {
+    return json({ options: PASSKEY_REQUEST });
+  }
+  if (url === '/api/session/passkey' && method === 'POST') {
+    if ((body?.credential as { id?: string }).id !== PASSKEY_ID) {
+      return json({ detail: PASSKEY_FAILED, sign_in_failed: true }, 401);
+    }
+    fake.user = JANE;
     return json(sessionState());
   }
   if (url === '/api/session/second-step/email-code' && method === 'POST') {
@@ -198,6 +257,29 @@ function handleTwoStep(
     fake.recoveryCodes = [];
     return json(twoStepStatus());
   }
+  if (url === '/api/session/two-step/passkeys/options' && method === 'POST') {
+    return json({ options: PASSKEY_CREATION });
+  }
+  if (url === '/api/session/two-step/passkeys' && method === 'POST') {
+    const first = !fake.twoStep.has(login) && fake.passkeys.length === 0;
+    fake.passkeys.push({
+      id: fake.passkeys.length + 1,
+      name: String(body?.name),
+    });
+    if (!first) return json({ recovery_codes: null });
+    fake.recoveryCodes = [...NEW_CODES];
+    return json({ recovery_codes: NEW_CODES });
+  }
+  const removing = /^\/api\/session\/two-step\/passkeys\/(\d+)\/remove$/.exec(
+    url,
+  );
+  if (removing && method === 'POST') {
+    fake.passkeys = fake.passkeys.filter((p) => p.id !== Number(removing[1]));
+    if (!fake.twoStep.has(login) && fake.passkeys.length === 0) {
+      fake.recoveryCodes = [];
+    }
+    return json(twoStepStatus());
+  }
   if (url === '/api/session/two-step/recovery-codes' && method === 'POST') {
     fake.recoveryCodes = NEW_CODES.map((code) => code.toUpperCase());
     return json({ recovery_codes: fake.recoveryCodes });
@@ -238,7 +320,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       return json(
         {
           methods: [
-            'TOTP',
+            ...(fake.passkeys.length === 0 ? ['TOTP'] : ['PASSKEY']),
             ...(fake.recoveryCodes.length ? ['RECOVERY_CODE'] : []),
             ...(fake.emailHint !== null ? ['EMAIL_CODE'] : []),
           ],
@@ -318,6 +400,7 @@ beforeEach(() => {
     recoveryCodes: [],
     emailHint: null,
     email: null,
+    passkeys: [],
     pendingStep: null,
     wrongCodes: 0,
     emailCodeSent: false,
@@ -1348,7 +1431,7 @@ test('Two-step sign-in…: setting up asks for the password, shows the code and 
   fireEvent.click(within(dialog).getByRole('button', { name: 'I saved them' }));
   expect(
     await within(dialog).findByText(
-      'You have 10 recovery codes left. Each works once if you lose the app.',
+      'You have 10 recovery codes left. Each works once if you lose your app and passkeys.',
     ),
   ).toBeInTheDocument();
   expect(sent('POST', '/api/session/two-step/totp')[1].body).toEqual({
@@ -1375,9 +1458,14 @@ test('Two-step sign-in…: on, new recovery codes and turning off each ask for t
   fireEvent.click(within(dialog).getByRole('button', { name: 'I saved them' }));
 
   fireEvent.click(
-    await within(dialog).findByRole('button', { name: 'Turn off…' }),
+    await within(dialog).findByRole('button', {
+      name: 'Remove the authenticator app…',
+    }),
   );
-  enterPassword(dialog, 'Turn off');
+  expect(dialog).toHaveTextContent(
+    'Signing in will take only your password, and your recovery codes are deleted.',
+  );
+  enterPassword(dialog, 'Remove app');
   expect(
     await within(dialog).findByText(/^Two-step sign-in is off\./),
   ).toBeInTheDocument();
@@ -1520,4 +1608,189 @@ test('Email address…: typed input asks before closing; offline nothing is save
   expect(
     await within(offline).findByRole('button', { name: 'Save email address' }),
   ).toBeDisabled();
+});
+
+/* ============ Passkeys (Phase 17) ============ */
+
+/** A stand-in for the browser's PublicKeyCredential. */
+class FakePublicKeyCredential {
+  readonly id = PASSKEY_ID;
+  readonly type = 'public-key';
+  toJSON() {
+    return {
+      id: PASSKEY_ID,
+      rawId: PASSKEY_ID,
+      type: 'public-key',
+      response: { clientDataJSON: 'e30' },
+      clientExtensionResults: {},
+    };
+  }
+}
+
+/** A secure context whose browser can use passkeys; returns the
+ * navigator.credentials stand-in. */
+function installWebAuthn() {
+  vi.stubGlobal('PublicKeyCredential', FakePublicKeyCredential);
+  Object.defineProperty(window, 'isSecureContext', {
+    value: true,
+    configurable: true,
+  });
+  const credentials = {
+    create: vi.fn<
+      (options: CredentialCreationOptions) => Promise<FakePublicKeyCredential>
+    >(() => Promise.resolve(new FakePublicKeyCredential())),
+    get: vi.fn<
+      (options: CredentialRequestOptions) => Promise<FakePublicKeyCredential>
+    >(() => Promise.resolve(new FakePublicKeyCredential())),
+  };
+  Object.defineProperty(navigator, 'credentials', {
+    value: credentials,
+    configurable: true,
+  });
+  return credentials;
+}
+
+afterEach(() => {
+  Reflect.deleteProperty(navigator, 'credentials');
+  Reflect.deleteProperty(window, 'isSecureContext');
+});
+
+test('passkeys: without a browser that can use them, no passkey control is offered', async () => {
+  await renderShell();
+  const dialog = openSignIn();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Sign in with a passkey' }),
+  ).toBeNull();
+});
+
+test('passkeys: a passkey alone signs in; a dismissed request changes nothing', async () => {
+  const credentials = installWebAuthn();
+  await renderShell();
+  let dialog = openSignIn();
+  credentials.get.mockRejectedValueOnce(
+    new DOMException('Dismissed', 'NotAllowedError'),
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Sign in with a passkey' }),
+  );
+  await waitFor(() => expect(credentials.get).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(
+      within(dialog).getByRole('button', { name: 'Sign in with a passkey' }),
+    ).toBeEnabled(),
+  );
+  expect(within(dialog).queryByRole('alert')).toBeNull();
+  expect(sent('POST', '/api/session/passkey')).toHaveLength(0);
+
+  dialog = screen.getByRole('dialog', { name: 'Sign in' });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Sign in with a passkey' }),
+  );
+  expect(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  ).toBeInTheDocument();
+  const options = credentials.get.mock.calls[1][0] as unknown as {
+    publicKey: { challenge: ArrayBuffer; rpId: string };
+  };
+  expect(options.publicKey.challenge).toBeInstanceOf(ArrayBuffer);
+  expect(options.publicKey.rpId).toBe('localhost');
+  expect(sent('POST', '/api/session/passkey')[0].body).toEqual({
+    credential: {
+      id: PASSKEY_ID,
+      rawId: PASSKEY_ID,
+      type: 'public-key',
+      response: { clientDataJSON: 'e30' },
+      clientExtensionResults: {},
+    },
+  });
+});
+
+test('passkeys: a refused passkey sign-in shows the reason and keeps the dialog', async () => {
+  const credentials = installWebAuthn();
+  credentials.get.mockResolvedValueOnce(
+    Object.assign(new FakePublicKeyCredential(), {
+      toJSON: () => ({ id: 'other' }),
+    }),
+  );
+  await renderShell();
+  const dialog = openSignIn();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Sign in with a passkey' }),
+  );
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    PASSKEY_FAILED,
+  );
+});
+
+test('passkeys: a passkey answers the second step', async () => {
+  const credentials = installWebAuthn();
+  fake.twoStep.add('jdoe');
+  fake.passkeys = [{ id: 1, name: 'Laptop' }];
+  fake.recoveryCodes = [...NEW_CODES];
+  await renderShell();
+  const dialog = openSignIn();
+  fillSignIn(dialog, 'jdoe', PASSWORD);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+  // A passkey user starts with the passkey; a recovery code stays offered.
+  fireEvent.click(
+    await within(dialog).findByRole('button', { name: 'Use passkey' }),
+  );
+  expect(
+    await screen.findByRole('button', { name: 'Account: Jane Doe' }),
+  ).toBeInTheDocument();
+  expect(credentials.get).toHaveBeenCalledTimes(1);
+  expect(sent('POST', '/api/session/second-step/passkey')).toHaveLength(1);
+});
+
+test('Two-step sign-in…: a passkey is added with the password and a name, and removed with the password', async () => {
+  const credentials = installWebAuthn();
+  const dialog = await openTwoStep();
+  expect(dialog).toHaveTextContent('No passkey yet.');
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add a passkey…' }),
+  );
+  enterPassword(dialog, 'Continue', 'not my password');
+  expect(await within(dialog).findByText(WRONG_CURRENT)).toBeInTheDocument();
+  enterPassword(dialog, 'Continue');
+  const name = await within(dialog).findByLabelText('Passkey name');
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Create passkey' }),
+  );
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Name the passkey with 1 to 80 characters',
+  );
+  fireEvent.change(name, { target: { value: '  Work laptop ' } });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Create passkey' }),
+  );
+  // The first factor: the recovery codes are shown once.
+  expect(await within(dialog).findByText('abcd-efgh-jk22')).toBeInTheDocument();
+  const created = credentials.create.mock.calls[0][0] as unknown as {
+    publicKey: { challenge: ArrayBuffer; user: { id: ArrayBuffer } };
+  };
+  expect(created.publicKey.challenge).toBeInstanceOf(ArrayBuffer);
+  expect(created.publicKey.user.id).toBeInstanceOf(ArrayBuffer);
+  expect(sent('POST', '/api/session/two-step/passkeys')[0].body).toEqual({
+    name: 'Work laptop',
+    credential: new FakePublicKeyCredential().toJSON(),
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'I saved them' }));
+  expect(await within(dialog).findByText('Work laptop')).toBeInTheDocument();
+  expect(dialog).toHaveTextContent('Two-step sign-in is on.');
+
+  fireEvent.click(
+    within(dialog).getByRole('button', {
+      name: 'Remove the passkey Work laptop…',
+    }),
+  );
+  expect(dialog).toHaveTextContent(
+    'Signing in will take only your password, and your recovery codes are deleted.',
+  );
+  enterPassword(dialog, 'Remove passkey');
+  expect(
+    await within(dialog).findByText(/^Two-step sign-in is off\./),
+  ).toBeInTheDocument();
+  expect(
+    sent('POST', '/api/session/two-step/passkeys/1/remove')[0].body,
+  ).toEqual({ current_password: PASSWORD });
 });

@@ -20,7 +20,7 @@ Commands:
   the authority; the audit row records ``source: cli`` and no actor.
 - ``reset-two-step --login-name NAME [--end-sessions]`` (Phase 17,
   recovery only): turn off the two-step sign-in of a User who lost the
-  authenticator app and the recovery codes — the app and the codes are
+  authenticator app, the passkeys and the recovery codes — all of them are
   deleted, so the User signs in with the password alone and can set it up
   again. The User's sign-ins continue unless ``--end-sessions`` ends them
   all. Audited like an administrator's reset with ``source: cli`` and no
@@ -220,8 +220,9 @@ def _add_reset_two_step_parser(subparsers: Any) -> None:
         "reset-two-step",
         help="Turn off a user's two-step sign-in (recovery).",
         description=(
-            "Delete the authenticator app and the recovery codes of a user who lost them, so"
-            " the user signs in with the password alone and can set up two-step sign-in again."
+            "Delete the authenticator app, the passkeys and the recovery codes of a user who lost"
+            " them, so the user signs in with the password alone and can set up two-step sign-in"
+            " again."
             " The user's sign-ins continue unless --end-sessions is given; reset the password"
             " too if the password may be known to someone else."
         ),
@@ -268,7 +269,7 @@ def _run_reset_two_step(args: argparse.Namespace) -> int:
         )
         print(
             f"Two-step sign-in of {outcome.display_name} (user {outcome.user_id}) is off: the"
-            f" authenticator app and the recovery codes were deleted.{signed_out}"
+            f" authenticator app, the passkeys and the recovery codes were deleted.{signed_out}"
         )
     else:
         print(

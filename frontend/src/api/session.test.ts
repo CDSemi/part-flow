@@ -261,6 +261,16 @@ test('getTwoStepStatus maps the own address and refuses a masked-only answer', a
   fetchMock.mockResolvedValueOnce(
     json({
       enabled: true,
+      authenticator_app: false,
+      passkeys: [
+        {
+          id: 3,
+          name: 'Laptop',
+          rp_id: 'pf.example.com',
+          created_at: '2026-11-17T08:00:00Z',
+          last_used_at: null,
+        },
+      ],
       recovery_codes_left: 9,
       email: 'jane@example.com',
       email_ready: false,
@@ -268,6 +278,16 @@ test('getTwoStepStatus maps the own address and refuses a masked-only answer', a
   );
   await expect(getTwoStepStatus()).resolves.toEqual({
     enabled: true,
+    authenticatorApp: false,
+    passkeys: [
+      {
+        id: 3,
+        name: 'Laptop',
+        rpId: 'pf.example.com',
+        createdAt: '2026-11-17T08:00:00Z',
+        lastUsedAt: null,
+      },
+    ],
     recoveryCodesLeft: 9,
     email: 'jane@example.com',
     emailReady: false,
@@ -275,6 +295,8 @@ test('getTwoStepStatus maps the own address and refuses a masked-only answer', a
   fetchMock.mockResolvedValueOnce(
     json({
       enabled: true,
+      authenticator_app: true,
+      passkeys: [],
       recovery_codes_left: 9,
       email_hint: 'j•••@example.com',
       email_ready: false,

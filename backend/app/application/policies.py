@@ -877,8 +877,8 @@ _TWO_STEP_RULES: Final = {
     "two_step_email_code_digits": "The digits of an emailed code must be a whole number",
     "two_step_recovery_codes": "The number of recovery codes must be a whole number",
     "two_step_recovery_code_length": "The characters of a recovery code must be a whole number",
-    "two_step_setup_minutes": "The time to finish setting up an authenticator app must be a whole"
-    " number of minutes",
+    "two_step_setup_minutes": "The time to finish setting up an authenticator app or a passkey"
+    " must be a whole number of minutes",
     "two_step_clock_drift_steps": "The clock drift allowed must be a whole number of 30-second"
     " steps",
 }

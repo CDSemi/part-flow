@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa commit ngày 2026-11-17.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -132,15 +132,22 @@ thiết bị đã được đăng ký (enroll) (§4.13).
 - **Đăng nhập là một dialog modal phủ lên view hiện tại.** Route và mọi công việc đang mở vẫn giữ nguyên. Một phiên đăng
   nhập hết hạn sẽ mở lại dialog đăng nhập phủ lên view hiện tại. Ngoại lệ là khi một lần lưu theme phát hiện phiên đăng
   nhập đã kết thúc (§2.1): khi đó dialog mở ở request bị từ chối tiếp theo.
-- **Xác thực hai bước (two-step sign-in).** Một người dùng có thể bật xác thực hai bước từ menu tài khoản; nó không bao
-  giờ bắt buộc, kể cả với Administrator. `Set up…` hỏi lại mật khẩu, hiển thị mã QR và khóa cho một app xác thực
-  (authenticator app, ví dụ 1Password) rồi bật xác thực hai bước bằng mã 6 chữ số đầu tiên mà app hiển thị; sau đó các
-  mã khôi phục (recovery code) được hiển thị một lần, kèm `Copy codes`. Khi nó đang bật, sau khi nhập đúng mật khẩu,
-  dialog Sign in hỏi mã mà app hiển thị, hoặc một mã khôi phục (`Use a recovery code`), hoặc — khi tài khoản có địa chỉ
-  email và đã thiết lập một outgoing mail server — một mã mà PartFlow gửi qua email (`Email me a code at
-  a•••@example.com`). Một mã sai giữ bước đó mở; khi bước kết thúc (hết thời gian, quá nhiều mã sai, hoặc bị khóa),
-  dialog quay lại bước mật khẩu kèm lý do. `New recovery codes…` và `Turn off…` hỏi lại mật khẩu. Mọi con số của xác
-  thực hai bước được đặt trong Settings → Two-step sign-in (§9).
+- **Xác thực hai bước (two-step sign-in).** Một người dùng có thể bật xác thực hai bước từ menu tài khoản
+  (`Two-step sign-in…`); nó không bao giờ bắt buộc, kể cả với Administrator, và nó đang bật khi đã thiết lập một app
+  xác thực (authenticator app) hoặc một passkey (khóa đăng nhập lưu trên thiết bị hoặc trình quản lý mật khẩu).
+  `Set up…` hỏi lại mật khẩu, hiển thị mã QR và khóa cho một app xác thực (ví dụ 1Password) rồi thiết lập app bằng mã 6
+  chữ số đầu tiên mà nó hiển thị. `Add a passkey…` hỏi lại mật khẩu và một cái tên; trình duyệt sau đó lưu passkey trên
+  thiết bị, trên điện thoại hoặc trong một trình quản lý mật khẩu. App hoặc passkey đầu tiên tạo ra các mã khôi phục
+  (recovery code), hiển thị một lần kèm `Copy codes`. Khi xác thực hai bước đang bật, sau khi nhập đúng mật khẩu,
+  dialog Sign in hỏi mã mà app hiển thị hoặc một passkey (`Use passkey`), hoặc một mã khôi phục
+  (`Use a recovery code`), hoặc — khi tài khoản có địa chỉ email và đã thiết lập một outgoing mail server — một mã mà
+  PartFlow gửi qua email (`Email me a code at a•••@example.com`). Một mã sai giữ bước đó mở; khi bước kết thúc (hết
+  thời gian, quá nhiều mã sai, hoặc bị khóa), dialog quay lại bước mật khẩu kèm lý do. `New recovery codes…` và mọi
+  `Remove…` hỏi lại mật khẩu; gỡ app xác thực hoặc passkey cuối cùng sẽ tắt xác thực hai bước và xóa các mã khôi phục.
+  Mọi con số của xác thực hai bước được đặt trong Settings → Two-step sign-in (§9).
+- **Đăng nhập bằng passkey.** `Sign in with a passkey` trong dialog Sign in đăng nhập chỉ bằng một passkey, không cần
+  tên đăng nhập hay mật khẩu: trình duyệt hỏi passkey, và thiết bị xác minh người dùng. Passkey chỉ dùng được khi
+  PartFlow được mở tại địa chỉ HTTPS của nó; ở nơi khác, không có nút điều khiển passkey nào được hiển thị.
 - **Địa chỉ email.** `Email address…` trong menu tài khoản hiển thị địa chỉ của chính người dùng, nơi PartFlow gửi mã
   đăng nhập qua email, và đổi hoặc gỡ nó khi nhập lại mật khẩu. Khi đã thiết lập một outgoing mail server, địa chỉ
   trước đó nhận một thông báo về thay đổi.
@@ -2652,9 +2659,9 @@ không phải xác nhận cho qua.
     mã sai trước khi khóa (3–100, 10; thời gian khóa bằng thời gian khóa trong User sign-in), số mã gửi qua email mỗi
     lần đăng nhập (1–10, 3), thời gian chờ giữa các mã gửi qua email (0–3600 giây, 60), số chữ số của một mã gửi qua
     email (6–10, 8), số mã khôi phục mỗi bộ (5–20, 10) và số ký tự của chúng (8–20, 12), thời gian để thiết lập một app
-    xác thực (1–60 phút, 15) và độ lệch đồng hồ cho phép (0–2 bước 30 giây, 1). Mã của app xác thực vẫn có 6 chữ số và
-    đổi mỗi 30 giây, theo chuẩn mà các app dựa vào. Nó được đọc và sửa giống User sign-in, và một thay đổi có hiệu lực
-    từ bước đăng nhập kế tiếp;
+    xác thực hoặc một passkey (1–60 phút, 15) và độ lệch đồng hồ cho phép (0–2 bước 30 giây, 1). Mã của app xác thực vẫn
+    có 6 chữ số và đổi mỗi 30 giây, theo chuẩn mà các app dựa vào. Nó được đọc và sửa giống User sign-in, và một
+    thay đổi có hiệu lực từ bước đăng nhập kế tiếp;
   - panel **Outgoing mail server**: mail server mà PartFlow gửi email qua — một mã đăng nhập dùng một lần gửi cho
     người dùng đã mất các cách đăng nhập khác. Nó hiển thị `Not set up`, hoặc host và port, connection security
     (STARTTLS, SSL/TLS hoặc None), thông tin đăng nhập vào server (một user name, và có lưu mật khẩu hay không; mật
@@ -2811,9 +2818,9 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
   cho đến nay. Với quản trị viên người dùng, bảng Users còn có cột `Email` và cột `Sign-in` hiển thị trạng thái đăng
   nhập của từng người dùng (kèm `· Two-step` khi xác thực hai bước của người dùng đang bật); `Set password…` đặt một
   mật khẩu tạm, kết thúc các phiên đăng nhập của người dùng và xóa khóa, còn `Turn off two-step…` tắt xác thực hai bước
-  của một người dùng đã mất app xác thực và các mã khôi phục. Hộp xác nhận của nó đưa ra `Sign them out everywhere`,
-  được đánh dấu sẵn, cho trường hợp một thiết bị bị mất có thể nằm trong tay người khác. Cả hai đều không được đưa ra
-  trên dòng của chính người dùng đang đăng nhập.
+  của một người dùng đã mất app xác thực, các passkey và các mã khôi phục, và xóa tất cả chúng. Hộp xác nhận của nó đưa
+  ra `Sign them out everywhere`, được đánh dấu sẵn, cho trường hợp một thiết bị bị mất có thể nằm trong tay người khác.
+  Cả hai đều không được đưa ra trên dòng của chính người dùng đang đăng nhập.
 - **Roles & permissions** liệt kê các role có tên (ban đầu là Administrator, Manager, Operator và Super User, với đúng
   các capability mà PROJECT_PROFILE §20 liệt kê là quyền cấp ban đầu) và sửa tên của từng role cùng các permission của
   nó, nhóm thành Administration, Production master data, Work Orders, priority and reports, và Scan Station. Bốn
@@ -4017,7 +4024,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §2: xác thực hai bước và địa chỉ email của chính người dùng từ menu tài khoản, và bước thứ hai của dialog Sign in; §9: Settings → Two-step sign-in, timeout của mail server, và trạng thái xác thực hai bước cùng `Turn off two-step…` trong Users. |
+| 2026-11-17 | uncommitted | §2: passkey — đăng nhập chỉ bằng passkey, passkey làm bước thứ hai, thêm và gỡ passkey; §9: thời gian thiết lập bao gồm cả passkey, và `Turn off two-step…` cũng xóa chúng. |
+| 2026-11-17 | aa6287d | §2: xác thực hai bước và địa chỉ email của chính người dùng từ menu tài khoản, và bước thứ hai của dialog Sign in; §9: Settings → Two-step sign-in, timeout của mail server, và trạng thái xác thực hai bước cùng `Turn off two-step…` trong Users. |
 | 2026-11-16 | 252f678 | §9: Settings → Outgoing mail server, kèm test email, và một địa chỉ email tùy chọn trong editor Users. |
 | 2026-11-16 | c1f042b | §9: Administration → Backups đặt khoảng thời gian backup scheduled và số backup hourly, daily và weekly được giữ. |
 | 2026-11-16 | 0e983ec | §9: Scan behavior và Other settings hiển thị các setting ứng viên thành bản xem trước bị vô hiệu hóa, gắn nhãn `Not available yet`. |

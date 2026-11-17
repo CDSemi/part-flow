@@ -101,6 +101,7 @@ from app.domain.enums import (
     RequestType,
     RouteMode,
     SignInChallengeEndReason,
+    SignInChallengePurpose,
     StationDeviceRevokedReason,
     ThemePreference,
     UserSessionEndReason,
@@ -490,6 +491,35 @@ TWO_STEP_POLICY_RANGES: dict[str, tuple[int, int]] = {
 }
 MAIL_TIMEOUT_SECONDS_RANGE: tuple[int, int] = (5, 120)
 USER_CREDENTIAL_FAILED_CODES_SQL = "failed_codes >= 0"
+
+# Passkeys (Phase 17, owner decision of 2026-11-13): WebAuthn credentials
+# such as those a password manager, a phone or a security key keeps — the
+# credential id the authenticator chose (at most 1023 bytes, WebAuthn
+# §6.5.1), the attested credential data (AAGUID, id and public key) that
+# verifies its assertions, the host it was made at (the WebAuthn relying
+# party id), the name the User gave it and its signature counter. A
+# pending registration keeps the 32-byte WebAuthn challenge; an open
+# sign-in challenge may carry the challenge of a passkey request. Repeated
+# verbatim by migration `0038_phase17_passkeys`.
+PASSKEY_NAME_MAX_LENGTH = 80
+PASSKEY_CREDENTIAL_ID_SQL = "octet_length(credential_id) BETWEEN 1 AND 1023"
+PASSKEY_CREDENTIAL_DATA_SQL = "octet_length(credential_data) BETWEEN 1 AND 8192"
+PASSKEY_RP_ID_SQL = "char_length(rp_id) BETWEEN 1 AND 253"
+PASSKEY_NAME_SQL = "char_length(name) BETWEEN 1 AND 80"
+PASSKEY_SIGN_COUNT_SQL = "sign_count >= 0"
+PASSKEY_SETUP_CHALLENGE_SQL = "octet_length(challenge) = 32"
+CHALLENGE_PURPOSE_SQL = (
+    "purpose IN (" + ", ".join(f"'{purpose}'" for purpose in SignInChallengePurpose) + ")"
+)
+CHALLENGE_USER_SQL = "purpose = 'PASSKEY_SIGN_IN' OR user_id IS NOT NULL"
+CHALLENGE_PASSKEY_SQL = "passkey_challenge IS NULL OR octet_length(passkey_challenge) = 32"
+CHALLENGE_PASSKEY_RP_ID_SQL = (
+    "passkey_rp_id IS NULL OR char_length(passkey_rp_id) BETWEEN 1 AND 253"
+)
+CHALLENGE_PASSKEY_SHAPE_SQL = (
+    "(passkey_challenge IS NULL) = (passkey_rp_id IS NULL)"
+    " AND (purpose <> 'PASSKEY_SIGN_IN' OR passkey_challenge IS NOT NULL)"
+)
 
 
 def policy_range_sql(column: str, bounds: tuple[int, int]) -> str:
@@ -1812,23 +1842,27 @@ class UserRecoveryCode(Base):
 class UserSignInChallenge(Base):
     """The open second step of one sign-in (Phase 17, two-step sign-in).
 
-    Created when a User with two-step sign-in gives the right password: the
+    Created when a User with two-step sign-in gives the right password
+    (`purpose` SECOND_STEP), or when anyone starts a sign-in with a passkey
+    alone (PASSKEY_SIGN_IN, `user_id` NULL until a passkey answers): the
     browser receives an opaque token in an HttpOnly cookie and only its
     SHA-256 digest is stored, like a session token. It is open for the
     two-step policy's window from `created_at` (expiry is derived from the
-    current policy, never recorded) until
-    `ended_at` / `end_reason` record its end. `failed_attempts` counts the
-    wrong codes it took; the last emailed code is kept only as a digest with
-    the time it was sent. Rows are never deleted at runtime.
+    current policy, never recorded) until `ended_at` / `end_reason` record
+    its end. `failed_attempts` counts the wrong codes it took; the last
+    emailed code is kept only as a digest with the time it was sent, and the
+    last passkey request as its WebAuthn challenge with the host it was made
+    for. Rows of a second step are never deleted at runtime; an expired
+    PASSKEY_SIGN_IN row no User answered is pruned by the next one.
     """
 
     __tablename__ = "user_sign_in_challenges"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    user_id: Mapped[int] = mapped_column(
+    user_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("users.id", name="fk_user_sign_in_challenges_user_id_users"),
-        nullable=False,
+        nullable=True,
     )
     token_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -1840,6 +1874,10 @@ class UserSignInChallenge(Base):
     )
     ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     end_reason: Mapped[str | None] = mapped_column(Text)
+    # Phase 17 passkeys (`0038_phase17_passkeys`).
+    purpose: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'SECOND_STEP'"))
+    passkey_challenge: Mapped[bytes | None] = mapped_column(LargeBinary)
+    passkey_rp_id: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         UniqueConstraint("token_digest", name="uq_user_sign_in_challenges_token_digest"),
@@ -1865,12 +1903,105 @@ class UserSignInChallenge(Base):
             CHALLENGE_END_REASON_SQL, name=conv("ck_user_sign_in_challenges_end_reason")
         ),
         CheckConstraint(CHALLENGE_END_SHAPE_SQL, name=conv("ck_user_sign_in_challenges_end_shape")),
+        CheckConstraint(CHALLENGE_PURPOSE_SQL, name=conv("ck_user_sign_in_challenges_purpose")),
+        CheckConstraint(CHALLENGE_USER_SQL, name=conv("ck_user_sign_in_challenges_user_shape")),
+        CheckConstraint(
+            CHALLENGE_PASSKEY_SQL,
+            name=conv("ck_user_sign_in_challenges_passkey_challenge_length"),
+        ),
+        CheckConstraint(
+            CHALLENGE_PASSKEY_RP_ID_SQL,
+            name=conv("ck_user_sign_in_challenges_passkey_rp_id_length"),
+        ),
+        CheckConstraint(
+            CHALLENGE_PASSKEY_SHAPE_SQL, name=conv("ck_user_sign_in_challenges_passkey_shape")
+        ),
         # Serves "end every open second step of this User".
         Index(
             "ix_user_sign_in_challenges_user_id_open",
             "user_id",
             postgresql_where=text("ended_at IS NULL"),
         ),
+    )
+
+
+class UserPasskey(Base):
+    """One passkey of a User (Phase 17, owner decision of 2026-11-13).
+
+    A WebAuthn credential kept by a password manager, a phone, a computer
+    or a security key. It signs the User in alone (the authenticator
+    verifies the person), or answers the second step after the password,
+    and while one exists two-step sign-in is on. `credential_data` is the
+    attested credential data (AAGUID, credential id and public key) that
+    verifies its assertions — public material, never a secret; `rp_id` is
+    the host it was made at, the only host it works at. `sign_count` is the
+    authenticator's latest signature counter. Removing it deletes the row.
+    """
+
+    __tablename__ = "user_passkeys"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_user_passkeys_user_id_users"),
+        nullable=False,
+    )
+    credential_id: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    credential_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    rp_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    sign_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("credential_id", name="uq_user_passkeys_credential_id"),
+        CheckConstraint(
+            PASSKEY_CREDENTIAL_ID_SQL, name=conv("ck_user_passkeys_credential_id_length")
+        ),
+        CheckConstraint(
+            PASSKEY_CREDENTIAL_DATA_SQL, name=conv("ck_user_passkeys_credential_data_length")
+        ),
+        CheckConstraint(PASSKEY_RP_ID_SQL, name=conv("ck_user_passkeys_rp_id_length")),
+        CheckConstraint(PASSKEY_NAME_SQL, name=conv("ck_user_passkeys_name_length")),
+        CheckConstraint(
+            PASSKEY_SIGN_COUNT_SQL, name=conv("ck_user_passkeys_sign_count_non_negative")
+        ),
+        # Serves "the passkeys of this User".
+        Index("ix_user_passkeys_user_id", "user_id"),
+    )
+
+
+class UserPasskeySetup(Base):
+    """A User's pending passkey registration (Phase 17).
+
+    At most one per User (the primary key is the User's id): the WebAuthn
+    challenge the browser must sign and the host it was asked at. It is
+    open for the two-step policy's setup time from `created_at`; a new
+    request replaces it and a completed registration deletes it.
+    """
+
+    __tablename__ = "user_passkey_setups"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_user_passkey_setups_user_id_users"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    challenge: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    rp_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            PASSKEY_SETUP_CHALLENGE_SQL, name=conv("ck_user_passkey_setups_challenge_length")
+        ),
+        CheckConstraint(PASSKEY_RP_ID_SQL, name=conv("ck_user_passkey_setups_rp_id_length")),
     )
 
 

@@ -483,12 +483,26 @@ class SecondStepMethod(StrEnum):
 
     TOTP — the 6-digit code of their authenticator app; RECOVERY_CODE — one
     of their one-time recovery codes; EMAIL_CODE — the code PartFlow emailed
-    for this sign-in (its length is set in Administration → Settings).
+    for this sign-in (its length is set in Administration → Settings);
+    PASSKEY — one of their passkeys (WebAuthn).
     """
 
     TOTP = "TOTP"
     RECOVERY_CODE = "RECOVERY_CODE"
     EMAIL_CODE = "EMAIL_CODE"
+    PASSKEY = "PASSKEY"
+
+
+class SignInChallengePurpose(StrEnum):
+    """What an open sign-in challenge is for (Phase 17).
+
+    SECOND_STEP — the second step after a User's correct password;
+    PASSKEY_SIGN_IN — a sign-in with a passkey alone, whose User is known
+    only once the passkey answers.
+    """
+
+    SECOND_STEP = "SECOND_STEP"
+    PASSKEY_SIGN_IN = "PASSKEY_SIGN_IN"
 
 
 class SignInChallengeEndReason(StrEnum):

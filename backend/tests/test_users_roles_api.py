@@ -1060,6 +1060,8 @@ def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
         "fk_user_totp_factors_user_id_users",
         "fk_user_recovery_codes_user_id_users",
         "fk_user_sign_in_challenges_user_id_users",
+        "fk_user_passkeys_user_id_users",
+        "fk_user_passkey_setups_user_id_users",
         "fk_audit_events_actor_user_id_users",
         "fk_machine_lifecycle_events_actor_user_id_users",
         "fk_work_order_allocations_actor_user_id_users",

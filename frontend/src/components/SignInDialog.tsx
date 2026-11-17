@@ -4,11 +4,20 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import {
+  getPasskey,
+  PasskeyCancelledError,
+  passkeysSupported,
+} from '../api/passkeys';
+import {
   completeSecondStep,
+  completeSecondStepWithPasskey,
+  finishPasskeySignIn,
+  passkeyStepOptions,
   secondStepEnded,
   sendSignInCode,
   signIn,
   signInWriteOutcomeUnknown,
+  startPasskeySignIn,
 } from '../api/session';
 import type {
   SecondStep,
@@ -20,27 +29,45 @@ import { connectionReason } from '../app/release-copy';
 import { ModalDialog } from './ModalDialog';
 
 const UNREACHABLE = 'The PartFlow server could not be reached. Try again.';
+const PASSKEY_FAILED =
+  'The passkey could not be used. Try again, or sign in with your login name and password.';
 
-const CODE_LABELS: Record<SecondStepMethod, string> = {
+type CodeMethod = Exclude<SecondStepMethod, 'PASSKEY'>;
+
+const CODE_LABELS: Record<CodeMethod, string> = {
   TOTP: 'Code from your authenticator app',
   RECOVERY_CODE: 'Recovery code',
   EMAIL_CODE: 'Code from the email',
 };
 
-const CODE_MISSING: Record<SecondStepMethod, string> = {
+const CODE_MISSING: Record<CodeMethod, string> = {
   TOTP: 'Enter the 6-digit code your authenticator app shows.',
   RECOVERY_CODE: 'Enter one of your recovery codes.',
-  EMAIL_CODE: 'Enter the 8-digit code from the email.',
+  EMAIL_CODE: 'Enter the code from the email.',
 };
+
+/** The way a second step starts: the first the user has, a typed code
+ * last (an emailed one must be asked for first). */
+function firstMethod(methods: SecondStepMethod[]): SecondStepMethod {
+  const order: SecondStepMethod[] = [
+    'TOTP',
+    ...(passkeysSupported() ? (['PASSKEY'] as const) : []),
+    'RECOVERY_CODE',
+    'EMAIL_CODE',
+  ];
+  return order.find((method) => methods.includes(method)) ?? 'RECOVERY_CODE';
+}
 
 /**
  * User sign-in (login name + password) over the current view: success
  * closes the dialog and returns focus to the opener — no navigation.
  * A user with two-step sign-in then takes a second step in the same
- * dialog: a code from the authenticator app, a recovery code, or a code
- * PartFlow emails (when the account has an address and an outgoing mail
- * server is set up). A second step that ended (expired, too many wrong
- * codes) returns to the password. Signing in is a write, so it is
+ * dialog: a code from the authenticator app, a passkey, a recovery code,
+ * or a code PartFlow emails (when the account has an address and an
+ * outgoing mail server is set up). A second step that ended (expired, too
+ * many wrong codes) returns to the password. Where the browser can use
+ * passkeys, `Sign in with a passkey` signs in with a passkey alone, without
+ * the login name or password. Signing in is a write, so it is
  * disabled while disconnected; nothing is queued. A failed sign-in
  * clears the password (or the code) and keeps the login name; an
  * unanswered one re-reads the sign-in once (it may have succeeded) and is
@@ -81,6 +108,35 @@ export function SignInDialog({
   // Cancel, Escape and the backdrop are ignored while signing in.
   const requestClose = () => {
     if (!busy) onCancel();
+  };
+
+  const signInWithPasskey = async () => {
+    if (busy || offline) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const options = await startPasskeySignIn();
+      const credential = await getPasskey(options);
+      onSignedIn(await finishPasskeySignIn(credential));
+    } catch (failure) {
+      if (failure instanceof PasskeyCancelledError) {
+        setBusy(false);
+        return;
+      }
+      if (signInWriteOutcomeUnknown(failure)) {
+        setError(UNREACHABLE);
+        const after = await onRefresh();
+        if (after?.user) {
+          onSignedIn(after);
+          return;
+        }
+      } else {
+        setError(
+          failure instanceof ApiError ? failure.message : PASSKEY_FAILED,
+        );
+      }
+      setBusy(false);
+    }
   };
 
   const submit = async () => {
@@ -213,6 +269,18 @@ export function SignInDialog({
                 Sign in
               </button>
             </div>
+            {passkeysSupported() ? (
+              <div className="acct-alts">
+                <button
+                  type="button"
+                  className="acct-alt"
+                  disabled={busy || offline}
+                  onClick={() => void signInWithPasskey()}
+                >
+                  Sign in with a passkey
+                </button>
+              </div>
+            ) : null}
           </form>
         </>
       )}
@@ -240,12 +308,16 @@ function SecondStepForm({
   /** The second step is over: back to the password, with the reason. */
   onEnded: (message: string) => void;
 }) {
-  const [method, setMethod] = useState<SecondStepMethod>('TOTP');
+  const [method, setMethod] = useState<SecondStepMethod>(() =>
+    firstMethod(step.methods),
+  );
   const [code, setCode] = useState('');
   const [attempted, setAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sentNote, setSentNote] = useState<string | null>(null);
   const [sendsLeft, setSendsLeft] = useState<number | null>(null);
+  const canUseApp = step.methods.includes('TOTP');
+  const canUsePasskey = step.methods.includes('PASSKEY') && passkeysSupported();
   const canRecover = step.methods.includes('RECOVERY_CODE');
   const canEmail = step.methods.includes('EMAIL_CODE');
 
@@ -268,8 +340,46 @@ function SecondStepForm({
         : 'This sign-in has ended. Enter your password again.',
     );
 
+  const answerWithPasskey = async () => {
+    if (busy || offline) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const options = await passkeyStepOptions();
+      const credential = await getPasskey(options);
+      onSignedIn(await completeSecondStepWithPasskey(credential));
+    } catch (failure) {
+      if (failure instanceof PasskeyCancelledError) {
+        setBusy(false);
+        return;
+      }
+      if (secondStepEnded(failure)) {
+        setBusy(false);
+        ended(failure);
+        return;
+      }
+      if (signInWriteOutcomeUnknown(failure)) {
+        setError(UNREACHABLE);
+        const after = await onRefresh();
+        if (after?.user) {
+          onSignedIn(after);
+          return;
+        }
+      } else {
+        setError(
+          failure instanceof ApiError ? failure.message : PASSKEY_FAILED,
+        );
+      }
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
     if (busy || offline) return;
+    if (method === 'PASSKEY') {
+      await answerWithPasskey();
+      return;
+    }
     if (code.trim() === '') {
       setAttempted(true);
       return;
@@ -337,20 +447,27 @@ function SecondStepForm({
           {sentNote}
         </p>
       ) : null}
-      <label>
-        <span>{CODE_LABELS[method]}</span>
-        <input
-          ref={codeField}
-          className="field mono"
-          value={code}
-          onChange={(event) => setCode(event.target.value)}
-          inputMode={method === 'RECOVERY_CODE' ? 'text' : 'numeric'}
-          autoComplete="one-time-code"
-          autoCapitalize="none"
-          spellCheck={false}
-        />
-      </label>
-      {attempted ? (
+      {method === 'PASSKEY' ? (
+        <p className="acct-note">
+          Use the passkey saved for PartFlow on this device, on your phone or in
+          your password manager.
+        </p>
+      ) : (
+        <label>
+          <span>{CODE_LABELS[method]}</span>
+          <input
+            ref={codeField}
+            className="field mono"
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
+            inputMode={method === 'RECOVERY_CODE' ? 'text' : 'numeric'}
+            autoComplete="one-time-code"
+            autoCapitalize="none"
+            spellCheck={false}
+          />
+        </label>
+      )}
+      {attempted && method !== 'PASSKEY' ? (
         <div className="err" role="alert">
           {CODE_MISSING[method]}
         </div>
@@ -361,7 +478,7 @@ function SecondStepForm({
         </div>
       ) : null}
       <div className="acct-alts">
-        {method !== 'TOTP' ? (
+        {canUseApp && method !== 'TOTP' ? (
           <button
             type="button"
             className="acct-alt"
@@ -369,6 +486,16 @@ function SecondStepForm({
             onClick={() => choose('TOTP')}
           >
             Use your authenticator app
+          </button>
+        ) : null}
+        {canUsePasskey && method !== 'PASSKEY' ? (
+          <button
+            type="button"
+            className="acct-alt"
+            disabled={busy}
+            onClick={() => choose('PASSKEY')}
+          >
+            Use a passkey
           </button>
         ) : null}
         {canRecover && method !== 'RECOVERY_CODE' ? (
@@ -408,7 +535,7 @@ function SecondStepForm({
           className="bigbtn primary"
           disabled={busy || offline}
         >
-          Sign in
+          {method === 'PASSKEY' ? 'Use passkey' : 'Sign in'}
         </button>
       </div>
     </form>

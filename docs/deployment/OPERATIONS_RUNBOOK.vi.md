@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `a4cf9a8` cộng các thay đổi
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi
 > chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -994,7 +994,7 @@ chúng vào ticket hay email. Không công cụ nào xóa chúng; hãy xóa bằ
 | Không có dòng `Setup token` trong log | Thiết lập đã hoàn tất (đã có một Administrator), hoặc `backend` chưa khởi động. Khi chưa có Administrator nào, `PARTFLOW_BACKEND_WORKERS=1 $PF up -d --force-recreate backend` ghi một token mới. |
 | Thiết lập lần đầu trả `setup_token_invalid` | Token đã cũ (mỗi lần khởi động lại `backend` ghi một token mới: dùng `$PF logs backend \| grep "Setup token" \| tail -n 1`), hoặc `backend` đang chạy nhiều worker: khởi động nó với một worker ([`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1, Backend processes and first-run setup). |
 | Không ai đăng nhập được với tư cách Administrator: quên mật khẩu hoặc login name | Xem mục Đăng nhập và tài khoản người dùng, bên dưới. |
-| Một user mất app xác thực (authenticator app) của xác thực hai bước (two-step sign-in) và các mã khôi phục (recovery code) | Xem mục Đăng nhập và tài khoản người dùng, bên dưới. |
+| Một user mất app xác thực (authenticator app) hoặc passkey của xác thực hai bước (two-step sign-in) và các mã khôi phục (recovery code) | Xem mục Đăng nhập và tài khoản người dùng, bên dưới. |
 | Không ai còn quyền quản lý các quyền sửa (correction permissions) (backend ghi một cảnh báo khi khởi động) | Xem mục Đăng nhập và tài khoản người dùng, bên dưới. |
 
 ### Đăng nhập và tài khoản người dùng (Sign-in and user accounts)
@@ -1022,23 +1022,25 @@ trên máy chủ, trong thư mục mã nguồn của bản phát hành, sau khi 
   vì lệnh đặt lại mật khẩu dù lần trước đã thành công hay chưa. Lệnh chỉ chạy khi còn một Administrator và không bao
   giờ tạo Administrator mới.
 
-**Mất app xác thực (xác thực hai bước).** Một user mất app đăng nhập bằng một trong các mã khôi phục của mình, hoặc bằng
-một mã mà PartFlow gửi qua email khi tài khoản có địa chỉ email và đã thiết lập một outgoing mail server, rồi có thể tắt
-và bật lại xác thực hai bước từ menu tài khoản. Một user không có cả hai:
+**Mất app xác thực hoặc passkey (xác thực hai bước).** Một user mất app hoặc một passkey đăng nhập bằng một cái khác,
+bằng một trong các mã khôi phục của mình, hoặc bằng một mã mà PartFlow gửi qua email khi tài khoản có địa chỉ email và
+đã thiết lập một outgoing mail server. Sau đó user gỡ cái đã mất và thêm một cái mới từ menu tài khoản
+(`Two-step sign-in…`). Một user không có cách nào trong số này:
 
 - Khi còn một quản trị viên người dùng (user administrator) khác đăng nhập được, người đó chọn **Turn off two-step…** ở
   dòng của user trong **Administration → Users**. User sau đó đăng nhập chỉ bằng mật khẩu. Hãy giữ **Sign them out
   everywhere** được đánh dấu khi thiết bị bị mất có thể nằm trong tay người khác; nếu mật khẩu cũng có thể đã bị biết,
   hãy chọn thêm **Set password…**.
-- Khi không ai đăng nhập được, ví dụ Administrator duy nhất mất app, tắt nó bằng:
+- Khi không ai đăng nhập được, ví dụ Administrator duy nhất mất app và các passkey, tắt nó bằng:
 
   ```sh
   $PF run --rm --no-deps -T backend python -m app.cli reset-two-step --login-name <login name> --end-sessions
   ```
 
-  `--end-sessions` cũng đăng xuất user ở mọi nơi; bỏ nó đi để giữ các phiên đăng nhập của user. Mã thoát 0 nghĩa là xong
-  (hoặc đã tắt sẵn, lệnh sẽ nói rõ); 1 nghĩa là bị từ chối và không có gì thay đổi (login name không tồn tại); 2 nghĩa
-  là chưa rõ kết quả hoặc không kết nối được database: hãy chạy lại.
+  Lệnh xóa app xác thực, các passkey và các mã khôi phục. `--end-sessions` cũng đăng xuất user ở mọi nơi; bỏ nó đi để
+  giữ các phiên đăng nhập của user. Mã thoát 0 nghĩa là xong (hoặc đã tắt sẵn, lệnh sẽ nói rõ); 1 nghĩa là bị từ chối
+  và không có gì thay đổi (login name không tồn tại); 2 nghĩa là chưa rõ kết quả hoặc không kết nối được database: hãy
+  chạy lại.
 
 Một user bị khóa sau quá nhiều mã sai thì chờ khóa kết thúc (Settings → User sign-in đặt thời gian khóa), hoặc một
 quản trị viên người dùng đặt mật khẩu mới, việc này gỡ khóa.
@@ -1214,7 +1216,8 @@ nó, §2).
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất app xác thực của xác thực hai bước, đăng xuất user ở mọi nơi, và khóa sau các mã sai. |
+| 2026-11-17 | uncommitted | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất một passkey, và một lần reset cũng xóa các passkey. |
+| 2026-11-17 | `aa6287d` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất app xác thực của xác thực hai bước, đăng xuất user ở mọi nơi, và khóa sau các mã sai. |
 | 2026-11-16 | `a4cf9a8` | §7: dạng reconcile cho một instance staging của Deployment Admin được bỏ cùng với công cụ đó. |
 | 2026-11-16 | `5708664` | Trước khi chạy bất kỳ lệnh nào: lệnh ngắn `deploy/production/pf`. |
 | 2026-11-16 | `c1f042b` | §2, §3, §5, §8, §9: tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ; Administration → Backups đặt khoảng thời gian và số bản sao lưu hourly, daily và weekly được giữ; giới hạn `backup_age` đi theo khoảng thời gian đó. |

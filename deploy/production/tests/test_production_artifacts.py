@@ -165,6 +165,16 @@ UPLOAD_LOCATIONS = {
 }
 SIGN_IN_ROUTE = "/api/session"
 SECOND_STEP_ROUTE = "/api/session/second-step"
+PASSKEY_SIGN_IN_ROUTES = (
+    "/api/session/passkey",
+    "/api/session/passkey/options",
+    "/api/session/second-step/passkey",
+    "/api/session/second-step/passkey-options",
+)
+PASSKEY_SIGN_IN_LOCATION = (
+    "~",
+    "^/api/session/(passkey|passkey/options|second-step/passkey|second-step/passkey-options)$",
+)
 PASSWORD_ROUTES = (
     "/api/session/password",
     "/api/setup/administrator",
@@ -173,13 +183,15 @@ PASSWORD_ROUTES = (
     "/api/session/two-step/totp/remove",
     "/api/session/two-step/recovery-codes",
     "/api/session/email",
+    "/api/session/two-step/passkeys/options",
+    "/api/session/two-step/passkeys/42/remove",
 )
 PASSWORD_LOCATIONS = {
     ("=", "/api/session/password"),
     ("=", "/api/session/email"),
     ("=", "/api/setup/administrator"),
     ("~", "^/api/users/[^/]+/password$"),
-    ("~", "^/api/session/two-step/(totp|totp/remove|recovery-codes)$"),
+    ("~", "^/api/session/two-step/(totp|totp/remove|recovery-codes|passkeys/options|passkeys/[^/]+/remove)$"),
 }
 # Ordinary API routes that must keep the server defaults (1 MiB, 60 s, no rate limit).
 ORDINARY_ROUTES = (
@@ -1034,9 +1046,16 @@ class WebTier(unittest.TestCase):
         )
         self.assertEqual([d.args for d in self.http_level("limit_req_status")], [["429"]])
         limited = {tuple(loc.args): loc.children("limit_req") for loc in self.locations if loc.children("limit_req")}
-        self.assertEqual(set(limited), {("=", SIGN_IN_ROUTE), ("=", SECOND_STEP_ROUTE)} | PASSWORD_LOCATIONS)
-        for route in (SIGN_IN_ROUTE, SECOND_STEP_ROUTE):
-            self.assertEqual([d.args for d in limited[("=", route)]], [["zone=partflow_sign_in", "burst=5", "nodelay"]])
+        self.assertEqual(
+            set(limited),
+            {("=", SIGN_IN_ROUTE), ("=", SECOND_STEP_ROUTE), PASSKEY_SIGN_IN_LOCATION} | PASSWORD_LOCATIONS,
+        )
+        for key in (("=", SIGN_IN_ROUTE), ("=", SECOND_STEP_ROUTE), PASSKEY_SIGN_IN_LOCATION):
+            self.assertEqual([d.args for d in limited[key]], [["zone=partflow_sign_in", "burst=5", "nodelay"]], key)
+        for path in PASSKEY_SIGN_IN_ROUTES:
+            self.assertEqual(tuple(select_location(self.locations, path).args), PASSKEY_SIGN_IN_LOCATION, path)
+        # The second step itself keeps its exact location.
+        self.assertEqual(tuple(select_location(self.locations, SECOND_STEP_ROUTE).args), ("=", SECOND_STEP_ROUTE))
         for key in PASSWORD_LOCATIONS:
             self.assertEqual([d.args for d in limited[key]], [["zone=partflow_password", "burst=4", "nodelay"]], key)
         self.assertEqual(tuple(select_location(self.locations, SIGN_IN_ROUTE).args), ("=", SIGN_IN_ROUTE))

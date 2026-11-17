@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0037_phase17_two_step`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0038_phase17_passkeys`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -796,7 +796,7 @@ Migration `0037_phase17_two_step` thêm những điều sau (IMPLEMENTATION_ROAD
   app xác thực (authenticator app) cho mỗi User); `secret bytea NOT NULL` (khóa 160 bit của các mật khẩu dùng một lần
   theo thời gian (TOTP), `ck_user_totp_factors_secret_length`: 20 byte); `confirmed_at timestamptz` có thể null (NULL =
   một lần thiết lập đang chờ mã đầu tiên trong thời gian thiết lập của policy tính từ `created_at`; xác thực hai bước
-  đang bật đúng khi có một dòng đã xác nhận); `last_used_step bigint` có thể null
+  đang bật đúng khi có một dòng đã xác nhận hoặc một passkey); `last_used_step bigint` có thể null
   (`ck_user_totp_factors_last_used_step_non_negative`: bước 30 giây mới nhất đã được chấp nhận, nên mỗi mã chỉ dùng được
   một lần); `created_at`. Khóa chỉ được trả lời một lần, để thiết lập app, và không bao giờ được ghi log hay audit.
 - **`user_recovery_codes`**: PK `pk_user_recovery_codes` `id bigint` identity; `user_id` FK
@@ -819,19 +819,47 @@ Migration `0037_phase17_two_step` thêm những điều sau (IMPLEMENTATION_ROAD
   chạy.
 - Cùng migration đó thêm `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, các cột policy xác
   thực hai bước của `application_policy` và `mail_timeout_seconds` (ở trên).
-- Cả ba bảng là `ORDINARY` với `partflow_app` và nằm ngoài những gì `partflow_maintenance` được đọc.
+- **`user_passkeys`** (`0038_phase17_passkeys`): PK `pk_user_passkeys` `id bigint` identity; `user_id` FK
+  `fk_user_passkeys_user_id_users`, được index bởi `ix_user_passkeys_user_id`; `credential_id bytea NOT NULL` (id mà
+  authenticator đã chọn, `ck_user_passkeys_credential_id_length`: 1–1023 byte) với `uq_user_passkeys_credential_id`;
+  `credential_data bytea NOT NULL` (dữ liệu credential đã được chứng thực (attested) — model của authenticator, id của
+  credential và khóa công khai — dùng để xác minh các câu trả lời của passkey: dữ liệu công khai,
+  `ck_user_passkeys_credential_data_length`: 1–8192 byte); `rp_id text NOT NULL` (host nơi nó được tạo, tức relying
+  party id của WebAuthn; nó chỉ hoạt động ở đó, `ck_user_passkeys_rp_id_length`: 1–253 ký tự); `name text NOT NULL` (do
+  User đặt, `ck_user_passkeys_name_length`: 1–80 ký tự); `sign_count bigint NOT NULL DEFAULT 0`
+  (`ck_user_passkeys_sign_count_non_negative`: bộ đếm chữ ký mới nhất của authenticator; khi bộ đếm đã lưu hoặc bộ đếm
+  mới lớn hơn không, một câu trả lời cần bộ đếm mới lớn hơn); `created_at`; `last_used_at` có thể null. Gỡ một passkey
+  xóa dòng của nó.
+- **`user_passkey_setups`** (`0038_phase17_passkeys`): lần đăng ký passkey đang chờ của một User. PK
+  `pk_user_passkey_setups` `user_id` (FK `fk_user_passkey_setups_user_id_users`); `challenge bytea NOT NULL` (challenge
+  WebAuthn 32 byte, `ck_user_passkey_setups_challenge_length`); `rp_id text NOT NULL`
+  (`ck_user_passkey_setups_rp_id_length`); `created_at`. Nó mở trong thời gian thiết lập của policy; một yêu cầu mới
+  thay thế nó và một lần đăng ký xóa nó.
+- `0038_phase17_passkeys` còn cho `user_sign_in_challenges` thêm `purpose text NOT NULL DEFAULT 'SECOND_STEP'`
+  (`ck_user_sign_in_challenges_purpose`: `SECOND_STEP`, hoặc `PASSKEY_SIGN_IN` cho một lần đăng nhập chỉ bằng passkey),
+  cho `user_id` có thể null ở một dòng `PASSKEY_SIGN_IN` cho đến khi một passkey trả lời
+  (`ck_user_sign_in_challenges_user_shape`), và thêm `passkey_challenge bytea` và `passkey_rp_id text`, cùng có thể
+  null: challenge WebAuthn 32 byte của yêu cầu passkey mới nhất và host nơi nó được tạo
+  (`ck_user_sign_in_challenges_passkey_challenge_length`, `ck_user_sign_in_challenges_passkey_rp_id_length`,
+  `ck_user_sign_in_challenges_passkey_shape`; một dòng `PASSKEY_SIGN_IN` luôn có một cặp). Một dòng `PASSKEY_SIGN_IN` đã
+  hết hạn mà không passkey nào trả lời sẽ bị dòng kế tiếp xóa, nên các yêu cầu ẩn danh không bao giờ chất đống.
+- Cả năm bảng là `ORDINARY` với `partflow_app` và nằm ngoài những gì `partflow_maintenance` được đọc.
 - Thứ tự lock của mọi lần ghi đăng nhập và xác thực hai bước: advisory lock `partflow:user-administration` (chỉ với các
   lần reset của administrator và của lệnh khôi phục), dòng `users`, dòng `user_credentials`, dòng
-  `user_sign_in_challenges`, dòng `user_totp_factors`, các dòng `user_recovery_codes`, rồi `user_sessions` và dòng
-  audit.
+  `user_sign_in_challenges`, dòng `user_totp_factors`, dòng `user_passkey_setups`, các dòng `user_passkeys`, các dòng
+  `user_recovery_codes`, rồi `user_sessions` và dòng audit.
 - Mỗi thay đổi các factor của một User append một dòng `UPDATED` cho entity type `User` với snapshot `{two_step,
-  recovery_codes}` (xác thực hai bước có đang bật hay không, và các mã khôi phục chưa dùng) trước và sau, và metadata
-  `{"two_step_change": ...}` (`TOTP_ADDED`, `TOTP_REMOVED`, `RECOVERY_CODES_CREATED`, `RESET_BY_ADMINISTRATOR`, hoặc
-  `RESET_BY_CLI` với `source: cli`); một lần reset còn ghi `sessions_ended` (mọi phiên đăng nhập của User có kết thúc
-  hay không, `TWO_STEP_RESET`). Không bao giờ có khóa, mã hay digest. Việc dùng một mã khi đăng nhập được ghi log, không
-  bao giờ được audit.
-- Downgrade từ chối khi bất kỳ bảng nào trong ba bảng còn dòng, một session đã kết thúc với `TWO_STEP_RESET`, một cột
-  policy của revision khác giá trị mặc định của nó, hoặc đã có dòng audit `two-step`.
+  authenticator_app, passkeys, recovery_codes}` (xác thực hai bước có đang bật hay không, một app xác thực có được
+  thiết lập hay không, số passkey và các mã khôi phục chưa dùng; các dòng ghi trước `0038_phase17_passkeys` chỉ có
+  `two_step` và `recovery_codes`) trước và sau, và metadata `{"two_step_change": ...}` (`TOTP_ADDED`, `TOTP_REMOVED`,
+  `PASSKEY_ADDED`, `PASSKEY_REMOVED`, `RECOVERY_CODES_CREATED`, `RESET_BY_ADMINISTRATOR`, hoặc `RESET_BY_CLI` với
+  `source: cli`); một lần reset còn ghi `sessions_ended` (mọi phiên đăng nhập của User có kết thúc hay không,
+  `TWO_STEP_RESET`). Không bao giờ có khóa, mã, digest hay dữ liệu credential của một passkey. Việc dùng một mã hoặc một
+  passkey khi đăng nhập được ghi log, không bao giờ được audit.
+- Downgrade của `0037_phase17_two_step` từ chối khi bất kỳ bảng nào trong ba bảng của nó còn dòng, một session đã kết
+  thúc với `TWO_STEP_RESET`, một cột policy của revision khác giá trị mặc định của nó, hoặc đã có dòng audit `two-step`.
+  Downgrade của `0038_phase17_passkeys` từ chối khi còn một passkey, một lần đăng ký đang chờ, một challenge
+  `PASSKEY_SIGN_IN` hoặc một yêu cầu passkey.
 
 ### Thiết bị Scan Station
 
@@ -1337,13 +1365,13 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (33 at head `0037_phase17_two_step`) |
+| Class | `partflow_app` privileges | Tables (35 at head `0038_phase17_passkeys`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (bước đã qua bất biến nhờ trigger và đặc quyền; một lần điều chỉnh xóa các bước tương lai chưa được tham chiếu) |
 | `READ_ONLY` | SELECT | `alembic_version` |
-| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
+| `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
 - `partflow_maintenance` chỉ có SELECT, trên `alembic_version`, `application_policy`, `areas`, `machines`, `operations`,
   `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`, `scan_stations`, `users`,
@@ -1482,7 +1510,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0037_phase17_two_step`: ba bảng của xác thực hai bước, các cột policy xác thực hai bước và timeout của mail server, `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, thứ tự lock và các dòng audit (section `two-step` và việc tự đổi email). |
+| 2026-11-17 | uncommitted | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, các cột passkey của `user_sign_in_challenges`, thứ tự lock và snapshot audit có passkey. |
+| 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: ba bảng của xác thực hai bước, các cột policy xác thực hai bước và timeout của mail server, `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, thứ tự lock và các dòng audit (section `two-step` và việc tự đổi email). |
 | 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, các cột mail server gửi đi của `application_policy` và section audit `mail-server`. |
 | 2026-11-16 | `c1f042b` | Migration head `0035_phase16_backup_policy`: bốn cột chính sách backup của `application_policy` và section audit `backups`. |
 | 2026-11-14 | `2a24c2a` | Migration head `0034_phase17_unique_names`. |

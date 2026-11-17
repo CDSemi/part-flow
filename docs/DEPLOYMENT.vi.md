@@ -1,6 +1,6 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `252f678` cộng các thay đổi chưa
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi chưa
 > commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -427,14 +427,16 @@ Giới hạn 4 MiB cao hơn các giới hạn riêng của ứng dụng (ảnh 2
 lớn hợp lý. Lần import lớn nhất được phép, 2,000 Work Order, mất khoảng nửa phút. `web` không bao giờ thử lại một yêu
 cầu, nên một yêu cầu của người dùng là nhiều nhất một lần thực thi ở backend.
 
-**Giới hạn tần suất (rate limit), theo từng địa chỉ client.** `POST /api/session` (đăng nhập) và
-`POST /api/session/second-step` (mã của xác thực hai bước, two-step sign-in) mỗi endpoint cho phép 10 mỗi phút với
-burst 5. `PUT /api/session/password`, `POST /api/setup/administrator`, `PUT /api/users/{user_id}/password`,
-`PUT /api/session/email` và ba thay đổi xác thực hai bước có kiểm tra mật khẩu (`POST /api/session/two-step/totp`,
-`…/totp/remove` và `…/recovery-codes`) cho phép 5 mỗi phút với burst 4. Các thao tác đọc và đăng xuất không bao giờ bị
-giới hạn. Một mã 429 từ `web` không bao giờ đến được ứng dụng, nên nó không bao giờ được tính là đăng nhập thất bại và
-không bao giờ khóa tài khoản. Mã đăng ký thiết bị (device enrollment code) không bị giới hạn tần suất (50 bit entropy,
-có hiệu lực 15 phút).
+**Giới hạn tần suất (rate limit), theo từng địa chỉ client.** `POST /api/session` (đăng nhập),
+`POST /api/session/second-step` (mã của xác thực hai bước, two-step sign-in) và bốn yêu cầu của việc đăng nhập bằng
+passkey hoặc của bước thứ hai bằng passkey (`POST /api/session/passkey/options`, `…/session/passkey`,
+`…/second-step/passkey-options` và `…/second-step/passkey`) mỗi endpoint cho phép 10 mỗi phút với burst 5.
+`PUT /api/session/password`, `POST /api/setup/administrator`, `PUT /api/users/{user_id}/password`,
+`PUT /api/session/email` và năm thay đổi xác thực hai bước có kiểm tra mật khẩu (`POST /api/session/two-step/totp`,
+`…/totp/remove`, `…/recovery-codes`, `…/passkeys/options` và `…/passkeys/{passkey_id}/remove`) cho phép 5 mỗi phút với
+burst 4. Các thao tác đọc và đăng xuất không bao giờ bị giới hạn. Một mã 429 từ `web` không bao giờ đến được ứng dụng,
+nên nó không bao giờ được tính là đăng nhập thất bại và không bao giờ khóa tài khoản. Mã đăng ký thiết bị (device
+enrollment code) không bị giới hạn tần suất (50 bit entropy, có hiệu lực 15 phút).
 
 `web` chỉ trả lời cho các tình huống mà chính nó phát hiện; mọi câu trả lời của ứng dụng đi qua nguyên vẹn:
 
@@ -741,7 +743,8 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §3.1: giới hạn tần suất của bước thứ hai trong xác thực hai bước, của việc user tự đổi địa chỉ email và của các thay đổi xác thực hai bước có kiểm tra mật khẩu. |
+| 2026-11-17 | uncommitted | §3.1: giới hạn tần suất của các yêu cầu passkey. |
+| 2026-11-17 | `aa6287d` | §3.1: giới hạn tần suất của bước thứ hai trong xác thực hai bước, của việc user tự đổi địa chỉ email và của các thay đổi xác thực hai bước có kiểm tra mật khẩu. |
 | 2026-11-16 | `252f678` | §3.1: `backend` truy cập outgoing mail server được đặt trong Administration → Settings qua network `edge`. |
 | 2026-11-16 | `a4cf9a8` | §1.2, §6: công cụ Deployment Admin và hướng dẫn của nó được gỡ bỏ. |
 | 2026-11-16 | `5708664` | §1.2: lệnh ngắn `deploy/production/pf` cho production stack. |

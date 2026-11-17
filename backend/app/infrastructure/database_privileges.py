@@ -65,6 +65,8 @@ TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
     "scan_station_devices": TableClass.ORDINARY,
     "scan_stations": TableClass.ORDINARY,
     "user_credentials": TableClass.ORDINARY,
+    "user_passkey_setups": TableClass.ORDINARY,
+    "user_passkeys": TableClass.ORDINARY,
     "user_recovery_codes": TableClass.ORDINARY,
     "user_sessions": TableClass.ORDINARY,
     "user_sign_in_challenges": TableClass.ORDINARY,

@@ -1,11 +1,13 @@
 """Two-step sign-in of application Users (Phase 17, owner decision of 2026-11-13).
 
 IMPLEMENTATION_ROADMAP Phase 17 item 8: each User may add an
-authenticator app (one-time codes, TOTP); it is never required,
-Administrators included. With it on, signing in takes the password and then
-a second step (``authentication.complete_second_step``): a code from the
-app, one of the User's recovery codes, or a code PartFlow emails to the
-User's address when an outgoing mail server is set up.
+authenticator app (one-time codes, TOTP) and passkeys; neither is ever
+required, Administrators included. While either is set up, signing in with
+the password takes a second step (``authentication.complete_second_step``):
+a code from the app, a passkey, one of the User's recovery codes, or a code
+PartFlow emails to the User's address when an outgoing mail server is set
+up. A passkey also signs its User in alone
+(``authentication.sign_in_with_passkey``).
 
 Rules owned here (the stored factors live in ``two_step_factors``; every
 number is the two-step policy of Administration → Settings,
@@ -14,13 +16,19 @@ number is the two-step policy of Administration → Settings,
 - Adding the app: the signed-in User types the password again; PartFlow
   stores a pending secret (open for the policy's setup time) and shows it
   as text, an ``otpauth://`` link and a QR code; the first code from the
-  app confirms it. The first confirmation creates the policy's number of
-  recovery codes, shown once.
-- Removing the app (two-step sign-in off, recovery codes deleted) and
-  creating new recovery codes take the password again too. A wrong password
-  counts as a failed sign-in (``authentication.confirm_own_password``).
+  app confirms it.
+- Adding a passkey: the signed-in User types the password again; PartFlow
+  answers WebAuthn creation options (``app.application.passkeys``) and
+  keeps their challenge for the policy's setup time; the browser's answer,
+  verified, is stored under the name the User gave.
+- The first factor (app or passkey) creates the policy's number of
+  recovery codes, shown once; they are deleted when the last factor goes.
+- Removing the app or a passkey and creating new recovery codes take the
+  password again too. A wrong password counts as a failed sign-in
+  (``authentication.confirm_own_password``).
 - A user administrator turns another User's two-step sign-in off (the User
-  lost the app and the recovery codes) — with ``MANAGE_CORRECTION_PERMISSIONS``
+  lost the app, the passkeys and the recovery codes, which are all deleted) —
+  with ``MANAGE_CORRECTION_PERMISSIONS``
   too when the User's role holds a protected key, as for a password set; the
   recovery command does it from the backend container. Either may also end
   every sign-in of the User (``end_sessions``; owner decision of
@@ -50,6 +58,7 @@ from app.application import (
     authorization,
     one_time_codes,
     outgoing_mail,
+    passkeys,
     policies,
     two_step_factors,
     user_access,
@@ -64,14 +73,27 @@ from app.application.errors import (
     UnknownLoginError,
 )
 from app.application.user_access import Principal
-from app.domain.enums import AuditEntityType, AuditEventType, Permission, UserSessionEndReason
+from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
+    Permission,
+    SignInChallengePurpose,
+    UserSessionEndReason,
+)
 from app.infrastructure import mail, qr_code
-from app.infrastructure.models import User, UserSignInChallenge, UserTotpFactor
+from app.infrastructure.models import (
+    PASSKEY_NAME_MAX_LENGTH,
+    User,
+    UserPasskey,
+    UserPasskeySetup,
+    UserSignInChallenge,
+    UserTotpFactor,
+)
 
 logger = logging.getLogger(__name__)
 
 _ALREADY_ON: Final = (
-    "Two-step sign-in is already on. Turn it off first to set up another authenticator app."
+    "An authenticator app is already set up. Remove it first to set up another one."
 )
 _NO_PENDING_SETUP: Final = (
     "This setup has expired or was not started. Start again with Set up two-step sign-in."
@@ -79,7 +101,23 @@ _NO_PENDING_SETUP: Final = (
 _WRONG_SETUP_CODE: Final = (
     "That code does not match. Type the 6-digit code your authenticator app shows now."
 )
-_NOT_ON: Final = "Two-step sign-in is off. Recovery codes come with an authenticator app."
+_NOT_ON: Final = (
+    "Two-step sign-in is off. Recovery codes come with an authenticator app or a passkey."
+)
+_NO_PENDING_PASSKEY: Final = (
+    "This passkey request has expired or was not started. Start again with Add a passkey."
+)
+_PASSKEY_REFUSED: Final = (
+    "The passkey could not be verified. Try again, and let your device or password manager save"
+    " the passkey for this address."
+)
+_PASSKEY_NAME: Final = (
+    "Name the passkey with 1 to 80 characters, without line breaks or other control characters."
+)
+_NO_PASSKEY: Final = "That passkey does not exist any more."
+_NO_PASSKEY_HERE: Final = (
+    "None of your passkeys was made at this address. Use another way to finish signing in."
+)
 _OWN_RESET: Final = (
     "Use Two-step sign-in… in your account menu to turn off your own two-step sign-in."
 )
@@ -106,10 +144,23 @@ _EMAIL_BODY: Final = (
 )
 
 
+class PasskeyView(NamedTuple):
+    """One of the User's passkeys, as answered: never its key material."""
+
+    id: int
+    name: str
+    # The host it was made at, the only host it works at.
+    rp_id: str
+    created_at: datetime.datetime
+    last_used_at: datetime.datetime | None
+
+
 class TwoStepStatus(NamedTuple):
     """The signed-in User's own two-step sign-in, as answered."""
 
     enabled: bool
+    authenticator_app: bool
+    passkeys: list[PasskeyView]
     recovery_codes_left: int
     # The User's own address; None = none.
     email: str | None
@@ -179,10 +230,8 @@ def _turn_off(
     (``TWO_STEP_RESET``) — only when two-step sign-in was on, so the audit
     row records it. Returns whether two-step sign-in was on.
     """
-    factor = two_step_factors.lock_totp(session, user_id)
-    if factor is None:
-        return False
-    was_on = factor.confirmed_at is not None
+    two_step_factors.lock_totp(session, user_id)
+    was_on = two_step_factors.is_enabled(session, user_id)
     before = two_step_factors.snapshot(session, user_id)
     two_step_factors.delete_factors(session, user_id)
     if not was_on:
@@ -196,11 +245,23 @@ def _turn_off(
     return True
 
 
+def _passkey_view(passkey: UserPasskey) -> PasskeyView:
+    return PasskeyView(
+        id=passkey.id,
+        name=passkey.name,
+        rp_id=passkey.rp_id,
+        created_at=passkey.created_at,
+        last_used_at=passkey.last_used_at,
+    )
+
+
 def status(session: Session, principal: Principal) -> TwoStepStatus:
     user_id = principal.user_id
     email = session.scalar(select(User.email).where(User.id == user_id))
     return TwoStepStatus(
         enabled=two_step_factors.is_enabled(session, user_id),
+        authenticator_app=two_step_factors.has_authenticator_app(session, user_id),
+        passkeys=[_passkey_view(p) for p in two_step_factors.passkeys(session, user_id)],
         recovery_codes_left=two_step_factors.unused_recovery_codes(session, user_id),
         email=email,
         email_ready=two_step_factors.email_target(session, user_id) is not None,
@@ -267,20 +328,149 @@ def confirm_totp(session: Session, principal: Principal, *, code: str) -> list[s
 
 
 def remove_totp(session: Session, principal: Principal, *, current_password: str) -> TwoStepStatus:
-    """Turn the signed-in User's two-step sign-in off; a no-op when it is off."""
+    """Remove the signed-in User's authenticator app; a no-op when there is none.
+
+    Two-step sign-in stays on while a passkey remains, recovery codes
+    included; without one it turns off.
+    """
     authentication.confirm_own_password(session, principal, current_password)
     factor = two_step_factors.lock_totp(session, principal.user_id)
     if factor is None:
         session.rollback()
         return status(session, principal)
-    was_on = factor.confirmed_at is not None
+    was_set_up = factor.confirmed_at is not None
     before = two_step_factors.snapshot(session, principal.user_id)
-    two_step_factors.delete_factors(session, principal.user_id)
-    if was_on:
+    session.delete(factor)
+    still_on = two_step_factors.off_without_factors(session, principal.user_id)
+    if was_set_up:
         _audit(session, principal.user_id, before, "TOTP_REMOVED", actor_user_id=principal.user_id)
     commit(session, {})
-    if was_on:
-        logger.info("Two-step sign-in turned off by user %s", principal.user_id)
+    if was_set_up:
+        logger.info(
+            "Authenticator app removed by user %s (two-step sign-in on: %s)",
+            principal.user_id,
+            still_on,
+        )
+    return status(session, principal)
+
+
+def _passkey_name(value: object) -> str:
+    """A trimmed name of 1 to 80 characters without control characters."""
+    name = value.strip() if isinstance(value, str) else ""
+    if not 1 <= len(name) <= PASSKEY_NAME_MAX_LENGTH or not name.isprintable():
+        raise InvalidInputError(_PASSKEY_NAME)
+    return name
+
+
+def begin_passkey(
+    session: Session, principal: Principal, *, current_password: str, origin: str | None
+) -> dict[str, Any]:
+    """Store a pending passkey registration; answers its WebAuthn creation options."""
+    rp_id = passkeys.relying_party(origin)
+    authentication.confirm_own_password(session, principal, current_password)
+    existing = [
+        p.credential_data for p in two_step_factors.passkeys(session, principal.user_id, rp_id)
+    ]
+    options, challenge = passkeys.registration_options(
+        rp_id,
+        user_id=principal.user_id,
+        login_name=principal.login_name,
+        display_name=principal.display_name,
+        existing=existing,
+    )
+    now = _database_now(session)
+    setup = session.get(
+        UserPasskeySetup, principal.user_id, with_for_update=True, populate_existing=True
+    )
+    if setup is None:
+        session.add(
+            UserPasskeySetup(
+                user_id=principal.user_id, challenge=challenge, rp_id=rp_id, created_at=now
+            )
+        )
+    else:
+        setup.challenge = challenge
+        setup.rp_id = rp_id
+        setup.created_at = now
+    commit(session, {})
+    logger.info("Passkey registration started for user %s", principal.user_id)
+    return options
+
+
+def add_passkey(
+    session: Session,
+    principal: Principal,
+    *,
+    name: object,
+    credential: dict[str, Any],
+    origin: str | None,
+) -> list[str] | None:
+    """Store the passkey the browser answered with.
+
+    Returns new recovery codes when it is the first factor, else None.
+    """
+    clean_name = _passkey_name(name)
+    rp_id = passkeys.relying_party(origin)
+    user_access.lock_credential(session, principal.user_id)
+    user_access.recheck_actor(session, principal)
+    two_step_factors.lock_totp(session, principal.user_id)
+    setup = session.get(
+        UserPasskeySetup, principal.user_id, with_for_update=True, populate_existing=True
+    )
+    now = _database_now(session)
+    policy = policies.read_two_step_policy(session)
+    if setup is None or setup.rp_id != rp_id or setup.created_at + policy.setup_time <= now:
+        session.rollback()
+        raise ConflictError(_NO_PENDING_PASSKEY)
+    registered = passkeys.verify_registration(rp_id, setup.challenge, credential)
+    if registered is None:
+        session.rollback()
+        raise InvalidInputError(_PASSKEY_REFUSED)
+    before = two_step_factors.snapshot(session, principal.user_id)
+    session.delete(setup)
+    session.add(
+        UserPasskey(
+            user_id=principal.user_id,
+            credential_id=registered.credential_id,
+            credential_data=registered.credential_data,
+            rp_id=rp_id,
+            name=clean_name,
+            sign_count=registered.sign_count,
+            created_at=now,
+        )
+    )
+    session.flush()
+    codes = (
+        None
+        if two_step_factors.unused_recovery_codes(session, principal.user_id)
+        else two_step_factors.replace_recovery_codes(session, principal.user_id, policy)
+    )
+    _audit(session, principal.user_id, before, "PASSKEY_ADDED", actor_user_id=principal.user_id)
+    commit(session, {"uq_user_passkeys_credential_id": _PASSKEY_REFUSED})
+    logger.info("Passkey added by user %s", principal.user_id)
+    return codes
+
+
+def remove_passkey(
+    session: Session, principal: Principal, passkey_id: int, *, current_password: str
+) -> TwoStepStatus:
+    """Remove one of the signed-in User's passkeys; without a factor left two-step turns off."""
+    authentication.confirm_own_password(session, principal, current_password)
+    two_step_factors.lock_totp(session, principal.user_id)
+    passkey = session.scalars(
+        select(UserPasskey)
+        .where(UserPasskey.id == passkey_id, UserPasskey.user_id == principal.user_id)
+        .with_for_update()
+    ).one_or_none()
+    if passkey is None:
+        session.rollback()
+        raise ConflictError(_NO_PASSKEY)
+    before = two_step_factors.snapshot(session, principal.user_id)
+    session.delete(passkey)
+    still_on = two_step_factors.off_without_factors(session, principal.user_id)
+    _audit(session, principal.user_id, before, "PASSKEY_REMOVED", actor_user_id=principal.user_id)
+    commit(session, {})
+    logger.info("Passkey removed by user %s (two-step sign-in on: %s)", principal.user_id, still_on)
     return status(session, principal)
 
 
@@ -386,6 +576,48 @@ def reset_for_login(session: Session, login_name: str, *, end_sessions: bool) ->
     return outcome
 
 
+def _second_step(session: Session, token: str | None) -> tuple[UserSignInChallenge, int]:
+    """The second step ``token`` names, unlocked, with its User; refused when there is none."""
+    challenge = two_step_factors.find_challenge(session, token)
+    if (
+        challenge is None
+        or challenge.purpose != SignInChallengePurpose.SECOND_STEP.value
+        or challenge.user_id is None
+    ):
+        session.rollback()
+        raise SecondStepExpiredError(authentication.SECOND_STEP_EXPIRED_MESSAGE)
+    return challenge, challenge.user_id
+
+
+def passkey_step_options(session: Session, token: str | None, origin: str | None) -> dict[str, Any]:
+    """WebAuthn request options for the open second step ``token`` names.
+
+    Only the User's passkeys made at this host may answer; the challenge is
+    kept on the second step until an answer uses it.
+    """
+    rp_id = passkeys.relying_party(origin)
+    found, user_id = _second_step(session, token)
+    challenge_id = found.id
+    # Lock order: the credential first, then the challenge.
+    session.rollback()
+    user_access.lock_credential(session, user_id)
+    challenge = two_step_factors.lock_challenge(session, challenge_id)
+    now = _database_now(session)
+    policy = policies.read_two_step_policy(session)
+    if not two_step_factors.is_open(challenge, now, policy.window):
+        session.rollback()
+        raise SecondStepExpiredError(authentication.SECOND_STEP_EXPIRED_MESSAGE)
+    allowed = [p.credential_data for p in two_step_factors.passkeys(session, user_id, rp_id)]
+    if not allowed:
+        session.rollback()
+        raise ConflictError(_NO_PASSKEY_HERE)
+    options, passkey_challenge = passkeys.second_step_options(rp_id, allowed)
+    challenge.passkey_challenge = passkey_challenge
+    challenge.passkey_rp_id = rp_id
+    commit(session, {})
+    return options
+
+
 def send_email_code(session: Session, token: str | None) -> EmailCodeSent:
     """Email a sign-in code for the open second step ``token`` names.
 
@@ -393,13 +625,13 @@ def send_email_code(session: Session, token: str | None) -> EmailCodeSent:
     sent is judged again, with the policy current then, after the message
     left and the challenge is locked.
     """
-    challenge = two_step_factors.find_challenge(session, token)
+    challenge, user_id = _second_step(session, token)
+    challenge_id = challenge.id
     now = _database_now(session)
     policy = policies.read_two_step_policy(session)
-    if challenge is None or not two_step_factors.is_open(challenge, now, policy.window):
+    if not two_step_factors.is_open(challenge, now, policy.window):
         session.rollback()
         raise SecondStepExpiredError(authentication.SECOND_STEP_EXPIRED_MESSAGE)
-    challenge_id, user_id = challenge.id, challenge.user_id
     until = challenge.created_at + policy.window
     refusal = _resend_refusal(challenge, now, policy)
     if refusal is not None:

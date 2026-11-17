@@ -51,14 +51,14 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
 | Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration and the minimal `pf` since 2026-11-16; the host checks after go-live, the open follow-ups and Movement-history archival remain. |
-| Phase 17 — Owner Decisions After Go-Live | In progress | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
+| Phase 17 — Owner Decisions After Go-Live | Closed (2026-11-17) | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 
-**Database schema.** The current Alembic migration head is `0037_phase17_two_step`
-(`backend/alembic/versions/20261117_0037_phase17_two_step.py`). Phase 15 added no migration; Phase 16 added
+**Database schema.** The current Alembic migration head is `0038_phase17_passkeys`
+(`backend/alembic/versions/20261117_0038_phase17_passkeys.py`). Phase 15 added no migration; Phase 16 added
 `0035_phase16_backup_policy` (the backup policy of Administration → Backups); Phase 17 added
 `0033_phase17_super_user_role` (the Super User role), `0034_phase17_unique_names` (unique Area and Planned Route
-names), `0036_phase17_outgoing_mail` (the users' email addresses and the outgoing mail server) and
-`0037_phase17_two_step` (two-step sign-in).
+names), `0036_phase17_outgoing_mail` (the users' email addresses and the outgoing mail server),
+`0037_phase17_two_step` (two-step sign-in) and `0038_phase17_passkeys` (passkeys).
 
 **Owner decision of 2026-11-09: direct go-live.** PartFlow went into real use on the company Synology NAS on
 2026-11-09, as soon as the production stack was installed. There is no pilot phase and no list of release gates;
@@ -1381,18 +1381,20 @@ order, and a delivered item says so:
    one result matches, and the default quantity. General settings: the site name and logo, the time zone and date
    format, the board refresh intervals and the update countdown. Nothing is stored, and no route needs `Manage scan
    behavior` yet.
-8. **Optional multi-factor sign-in.** Each user may add one-time codes (TOTP) and passkeys (for example kept in
-   1Password), which make signing in easier; neither is ever required, Administrators included. A user who loses them
-   signs in with a one-time recovery code or recovers by email, which needs an outgoing mail server set in General
-   settings and an email address on the user. Delivered so far: an optional email address on each user
-   (Administration → Users, seen and set by user administrators) and the outgoing mail server with a test email
-   (Administration → Settings → Outgoing mail server; migration `0036_phase17_outgoing_mail`), and two-step sign-in
+8. **Optional multi-factor sign-in — delivered.** Each user may add one-time codes (TOTP) and passkeys (for example
+   kept in 1Password), which make signing in easier; neither is ever required, Administrators included. A user who
+   loses them signs in with a one-time recovery code or recovers by email, which needs an outgoing mail server set in
+   General settings and an email address on the user. Delivered: an optional email address on each user
+   (Administration → Users, seen and set by user administrators) with the outgoing mail server and a test email
+   (Administration → Settings → Outgoing mail server; migration `0036_phase17_outgoing_mail`); two-step sign-in
    (migration `0037_phase17_two_step`): an authenticator app (one-time codes, TOTP) set up from the account menu with
    the password again and its first code, one-time recovery codes, and at sign-in a second step that takes the app's
-   code, a recovery code or a code emailed to the user. Owner decisions of 2026-11-17: every number of it is set in
-   Administration → Settings → Two-step sign-in, a wrong code counts apart from a wrong password, users change their
-   own email address, and a user administrator, or the recovery command `reset-two-step`, who turns off the two-step
-   sign-in of a user who lost the app and the codes may also sign that user out everywhere. Passkeys follow.
+   code, a recovery code or a code emailed to the user; and passkeys (migration `0038_phase17_passkeys`), added from
+   the account menu with the password again, which sign a user in alone or answer the second step, at PartFlow's
+   HTTPS address only. Owner decisions of 2026-11-17: every number of two-step sign-in is set in Administration →
+   Settings → Two-step sign-in, a wrong code counts apart from a wrong password, users change their own email
+   address, and a user administrator, or the recovery command `reset-two-step`, who turns off the two-step sign-in of
+   a user who lost the app, the passkeys and the codes may also sign that user out everywhere.
 
 This phase changes GUI_DESIGN §9 (a section not available yet shows disabled previews instead of only a statement) and
 PROJECT_PROFILE §20 (four seeded roles); each item updates its owning documents when it lands.
@@ -1440,7 +1442,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 17 item 8: two-step sign-in delivered (authenticator app, recovery codes, emailed code, its numbers in Settings, the own email address); migration `0037_phase17_two_step` becomes the schema head. |
+| 2026-11-17 | uncommitted | Phase 17 item 8 delivered with passkeys, which closes Phase 17; migration `0038_phase17_passkeys` becomes the schema head. |
+| 2026-11-17 | `aa6287d` | Phase 17 item 8: two-step sign-in delivered (authenticator app, recovery codes, emailed code, its numbers in Settings, the own email address); migration `0037_phase17_two_step` becomes the schema head. |
 | 2026-11-16 | `252f678` | Phase 17 item 8 in progress: users' email addresses and the outgoing mail server delivered; migration `0036_phase17_outgoing_mail` becomes the schema head. |
 | 2026-11-16 | `a4cf9a8` | Phase 16: the Deployment Admin removed, which completes the minimal `pf`; its open follow-up closed. |
 | 2026-11-16 | `5708664` | Phase 16: the minimal `pf` delivered as `deploy/production/pf`. |

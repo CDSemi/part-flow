@@ -46,8 +46,8 @@ Deliberate surface decisions:
   ``/api/session/password``.
 - ``POST /users/{id}/two-step/reset`` (Phase 17, ``MANAGE_USERS_AND_ROLES``,
   the protected-user guard as for a password set) turns another User's
-  two-step sign-in off — their authenticator app and recovery codes are
-  deleted — and, with ``{"end_sessions": true}``, ends every sign-in of the
+  two-step sign-in off — their authenticator app, passkeys and recovery
+  codes are deleted — and, with ``{"end_sessions": true}``, ends every sign-in of the
   User (the key is required); one's own is turned off through
   ``/api/session/two-step``.
 - Every route answering with Users adds ``sign_in_state`` (no password,

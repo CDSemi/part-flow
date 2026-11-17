@@ -122,6 +122,10 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("DELETE", "/api/session"): _PUBLIC,
     ("POST", "/api/session/second-step"): _PUBLIC,
     ("POST", "/api/session/second-step/email-code"): _PUBLIC,
+    ("POST", "/api/session/second-step/passkey-options"): _PUBLIC,
+    ("POST", "/api/session/second-step/passkey"): _PUBLIC,
+    ("POST", "/api/session/passkey/options"): _PUBLIC,
+    ("POST", "/api/session/passkey"): _PUBLIC,
     ("GET", "/api/setup"): _PUBLIC,
     ("POST", "/api/setup/administrator"): _PUBLIC,
     ("GET", "/api/production-board"): _PUBLIC,
@@ -170,6 +174,9 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/session/two-step/totp/confirm"): _SIGNED_IN,
     ("POST", "/api/session/two-step/totp/remove"): _SIGNED_IN,
     ("POST", "/api/session/two-step/recovery-codes"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/passkeys/options"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/passkeys"): _SIGNED_IN,
+    ("POST", "/api/session/two-step/passkeys/{passkey_id}/remove"): _SIGNED_IN,
     # Read by Administration and by Management → Machines (OD-S2-2).
     ("GET", "/api/barcode-configuration/machine-asset-tag-format"): _SIGNED_IN,
     # --- PERMISSION (static) ------------------------------------------------

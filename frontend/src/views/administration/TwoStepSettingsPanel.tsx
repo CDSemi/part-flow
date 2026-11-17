@@ -118,13 +118,13 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The characters of a recovery code must be a whole number from 8 to 20.',
   },
   setupMinutes: {
-    label: 'Time to set up an authenticator app',
-    field: 'Time to set up an authenticator app (minutes)',
+    label: 'Time to set up an app or a passkey',
+    field: 'Time to set up an app or a passkey (minutes)',
     min: 1,
     max: 60,
     show: minutes,
     error:
-      'The time to finish setting up an authenticator app must be a whole number of minutes from 1 to 60.',
+      'The time to finish setting up an authenticator app or a passkey must be a whole number of minutes from 1 to 60.',
   },
   clockDriftSteps: {
     label: 'Clock drift allowed',

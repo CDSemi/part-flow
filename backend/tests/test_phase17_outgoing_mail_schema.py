@@ -8,7 +8,7 @@ IMPLEMENTATION_ROADMAP Phase 17 item 8):
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_phase17_two_step_schema.py`` with ``0037_phase17_two_step``;
+  ``tests/test_phase17_passkeys_schema.py`` with ``0038_phase17_passkeys``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install stores no address, no mail server (port 587, STARTTLS)
   and no mail server password, and the CHECKs refuse every value outside
